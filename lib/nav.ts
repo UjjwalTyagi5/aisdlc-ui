@@ -1,6 +1,7 @@
 import type { PlatformRole } from "@/lib/roles";
 import {
   Activity,
+  Boxes,
   BrainCircuit,
   Building2,
   Coins,
@@ -101,6 +102,24 @@ export const deliverNav: NavItem[] = [
     // org_admin/bu_admin hold the latter but never the former.
     requirePermission: ["artifact:view", "workspace:manage"],
     prdSection: "§33.2",
+  },
+  {
+    /**
+     * The platform's discovery portal — deliberately the one Deliver entry with
+     * no permission and no scope requirement.
+     *
+     * Every other entry answers "may you act here". This one answers "what can
+     * this platform do", which is a question anyone who can sign in is entitled
+     * to ask. It renders only the documented model — agents, tracks, roles,
+     * governance — and reads no project, unit or spend data, so there is
+     * nothing in it to scope. Adding a gate would hide the map from exactly the
+     * people who need it most: someone new, working out where they fit.
+     */
+    label: "Agent Catalogue",
+    href: "/catalogue",
+    icon: Boxes,
+    segment: "catalogue",
+    prdSection: "§20, §21–§25",
   },
   {
     label: "Agent Studio",
@@ -309,6 +328,7 @@ export const segmentLabels: Record<string, string> = {
   roles: "Roles & Access",
   models: "Model Management",
   cost: "Cost & Budget",
+  catalogue: "Agent Catalogue",
   activity: "Activity",
   "my-access": "My access",
   traces: "Traces",
