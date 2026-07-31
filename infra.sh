@@ -66,11 +66,16 @@ echo "Ingress IP: $IP"
 say "ingress-nginx (pinned to $IP)"
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true
 helm repo update >/dev/null
+# health-probe-request-path=/healthz is REQUIRED, not cosmetic. Azure's default LB probe is
+# an HTTP GET / against the nodePort; ingress-nginx answers 404 to a request with no matching
+# host, Azure treats 404 as unhealthy, drops the backend, and every external connection hangs
+# until it times out — while the app is perfectly healthy inside the cluster. /healthz returns 200.
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   -n ingress-nginx --create-namespace \
   --set controller.service.loadBalancerIP="$IP" \
   --set-string controller.service.annotations."service\.beta\.kubernetes\.io/azure-pip-name"="$PIP" \
   --set-string controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-resource-group"="$NODE_RG" \
+  --set-string controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
   --set controller.replicaCount=1 \
   --wait --timeout 10m
 
