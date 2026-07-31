@@ -15,6 +15,23 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # --- Sign-in redirect fix (workaround, remove once the app is patched) ---
+    # Next's standalone server does `hostname = process.env.HOSTNAME || '0.0.0.0'`
+    # and builds route-handler `req.url` from that BIND address, ignoring Host and
+    # X-Forwarded-Host (it does honour X-Forwarded-Proto). So the four auth routes
+    # that do `NextResponse.redirect(new URL(path, req.url))` emit
+    #     Location: https://0.0.0.0:3000/dashboard
+    # The session cookie is set correctly, but the browser follows that dead
+    # address and sign-in looks broken. Invisible locally, where the bind address
+    # is the same localhost:3000 you browsed to.
+    #
+    # This rewrites the upstream Location header. It is a band-aid on the symptom:
+    # the real fix is in app code (derive the origin from the forwarded headers in
+    # app/api/auth/{mock/signin,mock/logout,logout}/route.ts). Once that ships,
+    # delete these two lines — they are host-specific and will silently rot if the
+    # ingress host ever changes.
+    nginx.ingress.kubernetes.io/proxy-redirect-from: "https://0.0.0.0:3000/"
+    nginx.ingress.kubernetes.io/proxy-redirect-to: "https://aisdlc.20.216.44.167.nip.io/"
     nginx.ingress.kubernetes.io/proxy-body-size: "25m"
     # Next.js streams (SSE/chat) — don't let nginx buffer or time them out early.
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
