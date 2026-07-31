@@ -32,11 +32,46 @@ import type { SpendSeriesEntry } from "@/lib/schemas/spend-series";
 const SERIES_COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)"] as const;
 const MAX_SERIES = SERIES_COLORS.length;
 
-const W = 720;
-const H = 264;
-const PAD = { top: 16, right: 16, bottom: 30, left: 62 };
+/**
+ * The viewBox is sized to roughly what the panel actually renders at, so the
+ * SVG scales near 1:1 and a `text-[11px]` label is about 11px on screen.
+ *
+ * This matters more than it sounds. An earlier version used a 720-wide box in
+ * a ~1300px panel, which scaled everything by ~1.8× — every axis label came
+ * out around 20px and every bar proportionally chunky, so the chart read as
+ * clumsy without any single thing being obviously wrong.
+ */
+const W = 1120;
+const H = 340;
+const PAD = { top: 28, right: 20, bottom: 44, left: 72 };
 const PLOT_W = W - PAD.left - PAD.right;
 const PLOT_H = H - PAD.top - PAD.bottom;
+
+/** Bars stay slim no matter how few there are — a 120px-wide bar is a slab. */
+const MAX_BAR_W = 26;
+const BAR_GAP = 5;
+const CORNER = 4;
+
+/**
+ * A bar with only its top corners rounded, anchored flat to the baseline.
+ *
+ * `rx` on a `<rect>` rounds all four, which lifts the bar off its own zero
+ * line and makes short bars look like they float. The data-end is the only end
+ * that should be soft.
+ */
+function topRoundedBar(x: number, y: number, w: number, h: number): string {
+  if (h <= 0) return "";
+  const r = Math.min(CORNER, w / 2, h);
+  return [
+    `M${x},${y + h}`,
+    `V${y + r}`,
+    `a${r},${r} 0 0 1 ${r},${-r}`,
+    `h${w - 2 * r}`,
+    `a${r},${r} 0 0 1 ${r},${r}`,
+    `V${y + h}`,
+    "Z",
+  ].join(" ");
+}
 
 /** Axis-tick money: "$0" / "$500" / "$5k" / "$12.5k" — a trailing ".0" is noise. */
 const usdShort = (n: number) => {
@@ -114,19 +149,17 @@ export function SpendBarChart({
 
   const y = (v: number) => PAD.top + PLOT_H - (v / yMax) * PLOT_H;
 
-  // Geometry: each month owns a slot; bars sit inside it with a gutter either
-  // side, and a 2px gap between adjacent bars so two segments never fuse into
-  // one shape.
+  // Geometry: each month owns a slot, and the group of bars is centred in it
+  // rather than stretched to fill — with three series and six months, filling
+  // the slot gives 120px slabs. Capping the width and centring leaves the
+  // whitespace that lets the eye group each month.
   const slot = months.length > 0 ? PLOT_W / months.length : PLOT_W;
-  const slotPad = Math.min(10, slot * 0.12);
-  const bandWidth = slot - slotPad * 2;
-  const gap = 2;
-  const barWidth = Math.max(
-    2,
-    (bandWidth - gap * (plotted.length - 1)) / Math.max(1, plotted.length),
-  );
+  const n = Math.max(1, plotted.length);
+  const barWidth = Math.min(MAX_BAR_W, Math.max(3, (slot * 0.7 - BAR_GAP * (n - 1)) / n));
+  const groupWidth = barWidth * n + BAR_GAP * (n - 1);
   const slotX = (i: number) => PAD.left + i * slot;
-  const barX = (i: number, s: number) => slotX(i) + slotPad + s * (barWidth + gap);
+  const barX = (i: number, s: number) =>
+    slotX(i) + (slot - groupWidth) / 2 + s * (barWidth + BAR_GAP);
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -158,8 +191,21 @@ export function SpendBarChart({
           onMouseMove={onMove}
           onMouseLeave={() => setHover(null)}
         >
-          {/* Grid — recessive on purpose; it is scaffolding, not data. */}
-          {gridValues.map((v) => (
+          {/* Hovered month band, behind everything so it tints nothing. */}
+          {hover !== null && (
+            <rect
+              x={slotX(hover) + 2}
+              y={PAD.top - 10}
+              width={slot - 4}
+              height={PLOT_H + 12}
+              rx={8}
+              className="fill-muted/50"
+            />
+          )}
+
+          {/* Grid — dashed and recessive; it is scaffolding, not data. The
+              zero line is solid, because a baseline is a real edge. */}
+          {gridValues.map((v, i) => (
             <g key={v}>
               <line
                 x1={PAD.left}
@@ -168,59 +214,48 @@ export function SpendBarChart({
                 y2={y(v)}
                 className="stroke-line-soft"
                 strokeWidth={1}
+                strokeDasharray={i === 0 ? undefined : "2 5"}
               />
               <text
-                x={PAD.left - 10}
+                x={PAD.left - 14}
                 y={y(v) + 4}
                 textAnchor="end"
-                className="fill-muted-foreground font-mono text-[11px]"
+                className="fill-muted-foreground font-mono text-[11px] tabular-nums"
               >
                 {usdShort(v)}
               </text>
             </g>
           ))}
 
-          {/* Hovered month band, behind the bars so it never tints them. */}
-          {hover !== null && (
-            <rect
-              x={slotX(hover)}
-              y={PAD.top}
-              width={slot}
-              height={PLOT_H}
-              className="fill-muted/40"
-            />
-          )}
-
-          {/* Bars */}
+          {/* Bars. Months other than the hovered one fade back rather than
+              disappear — the comparison is the point, so they stay readable. */}
           {plotted.map((s, si) => (
-            <g key={s.id}>
+            <g key={s.id} fill={SERIES_COLORS[si]}>
               {s.points.map((v, i) => {
                 const h = Math.max(0, PAD.top + PLOT_H - y(v));
                 return (
-                  <rect
+                  <path
                     key={months[i] ?? i}
-                    x={barX(i, si)}
-                    y={y(v)}
-                    width={barWidth}
-                    height={h}
-                    // Rounded data-end only, anchored to the baseline — a fully
-                    // rounded bar would misread its own value at both ends.
-                    rx={Math.min(3, barWidth / 2)}
-                    fill={SERIES_COLORS[si]}
+                    d={topRoundedBar(barX(i, si), y(v), barWidth, h)}
+                    opacity={hover === null || hover === i ? 1 : 0.45}
+                    className="transition-opacity duration-150"
                   />
                 );
               })}
             </g>
           ))}
 
-          {/* Month labels */}
+          {/* Month labels — the hovered one steps forward. */}
           {months.map((m, i) => (
             <text
               key={m}
               x={slotX(i) + slot / 2}
-              y={H - 10}
+              y={PAD.top + PLOT_H + 26}
               textAnchor="middle"
-              className="fill-muted-foreground font-mono text-[11px]"
+              className={cn(
+                "font-mono text-[11.5px] transition-colors",
+                hover === i ? "fill-foreground font-semibold" : "fill-muted-foreground",
+              )}
             >
               {monthLabel(m)}
             </text>
@@ -230,26 +265,38 @@ export function SpendBarChart({
         {/* Tooltip */}
         {hover !== null && (
           <div
-            className="border-line-soft bg-panel-elevated pointer-events-none absolute top-2 rounded-lg border px-3 py-2 shadow-lg"
+            className="border-line-soft bg-panel-elevated pointer-events-none absolute top-1 min-w-[13rem] rounded-xl border px-3 py-2.5 shadow-[0_8px_24px_-8px_oklch(0_0_0_/_0.35)]"
             style={{
               left: `${((slotX(hover) + slot / 2) / W) * 100}%`,
               transform: hover > months.length / 2 ? "translateX(-105%)" : "translateX(5%)",
             }}
           >
-            <p className="font-mono text-[10px] tracking-wider uppercase">{months[hover]}</p>
-            <ul className="mt-1 space-y-0.5">
+            <p className="text-muted-foreground border-line-soft mb-1.5 border-b pb-1.5 font-mono text-[10px] tracking-wider uppercase">
+              {months[hover]}
+            </p>
+            <ul className="space-y-1">
               {plotted.map((s, idx) => (
-                <li key={s.id} className="flex items-center gap-2 font-mono text-[11px]">
+                <li key={s.id} className="flex items-center gap-3 text-[11.5px]">
                   <span
                     className="size-2 shrink-0 rounded-full"
                     style={{ background: SERIES_COLORS[idx] }}
                     aria-hidden
                   />
-                  <span className="text-muted-foreground">{s.name}</span>
-                  <span className="ml-auto font-semibold">{usdFull(s.points[hover] ?? 0)}</span>
+                  <span className="text-muted-foreground truncate">{s.name}</span>
+                  <span className="ml-auto font-mono font-semibold tabular-nums">
+                    {usdFull(s.points[hover] ?? 0)}
+                  </span>
                 </li>
               ))}
             </ul>
+            {/* The month's total — the question a grouped chart makes you do
+                arithmetic for otherwise. */}
+            <p className="border-line-soft mt-1.5 flex items-center gap-3 border-t pt-1.5 text-[11.5px]">
+              <span className="text-muted-foreground">Total</span>
+              <span className="ml-auto font-mono font-semibold tabular-nums">
+                {usdFull(plotted.reduce((a, s) => a + (s.points[hover] ?? 0), 0))}
+              </span>
+            </p>
           </div>
         )}
       </div>
@@ -257,15 +304,18 @@ export function SpendBarChart({
       {/* Legend — always present for ≥ 2 series, so identity is never colour
           alone. Bars carry no direct labels: a number on every bar in a
           6×3 grid is 18 numbers, which is noise, not information. */}
-      <ul className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      <ul className="flex flex-wrap items-center gap-1.5">
         {plotted.map((s, idx) => (
-          <li key={s.id} className="flex items-center gap-1.5">
+          <li
+            key={s.id}
+            className="border-line-soft bg-surface-1 flex items-center gap-1.5 rounded-full border px-2.5 py-1"
+          >
             <span
-              className="size-2.5 shrink-0 rounded-full"
+              className="size-2 shrink-0 rounded-full"
               style={{ background: SERIES_COLORS[idx] }}
               aria-hidden
             />
-            <span className="text-muted-foreground font-mono text-[11px]">{s.name}</span>
+            <span className="text-muted-foreground text-[11.5px]">{s.name}</span>
           </li>
         ))}
       </ul>

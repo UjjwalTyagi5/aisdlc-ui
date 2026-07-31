@@ -18,6 +18,7 @@ import {
 import { PwcMark } from "@/components/brand/pwc-mark";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
+import { useAccessScope } from "@/hooks/use-access-scope";
 import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 
@@ -37,6 +38,13 @@ export function WorkspaceSwitcher({ collapsed }: WorkspaceSwitcherProps) {
   const queryClient = useQueryClient();
   const { active, workspaces, isLoading, isError, refetch, setActive } = useActiveWorkspace();
   const canManage = hasPermission(session, "workspace:manage");
+  // Creating a unit is an organization-level act, and `workspace:manage` does
+  // not distinguish it: a Business Unit Admin holds that permission for the
+  // unit they run, so the permission alone let them create siblings. Scope is
+  // what separates "administers a unit" from "administers the org" — the same
+  // rule the Business Units page applies to its own create button.
+  const { isOrgWide } = useAccessScope();
+  const canCreate = canManage && isOrgWide;
 
   // Self-heal: if the persisted active id is stale (e.g. an old mock id) and we
   // fell back to a real workspace, sync the store + cookie to the real id.
@@ -135,7 +143,7 @@ export function WorkspaceSwitcher({ collapsed }: WorkspaceSwitcherProps) {
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator className="bg-line-soft" />
-        {canManage && (
+        {canCreate && (
           <DropdownMenuItem onSelect={() => router.push("/workspaces?new=1")}>
             <Plus className="size-4" aria-hidden />
             Create {BUSINESS_UNIT_LABEL.toLowerCase()}

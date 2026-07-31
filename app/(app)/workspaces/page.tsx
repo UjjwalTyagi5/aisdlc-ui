@@ -73,13 +73,20 @@ export default function WorkspacesPage() {
 
   const [createOpen, setCreateOpen] = React.useState(false);
 
+  // `?new=1` is a deep link (the sidebar switcher uses it), so it has to be
+  // gated like any other entry point — it opened the dialog unconditionally
+  // before, which meant the URL alone was enough to bypass the check the
+  // button next to it performs.
+  //
+  // Scope resolves asynchronously, so this waits for the answer rather than
+  // reading `isOrgWide` while it is still undefined; stripping the param on an
+  // unresolved scope would silently swallow a legitimate request.
+  const scopeResolved = scope !== null;
   React.useEffect(() => {
-    if (searchParams.get("new") === "1") {
-      setCreateOpen(true);
-      router.replace("/workspaces");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (searchParams.get("new") !== "1" || !scopeResolved) return;
+    if (canCreate) setCreateOpen(true);
+    router.replace("/workspaces");
+  }, [searchParams, scopeResolved, canCreate, router]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => archiveWorkspace(id),
@@ -189,7 +196,7 @@ export default function WorkspacesPage() {
                 : "You haven't been added to a business unit yet. Ask your Organization Admin to invite you."}
             </p>
           </div>
-          {canManage && (
+          {canCreate && (
             <Button onClick={() => setCreateOpen(true)} variant="outline" className="border-line-soft">
               <Plus className="size-4" aria-hidden />
               New business unit

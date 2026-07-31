@@ -1114,8 +1114,20 @@ export const handlers = [
       fxListWorkspaces().filter((w) => canReadBusinessUnit(scope, String(w.id))),
     );
   }),
-  http.post("/api/workspaces", async ({ request }) => {
+  // Org Admin only — mirrors app/api/workspaces/route.ts. Without this the
+  // server route refuses while MSW happily creates one in the browser, which
+  // is the worst version: it looks like it worked.
+  http.post("/api/workspaces", async ({ request, cookies }) => {
     await lag();
+    if (!scopeFromCookies(cookies).isOrgWide) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: `Only an Organization Admin can create a ${BUSINESS_UNIT_LABEL.toLowerCase()}`,
+        },
+        { status: 403 },
+      );
+    }
     const body = (await request.json()) as {
       displayName: string;
       businessUnit?: string;
