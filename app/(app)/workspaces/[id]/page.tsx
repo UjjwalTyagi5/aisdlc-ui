@@ -13,7 +13,6 @@ import {
   Loader2,
   Pencil,
   Search,
-  ShieldAlert,
   ShieldCheck,
   Trash2,
   UserPlus,
@@ -59,7 +58,6 @@ import {
   requestBudgetIncrease,
 } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
-import type { DataClassification } from "@/lib/schemas";
 import { ROLE_META, ROLE_ORDER, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { resolveRoleLabel, useAllCustomRoles, useCustomRolesForScope } from "@/hooks/use-assignable-roles";
@@ -95,14 +93,6 @@ function assignableBuiltinRoles(canAppointBuAdmin: boolean): RoleRow[] {
 }
 
 type RoleName = string;
-
-// ─── Classification styles ────────────────────────────────────────────────────
-const CLASSIFICATION_TONE: Record<DataClassification, string> = {
-  public: "text-muted-foreground bg-muted/50 border-line-soft",
-  internal: "text-info bg-info/10 border-info/30",
-  confidential: "text-warning bg-warning/15 border-warning/40",
-  restricted: "text-destructive bg-destructive/10 border-destructive/30",
-};
 
 // ─── Avatar colors (deterministic by userId) ──────────────────────────────────
 const AVATAR_PALETTE = [
@@ -360,17 +350,6 @@ export default function WorkspaceDetailPage() {
               <h1 className="font-display text-[32px] font-bold leading-none tracking-[-0.03em]">
                 {ws.displayName}
               </h1>
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-semibold capitalize",
-                  CLASSIFICATION_TONE[ws.dataClassification],
-                )}
-              >
-                {ws.dataClassification === "restricted" && (
-                  <ShieldAlert className="size-3" aria-hidden />
-                )}
-                {ws.dataClassification}
-              </span>
               <ActiveBadge isActive={ws.isActive} />
             </div>
             <p className="text-muted-foreground font-mono text-[11px] tracking-wider uppercase">

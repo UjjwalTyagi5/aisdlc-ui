@@ -1084,8 +1084,7 @@ export const handlers = [
       displayName: string;
       businessUnit?: string;
       costCenter?: string;
-      dataClassification?: "public" | "internal" | "confidential" | "restricted";
-      monthlyBudgetUsd?: number | null;
+        monthlyBudgetUsd?: number | null;
       budgetStartDate?: string | null;
       budgetEndDate?: string | null;
       isActive?: boolean;

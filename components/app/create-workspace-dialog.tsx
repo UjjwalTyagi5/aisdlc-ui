@@ -47,14 +47,7 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 // The monthly cap is a *string* in the form and a `number | null` on the wire:
 // an empty box has to mean "no cap set" (null — the unit's own Admin sets one
 // later), which a numeric field can't express without conflating it with 0.
-// `dataClassification` is omitted deliberately: it is not asked at creation
-// any more. It stays on the Workspace contract and still renders as a badge on
-// the unit's card and detail page — it just defaults to "internal" here (see
-// lib/mock/workspace-fixtures.ts::createWorkspace) and is changed afterwards,
-// once someone actually knows what data the unit will hold. Asking on the
-// creation form put the question before the answer existed.
 const FormSchema = WorkspaceCreateInput.omit({
-  dataClassification: true,
   monthlyBudgetUsd: true,
   budgetStartDate: true,
   budgetEndDate: true,

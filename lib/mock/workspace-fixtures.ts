@@ -133,9 +133,9 @@ const WORKSPACES: Workspace[] = ([
   // removed, or reassigned to a different Business Unit.
   // Payments carries a closed budget window (the funded FY26 period) and
   // Lending an open-ended one, so both shapes render somewhere.
-  { id: "ws_payments", organizationId: ORG.id, slug: "payments", displayName: "Payments", businessUnit: "Payments", costCenter: "CC-4100", dataClassification: "restricted", status: "active", isActive: true, memberCount: 4, projectCount: 2, monthlySpendUsd: 12284.55, monthlyBudgetUsd: 12800, budgetStartDate: "2026-04-01", budgetEndDate: "2027-03-31", createdAt: "2026-02-01T09:00:00.000Z" },
-  { id: "ws_lending", organizationId: ORG.id, slug: "lending", displayName: "Lending", businessUnit: "Lending", costCenter: "CC-4200", dataClassification: "confidential", status: "active", isActive: true, memberCount: 3, projectCount: 2, monthlySpendUsd: 6420.10, monthlyBudgetUsd: 11000, budgetStartDate: "2026-01-01", budgetEndDate: null, createdAt: "2026-02-12T09:00:00.000Z" },
-  { id: "ws_platform", organizationId: ORG.id, slug: "platform", displayName: "Platform Engineering", businessUnit: "Shared Services", costCenter: "CC-1000", dataClassification: "internal", status: "active", isActive: false, memberCount: 2, projectCount: 1, monthlySpendUsd: 3184.40, monthlyBudgetUsd: 9000, createdAt: "2026-01-20T09:00:00.000Z" },
+  { id: "ws_payments", organizationId: ORG.id, slug: "payments", displayName: "Payments", businessUnit: "Payments", costCenter: "CC-4100", status: "active", isActive: true, memberCount: 4, projectCount: 2, monthlySpendUsd: 12284.55, monthlyBudgetUsd: 12800, budgetStartDate: "2026-04-01", budgetEndDate: "2027-03-31", createdAt: "2026-02-01T09:00:00.000Z" },
+  { id: "ws_lending", organizationId: ORG.id, slug: "lending", displayName: "Lending", businessUnit: "Lending", costCenter: "CC-4200", status: "active", isActive: true, memberCount: 3, projectCount: 2, monthlySpendUsd: 6420.10, monthlyBudgetUsd: 11000, budgetStartDate: "2026-01-01", budgetEndDate: null, createdAt: "2026-02-12T09:00:00.000Z" },
+  { id: "ws_platform", organizationId: ORG.id, slug: "platform", displayName: "Platform Engineering", businessUnit: "Shared Services", costCenter: "CC-1000", status: "active", isActive: false, memberCount: 2, projectCount: 1, monthlySpendUsd: 3184.40, monthlyBudgetUsd: 9000, createdAt: "2026-01-20T09:00:00.000Z" },
 ] as Workspace[]);
 
 // ───────── Memberships (identity × Business Unit × role) ─────────
@@ -209,7 +209,6 @@ export function createWorkspace(input: {
   displayName: string;
   businessUnit?: string;
   costCenter?: string;
-  dataClassification?: Workspace["dataClassification"];
   /** Null / omitted = no cap set; the unit's own Admin can set one later. */
   monthlyBudgetUsd?: number | null;
   budgetStartDate?: string | null;
@@ -223,7 +222,6 @@ export function createWorkspace(input: {
     displayName: input.displayName,
     businessUnit: input.businessUnit ?? null,
     costCenter: input.costCenter ?? null,
-    dataClassification: input.dataClassification ?? "internal",
     status: "active",
     isActive: input.isActive ?? true,
     memberCount: 0,
@@ -246,7 +244,6 @@ export function patchWorkspace(
       | "displayName"
       | "businessUnit"
       | "costCenter"
-      | "dataClassification"
       | "status"
       | "isActive"
       | "monthlyBudgetUsd"

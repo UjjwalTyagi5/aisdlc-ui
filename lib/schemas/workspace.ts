@@ -43,15 +43,6 @@ export type Organization = z.infer<typeof Organization>;
 export const WorkspaceStatus = z.enum(["active", "archived"]);
 export type WorkspaceStatus = z.infer<typeof WorkspaceStatus>;
 
-/** Data-classification of the work a workspace holds — drives model/connector policy. */
-export const DataClassification = z.enum([
-  "public",
-  "internal",
-  "confidential",
-  "restricted",
-]);
-export type DataClassification = z.infer<typeof DataClassification>;
-
 export const Workspace = z.object({
   id: WorkspaceId,
   organizationId: OrganizationId,
@@ -60,7 +51,6 @@ export const Workspace = z.object({
   /** What this workspace represents — the business unit / delivery org. */
   businessUnit: z.string().nullable().optional(),
   costCenter: z.string().nullable().optional(),
-  dataClassification: DataClassification.default("internal"),
   status: WorkspaceStatus,
   /**
    * Org-Admin-owned active/inactive marker — deliberately NOT the same axis as
@@ -110,7 +100,6 @@ export const WorkspaceCreateInput = z.object({
   displayName: z.string().min(2, "Name must be at least 2 characters").max(80),
   businessUnit: z.string().max(120).optional(),
   costCenter: z.string().max(64).optional(),
-  dataClassification: DataClassification.default("internal"),
   /**
    * Optional at creation and null by default — the Org Admin may leave the cap
    * unset and let the unit's own Admin set it later (PRD §34.5 budget
@@ -125,12 +114,10 @@ export type WorkspaceCreateInput = z.infer<typeof WorkspaceCreateInput>;
 /**
  * What a *caller* has to supply, as opposed to what the parsed result contains.
  *
- * `z.infer` is the output type, so every field carrying `.default()` —
- * `dataClassification`, `isActive` — comes out required, which is backwards for
- * a request body: the whole point of a default is that the caller may omit it.
- * The creation form does omit `dataClassification` (it isn't asked any more),
- * and typing the client against the output would have forced it to invent a
- * value that zod is about to supply anyway.
+ * `z.infer` is the output type, so a field carrying `.default()` — `isActive` —
+ * comes out required, which is backwards for a request body: the whole point of
+ * a default is that the caller may omit it. Typing the client against the output
+ * would force callers to invent values that zod is about to supply anyway.
  */
 export type WorkspaceCreateBody = z.input<typeof WorkspaceCreateInput>;
 

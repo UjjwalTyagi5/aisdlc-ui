@@ -13,7 +13,6 @@ import {
   MoreVertical,
   Pencil,
   Plus,
-  ShieldAlert,
   ShieldCheck,
   Users,
   type LucideIcon,
@@ -42,14 +41,7 @@ import { useAccessScope } from "@/hooks/use-access-scope";
 import { archiveWorkspace } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
 import { ActiveBadge } from "@/components/app/active-badge";
-import type { DataClassification, Workspace } from "@/lib/schemas";
-
-const CLASSIFICATION_TONE: Record<DataClassification, string> = {
-  public: "text-muted-foreground bg-muted/50 border-line-soft",
-  internal: "text-info bg-info/10 border-info/30",
-  confidential: "text-warning bg-warning/15 border-warning/40",
-  restricted: "text-destructive bg-destructive/10 border-destructive/30",
-};
+import type { Workspace } from "@/lib/schemas";
 
 const RISE = {
   animationName: "rise",
@@ -350,21 +342,10 @@ function WorkspaceCard({
           </div>
         </div>
 
-        {/* Classification + active/inactive badges */}
-        <div className="flex w-fit flex-wrap items-center gap-1.5">
-          <span
-            className={cn(
-              "inline-flex w-fit items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold capitalize",
-              CLASSIFICATION_TONE[ws.dataClassification],
-            )}
-          >
-            {ws.dataClassification === "restricted" && (
-              <ShieldAlert className="size-3" aria-hidden />
-            )}
-            {ws.dataClassification}
-          </span>
-          <ActiveBadge isActive={ws.isActive} className="text-[10px]" />
-        </div>
+        {/* Rendered without a wrapper: ActiveBadge is null for an active unit,
+            and an empty flex child would still claim one of the card's gap-4
+            rows — leaving a hole on every card that has nothing to flag. */}
+        <ActiveBadge isActive={ws.isActive} className="w-fit text-[10px]" />
 
         {/* Stats */}
         <div className="text-muted-foreground mt-auto flex flex-wrap items-center gap-x-4 gap-y-1">

@@ -9,7 +9,6 @@ import {
   WorkspaceMemberList,
   WorkspaceMemberOut,
   type WorkspaceCreateBody,
-  type DataClassification,
 } from "@/lib/schemas/workspace";
 import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
@@ -27,7 +26,6 @@ export const updateWorkspace = (
     displayName: string;
     businessUnit: string | null;
     costCenter: string | null;
-    dataClassification: DataClassification;
     monthlyBudgetUsd: number | null;
     /** Validity period of the cap — see lib/schemas/budget-window.ts. */
     budgetStartDate: string | null;

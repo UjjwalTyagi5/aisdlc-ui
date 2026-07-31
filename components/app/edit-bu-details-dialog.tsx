@@ -16,27 +16,17 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { updateWorkspace } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
-import type { DataClassification, Workspace } from "@/lib/schemas/workspace";
+import type { Workspace } from "@/lib/schemas/workspace";
 
 /**
  * Edit a Business Unit's record after it exists.
  *
- * These four fields are asked once and then never again — a unit gets renamed,
- * moves cost centre, or is re-classified as its remit changes. Until this
- * dialog they were write-once: the creation form set them and nothing could
- * touch them afterwards, which was especially wrong for `dataClassification`,
- * since that was dropped from creation on the reasoning that it is better
- * decided later, once someone knows what data the unit will actually hold.
+ * A unit gets renamed, re-labelled, or moves cost centre. Until this dialog
+ * those three fields were write-once: the creation form set them and nothing
+ * could touch them afterwards.
  *
  * Budget, active/inactive and who administers the unit are deliberately NOT
  * here — each has its own rule (a cascade, an Org-Admin-only flag, an
@@ -47,13 +37,6 @@ import type { DataClassification, Workspace } from "@/lib/schemas/workspace";
  * (`canManageBusinessUnit` in app/api/workspaces/[id]/route.ts): the Org Admin,
  * and the unit's own Admin maintaining their own record.
  */
-const CLASSIFICATIONS: { value: DataClassification; label: string; hint: string }[] = [
-  { value: "public", label: "Public", hint: "No sensitive data" },
-  { value: "internal", label: "Internal", hint: "Default — internal use" },
-  { value: "confidential", label: "Confidential", hint: "Restricted access" },
-  { value: "restricted", label: "Restricted", hint: "Regulated / highest controls" },
-];
-
 export function EditBuDetailsDialog({
   workspace: ws,
   open,
@@ -67,9 +50,6 @@ export function EditBuDetailsDialog({
   const [displayName, setDisplayName] = React.useState(ws.displayName);
   const [businessUnit, setBusinessUnit] = React.useState(ws.businessUnit ?? "");
   const [costCenter, setCostCenter] = React.useState(ws.costCenter ?? "");
-  const [classification, setClassification] = React.useState<DataClassification>(
-    ws.dataClassification,
-  );
 
   // Re-seed whenever it opens, so a cancelled edit doesn't persist as the
   // starting point of the next one.
@@ -78,9 +58,8 @@ export function EditBuDetailsDialog({
       setDisplayName(ws.displayName);
       setBusinessUnit(ws.businessUnit ?? "");
       setCostCenter(ws.costCenter ?? "");
-      setClassification(ws.dataClassification);
     }
-  }, [open, ws.displayName, ws.businessUnit, ws.costCenter, ws.dataClassification]);
+  }, [open, ws.displayName, ws.businessUnit, ws.costCenter]);
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -90,7 +69,6 @@ export function EditBuDetailsDialog({
         // nullable on the contract and "unset" is a real state for both.
         businessUnit: businessUnit.trim() || null,
         costCenter: costCenter.trim() || null,
-        dataClassification: classification,
       }),
     onSuccess: (updated) => {
       toast.success(`${updated.displayName} updated`);
@@ -184,34 +162,6 @@ export function EditBuDetailsDialog({
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-              Data classification
-            </Label>
-            <Select
-              value={classification}
-              onValueChange={(v) => setClassification(v as DataClassification)}
-            >
-              <SelectTrigger className="border-line-soft bg-surface-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CLASSIFICATIONS.map((c) => (
-                  <SelectItem key={c.value} value={c.value}>
-                    <span className="flex items-center gap-2">
-                      <span className="font-medium">{c.label}</span>
-                      <span className="text-muted-foreground text-[11px]">· {c.hint}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-muted-foreground text-[11px]">
-              Drives which models and connectors this {BUSINESS_UNIT_LABEL.toLowerCase()} is
-              allowed to use. Set here rather than at creation, when what the unit will hold is
-              actually known.
-            </p>
-          </div>
 
           <DialogFooter>
             <Button

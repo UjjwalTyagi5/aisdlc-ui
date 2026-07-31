@@ -31,7 +31,6 @@ export async function POST(req: NextRequest) {
     displayName: string;
     businessUnit?: string;
     costCenter?: string;
-    dataClassification?: "public" | "internal" | "confidential" | "restricted";
     /** Optional at creation; null = no cap, for the unit's Admin to set later. */
     monthlyBudgetUsd?: number | null;
     budgetStartDate?: string | null;
