@@ -307,7 +307,14 @@ export default function IntegrationsPage() {
   }
 
   // Phase 6: page-level connector:view guard — excludes stakeholder (artifact:view only).
-  // connector:manage users implicitly have connector:view; admin:* passes via wildcard.
+  //
+  // Every role that may open this page lists `connector:view` explicitly, and
+  // admin:* passes via the wildcard. An earlier comment here claimed
+  // `connector:manage` implied `connector:view`; it does not — `hasPermission`
+  // mirrors the backend's exact membership test — and the Business Unit Admin,
+  // who held only the manage half, was bounced off a page its own sidebar link
+  // offered. Grant both halves in lib/auth/role-permissions.ts rather than
+  // loosening this gate or the primitive behind it.
   if (!hasPermission(session, "connector:view")) {
     return <RestrictedAccess description="Connectors require the connector:view permission." />;
   }

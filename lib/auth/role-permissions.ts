@@ -15,7 +15,15 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
   bu_admin: [
     "member:manage",
     "role:manage",
+    // Both halves, explicitly. `hasPermission` mirrors the backend's exact
+    // membership test — `required in perms or "admin:*" in perms` — with no
+    // implication from manage to view, so holding only `connector:manage` did
+    // not satisfy the Integrations page's `connector:view` gate. The Business
+    // Unit Admin runs their unit's connections (PRD §15.2), and every delivery
+    // role already lists `connector:view`; this role was the sole exception,
+    // and the only one whose sidebar link led to a permission error.
     "connector:manage",
+    "connector:view",
     "project:create",
     "model:manage",
     "audit:view",
