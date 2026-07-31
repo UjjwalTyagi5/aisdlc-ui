@@ -28,7 +28,10 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env
-.env
+# .env IS tracked on purpose: this project runs mock-only, so its contents are
+# just the flags that put it in that mode — committing them is what makes a
+# fresh clone work without setup. It must therefore stay secret-free; anything
+# real (a JWT signing key, Auth0 credentials) belongs in .env.local below.
 .env.local
 .env.development.local
 .env.test.local
