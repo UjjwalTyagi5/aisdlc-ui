@@ -7,16 +7,23 @@ pipeline bumps the image tag in `Manifest/` → ArgoCD syncs AKS.** No manual `k
 
 | Thing | Name | Notes |
 |---|---|---|
-| Region | `southeastasia` | southindia/centralindia are already at their 4-vCPU free-trial quota |
+| Region | `uaenorth` | closest region where this subscription is **permitted** to use B-series VMs, and it owns its own 4-vCPU quota |
 | Resource group | `aisdlc-rg` | |
-| Registry | `aisdlcacr2026` | Basic SKU, admin enabled |
+| Registry | `aisdlcacr2026` | Basic SKU, admin enabled, attached to AKS |
 | Cluster | `aisdlc-aks` | 1 × `Standard_B2s_v2` (2 vCPU / 8 GiB) — half the regional quota, room to add a node |
-| Static IP | `aisdlc-ingress-ip` | pinned to ingress-nginx so the URL survives every `aks stop/start` |
+| Static IP | `aisdlc-ingress-ip` | **20.216.44.167** — pinned to ingress-nginx so the URL survives every `aks stop/start` |
 | Namespace | `aisdlc` | |
-| ADO project | `AISDLC` in org `IDP-CORE` | repo `aisdlc-ui`, pipeline `aisdlc-ui` |
+| ADO project | `AISDLC` in org `IDP-CORE` | repo `aisdlc-ui`, pipeline `aisdlc-ui` (id 4) |
+| **Public URL** | `http://aisdlc.20.216.44.167.nip.io` | |
 
 Subscription is **Free Trial with spending limit ON** — it cannot overspend; it disables
 resources instead of billing you.
+
+> **Region gotcha, do not re-learn the hard way:** on a Free Trial, `az vm list-usage`
+> reporting quota for a VM family does **not** mean you may use it there. southeastasia
+> showed `Standard Bsv2 Family 0/4` but forbids B/D/A families entirely. Check with
+> `az rest .../Microsoft.Compute/skus?$filter=location eq '<r>'` and look for a restriction
+> with `"type": "Location"`.
 
 ---
 
@@ -58,32 +65,43 @@ git push ado main
 
 ## STEP 3 — Pipeline
 
-1. **Pipelines → New pipeline → Azure Repos Git → `aisdlc-ui` → Existing Azure Pipelines YAML file →
-   `/azure-pipelines.yml`** → **Save** (not Run yet).
-2. **Edit → Variables → New variable**, twice:
-   - `ACR_USERNAME` = `aisdlcacr2026`
-   - `ACR_PASSWORD` = output of `az acr credential show -n aisdlcacr2026 --query passwords[0].value -o tsv` → **tick "Keep this value secret"**
-3. **Project Settings → Repos → `aisdlc-ui` → Security →** select **`AISDLC Build Service (IDP-CORE)`**
-   → set **Contribute** = **Allow**. Without this the tag-bump step can't push and every build fails at the last step.
-4. **Run pipeline.**
+Already created (id 4) with `ACR_USERNAME` / `ACR_PASSWORD` (secret) set:
+
+```bash
+az pipelines create --name aisdlc-ui --project AISDLC --org https://dev.azure.com/IDP-CORE \
+  --repository aisdlc-ui --repository-type tfsgit --branch main \
+  --yml-path azure-pipelines.yml --skip-first-run
+```
+
+**⚠️ One setting you must click — the pipeline will fail without it.** The tag-bump step
+pushes to `main` as the build identity, which has no write access by default:
+
+**Project Settings → Repositories → `aisdlc-ui` → Security →** select
+**`AISDLC Build Service (IDP-CORE)`** → **Contribute = Allow**.
+
+There is no CLI for this: the build identity is a *service identity*, so it has no group
+descriptor for `az devops security permission update --subject`, and the ACL REST API
+rejects `az`'s AAD token because that identity was never materialized in the org.
 
 ## STEP 4 — Point ArgoCD at the repo
 
 ADO private repos need credentials — ArgoCD can't clone anonymously.
 
+The `aisdlc` Application is already applied; it just needs a credential to clone the private
+ADO repo.
+
 1. ADO → User settings → **Personal access tokens** → New token, scope **Code (Read)**.
-2. Then (passwords printed by `infra.sh`):
+2. Then:
 
 ```bash
 kubectl -n argocd port-forward svc/argocd-server 8080:443 &
 argocd login localhost:8080 --username admin \
   --password "$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)" --insecure
 argocd repo add https://dev.azure.com/IDP-CORE/AISDLC/_git/aisdlc-ui --username azdo --password <PAT>
-kubectl apply -f argocd/aisdlc-application.yaml
 argocd app sync aisdlc
 ```
 
-App is live at `http://aisdlc.<ip>.nip.io` (exact URL printed by `infra.sh`).
+App is live at **http://aisdlc.20.216.44.167.nip.io**
 
 ## Day-to-day: shipping a change
 
