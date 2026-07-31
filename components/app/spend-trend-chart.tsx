@@ -12,23 +12,24 @@ import { cn } from "@/lib/utils";
  * components/app/cost-meter.tsx::Sparkline), and one 6×6-point line chart is
  * not worth the first one.
  *
- * PALETTE — validated, do not eyeball changes. These six hues pass the
- * lightness band, chroma floor, adjacent-pair CVD separation (worst deutan ΔE
- * 11.4), normal-vision separation and the 3:1 contrast check against BOTH this
- * app's light and dark panel surfaces, which is why one set serves both themes
- * rather than each mode getting its own steps. Re-run the validator before
- * touching any value. Status colors (success/warning/destructive/info) are
- * deliberately absent — they mean a state, and reusing one as "series 4" would
- * make a green line look like good news.
+ * PALETTE — the brand's, and only three of them. The values live as
+ * `--series-1..3` in app/globals.css with separate light and dark steps; they
+ * are referenced rather than inlined so the chart follows the theme without
+ * this component knowing which one is active. That file carries the rationale
+ * and the validator results — read it before changing a colour, and do not
+ * eyeball a replacement.
+ *
+ * Three is a real ceiling, not a placeholder: the guideline allows one warm
+ * ramp plus a neutral for data visualisation, and no fourth colour drawn from
+ * those can stay distinguishable from the orange or the tangerine. Series
+ * beyond the third therefore fold into a single "Other" line, which is the
+ * honest failure mode — inventing a fourth hue would be off-brand, and
+ * recycling one would silently merge two units.
+ *
+ * Status colours (success/warning/destructive/info) are deliberately absent:
+ * they mean a state, and a green line would read as good news.
  */
-const SERIES_COLORS = [
-  "#E06C3B",
-  "#4C8DF6",
-  "#2FA37A",
-  "#A970E8",
-  "#B0821E",
-  "#E0578F",
-] as const;
+const SERIES_COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)"] as const;
 
 /** Beyond this the rest folds into one "Other" line — hues are never cycled. */
 const MAX_SERIES = SERIES_COLORS.length;

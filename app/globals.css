@@ -76,6 +76,30 @@
   --surface-2: oklch(0.96 0.004 60);
   --panel-elevated: oklch(0.99 0.003 60);
   --line-soft: oklch(0.88 0.006 60);
+
+  /* ---- Data-visualisation series colours ----------------------------
+   * Brand-derived. The guideline restricts data viz to the orange ramp,
+   * the grey ramp, and tangerine; --chart-1 is the brand orange exactly
+   * (#FD5108), and the other two are the neutral and tangerine darkened
+   * until a 2px line clears 3:1 against the panel. The pale ramp steps
+   * ("use for backgrounds and data visualisations") are fills — as thin
+   * strokes on a near-white panel they measure 1.4–1.8:1 and vanish.
+   *
+   * Three, and no more: one warm ramp plus a neutral cannot separate a
+   * fourth categorical series — every candidate collides with the orange
+   * or the tangerine. A 4th business unit folds into "Other" rather than
+   * inventing an off-brand hue (see spend-trend-chart.tsx).
+   *
+   * Dark gets its own steps rather than a flip — validated against
+   * --panel-elevated dark, not the light one. Verified with the dataviz
+   * validator: lightness band, CVD separation (worst ΔE 13.9 light /
+   * 15.9 dark), normal-vision separation and contrast all pass. The
+   * neutral trips the "reads gray" chroma check by design, because the
+   * brand's grey ramp is a prescribed data-viz colour.
+   * ------------------------------------------------------------------ */
+  --series-1: #fd5108;
+  --series-2: #6b7280;
+  --series-3: #b87500;
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,6 +163,13 @@
   --surface-2: oklch(0.185 0.007 60);
   --panel-elevated: oklch(0.205 0.008 62);
   --line-soft: oklch(0.26 0.008 60);
+
+  /* Series colours re-picked for the dark panel — see the light block.
+   * The brand orange holds at full strength here; the neutral and
+   * tangerine lift instead of darkening. */
+  --series-1: #fd5108;
+  --series-2: #868fa0;
+  --series-3: #c27e00;
 }
 
 /* ------------------------------------------------------------------ */

@@ -19,6 +19,13 @@ const TooltipContent = React.forwardRef<
       sideOffset={sideOffset}
       className={cn(
         "bg-primary text-primary-foreground data-[state=delayed-open]:data-[side=bottom]:slide-in-from-top-2 data-[state=delayed-open]:data-[side=left]:slide-in-from-right-2 data-[state=delayed-open]:data-[side=right]:slide-in-from-left-2 data-[state=delayed-open]:data-[side=top]:slide-in-from-bottom-2 z-50 overflow-hidden rounded-md px-3 py-1.5 text-xs animate-in fade-in-0 zoom-in-95",
+        // A tooltip's surface is brand orange, but `text-muted-foreground` is a
+        // grey mixed for the app's light panels — put one inside the other and
+        // the text all but disappears. Several call sites use it for a
+        // secondary line (the agent rail's descriptions, project card badges),
+        // so this is fixed here rather than in each of them: inside a tooltip,
+        // "muted" means the same ink held back, not a different one.
+        "[&_.text-muted-foreground]:text-primary-foreground/75",
         className,
       )}
       {...props}
