@@ -104,24 +104,6 @@ export const deliverNav: NavItem[] = [
     prdSection: "§33.2",
   },
   {
-    /**
-     * The platform's discovery portal — deliberately the one Deliver entry with
-     * no permission and no scope requirement.
-     *
-     * Every other entry answers "may you act here". This one answers "what can
-     * this platform do", which is a question anyone who can sign in is entitled
-     * to ask. It renders only the documented model — agents, tracks, roles,
-     * governance — and reads no project, unit or spend data, so there is
-     * nothing in it to scope. Adding a gate would hide the map from exactly the
-     * people who need it most: someone new, working out where they fit.
-     */
-    label: "Agent Catalogue",
-    href: "/catalogue",
-    icon: Boxes,
-    segment: "catalogue",
-    prdSection: "§20, §21–§25",
-  },
-  {
     label: "Agent Studio",
     href: "/agent-studio",
     icon: SlidersHorizontal,
@@ -239,6 +221,29 @@ export const observeNav: NavItem[] = [
  * the route is untouched.
  */
 export const utilityNav: NavItem[] = [
+  {
+    /**
+     * The platform's discovery portal, and the one entry here with no
+     * permission and no scope requirement — it renders only the documented
+     * model (agents, tracks, roles, governance) and reads no project, unit or
+     * spend data, so there is nothing in it to scope.
+     *
+     * It sits in the footer beside Help & docs rather than in Deliver because
+     * it is reference material, not a place you work: you come to it to learn
+     * what exists, then leave. A permanent slot in the main rail would have it
+     * competing with the pages people actually operate in, which is the same
+     * reasoning that keeps My access out of the rail.
+     *
+     * `hiddenInSidebar` keeps it out of the main nav loop; the footer renders
+     * it explicitly (components/app/sidebar.tsx).
+     */
+    label: "Agent Catalogue",
+    href: "/catalogue",
+    icon: Boxes,
+    segment: "catalogue",
+    hiddenInSidebar: true,
+    prdSection: "§20, §21–§25",
+  },
   {
     label: "Profile",
     href: "/profile",

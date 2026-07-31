@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Boxes,
   HelpCircle,
   Lock,
   MessageSquare,
@@ -484,6 +485,14 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="flex flex-col gap-0.5 p-2">
+        {/* Reference material, above the help links it belongs with. Ungated
+            deliberately — see its entry in lib/nav.ts::utilityNav. */}
+        <SidebarFooterLink
+          href="/catalogue"
+          label="Agent Catalogue"
+          icon={Boxes}
+          collapsed={collapsed}
+        />
         <SidebarFooterLink href="/help" label="Help & docs" icon={HelpCircle} collapsed={collapsed} />
         <SidebarFooterLink href="/feedback" label="Send feedback" icon={MessageSquare} collapsed={collapsed} />
         <Button
