@@ -46,6 +46,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -450,6 +451,9 @@ export default function ModelProvidersPage() {
           Add provider
         </Button>
       </header>
+
+      {/* What the allow-lists below are actually costing, per model. */}
+      <SpendBreakdownCard groupBy="model" />
 
       {scope === "org" && (
         <ModelAllowListCard

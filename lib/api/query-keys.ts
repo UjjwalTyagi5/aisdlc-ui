@@ -139,6 +139,8 @@ export const qk = {
     breakdown: (windowDays?: number, workspace?: string | null) =>
       ["cost", "breakdown", windowDays ?? 30, workspace ?? "all"] as const,
     budgets: () => ["cost", "budgets"] as const,
+    spendSeries: (groupBy: string, workspaceId: string | null, months: number) =>
+      ["cost", "spend-series", groupBy, workspaceId ?? "all", months] as const,
   },
   org: {
     overview: () => ["org", "overview"] as const,

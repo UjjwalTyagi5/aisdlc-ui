@@ -29,6 +29,7 @@ import {
 } from "@/lib/mock/access-fixtures";
 import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
 import { buildOrgOverview } from "@/lib/mock/org-overview-fixtures";
+import { buildSpendSeries } from "@/lib/mock/cost-fixtures";
 import {
   activateProject,
   createProjectRecord,
@@ -1051,6 +1052,41 @@ export const handlers = [
     const page = Number(url.searchParams.get("page") ?? "1");
     const pageSize = Number(url.searchParams.get("page_size") ?? "50");
     return HttpResponse.json({ items: [], pagination: { page, pageSize, total: 0 } });
+  }),
+
+  // Spend split by business unit / project / model — mirrors
+  // app/api/cost/spend-series/route.ts, including its scope bounding.
+  http.get("/api/cost/spend-series", async ({ request, cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    const url = new URL(request.url);
+
+    const raw = url.searchParams.get("groupBy") ?? "business_unit";
+    const groupBy = (["business_unit", "project", "model"] as const).includes(
+      raw as "business_unit",
+    )
+      ? (raw as "business_unit" | "project" | "model")
+      : "business_unit";
+
+    const monthsRaw = Number(url.searchParams.get("months") ?? 6);
+    const months = Number.isFinite(monthsRaw)
+      ? Math.min(24, Math.max(1, Math.trunc(monthsRaw)))
+      : 6;
+
+    const requested = url.searchParams.get("workspaceId");
+    const workspaceId = requested && requested !== "all" ? requested : null;
+    if (workspaceId && !canReadBusinessUnit(scope, workspaceId)) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+
+    return HttpResponse.json(
+      buildSpendSeries(
+        months,
+        scope.isOrgWide ? null : scope.businessUnitIds,
+        groupBy,
+        workspaceId,
+      ),
+    );
   }),
 
   // ───── Organization rollup (Org Admin dashboard) ─────

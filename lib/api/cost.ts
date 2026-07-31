@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { SpendSeries, type SpendGroupBy } from "@/lib/schemas/spend-series";
+
 import { Timestamp } from "@/lib/schemas/primitives";
 
 import { api } from "./client";
@@ -76,3 +78,25 @@ export const setBudget = (body: {
   id: string;
   monthlyBudgetUsd: number | null;
 }) => api("/cost/budgets", { method: "PUT", body });
+
+/**
+ * Monthly spend split by business unit, project or model — the dashboard
+ * chart's data, refetched whenever a filter changes.
+ *
+ * `workspaceId` omitted (or "all") means every unit the caller may read, which
+ * is why a Business Unit Admin can use this endpoint unchanged: the server
+ * bounds "all" to their own scope.
+ */
+export const getSpendSeries = (params?: {
+  groupBy?: SpendGroupBy;
+  workspaceId?: string | null;
+  months?: number;
+}) =>
+  api("/cost/spend-series", {
+    query: {
+      groupBy: params?.groupBy ?? "business_unit",
+      workspaceId: params?.workspaceId ?? "all",
+      months: params?.months ?? 6,
+    },
+    schema: SpendSeries,
+  });

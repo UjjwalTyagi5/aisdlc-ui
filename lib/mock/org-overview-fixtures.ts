@@ -11,10 +11,7 @@ import { CONNECTORS, PROJECTS } from "@/mocks/fixtures";
 import { listIdentities, listMembers, listWorkspaces } from "@/lib/mock/workspace-fixtures";
 import { listAllModelProviders } from "@/lib/mock/model-fixtures";
 import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
-import { buildSpendSeries } from "@/lib/mock/cost-fixtures";
 import type { OrgOverview } from "@/lib/schemas/org-overview";
-
-const SERIES_MONTHS = 6;
 
 /**
  * @param allowed the ids the viewer may read, or null when unbounded. Applied
@@ -54,7 +51,6 @@ export function buildOrgOverview(
           ),
         ).size;
 
-  const { months, series } = buildSpendSeries(SERIES_MONTHS, workspaceIds);
 
   return {
     userCount,
@@ -70,8 +66,6 @@ export function buildOrgOverview(
       monthlySpendUsd: w.monthlySpendUsd,
       isActive: w.isActive,
     })),
-    months,
-    spendSeries: series,
     generatedAt: new Date().toISOString(),
   };
 }

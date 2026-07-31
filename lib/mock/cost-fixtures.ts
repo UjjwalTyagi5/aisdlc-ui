@@ -69,55 +69,111 @@ export function buildBudgets(
   };
 }
 
-/**
- * Monthly spend per Business Unit, ending at the current month.
- *
- * Derived from each unit's `monthlySpendUsd` rather than seeded independently,
- * so the last point of every series equals the figure the Dashboard tiles and
- * the Cost page already show — a chart that disagreed with the number printed
- * next to it would be read as a bug in the number.
- *
- * The shape backwards is deterministic (a fixed per-unit ramp plus a fixed
- * wobble keyed off the month index), not random: the same page rendered twice
- * must not draw two different histories.
- *
- * @param months how many points to return, including the current month.
- */
-export function buildSpendSeries(
-  months = 6,
-  allowedWorkspaceIds?: string[] | null,
-): {
-  months: string[];
-  series: Array<{ workspaceId: string; name: string; points: number[] }>;
-} {
-  const workspaces = listWorkspaces().filter(
-    (w) => allowedWorkspaceIds == null || allowedWorkspaceIds.includes(String(w.id)),
-  );
+/** What the spend chart splits its bars by. */
+export type SpendGroupBy = "business_unit" | "project" | "model";
 
+/** `YYYY-MM` labels ending at the current month, oldest first. */
+function monthLabels(months: number): string[] {
   const end = new Date(GENERATED_AT);
   const labels: string[] = [];
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - i, 1));
     labels.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
   }
+  return labels;
+}
 
-  const series = workspaces.map((w, wi) => {
-    const current = w.monthlySpendUsd;
-    const points = labels.map((_, i) => {
-      const age = months - 1 - i; // 0 for the current month
-      // The current month IS the live figure — no ramp, no wobble — so the
-      // chart's last point matches the tile beside it exactly.
-      if (age === 0) return Number(current.toFixed(2));
-      // Earlier months ramp back ~8% each, with a small unit-specific wobble so
-      // the lines don't read as three copies of one curve.
-      const ramp = Math.pow(1 / 1.08, age);
-      const wobble = 1 + 0.06 * Math.sin((i + wi * 2) * 1.1);
-      return Number((current * ramp * wobble).toFixed(2));
-    });
-    return { workspaceId: String(w.id), name: w.displayName, points };
+/**
+ * Spread a known current-month figure backwards over `months`.
+ *
+ * The current month is returned untouched so the chart's last bar equals the
+ * figure printed beside it — a chart that disagreed with its own tile reads as
+ * a bug in the tile. Earlier months ramp back ~8% each with a small
+ * series-specific wobble, deterministic rather than random: the same page
+ * rendered twice must not draw two different histories.
+ */
+function backcast(current: number, months: number, seriesIndex: number): number[] {
+  return Array.from({ length: months }, (_, i) => {
+    const age = months - 1 - i;
+    if (age === 0) return Number(current.toFixed(2));
+    const ramp = Math.pow(1 / 1.08, age);
+    const wobble = 1 + 0.06 * Math.sin((i + seriesIndex * 2) * 1.1);
+    return Number((current * ramp * wobble).toFixed(2));
   });
+}
 
-  return { months: labels, series };
+/**
+ * Monthly spend, split by Business Unit, project or model.
+ *
+ * All three groupings are derived from the same fixture figures rather than
+ * seeded apart, so they reconcile: the per-project bars for a unit sum to that
+ * unit's bar, and the per-model split is that same total redistributed by
+ * MODEL_SHARE. Grouping is a change of lens, not a change of subject.
+ *
+ * @param allowedWorkspaceIds units the viewer may read, or null when unbounded.
+ * @param workspaceId         the viewer's narrowing choice ("all" → no filter),
+ *                            applied on top of what they're allowed to see.
+ */
+export function buildSpendSeries(
+  months = 6,
+  allowedWorkspaceIds?: string[] | null,
+  groupBy: SpendGroupBy = "business_unit",
+  workspaceId?: string | null,
+): {
+  months: string[];
+  groupBy: SpendGroupBy;
+  series: Array<{ id: string; name: string; points: number[] }>;
+} {
+  const labels = monthLabels(months);
+
+  const readable = listWorkspaces().filter(
+    (w) => allowedWorkspaceIds == null || allowedWorkspaceIds.includes(String(w.id)),
+  );
+  const scoped = workspaceId ? readable.filter((w) => String(w.id) === workspaceId) : readable;
+  const scopedIds = new Set(scoped.map((w) => String(w.id)));
+
+  if (groupBy === "business_unit") {
+    return {
+      months: labels,
+      groupBy,
+      series: scoped.map((w, i) => ({
+        id: String(w.id),
+        name: w.displayName,
+        points: backcast(w.monthlySpendUsd, months, i),
+      })),
+    };
+  }
+
+  if (groupBy === "project") {
+    const projects = PROJECTS.filter(
+      (p) => !p.archived && p.workspaceId != null && scopedIds.has(String(p.workspaceId)),
+    );
+    return {
+      months: labels,
+      groupBy,
+      series: projects
+        // Largest first, so the top-N fold keeps the spend that matters.
+        .sort((a, b) => (b.monthlySpendUsd ?? 0) - (a.monthlySpendUsd ?? 0))
+        .map((p, i) => ({
+          id: String(p.id),
+          name: p.name,
+          points: backcast(p.monthlySpendUsd ?? 0, months, i),
+        })),
+    };
+  }
+
+  // Model: the scoped total redistributed by the same share table the Cost
+  // page's per-model breakdown uses, so the two agree.
+  const total = scoped.reduce((a, w) => a + w.monthlySpendUsd, 0);
+  return {
+    months: labels,
+    groupBy,
+    series: MODEL_SHARE.map(({ model, share }, i) => ({
+      id: model,
+      name: model,
+      points: backcast(total * share, months, i),
+    })),
+  };
 }
 
 /** Per-model breakdown, weighted toward the models already used across fixtures/traces. */

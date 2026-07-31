@@ -27,14 +27,6 @@ export const OrgBudgetRow = z.object({
 });
 export type OrgBudgetRow = z.infer<typeof OrgBudgetRow>;
 
-export const OrgSpendSeries = z.object({
-  workspaceId: z.string(),
-  name: z.string(),
-  /** One point per entry in `months`, oldest first. */
-  points: z.array(z.number()),
-});
-export type OrgSpendSeries = z.infer<typeof OrgSpendSeries>;
-
 export const OrgOverview = z.object({
   /** Distinct people, not memberships — see listIdentities(). */
   userCount: z.number().int().nonnegative(),
@@ -47,9 +39,6 @@ export const OrgOverview = z.object({
   businessUnitCount: z.number().int().nonnegative(),
   projectCount: z.number().int().nonnegative(),
   budgets: z.array(OrgBudgetRow),
-  /** `YYYY-MM` labels, oldest first. */
-  months: z.array(z.string()),
-  spendSeries: z.array(OrgSpendSeries),
   generatedAt: z.string(),
 });
 export type OrgOverview = z.infer<typeof OrgOverview>;
