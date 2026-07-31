@@ -1,0 +1,1347 @@
+import { http, HttpResponse, delay } from "msw";
+
+import { ARTIFACTS, AUDIT_EVENTS, CONNECTORS, PROJECTS, RUNS, STEPS } from "./fixtures";
+import {
+  archiveWorkspace as fxArchiveWorkspace,
+  createMembership as fxCreateMembership,
+  createWorkspace as fxCreateWorkspace,
+  findOrCreateIdentity as fxFindOrCreateIdentity,
+  findOrCreateIdentityBySsoSubject as fxFindOrCreateIdentityBySsoSubject,
+  getWorkspace as fxGetWorkspace,
+  listMembers as fxListMembers,
+  listWorkspaces as fxListWorkspaces,
+  patchWorkspace as fxPatchWorkspace,
+  removeMembership as fxRemoveMembership,
+  setBusinessUnitAdmin as fxSetBusinessUnitAdmin,
+  setMembershipRole as fxSetMembershipRole,
+} from "@/lib/mock/workspace-fixtures";
+import { sseHandler } from "./sse";
+import { workspaceStreamHandler } from "./workspace-stream";
+import { chatHandler } from "./chat";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { ROLE_PERMISSIONS } from "@/lib/auth/role-permissions";
+import {
+  ACCESS_MEMBERS,
+  ACCESS_WORKSPACES,
+  ORG_MEMBERS,
+  addAccessMember,
+  mockInitials,
+} from "@/lib/mock/access-fixtures";
+import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
+import { buildOrgOverview } from "@/lib/mock/org-overview-fixtures";
+import {
+  activateProject,
+  createProjectRecord,
+  getProjectById as fxGetProjectById,
+  rejectProjectCreation,
+  requestOrArchiveProject,
+  setProjectArchived,
+  updateProjectRecord,
+  type ProjectUpdatePatch,
+} from "@/lib/mock/project-fixtures";
+import {
+  createGovernanceApproval,
+  decideGovernanceApproval,
+  getGovernanceApproval,
+  listGovernanceApprovals,
+} from "@/lib/mock/governance-approval-fixtures";
+import type { GovernanceApprovalDecisionInput } from "@/lib/schemas/governance-approval";
+import { MOCK_COOKIE_NAME, decodeSession } from "@/lib/auth/mock";
+import { resolveSessionScope } from "@/lib/auth/access-scope";
+import {
+  canManageBusinessUnit,
+  canManageProject,
+  canReadBusinessUnit,
+  canReadGovernanceApproval,
+  canReadProject,
+  filterByProject,
+} from "@/lib/mock/access-scope";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import type { ProjectCreateInput } from "@/lib/schemas/project";
+import {
+  activateModelProvider,
+  createModelProvider,
+  deleteModelProvider,
+  getBuAllowedModels,
+  getModelCatalog,
+  getOrgAllowedModels,
+  getProjectModelSelection,
+  listModelProviders,
+  rejectModelProvider,
+  setBuAllowedModels,
+  setProjectModelSelection,
+  setModelDefaultOffering,
+  setOrgAllowedModels,
+  updateModelProvider,
+  verifyModelProvider,
+  type CreateModelProviderInput,
+} from "@/lib/mock/model-fixtures";
+import type { ModelAllowEntry } from "@/lib/schemas/model";
+import {
+  listOverridesForProject,
+  removeOverride,
+  setOverride,
+} from "@/lib/mock/agent-access-override-fixtures";
+import type { AgentAccessOverrideInput, InvolvementLevel } from "@/lib/schemas/agent-access";
+import type { Phase } from "@/lib/schemas/enums";
+import { listMcpServers } from "@/lib/mock/mcp-fixtures";
+import { getProjectCapabilitiesData, setCuratedDisabled } from "@/lib/mock/capabilities-fixtures";
+import {
+  createCustomRole as fxCreateCustomRole,
+  deleteCustomRole as fxDeleteCustomRole,
+  listCustomRoles as fxListCustomRoles,
+  updateCustomRole as fxUpdateCustomRole,
+} from "@/lib/mock/custom-role-fixtures";
+import type { CustomRoleScope } from "@/lib/api/roles";
+import { getUserDetail as fxGetUserDetail } from "@/lib/mock/user-directory-fixtures";
+import {
+  addProjectMember as fxAddProjectMember,
+  listProjectMembers as fxListProjectMembers,
+  removeProjectMember as fxRemoveProjectMember,
+  updateProjectMemberRole as fxUpdateProjectMemberRole,
+} from "@/lib/mock/project-membership-fixtures";
+import {
+  buildPreview,
+  createDraft,
+  getAgentProfileSummary,
+  listVersions,
+  publishVersion,
+  unpublishVersion,
+} from "@/lib/mock/agent-profile-fixtures";
+import { agentDefaultApprovalType } from "@/lib/governance";
+import type { AgentProfileDraftInput, ProfileScope } from "@/lib/schemas/agent-profiles";
+
+/**
+ * Read the signed-in session from MSW's parsed cookie jar — MSW handlers run
+ * in a Service Worker, and the Fetch spec strips the `Cookie` header from any
+ * request a Service Worker intercepts (a browser-enforced restriction, not an
+ * MSW gap), so `request.headers.get("cookie")` is always empty there. MSW
+ * works around this by parsing `document.cookie` on the page side and handing
+ * it to the resolver as `cookies` — use that instead of the request headers.
+ */
+function sessionFromCookies(cookies: Record<string, string>) {
+  const raw = cookies[MOCK_COOKIE_NAME];
+  if (!raw) return null;
+  return decodeSession(raw);
+}
+
+/**
+ * The viewer's Business Unit / project boundary, resolved the same way the Next
+ * route handlers resolve it — same function, same fixtures, so the two runtimes
+ * cannot disagree about who sees what ([[msw-dual-runtime-mutation-rule]]).
+ *
+ * Every handler below that returns scope-bearing rows MUST filter through this.
+ * MSW intercepts client-side fetches only, so a handler that skips the filter
+ * silently re-opens the leak in the browser while the server route stays
+ * correct — the hardest version of this bug to see, because the page looks fine
+ * until MSW is disabled.
+ */
+function scopeFromCookies(cookies: Record<string, string>) {
+  return resolveSessionScope(sessionFromCookies(cookies));
+}
+
+/**
+ * Toggle simulated network latency via NEXT_PUBLIC_MOCK_LATENCY_MS
+ * (clamped 0 – 2000ms). Useful for testing loading states.
+ */
+const LATENCY_MS = Math.min(
+  Math.max(Number(process.env.NEXT_PUBLIC_MOCK_LATENCY_MS) || 120, 0),
+  2000,
+);
+
+async function lag() {
+  if (LATENCY_MS > 0) await delay(LATENCY_MS);
+}
+
+function page<T>(items: T[], query: URLSearchParams) {
+  const page = Number(query.get("page") ?? "1");
+  const pageSize = Math.min(Number(query.get("pageSize") ?? "20"), 200);
+  const start = (page - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    pagination: { page, pageSize, total: items.length },
+  };
+}
+
+// ───── Access / RBAC mock state (mirrors backend shared/authz/permissions.py) ─────
+/**
+ * The assignable role catalogue — the platform's twelve roles (PRD §33.1 plus
+ * Scrum Master, a platform addition),
+ * with the permissions each holds per the role × permission matrix (§14.11).
+ *
+ * Governance tier (Organization Admin, Business Unit Admin) never holds
+ * agent-invoke or approval permissions; the Developer never holds an approval
+ * permission at all, which is what makes self-approval structurally
+ * impossible rather than merely discouraged (§14.10).
+ */
+const ACCESS_ROLES = [
+  { name: "org_admin", label: "Organization Admin", description: "Governance only. Creates business units and appoints their admins; sets the organization budget and org-wide policy. Never builds, never approves delivery work.", permissions: [...ROLE_PERMISSIONS.org_admin] },
+  { name: "bu_admin", label: "Business Unit Admin", description: "Governance only. Runs one business unit: its budget, connections, members and project creation.", permissions: [...ROLE_PERMISSIONS.bu_admin] },
+  { name: "project_admin", label: "Project Admin", description: "Runs one project; selects its connections; fallback approver on every agent.", permissions: [...ROLE_PERMISSIONS.project_admin] },
+  { name: "ba", label: "BA (Business Analyst)", description: "Owns the Requirements agent.", permissions: [...ROLE_PERMISSIONS.ba] },
+  { name: "architect", label: "Architect", description: "Owns Design; approves Development and Code Review.", permissions: [...ROLE_PERMISSIONS.architect] },
+  { name: "developer", label: "Developer", description: "Builds in Development; requests code review. Never self-approves — the Architect approves its push and PR.", permissions: [...ROLE_PERMISSIONS.developer] },
+  { name: "qa", label: "QA / Tester", description: "Owns the Testing agent.", permissions: [...ROLE_PERMISSIONS.qa] },
+  { name: "security_engineer", label: "Security Engineer", description: "Owns the Security agent; the one contributor role with standing trace and audit access on its projects.", permissions: [...ROLE_PERMISSIONS.security_engineer] },
+  { name: "devops_engineer", label: "DevOps Engineer", description: "Owns the Deployment agent; requests tooling in Development.", permissions: [...ROLE_PERMISSIONS.devops_engineer] },
+  { name: "data_engineer", label: "Data Engineer", description: "Owns the Data Engineering agent (Track 5).", permissions: [...ROLE_PERMISSIONS.data_engineer] },
+  { name: "scrum_master", label: "Scrum Master", description: "Coordinates the team's flow across every agent stage; observes but owns no single gate — never holds an approval permission.", permissions: [...ROLE_PERMISSIONS.scrum_master] },
+];
+
+// ACCESS_WORKSPACES / ACCESS_MEMBERS / ORG_MEMBERS / mockInitials moved to
+// lib/mock/access-fixtures.ts so app/api/onboarding/route.ts can write into
+// the same store — a person onboarded from Users or Roles & Access must show
+// up in both places, not just here.
+
+export const handlers = [
+  // ───── Projects ─────
+  http.get("/api/projects", async ({ request, cookies }) => {
+    await lag();
+    const url = new URL(request.url);
+    const archived = url.searchParams.get("archived");
+    const search = url.searchParams.get("search")?.toLowerCase();
+    // Scope first, then archive/search/page — mirrors app/api/projects/route.ts
+    // exactly, including the ordering, so `pagination.total` describes a set the
+    // viewer can actually open.
+    const scope = scopeFromCookies(cookies);
+    let list = PROJECTS.filter((p) => canReadProject(scope, String(p.id)));
+    if (archived !== null) list = list.filter((p) => p.archived === (archived === "true"));
+    else list = list.filter((p) => !p.archived);
+    if (search) list = list.filter((p) => p.name.toLowerCase().includes(search));
+    return HttpResponse.json(page(list, url.searchParams));
+  }),
+
+  // 404 (not 403) for an unauthorized id — a 403 would confirm the project
+  // exists, which is itself the cross-project fact being withheld.
+  http.get("/api/projects/:id", async ({ params, cookies }) => {
+    await lag();
+    const project = PROJECTS.find((p) => p.id === params.id);
+    if (!project || !canReadProject(scopeFromCookies(cookies), String(params.id))) {
+      return HttpResponse.json(
+        { code: "not_found", message: "Project not found" },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json(project);
+  }),
+
+  // Mirrors app/api/projects/route.ts's POST exactly (same lib/mock
+  // functions) — see [[msw-dual-runtime-mutation-rule]].
+  http.post("/api/projects", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) {
+      return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    }
+    const body = (await request.json()) as ProjectCreateInput;
+    if (!body?.name || !body?.workspaceId) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "name and workspaceId are required" },
+        { status: 422 },
+      );
+    }
+    const role = effectivePlatformRole(session);
+    const created = createProjectRecord(body, {
+      role,
+      displayName: session.user.name,
+      userRef: {
+        id: session.user.id,
+        name: session.user.name,
+        email: session.user.email,
+        initials: session.user.initials,
+      },
+    });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+
+  http.post("/api/projects/:id/archive", async ({ params, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const role = effectivePlatformRole(session);
+    const result = requestOrArchiveProject(String(params.id), { role, displayName: session.user.name });
+    if (!result) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(result.project);
+  }),
+
+  http.post("/api/projects/:id/restore", async ({ params }) => {
+    await lag();
+    const project = setProjectArchived(String(params.id), false);
+    if (!project) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(project);
+  }),
+
+  http.patch("/api/projects/:id", async ({ params, request, cookies }) => {
+    await lag();
+    const patch = (await request.json()) as ProjectUpdatePatch;
+    // Delivery status and the cost cap need MANAGE, not read — mirrors
+    // app/api/projects/[id]/route.ts.
+    const needsManage =
+      "deliveryStatus" in patch ||
+      "monthlyBudgetUsd" in patch ||
+      "budgetStartDate" in patch ||
+      "budgetEndDate" in patch;
+    if (needsManage) {
+      const scope = scopeFromCookies(cookies);
+      const existing = fxGetProjectById(String(params.id));
+      const managed =
+        canManageProject(scope, String(params.id)) ||
+        canManageBusinessUnit(scope, existing?.workspaceId);
+      if (!managed) {
+        return HttpResponse.json(
+          {
+            code: "forbidden",
+            message: "Only a Project, Business Unit or Organization Admin can change this",
+          },
+          { status: 403 },
+        );
+      }
+    }
+    const project = updateProjectRecord(String(params.id), patch);
+    if (!project) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(project);
+  }),
+
+  // Per-project agent-access overrides. Mirrors
+  // app/api/projects/:id/agent-access-overrides/route.ts exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/projects/:id/agent-access-overrides", async ({ params }) => {
+    await lag();
+    return HttpResponse.json(listOverridesForProject(String(params.id)));
+  }),
+  http.put("/api/projects/:id/agent-access-overrides", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const body = (await request.json()) as AgentAccessOverrideInput;
+    if (!body?.role || !body?.phase || !body?.involvement) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "role, phase and involvement are required" },
+        { status: 422 },
+      );
+    }
+    const created = setOverride(String(params.id), body.role, body.phase, body.involvement, session.user.name);
+    return HttpResponse.json(created, { status: 201 });
+  }),
+  http.delete("/api/projects/:id/agent-access-overrides", async ({ params, request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const role = url.searchParams.get("role");
+    const phase = url.searchParams.get("phase");
+    if (!role || !phase) {
+      return HttpResponse.json({ code: "invalid_input", message: "role and phase are required" }, { status: 422 });
+    }
+    const ok = removeOverride(String(params.id), role, phase as Phase);
+    if (!ok) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ───── Governance approvals (project creation, model credentials) ─────
+  // Mirrors app/api/governance-approvals/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/governance-approvals", async ({ request, cookies }) => {
+    await lag();
+    const url = new URL(request.url);
+    // The query param is the caller's narrowing choice; the viewer's own scope
+    // is applied unconditionally on top, so "all" can only widen to the scopes
+    // they actually ADMINISTER — read access to a parent unit is not enough for
+    // its governance queue.
+    const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      listGovernanceApprovals(workspaceId).filter((a) =>
+        canReadGovernanceApproval(scope, a.workspaceId, a.projectId),
+      ),
+    );
+  }),
+  http.post("/api/governance-approvals/:id/decide", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const id = String(params.id);
+    const body = (await request.json()) as GovernanceApprovalDecisionInput;
+    const approval = getGovernanceApproval(id);
+    if (!approval) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+
+    const decided = decideGovernanceApproval(id, body.decision, session.user.name, body.reason);
+    if (!decided) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+
+    if (approval.type === "project_creation") {
+      if (body.decision === "approve") activateProject(approval.targetRef, session.user.name);
+      else rejectProjectCreation(approval.targetRef, session.user.name, body.reason);
+    } else if (approval.type === "model_credential") {
+      if (body.decision === "approve") activateModelProvider(approval.targetRef, session.user.name);
+      else rejectModelProvider(approval.targetRef, session.user.name, body.reason);
+    } else if (approval.type === "budget_increase" && body.decision === "approve") {
+      const requestedAmountUsd = approval.payload?.requestedAmountUsd;
+      if (typeof requestedAmountUsd === "number") {
+        fxPatchWorkspace(approval.targetRef, { monthlyBudgetUsd: requestedAmountUsd });
+      }
+    } else if (approval.type === "project_archive" && body.decision === "approve") {
+      setProjectArchived(approval.targetRef, true);
+    } else if (
+      (approval.type === "agent_default_org" ||
+        approval.type === "agent_default_workspace" ||
+        approval.type === "agent_default_project") &&
+      body.decision === "approve"
+    ) {
+      publishVersion(approval.targetRef, session.user.name);
+    }
+
+    return HttpResponse.json(decided);
+  }),
+
+  // ───── Agent Studio prompt profiles (Behavior tab) ─────
+  // Mirrors app/api/agent-profiles/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/agent-profiles/summary", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const sp = url.searchParams;
+    const scope = (sp.get("scope") ?? "workspace") as ProfileScope;
+    const scopeId = sp.get("scope_id");
+    const agents = getAgentProfileSummary(scope, scopeId, {
+      workspaceId: sp.get("workspace_id"),
+      projectId: sp.get("project_id"),
+      userId: sp.get("user_id"),
+    });
+    return HttpResponse.json({ agents });
+  }),
+  http.get("/api/agent-profiles/versions", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const sp = url.searchParams;
+    const agentId = sp.get("agent_id");
+    if (!agentId) return HttpResponse.json({ code: "invalid_input", message: "agent_id is required" }, { status: 422 });
+    const scope = (sp.get("scope") ?? "workspace") as ProfileScope;
+    const scopeId = sp.get("scope_id");
+    return HttpResponse.json({ versions: listVersions(agentId, scope, scopeId) });
+  }),
+  http.post("/api/agent-profiles/draft", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const body = (await request.json()) as AgentProfileDraftInput;
+    if (!body?.agent_id || !body?.scope) {
+      return HttpResponse.json({ code: "invalid_input", message: "agent_id and scope are required" }, { status: 422 });
+    }
+    const FIELD_CAPS = { prompt_prepend: 4000, prompt_append: 4000, output_contract_extra: 2000 } as const;
+    const violations = (
+      [
+        ["prompt_prepend", body.prompt_prepend ?? ""],
+        ["prompt_append", body.prompt_append ?? ""],
+        ["output_contract_extra", body.output_contract_extra ?? ""],
+      ] as const
+    )
+      .filter(([field, value]) => value.length > FIELD_CAPS[field])
+      .map(([field]) => ({
+        field,
+        code: "too_long",
+        message: `Over the ${FIELD_CAPS[field].toLocaleString()}-character limit.`,
+      }));
+    if (violations.length > 0) {
+      return HttpResponse.json({ detail: { violations } }, { status: 422 });
+    }
+
+    const created = createDraft({
+      agentId: body.agent_id,
+      scope: body.scope,
+      scopeId: body.scope_id ?? null,
+      promptPrepend: body.prompt_prepend ?? "",
+      promptAppend: body.prompt_append ?? "",
+      outputContractExtra: body.output_contract_extra ?? "",
+      createdBy: session.user.name,
+    });
+    return HttpResponse.json(created);
+  }),
+  http.post("/api/agent-profiles/:id/publish", async ({ params, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const published = publishVersion(String(params.id), session.user.name);
+    if (!published) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(published);
+  }),
+  http.post("/api/agent-profiles/:id/unpublish", async ({ params, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const unpublished = unpublishVersion(String(params.id));
+    if (!unpublished) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(unpublished);
+  }),
+  http.post("/api/agent-profiles/preview", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const body = (await request.json()) as AgentProfileDraftInput;
+    const preview = buildPreview(
+      body.agent_id,
+      body.scope,
+      body.scope_id ?? null,
+      { workspaceId: body.workspace_id, projectId: body.project_id, userId: body.user_id },
+      {
+        promptPrepend: body.prompt_prepend ?? "",
+        promptAppend: body.prompt_append ?? "",
+        outputContractExtra: body.output_contract_extra ?? "",
+      },
+    );
+    return HttpResponse.json({ ...preview, warnings: [] });
+  }),
+  http.post("/api/agent-profiles/:id/propose", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const id = String(params.id);
+    const body = (await request.json()) as {
+      scope: "org" | "workspace" | "project";
+      agentId: string;
+      agentLabel: string;
+      workspaceId?: string;
+      workspaceName?: string;
+      projectId?: string;
+      projectName?: string;
+    };
+    const scopeLabel =
+      body.scope === "org" ? "organization" : body.scope === "workspace" ? "business unit" : "project";
+    const created = createGovernanceApproval({
+      type: agentDefaultApprovalType(body.scope),
+      workspaceId: body.workspaceId ?? "",
+      workspaceName: body.workspaceName ?? "",
+      projectId: body.projectId ?? null,
+      projectName: body.projectName ?? null,
+      title: `${body.agentLabel} default change (${scopeLabel})`,
+      summary: `${session.user.name} proposed a ${body.agentLabel} behavior change for the ${scopeLabel} default.`,
+      requestedBy: session.user.name,
+      targetRef: id,
+      payload: { agentId: body.agentId, scope: body.scope },
+    });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+
+  http.post("/api/workspaces/:id/budget-increase-request", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const workspace = fxGetWorkspace(String(params.id));
+    if (!workspace) return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+
+    const body = (await request.json()) as { requestedAmountUsd?: number; reason?: string };
+    if (!body?.requestedAmountUsd || body.requestedAmountUsd <= 0) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "requestedAmountUsd must be a positive number" },
+        { status: 422 },
+      );
+    }
+
+    const created = createGovernanceApproval({
+      type: "budget_increase",
+      workspaceId: workspace.id,
+      workspaceName: workspace.displayName,
+      title: `Budget increase: ${workspace.displayName}`,
+      summary: `${session.user.name} requested a monthly budget increase to $${body.requestedAmountUsd.toLocaleString()} for ${workspace.displayName}${body.reason ? ` — "${body.reason}"` : ""}.`,
+      requestedBy: session.user.name,
+      targetRef: workspace.id,
+      payload: { requestedAmountUsd: body.requestedAmountUsd },
+    });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+
+  // ───── Model catalogue cascade (org allow-list → BU allow-list → onboarded
+  // providers). Mirrors app/api/model/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/model/catalog", async () => {
+    await lag();
+    return HttpResponse.json(getModelCatalog());
+  }),
+  http.get("/api/model/allowed/org", async () => {
+    await lag();
+    return HttpResponse.json(getOrgAllowedModels());
+  }),
+  http.put("/api/model/allowed/org", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const body = (await request.json()) as { entries: ModelAllowEntry[] };
+    return HttpResponse.json(setOrgAllowedModels(body.entries));
+  }),
+  http.get("/api/model/allowed/bu", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const workspaceId = url.searchParams.get("workspaceId");
+    if (!workspaceId) {
+      return HttpResponse.json({ code: "invalid_input", message: "workspaceId is required" }, { status: 422 });
+    }
+    return HttpResponse.json(getBuAllowedModels(workspaceId));
+  }),
+  http.put("/api/model/allowed/bu", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const url = new URL(request.url);
+    const workspaceId = url.searchParams.get("workspaceId");
+    if (!workspaceId) {
+      return HttpResponse.json({ code: "invalid_input", message: "workspaceId is required" }, { status: 422 });
+    }
+    const body = (await request.json()) as { entries: ModelAllowEntry[] };
+    return HttpResponse.json(setBuAllowedModels(workspaceId, body.entries));
+  }),
+
+  // Fourth tier — what a project selected from its BU's allow-list. Mirrors
+  // app/api/model/allowed/project/route.ts exactly, including resolving the
+  // project's parent Business Unit here rather than inside the fixture module.
+  http.get("/api/model/allowed/project", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) {
+      return HttpResponse.json({ code: "invalid_input", message: "projectId is required" }, { status: 422 });
+    }
+    const project = fxGetProjectById(projectId);
+    if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(getProjectModelSelection(projectId, project.workspaceId ?? null));
+  }),
+  http.put("/api/model/allowed/project", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) {
+      return HttpResponse.json({ code: "invalid_input", message: "projectId is required" }, { status: 422 });
+    }
+    const project = fxGetProjectById(projectId);
+    if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    const body = (await request.json()) as {
+      selected?: ModelAllowEntry[];
+      defaultKey?: string | null;
+    };
+    return HttpResponse.json(
+      setProjectModelSelection(projectId, project.workspaceId ?? null, {
+        selected: body.selected ?? [],
+        defaultKey: body.defaultKey,
+      }),
+    );
+  }),
+
+  http.get("/api/model/providers", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const workspaceId = url.searchParams.get("workspaceId");
+    return HttpResponse.json(listModelProviders(workspaceId || null));
+  }),
+  http.post("/api/model/providers", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const body = (await request.json()) as CreateModelProviderInput;
+    if (!body?.provider || !body?.display_name) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "provider and display_name are required" },
+        { status: 422 },
+      );
+    }
+    const role = effectivePlatformRole(session);
+    const created = createModelProvider(body, { role, displayName: session.user.name });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+  http.patch("/api/model/providers/:id", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json()) as { display_name?: string; enabled_models?: string[] };
+    const updated = updateModelProvider(String(params.id), body);
+    if (!updated) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(updated);
+  }),
+  http.delete("/api/model/providers/:id", async ({ params }) => {
+    await lag();
+    const ok = deleteModelProvider(String(params.id));
+    if (!ok) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return new HttpResponse(null, { status: 204 });
+  }),
+  http.post("/api/model/providers/:id/verify", async ({ params }) => {
+    await lag();
+    const result = verifyModelProvider(String(params.id));
+    if (!result) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(result);
+  }),
+  http.put("/api/model/default", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as { offering_id: string };
+    setModelDefaultOffering(body.offering_id);
+    return HttpResponse.json({ ok: true });
+  }),
+
+  // ───── Runs ─────
+  http.get("/api/runs", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get("projectId");
+    const status = url.searchParams.get("status");
+    let list = [...RUNS];
+    if (projectId) list = list.filter((r) => r.projectId === projectId);
+    if (status) list = list.filter((r) => r.status === status);
+    return HttpResponse.json(page(list, url.searchParams));
+  }),
+
+  http.get("/api/runs/:id", async ({ params }) => {
+    await lag();
+    const run = RUNS.find((r) => r.id === params.id);
+    if (!run) {
+      return HttpResponse.json({ code: "not_found", message: "Run not found" }, { status: 404 });
+    }
+    return HttpResponse.json(run);
+  }),
+
+  http.get("/api/runs/:id/steps", async ({ params }) => {
+    await lag();
+    const steps = STEPS.filter((s) => s.runId === params.id);
+    return HttpResponse.json(steps);
+  }),
+
+  http.post("/api/runs/:id/approvals", async ({ params, request }) => {
+    await lag();
+    const run = RUNS.find((r) => r.id === params.id);
+    if (!run) {
+      return HttpResponse.json({ code: "not_found", message: "Run not found" }, { status: 404 });
+    }
+    const body = (await request.json()) as {
+      decision: "approve" | "reject" | "retry";
+      reason?: string;
+      idempotencyKey: string;
+    };
+    run.status =
+      body.decision === "approve"
+        ? "approved"
+        : body.decision === "reject"
+          ? "rejected"
+          : "running";
+    return HttpResponse.json({
+      id: `appr_${Date.now()}`,
+      runId: run.id,
+      artifactId: null,
+      decision: body.decision,
+      decidedBy: "u_admin",
+      decidedAt: new Date().toISOString(),
+      reason: body.reason,
+    });
+  }),
+
+  // ───── Artifacts ─────
+  http.get("/api/projects/:id/artifacts", async ({ params, request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const phase = url.searchParams.get("phase");
+    let list = ARTIFACTS.filter((a) => a.projectId === params.id);
+    if (phase) list = list.filter((a) => a.phase === phase);
+    return HttpResponse.json(list);
+  }),
+
+  http.get("/api/artifacts/:id", async ({ params }) => {
+    await lag();
+    const a = ARTIFACTS.find((x) => x.id === params.id);
+    if (!a) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(a);
+  }),
+
+  http.patch("/api/artifacts/:id", async ({ params, request }) => {
+    await lag();
+    const a = ARTIFACTS.find((x) => x.id === params.id);
+    if (!a) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    const patch = (await request.json()) as {
+      title?: string;
+      status?: (typeof a)["status"];
+      body?: (typeof a)["body"];
+    };
+    if (patch.title !== undefined) a.title = patch.title;
+    if (patch.status !== undefined) a.status = patch.status;
+    if (patch.body !== undefined) a.body = patch.body;
+    a.version += 1;
+    a.updatedAt = new Date().toISOString();
+    return HttpResponse.json(a);
+  }),
+
+  // ───── Capabilities ─────
+  // Mirrors app/api/capabilities/projects/:id/agents/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/capabilities/projects/:id/agents", async ({ params }) => {
+    await lag();
+    const data = getProjectCapabilitiesData(String(params.id));
+    if (!data) return HttpResponse.json({ code: "not_found", message: "Project not found" }, { status: 404 });
+    return HttpResponse.json(data);
+  }),
+  http.put("/api/capabilities/projects/:id/agents/:agentId/curated", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json()) as { disabled: string[] };
+    const result = setCuratedDisabled(String(params.id), String(params.agentId), body.disabled ?? []);
+    return HttpResponse.json(result);
+  }),
+
+  // ───── MCP registry ─────
+  // Mirrors app/api/mcp/registry/route.ts's GET exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/mcp/registry", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const activeOnly = url.searchParams.get("active_only") === "true";
+    return HttpResponse.json(listMcpServers(activeOnly));
+  }),
+
+  // ───── Connectors ─────
+  // REQ-M4-05: response shape is aligned to the real Connector Zod schema
+  // (id, tenantId, kind, name, installed, health, capabilities, lastCheckedAt, account?).
+  // MSW is retained for Storybook/component tests — retired from the runtime path
+  // (NEXT_PUBLIC_API_MOCKS=off routes through the BFF to FastAPI instead).
+  http.get("/api/connectors", async ({ request, cookies }) => {
+    await lag();
+    // Mirrors app/api/connectors/route.ts — org-wide plus the unit's own,
+    // intersected with the units the viewer may read. The "no workspaceId means
+    // the whole tenant" default survives only for an unbounded viewer.
+    const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      visibleConnectorsForScope(
+        CONNECTORS,
+        workspaceId,
+        scope.isOrgWide ? null : scope.businessUnitIds,
+      ),
+    );
+  }),
+  http.get("/api/connectors/:kind", async ({ params, cookies }) => {
+    await lag();
+    const c = CONNECTORS.find((x) => x.kind === params.kind);
+    // A by-kind read must respect the same boundary as the list, or a
+    // Business Unit Admin could name a sibling unit's connector kind directly
+    // and read its account, health and capabilities.
+    const scope = scopeFromCookies(cookies);
+    const readable =
+      c != null &&
+      (c.scope === "organization" || canReadBusinessUnit(scope, c.workspaceId ?? null));
+    if (!readable) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(c);
+  }),
+
+  http.post("/api/connectors/:kind/install", async ({ params }) => {
+    await lag();
+    const c = CONNECTORS.find((x) => x.kind === params.kind);
+    if (!c) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    c.installed = true;
+    c.health = "healthy";
+    c.lastCheckedAt = new Date().toISOString();
+    return HttpResponse.json(c);
+  }),
+
+  http.post("/api/connectors/:kind/disconnect", async ({ params }) => {
+    await lag();
+    const c = CONNECTORS.find((x) => x.kind === params.kind);
+    if (!c) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    c.installed = false;
+    c.health = "disconnected";
+    return HttpResponse.json(c);
+  }),
+
+  // ───── Audit ─────
+  // Scoped to the viewer's projects; organization-level rows (projectId: null)
+  // are dropped for anyone not org-wide, since an unattributable governance
+  // event is exactly the row that must not cross a boundary. Mirrors
+  // app/api/audit/route.ts.
+  http.get("/api/audit", async ({ request, cookies }) => {
+    await lag();
+    const url = new URL(request.url);
+    const scope = scopeFromCookies(cookies);
+    const rows = filterByProject(scope, AUDIT_EVENTS, (e) => e.projectId);
+    return HttpResponse.json(page(rows, url.searchParams));
+  }),
+
+  // ───── Access scope (the viewer's Business Unit / project boundary) ─────
+  // Mirrors app/api/auth/access-scope/route.ts. Every scope indicator, the
+  // dashboard shape and every "is this empty or forbidden" empty state read
+  // this one answer, so it must resolve identically in both runtimes.
+  http.get("/api/auth/access-scope", async ({ cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) {
+      return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    }
+    return HttpResponse.json(resolveSessionScope(session));
+  }),
+
+  // ───── Access / RBAC (admin) ─────
+  // Scoped to units the viewer ADMINISTERS: this list is the Business Unit
+  // picker on Roles & Access, so it decides whose role assignments can be
+  // opened at all. Read access to a parent unit is deliberately not enough.
+  http.get("/api/admin/workspaces", async ({ cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      ACCESS_WORKSPACES.filter((w) => canManageBusinessUnit(scope, w.id)),
+    );
+  }),
+  http.get("/api/admin/roles", async () => {
+    await lag();
+    return HttpResponse.json(ACCESS_ROLES);
+  }),
+  http.get("/api/admin/org-members", async () => {
+    await lag();
+    return HttpResponse.json(ORG_MEMBERS);
+  }),
+  // The default was `ACCESS_WORKSPACES[0]` — always Payments, regardless of who
+  // asked. That both leaked a roster and made the page show the wrong unit for
+  // any admin who doesn't run Payments; the default is now the caller's own
+  // first manageable unit, and a denied id returns empty rather than falling
+  // back to someone else's.
+  http.get("/api/admin/members", async ({ request, cookies }) => {
+    await lag();
+    const url = new URL(request.url);
+    const scope = scopeFromCookies(cookies);
+    const manageable = ACCESS_WORKSPACES.filter((w) => canManageBusinessUnit(scope, w.id));
+    const wid = url.searchParams.get("workspace_id") ?? manageable[0]?.id;
+    if (!wid || !canManageBusinessUnit(scope, wid)) return HttpResponse.json([]);
+    return HttpResponse.json(ACCESS_MEMBERS[wid] ?? []);
+  }),
+  http.post("/api/admin/assignments", async ({ request }) => {
+    await lag();
+    const b = (await request.json()) as { user_id: string; workspace_id: string; role_name: string };
+    const list = (ACCESS_MEMBERS[b.workspace_id] ??= []);
+    let m = list.find((x) => x.userId === b.user_id);
+    if (!m) {
+      const isEmail = b.user_id.includes("@");
+      m = {
+        userId: b.user_id,
+        name: null,
+        email: isEmail ? b.user_id : null,
+        initials: mockInitials(b.user_id),
+        roles: [],
+      };
+      list.push(m);
+    }
+    if (!m.roles.includes(b.role_name)) m.roles.push(b.role_name);
+    return HttpResponse.json({ ok: true });
+  }),
+  http.delete("/api/admin/assignments", async ({ request }) => {
+    await lag();
+    const b = (await request.json()) as { user_id: string; workspace_id: string; role_name: string };
+    const list = ACCESS_MEMBERS[b.workspace_id] ?? [];
+    const m = list.find((x) => x.userId === b.user_id);
+    if (m) {
+      m.roles = m.roles.filter((r) => r !== b.role_name);
+      if (m.roles.length === 0) {
+        ACCESS_MEMBERS[b.workspace_id] = list.filter((x) => x.userId !== b.user_id);
+      }
+    }
+    return HttpResponse.json({ ok: true });
+  }),
+
+  // Mirrors app/api/onboarding/route.ts exactly (same lib/mock functions) —
+  // needed so a person onboarded while MSW is intercepting client fetches
+  // (the normal dev-with-mocks path) is visible to the ALSO-MSW-handled
+  // /api/admin/members and /api/workspaces/:id/members reads above/elsewhere.
+  // A Next.js server route and an MSW browser handler are separate JS
+  // runtimes with independent copies of any "shared" module state, so both
+  // sides of a read/write pair must run in the SAME one.
+  http.post("/api/onboarding", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as {
+      email?: string;
+      displayName?: string;
+      workspaceId?: string;
+      role?: string;
+    };
+    if (!body?.email || !body?.workspaceId || !body?.role) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "email, workspaceId and role are required" },
+        { status: 422 },
+      );
+    }
+    if (!fxGetWorkspace(body.workspaceId)) {
+      return HttpResponse.json({ code: "not_found", message: "Unknown workspace" }, { status: 404 });
+    }
+    const identity = fxFindOrCreateIdentity(body.email, body.displayName);
+    const membership = fxCreateMembership(body.workspaceId, identity.id, body.role);
+    addAccessMember(
+      body.workspaceId,
+      { userId: identity.ssoSubject, name: identity.displayName, email: identity.email },
+      body.role,
+    );
+    return HttpResponse.json(
+      {
+        identityId: identity.id,
+        email: identity.email,
+        displayName: identity.displayName,
+        initials: identity.initials,
+        workspaceId: membership.workspaceId,
+        role: membership.role,
+        membershipStatus: "invited",
+      },
+      { status: 201 },
+    );
+  }),
+
+  // ───── Custom roles (Roles & Access → Custom roles) ─────
+  // Mirrors app/api/admin/custom-roles/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/admin/custom-roles", async () => {
+    await lag();
+    return HttpResponse.json(fxListCustomRoles());
+  }),
+  http.post("/api/admin/custom-roles", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as {
+      name: string;
+      description?: string;
+      permissions: string[];
+      agentAccess?: Partial<Record<Phase, InvolvementLevel>>;
+      scope: CustomRoleScope;
+    };
+    const role = fxCreateCustomRole(body);
+    return HttpResponse.json(role, { status: 201 });
+  }),
+  http.patch("/api/admin/custom-roles/:id", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json()) as Partial<{
+      name: string;
+      description: string | null;
+      permissions: string[];
+      agentAccess: Partial<Record<Phase, InvolvementLevel>>;
+      scope: CustomRoleScope;
+    }>;
+    const role = fxUpdateCustomRole(String(params.id), body);
+    if (!role) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(role);
+  }),
+  http.delete("/api/admin/custom-roles/:id", async ({ params }) => {
+    await lag();
+    fxDeleteCustomRole(String(params.id));
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ───── User detail (Users page click-through) ─────
+  // Mirrors app/api/admin/users/[id]/route.ts exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/admin/users/:id", async ({ params }) => {
+    await lag();
+    const detail = fxGetUserDetail(String(params.id));
+    if (!detail) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(detail);
+  }),
+
+  http.get("/api/admin/audit", async ({ request }) => {
+    await lag();
+    const url = new URL(request.url);
+    const page = Number(url.searchParams.get("page") ?? "1");
+    const pageSize = Number(url.searchParams.get("page_size") ?? "50");
+    return HttpResponse.json({ items: [], pagination: { page, pageSize, total: 0 } });
+  }),
+
+  // ───── Organization rollup (Org Admin dashboard) ─────
+  // Mirrors app/api/org/overview/route.ts — see [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/org/overview", async ({ cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      buildOrgOverview(
+        scope.isOrgWide
+          ? null
+          : { workspaceIds: scope.businessUnitIds, projectIds: scope.projectIds },
+      ),
+    );
+  }),
+
+  // ───── Workspaces (F0/F1/F2) ─────
+  // Scoped: this list feeds the sidebar switcher and every Business Unit
+  // dropdown, so a sibling unit that never reaches the browser cannot be
+  // picked, searched, filtered or linked to.
+  http.get("/api/workspaces", async ({ cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      fxListWorkspaces().filter((w) => canReadBusinessUnit(scope, String(w.id))),
+    );
+  }),
+  http.post("/api/workspaces", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as {
+      displayName: string;
+      businessUnit?: string;
+      costCenter?: string;
+      dataClassification?: "public" | "internal" | "confidential" | "restricted";
+      monthlyBudgetUsd?: number | null;
+      budgetStartDate?: string | null;
+      budgetEndDate?: string | null;
+      isActive?: boolean;
+    };
+    if (!body?.displayName || body.displayName.trim().length < 2) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: `${BUSINESS_UNIT_LABEL} name must be at least 2 characters` },
+        { status: 422 },
+      );
+    }
+    return HttpResponse.json(fxCreateWorkspace({ ...body, displayName: body.displayName.trim() }), {
+      status: 201,
+    });
+  }),
+  http.get("/api/workspaces/:id", async ({ params, cookies }) => {
+    await lag();
+    const ws = fxGetWorkspace(String(params.id));
+    if (!ws || !canReadBusinessUnit(scopeFromCookies(cookies), String(params.id))) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    return HttpResponse.json(ws);
+  }),
+  // MANAGE, not read — a Project Admin may read the parent unit of their own
+  // project for context but must never be able to rename or re-classify it.
+  http.patch("/api/workspaces/:id", async ({ params, request, cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    if (!canManageBusinessUnit(scope, String(params.id))) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    const patch = (await request.json()) as Record<string, unknown>;
+    // Org-Admin-only field, and the first-cap-only budget rule — both mirror
+    // app/api/workspaces/[id]/route.ts.
+    if ("isActive" in patch && !scope.isOrgWide) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Only an Organization Admin can change active status" },
+        { status: 403 },
+      );
+    }
+    const touchesBudget =
+      "monthlyBudgetUsd" in patch || "budgetStartDate" in patch || "budgetEndDate" in patch;
+    if (touchesBudget && !scope.isOrgWide) {
+      const current = fxGetWorkspace(String(params.id));
+      if ((current?.monthlyBudgetUsd ?? null) !== null) {
+        return HttpResponse.json(
+          {
+            code: "forbidden",
+            message: "Request a budget increase — an existing cap needs Org Admin approval to change",
+          },
+          { status: 403 },
+        );
+      }
+    }
+    const ws = fxPatchWorkspace(String(params.id), patch);
+    if (!ws) return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    return HttpResponse.json(ws);
+  }),
+  // Org Admin only — mirrors app/api/workspaces/[id]/admin/route.ts.
+  http.post("/api/workspaces/:id/admin", async ({ params, request, cookies }) => {
+    await lag();
+    if (!scopeFromCookies(cookies).isOrgWide) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: `Only an Organization Admin can change a ${BUSINESS_UNIT_LABEL.toLowerCase()}'s admin`,
+        },
+        { status: 403 },
+      );
+    }
+    const body = (await request.json().catch(() => ({}))) as {
+      email?: string;
+      displayName?: string;
+    };
+    if (!body?.email) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "email is required" },
+        { status: 422 },
+      );
+    }
+    const result = fxSetBusinessUnitAdmin(String(params.id), {
+      email: body.email,
+      displayName: body.displayName,
+    });
+    if (!result) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+    addAccessMember(
+      String(params.id),
+      {
+        userId: result.admin.ssoSubject,
+        name: result.admin.displayName,
+        email: result.admin.email,
+      },
+      "bu_admin",
+    );
+    return HttpResponse.json({
+      workspaceId: String(params.id),
+      admin: {
+        identityId: result.admin.id,
+        userId: result.admin.ssoSubject,
+        email: result.admin.email,
+        displayName: result.admin.displayName,
+        initials: result.admin.initials,
+      },
+      replacedDisplayName: result.replaced?.displayName ?? null,
+    });
+  }),
+  http.post("/api/workspaces/:id/archive", async ({ params }) => {
+    await lag();
+    const ws = fxArchiveWorkspace(String(params.id));
+    if (!ws) return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    return HttpResponse.json(ws);
+  }),
+  http.get("/api/workspaces/:id/members", async ({ params }) => {
+    await lag();
+    // Transform fixture WorkspaceMember (frontend-first, Identity-rich) →
+    // WorkspaceMemberOut (backend-aligned, simpler) so the schema stays in sync.
+    const members = fxListMembers(String(params.id)).map((m) => ({
+      userId: m.identity.ssoSubject,
+      email: m.identity.email,
+      displayName: m.identity.displayName,
+      initials: m.identity.initials,
+      roleName: m.role,
+      joinedAt: new Date().toISOString(),
+    }));
+    return HttpResponse.json(members);
+  }),
+  http.post("/api/workspaces/:id/members", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json().catch(() => ({}))) as {
+      userId?: string;
+      roleName?: string;
+      email?: string | null;
+      initials?: string;
+    };
+    if (!body.userId || !body.roleName) {
+      return HttpResponse.json({ code: "validation_error", message: "userId and roleName are required" }, { status: 422 });
+    }
+    const identity = fxFindOrCreateIdentityBySsoSubject(body.userId, body.email, body.initials);
+    fxSetMembershipRole(String(params.id), identity.id, body.roleName);
+    return HttpResponse.json({
+      userId: identity.ssoSubject,
+      email: identity.email,
+      displayName: identity.displayName,
+      initials: identity.initials,
+      roleName: body.roleName,
+      joinedAt: new Date().toISOString(),
+    }, { status: 201 });
+  }),
+  http.patch("/api/workspaces/:id/members/:userId", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json().catch(() => ({}))) as { roleName?: string };
+    if (!body.roleName) {
+      return HttpResponse.json({ code: "invalid_input", message: "roleName is required" }, { status: 422 });
+    }
+    const identity = fxFindOrCreateIdentityBySsoSubject(String(params.userId));
+    fxSetMembershipRole(String(params.id), identity.id, body.roleName);
+    return HttpResponse.json({
+      userId: identity.ssoSubject,
+      email: identity.email,
+      displayName: identity.displayName,
+      initials: identity.initials,
+      roleName: body.roleName,
+      joinedAt: new Date().toISOString(),
+    });
+  }),
+  http.delete("/api/workspaces/:id/members/:userId", async ({ params }) => {
+    await lag();
+    const identity = fxFindOrCreateIdentityBySsoSubject(String(params.userId));
+    fxRemoveMembership(String(params.id), identity.id);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ───── Project members (project-scoped role binding) ─────
+  // Mirrors app/api/projects/[id]/members/** exactly — see
+  // [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/projects/:id/members", async ({ params }) => {
+    await lag();
+    return HttpResponse.json(fxListProjectMembers(String(params.id)));
+  }),
+  http.post("/api/projects/:id/members", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json()) as { email: string; displayName?: string; roleName: string };
+    if (!body?.email || !body?.roleName) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "email and roleName are required" },
+        { status: 422 },
+      );
+    }
+    const member = fxAddProjectMember(String(params.id), body);
+    return HttpResponse.json(member, { status: 201 });
+  }),
+  http.patch("/api/projects/:id/members/:membershipId", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json()) as { roleName: string };
+    const member = fxUpdateProjectMemberRole(String(params.id), String(params.membershipId), body.roleName);
+    if (!member) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(member);
+  }),
+  http.delete("/api/projects/:id/members/:membershipId", async ({ params }) => {
+    await lag();
+    fxRemoveProjectMember(String(params.id), String(params.membershipId));
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ───── Stream ─────
+  http.get("/api/runs/:id/stream", sseHandler),
+  http.get("/api/stream", workspaceStreamHandler),
+
+  // ───── Chat ─────
+  http.post("/api/chat", chatHandler),
+
+  // ───── HITL signals (Temporal-shaped) ─────
+  // Real backend translates this into a workflow signal; the mock just flips
+  // the artifact's status to mirror what the agent worker would do downstream.
+  http.post("/api/runs/:id/signals/:name", async ({ params, request }) => {
+    await lag();
+    const run = RUNS.find((r) => r.id === params.id);
+    if (!run) {
+      return HttpResponse.json(
+        { code: "not_found", message: "Run not found" },
+        { status: 404 },
+      );
+    }
+    const body = (await request.json().catch(() => ({}))) as {
+      idempotencyKey?: string;
+      payload?: { artifactId?: string; decision?: "approve" | "reject" | "retry" };
+    };
+    if (!body.idempotencyKey) {
+      return HttpResponse.json(
+        { code: "missing_idempotency_key", message: "Idempotency-Key required" },
+        { status: 400 },
+      );
+    }
+    const decision = body.payload?.decision;
+    const artifactId = body.payload?.artifactId;
+    if (artifactId && decision) {
+      const a = ARTIFACTS.find((x) => x.id === artifactId);
+      if (a) {
+        a.status =
+          decision === "approve"
+            ? "approved"
+            : decision === "reject"
+              ? "rejected"
+              : "running";
+        a.updatedAt = new Date().toISOString();
+      }
+    }
+    return HttpResponse.json(
+      {
+        accepted: true,
+        signalName: params.name,
+        runId: params.id,
+        idempotencyKey: body.idempotencyKey,
+      },
+      { status: 202 },
+    );
+  }),
+];

@@ -1,0 +1,134 @@
+/* Theme-aware highlight.js palette scoped to the repo CodeViewer.
+   Light = VS Code "Light+", dark (.dark ancestor) = VS Code "Dark+".
+   Scoped under .code-viewer so it overrides the chat's global github-dark
+   import by specificity (0,2,0 > 0,1,0) without affecting other surfaces. */
+
+.code-viewer .hljs {
+  color: inherit;
+  background: transparent;
+  padding: 0;
+}
+
+/* Changed (agent-edited) lines — green diff highlight, theme-aware. The gutter
+   cell carries a left accent bar so the change reads at a glance. */
+.code-viewer .code-line-changed {
+  background: rgba(16, 185, 129, 0.1); /* emerald-500 @ 10% */
+}
+.code-viewer .code-gutter-changed {
+  box-shadow: inset 2px 0 0 rgb(16, 185, 129);
+  color: rgb(5, 150, 105);
+}
+.dark .code-viewer .code-line-changed {
+  background: rgba(52, 211, 153, 0.12); /* emerald-400 @ 12% */
+}
+.dark .code-viewer .code-gutter-changed {
+  box-shadow: inset 2px 0 0 rgb(52, 211, 153);
+  color: rgb(110, 231, 183);
+}
+
+/* ── Light (default) ───────────────────────────────────────────── */
+.code-viewer .hljs-comment,
+.code-viewer .hljs-quote {
+  color: #008000;
+  font-style: italic;
+}
+.code-viewer .hljs-keyword,
+.code-viewer .hljs-selector-tag,
+.code-viewer .hljs-literal,
+.code-viewer .hljs-section,
+.code-viewer .hljs-meta .hljs-keyword,
+.code-viewer .hljs-name {
+  color: #0000ff;
+}
+.code-viewer .hljs-string,
+.code-viewer .hljs-regexp,
+.code-viewer .hljs-addition,
+.code-viewer .hljs-meta-string {
+  color: #a31515;
+}
+.code-viewer .hljs-number,
+.code-viewer .hljs-symbol,
+.code-viewer .hljs-bullet,
+.code-viewer .hljs-link {
+  color: #098658;
+}
+.code-viewer .hljs-title,
+.code-viewer .hljs-title.function_,
+.code-viewer .hljs-function .hljs-title {
+  color: #795e26;
+}
+.code-viewer .hljs-type,
+.code-viewer .hljs-class .hljs-title,
+.code-viewer .hljs-title.class_,
+.code-viewer .hljs-built_in {
+  color: #267f99;
+}
+.code-viewer .hljs-attr,
+.code-viewer .hljs-attribute,
+.code-viewer .hljs-variable,
+.code-viewer .hljs-template-variable,
+.code-viewer .hljs-property {
+  color: #001080;
+}
+.code-viewer .hljs-meta {
+  color: #0000ff;
+}
+.code-viewer .hljs-deletion {
+  color: #a31515;
+}
+.code-viewer .hljs-emphasis {
+  font-style: italic;
+}
+.code-viewer .hljs-strong {
+  font-weight: 600;
+}
+
+/* ── Dark ──────────────────────────────────────────────────────── */
+.dark .code-viewer .hljs-comment,
+.dark .code-viewer .hljs-quote {
+  color: #6a9955;
+}
+.dark .code-viewer .hljs-keyword,
+.dark .code-viewer .hljs-selector-tag,
+.dark .code-viewer .hljs-literal,
+.dark .code-viewer .hljs-section,
+.dark .code-viewer .hljs-meta .hljs-keyword,
+.dark .code-viewer .hljs-name {
+  color: #569cd6;
+}
+.dark .code-viewer .hljs-string,
+.dark .code-viewer .hljs-regexp,
+.dark .code-viewer .hljs-addition,
+.dark .code-viewer .hljs-meta-string {
+  color: #ce9178;
+}
+.dark .code-viewer .hljs-number,
+.dark .code-viewer .hljs-symbol,
+.dark .code-viewer .hljs-bullet,
+.dark .code-viewer .hljs-link {
+  color: #b5cea8;
+}
+.dark .code-viewer .hljs-title,
+.dark .code-viewer .hljs-title.function_,
+.dark .code-viewer .hljs-function .hljs-title {
+  color: #dcdcaa;
+}
+.dark .code-viewer .hljs-type,
+.dark .code-viewer .hljs-class .hljs-title,
+.dark .code-viewer .hljs-title.class_,
+.dark .code-viewer .hljs-built_in {
+  color: #4ec9b0;
+}
+.dark .code-viewer .hljs-attr,
+.dark .code-viewer .hljs-attribute,
+.dark .code-viewer .hljs-variable,
+.dark .code-viewer .hljs-template-variable,
+.dark .code-viewer .hljs-property {
+  color: #9cdcfe;
+}
+.dark .code-viewer .hljs-meta {
+  color: #569cd6;
+}
+.dark .code-viewer .hljs-deletion {
+  color: #ce9178;
+}
