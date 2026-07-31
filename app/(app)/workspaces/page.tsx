@@ -11,6 +11,7 @@ import {
   Coins,
   FolderKanban,
   MoreVertical,
+  Pencil,
   Plus,
   ShieldAlert,
   ShieldCheck,
@@ -34,6 +35,7 @@ import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
+import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
 import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
@@ -282,6 +284,7 @@ function WorkspaceCard({
   onArchive?: () => void;
 }) {
   const [adminOpen, setAdminOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
 
   return (
     <li className="h-full">
@@ -324,6 +327,10 @@ function WorkspaceCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="border-line-soft bg-panel-elevated">
+                  <DropdownMenuItem onSelect={() => setEditOpen(true)}>
+                    <Pencil className="size-4" aria-hidden />
+                    Edit details
+                  </DropdownMenuItem>
                   {/* Appointing a unit's admin is the Org Admin's call, not the
                       sitting admin's — `canManage` alone would show this to the
                       BU Admin, who must not pick their own replacement. */}
@@ -392,6 +399,10 @@ function WorkspaceCard({
           </div>
         )}
       </Card>
+
+      {canManage && !archived && (
+        <EditBuDetailsDialog workspace={ws} open={editOpen} onOpenChange={setEditOpen} />
+      )}
 
       {canChangeAdmin && (
         <ChangeBuAdminDialog

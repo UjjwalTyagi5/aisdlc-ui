@@ -11,6 +11,7 @@ import {
   Coins,
   FolderKanban,
   Loader2,
+  Pencil,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -37,6 +38,7 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { Switch } from "@/components/ui/switch";
 import { ActiveBadge } from "@/components/app/active-badge";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
+import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
 import {
   BudgetWindowFieldsInput,
   BudgetWindowSummary,
@@ -269,6 +271,7 @@ export default function WorkspaceDetailPage() {
       }),
   });
 
+  const [editOpen, setEditOpen] = React.useState(false);
   const [filter, setFilter] = React.useState<FilterTab>("all");
   const [search, setSearch] = React.useState("");
 
@@ -394,18 +397,35 @@ export default function WorkspaceDetailPage() {
             </div>
           </div>
 
-          {canSetActive && (
-            <label className="border-line-soft bg-surface-1 flex shrink-0 items-center gap-2.5 rounded-lg border px-3 py-2">
-              <span className="text-muted-foreground font-mono text-[10.5px] tracking-[0.12em] uppercase">
-                Active
-              </span>
-              <Switch
-                checked={ws.isActive}
-                disabled={activeMutation.isPending}
-                onCheckedChange={(v) => activeMutation.mutate(v)}
-                aria-label={`${ws.displayName} is active`}
-              />
-            </label>
+          <div className="flex shrink-0 items-center gap-2">
+            {canManage && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-line-soft h-9 font-mono text-[11px]"
+                onClick={() => setEditOpen(true)}
+              >
+                <Pencil className="size-3.5" aria-hidden />
+                Edit details
+              </Button>
+            )}
+            {canSetActive && (
+              <label className="border-line-soft bg-surface-1 flex shrink-0 items-center gap-2.5 rounded-lg border px-3 py-2">
+                <span className="text-muted-foreground font-mono text-[10.5px] tracking-[0.12em] uppercase">
+                  Active
+                </span>
+                <Switch
+                  checked={ws.isActive}
+                  disabled={activeMutation.isPending}
+                  onCheckedChange={(v) => activeMutation.mutate(v)}
+                  aria-label={`${ws.displayName} is active`}
+                />
+              </label>
+            )}
+          </div>
+
+          {canManage && (
+            <EditBuDetailsDialog workspace={ws} open={editOpen} onOpenChange={setEditOpen} />
           )}
         </div>
       ) : (
