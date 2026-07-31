@@ -8,7 +8,7 @@ import {
   WorkspaceList,
   WorkspaceMemberList,
   WorkspaceMemberOut,
-  type WorkspaceCreateInput,
+  type WorkspaceCreateBody,
   type DataClassification,
 } from "@/lib/schemas/workspace";
 import { GovernanceApproval } from "@/lib/schemas/governance-approval";
@@ -18,7 +18,7 @@ export const listWorkspaces = () => api("/workspaces", { schema: WorkspaceList }
 export const getWorkspace = (id: string) =>
   api(`/workspaces/${encodeURIComponent(id)}`, { schema: Workspace });
 
-export const createWorkspace = (body: WorkspaceCreateInput) =>
+export const createWorkspace = (body: WorkspaceCreateBody) =>
   api("/workspaces", { method: "POST", body, schema: Workspace });
 
 export const updateWorkspace = (

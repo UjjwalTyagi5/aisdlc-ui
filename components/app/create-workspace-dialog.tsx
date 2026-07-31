@@ -27,18 +27,11 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
 import { onboardPerson } from "@/lib/api/onboarding";
 import { createWorkspace } from "@/lib/api/workspaces";
-import { WorkspaceCreateInput, type Workspace } from "@/lib/schemas/workspace";
+import { WorkspaceCreateInput } from "@/lib/schemas/workspace";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { ROLE_META } from "@/lib/roles";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -54,7 +47,14 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 // The monthly cap is a *string* in the form and a `number | null` on the wire:
 // an empty box has to mean "no cap set" (null — the unit's own Admin sets one
 // later), which a numeric field can't express without conflating it with 0.
+// `dataClassification` is omitted deliberately: it is not asked at creation
+// any more. It stays on the Workspace contract and still renders as a badge on
+// the unit's card and detail page — it just defaults to "internal" here (see
+// lib/mock/workspace-fixtures.ts::createWorkspace) and is changed afterwards,
+// once someone actually knows what data the unit will hold. Asking on the
+// creation form put the question before the answer existed.
 const FormSchema = WorkspaceCreateInput.omit({
+  dataClassification: true,
   monthlyBudgetUsd: true,
   budgetStartDate: true,
   budgetEndDate: true,
@@ -76,13 +76,6 @@ const FormSchema = WorkspaceCreateInput.omit({
   });
 type FormValues = z.infer<typeof FormSchema>;
 
-const CLASSIFICATIONS: { value: Workspace["dataClassification"]; label: string; hint: string }[] = [
-  { value: "public", label: "Public", hint: "No sensitive data" },
-  { value: "internal", label: "Internal", hint: "Default — internal use" },
-  { value: "confidential", label: "Confidential", hint: "Restricted access" },
-  { value: "restricted", label: "Restricted", hint: "Regulated / highest controls" },
-];
-
 export interface CreateWorkspaceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -98,7 +91,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
       displayName: "",
       businessUnit: "",
       costCenter: "",
-      dataClassification: "internal",
       monthlyBudgetUsd: "",
       budgetStartDate: "",
       budgetEndDate: "",
@@ -114,8 +106,9 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         displayName: "",
         businessUnit: "",
         costCenter: "",
-        dataClassification: "internal",
         monthlyBudgetUsd: "",
+        budgetStartDate: "",
+        budgetEndDate: "",
         isActive: true,
         buAdminEmail: "",
         buAdminName: "",
@@ -128,7 +121,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         displayName: values.displayName,
         businessUnit: values.businessUnit || undefined,
         costCenter: values.costCenter || undefined,
-        dataClassification: values.dataClassification,
         // Blank → null, never 0: "no cap set" and "capped at zero" are
         // different states, and only the first lets the BU Admin set one.
         monthlyBudgetUsd:
@@ -244,39 +236,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                 )}
               />
             </div>
-
-            <FormField
-              control={form.control}
-              name="dataClassification"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                    Data classification
-                  </FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger className="border-line-soft bg-surface-1">
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {CLASSIFICATIONS.map((c) => (
-                        <SelectItem key={c.value} value={c.value}>
-                          <span className="flex items-center gap-2">
-                            <span className="font-medium">{c.label}</span>
-                            <span className="text-muted-foreground text-[11px]">· {c.hint}</span>
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormDescription className="text-[11px]">
-                    Drives which models and connectors the {BUSINESS_UNIT_LABEL.toLowerCase()} is
-                    allowed to use.
-                  </FormDescription>
-                </FormItem>
-              )}
-            />
 
             <FormField
               control={form.control}

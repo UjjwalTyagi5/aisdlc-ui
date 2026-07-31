@@ -434,13 +434,21 @@ export function setBusinessUnitAdmin(
   const replaced = outgoing ? (IDENTITIES.find((i) => i.id === outgoing.identityId) ?? null) : null;
   if (outgoing) outgoing.role = previousRole;
 
-  // createMembership for a newcomer (it maintains `memberCount`),
-  // setMembershipRole for someone already in the unit (it must not).
+  // A newcomer needs the membership row created (createMembership is what
+  // maintains `memberCount`); someone already in the unit does not.
   const already = MEMBERSHIPS.some(
     (m) => m.workspaceId === workspaceId && m.identityId === identity.id,
   );
-  if (already) setMembershipRole(workspaceId, identity.id, "bu_admin");
-  else createMembership(workspaceId, identity.id, "bu_admin");
+  if (!already) createMembership(workspaceId, identity.id, "bu_admin");
+
+  // Then promote unconditionally, because `createMembership` writes
+  // status:"invited" — right for an invitation the person has yet to accept,
+  // wrong for this. An Org Admin appointing an admin is a decision, not a
+  // request, and `buAdminNameFor` above only resolves ACTIVE bu_admins: leaving
+  // the row invited demotes the outgoing holder and leaves the unit reading
+  // "No admin appointed", which is the exact broken state this function exists
+  // to prevent. setMembershipRole sets both the role and status:"active".
+  setMembershipRole(workspaceId, identity.id, "bu_admin");
 
   return { admin: identity, replaced };
 }

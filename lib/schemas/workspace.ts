@@ -122,6 +122,18 @@ export const WorkspaceCreateInput = z.object({
 });
 export type WorkspaceCreateInput = z.infer<typeof WorkspaceCreateInput>;
 
+/**
+ * What a *caller* has to supply, as opposed to what the parsed result contains.
+ *
+ * `z.infer` is the output type, so every field carrying `.default()` —
+ * `dataClassification`, `isActive` — comes out required, which is backwards for
+ * a request body: the whole point of a default is that the caller may omit it.
+ * The creation form does omit `dataClassification` (it isn't asked any more),
+ * and typing the client against the output would have forced it to invent a
+ * value that zod is about to supply anyway.
+ */
+export type WorkspaceCreateBody = z.input<typeof WorkspaceCreateInput>;
+
 /** Result of re-appointing a unit's admin — POST /workspaces/:id/admin. */
 export const BusinessUnitAdminChange = z.object({
   workspaceId: z.string(),

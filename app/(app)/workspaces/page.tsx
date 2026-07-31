@@ -33,6 +33,7 @@ import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
+import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
 import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
@@ -209,6 +210,7 @@ export default function WorkspacesPage() {
               workspace={ws}
               isActive={active?.id === ws.id}
               canManage={canManage}
+              canChangeAdmin={canCreate}
               onSetActive={() => {
                 setActive(ws.id);
                 queryClient.invalidateQueries();
@@ -268,14 +270,19 @@ function WorkspaceCard({
   archived,
   onSetActive,
   onArchive,
+  canChangeAdmin,
 }: {
   workspace: Workspace;
   isActive: boolean;
   canManage: boolean;
+  /** Org Admin only — see the comment on the menu item below. */
+  canChangeAdmin?: boolean;
   archived?: boolean;
   onSetActive?: () => void;
   onArchive?: () => void;
 }) {
+  const [adminOpen, setAdminOpen] = React.useState(false);
+
   return (
     <li className="h-full">
       <Card
@@ -317,6 +324,15 @@ function WorkspaceCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="border-line-soft bg-panel-elevated">
+                  {/* Appointing a unit's admin is the Org Admin's call, not the
+                      sitting admin's — `canManage` alone would show this to the
+                      BU Admin, who must not pick their own replacement. */}
+                  {canChangeAdmin && (
+                    <DropdownMenuItem onSelect={() => setAdminOpen(true)}>
+                      <ShieldCheck className="size-4" aria-hidden />
+                      {ws.buAdminName ? "Change admin" : "Appoint admin"}
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onSelect={() => onArchive?.()} className="text-destructive">
                     <Archive className="size-4" aria-hidden />
                     Archive business unit
@@ -376,6 +392,16 @@ function WorkspaceCard({
           </div>
         )}
       </Card>
+
+      {canChangeAdmin && (
+        <ChangeBuAdminDialog
+          workspaceId={String(ws.id)}
+          workspaceName={ws.displayName}
+          currentAdminName={ws.buAdminName ?? null}
+          open={adminOpen}
+          onOpenChange={setAdminOpen}
+        />
+      )}
     </li>
   );
 }
