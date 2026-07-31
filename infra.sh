@@ -84,6 +84,33 @@ sed -i '' -E "s#(host: aisdlc\.).*#\1${IP}.nip.io#" Manifest/ingress.yaml 2>/dev
   || sed -i -E "s#(host: aisdlc\.).*#\1${IP}.nip.io#" Manifest/ingress.yaml
 grep 'host:' Manifest/ingress.yaml
 
+# cert-manager + Let's Encrypt. NOT optional: next.config.ts sets `upgrade-insecure-requests`
+# in the production CSP, so served over plain HTTP the browser upgrades every /_next/static
+# request to https://, finds no TLS listener, and the page renders unstyled — while the
+# server happily returns 200 for those same assets. TLS is what makes the app render.
+say "cert-manager"
+kubectl apply --server-side --force-conflicts \
+  -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=6m
+
+say "Let's Encrypt ClusterIssuer"
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${ACME_EMAIL:-pratap1297@gmail.com}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+EOF
+
 say "ArgoCD"
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
 # --server-side is REQUIRED: client-side apply stores the whole manifest in the
