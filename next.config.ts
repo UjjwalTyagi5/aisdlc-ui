@@ -74,6 +74,9 @@ const securityHeaders = [
 const baseConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Emits .next/standalone with a self-contained server.js + pruned node_modules,
+  // so the container image ships ~150MB instead of the full dev tree.
+  output: "standalone",
   experimental: {
     optimizePackageImports: ["lucide-react", "@tanstack/react-query", "date-fns"],
   },

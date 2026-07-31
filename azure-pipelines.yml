@@ -1,0 +1,97 @@
+# ==============================================================================
+# AISDLC frontend CI/CD — build + GitOps handoff (same flow as AgentCore).
+#
+#   push to main -> build amd64 image -> push to ACR as :<BuildId> and :latest
+#   -> rewrite the image tag in Manifest/frontend-deploy.yaml -> git push [skip ci]
+#   -> ArgoCD sees the commit and syncs the cluster. No manual kubectl.
+#
+# Single service, so there's no change-detection stage — the path filters below
+# already scope what triggers a build.
+#
+# Required pipeline variables (Pipeline > Edit > Variables):
+#   ACR_USERNAME = aisdlcacr2026
+#   ACR_PASSWORD = <az acr credential show -n aisdlcacr2026 --query passwords[0].value>  (mark SECRET)
+#
+# Required permission: Project Settings > Repos > aisdlc-ui > Security >
+#   "AISDLC Build Service (IDP-CORE)" -> Contribute = Allow
+#   (so the manifest-bump step can push back to main).
+# ==============================================================================
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - app/**
+      - components/**
+      - lib/**
+      - hooks/**
+      - stores/**
+      - mocks/**
+      - public/**
+      - middleware.ts
+      - next.config.ts
+      - package.json
+      - pnpm-lock.yaml
+      - Dockerfile
+    exclude:
+      - Manifest/** # the pipeline's own tag-bump commit must never re-trigger it
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  acr: 'aisdlcacr2026.azurecr.io'
+  image: 'frontend'
+  m_file: 'Manifest/frontend-deploy.yaml'
+  # Baked into the client bundle at build time. Flip these to move off mock mode.
+  NEXT_PUBLIC_AUTH_MODE: 'mock'
+  NEXT_PUBLIC_API_MOCKS: 'enabled'
+  NEXT_PUBLIC_API_BASE: '/api'
+
+jobs:
+  - job: build
+    displayName: 'Build image + bump manifest'
+    timeoutInMinutes: 60
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        persistCredentials: true
+
+      - bash: |
+          echo "$(ACR_PASSWORD)" | docker login $(acr) -u "$(ACR_USERNAME)" --password-stdin
+        displayName: 'Login to ACR'
+
+      - bash: |
+          set -euo pipefail
+          TAG=$(Build.BuildId)
+          # --platform linux/amd64: the AKS node pool is x86 B-series, not arm.
+          docker build --platform linux/amd64 \
+            --build-arg NEXT_PUBLIC_AUTH_MODE=$(NEXT_PUBLIC_AUTH_MODE) \
+            --build-arg NEXT_PUBLIC_API_MOCKS=$(NEXT_PUBLIC_API_MOCKS) \
+            --build-arg NEXT_PUBLIC_API_BASE=$(NEXT_PUBLIC_API_BASE) \
+            -t $(acr)/$(image):$TAG -t $(acr)/$(image):latest .
+          docker push $(acr)/$(image):$TAG
+          docker push $(acr)/$(image):latest
+        displayName: 'Build & push image (amd64)'
+
+      - bash: |
+          set -euo pipefail
+          TAG=$(Build.BuildId)
+          git config user.email "pipeline@aisdlc.local"
+          git config user.name "AISDLC Pipeline"
+          git fetch origin main
+          git checkout main
+
+          sed -i -E "s#(image: aisdlcacr2026\.azurecr\.io/$(image):).*#\1$TAG#" "$(m_file)"
+
+          if git diff --quiet -- "$(m_file)"; then
+            echo "No manifest change to commit."; exit 0
+          fi
+          git add "$(m_file)"
+          git commit -m "deploy: frontend -> $TAG [skip ci]"
+          git push origin main
+          echo "Manifest tag updated -> ArgoCD will sync."
+        displayName: 'Update manifest image tag + push (GitOps)'
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)

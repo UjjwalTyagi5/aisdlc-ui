@@ -74,3 +74,6 @@ package-lock.json
 # Claude Code — settings.json is shared, settings.local.json is per-machine
 # (it accumulates absolute local paths)
 .claude/settings.local.json
+
+# Deployment audit trail — local working record, never pushed
+AUDIT_LOG.md

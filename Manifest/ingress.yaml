@@ -1,0 +1,26 @@
+# __INGRESS_HOST__ is replaced by infra.sh with "<ingress-nginx LB IP>.nip.io"
+# (nip.io resolves any *.<ip>.nip.io to that IP — free DNS, no domain needed).
+# Swap in a real hostname + a `tls:` block once you have a domain and cert.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: aisdlc
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"
+    # Next.js streams (SSE/chat) — don't let nginx buffer or time them out early.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: aisdlc.20.216.44.167.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
