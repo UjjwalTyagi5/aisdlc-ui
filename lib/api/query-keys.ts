@@ -52,13 +52,15 @@ export const qk = {
   connectors: {
     list: (workspaceId?: string | null) => ["connectors", workspaceId ?? ""] as const,
     detail: (kind: string) => ["connectors", kind] as const,
+    grants: (workspaceId?: string | null) => ["connectors", "grants", workspaceId ?? ""] as const,
   },
   model: {
     catalog: () => ["model", "catalog"] as const,
     providers: (workspaceId?: string | null) => ["model", "providers", workspaceId ?? ""] as const,
     options: () => ["model", "options"] as const,
-    orgAllowed: () => ["model", "allowed", "org"] as const,
+    orgGrants: () => ["model", "allowed", "org"] as const,
     buAllowed: (workspaceId: string) => ["model", "allowed", "bu", workspaceId] as const,
+    availability: (workspaceId: string) => ["model", "availability", workspaceId] as const,
   },
   mcp: {
     list: (activeOnly?: boolean) => ["mcp", "list", activeOnly ?? false] as const,

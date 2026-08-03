@@ -1,14 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { Boxes, Globe, Loader2, Plug, ShieldCheck } from "lucide-react";
 import { z } from "zod";
 
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -27,11 +29,17 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
+import { listConnectorGrants, setBuConnectorGrants } from "@/lib/api/connectors";
+import { getOrgModelGrants, setBuModelGrants } from "@/lib/api/models";
 import { onboardPerson } from "@/lib/api/onboarding";
+import { qk } from "@/lib/api/query-keys";
 import { createWorkspace } from "@/lib/api/workspaces";
+import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
 import { WorkspaceCreateInput } from "@/lib/schemas/workspace";
+import type { ConnectorKind } from "@/lib/schemas/enums";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { ROLE_META } from "@/lib/roles";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -74,9 +82,126 @@ export interface CreateWorkspaceDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+/**
+ * One "what does this unit get" block: the things it gets anyway, then the
+ * restricted ones to tick.
+ *
+ * Global grants are listed but not selectable. Rendering them as checked-and
+ * -disabled boxes would read as "you could untick this", which is exactly the
+ * thing that isn't true — a global grant reaches every unit and cannot be
+ * withdrawn from one.
+ */
+function GrantPicker({
+  icon: Icon,
+  title,
+  globals,
+  options,
+  selected,
+  onToggle,
+  idPrefix,
+  emptyHint,
+  loading,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  globals: string[];
+  options: { value: string; label: string; hint?: string }[];
+  selected: string[];
+  onToggle: (next: string[]) => void;
+  idPrefix: string;
+  emptyHint: string;
+  loading?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <p className="flex items-center gap-1.5 text-[12.5px] font-medium">
+        <Icon className="text-muted-foreground size-3.5" aria-hidden />
+        {title}
+      </p>
+
+      {globals.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5">
+          {globals.map((g) => (
+            <li
+              key={g}
+              className="border-line-soft bg-surface-1 text-muted-foreground inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px]"
+            >
+              <Globe className="size-2.5" aria-hidden />
+              {g}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {loading ? (
+        <p className="text-muted-foreground text-[11.5px]">Loading…</p>
+      ) : options.length === 0 ? (
+        <p className="text-muted-foreground text-[11.5px]">{emptyHint}</p>
+      ) : (
+        <ul className="divide-line-soft border-line-soft max-h-40 divide-y overflow-y-auto rounded-lg border">
+          {options.map((o) => {
+            const id = `${idPrefix}-${o.value}`;
+            const on = selected.includes(o.value);
+            return (
+              <li key={o.value} className="flex items-center gap-2.5 px-2.5 py-2">
+                <Checkbox
+                  id={id}
+                  checked={on}
+                  onCheckedChange={() =>
+                    onToggle(on ? selected.filter((v) => v !== o.value) : [...selected, o.value])
+                  }
+                />
+                <Label
+                  htmlFor={id}
+                  className={cn(
+                    "min-w-0 flex-1 cursor-pointer truncate font-mono text-[11.5px] font-normal",
+                    !on && "text-muted-foreground",
+                  )}
+                >
+                  {o.label}
+                </Label>
+                {o.hint && (
+                  <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
+                    {o.hint}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDialogProps) {
   const queryClient = useQueryClient();
   const setActive = useWorkspaceStore((s) => s.setActiveWorkspace);
+
+  // What this unit gets on day one. Only restricted grants are choices —
+  // global ones arrive automatically, and are shown so the answer to "what
+  // will they be able to use?" is complete rather than just the part that
+  // needed a decision.
+  const modelGrantsQ = useQuery({
+    queryKey: qk.model.orgGrants(),
+    queryFn: getOrgModelGrants,
+    enabled: open,
+  });
+  const connectorGrantsQ = useQuery({
+    queryKey: qk.connectors.grants(null),
+    queryFn: () => listConnectorGrants(),
+    enabled: open,
+  });
+
+  const restrictedModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "specific");
+  const globalModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "global");
+  const restrictedConnectors = (connectorGrantsQ.data ?? []).filter(
+    (g) => g.visibility === "specific",
+  );
+  const globalConnectors = (connectorGrantsQ.data ?? []).filter((g) => g.visibility === "global");
+
+  const [grantedModels, setGrantedModels] = React.useState<string[]>([]);
+  const [grantedConnectors, setGrantedConnectors] = React.useState<string[]>([]);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
@@ -94,7 +219,7 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
   });
 
   React.useEffect(() => {
-    if (open)
+    if (open) {
       form.reset({
         displayName: "",
         businessUnit: "",
@@ -106,6 +231,9 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         buAdminEmail: "",
         buAdminName: "",
       });
+      setGrantedModels([]);
+      setGrantedConnectors([]);
+    }
   }, [open, form]);
 
   const mutation = useMutation({
@@ -128,6 +256,21 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         workspaceId: ws.id,
         role: "bu_admin",
       });
+      // Grants come after the unit exists, since they're keyed by its id. A
+      // failure here would leave a unit with an admin and no restricted
+      // access, which is recoverable from its management page — so it is
+      // reported rather than rolled back.
+      if (grantedModels.length > 0) {
+        await setBuModelGrants(
+          ws.id,
+          restrictedModels
+            .filter((g) => grantedModels.includes(`${g.provider}::${g.model_id}`))
+            .map((g) => ({ provider: g.provider, model_id: g.model_id })),
+        );
+      }
+      if (grantedConnectors.length > 0) {
+        await setBuConnectorGrants(ws.id, grantedConnectors as ConnectorKind[]);
+      }
       return { ws, admin };
     },
     onSuccess: ({ ws, admin }) => {
@@ -312,6 +455,53 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                 </FormItem>
               )}
             />
+
+            {/* What this unit will be able to use. Restricted grants are the
+                only decisions here; the global ones are stated so the picture
+                is complete rather than half of it. */}
+            <div className="border-line-soft space-y-4 rounded-lg border border-dashed p-4">
+              <p className="text-muted-foreground flex items-center gap-1.5 font-mono text-xs tracking-wider uppercase">
+                <Boxes className="text-brand-bright size-3.5" aria-hidden />
+                Access
+              </p>
+
+              <GrantPicker
+                icon={Boxes}
+                title="Models"
+                globals={globalModels.map((g) => g.model_id)}
+                options={restrictedModels.map((g) => ({
+                  value: `${g.provider}::${g.model_id}`,
+                  label: g.model_id,
+                  hint: g.provider,
+                }))}
+                selected={grantedModels}
+                onToggle={setGrantedModels}
+                idPrefix="new-bu-model"
+                emptyHint={`No restricted models — everything the org has approved reaches every ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
+                loading={modelGrantsQ.isLoading}
+              />
+
+              <GrantPicker
+                icon={Plug}
+                title="Connectors"
+                globals={globalConnectors.map((g) => CONNECTOR_KIND_LABEL[g.kind])}
+                options={restrictedConnectors.map((g) => ({
+                  value: g.kind,
+                  label: CONNECTOR_KIND_LABEL[g.kind],
+                }))}
+                selected={grantedConnectors}
+                onToggle={setGrantedConnectors}
+                idPrefix="new-bu-connector"
+                emptyHint={`No restricted connectors — everything permitted reaches every ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
+                loading={connectorGrantsQ.isLoading}
+              />
+
+              <p className="text-muted-foreground text-[11px]">
+                You can change any of this later from the {BUSINESS_UNIT_LABEL.toLowerCase()}&apos;s
+                page. Models the organization has already keyed centrally need no further setup
+                here.
+              </p>
+            </div>
 
             <div className="border-line-soft space-y-4 rounded-lg border border-dashed p-4">
               <p className="text-muted-foreground flex items-center gap-1.5 font-mono text-xs tracking-wider uppercase">

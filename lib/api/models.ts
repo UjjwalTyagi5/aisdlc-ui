@@ -1,10 +1,13 @@
 import { z } from "zod";
 
+import { type GrantVisibility } from "@/lib/schemas/grant";
 import {
   CatalogProvider,
   ModelAllowEntry,
+  ModelAvailability,
   ModelOptions,
   ModelProvider,
+  OrgModelGrant,
   ProjectModelSelection,
   VerifyResult,
 } from "@/lib/schemas/model";
@@ -20,16 +23,20 @@ export const listModelProviders = (workspaceId?: string | null) =>
     schema: z.array(ModelProvider),
   });
 
-export const getOrgAllowedModels = () =>
-  api("/model/allowed/org", { schema: z.array(ModelAllowEntry) });
+/** The organization's catalogue policy: which models exist and who they reach. */
+export const getOrgModelGrants = () =>
+  api("/model/allowed/org", { schema: z.array(OrgModelGrant) });
 
-export const setOrgAllowedModels = (entries: ModelAllowEntry[]) =>
-  api("/model/allowed/org", { method: "PUT", body: { entries }, schema: z.array(ModelAllowEntry) });
+export const setOrgModelGrants = (entries: OrgModelGrant[]) =>
+  api("/model/allowed/org", { method: "PUT", body: { entries }, schema: z.array(OrgModelGrant) });
 
+/** What one Business Unit may use — derived from the grants, read-only to it. */
 export const getBuAllowedModels = (workspaceId: string) =>
   api("/model/allowed/bu", { query: { workspaceId }, schema: z.array(ModelAllowEntry) });
 
-export const setBuAllowedModels = (workspaceId: string, entries: ModelAllowEntry[]) =>
+/** The Org Admin's per-unit grant, from Business Unit creation / management.
+ *  Only `specific` models move; global ones already reach every unit. */
+export const setBuModelGrants = (workspaceId: string, entries: ModelAllowEntry[]) =>
   api("/model/allowed/bu", {
     method: "PUT",
     query: { workspaceId },
@@ -37,7 +44,11 @@ export const setBuAllowedModels = (workspaceId: string, entries: ModelAllowEntry
     schema: z.array(ModelAllowEntry),
   });
 
-/** The fourth tier: what one project selected from its BU's allow-list. */
+/** The same set, plus whether each model still needs a key at this level. */
+export const getModelAvailability = (workspaceId: string) =>
+  api("/model/availability", { query: { workspaceId }, schema: z.array(ModelAvailability) });
+
+/** The last tier: what one project selected from what its BU was granted. */
 export const getProjectModelSelection = (projectId: string) =>
   api("/model/allowed/project", { query: { projectId }, schema: ProjectModelSelection });
 
@@ -77,6 +88,11 @@ export const addModelProvider = (body: {
    *  to that BU (BU Admin onboards active; Project Admin onboards pending
    *  that BU Admin's approval). */
   workspaceId: string | null;
+  /** Org-wide onboarding only: how far the models being credentialed here
+   *  should reach. The grant is written in the same act so a key can't land
+   *  without anyone being able to use what it unlocks. */
+  visibility?: GrantVisibility;
+  businessUnitIds?: string[];
 }) => api("/model/providers", { method: "POST", body, schema: ModelProvider });
 
 export const verifyModelProvider = (id: string) =>

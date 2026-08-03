@@ -1,9 +1,35 @@
 import { z } from "zod";
 
 import { Connector, ConnectorInstallResponse, type ConnectorKind } from "@/lib/schemas";
-import { SetCredentialsResult } from "@/lib/schemas/connector";
+import { ConnectorGrant, SetCredentialsResult } from "@/lib/schemas/connector";
 
 import { api } from "./client";
+
+/**
+ * Which connector kinds the Organization Admin permits.
+ *
+ * Omit `workspaceId` to read the whole policy (Org Admin only). Pass one to
+ * read what reaches that Business Unit — the form a BU or Project Admin needs,
+ * and the only form they are allowed.
+ */
+export const listConnectorGrants = (workspaceId?: string | null) =>
+  api("/connectors/grants", {
+    query: { workspaceId: workspaceId || undefined },
+    schema: z.array(ConnectorGrant),
+  });
+
+/** Replace the whole policy — the per-connector visibility control. */
+export const setConnectorGrants = (grants: ConnectorGrant[]) =>
+  api("/connectors/grants", { method: "PUT", body: { grants }, schema: z.array(ConnectorGrant) });
+
+/** Grant one Business Unit a set of kinds, from its creation / management. */
+export const setBuConnectorGrants = (workspaceId: string, kinds: ConnectorKind[]) =>
+  api("/connectors/grants", {
+    method: "PUT",
+    query: { workspaceId },
+    body: { kinds },
+    schema: z.array(ConnectorGrant),
+  });
 
 /**
  * Connectors visible to a Business Unit: org-wide ones plus that unit's own
@@ -54,6 +80,11 @@ export const setConnectorCredentials = (
     email?: string;
     api_token?: string;
     owner?: string;
+    /** Which Business Unit the resulting connection belongs to. Required of a
+     *  viewer bound to more than one — a credential lands in exactly one unit,
+     *  and picking for them is how a key ends up in the wrong one. Ignored for
+     *  an Org Admin, whose connections are org-wide. */
+    workspaceId?: string | null;
   },
 ) =>
   api(`/connectors/${encodeURIComponent(kind)}/credentials`, {

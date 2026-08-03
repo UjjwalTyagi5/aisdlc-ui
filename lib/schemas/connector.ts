@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { ConnectorId, TenantId } from "./ids";
 import { ConnectorHealth, ConnectorKind } from "./enums";
+import { GrantVisibility } from "./grant";
 import { Timestamp } from "./primitives";
 
 /** Declares what a connector can read/write. Rendered in the scope inspector. */
@@ -27,6 +28,25 @@ export type Capability = z.infer<typeof Capability>;
  */
 export const ConnectorScope = z.enum(["organization", "business_unit"]);
 export type ConnectorScope = z.infer<typeof ConnectorScope>;
+
+/**
+ * Which connector KINDS the Organization Admin permits, and how far each
+ * permission reaches — the connector twin of `OrgModelGrant`.
+ *
+ * `scope` above records where an existing connection was onboarded. This
+ * records something earlier and stricter: whether a kind may be onboarded or
+ * used at all, and by whom. A kind with no grant is absent from every Business
+ * Unit's catalogue — a BU or Project Admin cannot connect it, and an org-wide
+ * connection of that kind stops being inherited. A `specific` grant reaches
+ * only the named units.
+ */
+export const ConnectorGrant = z.object({
+  kind: ConnectorKind,
+  visibility: GrantVisibility.default("global"),
+  /** Meaningful only when `visibility === "specific"`. */
+  businessUnitIds: z.array(z.string()).default([]),
+});
+export type ConnectorGrant = z.infer<typeof ConnectorGrant>;
 
 export const Connector = z.object({
   id: ConnectorId,

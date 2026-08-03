@@ -4,21 +4,31 @@
  * DUMMY-DATA source; the LiteLLM-backed catalog (Phase 2) replaces the route
  * handler body, not these shapes.
  *
- * Also the DUMMY-DATA source for the three-tier model cascade: the full
- * catalog below → an Org Admin's org-wide allow-list subset → a BU Admin's
- * further subset for their business unit → an actual credentialed
- * ModelProvider a Project Admin onboards from that BU subset (pending BU
- * Admin approval — the governance-approval plumbing this reuses is in
- * lib/mock/governance-approval-fixtures.ts).
+ * Also the DUMMY-DATA source for the model cascade:
+ *
+ *   full catalog
+ *     → an Org Admin's grants (which models the organization may use, each
+ *       reaching every unit or only named ones — see `OrgModelGrant`)
+ *     → what one Business Unit may use (derived, never curated locally)
+ *     → what one project selected from that (`PROJECT_SELECTION`)
+ *
+ * Credentials run alongside, not through, that chain: an Org Admin may
+ * credential a granted model centrally, in which case nothing below needs a
+ * key; where they haven't, a BU Admin (active immediately) or a Project Admin
+ * (pending BU approval — see lib/mock/governance-approval-fixtures.ts) may
+ * onboard their own for granted models only.
  */
 import type {
   CatalogProvider,
   ModelAllowEntry,
+  ModelAvailability,
   ModelOffering,
   ModelOption,
   ModelProvider,
   ModelProviderStatus,
+  OrgModelGrant,
 } from "@/lib/schemas/model";
+import { grantReaches, type GrantVisibility } from "@/lib/schemas/grant";
 import { createGovernanceApproval } from "@/lib/mock/governance-approval-fixtures";
 import { getWorkspace } from "@/lib/mock/workspace-fixtures";
 import type { PlatformRole } from "@/lib/roles";
@@ -60,7 +70,7 @@ export const DEFAULT_OFFERING_ID = "off_anthropic_sonnet";
 export const DEFAULT_MODEL_ID = "claude-sonnet-4-6";
 
 // ───────────────────────────────────────────────────────────────────────
-//  Three-tier catalogue cascade
+//  Catalogue cascade
 // ───────────────────────────────────────────────────────────────────────
 
 /** The full catalog — any provider LiteLLM supports is onboardable in
@@ -97,47 +107,142 @@ export function getModelCatalog(): CatalogProvider[] {
   return CATALOG;
 }
 
-function inCatalog(entry: ModelAllowEntry): boolean {
-  const p = CATALOG.find((c) => c.provider === entry.provider);
-  return !!p?.models.some((m) => m.model_id === entry.model_id);
+/** A grant needs both halves of the pair to name anything. It is deliberately
+ *  NOT checked against CATALOG: self-hosted and brand-new models are onboarded
+ *  by hand (see the custom-model rows in the add-provider dialog), and a
+ *  catalog check would silently drop the grant for exactly those. */
+function isNamedEntry(entry: ModelAllowEntry): boolean {
+  return entry.provider.trim().length > 0 && entry.model_id.trim().length > 0;
 }
 
-/** Org-wide allow-list, curated by an Org Admin — seeded with a starter set. */
-let ORG_ALLOWED: ModelAllowEntry[] = [
-  { provider: "anthropic", model_id: "claude-sonnet-4-6" },
-  { provider: "anthropic", model_id: "claude-opus-4-7" },
-  { provider: "anthropic", model_id: "claude-haiku-4-5" },
-  { provider: "openai", model_id: "gpt-5.1" },
+/**
+ * The Org Admin's grants — the single source of truth for what exists in the
+ * organization's catalogue and who gets it.
+ *
+ * Seeded with both visibilities on purpose: with everything `global` the
+ * per-unit grant UI never renders a selected unit and a working feature reads
+ * as a dead one.
+ */
+let ORG_GRANTS: OrgModelGrant[] = [
+  { provider: "anthropic", model_id: "claude-sonnet-4-6", visibility: "global", businessUnitIds: [] },
+  { provider: "anthropic", model_id: "claude-haiku-4-5", visibility: "global", businessUnitIds: [] },
+  {
+    provider: "anthropic",
+    model_id: "claude-opus-4-7",
+    visibility: "specific",
+    businessUnitIds: ["ws_payments"],
+  },
+  {
+    provider: "openai",
+    model_id: "gpt-5.1",
+    visibility: "specific",
+    businessUnitIds: ["ws_lending", "ws_payments"],
+  },
 ];
 
-export function getOrgAllowedModels(): ModelAllowEntry[] {
-  return ORG_ALLOWED;
+const entryKey = (e: { provider: string; model_id: string }) => `${e.provider}::${e.model_id}`;
+
+export function getOrgModelGrants(): OrgModelGrant[] {
+  return ORG_GRANTS.map((g) => ({ ...g, businessUnitIds: [...g.businessUnitIds] }));
 }
 
-export function setOrgAllowedModels(entries: ModelAllowEntry[]): ModelAllowEntry[] {
-  ORG_ALLOWED = entries.filter(inCatalog);
-  return ORG_ALLOWED;
+/** Replace the whole grant list. Duplicates collapse, and a `global` grant's
+ *  unit list is cleared — carrying stale unit ids on a grant that ignores them
+ *  is how "why is Payments still listed?" bugs start. */
+export function setOrgModelGrants(grants: OrgModelGrant[]): OrgModelGrant[] {
+  const seen = new Set<string>();
+  ORG_GRANTS = grants.filter(isNamedEntry).flatMap((g) => {
+    const k = entryKey(g);
+    if (seen.has(k)) return [];
+    seen.add(k);
+    return [
+      {
+        provider: g.provider,
+        model_id: g.model_id,
+        visibility: g.visibility,
+        businessUnitIds: g.visibility === "specific" ? [...new Set(g.businessUnitIds)] : [],
+      },
+    ];
+  });
+  return getOrgModelGrants();
 }
 
-/** Per-BU allow-list, curated by that BU's Admin — must stay a subset of
- *  ORG_ALLOWED (enforced on write, see setBuAllowedModels). */
-let BU_ALLOWED: { workspaceId: string; provider: string; model_id: string }[] = [
-  { workspaceId: "ws_lending", provider: "anthropic", model_id: "claude-sonnet-4-6" },
-  { workspaceId: "ws_lending", provider: "anthropic", model_id: "claude-haiku-4-5" },
-];
-
+/**
+ * What a Business Unit may use: derived from the grants, never stored.
+ *
+ * Nothing writes a per-BU allow-list any more, so a unit's set cannot drift
+ * out of sync with the org's — revoking a grant removes it from every unit in
+ * the same instant, including from projects that had selected it (see
+ * `getProjectModelSelection`, which clamps against this).
+ */
 export function getBuAllowedModels(workspaceId: string): ModelAllowEntry[] {
-  return BU_ALLOWED.filter((e) => e.workspaceId === workspaceId).map((e) => ({
-    provider: e.provider,
-    model_id: e.model_id,
+  return ORG_GRANTS.filter((g) => grantReaches(g, workspaceId)).map((g) => ({
+    provider: g.provider,
+    model_id: g.model_id,
   }));
 }
 
-export function setBuAllowedModels(workspaceId: string, entries: ModelAllowEntry[]): ModelAllowEntry[] {
-  const orgAllowedSet = new Set(ORG_ALLOWED.map((e) => `${e.provider}::${e.model_id}`));
-  const next = entries.filter((e) => orgAllowedSet.has(`${e.provider}::${e.model_id}`));
-  BU_ALLOWED = [...BU_ALLOWED.filter((e) => e.workspaceId !== workspaceId), ...next.map((e) => ({ workspaceId, ...e }))];
+/**
+ * Grant a Business Unit exactly `entries` — the Org Admin's per-unit control,
+ * used when creating a unit and from its management page.
+ *
+ * Only `specific` grants are touched. A `global` model reaches every unit by
+ * definition, so it can be neither granted nor revoked here; unchecking one
+ * would have to either silently do nothing or quietly demote it for the whole
+ * organization, and both are worse than the UI simply not offering it (which
+ * it doesn't — global models render as already-included, not as choices).
+ *
+ * An entry naming a model with no grant at all is ignored: a unit cannot be
+ * given something the organization has not approved.
+ */
+export function setBuModelGrants(workspaceId: string, entries: ModelAllowEntry[]): ModelAllowEntry[] {
+  const wanted = new Set(entries.map(entryKey));
+  for (const grant of ORG_GRANTS) {
+    if (grant.visibility !== "specific") continue;
+    const has = grant.businessUnitIds.includes(workspaceId);
+    const want = wanted.has(entryKey(grant));
+    if (want && !has) grant.businessUnitIds.push(workspaceId);
+    else if (!want && has) {
+      grant.businessUnitIds = grant.businessUnitIds.filter((id) => id !== workspaceId);
+    }
+  }
   return getBuAllowedModels(workspaceId);
+}
+
+/**
+ * The BU-facing view: what this unit has, and what (if anything) still needs a
+ * key before it can be used. See `ModelAvailability`.
+ */
+export function getBuModelAvailability(workspaceId: string): ModelAvailability[] {
+  return ORG_GRANTS.filter((g) => grantReaches(g, workspaceId)).map((g) => ({
+    provider: g.provider,
+    model_id: g.model_id,
+    visibility: g.visibility,
+    centrallyCredentialed: hasCredentialFor(null, g.provider, g.model_id),
+    locallyCredentialed: hasCredentialFor(workspaceId, g.provider, g.model_id),
+  }));
+}
+
+/**
+ * Is there a usable credential for this provider+model at the given level?
+ *
+ * "Usable" excludes a connection still pending its BU Admin's approval and one
+ * whose offering is disabled — both are onboarded but neither can serve a run,
+ * and reporting them as covered would hide the very credential gap this
+ * answers.
+ */
+function hasCredentialFor(
+  workspaceId: string | null,
+  provider: string,
+  modelId: string,
+): boolean {
+  return PROVIDERS.some(
+    (p) =>
+      p.workspaceId === workspaceId &&
+      p.approvalStatus === "active" &&
+      p.provider === provider &&
+      p.offerings.some((o) => o.enabled && o.model_id === modelId),
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -284,6 +389,17 @@ export interface CreateModelProviderInput {
   enabled_models?: string[];
   /** null = org-wide (only meaningful for an Org Admin's own onboarding). */
   workspaceId: string | null;
+  /**
+   * How far the models onboarded here should reach. Org-wide onboarding only:
+   * an Org Admin bringing a key is also deciding who may use what it unlocks,
+   * so the grant is written in the same act rather than left as a second step
+   * someone forgets — a credentialed model nobody was granted is invisible
+   * everywhere, which reads as the credential having failed.
+   *
+   * Omitted (or set on a unit-scoped onboarding) leaves the grants untouched.
+   */
+  visibility?: GrantVisibility;
+  businessUnitIds?: string[];
 }
 
 /** Governance mirrors createProjectRecord (lib/mock/project-fixtures.ts):
@@ -295,10 +411,22 @@ export function createModelProvider(
 ): ModelProvider {
   const id = `prov_${nextProviderSeq++}`;
   const now = new Date().toISOString();
-  const specs: ModelSpecInput[] =
+  const requested: ModelSpecInput[] =
     input.models && input.models.length > 0
       ? input.models
       : (input.enabled_models ?? []).map((model_id) => ({ model_id }));
+
+  // A unit-scoped onboarding may only credential models the Org Admin granted
+  // that unit. The dialogs already restrict what can be picked, but the rule
+  // belongs here too: a hand-rolled request must not be able to smuggle in a
+  // model the organization never approved. Org-wide onboarding (workspaceId
+  // null) is the Org Admin defining the catalogue and is not clamped.
+  const specs = input.workspaceId
+    ? (() => {
+        const granted = new Set(getBuAllowedModels(input.workspaceId).map(entryKey));
+        return requested.filter((m) => granted.has(`${input.provider}::${m.model_id}`));
+      })()
+    : requested;
 
   const offerings: ModelOffering[] = specs.map((m, i) => ({
     id: `off_${id}_${i}`,
@@ -332,6 +460,24 @@ export function createModelProvider(
     approvalReason: null,
   };
   PROVIDERS.push(created);
+
+  // Org-wide onboarding also grants what it credentialed, at the visibility
+  // the admin chose. An existing grant is respected rather than overwritten:
+  // re-keying a provider is not a decision about who may use its models.
+  if (input.workspaceId === null && input.visibility) {
+    const next = getOrgModelGrants();
+    for (const spec of specs) {
+      const key = `${input.provider}::${spec.model_id}`;
+      if (next.some((g) => entryKey(g) === key)) continue;
+      next.push({
+        provider: input.provider,
+        model_id: spec.model_id,
+        visibility: input.visibility,
+        businessUnitIds: input.visibility === "specific" ? (input.businessUnitIds ?? []) : [],
+      });
+    }
+    setOrgModelGrants(next);
+  }
 
   if (needsApproval) {
     const workspace = input.workspaceId ? getWorkspace(input.workspaceId) : undefined;

@@ -58,7 +58,12 @@ export function DeliveryStatusBadge({
   /** Rendered inside the pill, after the label — the picker's chevron. */
   trailing?: React.ReactNode;
 }) {
-  const { className: tone, icon: Icon } = TONE[status];
+  // Falls back rather than destructuring blind. This badge renders from
+  // optimistic and cached rows as well as from server ones, and an unknown or
+  // missing status used to throw here — taking the whole projects list down
+  // with it. A pill reading "Not started" is a far better failure than a
+  // white screen, and the type still says which values are expected.
+  const { className: tone, icon: Icon } = TONE[status] ?? TONE.not_started;
   return (
     <span
       className={cn(
@@ -70,7 +75,7 @@ export function DeliveryStatusBadge({
       )}
     >
       <Icon className="size-2.5 shrink-0" aria-hidden />
-      {PROJECT_DELIVERY_STATUS_LABEL[status]}
+      {PROJECT_DELIVERY_STATUS_LABEL[status] ?? PROJECT_DELIVERY_STATUS_LABEL.not_started}
       {trailing}
     </span>
   );

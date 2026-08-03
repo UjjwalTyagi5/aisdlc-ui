@@ -1,8 +1,9 @@
 import { type NextRequest } from "next/server";
 
 import { getSession } from "@/lib/auth/session";
-import { getOrgAllowedModels, setOrgAllowedModels } from "@/lib/mock/model-fixtures";
-import type { ModelAllowEntry } from "@/lib/schemas/model";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { getOrgModelGrants, setOrgModelGrants } from "@/lib/mock/model-fixtures";
+import type { OrgModelGrant } from "@/lib/schemas/model";
 
 // DUMMY-DATA SEAM: mutates the shared fixture store directly. Mirrored in
 // mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
@@ -13,12 +14,22 @@ import type { ModelAllowEntry } from "@/lib/schemas/model";
 export const dynamic = "force-dynamic";
 
 export function GET() {
-  return Response.json(getOrgAllowedModels());
+  return Response.json(getOrgModelGrants());
 }
 
 export async function PUT(req: NextRequest) {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  const body = (await req.json()) as { entries: ModelAllowEntry[] };
-  return Response.json(setOrgAllowedModels(body.entries ?? []));
+  // The grant list IS the organization's catalogue policy — a Business Unit
+  // Admin holding `model:manage` for their own unit must not be able to widen
+  // what the organization permits, so the role, not the permission, is the
+  // gate here.
+  if (effectivePlatformRole(session) !== "org_admin") {
+    return Response.json(
+      { code: "forbidden", message: "Only an Organization Admin can change model grants." },
+      { status: 403 },
+    );
+  }
+  const body = (await req.json()) as { entries?: OrgModelGrant[] };
+  return Response.json(setOrgModelGrants(body.entries ?? []));
 }

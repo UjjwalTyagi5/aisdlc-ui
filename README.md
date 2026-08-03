@@ -142,7 +142,7 @@ Consolidated story files (one per category, not one per component) under `storie
 **App shell (`components/app/app-shell.tsx`)** composes:
 - `Sidebar` — collapsible (240 px ↔ 64 px), persisted via Zustand `persist` to `localStorage`. Tooltips appear when collapsed.
 - `MobileSidebar` — Sheet-based drawer on <1024 px, triggered from the top bar. Auto-closes on route change.
-- `WorkspaceSwitcher` — dropdown with a hardcoded workspace list (Chunk 4 wires real data).
+- `WorkspaceIdentity` — read-only sidebar header naming the active Business Unit and its organization. Replaced a switcher dropdown: which unit you act in follows from your bindings, not from a control in the chrome.
 - `TopBar` — sticky, backdrop-blur, carries breadcrumbs + global search trigger + notifications bell + theme toggle + user menu.
 - `Breadcrumbs` — derived from the pathname via `lib/nav.ts` label map; dynamic segments fall back to the raw value (Chunk 5 adds data-driven resolution).
 - `CommandPalette` — cmd+k / ctrl+k opens it; arrow-key nav; groups for Navigate / Actions / Theme. Also binds cmd+b to toggle sidebar.
@@ -198,7 +198,7 @@ Consolidated story files (one per category, not one per component) under `storie
 
 **Shell now session-aware:**
 - `UserMenu` — real name/email/avatar/role; logout link dispatches to mock or Auth0 endpoint by mode.
-- `WorkspaceSwitcher` — reads tenant from session.
+- `WorkspaceIdentity` — reads tenant from session.
 - `Sidebar` + `MobileSidebar` — filter nav items by `requireRole`. Audit log disappears for `member` / `viewer`.
 - `CommandPalette` — filters entries by `requireCapability` (audit, new project hidden for viewers).
 - `Projects` page — demos `<RequireRole>` and `useCan` (New project button swaps to disabled for viewers).

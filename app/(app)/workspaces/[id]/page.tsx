@@ -36,6 +36,10 @@ import {
 import { LoadingState } from "@/components/ui/loading-state";
 import { Switch } from "@/components/ui/switch";
 import { ActiveBadge } from "@/components/app/active-badge";
+import {
+  BuConnectorAccessCard,
+  BuModelAccessCard,
+} from "@/components/app/bu-access-cards";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
 import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
 import {
@@ -163,8 +167,10 @@ export default function WorkspaceDetailPage() {
   const canEditBudgetDirectly = role === "org_admin" || (role === "bu_admin" && !budgetSet);
   const canRequestBudgetIncrease = role === "bu_admin" && budgetSet;
   // Active/inactive is the Org Admin's label about a unit, not one the unit
-  // administers for itself — the API rejects it from anyone else.
-  const canSetActive = role === "org_admin";
+  // administers for itself — the API rejects it from anyone else. The same is
+  // true of which models and connectors the unit is granted.
+  const isOrgAdmin = role === "org_admin";
+  const canSetActive = isOrgAdmin;
   const membersQ = useQuery({
     queryKey: qk.workspaces.members(id),
     queryFn: () => listWorkspaceMembers(id),
@@ -439,6 +445,24 @@ export default function WorkspaceDetailPage() {
             budgetIncreaseMutation.mutate({ requestedAmountUsd: v, reason })
           }
         />
+      )}
+
+      {/* What this unit may use — the Org Admin's per-unit grants (PRD §34.2,
+          §34.3). Editable only by them; its own Admin reads what they were
+          given, which is the whole point of the grant living up here. */}
+      {ws && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <BuModelAccessCard
+            workspaceId={id}
+            workspaceName={ws.displayName}
+            canManage={isOrgAdmin}
+          />
+          <BuConnectorAccessCard
+            workspaceId={id}
+            workspaceName={ws.displayName}
+            canManage={isOrgAdmin}
+          />
+        </div>
       )}
 
       {/* Members section */}

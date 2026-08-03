@@ -67,12 +67,23 @@ describe("resolveSessionScope", () => {
   describe("Project Admin", () => {
     const scope = scopeFor("project_admin");
 
-    it("sees only the project it administers", () => {
-      // Priya is project_admin on payments-api and `ba` on mobile-onboarding.
-      // Acting AS Project Admin must not silently confer the BA binding's reach.
-      expect(scope.managedProjectIds).toEqual(["payments-api"]);
+    it("sees only the projects it administers", () => {
+      // Priya is project_admin on payments-api (Payments) AND core-ledger
+      // (Lending), and `ba` on mobile-onboarding. Two boundaries at once:
+      // acting AS Project Admin must not silently confer the BA binding's
+      // reach, and administering ONE project in Lending must not open the
+      // sibling project in the same unit.
+      expect([...scope.managedProjectIds].sort()).toEqual(["core-ledger", "payments-api"]);
       expect(canReadProject(scope, "payments-api")).toBe(true);
+      expect(canReadProject(scope, "core-ledger")).toBe(true);
       expect(canReadProject(scope, "mobile-onboarding")).toBe(false);
+    });
+
+    it("reads both parent units when it administers across two", () => {
+      // The multi-unit admin case the scoped pages union across — with no
+      // Business Unit switcher there is no "active" one to fall back to.
+      expect([...scope.businessUnitIds].sort()).toEqual(["ws_lending", "ws_payments"]);
+      expect(canManageBusinessUnit(scope, "ws_lending")).toBe(false);
     });
 
     it("reads the parent unit for context but cannot manage it", () => {
@@ -151,7 +162,10 @@ describe("filterByProject", () => {
     const scope = scopeFor("project_admin");
     const visible = filterByProject(scope, GATES, (g) => g.projectId);
     expect(visible.length).toBeGreaterThan(0);
-    expect(visible.every((g) => g.projectId === "payments-api")).toBe(true);
+    // Exactly her two administered projects — notably NOT mobile-onboarding,
+    // which sits in the same unit as core-ledger and is hers only as a BA.
+    expect(visible.every((g) => ["payments-api", "core-ledger"].includes(g.projectId))).toBe(true);
+    expect(visible.some((g) => g.projectId === "mobile-onboarding")).toBe(false);
     expect(visible.length).toBeLessThan(GATES.length);
   });
 

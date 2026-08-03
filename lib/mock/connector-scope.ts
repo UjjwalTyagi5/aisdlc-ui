@@ -9,24 +9,29 @@
  * inherited ones a project uses is a property of the project
  * (`project.connectors`). Nothing needs a third table.
  */
+import { filterConnectorsByGrant } from "@/lib/mock/connector-grants";
 import type { Connector } from "@/lib/schemas/connector";
 
 /**
- * What a Business Unit can see: every org-wide connector, plus the ones
- * onboarded into that unit. A null `workspaceId` means the caller has no unit
- * context and gets the whole tenant list — the onboarding wizard and the
- * dashboard health tile both legitimately want that.
+ * What a Business Unit can see: every org-wide connector whose kind the
+ * Organization Admin permitted this unit, plus the ones onboarded into the
+ * unit itself. A null `workspaceId` means the caller has no unit context and
+ * gets the whole tenant list — the onboarding wizard and the dashboard health
+ * tile both legitimately want that.
  *
  * Inheritance is one-way by construction: a unit never sees a sibling unit's
- * connectors, and an org-wide connector is never hidden from a unit.
+ * connectors. It is no longer unconditional, though — an org-wide connector
+ * whose kind is granted only to *other* units is hidden here, which is the
+ * whole point of a `specific` grant (lib/mock/connector-grants.ts).
  */
 export function visibleConnectors(
   connectors: Connector[],
   workspaceId: string | null | undefined,
 ): Connector[] {
   if (!workspaceId) return connectors;
-  return connectors.filter(
-    (c) => c.scope === "organization" || c.workspaceId === workspaceId,
+  return filterConnectorsByGrant(
+    connectors.filter((c) => c.scope === "organization" || c.workspaceId === workspaceId),
+    workspaceId,
   );
 }
 
@@ -56,10 +61,16 @@ export function visibleConnectorsForScope(
     if (!allowedWorkspaceIds.includes(String(workspaceId))) return [];
     return visibleConnectors(connectors, workspaceId);
   }
-  return connectors.filter(
-    (c) =>
-      c.scope === "organization" ||
-      (c.workspaceId != null && allowedWorkspaceIds.includes(String(c.workspaceId))),
+  // No unit named, bounded viewer: the union over the units they may read.
+  // Deduped by id, since an org-wide connector permitted to two of their units
+  // would otherwise appear twice.
+  const seen = new Set<string>();
+  return allowedWorkspaceIds.flatMap((id) =>
+    visibleConnectors(connectors, id).filter((c) => {
+      if (seen.has(String(c.id))) return false;
+      seen.add(String(c.id));
+      return true;
+    }),
   );
 }
 
@@ -72,4 +83,51 @@ export function onboardingScopeFor(
   return role === "org_admin"
     ? { scope: "organization", requiresWorkspace: false }
     : { scope: "business_unit", requiresWorkspace: true };
+}
+
+/**
+ * Record a pasted credential against a connector kind, creating the connection
+ * if this is the first one — the write behind "Add credentials" on the
+ * Integrations page.
+ *
+ * The level it lands at comes from who is doing it (`onboardingScopeFor`), so
+ * a Business Unit Admin's key produces a connection inside their unit rather
+ * than an org-wide one every sibling inherits. An existing connection keeps
+ * the level it was onboarded at: re-keying is not re-scoping, and quietly
+ * promoting a unit's connection to org-wide because an Org Admin rotated its
+ * token would hand every other unit an integration nobody granted them.
+ *
+ * Returns the connection, or null when the kind isn't in the catalogue at all.
+ */
+export function recordConnectorCredentials(
+  connectors: Connector[],
+  kind: string,
+  onboarder: { scope: Connector["scope"]; workspaceId: string | null; tenantId: string },
+  account?: string | null,
+): Connector | null {
+  const now = new Date().toISOString();
+  const existing = connectors.find((c) => c.kind === kind);
+  if (existing) {
+    existing.installed = true;
+    existing.health = "healthy";
+    existing.lastCheckedAt = now;
+    if (account) existing.account = account;
+    return existing;
+  }
+
+  const created = {
+    id: `conn_${kind}`,
+    tenantId: onboarder.tenantId,
+    kind,
+    name: kind,
+    installed: true,
+    health: "healthy",
+    capabilities: [],
+    lastCheckedAt: now,
+    account: account ?? null,
+    scope: onboarder.scope,
+    workspaceId: onboarder.scope === "business_unit" ? onboarder.workspaceId : null,
+  } as unknown as Connector;
+  connectors.push(created);
+  return created;
 }

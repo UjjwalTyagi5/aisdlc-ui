@@ -27,7 +27,19 @@ import {
   addAccessMember,
   mockInitials,
 } from "@/lib/mock/access-fixtures";
-import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
+import {
+  onboardingScopeFor,
+  recordConnectorCredentials,
+  visibleConnectorsForScope,
+} from "@/lib/mock/connector-scope";
+import {
+  connectorGrantsForWorkspace,
+  connectorGrantsForWorkspaces,
+  listConnectorGrants,
+  permittedConnectorKinds,
+  setBuConnectorGrants,
+  setConnectorGrants,
+} from "@/lib/mock/connector-grants";
 import { buildOrgOverview } from "@/lib/mock/org-overview-fixtures";
 import { buildSpendSeries } from "@/lib/mock/cost-fixtures";
 import {
@@ -64,20 +76,22 @@ import {
   createModelProvider,
   deleteModelProvider,
   getBuAllowedModels,
+  getBuModelAvailability,
   getModelCatalog,
-  getOrgAllowedModels,
+  getOrgModelGrants,
   getProjectModelSelection,
   listModelProviders,
   rejectModelProvider,
-  setBuAllowedModels,
+  setBuModelGrants,
   setProjectModelSelection,
   setModelDefaultOffering,
-  setOrgAllowedModels,
+  setOrgModelGrants,
   updateModelProvider,
   verifyModelProvider,
   type CreateModelProviderInput,
 } from "@/lib/mock/model-fixtures";
-import type { ModelAllowEntry } from "@/lib/schemas/model";
+import type { ModelAllowEntry, OrgModelGrant } from "@/lib/schemas/model";
+import type { ConnectorGrant } from "@/lib/schemas/connector";
 import {
   listOverridesForProject,
   removeOverride,
@@ -139,6 +153,27 @@ function sessionFromCookies(cookies: Record<string, string>) {
  */
 function scopeFromCookies(cookies: Record<string, string>) {
   return resolveSessionScope(sessionFromCookies(cookies));
+}
+
+const NOT_PERMITTED =
+  "Your Organization Admin hasn't permitted this connector for your business unit.";
+
+/**
+ * May this viewer touch this connector kind at all?
+ *
+ * Org-wide viewers write the grants, so nothing is withheld from them. Anyone
+ * else is permitted a kind if any unit they belong to was granted it — the
+ * union, not the intersection, because a person in two units legitimately acts
+ * in whichever one permits the connector they're reaching for.
+ */
+function kindIsPermitted(
+  scope: ReturnType<typeof scopeFromCookies>,
+  kind: string,
+): boolean {
+  if (scope.isOrgWide) return true;
+  return scope.businessUnitIds.some((id) =>
+    (permittedConnectorKinds(id) as string[]).includes(kind),
+  );
 }
 
 /**
@@ -559,7 +594,7 @@ export const handlers = [
     return HttpResponse.json(created, { status: 201 });
   }),
 
-  // ───── Model catalogue cascade (org allow-list → BU allow-list → onboarded
+  // ───── Model catalogue cascade (org grants → what a unit may use → onboarded
   // providers). Mirrors app/api/model/** exactly — see
   // [[msw-dual-runtime-mutation-rule]].
   http.get("/api/model/catalog", async () => {
@@ -568,14 +603,36 @@ export const handlers = [
   }),
   http.get("/api/model/allowed/org", async () => {
     await lag();
-    return HttpResponse.json(getOrgAllowedModels());
+    return HttpResponse.json(getOrgModelGrants());
   }),
   http.put("/api/model/allowed/org", async ({ request, cookies }) => {
     await lag();
     const session = sessionFromCookies(cookies);
     if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
-    const body = (await request.json()) as { entries: ModelAllowEntry[] };
-    return HttpResponse.json(setOrgAllowedModels(body.entries));
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Only an Organization Admin can change model grants." },
+        { status: 403 },
+      );
+    }
+    const body = (await request.json()) as { entries: OrgModelGrant[] };
+    return HttpResponse.json(setOrgModelGrants(body.entries));
+  }),
+  // What a unit may use, plus whether anything still needs a key. Mirrors
+  // app/api/model/availability/route.ts.
+  http.get("/api/model/availability", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+    if (!workspaceId) {
+      return HttpResponse.json({ code: "invalid_input", message: "workspaceId is required" }, { status: 422 });
+    }
+    const scope = scopeFromCookies(cookies);
+    if (!canReadBusinessUnit(scope, workspaceId)) {
+      return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    }
+    return HttpResponse.json(getBuModelAvailability(workspaceId));
   }),
   http.get("/api/model/allowed/bu", async ({ request }) => {
     await lag();
@@ -595,11 +652,20 @@ export const handlers = [
     if (!workspaceId) {
       return HttpResponse.json({ code: "invalid_input", message: "workspaceId is required" }, { status: 422 });
     }
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: "Only an Organization Admin can grant models to a business unit.",
+        },
+        { status: 403 },
+      );
+    }
     const body = (await request.json()) as { entries: ModelAllowEntry[] };
-    return HttpResponse.json(setBuAllowedModels(workspaceId, body.entries));
+    return HttpResponse.json(setBuModelGrants(workspaceId, body.entries));
   }),
 
-  // Fourth tier — what a project selected from its BU's allow-list. Mirrors
+  // Last tier — what a project selected from what its BU was granted. Mirrors
   // app/api/model/allowed/project/route.ts exactly, including resolving the
   // project's parent Business Unit here rather than inside the fixture module.
   http.get("/api/model/allowed/project", async ({ request }) => {
@@ -822,6 +888,47 @@ export const handlers = [
       ),
     );
   }),
+  // Which connector kinds the Org Admin permits. Mirrors
+  // app/api/connectors/grants/route.ts — the static `grants` segment wins over
+  // the `:kind` matcher below, so this must stay declared before it.
+  http.get("/api/connectors/grants", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+    const scope = scopeFromCookies(cookies);
+    if (workspaceId) {
+      if (!canReadBusinessUnit(scope, workspaceId)) {
+        return HttpResponse.json({ code: "not_found" }, { status: 404 });
+      }
+      return HttpResponse.json(connectorGrantsForWorkspace(workspaceId));
+    }
+    // Bounded viewer: the union across their units, with the unit lists
+    // stripped — see connectorGrantsForWorkspaces.
+    if (!scope.isOrgWide) {
+      return HttpResponse.json(connectorGrantsForWorkspaces(scope.businessUnitIds));
+    }
+    return HttpResponse.json(listConnectorGrants());
+  }),
+  http.put("/api/connectors/grants", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Only an Organization Admin can change connector grants." },
+        { status: 403 },
+      );
+    }
+    const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+    const body = (await request.json()) as { grants?: ConnectorGrant[]; kinds?: string[] };
+    return HttpResponse.json(
+      workspaceId
+        ? setBuConnectorGrants(workspaceId, body.kinds ?? [])
+        : setConnectorGrants(body.grants ?? []),
+    );
+  }),
+
   http.get("/api/connectors/:kind", async ({ params, cookies }) => {
     await lag();
     const c = CONNECTORS.find((x) => x.kind === params.kind);
@@ -831,23 +938,76 @@ export const handlers = [
     const scope = scopeFromCookies(cookies);
     const readable =
       c != null &&
-      (c.scope === "organization" || canReadBusinessUnit(scope, c.workspaceId ?? null));
+      (c.scope === "organization" || canReadBusinessUnit(scope, c.workspaceId ?? null)) &&
+      kindIsPermitted(scope, String(params.kind));
     if (!readable) {
       return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
     }
     return HttpResponse.json(c);
   }),
 
-  http.post("/api/connectors/:kind/install", async ({ params }) => {
+  http.post("/api/connectors/:kind/install", async ({ params, cookies }) => {
     await lag();
     const c = CONNECTORS.find((x) => x.kind === params.kind);
     if (!c) {
       return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
     }
+    if (!kindIsPermitted(scopeFromCookies(cookies), String(params.kind))) {
+      return HttpResponse.json({ code: "forbidden", message: NOT_PERMITTED }, { status: 403 });
+    }
     c.installed = true;
     c.health = "healthy";
     c.lastCheckedAt = new Date().toISOString();
     return HttpResponse.json(c);
+  }),
+
+  // Pasted credentials (ADO PAT, Jira token, GH Actions PAT). Mirrors
+  // app/api/connectors/[kind]/credentials/route.ts.
+  http.post("/api/connectors/:kind/credentials", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const kind = String(params.kind);
+    const scope = scopeFromCookies(cookies);
+    if (!kindIsPermitted(scope, kind)) {
+      return HttpResponse.json({ code: "forbidden", message: NOT_PERMITTED }, { status: 403 });
+    }
+    const body = (await request.json().catch(() => ({}))) as {
+      org_url?: string;
+      base_url?: string;
+      owner?: string;
+      workspaceId?: string | null;
+    };
+    // Mirrors the route: a named unit must be the caller's; otherwise their
+    // only one, never the first of several.
+    const requested = body.workspaceId ? String(body.workspaceId) : null;
+    if (requested && !canReadBusinessUnit(scope, requested)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Not your business unit." },
+        { status: 403 },
+      );
+    }
+    const target =
+      requested ?? (scope.businessUnitIds.length === 1 ? scope.businessUnitIds[0]! : null);
+    const onboardAt = onboardingScopeFor(effectivePlatformRole(session));
+    if (onboardAt.requiresWorkspace && !target) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "workspaceId is required — you belong to several." },
+        { status: 422 },
+      );
+    }
+    const connector = recordConnectorCredentials(
+      CONNECTORS,
+      kind,
+      {
+        scope: onboardAt.scope,
+        workspaceId: target,
+        tenantId: String(CONNECTORS[0]?.tenantId ?? ""),
+      },
+      body.org_url ?? body.base_url ?? body.owner ?? null,
+    );
+    if (!connector) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json({ kind, status: "valid", account: connector.account ?? null });
   }),
 
   http.post("/api/connectors/:kind/disconnect", async ({ params }) => {
