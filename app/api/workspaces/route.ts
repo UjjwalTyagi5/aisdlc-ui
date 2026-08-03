@@ -24,14 +24,31 @@ export async function GET() {
   return Response.json(listWorkspaces().filter((w) => canReadBusinessUnit(scope, String(w.id))));
 }
 
+/**
+ * Creating a Business Unit is an Organization Admin action (PRD §15.2).
+ *
+ * The check is `isOrgWide`, not a permission: `workspace:manage` is held by a
+ * unit's own Admin for the unit they run, so gating on it would let a Business
+ * Unit Admin create siblings. Until this existed the route accepted a create
+ * from anyone signed in — the UI hid the button but the endpoint did not, and
+ * the `?new=1` deep link reached the dialog without passing the button at all.
+ */
 export async function POST(req: NextRequest) {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+  if (!resolveSessionScope(session).isOrgWide) {
+    return Response.json(
+      {
+        code: "forbidden",
+        message: `Only an Organization Admin can create a ${BUSINESS_UNIT_LABEL.toLowerCase()}`,
+      },
+      { status: 403 },
+    );
+  }
   const body = (await req.json()) as {
     displayName: string;
     businessUnit?: string;
     costCenter?: string;
-    dataClassification?: "public" | "internal" | "confidential" | "restricted";
     /** Optional at creation; null = no cap, for the unit's Admin to set later. */
     monthlyBudgetUsd?: number | null;
     budgetStartDate?: string | null;

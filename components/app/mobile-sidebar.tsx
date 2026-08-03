@@ -15,7 +15,7 @@ import { useAccessScope } from "@/hooks/use-access-scope";
 import { isActiveNav, visibleNav } from "@/lib/nav";
 
 import { ScopeContextBar } from "./scope-indicator";
-import { WorkspaceSwitcher } from "./workspace-switcher";
+import { OrgHeader } from "./org-header";
 
 /**
  * Mobile navigation — triggered from the top bar on screens <1024px.
@@ -53,7 +53,7 @@ export function MobileSidebar() {
       <SheetContent side="left" className="flex w-72 flex-col p-0">
         <SheetHeader className="border-b p-3 text-left">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
-          <WorkspaceSwitcher />
+          <OrgHeader />
           {/* The top bar hides the scope bar below lg, which is exactly where
               this menu lives — so it carries the context instead. */}
           <ScopeContextBar className="mt-2 flex-wrap" />

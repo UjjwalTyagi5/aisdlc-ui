@@ -11,8 +11,8 @@ import {
   Coins,
   FolderKanban,
   MoreVertical,
+  Pencil,
   Plus,
-  ShieldAlert,
   ShieldCheck,
   Users,
   type LucideIcon,
@@ -33,20 +33,15 @@ import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
+import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
+import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
 import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { archiveWorkspace } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
 import { ActiveBadge } from "@/components/app/active-badge";
-import type { DataClassification, Workspace } from "@/lib/schemas";
-
-const CLASSIFICATION_TONE: Record<DataClassification, string> = {
-  public: "text-muted-foreground bg-muted/50 border-line-soft",
-  internal: "text-info bg-info/10 border-info/30",
-  confidential: "text-warning bg-warning/15 border-warning/40",
-  restricted: "text-destructive bg-destructive/10 border-destructive/30",
-};
+import type { Workspace } from "@/lib/schemas";
 
 const RISE = {
   animationName: "rise",
@@ -78,13 +73,20 @@ export default function WorkspacesPage() {
 
   const [createOpen, setCreateOpen] = React.useState(false);
 
+  // `?new=1` is a deep link (the sidebar switcher uses it), so it has to be
+  // gated like any other entry point — it opened the dialog unconditionally
+  // before, which meant the URL alone was enough to bypass the check the
+  // button next to it performs.
+  //
+  // Scope resolves asynchronously, so this waits for the answer rather than
+  // reading `isOrgWide` while it is still undefined; stripping the param on an
+  // unresolved scope would silently swallow a legitimate request.
+  const scopeResolved = scope !== null;
   React.useEffect(() => {
-    if (searchParams.get("new") === "1") {
-      setCreateOpen(true);
-      router.replace("/workspaces");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (searchParams.get("new") !== "1" || !scopeResolved) return;
+    if (canCreate) setCreateOpen(true);
+    router.replace("/workspaces");
+  }, [searchParams, scopeResolved, canCreate, router]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => archiveWorkspace(id),
@@ -194,7 +196,7 @@ export default function WorkspacesPage() {
                 : "You haven't been added to a business unit yet. Ask your Organization Admin to invite you."}
             </p>
           </div>
-          {canManage && (
+          {canCreate && (
             <Button onClick={() => setCreateOpen(true)} variant="outline" className="border-line-soft">
               <Plus className="size-4" aria-hidden />
               New business unit
@@ -209,6 +211,7 @@ export default function WorkspacesPage() {
               workspace={ws}
               isActive={active?.id === ws.id}
               canManage={canManage}
+              canChangeAdmin={canCreate}
               onSetActive={() => {
                 setActive(ws.id);
                 queryClient.invalidateQueries();
@@ -268,14 +271,20 @@ function WorkspaceCard({
   archived,
   onSetActive,
   onArchive,
+  canChangeAdmin,
 }: {
   workspace: Workspace;
   isActive: boolean;
   canManage: boolean;
+  /** Org Admin only — see the comment on the menu item below. */
+  canChangeAdmin?: boolean;
   archived?: boolean;
   onSetActive?: () => void;
   onArchive?: () => void;
 }) {
+  const [adminOpen, setAdminOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
+
   return (
     <li className="h-full">
       <Card
@@ -317,6 +326,19 @@ function WorkspaceCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="border-line-soft bg-panel-elevated">
+                  <DropdownMenuItem onSelect={() => setEditOpen(true)}>
+                    <Pencil className="size-4" aria-hidden />
+                    Edit details
+                  </DropdownMenuItem>
+                  {/* Appointing a unit's admin is the Org Admin's call, not the
+                      sitting admin's — `canManage` alone would show this to the
+                      BU Admin, who must not pick their own replacement. */}
+                  {canChangeAdmin && (
+                    <DropdownMenuItem onSelect={() => setAdminOpen(true)}>
+                      <ShieldCheck className="size-4" aria-hidden />
+                      {ws.buAdminName ? "Change admin" : "Appoint admin"}
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onSelect={() => onArchive?.()} className="text-destructive">
                     <Archive className="size-4" aria-hidden />
                     Archive business unit
@@ -327,21 +349,10 @@ function WorkspaceCard({
           </div>
         </div>
 
-        {/* Classification + active/inactive badges */}
-        <div className="flex w-fit flex-wrap items-center gap-1.5">
-          <span
-            className={cn(
-              "inline-flex w-fit items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold capitalize",
-              CLASSIFICATION_TONE[ws.dataClassification],
-            )}
-          >
-            {ws.dataClassification === "restricted" && (
-              <ShieldAlert className="size-3" aria-hidden />
-            )}
-            {ws.dataClassification}
-          </span>
-          <ActiveBadge isActive={ws.isActive} className="text-[10px]" />
-        </div>
+        {/* Rendered without a wrapper: ActiveBadge is null for an active unit,
+            and an empty flex child would still claim one of the card's gap-4
+            rows — leaving a hole on every card that has nothing to flag. */}
+        <ActiveBadge isActive={ws.isActive} className="w-fit text-[10px]" />
 
         {/* Stats */}
         <div className="text-muted-foreground mt-auto flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -376,6 +387,20 @@ function WorkspaceCard({
           </div>
         )}
       </Card>
+
+      {canManage && !archived && (
+        <EditBuDetailsDialog workspace={ws} open={editOpen} onOpenChange={setEditOpen} />
+      )}
+
+      {canChangeAdmin && (
+        <ChangeBuAdminDialog
+          workspaceId={String(ws.id)}
+          workspaceName={ws.displayName}
+          currentAdminName={ws.buAdminName ?? null}
+          open={adminOpen}
+          onOpenChange={setAdminOpen}
+        />
+      )}
     </li>
   );
 }

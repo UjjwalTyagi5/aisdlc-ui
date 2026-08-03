@@ -5,7 +5,13 @@ import { Command as CommandPrimitive } from "cmdk";
 import { Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const Command = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive>,
@@ -22,12 +28,38 @@ const Command = React.forwardRef<
 ));
 Command.displayName = CommandPrimitive.displayName;
 
-type CommandDialogProps = React.ComponentProps<typeof Dialog>;
+type CommandDialogProps = React.ComponentProps<typeof Dialog> & {
+  /** Announced to screen readers; the palette shows no visible heading. */
+  label?: string;
+  description?: string;
+};
 
-const CommandDialog = ({ children, ...props }: CommandDialogProps) => {
+/**
+ * The command palette's shell.
+ *
+ * The title and description are visually hidden rather than absent. Radix
+ * requires every `DialogContent` to be labelled — without one it logs an error
+ * and, more to the point, a screen reader announces the palette as an unnamed
+ * dialog. This one has no visible heading by design (it opens straight onto a
+ * search field), so the label lives in the accessibility tree only.
+ *
+ * `sr-only` keeps the elements rendered and reachable by assistive tech;
+ * `hidden` or `display:none` would remove them from that tree and put the
+ * warning straight back.
+ */
+const CommandDialog = ({
+  children,
+  label = "Command palette",
+  description = "Search for a page or run a command.",
+  ...props
+}: CommandDialogProps) => {
   return (
     <Dialog {...props}>
       <DialogContent className="overflow-hidden p-0">
+        <DialogHeader className="sr-only">
+          <DialogTitle>{label}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
         <Command className="[&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-group]]:px-2 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5">
           {children}
         </Command>

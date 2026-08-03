@@ -1,6 +1,7 @@
 import type { PlatformRole } from "@/lib/roles";
 import {
   Activity,
+  Boxes,
   BrainCircuit,
   Building2,
   Coins,
@@ -221,6 +222,29 @@ export const observeNav: NavItem[] = [
  */
 export const utilityNav: NavItem[] = [
   {
+    /**
+     * The platform's discovery portal, and the one entry here with no
+     * permission and no scope requirement — it renders only the documented
+     * model (agents, tracks, roles, governance) and reads no project, unit or
+     * spend data, so there is nothing in it to scope.
+     *
+     * It sits in the footer beside Help & docs rather than in Deliver because
+     * it is reference material, not a place you work: you come to it to learn
+     * what exists, then leave. A permanent slot in the main rail would have it
+     * competing with the pages people actually operate in, which is the same
+     * reasoning that keeps My access out of the rail.
+     *
+     * `hiddenInSidebar` keeps it out of the main nav loop; the footer renders
+     * it explicitly (components/app/sidebar.tsx).
+     */
+    label: "Agent Catalogue",
+    href: "/catalogue",
+    icon: Boxes,
+    segment: "catalogue",
+    hiddenInSidebar: true,
+    prdSection: "§20, §21–§25",
+  },
+  {
     label: "Profile",
     href: "/profile",
     icon: UserCircle,
@@ -309,6 +333,7 @@ export const segmentLabels: Record<string, string> = {
   roles: "Roles & Access",
   models: "Model Management",
   cost: "Cost & Budget",
+  catalogue: "Agent Catalogue",
   activity: "Activity",
   "my-access": "My access",
   traces: "Traces",

@@ -12,10 +12,13 @@
  *   bu_admin       → Noah Bennett, `bu_admin` of Platform Engineering and
  *                    nothing else. A single-unit admin is the cleanest proof
  *                    that the other two units are gone from every surface.
- *   project_admin  → Priya Menon, `project_admin` on one Payments project and
- *                    `ba` on a Lending one. Authorized on two projects across
- *                    two different units, admin on only one — so "authorized"
- *                    and "administered" can be seen to differ.
+ *   project_admin  → Priya Menon, `project_admin` on a Payments project AND a
+ *                    Lending one, plus `ba` on a second Lending project. Two
+ *                    things at once: a person who administers across two
+ *                    Business Units (the case the scoped pages must answer now
+ *                    that no switcher names an "active" one), and one whose
+ *                    `ba` binding keeps "authorized on" visibly distinct from
+ *                    "administers".
  *   contributors   → people already seeded with that role somewhere.
  *
  * Marcus Reyes and Farah Haddad are deliberately NOT used here: each holds

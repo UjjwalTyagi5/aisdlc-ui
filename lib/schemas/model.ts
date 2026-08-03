@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { GrantVisibility } from "./grant";
+
 /** Curated presets with first-class UX (logo, known models). */
 export const KnownProviderKind = z.enum(["anthropic", "openai", "google"]);
 export type KnownProviderKind = z.infer<typeof KnownProviderKind>;
@@ -13,12 +15,8 @@ export const ModelProviderStatus = z.enum(["unverified", "valid", "invalid"]);
 export type ModelProviderStatus = z.infer<typeof ModelProviderStatus>;
 
 /**
- * Three-tier model catalogue cascade: the full LiteLLM-style catalog is
- * curated down at each governance step — Org Admin allow-lists a subset of
- * the catalog org-wide; BU Admin allow-lists a subset of THAT for their
- * business unit; Project Admin then onboards actual credentials for one
- * allowed provider+model, scoped to their BU. A `ModelAllowEntry` is just
- * that provider+model pair — the allow-list itself carries no credentials.
+ * A provider+model pair with no credentials attached — the unit every tier of
+ * the cascade below deals in.
  */
 export const ModelAllowEntry = z.object({
   provider: ModelProviderKind,
@@ -27,9 +25,55 @@ export const ModelAllowEntry = z.object({
 export type ModelAllowEntry = z.infer<typeof ModelAllowEntry>;
 
 /**
+ * One model the Organization Admin has approved for the organization, and how
+ * far that approval reaches.
+ *
+ * This is the ONLY place a model enters the platform's catalogue. A `global`
+ * grant lands in every Business Unit automatically; a `specific` one lands
+ * only in the units named on it, which the Org Admin picks when creating or
+ * administering that unit. A Business Unit Admin cannot widen either — what
+ * their unit may use is a consequence of these grants, never a list they
+ * curate. (This replaced a per-BU allow-list that BU Admins edited themselves:
+ * it let a unit's own admin decide what that unit could use, which is the
+ * opposite of what "the Org Admin governs the catalogue" means.)
+ *
+ * Credentials are a separate axis and deliberately not on this record — see
+ * `ModelAvailability.centrallyCredentialed`.
+ */
+export const OrgModelGrant = z.object({
+  provider: ModelProviderKind,
+  model_id: z.string(),
+  visibility: GrantVisibility.default("global"),
+  /** Meaningful only when `visibility === "specific"`. */
+  businessUnitIds: z.array(z.string()).default([]),
+});
+export type OrgModelGrant = z.infer<typeof OrgModelGrant>;
+
+/**
+ * What one Business Unit may actually use, resolved from the org grants, plus
+ * whether anyone still has to supply a key for it.
+ *
+ * The two credential flags are the answer to "does this unit have to do
+ * anything?": a model the Org Admin credentialed centrally is usable the
+ * moment it is granted, and a BU or Project Admin must not be shown a
+ * credentials form for it. One with no central key is granted but inert until
+ * the unit (or a project inside it) onboards its own.
+ */
+export const ModelAvailability = z.object({
+  provider: ModelProviderKind,
+  model_id: z.string(),
+  visibility: GrantVisibility,
+  /** An org-wide, active provider connection already offers this model. */
+  centrallyCredentialed: z.boolean(),
+  /** This business unit has onboarded its own active credentials for it. */
+  locallyCredentialed: z.boolean(),
+});
+export type ModelAvailability = z.infer<typeof ModelAvailability>;
+
+/**
  * What one project actually uses, and where its options came from.
  *
- * The org and BU allow-lists say what a project *may* use; this says what it
+ * The org grants say what a project *may* use; this says what it
  * *does*. `usingDefaults` distinguishes "inherits everything the BU allows"
  * (a project that has never customised) from "selected exactly these", which
  * happen to be the same set — the UI must not present the first as a choice

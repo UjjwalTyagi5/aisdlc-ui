@@ -33,6 +33,11 @@ interface ProjectMembershipRow {
  *    he delivers on.
  *  - **Farah Haddad** is the same shape the other way round: `bu_admin` of
  *    Lending, `project_admin` on a Platform Engineering project.
+ *  - **Priya Menon** is `project_admin` on projects in TWO Business Units
+ *    (Payments and Lending) and `ba` on a third. Multi-unit administration is
+ *    the case the scoped pages have to answer without an "active" unit to
+ *    inherit; her `ba` binding keeps "authorized on" and "administers"
+ *    visibly different at the same time.
  *  - **Diego Alvarez** carries a different delivery role per project
  *    (`developer` on two, `architect` on a third), matching his differing
  *    Business Unit bindings in workspace-fixtures.ts.
@@ -48,6 +53,14 @@ const SEEDED: { projectId: string; identityId: string; role: string }[] = [
   { projectId: "mobile-onboarding", identityId: "idn_wei", role: "qa" },
 
   // Lending — core ledger modernization
+  // Priya administers this one AND payments-api, in two different Business
+  // Units. That is the multi-unit admin case: with no Business Unit switcher
+  // in the chrome ([[no-bu-switcher-in-chrome]]) the scoped pages union their
+  // reads across both units and ask which one a credential belongs to. Without
+  // a seeded person shaped like this the whole path is unreachable, and
+  // working code reads as untested — see [[scoped-fixtures-need-coverage]].
+  // This project also had no project_admin at all, which was its own gap.
+  { projectId: "core-ledger", identityId: "idn_priya", role: "project_admin" },
   { projectId: "core-ledger", identityId: "idn_diego", role: "architect" },
   { projectId: "core-ledger", identityId: "idn_marcus", role: "ba" },
   { projectId: "core-ledger", identityId: "idn_lena", role: "devops_engineer" },

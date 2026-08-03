@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { ChevronDown, Loader2, ShieldAlert, Trash2, UserPlus, Wrench } from "lucide-react";
+import { Boxes, ChevronDown, Loader2, ShieldAlert, Trash2, UserPlus, Wrench } from "lucide-react";
 import { z } from "zod";
 
 import { cn } from "@/lib/utils";
@@ -31,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
@@ -44,6 +45,7 @@ import { useSession } from "@/hooks/use-session";
 import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { createProject, listProjects } from "@/lib/api/projects";
+import { getModelAvailability, setProjectModelSelection } from "@/lib/api/models";
 import { budgetAllocation } from "@/lib/budget-allocation";
 import { BudgetAllocationNotice } from "@/components/app/budget-allocation-notice";
 import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
@@ -131,9 +133,25 @@ export function CreateProjectDialog({
   const [contribRole, setContribRole] = React.useState<string>(contributorRoles[0]?.value ?? "");
   const [contributorsOpen, setContributorsOpen] = React.useState(false);
 
-  const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
+  // Which of the Business Unit's models this project runs on.
+  //
+  // "inherit" is the default and is NOT the same as ticking every box: it
+  // writes no selection at all, so the project keeps picking up models the Org
+  // Admin grants the unit later. Ticking everything freezes today's list. That
+  // distinction is the whole point of `usingDefaults` (lib/schemas/model.ts),
+  // and offering only checkboxes here would quietly destroy it for every
+  // project created through this dialog.
+  const [modelsOpen, setModelsOpen] = React.useState(false);
+  const [modelMode, setModelMode] = React.useState<"inherit" | "choose">("inherit");
+  const [modelSel, setModelSel] = React.useState<string[]>([]);
+  const [modelDefault, setModelDefault] = React.useState<string | null>(null);
+
+  // One source of truth for the blank form. `form.reset(values)` REPLACES every
+  // value rather than merging, so a partial object silently sets the omitted
+  // fields to `undefined` — which is what made `budgetInput.trim()` below throw
+  // "Cannot read properties of undefined" the moment the dialog opened.
+  const blankForm = React.useMemo<FormValues>(
+    () => ({
       name: "",
       description: "",
       track: "greenfield",
@@ -141,18 +159,19 @@ export function CreateProjectDialog({
       monthlyBudgetUsd: "",
       budgetStartDate: "",
       budgetEndDate: "",
-    },
+    }),
+    [activeWorkspace?.id],
+  );
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(formSchema),
+    defaultValues: blankForm,
   });
 
   // Reset whenever the dialog opens fresh
   React.useEffect(() => {
     if (open) {
-      form.reset({
-        name: "",
-        description: "",
-        track: "greenfield",
-        workspaceId: activeWorkspace?.id ?? "",
-      });
+      form.reset(blankForm);
       setMcpSel({});
       setConnSel({});
       setAccessModeSel({});
@@ -160,8 +179,12 @@ export function CreateProjectDialog({
       setContributors([]);
       setContribEmail("");
       setContributorsOpen(false);
+      setModelsOpen(false);
+      setModelMode("inherit");
+      setModelSel([]);
+      setModelDefault(null);
     }
-  }, [open, form, activeWorkspace?.id]);
+  }, [open, form, blankForm]);
 
   // Existing members of the selected BU — lets the creator pick a real person
   // instead of only inviting by email. Re-fetches if they switch the BU
@@ -176,10 +199,45 @@ export function CreateProjectDialog({
     (m): m is typeof m & { email: string } => !!m.email,
   );
 
+  // What the chosen Business Unit was granted, with credential status — a
+  // project can never be given a model its unit doesn't have, so this list IS
+  // the ceiling. Re-fetches if the creator switches units mid-dialog.
+  const modelsQ = useQuery({
+    queryKey: qk.model.availability(selectedWorkspaceId),
+    queryFn: () => getModelAvailability(selectedWorkspaceId),
+    enabled: open && !!selectedWorkspaceId,
+  });
+  const availableModels = React.useMemo(() => modelsQ.data ?? [], [modelsQ.data]);
+
+  // Switching Business Unit invalidates any picks: they came from the other
+  // unit's grants and may not exist here.
+  React.useEffect(() => {
+    setModelMode("inherit");
+    setModelSel([]);
+    setModelDefault(null);
+  }, [selectedWorkspaceId]);
+
+  const toggleModel = (key: string) => {
+    // Computed OUTSIDE the updater on purpose. Calling setState from inside
+    // another setState's updater makes the updater impure, and React invokes
+    // updaters twice in development — which applied this toggle twice and left
+    // the box exactly as it started.
+    const next = modelSel.includes(key)
+      ? modelSel.filter((k) => k !== key)
+      : [...modelSel, key];
+    setModelSel(next);
+    // Dropping the default has to promote something, or the project resolves
+    // to no model on its first run.
+    setModelDefault(modelDefault && next.includes(modelDefault) ? modelDefault : (next[0] ?? null));
+  };
+
   // Over-allocation is reported, not prevented (lib/budget-allocation.ts), so
   // this only ever needs to be accurate enough to explain the position — hence
   // one list fetched lazily, and only once a cap is actually being typed.
-  const budgetInput = form.watch("monthlyBudgetUsd");
+  // `?? ""` is belt-and-braces: `blankForm` above is what actually guarantees
+  // this is a string, but a crash here white-screens the whole dialog, so it
+  // does not depend on every future reset remembering to be complete.
+  const budgetInput = form.watch("monthlyBudgetUsd") ?? "";
   const budgetEntered = budgetInput.trim() !== "";
   const siblingsQ = useQuery({
     queryKey: qk.projects.list({ pageSize: 200 }),
@@ -204,7 +262,36 @@ export function CreateProjectDialog({
   );
 
   const mutation = useMutation({
-    mutationFn: (input: ProjectCreateInput) => createProject(input),
+    mutationFn: async (input: ProjectCreateInput) => {
+      const project = await createProject(input);
+      // Only when the creator actually narrowed the list. "Inherit" writes
+      // nothing, which is what keeps the project picking up later grants.
+      //
+      // Applied after creation because the selection is keyed by project id.
+      // A failure here is reported but does NOT fail the creation: the project
+      // exists and falls back to inheriting everything, which is a safe state
+      // the creator can correct on Settings → Model — losing the whole project
+      // over a model preference would not be.
+      if (modelMode === "choose" && modelSel.length > 0) {
+        try {
+          await setProjectModelSelection(String(project.id), {
+            selected: modelSel.map((k) => {
+              const [provider, model_id] = k.split("::");
+              return { provider: provider ?? "", model_id: model_id ?? "" };
+            }),
+            defaultKey: modelDefault,
+          });
+        } catch (err) {
+          toast.warning("Project created, but the model selection didn't save", {
+            description:
+              err instanceof Error
+                ? err.message
+                : "Set it on the project's Settings → Model tab.",
+          });
+        }
+      }
+      return project;
+    },
     onMutate: async (input) => {
       await queryClient.cancelQueries({ queryKey: qk.projects.all() });
       const previous = queryClient.getQueriesData<{ items: Project[]; pagination: unknown }>({
@@ -219,6 +306,11 @@ export function CreateProjectDialog({
         description: input.description,
         workspaceId: input.workspaceId,
         approvalStatus: needsApproval ? "pending_approval" : "active",
+        // Not decorative: ProjectCard renders a DeliveryStatusBadge from this
+        // row the moment it lands in the cache, and the badge has no entry for
+        // `undefined`. The `as unknown as Project` cast below is what let this
+        // ship — it silences exactly the check that would have caught it.
+        deliveryStatus: "not_started",
         template: DEFAULT_TEMPLATE,
         track: input.track,
         archived: false,
@@ -620,6 +712,168 @@ export function CreateProjectDialog({
               )}
             </div>
 
+            {/* Models — the subset of the Business Unit's granted models this
+                project's agents (and therefore its contributors) may run on. */}
+            <div className="rounded-xl border border-line-soft bg-surface-1">
+              <button
+                type="button"
+                onClick={() => setModelsOpen((v) => !v)}
+                aria-expanded={modelsOpen}
+                className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left"
+              >
+                <span className="flex items-center gap-2">
+                  <Boxes className="size-4 text-muted-foreground" aria-hidden />
+                  <span className="text-sm font-medium">Models</span>
+                  <span className="text-[12px] text-muted-foreground">
+                    {!selectedWorkspaceId
+                      ? `Pick a ${BUSINESS_UNIT_LABEL.toLowerCase()} first`
+                      : modelsQ.isLoading
+                        ? "Loading…"
+                        : modelMode === "choose"
+                          ? `${modelSel.length} of ${availableModels.length} selected`
+                          : `Inheriting all ${availableModels.length}`}
+                  </span>
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "size-4 shrink-0 text-muted-foreground transition-transform",
+                    modelsOpen && "rotate-180",
+                  )}
+                  aria-hidden
+                />
+              </button>
+
+              {modelsOpen && (
+                <div className="space-y-3 border-t border-line-soft p-3">
+                  {!selectedWorkspaceId ? (
+                    <p className="text-[12.5px] text-muted-foreground">
+                      Choose a {BUSINESS_UNIT_LABEL.toLowerCase()} above — a project can only use
+                      the models its unit was granted.
+                    </p>
+                  ) : modelsQ.isLoading ? (
+                    <p className="text-[12.5px] text-muted-foreground">Loading…</p>
+                  ) : availableModels.length === 0 ? (
+                    <p className="text-[12.5px] text-muted-foreground">
+                      This {BUSINESS_UNIT_LABEL.toLowerCase()} hasn&apos;t been granted any models
+                      yet. The project can still be created — ask your Organization Admin to grant
+                      some before its agents can run.
+                    </p>
+                  ) : (
+                    <>
+                      <RadioGroup
+                        value={modelMode}
+                        onValueChange={(v) => {
+                          const mode = v as "inherit" | "choose";
+                          setModelMode(mode);
+                          // Seed the picker with everything, so "choose" starts
+                          // from the same place inheriting would land.
+                          if (mode === "choose" && modelSel.length === 0) {
+                            const all = availableModels.map((m) => `${m.provider}::${m.model_id}`);
+                            setModelSel(all);
+                            setModelDefault(all[0] ?? null);
+                          }
+                        }}
+                        className="gap-2"
+                      >
+                        <label className="flex cursor-pointer items-start gap-2.5">
+                          <RadioGroupItem value="inherit" id="models-inherit" className="mt-0.5" />
+                          <span className="min-w-0">
+                            <span className="block text-[13px] font-medium">
+                              Use everything this {BUSINESS_UNIT_LABEL.toLowerCase()} is granted
+                            </span>
+                            <span className="block text-[11.5px] text-muted-foreground">
+                              Recommended. The project also picks up any model granted later.
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex cursor-pointer items-start gap-2.5">
+                          <RadioGroupItem value="choose" id="models-choose" className="mt-0.5" />
+                          <span className="min-w-0">
+                            <span className="block text-[13px] font-medium">
+                              Choose specific models
+                            </span>
+                            <span className="block text-[11.5px] text-muted-foreground">
+                              Fixes the list to what you pick. Later grants won&apos;t appear
+                              automatically.
+                            </span>
+                          </span>
+                        </label>
+                      </RadioGroup>
+
+                      <ul className="divide-y divide-line-soft rounded-lg border border-line-soft">
+                        {availableModels.map((m) => {
+                          const key = `${m.provider}::${m.model_id}`;
+                          const choosing = modelMode === "choose";
+                          const on = choosing ? modelSel.includes(key) : true;
+                          const keyed = m.centrallyCredentialed || m.locallyCredentialed;
+                          return (
+                            <li
+                              key={key}
+                              className={cn(
+                                "flex flex-wrap items-center gap-x-2.5 gap-y-1 px-2.5 py-2",
+                                !on && "opacity-55",
+                              )}
+                            >
+                              <Checkbox
+                                id={`new-project-model-${key}`}
+                                checked={on}
+                                disabled={!choosing}
+                                onCheckedChange={() => toggleModel(key)}
+                                aria-label={`Use ${m.model_id} on this project`}
+                              />
+                              <Label
+                                htmlFor={`new-project-model-${key}`}
+                                className={cn(
+                                  "min-w-0 flex-1 truncate font-mono text-[12px] font-normal",
+                                  choosing && "cursor-pointer",
+                                )}
+                              >
+                                {m.model_id}
+                              </Label>
+                              <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
+                                {m.provider}
+                              </span>
+                              {/* A granted model with no key anywhere is real but
+                                  inert — selecting it would fail at run time, so
+                                  say so here rather than at the first run. */}
+                              {!keyed && (
+                                <Badge
+                                  variant="outline"
+                                  className="shrink-0 border-warning/40 font-mono text-[10px] text-warning"
+                                >
+                                  needs credentials
+                                </Badge>
+                              )}
+                              {choosing && on && modelDefault === key && (
+                                <Badge className="shrink-0 font-mono text-[10px]">default</Badge>
+                              )}
+                              {choosing && on && modelDefault !== key && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 shrink-0 text-[11px] text-muted-foreground"
+                                  onClick={() => setModelDefault(key)}
+                                >
+                                  Make default
+                                </Button>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+
+                      {modelMode === "choose" && modelSel.length === 0 && (
+                        <p className="text-[12px] text-warning">
+                          Pick at least one model, or switch back to inheriting.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Tools per stage — connectors + MCP servers, assigned per agent stage. */}
             <div className="rounded-xl border border-line-soft bg-surface-1">
               <button
@@ -672,7 +926,11 @@ export function CreateProjectDialog({
               </Button>
               <Button
                 type="submit"
-                disabled={mutation.isPending}
+                // "Choose specific models" with nothing chosen would create a
+                // project that can run nothing — block it rather than silently
+                // falling back to inheriting, which is the opposite of what the
+                // creator just said.
+                disabled={mutation.isPending || (modelMode === "choose" && modelSel.length === 0)}
                 aria-busy={mutation.isPending}
                 className="bg-gradient-to-br from-brand-gradient-from to-brand-gradient-to font-semibold text-white"
               >

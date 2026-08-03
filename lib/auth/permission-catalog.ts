@@ -116,8 +116,9 @@ export const PERMISSION_CATALOG: PermGroup[] = [
       { id: "project:create", label: "Create projects", grants: "Create a new project." },
       {
         id: "model:manage",
-        label: "Manage model providers",
-        grants: "Onboard (org) / assign to projects (business unit).",
+        label: "Manage models",
+        grants:
+          "Approve models and grant them to business units (organization) / credential granted models (business unit, project).",
       },
       {
         id: "settings:manage",

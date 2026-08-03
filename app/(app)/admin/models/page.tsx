@@ -1,16 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   AlertTriangle,
-  Building2,
   Check,
   CheckCircle2,
   ChevronsUpDown,
   Clock,
-  Globe,
   Loader2,
   Lock,
   Pencil,
@@ -46,6 +44,10 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
+import { GrantVisibilityControl } from "@/components/app/grant-visibility-control";
+import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
+import { ModelGrantsCard } from "@/components/app/model-grants-card";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -54,19 +56,18 @@ import {
   deleteModelProvider,
   getBuAllowedModels,
   getModelCatalog,
-  getOrgAllowedModels,
   listModelProviders,
-  setBuAllowedModels,
   setModelDefault,
-  setOrgAllowedModels,
   updateModelProvider,
   verifyModelProvider,
 } from "@/lib/api/models";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { qk } from "@/lib/api/query-keys";
-import { useActiveWorkspace } from "@/hooks/use-workspaces";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { useWorkspaces } from "@/hooks/use-workspaces";
+import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
+import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import type { GrantVisibility } from "@/lib/schemas/grant";
 import type {
   CatalogProvider,
   ModelAllowEntry,
@@ -97,9 +98,9 @@ function ProviderGlyph({ label }: { label: string }) {
   );
 }
 
-/** Keep only the catalog entries an allow-list actually permits — used to
- *  scope a BU Admin's onboarding dialog to org-allowed models, and a Project
- *  Admin's to BU-allowed models (the cascade's enforcement point). */
+/** Keep only the catalog entries a grant actually permits — the cascade's
+ *  enforcement point in the UI: a BU Admin's and a Project Admin's onboarding
+ *  dialog can only offer models the Org Admin granted their unit. */
 function filterCatalogToAllowed(
   catalog: CatalogProvider[],
   allowed: ModelAllowEntry[],
@@ -113,142 +114,39 @@ function filterCatalogToAllowed(
     .filter((c) => c.models.length > 0);
 }
 
-// ───────── Allow-list card — checkbox grid + explicit Save (org and BU tiers) ─────────
-
-function ModelAllowListCard({
-  icon: Icon,
-  title,
-  description,
-  catalog,
-  value,
-  loading,
-  saving,
-  onSave,
-  emptyHint,
-}: {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  /** The universe of models this tier may choose from — already scoped to
-   *  the tier above (full catalog for org; org-allowed for bu). */
-  catalog: CatalogProvider[];
-  value: ModelAllowEntry[];
-  loading?: boolean;
-  saving?: boolean;
-  onSave: (entries: ModelAllowEntry[]) => void;
-  emptyHint?: string;
-}) {
-  const [draft, setDraft] = React.useState<Set<string>>(new Set());
-  React.useEffect(() => {
-    setDraft(new Set(value.map((e) => `${e.provider}::${e.model_id}`)));
-  }, [value]);
-
-  const key = (provider: string, model_id: string) => `${provider}::${model_id}`;
-  const toggle = (provider: string, model_id: string) => {
-    const k = key(provider, model_id);
-    setDraft((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k);
-      else next.add(k);
-      return next;
-    });
-  };
-
-  const originalKey = value
-    .map((e) => key(e.provider, e.model_id))
-    .sort()
-    .join(",");
-  const draftKey = [...draft].sort().join(",");
-  const dirty = originalKey !== draftKey;
-
-  const handleSave = () => {
-    const entries: ModelAllowEntry[] = [];
-    for (const k of draft) {
-      const [provider, model_id] = k.split("::");
-      if (provider && model_id) entries.push({ provider, model_id });
-    }
-    onSave(entries);
-  };
-
-  return (
-    <Card className="border-line-soft bg-panel-elevated">
-      <CardHeader className="pb-3">
-        <div className="flex items-start gap-3">
-          <div
-            aria-hidden
-            className="border-line-soft bg-surface-2 text-muted-foreground grid size-9 shrink-0 place-items-center rounded-lg border"
-          >
-            <Icon className="size-4" aria-hidden />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="font-display text-[14px] font-bold tracking-[-0.01em]">{title}</h3>
-            <p className="text-muted-foreground mt-0.5 text-[12px]">{description}</p>
-          </div>
-          <Button size="sm" onClick={handleSave} disabled={!dirty || saving} aria-busy={saving}>
-            {saving ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {loading ? (
-          <p className="text-muted-foreground text-[12.5px]">Loading…</p>
-        ) : catalog.length === 0 ? (
-          <p className="text-muted-foreground text-[12.5px]">
-            {emptyHint ?? "Nothing available to allow-list yet."}
-          </p>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {catalog.map((c) => (
-              <div key={c.provider} className="space-y-1.5">
-                <p className="text-muted-foreground font-mono text-[10.5px] font-semibold uppercase tracking-wider">
-                  {c.label}
-                </p>
-                <ul className="space-y-1">
-                  {c.models.map((m) => {
-                    const checkboxId = `allow-${c.provider}-${m.model_id}`;
-                    return (
-                      <li key={m.model_id} className="flex items-center gap-2">
-                        <Checkbox
-                          id={checkboxId}
-                          checked={draft.has(key(c.provider, m.model_id))}
-                          onCheckedChange={() => toggle(c.provider, m.model_id)}
-                        />
-                        <Label htmlFor={checkboxId} className="cursor-pointer truncate font-mono text-[12px] font-normal">
-                          {m.model_id}
-                        </Label>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function ModelProvidersPage() {
   const queryClient = useQueryClient();
   const session = useRawSession();
   const role = effectivePlatformRole(session);
-  const { active: activeWorkspace } = useActiveWorkspace();
-  const activeWsId = activeWorkspace?.id ?? null;
 
-  // Three-tier cascade: an Org Admin's own onboarding is org-wide
-  // (workspaceId null); a BU Admin's and a Project Admin's are scoped to
-  // their active business unit.
+  // The cascade's three vantage points: an Org Admin's own onboarding is
+  // org-wide (workspaceId null); a BU Admin's and a Project Admin's land inside
+  // a business unit they're bound to.
   const scope: "org" | "bu" | "project" | null =
     role === "org_admin" ? "org" : role === "bu_admin" ? "bu" : role === "project_admin" ? "project" : null;
-  const viewWorkspaceId = scope === "org" ? null : activeWsId;
+  const isOrg = scope === "org";
   const needsApproval = scope === "project";
 
-  const providersQ = useQuery({
-    queryKey: qk.model.providers(viewWorkspaceId),
-    queryFn: () => listModelProviders(viewWorkspaceId),
-    staleTime: 0,
+  // Which units this page speaks for. There is no "active" one to inherit —
+  // reads union across every unit the viewer is bound to, so someone in two
+  // units sees both rather than whichever the old switcher happened to leave
+  // selected. See hooks/use-scoped-business-units.ts.
+  const { units: scopedUnits, isLoading: unitsLoading } = useScopedBusinessUnits();
+
+  const providerQueries = useQueries({
+    queries: isOrg
+      ? [
+          {
+            queryKey: qk.model.providers(null),
+            queryFn: () => listModelProviders(null),
+            staleTime: 0,
+          },
+        ]
+      : scopedUnits.map((u) => ({
+          queryKey: qk.model.providers(u.id),
+          queryFn: () => listModelProviders(u.id),
+          staleTime: 0,
+        })),
   });
 
   const catalogQ = useQuery({
@@ -256,24 +154,43 @@ export default function ModelProvidersPage() {
     queryFn: () => getModelCatalog(),
   });
 
-  const orgAllowedQ = useQuery({
-    queryKey: qk.model.orgAllowed(),
-    queryFn: () => getOrgAllowedModels(),
+  // What each unit was granted — the universe a BU or Project Admin may
+  // credential from, per unit. An Org Admin doesn't need it: they define it.
+  const allowedQueries = useQueries({
+    queries: isOrg
+      ? []
+      : scopedUnits.map((u) => ({
+          queryKey: qk.model.buAllowed(u.id),
+          queryFn: () => getBuAllowedModels(u.id),
+        })),
   });
+  const allowedByUnit = React.useMemo(() => {
+    const map: Record<string, ModelAllowEntry[]> = {};
+    scopedUnits.forEach((u, i) => {
+      map[u.id] = allowedQueries[i]?.data ?? [];
+    });
+    return map;
+    // allowedQueries is a fresh array each render; its data is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedUnits, allowedQueries.map((q) => q.dataUpdatedAt).join(",")]);
 
-  const buAllowedQ = useQuery({
-    queryKey: qk.model.buAllowed(viewWorkspaceId ?? ""),
-    queryFn: () => getBuAllowedModels(viewWorkspaceId as string),
-    enabled: scope !== "org" && !!viewWorkspaceId,
-  });
+  // Only an Org Admin picks who a newly credentialed model reaches, so only
+  // their dialog needs the full unit list.
+  const { data: allWorkspaces } = useWorkspaces();
+  const grantableWorkspaces = React.useMemo(
+    () => (allWorkspaces ?? []).filter((w) => w.status === "active"),
+    [allWorkspaces],
+  );
 
   const [addOpen, setAddOpen] = React.useState(false);
   const [editFor, setEditFor] = React.useState<ModelProvider | null>(null);
   const [removeFor, setRemoveFor] = React.useState<ModelProvider | null>(null);
   const [verifyingId, setVerifyingId] = React.useState<string | null>(null);
 
+  // Prefix-invalidate: with one query per unit there is no single key to name,
+  // and a provider added to one unit still changes this page's totals.
   const invalidateProviders = () =>
-    queryClient.invalidateQueries({ queryKey: qk.model.providers(viewWorkspaceId) });
+    queryClient.invalidateQueries({ queryKey: ["model", "providers"] });
 
   const setDefaultMutation = useMutation({
     mutationFn: (offeringId: string) => setModelDefault(offeringId),
@@ -283,30 +200,6 @@ export default function ModelProvidersPage() {
     },
     onError: (err) =>
       toast.error("Couldn't set default model", {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-  });
-
-  const orgAllowMutation = useMutation({
-    mutationFn: (entries: ModelAllowEntry[]) => setOrgAllowedModels(entries),
-    onSuccess: () => {
-      toast.success("Global allow-list updated");
-      queryClient.invalidateQueries({ queryKey: qk.model.orgAllowed() });
-    },
-    onError: (err) =>
-      toast.error("Couldn't update allow-list", {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-  });
-
-  const buAllowMutation = useMutation({
-    mutationFn: (entries: ModelAllowEntry[]) => setBuAllowedModels(viewWorkspaceId as string, entries),
-    onSuccess: () => {
-      toast.success(`${BUSINESS_UNIT_LABEL} allow-list updated`);
-      queryClient.invalidateQueries({ queryKey: qk.model.buAllowed(viewWorkspaceId ?? "") });
-    },
-    onError: (err) =>
-      toast.error("Couldn't update allow-list", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -343,7 +236,9 @@ export default function ModelProvidersPage() {
       }),
   });
 
-  if (providersQ.isLoading) {
+  // Wait for the scope too: rendering "no units" before the bindings resolve
+  // is a false access-denied, the same three-state rule the sidebar follows.
+  if (unitsLoading || providerQueries.some((q) => q.isLoading)) {
     return (
       <div className="w-full space-y-8 p-4 md:px-10 md:py-8">
         <LoadingState variant="list" rows={3} />
@@ -351,24 +246,25 @@ export default function ModelProvidersPage() {
     );
   }
 
-  if (providersQ.isError) {
+  const failed = providerQueries.find((q) => q.isError);
+  if (failed) {
     return (
       <div className="w-full space-y-8 p-4 md:px-10 md:py-8">
         <ApiErrorState
           title="Couldn't load model providers"
           error={
-            providersQ.error && "code" in providersQ.error && "message" in providersQ.error
-              ? (providersQ.error as { code: string; message: string; requestId?: string })
+            failed.error && "code" in failed.error && "message" in failed.error
+              ? (failed.error as { code: string; message: string; requestId?: string })
               : undefined
           }
           description={
-            !(providersQ.error && "code" in providersQ.error)
-              ? providersQ.error instanceof Error
-                ? providersQ.error.message
+            !(failed.error && "code" in failed.error)
+              ? failed.error instanceof Error
+                ? failed.error.message
                 : "Unknown error."
               : undefined
           }
-          onRetry={() => providersQ.refetch()}
+          onRetry={() => providerQueries.forEach((q) => void q.refetch())}
         />
       </div>
     );
@@ -380,17 +276,21 @@ export default function ModelProvidersPage() {
     );
   }
 
-  const providers = providersQ.data ?? [];
+  // One flat list across every unit in view; each provider still knows which
+  // unit it belongs to, so the cards can say so when there is more than one.
+  const providers = providerQueries.flatMap((q) => q.data ?? []);
   const catalog = catalogQ.data ?? [];
-  const orgAllowed = orgAllowedQ.data ?? [];
-  const buAllowed = buAllowedQ.data ?? [];
+  const unitNameById = new Map(scopedUnits.map((u) => [u.id, u.name] as const));
+
+  // Everything the viewer could credential anywhere they're bound — the union
+  // across their units. The dialog narrows this again to the ONE unit being
+  // onboarded into, which is the set that actually governs the save.
+  const allAllowed = Object.values(allowedByUnit).flat();
 
   // The onboarding dialog's provider picker is scoped by the cascade: an Org
-  // Admin sees the full catalog (they're the ones defining what's allowed at
-  // all); a BU Admin sees only org-allowed models; a Project Admin sees only
-  // their BU's allowed subset.
-  const effectiveCatalog =
-    scope === "org" ? catalog : scope === "bu" ? filterCatalogToAllowed(catalog, orgAllowed) : filterCatalogToAllowed(catalog, buAllowed);
+  // Admin sees the full catalog (they define what's permitted at all), while a
+  // BU or Project Admin sees only what the Org Admin granted their units.
+  const effectiveCatalog = isOrg ? catalog : filterCatalogToAllowed(catalog, allAllowed);
 
   // The single org-wide default across every provider's enabled offerings —
   // only Org Admin's own org-wide providers participate in this.
@@ -401,18 +301,18 @@ export default function ModelProvidersPage() {
   const HEADER_COPY: Record<"org" | "bu" | "project", { eyebrow: string; title: string; body: string }> = {
     org: {
       eyebrow: "Govern",
-      title: "Model Providers",
-      body: "Curate the org-wide model catalogue and bring your organization's own LLM keys. Agent runs use these models — and only these.",
+      title: "Models",
+      body: "Approve the models this organization may use, decide which business units get each one, and bring your own LLM keys. Agent runs use these models — and only these.",
     },
     bu: {
       eyebrow: "Govern",
-      title: "Model Providers",
-      body: `Choose which org-approved models this business unit can use, and connect ${BUSINESS_UNIT_LABEL.toLowerCase()}-scoped credentials directly.`,
+      title: "Models",
+      body: `The models your Organization Admin granted this ${BUSINESS_UNIT_LABEL.toLowerCase()}. Anything they keyed centrally works as-is; for the rest, connect this ${BUSINESS_UNIT_LABEL.toLowerCase()}'s own credentials.`,
     },
     project: {
       eyebrow: "Configure",
-      title: "Model Providers",
-      body: `Onboard a model with your own credentials from your business unit's allowed list. New connections need your ${BUSINESS_UNIT_LABEL} Admin's approval before they're usable.`,
+      title: "Models",
+      body: `The models your business unit was granted. Onboard your own credentials for any that need them — new connections need your ${BUSINESS_UNIT_LABEL} Admin's approval before they're usable.`,
     },
   };
   const copy = HEADER_COPY[scope];
@@ -451,75 +351,52 @@ export default function ModelProvidersPage() {
         </Button>
       </header>
 
-      {scope === "org" && (
-        <ModelAllowListCard
-          icon={Globe}
-          title="Global model allow-list"
-          description="Which models any business unit may be given access to. Nothing outside this list can be BU-allowed or onboarded anywhere in the org."
-          catalog={catalog}
-          value={orgAllowed}
-          loading={catalogQ.isLoading || orgAllowedQ.isLoading}
-          saving={orgAllowMutation.isPending}
-          onSave={(entries) => orgAllowMutation.mutate(entries)}
-        />
-      )}
+      {/* What the models below are actually costing, per model. */}
+      <SpendBreakdownCard groupBy="model" />
 
-      {scope === "bu" && (
-        <ModelAllowListCard
-          icon={Building2}
-          title={`${BUSINESS_UNIT_LABEL} model allow-list`}
-          description={`A subset of the org's allow-list — only these models can be onboarded with credentials in ${activeWorkspace?.displayName ?? "this business unit"}.`}
-          catalog={filterCatalogToAllowed(catalog, orgAllowed)}
-          value={buAllowed}
-          loading={catalogQ.isLoading || orgAllowedQ.isLoading || buAllowedQ.isLoading}
-          saving={buAllowMutation.isPending}
-          onSave={(entries) => buAllowMutation.mutate(entries)}
-          emptyHint="Your Org Admin hasn't allow-listed any models org-wide yet."
-        />
-      )}
+      {/* The catalogue policy itself — Org Admin only. Everyone below reads
+          its consequences rather than editing it. */}
+      {scope === "org" && <ModelGrantsCard />}
 
-      {scope === "project" && (
-        <div className="border-line-soft bg-surface-1 rounded-xl border p-4">
-          <p className="text-[13px] font-medium">
-            Models available to onboard in {activeWorkspace?.displayName ?? "this business unit"}
+      {/* One card per unit the viewer is bound to. Someone in two units gets
+          two, each named — no arbitrary winner, and no hidden second unit. */}
+      {!isOrg && scopedUnits.length === 0 && (
+        <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
+          <p className="text-muted-foreground mx-auto max-w-md text-sm">
+            You aren&apos;t bound to any {BUSINESS_UNIT_LABEL.toLowerCase()} yet, so there are no
+            models to configure. Ask an admin to add you to one.
           </p>
-          {buAllowedQ.isLoading ? (
-            <p className="text-muted-foreground mt-1 text-[12.5px]">Loading…</p>
-          ) : buAllowed.length === 0 ? (
-            <p className="text-muted-foreground mt-1 text-[12.5px]">
-              Your {BUSINESS_UNIT_LABEL} Admin hasn&apos;t allowed any models for this business unit yet —
-              ask them to add some before onboarding credentials.
-            </p>
-          ) : (
-            <>
-              <ul className="mt-2 flex flex-wrap gap-1.5">
-                {buAllowed.map((e) => (
-                  <li
-                    key={`${e.provider}::${e.model_id}`}
-                    className="border-line-soft bg-surface-2 text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[10.5px]"
-                  >
-                    {e.model_id}
-                  </li>
-                ))}
-              </ul>
-              {/* This page onboards credentials; choosing which of these a
-                  given project actually runs on is per-project, so it lives
-                  with the project rather than here. */}
-              <p className="text-muted-foreground mt-2.5 text-[12.5px]">
-                Choose which of these a project uses on its{" "}
-                <span className="text-foreground">Settings → Model</span> tab.
-              </p>
-            </>
-          )}
         </div>
+      )}
+
+      {!isOrg &&
+        scopedUnits.map((u) => (
+          <ModelAvailabilityCard
+            key={u.id}
+            workspaceId={u.id}
+            workspaceName={u.name}
+            audience={scope === "project" ? "project" : "bu"}
+          />
+        ))}
+
+      {/* This page onboards credentials; choosing which of these a given
+          project actually runs on is per-project, so it lives with the
+          project rather than here. */}
+      {scope === "project" && allAllowed.length > 0 && (
+        <p className="text-muted-foreground -mt-4 text-[12.5px]">
+          Choose which of these a project uses on its{" "}
+          <span className="text-foreground">Settings → Model</span> tab.
+        </p>
       )}
 
       {providers.length === 0 ? (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
-            {scope === "org"
+            {isOrg
               ? "No model provider configured yet. Agent runs are blocked until an admin adds and verifies one."
-              : `No model provider onboarded in ${activeWorkspace?.displayName ?? "this business unit"} yet.`}
+              : scopedUnits.length === 1
+                ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
+                : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
           </p>
           <Button
             onClick={() => setAddOpen(true)}
@@ -532,16 +409,23 @@ export default function ModelProvidersPage() {
         </div>
       ) : (
         <RadioGroup
-          value={scope === "org" ? (defaultOfferingId ?? "") : ""}
-          onValueChange={(v) => scope === "org" && setDefaultMutation.mutate(v)}
+          value={isOrg ? (defaultOfferingId ?? "") : ""}
+          onValueChange={(v) => isOrg && setDefaultMutation.mutate(v)}
           className="grid gap-3 sm:grid-cols-2"
-          aria-label={scope === "org" ? "Org-wide default model" : "Enabled models"}
+          aria-label={isOrg ? "Org-wide default model" : "Enabled models"}
         >
           {providers.map((p) => (
             <ProviderCard
               key={p.id}
               provider={p}
-              radioDisabled={scope !== "org"}
+              radioDisabled={!isOrg}
+              // Only worth naming when there's more than one unit in view;
+              // otherwise it repeats the card above on every tile.
+              unitName={
+                scopedUnits.length > 1 && p.workspaceId
+                  ? (unitNameById.get(String(p.workspaceId)) ?? null)
+                  : null
+              }
               verifying={verifyMutation.isPending && verifyingId === p.id}
               onVerify={() => verifyMutation.mutate(p.id)}
               onEdit={() => setEditFor(p)}
@@ -555,10 +439,18 @@ export default function ModelProvidersPage() {
         open={addOpen}
         onOpenChange={setAddOpen}
         catalog={effectiveCatalog}
-        catalogLoading={catalogQ.isLoading || (scope !== "org" && (orgAllowedQ.isLoading || buAllowedQ.isLoading))}
-        workspaceId={viewWorkspaceId}
+        catalogLoading={catalogQ.isLoading || (!isOrg && allowedQueries.some((q) => q.isLoading))}
+        targetUnits={isOrg ? null : scopedUnits}
+        allowedByUnit={allowedByUnit}
+        fullCatalog={catalog}
         needsApproval={needsApproval}
-        onAdded={invalidateProviders}
+        grantableWorkspaces={isOrg ? grantableWorkspaces : null}
+        onAdded={() => {
+          invalidateProviders();
+          // Org-wide onboarding writes grants too, and every unit's view of
+          // what it may use is derived from those.
+          queryClient.invalidateQueries({ queryKey: ["model"] });
+        }}
       />
 
       <EditProviderDialog
@@ -589,6 +481,7 @@ function ProviderCard({
   onEdit,
   onRemove,
   radioDisabled,
+  unitName,
 }: {
   provider: ModelProvider;
   verifying?: boolean;
@@ -598,6 +491,10 @@ function ProviderCard({
   /** True outside org scope — no scoped provider participates in the single
    *  org-wide default, so the radio is shown inert rather than interactive. */
   radioDisabled?: boolean;
+  /** Which Business Unit this connection lives in. Passed only when the viewer
+   *  is looking at more than one, since otherwise every card would repeat the
+   *  same name the section above already gives. */
+  unitName?: string | null;
 }) {
   const label = providerLabel(provider.provider);
   const enabledOfferings = provider.offerings.filter((o) => o.enabled);
@@ -613,7 +510,15 @@ function ProviderCard({
             <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
               {provider.display_name}
             </h3>
-            <p className="text-muted-foreground mt-0.5 truncate text-[12px]">{label}</p>
+            <p className="text-muted-foreground mt-0.5 truncate text-[12px]">
+              {label}
+              {unitName && (
+                <>
+                  {" · "}
+                  <span className="font-mono text-[11px]">{unitName}</span>
+                </>
+              )}
+            </p>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-1">
             <StatusPill status={provider.status} />
@@ -766,20 +671,34 @@ function AddProviderDialog({
   onOpenChange,
   catalog,
   catalogLoading,
-  workspaceId,
+  targetUnits,
+  allowedByUnit,
+  fullCatalog,
   needsApproval,
+  grantableWorkspaces,
   onAdded,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The union of what the viewer may credential — used until they pick a
+   *  unit, after which `allowedByUnit` narrows it to that one. */
   catalog: CatalogProvider[];
   catalogLoading: boolean;
-  /** null = org-wide (Org Admin); a workspace id scopes the connection to
-   *  that business unit (BU Admin or Project Admin onboarding). */
-  workspaceId: string | null;
+  /** null = org-wide onboarding (Org Admin). Otherwise the units the viewer is
+   *  bound to: a credential belongs to exactly one, so when there are several
+   *  the choice is made HERE rather than inherited from the chrome. */
+  targetUnits: { id: string; name: string }[] | null;
+  /** Per-unit grants — what each unit may actually be credentialed with. */
+  allowedByUnit: Record<string, ModelAllowEntry[]>;
+  /** The unfiltered catalog, re-narrowed once a target unit is chosen. */
+  fullCatalog: CatalogProvider[];
   /** True for a Project Admin's onboarding — created pending, needs their BU
    *  Admin's approval before it's verified or usable. */
   needsApproval: boolean;
+  /** Non-null only for an Org Admin: the units a `specific` grant could name.
+   *  A BU or Project Admin is credentialing models that were already granted
+   *  to them, so there is no reach to choose and the control is absent. */
+  grantableWorkspaces: { id: string; displayName: string }[] | null;
   onAdded: () => void;
 }) {
   const [provider, setProvider] = React.useState<ModelProviderKind | "">("");
@@ -798,8 +717,26 @@ function AddProviderDialog({
   const [rpmLimit, setRpmLimit] = React.useState("");
   const [tpmLimit, setTpmLimit] = React.useState("");
   const [costLimit, setCostLimit] = React.useState("");
+  // Org-wide onboarding only — how far the models added here reach.
+  const [visibility, setVisibility] = React.useState<GrantVisibility>("global");
+  const [grantedUnits, setGrantedUnits] = React.useState<string[]>([]);
+  // Unit-scoped onboarding only — which unit this credential lands in.
+  const [targetUnitId, setTargetUnitId] = React.useState<string>("");
 
-  const selectedCatalog = catalog.find((c) => c.provider === provider);
+  const resolvedTargetId = targetUnits
+    ? (targetUnitId || targetUnits[0]?.id || "")
+    : null;
+
+  // Once a unit is chosen the offer narrows to THAT unit's grants — the union
+  // is only right until there's a target, and saving against the union would
+  // let a model granted to unit A be credentialed into unit B (the server
+  // clamps it away, which would read as a save that silently did nothing).
+  const activeCatalog = React.useMemo(() => {
+    if (!targetUnits || targetUnits.length <= 1) return catalog;
+    return filterCatalogToAllowed(fullCatalog, allowedByUnit[resolvedTargetId ?? ""] ?? []);
+  }, [targetUnits, catalog, fullCatalog, allowedByUnit, resolvedTargetId]);
+
+  const selectedCatalog = activeCatalog.find((c) => c.provider === provider);
   const providerModels = selectedCatalog?.models ?? [];
 
   React.useEffect(() => {
@@ -815,9 +752,20 @@ function AddProviderDialog({
       setRpmLimit("");
       setTpmLimit("");
       setCostLimit("");
+      setVisibility("global");
+      setGrantedUnits([]);
+      setTargetUnitId("");
       setPending(false);
     }
   }, [open]);
+
+  // Switching target unit invalidates the model picks: they were chosen from
+  // the other unit's grants and may not exist in this one.
+  React.useEffect(() => {
+    setProvider("");
+    setEnabled({});
+    setModelQuery("");
+  }, [targetUnitId]);
 
   // Picking a provider just prefills the display name; the admin chooses models.
   const onProviderChange = (slug: string) => {
@@ -825,7 +773,7 @@ function AddProviderDialog({
     setProviderOpen(false);
     setEnabled({});
     setModelQuery("");
-    const label = catalog.find((c) => c.provider === slug)?.label ?? slug;
+    const label = activeCatalog.find((c) => c.provider === slug)?.label ?? slug;
     if (!displayName.trim()) setDisplayName(label);
   };
 
@@ -849,8 +797,16 @@ function AddProviderDialog({
   );
 
   const sharedValid = displayName.trim().length > 0 && apiKey.trim().length > 0;
+  // A `specific` grant that names nobody would credential models no one can
+  // use — a silent no-op that reads as a failed save.
+  const grantValid = !grantableWorkspaces || visibility === "global" || grantedUnits.length > 0;
+  const targetValid = !targetUnits || !!resolvedTargetId;
   const canSubmit =
-    !!provider && sharedValid && enabledModels.length + validCustomModels.length > 0;
+    !!provider &&
+    sharedValid &&
+    grantValid &&
+    targetValid &&
+    enabledModels.length + validCustomModels.length > 0;
 
   const updateCustomModel = (i: number, patch: Partial<(typeof customModels)[number]>) =>
     setCustomModels((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
@@ -891,7 +847,12 @@ function AddProviderDialog({
         api_key: apiKey,
         api_base: apiBase.trim() || undefined,
         models,
-        workspaceId,
+        workspaceId: resolvedTargetId,
+        // Only the Org Admin's onboarding carries a grant; a unit-scoped one
+        // is credentialing models that were already granted to it.
+        ...(grantableWorkspaces
+          ? { visibility, businessUnitIds: visibility === "specific" ? grantedUnits : [] }
+          : {}),
       });
       if (needsApproval) {
         toast.info("Sent for approval", {
@@ -938,6 +899,32 @@ function AddProviderDialog({
         )}
 
         <div className="space-y-4">
+          {/* Which unit this credential belongs to. Only asked when there is
+              genuinely a choice — with one unit it is not a decision, and a
+              select with a single option is just noise. */}
+          {targetUnits && targetUnits.length > 1 && (
+            <div className="space-y-1.5">
+              <Label htmlFor="target-unit">{BUSINESS_UNIT_LABEL}</Label>
+              <select
+                id="target-unit"
+                value={resolvedTargetId ?? ""}
+                onChange={(e) => setTargetUnitId(e.target.value)}
+                disabled={pending}
+                className="border-line-soft bg-surface-1 h-9 w-full rounded-md border px-3 text-[13px]"
+              >
+                {targetUnits.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-muted-foreground text-[11px]">
+                You&apos;re in more than one {BUSINESS_UNIT_LABEL.toLowerCase()}. This key is stored
+                for the one you pick, and only its granted models are offered below.
+              </p>
+            </div>
+          )}
+
           {/* Provider — searchable combobox over LiteLLM's full provider catalog */}
           <div className="space-y-1.5">
             <Label>Provider</Label>
@@ -966,7 +953,7 @@ function AddProviderDialog({
                   <CommandList>
                     <CommandEmpty>No provider found.</CommandEmpty>
                     <CommandGroup>
-                      {catalog.map((c) => (
+                      {activeCatalog.map((c) => (
                         <CommandItem
                           key={c.provider}
                           value={`${c.label} ${c.provider}`}
@@ -1158,6 +1145,28 @@ function AddProviderDialog({
             </div>
           )}
         </div>
+
+        {/* Who the models onboarded here reach — the grant, written in the
+            same act as the key so a credentialed model can't land invisible. */}
+        {grantableWorkspaces && (
+          <div className="border-line-soft space-y-2 rounded-xl border p-3.5">
+            <div className="text-[13px] font-medium">Availability</div>
+            <p className="text-muted-foreground text-[12px]">
+              Global reaches every {BUSINESS_UNIT_LABEL.toLowerCase()} and project automatically.
+              Specific reaches only the ones you name — you can change this later from Model access.
+            </p>
+            <GrantVisibilityControl
+              idPrefix="add-provider-grant"
+              value={{ visibility, businessUnitIds: grantedUnits }}
+              workspaces={grantableWorkspaces}
+              disabled={pending}
+              onChange={(next) => {
+                setVisibility(next.visibility);
+                setGrantedUnits(next.businessUnitIds);
+              }}
+            />
+          </div>
+        )}
 
         {/* Optional per-model usage limits — applied to every model added here. */}
         <div className="space-y-2">

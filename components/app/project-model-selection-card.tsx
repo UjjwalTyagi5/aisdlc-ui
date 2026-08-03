@@ -25,18 +25,18 @@ const keyOf = (e: ModelAllowEntry) => `${e.provider}::${e.model_id}`;
 /**
  * Which of its inherited models a project actually uses (PRD §34.2).
  *
- * Everything above this card is governance — the Org Admin decides what the
- * organization may use, the {BUSINESS_UNIT_LABEL} Admin narrows that to what
- * their unit may use. Neither of them knows which model suits this team's
- * work, so the last narrowing belongs to the Project Admin, and only the last
- * one. This card can therefore never *add* a model: everything it offers came
- * down the cascade, and a model the unit revokes disappears from here whether
- * the project had selected it or not.
+ * Everything above this card is governance — the Org Admin decides which
+ * models the organization may use and which {BUSINESS_UNIT_LABEL}s get each
+ * one. They don't know which model suits this team's work, so the last
+ * narrowing belongs to the Project Admin, and only the last one. This card can
+ * therefore never *add* a model: everything it offers came down the cascade,
+ * and a model the Org Admin revokes disappears from here whether the project
+ * had selected it or not.
  *
- * A project that has never touched this inherits the whole allowed set. That
+ * A project that has never touched this inherits the whole granted set. That
  * is shown as inheritance, not as a selection someone made — the distinction
- * matters when a {BUSINESS_UNIT_LABEL} Admin later widens the list and the
- * project should pick the new model up automatically.
+ * matters when the Org Admin later grants another model and the project should
+ * pick it up automatically.
  */
 export function ProjectModelSelectionCard({
   projectId,
@@ -53,8 +53,8 @@ export function ProjectModelSelectionCard({
   const [draft, setDraft] = React.useState<Set<string> | null>(null);
   const [draftDefault, setDraftDefault] = React.useState<string | null>(null);
 
-  // Reset the draft whenever the server's answer changes, so a BU Admin
-  // widening the allow-list mid-edit doesn't leave a stale checkbox set.
+  // Reset the draft whenever the server's answer changes, so an Org Admin
+  // granting another model mid-edit doesn't leave a stale checkbox set.
   const serverSignature = selectionQ.data
     ? `${selectionQ.data.selected.map(keyOf).sort().join(",")}|${selectionQ.data.defaultKey ?? ""}`
     : null;
@@ -151,9 +151,9 @@ export function ProjectModelSelectionCard({
           <p className="text-muted-foreground text-sm">Loading…</p>
         ) : inherited.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            Your {BUSINESS_UNIT_LABEL} Admin hasn&apos;t allowed any models for this{" "}
-            {BUSINESS_UNIT_LABEL.toLowerCase()} yet. Ask them to add some — a project can only use
-            what it inherits.
+            Your Organization Admin hasn&apos;t granted this{" "}
+            {BUSINESS_UNIT_LABEL.toLowerCase()} any models yet. Ask them to grant some — a project
+            can only use what it inherits.
           </p>
         ) : (
           <ul className="divide-y rounded-md border">

@@ -488,7 +488,7 @@ export default function ProjectSettingsPage() {
 
         {/* ─── Model ─── */}
         <TabsContent value="model" className="space-y-4">
-          {/* The cascade's last step: org allow-list → BU allow-list → this. */}
+          {/* The cascade's last step: org grants → this business unit → this. */}
           <ProjectModelSelectionCard
             projectId={projectId}
             canManage={hasPermission(session, "model:manage")}

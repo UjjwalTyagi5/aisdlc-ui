@@ -1,6 +1,7 @@
 export * from "./ids";
 export * from "./enums";
 export * from "./primitives";
+export * from "./grant";
 export * from "./tenant";
 export * from "./user";
 export * from "./workspace";

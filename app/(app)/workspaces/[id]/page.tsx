@@ -11,8 +11,8 @@ import {
   Coins,
   FolderKanban,
   Loader2,
+  Pencil,
   Search,
-  ShieldAlert,
   ShieldCheck,
   Trash2,
   UserPlus,
@@ -37,6 +37,12 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { Switch } from "@/components/ui/switch";
 import { ActiveBadge } from "@/components/app/active-badge";
 import {
+  BuConnectorAccessCard,
+  BuModelAccessCard,
+} from "@/components/app/bu-access-cards";
+import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
+import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
+import {
   BudgetWindowFieldsInput,
   BudgetWindowSummary,
 } from "@/components/app/budget-window-fields";
@@ -54,10 +60,8 @@ import {
   getWorkspace,
   updateWorkspace,
   requestBudgetIncrease,
-  changeBusinessUnitAdmin,
 } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
-import type { DataClassification } from "@/lib/schemas";
 import { ROLE_META, ROLE_ORDER, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { resolveRoleLabel, useAllCustomRoles, useCustomRolesForScope } from "@/hooks/use-assignable-roles";
@@ -93,14 +97,6 @@ function assignableBuiltinRoles(canAppointBuAdmin: boolean): RoleRow[] {
 }
 
 type RoleName = string;
-
-// ─── Classification styles ────────────────────────────────────────────────────
-const CLASSIFICATION_TONE: Record<DataClassification, string> = {
-  public: "text-muted-foreground bg-muted/50 border-line-soft",
-  internal: "text-info bg-info/10 border-info/30",
-  confidential: "text-warning bg-warning/15 border-warning/40",
-  restricted: "text-destructive bg-destructive/10 border-destructive/30",
-};
 
 // ─── Avatar colors (deterministic by userId) ──────────────────────────────────
 const AVATAR_PALETTE = [
@@ -171,8 +167,10 @@ export default function WorkspaceDetailPage() {
   const canEditBudgetDirectly = role === "org_admin" || (role === "bu_admin" && !budgetSet);
   const canRequestBudgetIncrease = role === "bu_admin" && budgetSet;
   // Active/inactive is the Org Admin's label about a unit, not one the unit
-  // administers for itself — the API rejects it from anyone else.
-  const canSetActive = role === "org_admin";
+  // administers for itself — the API rejects it from anyone else. The same is
+  // true of which models and connectors the unit is granted.
+  const isOrgAdmin = role === "org_admin";
+  const canSetActive = isOrgAdmin;
   const membersQ = useQuery({
     queryKey: qk.workspaces.members(id),
     queryFn: () => listWorkspaceMembers(id),
@@ -255,22 +253,6 @@ export default function WorkspaceDetailPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Couldn't update active status"),
   });
 
-  const adminMutation = useMutation({
-    mutationFn: (body: { email: string; displayName?: string }) =>
-      changeBusinessUnitAdmin(id, body),
-    onSuccess: (res) => {
-      toast.success(`${res.admin.displayName} now runs this ${BUSINESS_UNIT_LABEL.toLowerCase()}`, {
-        description: res.replacedDisplayName
-          ? `${res.replacedDisplayName} was moved off the admin role but kept in the unit.`
-          : undefined,
-      });
-      queryClient.invalidateQueries({ queryKey: qk.workspaces.detail(id) });
-      queryClient.invalidateQueries({ queryKey: qk.workspaces.members(id) });
-      queryClient.invalidateQueries({ queryKey: qk.workspaces.all() });
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Couldn't change the admin"),
-  });
-
   const budgetIncreaseMutation = useMutation({
     mutationFn: (body: { requestedAmountUsd: number; reason?: string }) =>
       requestBudgetIncrease(id, body),
@@ -285,6 +267,7 @@ export default function WorkspaceDetailPage() {
       }),
   });
 
+  const [editOpen, setEditOpen] = React.useState(false);
   const [filter, setFilter] = React.useState<FilterTab>("all");
   const [search, setSearch] = React.useState("");
 
@@ -373,17 +356,6 @@ export default function WorkspaceDetailPage() {
               <h1 className="font-display text-[32px] font-bold leading-none tracking-[-0.03em]">
                 {ws.displayName}
               </h1>
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-semibold capitalize",
-                  CLASSIFICATION_TONE[ws.dataClassification],
-                )}
-              >
-                {ws.dataClassification === "restricted" && (
-                  <ShieldAlert className="size-3" aria-hidden />
-                )}
-                {ws.dataClassification}
-              </span>
               <ActiveBadge isActive={ws.isActive} />
             </div>
             <p className="text-muted-foreground font-mono text-[11px] tracking-wider uppercase">
@@ -410,18 +382,35 @@ export default function WorkspaceDetailPage() {
             </div>
           </div>
 
-          {canSetActive && (
-            <label className="border-line-soft bg-surface-1 flex shrink-0 items-center gap-2.5 rounded-lg border px-3 py-2">
-              <span className="text-muted-foreground font-mono text-[10.5px] tracking-[0.12em] uppercase">
-                Active
-              </span>
-              <Switch
-                checked={ws.isActive}
-                disabled={activeMutation.isPending}
-                onCheckedChange={(v) => activeMutation.mutate(v)}
-                aria-label={`${ws.displayName} is active`}
-              />
-            </label>
+          <div className="flex shrink-0 items-center gap-2">
+            {canManage && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-line-soft h-9 font-mono text-[11px]"
+                onClick={() => setEditOpen(true)}
+              >
+                <Pencil className="size-3.5" aria-hidden />
+                Edit details
+              </Button>
+            )}
+            {canSetActive && (
+              <label className="border-line-soft bg-surface-1 flex shrink-0 items-center gap-2.5 rounded-lg border px-3 py-2">
+                <span className="text-muted-foreground font-mono text-[10.5px] tracking-[0.12em] uppercase">
+                  Active
+                </span>
+                <Switch
+                  checked={ws.isActive}
+                  disabled={activeMutation.isPending}
+                  onCheckedChange={(v) => activeMutation.mutate(v)}
+                  aria-label={`${ws.displayName} is active`}
+                />
+              </label>
+            )}
+          </div>
+
+          {canManage && (
+            <EditBuDetailsDialog workspace={ws} open={editOpen} onOpenChange={setEditOpen} />
           )}
         </div>
       ) : (
@@ -431,10 +420,10 @@ export default function WorkspaceDetailPage() {
       {/* Who runs this unit — PRD §15.2 */}
       {ws && (
         <BuAdminCard
+          workspaceId={id}
+          workspaceName={ws.displayName}
           adminName={ws.buAdminName ?? null}
           canChange={canSetActive}
-          saving={adminMutation.isPending}
-          onChange={(email, displayName) => adminMutation.mutate({ email, displayName })}
         />
       )}
 
@@ -456,6 +445,24 @@ export default function WorkspaceDetailPage() {
             budgetIncreaseMutation.mutate({ requestedAmountUsd: v, reason })
           }
         />
+      )}
+
+      {/* What this unit may use — the Org Admin's per-unit grants (PRD §34.2,
+          §34.3). Editable only by them; its own Admin reads what they were
+          given, which is the whole point of the grant living up here. */}
+      {ws && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <BuModelAccessCard
+            workspaceId={id}
+            workspaceName={ws.displayName}
+            canManage={isOrgAdmin}
+          />
+          <BuConnectorAccessCard
+            workspaceId={id}
+            workspaceName={ws.displayName}
+            canManage={isOrgAdmin}
+          />
+        </div>
       )}
 
       {/* Members section */}
@@ -587,31 +594,17 @@ export default function WorkspaceDetailPage() {
  * to someone else.
  */
 function BuAdminCard({
+  workspaceId,
+  workspaceName,
   adminName,
   canChange,
-  saving,
-  onChange,
 }: {
+  workspaceId: string;
+  workspaceName: string;
   adminName: string | null;
   canChange: boolean;
-  saving: boolean;
-  onChange: (email: string, displayName?: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
-  const [email, setEmail] = React.useState("");
-  const [name, setName] = React.useState("");
-
-  const submit = () => {
-    const trimmed = email.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-      toast.error("Enter a valid email");
-      return;
-    }
-    onChange(trimmed, name.trim() || undefined);
-    setOpen(false);
-    setEmail("");
-    setName("");
-  };
 
   return (
     <section
@@ -625,7 +618,7 @@ function BuAdminCard({
             {ROLE_META.bu_admin.label}
           </span>
         </div>
-        {canChange && !open && (
+        {canChange && (
           <Button
             size="sm"
             variant="outline"
@@ -637,53 +630,27 @@ function BuAdminCard({
         )}
       </div>
 
-      {open ? (
-        <div className="mt-4 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              type="email"
-              value={email}
-              autoFocus
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@company.com"
-              className="border-line-soft h-8 w-64 text-[12px]"
-            />
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Name (optional)"
-              className="border-line-soft h-8 w-48 text-[12px]"
-            />
-            <Button
-              size="sm"
-              className="from-brand-gradient-from to-brand-gradient-to h-7 bg-gradient-to-br px-3 font-semibold text-white"
-              disabled={saving}
-              aria-busy={saving}
-              onClick={submit}
-            >
-              {saving ? <Loader2 className="size-3.5 animate-spin" /> : "Appoint"}
-            </Button>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setOpen(false)}>
-              <X className="size-3.5" aria-hidden />
-            </Button>
-          </div>
-          <p className="text-muted-foreground font-mono text-[10.5px]">
-            A new email is onboarded automatically.
-            {adminName && ` ${adminName} keeps their place in the unit as a contributor.`}
-          </p>
-        </div>
-      ) : (
-        <p className="text-muted-foreground mt-3 font-mono text-[12px]">
-          {adminName ? (
-            <span className="text-foreground font-semibold">{adminName}</span>
-          ) : (
-            "No admin appointed yet."
-          )}
-        </p>
+      <p className="text-muted-foreground mt-3 font-mono text-[12px]">
+        {adminName ? (
+          <span className="text-foreground font-semibold">{adminName}</span>
+        ) : (
+          "No admin appointed yet."
+        )}
+      </p>
+
+      {canChange && (
+        <ChangeBuAdminDialog
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          currentAdminName={adminName}
+          open={open}
+          onOpenChange={setOpen}
+        />
       )}
     </section>
   );
 }
+
 
 // ─── Budget card ──────────────────────────────────────────────────────────────
 function fmtUsd(n: number, max = 2): string {

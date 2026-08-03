@@ -31,7 +31,7 @@ import {
   usd,
 } from "@/components/app/stat-tile";
 import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
-import { SpendTrendChart } from "@/components/app/spend-trend-chart";
+import { SpendPanel } from "@/components/app/spend-panel";
 import { ActiveBadge } from "@/components/app/active-badge";
 import { NoScopeAccess } from "@/components/auth/scope-empty-state";
 import { useSession } from "@/hooks/use-session";
@@ -458,33 +458,12 @@ export default function DashboardPage() {
               Full width and above the two-column row: the tiles say what this
               month costs, and the only question that follows is whether that
               is normal — which a single number cannot answer. */}
-          {isOrg && (
-            <section
-              aria-labelledby="spend-trend-heading"
-              className="border-line-soft bg-panel-elevated rounded-xl border"
-            >
-              <div className="border-line-soft flex items-center justify-between border-b px-4 py-3">
-                <h2
-                  id="spend-trend-heading"
-                  className="font-display text-[13px] font-semibold tracking-tight"
-                >
-                  Spend by {BUSINESS_UNIT_LABEL.toLowerCase()}
-                </h2>
-                <Link
-                  href="/cost"
-                  className="text-muted-foreground hover:text-foreground font-mono text-[11px] transition-colors"
-                >
-                  Cost &amp; budget →
-                </Link>
-              </div>
-              <div className="px-4 py-4">
-                {overviewQ.isLoading || !overview ? (
-                  <LoadingState variant="card" />
-                ) : (
-                  <SpendTrendChart months={overview.months} series={overview.spendSeries} />
-                )}
-              </div>
-            </section>
+          {/* Both governance tiers, not just the Org Admin: a Business Unit
+              Admin has a budget to answer for too, and the endpoint already
+              bounds them to their own units — so the same panel serves both
+              and simply contains less for one of them. */}
+          {governanceView && (
+            <SpendPanel workspaces={units.map((w) => ({ id: String(w.id), displayName: w.displayName }))} />
           )}
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.55fr_1fr]">

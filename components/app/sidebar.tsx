@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Boxes,
   HelpCircle,
   Lock,
   MessageSquare,
@@ -24,109 +25,32 @@ import {
   visibleObserveNav,
   type NavItem,
 } from "@/lib/nav";
-import { PHASE_DESCRIPTION, PHASE_LABEL } from "@/lib/agents";
 import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
-import { Phase } from "@/lib/schemas/enums";
-import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
 
 import { ScopeChip } from "./scope-indicator";
-import { WorkspaceSwitcher } from "./workspace-switcher";
+import { OrgHeader } from "./org-header";
 
 const APP_VERSION = "0.1.0";
 
-type AgentDotStatus = "idle" | "running" | "queued" | "done" | "failed";
-
-interface AgentRailProps {
-  agentStatuses?: Partial<Record<string, AgentDotStatus>>;
-  collapsed: boolean;
-}
-
-// All 13 agents (Phase.options preserves declaration order: the 8 shared by
-// every track, then the 5 track-specific ones) — this is a global rail, not
-// scoped to one project's track, so it shows the full roster rather than
-// silently hiding the 5 a Track-1 project doesn't run.
-const ALL_PHASES = Phase.options;
-
-function dotClass(status: AgentDotStatus): string {
-  switch (status) {
-    case "running":
-      return "bg-success animate-[pulse_2s_ease-in-out_infinite]";
-    case "queued":
-      return "bg-warning";
-    case "done":
-      return "bg-success";
-    case "failed":
-      return "bg-destructive";
-    default:
-      return "bg-muted-foreground/40";
-  }
-}
-
-function AgentStatusRail({ agentStatuses = {}, collapsed }: AgentRailProps) {
-  return (
-    <div className="border-line-soft mt-auto border-t pt-3">
-      {!collapsed && (
-        <div className="font-display text-muted-foreground mb-1.5 px-2 text-[10px] font-semibold tracking-widest uppercase">
-          Agents
-        </div>
-      )}
-      <ul className="flex flex-col gap-0.5">
-        {ALL_PHASES.map((phase) => {
-          const status: AgentDotStatus = agentStatuses[phase] ?? "idle";
-          const label = PHASE_LABEL[phase];
-          const chip = (
-            <li
-              key={phase}
-              className={cn(
-                "flex items-center gap-2 rounded-md px-2 py-1.5 font-mono text-xs",
-                "text-muted-foreground",
-                collapsed && "justify-center px-0",
-              )}
-            >
-              <span
-                className={cn("size-[7px] shrink-0 rounded-full", dotClass(status))}
-                aria-label={`${label}: ${status}`}
-              />
-              {!collapsed && (
-                <>
-                  <span className="truncate">{label}</span>
-                  {status !== "idle" && (
-                    <span
-                      className={cn(
-                        "ml-auto font-mono text-[10px]",
-                        status === "running" && "text-success",
-                        status === "queued" && "text-warning",
-                        status === "done" && "text-success",
-                        status === "failed" && "text-destructive",
-                      )}
-                    >
-                      {status}
-                    </span>
-                  )}
-                </>
-              )}
-            </li>
-          );
-          // Hover info always available — collapsed mode needs it to
-          // identify the agent at all; expanded mode still benefits from a
-          // one-line description beyond just the name.
-          return (
-            <Tooltip key={phase}>
-              <TooltipTrigger asChild>{chip}</TooltipTrigger>
-              <TooltipContent side="right" className="max-w-[240px]">
-                <p className="font-medium">
-                  {label} — {status}
-                </p>
-                <p className="text-muted-foreground mt-1 text-[12px]">{PHASE_DESCRIPTION[phase]}</p>
-              </TooltipContent>
-            </Tooltip>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
+/*
+ * The 13-agent status rail that used to live here is gone (2026-08-03).
+ *
+ * It was rendered without an `agentStatuses` prop, so every dot resolved to
+ * "idle" permanently — the status it existed to show never once appeared. Its
+ * rows were `<li>`s with no link, so they navigated nowhere. That left one real
+ * affordance, a hover tooltip carrying the agent's name and one-line
+ * description, in exchange for thirteen rows that pushed Govern and Observe up
+ * the sidebar.
+ *
+ * Both halves now have better homes. Discovery belongs to the Agent Catalogue
+ * (/catalogue, linked in the footer below), which is searchable and cross-
+ * references each agent by track, owning role and capability class. Status
+ * belongs to the project pipeline on a project's Overview, which is real,
+ * per-run, and scoped to that project's track — something a global rail could
+ * not do, as its own comment conceded while listing all 13 including the 5 a
+ * Track-1 project never runs.
+ */
 
 // ─── Nav item ─────────────────────────────────────────────────────────────────
 
@@ -319,14 +243,18 @@ export function Sidebar() {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggle = useUiStore((s) => s.toggleSidebar);
   const session = useSession({ required: true });
-  const {
-    active: activeWorkspace,
-    isLoading: wsLoading,
-    isError: wsError,
-    refetch: refetchWorkspaces,
-  } = useActiveWorkspace();
 
-  const { role, isOrgWide, managedBusinessUnitIds, scope, level } = useAccessScope();
+  const {
+    role,
+    isOrgWide,
+    businessUnitIds,
+    managedBusinessUnitIds,
+    scope,
+    level,
+    isLoading: scopeLoading,
+    isError: scopeError,
+    refetch: refetchScope,
+  } = useAccessScope();
 
   const perms = session?.permissions ?? [];
   // The PRD's fixed page set, in three presentational groups (§15.1, §32.1).
@@ -349,12 +277,14 @@ export function Sidebar() {
 
   // Three distinct states, not two: a slow/failed request must never read as
   // "loaded, you have zero access" — that's a false access-denied message.
-  const wsPending = wsLoading;
-  const wsFailed = !wsLoading && wsError;
-  const hasWorkspace = !wsLoading && !wsError && activeWorkspace !== null;
-  const wsLabel = activeWorkspace?.displayName ?? (
-    wsPending ? "…" : wsFailed ? "Unavailable" : `No ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase().slice(0, -1)}`
-  );
+  //
+  // Whether the Deliver links work is a question about the viewer's BINDINGS,
+  // which is what the access scope answers. It used to be asked of the
+  // workspace list via the switcher's active unit; with no switcher there is no
+  // active unit, and "do I belong to any unit" was always the real question.
+  const wsPending = scopeLoading;
+  const wsFailed = !scopeLoading && scopeError;
+  const hasWorkspace = !scopeLoading && !scopeError && (isOrgWide || businessUnitIds.length > 0);
 
   return (
     <aside
@@ -366,34 +296,31 @@ export function Sidebar() {
       )}
       aria-label="Primary"
     >
-      {/* Brand / workspace switcher */}
+      {/* Organization identity + Business Unit actions — never a unit name */}
       <div className="border-line-soft border-b p-2">
-        <WorkspaceSwitcher collapsed={collapsed} />
+        <OrgHeader collapsed={collapsed} />
       </div>
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto p-2" aria-label="Main navigation">
 
         {/* ── Deliver — the work itself ─────────────────────────────────── */}
+        {/* Named for what the group IS, not for a Business Unit. This label
+            used to carry the active unit's name, which was a lie for anyone
+            bound to more than one — see components/app/org-header.tsx. */}
         <SectionLabel
-          label={wsLabel}
+          label="Deliver"
           collapsed={collapsed}
           dimmed={!hasWorkspace && !wsPending}
         />
 
-        {/* The scope these Deliver links resolve within. The section label above
-            names the active Business Unit but not what KIND of scope bounds the
-            viewer — an Organization Admin and a Project Admin both see a unit
-            name there while looking at very different sets underneath. */}
+        {/* What KIND of scope bounds these links — an Organization Admin and a
+            Project Admin see the same menu over very different sets. */}
         {!collapsed && scope !== null && (
           <div className="mb-1.5 px-2">
             <ScopeChip
               kind={isOrgWide ? "organization" : level}
-              access={
-                isOrgWide || managedBusinessUnitIds.includes(activeWorkspace?.id ?? "")
-                  ? "manage"
-                  : "read"
-              }
+              access={isOrgWide || managedBusinessUnitIds.length > 0 ? "manage" : "read"}
               size="sm"
               className="w-full"
             />
@@ -425,7 +352,7 @@ export function Sidebar() {
                 </li>
               ))}
             </ul>
-            <WorkspaceLoadErrorSection collapsed={collapsed} onRetry={refetchWorkspaces} />
+            <WorkspaceLoadErrorSection collapsed={collapsed} onRetry={refetchScope} />
           </>
         ) : (
           <>
@@ -473,17 +400,20 @@ export function Sidebar() {
             </ul>
           </>
         )}
-
-        {/* ── Agent status rail ────────────────────────────────────────── */}
-        <div className="mt-2">
-          <AgentStatusRail collapsed={collapsed} />
-        </div>
       </nav>
 
       <Separator className="bg-line-soft" />
 
       {/* Footer */}
       <div className="flex flex-col gap-0.5 p-2">
+        {/* Reference material, above the help links it belongs with. Ungated
+            deliberately — see its entry in lib/nav.ts::utilityNav. */}
+        <SidebarFooterLink
+          href="/catalogue"
+          label="Agent Catalogue"
+          icon={Boxes}
+          collapsed={collapsed}
+        />
         <SidebarFooterLink href="/help" label="Help & docs" icon={HelpCircle} collapsed={collapsed} />
         <SidebarFooterLink href="/feedback" label="Send feedback" icon={MessageSquare} collapsed={collapsed} />
         <Button

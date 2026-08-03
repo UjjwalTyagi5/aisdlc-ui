@@ -8,8 +8,7 @@ import {
   WorkspaceList,
   WorkspaceMemberList,
   WorkspaceMemberOut,
-  type WorkspaceCreateInput,
-  type DataClassification,
+  type WorkspaceCreateBody,
 } from "@/lib/schemas/workspace";
 import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
@@ -18,7 +17,7 @@ export const listWorkspaces = () => api("/workspaces", { schema: WorkspaceList }
 export const getWorkspace = (id: string) =>
   api(`/workspaces/${encodeURIComponent(id)}`, { schema: Workspace });
 
-export const createWorkspace = (body: WorkspaceCreateInput) =>
+export const createWorkspace = (body: WorkspaceCreateBody) =>
   api("/workspaces", { method: "POST", body, schema: Workspace });
 
 export const updateWorkspace = (
@@ -27,7 +26,6 @@ export const updateWorkspace = (
     displayName: string;
     businessUnit: string | null;
     costCenter: string | null;
-    dataClassification: DataClassification;
     monthlyBudgetUsd: number | null;
     /** Validity period of the cap — see lib/schemas/budget-window.ts. */
     budgetStartDate: string | null;

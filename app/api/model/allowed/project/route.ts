@@ -11,8 +11,8 @@ import type { ModelAllowEntry } from "@/lib/schemas/model";
 // DUMMY-DATA SEAM: mutates the shared fixture store directly. Mirrored in
 // mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
 //
-// The fourth tier of the model cascade: org allow-list → BU allow-list →
-// what this project selected from it. The project's parent Business Unit is
+// The last tier of the model cascade: org grants → what the parent Business
+// Unit was granted → what this project selected from it. The Business Unit is
 // resolved here rather than in model-fixtures, so that module keeps its
 // one-way dependency and never has to know what a project is.
 

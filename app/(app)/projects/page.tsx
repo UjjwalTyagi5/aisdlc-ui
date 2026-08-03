@@ -14,6 +14,7 @@ import { EmptyProjects } from "@/components/feedback/empty-projects";
 import { RequireRole } from "@/components/auth/require-role";
 import { CreateProjectDialog } from "@/components/app/create-project-dialog";
 import { ProjectCard } from "@/components/app/project-card";
+import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
 import {
   ProjectsToolbar,
   type ProjectsToolbarState,
@@ -309,6 +310,11 @@ export default function ProjectsPage() {
           />
         </div>
       )}
+
+      {/* Which projects are costing what, this month. Sits above the toolbar
+          because it describes the whole list rather than the filtered view —
+          it does not follow the search or template filters. */}
+      <SpendBreakdownCard groupBy="project" />
 
       <ProjectsToolbar
         value={toolbarState}

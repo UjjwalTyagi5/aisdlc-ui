@@ -32,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
+import { ConnectorGrantsCard } from "@/components/app/connector-grants-card";
 import { McpServersPanel } from "@/components/app/mcp-servers-panel";
 import { RequireRole } from "@/components/auth/require-role";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
@@ -41,27 +42,20 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import {
   disconnectConnector,
   installConnector,
+  listConnectorGrants,
   listConnectors,
   setConnectorCredentials,
 } from "@/lib/api/connectors";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
 import { onboardingScopeFor } from "@/lib/mock/connector-scope";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { qk } from "@/lib/api/query-keys";
-import { useActiveWorkspace } from "@/hooks/use-workspaces";
+import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import type { Capability, Connector, ConnectorKind } from "@/lib/schemas";
 
-const KIND_LABEL: Record<ConnectorKind, string> = {
-  jira: "Jira",
-  azure_devops: "Azure DevOps",
-  github: "GitHub",
-  azure_repos: "Azure Repos",
-  github_actions: "GitHub Actions",
-  slack: "Slack",
-  sso_okta: "Okta SSO",
-  sso_entra: "Microsoft Entra SSO",
-};
+const KIND_LABEL = CONNECTOR_KIND_LABEL;
 
 const KIND_TAGLINE: Record<ConnectorKind, string> = {
   jira: "Read issues + write sub-tasks. Webhook-driven.",
@@ -182,6 +176,10 @@ const KIND_CATEGORY = Object.fromEntries(
   CATEGORIES.flatMap((cat) => cat.kinds.map((k) => [k, cat.title] as const)),
 ) as Record<ConnectorKind, string>;
 
+/** Every kind the platform offers, in CATEGORIES order — the universe the Org
+ *  Admin's grant card lists, and the superset the tiles are filtered from. */
+const ALL_KINDS: ConnectorKind[] = CATEGORIES.flatMap((cat) => cat.kinds);
+
 /** Override for the top-right tile chip when a connector spans multiple purposes.
  *  Azure DevOps is one connection that does all three — the chip says so. */
 const KIND_CAPABILITY_CHIP: Partial<Record<ConnectorKind, string>> = {
@@ -204,18 +202,31 @@ export default function IntegrationsPage() {
   const queryClient = useQueryClient();
   const session = useRawSession();
   const searchParams = useSearchParams();
-  const { active: activeWorkspace } = useActiveWorkspace();
-  const activeWsId = activeWorkspace?.id ?? null;
   const role = effectivePlatformRole(session);
 
-  // listConnectors query — genuinely workspace-scoped now: activeWsId is both
-  // the cache key AND the server-side filter, so a unit sees org-wide
-  // connectors plus its own and never a sibling unit's (PRD §34.3). It used to
-  // key on the id while fetching the whole flat tenant list.
+  // The units this viewer is bound to. No id is passed to either query: the
+  // server unions across exactly those units and drops anything outside them,
+  // which is both the correct answer for someone in two units and the same
+  // answer as before for someone in one. Passing an "active" unit here was
+  // what made the page arbitrary — see hooks/use-scoped-business-units.ts.
+  const { units: scopedUnits } = useScopedBusinessUnits();
+
   const connectorsQ = useQuery({
-    queryKey: qk.connectors.list(activeWsId),
-    queryFn: () => listConnectors(activeWsId),
+    queryKey: qk.connectors.list(null),
+    queryFn: () => listConnectors(),
     staleTime: 0,
+  });
+
+  // Which kinds this viewer may touch at all. An Org Admin writes the policy,
+  // so they see the whole catalogue and edit it below; anyone else sees only
+  // what their units were granted — a kind they weren't granted is absent, not
+  // disabled, because a tile with a permanently dead button is worse than no
+  // tile at all.
+  const isOrgAdmin = role === "org_admin";
+  const grantsQ = useQuery({
+    queryKey: qk.connectors.grants(null),
+    queryFn: () => listConnectorGrants(),
+    enabled: !isOrgAdmin,
   });
 
   const [installing, setInstalling] = React.useState<ConnectorKind | null>(null);
@@ -253,7 +264,7 @@ export default function IntegrationsPage() {
       // Non-OAuth / direct-install path (backward-compat): data is a Connector.
       const c = data as Connector;
       toast.success(`${c.name} connected`);
-      queryClient.invalidateQueries({ queryKey: qk.connectors.list(activeWsId) });
+      queryClient.invalidateQueries({ queryKey: ["connectors"] });
     },
     onError: (err, kind) =>
       toast.error(`Couldn't connect ${KIND_LABEL[kind]}`, {
@@ -266,7 +277,7 @@ export default function IntegrationsPage() {
     mutationFn: (kind: ConnectorKind) => disconnectConnector(kind),
     onSuccess: (c) => {
       toast.success(`${c.name} disconnected`);
-      queryClient.invalidateQueries({ queryKey: qk.connectors.list(activeWsId) });
+      queryClient.invalidateQueries({ queryKey: ["connectors"] });
     },
     onError: (err) =>
       toast.error("Couldn't disconnect", {
@@ -307,7 +318,14 @@ export default function IntegrationsPage() {
   }
 
   // Phase 6: page-level connector:view guard — excludes stakeholder (artifact:view only).
-  // connector:manage users implicitly have connector:view; admin:* passes via wildcard.
+  //
+  // Every role that may open this page lists `connector:view` explicitly, and
+  // admin:* passes via the wildcard. An earlier comment here claimed
+  // `connector:manage` implied `connector:view`; it does not — `hasPermission`
+  // mirrors the backend's exact membership test — and the Business Unit Admin,
+  // who held only the manage half, was bounced off a page its own sidebar link
+  // offered. Grant both halves in lib/auth/role-permissions.ts rather than
+  // loosening this gate or the primitive behind it.
   if (!hasPermission(session, "connector:view")) {
     return <RestrictedAccess description="Connectors require the connector:view permission." />;
   }
@@ -325,22 +343,34 @@ export default function IntegrationsPage() {
   // active unit for anyone else (PRD §34.3).
   const wouldOnboardAt = onboardingScopeFor(role);
   const byKind = new Map(connectors.map((c) => [c.kind, c] as const));
-  const resolved = CATEGORIES.flatMap((cat) =>
-    cat.kinds.map(
-      (k): Connector =>
-        byKind.get(k) ?? {
-          id: k as Connector["id"],
-          tenantId,
-          kind: k,
-          name: KIND_LABEL[k],
-          installed: false,
-          health: "disconnected",
-          capabilities: [],
-          lastCheckedAt: null,
-          scope: wouldOnboardAt.scope,
-          workspaceId: wouldOnboardAt.scope === "business_unit" ? activeWsId : null,
-        },
-    ),
+  // An Org Admin sees the whole catalogue; everyone else only the kinds their
+  // unit was granted. Un-granted kinds must not be synthesized as placeholders
+  // either — a placeholder is exactly what would put a "Connect" button on a
+  // connector the organization never permitted.
+  const permittedKinds = isOrgAdmin
+    ? new Set<string>(ALL_KINDS)
+    : new Set<string>((grantsQ.data ?? []).map((g) => g.kind));
+  const visibleKinds = ALL_KINDS.filter((k) => permittedKinds.has(k));
+  const resolved = visibleKinds.map(
+    (k): Connector =>
+      byKind.get(k) ?? {
+        id: k as Connector["id"],
+        tenantId,
+        kind: k,
+        name: KIND_LABEL[k],
+        installed: false,
+        health: "disconnected",
+        capabilities: [],
+        lastCheckedAt: null,
+        scope: wouldOnboardAt.scope,
+        // A placeholder is a connector nobody has onboarded yet. With one unit
+        // it is already known where it would land; with several the answer is
+        // "not decided yet", which the credentials dialog asks for.
+        workspaceId:
+          wouldOnboardAt.scope === "business_unit" && scopedUnits.length === 1
+            ? scopedUnits[0]!.id
+            : null,
+      },
   );
 
   // Split for the control-panel layout: connected integrations are featured at the
@@ -389,10 +419,9 @@ export default function IntegrationsPage() {
           Integrations
         </h1>
         <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-          OAuth- and key-based connectors, onboarded org-wide or into a single{" "}
-          {BUSINESS_UNIT_LABEL.toLowerCase()}. Projects inherit both and their Project Admin picks
-          which ones the team uses. Credentials live in the tenant&apos;s secrets vault, never
-          echoed back; revocation is a one-click action.
+          {isOrgAdmin
+            ? `OAuth- and key-based connectors. Permit a kind below and choose who gets it — globally, or only the ${BUSINESS_UNIT_LABEL.toLowerCase()}s you name. Credentials live in the tenant's secrets vault, never echoed back; revocation is a one-click action.`
+            : `The integrations your Organization Admin permitted this ${BUSINESS_UNIT_LABEL.toLowerCase()}. Connect the ones your teams need — credentials live in the tenant's secrets vault, never echoed back.`}
         </p>
       </header>
 
@@ -402,6 +431,19 @@ export default function IntegrationsPage() {
         attention={attentionCount}
         available={available.length}
       />
+
+      {/* The policy itself, at the top — everything below is its consequence. */}
+      {isOrgAdmin && <ConnectorGrantsCard kinds={ALL_KINDS} kindLabel={(k) => KIND_LABEL[k]} />}
+
+      {!isOrgAdmin && visibleKinds.length === 0 && !grantsQ.isLoading && (
+        <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
+          <p className="text-muted-foreground mx-auto max-w-md text-sm">
+            Your Organization Admin hasn&apos;t permitted any connectors for this{" "}
+            {BUSINESS_UNIT_LABEL.toLowerCase()} yet. Ask them to grant the integrations your teams
+            need — nothing can be connected until they do.
+          </p>
+        </div>
+      )}
 
       {/* Available — quiet, dense, scannable grid */}
       {available.length > 0 && (
@@ -452,8 +494,12 @@ export default function IntegrationsPage() {
           <SectionLabel
             id="connected-unit-heading"
             eyebrow={`Active · ${BUSINESS_UNIT_LABEL}`}
-            title={`Onboarded in ${activeWorkspace?.displayName ?? `this ${BUSINESS_UNIT_LABEL.toLowerCase()}`}`}
-            blurb={`Managed by this ${BUSINESS_UNIT_LABEL.toLowerCase()}'s Admin. Not visible to any other ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
+            title={
+              scopedUnits.length === 1
+                ? `Onboarded in ${scopedUnits[0]!.name}`
+                : `Onboarded in a ${BUSINESS_UNIT_LABEL.toLowerCase()}`
+            }
+            blurb={`Managed by the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s own Admin. Not visible to any other ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
           />
           <ul className="space-y-3">
             {unitConnected.map((c) => (
@@ -489,8 +535,9 @@ export default function IntegrationsPage() {
       {/* Credential entry (ADO PAT / Jira API token) */}
       <CredentialsDialog
         kind={credentialsFor}
+        targetUnits={isOrgAdmin ? [] : scopedUnits}
         onClose={() => setCredentialsFor(null)}
-        onSaved={() => queryClient.invalidateQueries({ queryKey: qk.connectors.list(activeWsId) })}
+        onSaved={() => queryClient.invalidateQueries({ queryKey: ["connectors"] })}
       />
     </div>
   );
@@ -966,16 +1013,24 @@ function DisconnectConfirm({
 
 function CredentialsDialog({
   kind,
+  targetUnits,
   onClose,
   onSaved,
 }: {
   kind: ConnectorKind | null;
+  /** The units the viewer may onboard into. Empty for an Org Admin, whose
+   *  connections are org-wide; one entry needs no question; several make the
+   *  target a real choice, asked here rather than assumed. */
+  targetUnits: { id: string; name: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const open = !!kind;
   const isJira = kind === "jira";
   const isGithubActions = kind === "github_actions";
+  const mustChooseUnit = targetUnits.length > 1;
+  const [unitId, setUnitId] = React.useState("");
+  const targetUnitId = unitId || targetUnits[0]?.id || "";
 
   const [orgUrl, setOrgUrl] = React.useState("");
   const [pat, setPat] = React.useState("");
@@ -996,26 +1051,31 @@ function CredentialsDialog({
       setApiToken("");
       setGhToken("");
       setGhOwner("");
+      setUnitId("");
       setPending(false);
     }
   }, [open]);
 
-  const canSubmit = isJira
+  const fieldsValid = isJira
     ? Boolean(baseUrl.trim() && email.trim() && apiToken.trim())
     : isGithubActions
       ? Boolean(ghToken.trim())
       : Boolean(orgUrl.trim() && pat.trim());
+  const canSubmit = fieldsValid && (!mustChooseUnit || Boolean(targetUnitId));
 
   const handleSubmit = async () => {
     if (!kind || !canSubmit || pending) return;
     setPending(true);
     try {
-      const body = isJira
+      const fields = isJira
         ? { base_url: baseUrl.trim(), email: email.trim(), api_token: apiToken }
         : isGithubActions
           ? { pat: ghToken, owner: ghOwner.trim() || undefined }
           : { org_url: orgUrl.trim(), pat };
-      const result = await setConnectorCredentials(kind, body);
+      const result = await setConnectorCredentials(kind, {
+        ...fields,
+        workspaceId: targetUnitId || undefined,
+      });
       onSaved();
       if (result.status === "valid") {
         toast.success(`${KIND_LABEL[kind]} connected ✓`);
@@ -1053,6 +1113,32 @@ function CredentialsDialog({
         </DialogHeader>
 
         <div className="space-y-4">
+          {/* Only asked when there is genuinely a choice — a credential lands
+              in exactly one unit, and with several bound to the viewer nobody
+              should pick for them. */}
+          {mustChooseUnit && (
+            <div className="space-y-1.5">
+              <Label htmlFor="cred-unit">{BUSINESS_UNIT_LABEL}</Label>
+              <select
+                id="cred-unit"
+                value={targetUnitId}
+                onChange={(e) => setUnitId(e.target.value)}
+                disabled={pending}
+                className="border-line-soft bg-surface-1 h-9 w-full rounded-md border px-3 text-[13px]"
+              >
+                {targetUnits.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-muted-foreground text-[11px]">
+                This connection is stored for the {BUSINESS_UNIT_LABEL.toLowerCase()} you pick and
+                is not visible to the others.
+              </p>
+            </div>
+          )}
+
           {isGithubActions ? (
             <>
               <div className="space-y-1.5">
