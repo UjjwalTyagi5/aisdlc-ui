@@ -108,7 +108,16 @@ export const verifyModelProvider = (id: string) =>
 
 export const updateModelProvider = (
   id: string,
-  body: { display_name?: string; enabled_models?: string[] },
+  body: {
+    display_name?: string;
+    enabled_models?: string[];
+    /** Omit to leave the stored secret alone; "" clears it. */
+    api_key?: string;
+    api_base?: string | null;
+    rpm_limit?: number | null;
+    tpm_limit?: number | null;
+    cost_limit_usd?: number | null;
+  },
 ) => api(`/model/providers/${encodeURIComponent(id)}`, { method: "PATCH", body, schema: ModelProvider });
 
 export const deleteModelProvider = (id: string) =>

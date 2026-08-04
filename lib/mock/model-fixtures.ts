@@ -282,6 +282,7 @@ export function getModelGrantMatrix(): {
         (p) =>
           p.workspaceId === null &&
           p.approvalStatus === "active" &&
+          p.hasKey &&
           p.offerings.some((o) => o.enabled),
       ).map((p) => p.provider),
     ),
@@ -307,6 +308,10 @@ function hasCredentialFor(
     (p) =>
       p.workspaceId === workspaceId &&
       p.approvalStatus === "active" &&
+      // A connection registered without a secret is real and grantable but
+      // cannot serve a run — counting it as credentialed would report the
+      // credential gap this function exists to find as already closed.
+      p.hasKey &&
       p.provider === provider &&
       p.offerings.some((o) => o.enabled && o.model_id === modelId),
   );
@@ -433,6 +438,7 @@ const PROVIDERS: ModelProvider[] = [
     status: "valid",
     api_base: null,
     is_custom: false,
+    hasKey: true,
     last_verified_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
@@ -452,6 +458,7 @@ const PROVIDERS: ModelProvider[] = [
     status: "valid",
     api_base: null,
     is_custom: false,
+    hasKey: true,
     last_verified_at: new Date(Date.now() - 6 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 21 * 24 * 3600 * 1000).toISOString(),
     // Org-wide so the platform holds the key, but it only offers Opus — the
@@ -472,6 +479,7 @@ const PROVIDERS: ModelProvider[] = [
     status: "valid",
     api_base: null,
     is_custom: false,
+    hasKey: true,
     last_verified_at: new Date(Date.now() - 1 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 9 * 24 * 3600 * 1000).toISOString(),
     // Lending keyed this themselves. Payments is granted gpt-5.1 too and
@@ -504,6 +512,13 @@ export interface ModelSpecInput {
 export interface CreateModelProviderInput {
   provider: string;
   display_name: string;
+  /**
+   * Optional. A provider may be registered with NO key so its models enter the
+   * catalogue and can be granted, leaving each Business Unit to bring its own
+   * — the "granted but inert" path, which was previously impossible because
+   * the form demanded a secret before it would let anything through.
+   */
+  api_key?: string;
   api_base?: string;
   models?: ModelSpecInput[];
   enabled_models?: string[];
@@ -568,6 +583,9 @@ export function createModelProvider(
     provider: input.provider,
     display_name: input.display_name,
     status: "unverified",
+    // Keyless onboarding is legitimate: the Org Admin registers the provider
+    // so its models can be granted, and each unit brings its own secret.
+    hasKey: (input.api_key ?? "").trim().length > 0,
     api_base: input.api_base ?? null,
     is_custom: !CATALOG.some((c) => c.provider === input.provider),
     last_verified_at: null,
@@ -643,16 +661,53 @@ export function getModelProvider(id: string): ModelProvider | undefined {
   return PROVIDERS.find((p) => p.id === id);
 }
 
+/**
+ * Patch a connection.
+ *
+ * Rotating the KEY resets `status` to `unverified` and clears the verified
+ * timestamp: the old probe proved the old secret, and reporting a connection
+ * as valid on the strength of a credential it no longer holds is the one
+ * answer this field must never give. Supplying an empty key clears it — a
+ * connection with no key is a legitimate state (see `createModelProvider`),
+ * not an error.
+ *
+ * Limits apply to every offering on the connection, which is how they were
+ * set at creation; a per-model override is a separate decision and would need
+ * its own control rather than a silent reinterpretation of this one.
+ */
 export function updateModelProvider(
   id: string,
-  patch: { display_name?: string; enabled_models?: string[] },
+  patch: {
+    display_name?: string;
+    enabled_models?: string[];
+    api_key?: string | null;
+    api_base?: string | null;
+    rpm_limit?: number | null;
+    tpm_limit?: number | null;
+    cost_limit_usd?: number | null;
+  },
 ): ModelProvider | undefined {
   const provider = PROVIDERS.find((p) => p.id === id);
   if (!provider) return undefined;
   if (patch.display_name !== undefined) provider.display_name = patch.display_name;
+  if (patch.api_base !== undefined) provider.api_base = patch.api_base || null;
+
+  if (patch.api_key !== undefined) {
+    const key = (patch.api_key ?? "").trim();
+    provider.hasKey = key.length > 0;
+    provider.status = key.length > 0 ? "unverified" : "unverified";
+    provider.last_verified_at = null;
+  }
+
   if (patch.enabled_models !== undefined) {
     const allow = new Set(patch.enabled_models);
     for (const o of provider.offerings) o.enabled = allow.has(o.model_id);
+  }
+
+  for (const o of provider.offerings) {
+    if (patch.rpm_limit !== undefined) o.rpm_limit = patch.rpm_limit;
+    if (patch.tpm_limit !== undefined) o.tpm_limit = patch.tpm_limit;
+    if (patch.cost_limit_usd !== undefined) o.cost_limit_usd = patch.cost_limit_usd;
   }
   return provider;
 }

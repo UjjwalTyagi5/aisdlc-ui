@@ -917,7 +917,15 @@ export const handlers = [
   }),
   http.patch("/api/model/providers/:id", async ({ params, request }) => {
     await lag();
-    const body = (await request.json()) as { display_name?: string; enabled_models?: string[] };
+    const body = (await request.json()) as {
+    display_name?: string;
+    enabled_models?: string[];
+    api_key?: string;
+    api_base?: string | null;
+    rpm_limit?: number | null;
+    tpm_limit?: number | null;
+    cost_limit_usd?: number | null;
+  };
     const updated = updateModelProvider(String(params.id), body);
     if (!updated) return HttpResponse.json({ code: "not_found" }, { status: 404 });
     return HttpResponse.json(updated);

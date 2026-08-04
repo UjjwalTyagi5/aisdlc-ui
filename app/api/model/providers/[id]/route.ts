@@ -6,7 +6,15 @@ import { deleteModelProvider, updateModelProvider } from "@/lib/mock/model-fixtu
 // mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const body = (await req.json()) as { display_name?: string; enabled_models?: string[] };
+  const body = (await req.json()) as {
+    display_name?: string;
+    enabled_models?: string[];
+    api_key?: string;
+    api_base?: string | null;
+    rpm_limit?: number | null;
+    tpm_limit?: number | null;
+    cost_limit_usd?: number | null;
+  };
   const updated = updateModelProvider(id, body);
   if (!updated) return Response.json({ code: "not_found" }, { status: 404 });
   return Response.json(updated);

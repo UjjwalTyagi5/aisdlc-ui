@@ -173,6 +173,18 @@ export const ModelProvider = z.object({
   api_base: z.string().nullable().optional(),
   /** True for a non-preset provider onboarded via the custom flow. */
   is_custom: z.boolean().optional(),
+  /**
+   * Whether a secret is actually held.
+   *
+   * A provider may be onboarded WITHOUT a key: the Org Admin registers it so
+   * its models enter the catalogue and can be granted, and each Business Unit
+   * supplies its own credential. Such a connection is real and grantable but
+   * cannot serve a run, which is a different state from "no connection at all"
+   * — the first says the organisation approved this provider, the second says
+   * nobody has. Defaults true so a connection that predates the field reads as
+   * keyed, which every existing one is.
+   */
+  hasKey: z.boolean().default(true),
   last_verified_at: z.string().nullable(),
   created_at: z.string().nullable(),
   offerings: z.array(ModelOffering),

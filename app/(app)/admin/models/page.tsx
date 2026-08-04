@@ -922,7 +922,11 @@ function AddProviderDialog({
       Number(m.output) >= 0,
   );
 
-  const sharedValid = displayName.trim().length > 0 && apiKey.trim().length > 0;
+  // The KEY IS OPTIONAL. Registering a provider without one is a real choice:
+  // its models enter the catalogue and can be granted, and each Business Unit
+  // brings its own secret. Demanding a key here made that impossible, so an
+  // organisation approving a provider it does not itself pay for had no route.
+  const sharedValid = displayName.trim().length > 0;
   // A `specific` grant that names nobody would credential models no one can
   // use — a silent no-op that reads as a failed save.
   const grantValid = !grantableWorkspaces || visibility === "global" || grantedUnits.length > 0;
@@ -1130,15 +1134,23 @@ function AddProviderDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="api-key">API key</Label>
+            <Label htmlFor="api-key">
+              API key{" "}
+              <span className="text-muted-foreground/60 font-normal normal-case">(optional)</span>
+            </Label>
             <Input
               id="api-key"
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-…"
+              placeholder="sk-… — leave blank to let each unit bring its own"
               autoComplete="off"
             />
+            <p className="text-muted-foreground text-[11.5px]">
+              {apiKey.trim().length > 0
+                ? "The platform pays for these models — no business unit needs a key."
+                : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
+            </p>
           </div>
 
           <div className="space-y-1.5">
@@ -1388,6 +1400,14 @@ function EditProviderDialog({
   const [enabled, setEnabled] = React.useState<Record<string, boolean>>({});
   const [modelQuery, setModelQuery] = React.useState("");
   const [pending, setPending] = React.useState(false);
+  // Rotation only: the stored secret is never read back, so this starts empty
+  // and an empty value means "leave it alone" rather than "clear it".
+  const [newKey, setNewKey] = React.useState("");
+  const [clearKey, setClearKey] = React.useState(false);
+  const [apiBase, setApiBase] = React.useState("");
+  const [rpm, setRpm] = React.useState("");
+  const [tpm, setTpm] = React.useState("");
+  const [costCap, setCostCap] = React.useState("");
 
   // Snapshot of the opened provider — used for dirty-checking and the default-model lock.
   // The org-wide default may only be disabled from the default radio, never from here,
@@ -1398,7 +1418,15 @@ function EditProviderDialog({
     for (const o of provider.offerings) if (o.enabled) enabledMap[o.model_id] = true;
     const lockedModelId =
       provider.offerings.find((o) => o.is_default && o.enabled)?.model_id ?? null;
-    return { displayName: provider.display_name, enabledKeys: Object.keys(enabledMap).sort(), lockedModelId };
+    const first = provider.offerings.find((o) => o.enabled) ?? provider.offerings[0];
+    return {
+      displayName: provider.display_name,
+      enabledKeys: Object.keys(enabledMap).sort(),
+      lockedModelId,
+      rpm: first?.rpm_limit != null ? String(first.rpm_limit) : "",
+      tpm: first?.tpm_limit != null ? String(first.tpm_limit) : "",
+      cost: first?.cost_limit_usd != null ? String(first.cost_limit_usd) : "",
+    };
   }, [provider]);
 
   // Re-seed the form each time a different provider is opened.
@@ -1410,6 +1438,15 @@ function EditProviderDialog({
     setEnabled(seed);
     setModelQuery("");
     setPending(false);
+    setNewKey("");
+    setClearKey(false);
+    setApiBase(provider.api_base ?? "");
+    // Limits are per-offering but set connection-wide, so the first enabled
+    // offering is a faithful reading of the connection's current setting.
+    const first = provider.offerings.find((o) => o.enabled) ?? provider.offerings[0];
+    setRpm(first?.rpm_limit != null ? String(first.rpm_limit) : "");
+    setTpm(first?.tpm_limit != null ? String(first.tpm_limit) : "");
+    setCostCap(first?.cost_limit_usd != null ? String(first.cost_limit_usd) : "");
   }, [provider]);
 
   const models = provider
@@ -1424,10 +1461,19 @@ function EditProviderDialog({
     .map(([k]) => k);
 
   const trimmedName = displayName.trim();
+  const limitsDirty =
+    !!provider &&
+    (apiBase.trim() !== (provider.api_base ?? "") ||
+      rpm !== (original?.rpm ?? "") ||
+      tpm !== (original?.tpm ?? "") ||
+      costCap !== (original?.cost ?? ""));
   const dirty =
     !!original &&
     (trimmedName !== original.displayName ||
-      enabledModels.slice().sort().join(" ") !== original.enabledKeys.join(" "));
+      enabledModels.slice().sort().join(" ") !== original.enabledKeys.join(" ") ||
+      newKey.trim().length > 0 ||
+      clearKey ||
+      limitsDirty);
 
   const canSubmit = trimmedName.length > 0 && enabledModels.length > 0 && dirty;
   const lockedModelId = original?.lockedModelId ?? null;
@@ -1436,9 +1482,17 @@ function EditProviderDialog({
     if (!provider || !canSubmit || pending) return;
     setPending(true);
     try {
+      const num = (v: string) => (v.trim() === "" ? null : Number(v));
       await updateModelProvider(provider.id, {
         display_name: trimmedName,
         enabled_models: enabledModels,
+        // undefined = untouched. Only an explicit rotation or clear is sent,
+        // so saving a rename never disturbs the stored secret.
+        api_key: clearKey ? "" : newKey.trim() ? newKey.trim() : undefined,
+        api_base: apiBase.trim() || null,
+        rpm_limit: num(rpm),
+        tpm_limit: num(tpm),
+        cost_limit_usd: num(costCap),
       });
       toast.success("Provider updated");
       onSaved();
@@ -1458,8 +1512,9 @@ function EditProviderDialog({
         <DialogHeader>
           <DialogTitle className="font-display">Edit {provider?.display_name}</DialogTitle>
           <DialogDescription>
-            Rename this connection or change which models it offers. The provider and API key
-            can&apos;t be changed here &mdash; remove and re-add to rotate the key.
+            Rename this subscription, rotate its key, point it at a different endpoint, change
+            which models it offers, or adjust its limits. The provider itself can&apos;t change
+            &mdash; that would be a different subscription.
           </DialogDescription>
         </DialogHeader>
 
@@ -1470,8 +1525,100 @@ function EditProviderDialog({
               id="edit-display-name"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Anthropic (production)"
+              placeholder="e.g. Anthropic — Payments enterprise"
             />
+          </div>
+
+          {/* ── Credential ─────────────────────────────────────────────────
+              The stored secret is never read back, so this is rotation only:
+              blank leaves it alone. "Remove the key" is offered explicitly
+              because a connection with no key is a valid state, not a
+              half-finished one — the models stay grantable and go inert. */}
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-api-key">
+              API key{" "}
+              <span className="text-muted-foreground/60 font-normal normal-case">
+                {provider?.hasKey ? "(leave blank to keep)" : "(none stored)"}
+              </span>
+            </Label>
+            <Input
+              id="edit-api-key"
+              type="password"
+              value={newKey}
+              disabled={clearKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              placeholder={provider?.hasKey ? "Enter a new key to rotate" : "sk-…"}
+              autoComplete="off"
+            />
+            {provider?.hasKey && (
+              <label className="text-muted-foreground flex items-center gap-2 text-[11.5px]">
+                <Checkbox
+                  checked={clearKey}
+                  onCheckedChange={(v) => {
+                    setClearKey(v === true);
+                    if (v === true) setNewKey("");
+                  }}
+                />
+                Remove the key — units bring their own
+              </label>
+            )}
+            {(newKey.trim().length > 0 || clearKey) && (
+              <p className="text-warning text-[11.5px]">
+                Changing the key resets this connection to unverified — test it after saving.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-api-base">
+              API base{" "}
+              <span className="text-muted-foreground/60 font-normal normal-case">(optional)</span>
+            </Label>
+            <Input
+              id="edit-api-base"
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+              placeholder="https://your-gateway.internal/v1"
+              autoComplete="off"
+              className="font-mono"
+            />
+          </div>
+
+          {/* ── Limits ─────────────────────────────────────────────────────
+              Applied to every model on this subscription, which is how they
+              were set at creation. Blank means no limit — an empty field and a
+              zero are different answers and must not collapse. */}
+          <div className="space-y-1.5">
+            <Label>Usage limits</Label>
+            <div className="grid grid-cols-3 gap-2">
+              <Input
+                aria-label="Requests per minute"
+                inputMode="numeric"
+                value={rpm}
+                onChange={(e) => setRpm(e.target.value)}
+                placeholder="RPM"
+                className="font-mono text-[12px]"
+              />
+              <Input
+                aria-label="Tokens per minute"
+                inputMode="numeric"
+                value={tpm}
+                onChange={(e) => setTpm(e.target.value)}
+                placeholder="TPM"
+                className="font-mono text-[12px]"
+              />
+              <Input
+                aria-label="Monthly cost cap in USD"
+                inputMode="decimal"
+                value={costCap}
+                onChange={(e) => setCostCap(e.target.value)}
+                placeholder="$ / month"
+                className="font-mono text-[12px]"
+              />
+            </div>
+            <p className="text-muted-foreground text-[11.5px]">
+              Blank means no limit. Applied to every model on this subscription.
+            </p>
           </div>
 
           {models.length > 0 && (
