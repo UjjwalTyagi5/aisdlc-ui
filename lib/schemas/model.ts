@@ -21,6 +21,18 @@ export type ModelProviderStatus = z.infer<typeof ModelProviderStatus>;
 export const ModelAllowEntry = z.object({
   provider: ModelProviderKind,
   model_id: z.string(),
+  /**
+   * Which subscription serves it.
+   *
+   * The same model can be offered by two keys with different endpoints, rates
+   * and limits — an EU gateway and a US one are not interchangeable, so the
+   * pair (model, credential) is the real unit of access, not the model alone.
+   * Null means "whichever key the provider has", which is every entry that
+   * predates a second subscription existing.
+   */
+  credentialId: z.string().nullable().optional(),
+  /** Human name of that subscription, for pickers that must tell two apart. */
+  credentialName: z.string().nullable().optional(),
 });
 export type ModelAllowEntry = z.infer<typeof ModelAllowEntry>;
 
@@ -43,6 +55,15 @@ export type ModelAllowEntry = z.infer<typeof ModelAllowEntry>;
 export const OrgModelGrant = z.object({
   provider: ModelProviderKind,
   model_id: z.string(),
+  /**
+   * The subscription this grant is for. Null = any key the provider holds,
+   * which is what every grant meant before a provider could hold two.
+   *
+   * This is what lets the SAME model be granted twice — Sonnet on the shared
+   * platform key for everyone, Sonnet on the EU gateway for one unit — as two
+   * grants that do not overwrite each other.
+   */
+  credentialId: z.string().nullable().optional(),
   visibility: GrantVisibility.default("global"),
   /** Meaningful only when `visibility === "specific"`. */
   businessUnitIds: z.array(z.string()).default([]),
@@ -62,6 +83,8 @@ export type OrgModelGrant = z.infer<typeof OrgModelGrant>;
 export const ModelAvailability = z.object({
   provider: ModelProviderKind,
   model_id: z.string(),
+  credentialId: z.string().nullable().optional(),
+  credentialName: z.string().nullable().optional(),
   visibility: GrantVisibility,
   /** An org-wide, active provider connection already offers this model. */
   centrallyCredentialed: z.boolean(),
@@ -96,6 +119,9 @@ export type ModelUnitAccess = z.infer<typeof ModelUnitAccess>;
 export const ModelGrantMatrixRow = z.object({
   provider: ModelProviderKind,
   model_id: z.string(),
+  /** One row per (model, subscription). Null when no key offers it yet. */
+  credentialId: z.string().nullable(),
+  credentialName: z.string().nullable(),
   granted: z.boolean(),
   visibility: GrantVisibility.nullable(),
   /** An org-wide, active provider connection already offers this model, so no

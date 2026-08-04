@@ -24,6 +24,8 @@ export interface ProjectModelOption {
   key: string;
   provider: string;
   model_id: string;
+  /** Which subscription serves it — shown only when two serve the same model. */
+  credentialName?: string | null;
   /** False when nobody has supplied a key for it — selectable but inert. */
   credentialed: boolean;
   /** True when it came from the BU's grant rather than the project's own pick. */
@@ -114,6 +116,7 @@ export function ModelPicker({
         key,
         provider: e.provider,
         model_id: e.model_id,
+        credentialName: e.credentialName ?? null,
         // Availability not loaded yet must not read as "no key" — that would
         // grey out every option for a frame and look like a broken page.
         credentialed: availabilityQ.data ? credentialedKeys.has(key) : true,
@@ -235,6 +238,14 @@ export function ModelPicker({
                   {o.provider}
                 </span>
                 <span className="truncate font-mono text-[12.5px]">{o.model_id}</span>
+              {/* Named only when it distinguishes: two keys serving the same
+                  model are a real choice, one key is noise. */}
+              {o.credentialName &&
+                options.filter((x) => x.model_id === o.model_id).length > 1 && (
+                  <span className="text-muted-foreground shrink-0 truncate text-[11px]">
+                    {o.credentialName}
+                  </span>
+                )}
                 {o.inherited && (
                   <span className="text-muted-foreground border-line-soft ml-auto shrink-0 rounded-full border px-1.5 py-px font-mono text-[9px] tracking-wide uppercase">
                     Inherited

@@ -84,10 +84,24 @@ export interface OrchestratorSession {
   status: SessionStatus;
 }
 
-export const modelKeyOf = (e: { provider: string; model_id: string }) =>
-  `${e.provider}::${e.model_id}`;
+/**
+ * Identifies a runnable model — provider, model, and WHICH SUBSCRIPTION.
+ *
+ * The credential is part of the identity because the same model can be served
+ * by two keys with different endpoints, rates and limits. Keying on
+ * provider+model alone made those one option, so a run could silently land on
+ * the wrong contract — or the wrong region.
+ *
+ * The trailing segment is empty for an entry with no named subscription, which
+ * keeps every key written before a provider could hold two parsing unchanged.
+ */
+export const modelKeyOf = (e: {
+  provider: string;
+  model_id: string;
+  credentialId?: string | null;
+}) => `${e.provider}::${e.model_id}::${e.credentialId ?? ""}`;
 
 export const splitModelKey = (key: string) => {
-  const [provider = "", model_id = ""] = key.split("::");
-  return { provider, model_id };
+  const [provider = "", model_id = "", credentialId = ""] = key.split("::");
+  return { provider, model_id, credentialId: credentialId || null };
 };

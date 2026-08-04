@@ -36,7 +36,8 @@ const PROVIDER_LABEL: Record<string, string> = {
 const usd = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
-const keyOf = (provider: string, modelId: string) => `${provider}::${modelId}`;
+const keyOf = (provider: string, modelId: string, credentialId?: string | null) =>
+  `${provider}::${modelId}::${credentialId ?? ""}`;
 
 /**
  * One provider, in full.
@@ -95,24 +96,29 @@ export default function ProviderDetailPage() {
     return m;
   }, [spendQ.data]);
 
-  const providerSpend = React.useMemo(
-    () => rows.reduce((a, r) => a + (spendByModel.get(r.model_id) ?? 0), 0),
-    [rows, spendByModel],
-  );
-
   /**
-   * Which credential serves a model.
+   * Summed over DISTINCT models, not rows.
    *
-   * A model can legitimately appear on more than one — two keys covering the
-   * same model is a valid setup — so this returns all of them rather than the
-   * first. Naming only the first would make a second key invisible in exactly
-   * the configuration this screen exists to explain.
+   * Spend is recorded per model; a model served by two subscriptions has two
+   * rows but one bill. Summing rows counted it twice and inflated the provider
+   * total — the exact class of double-count this page exists to avoid.
    */
-  const credentialsFor = React.useCallback(
-    (modelId: string) =>
-      credentials.filter((c) => c.offerings.some((o) => o.enabled && o.model_id === modelId)),
-    [credentials],
-  );
+  const providerSpend = React.useMemo(() => {
+    const seen = new Set<string>();
+    return rows.reduce((a, r) => {
+      if (seen.has(r.model_id)) return a;
+      seen.add(r.model_id);
+      return a + (spendByModel.get(r.model_id) ?? 0);
+    }, 0);
+  }, [rows, spendByModel]);
+
+  /** Models served by more than one subscription — their spend is not
+   *  attributable to a single key, and the row must say so. */
+  const sharedModels = React.useMemo(() => {
+    const count = new Map<string, number>();
+    for (const r of rows) count.set(r.model_id, (count.get(r.model_id) ?? 0) + 1);
+    return new Set([...count.entries()].filter(([, n]) => n > 1).map(([id]) => id));
+  }, [rows]);
 
   const saveM = useMutation({
     mutationFn: (entries: OrgModelGrant[]) => setOrgModelGrants(entries),
@@ -127,10 +133,10 @@ export default function ProviderDetailPage() {
   });
 
   function toggleCell(row: ModelGrantMatrixRow, unitId: string) {
-    const k = keyOf(row.provider, row.model_id);
+    const k = keyOf(row.provider, row.model_id, row.credentialId);
     saveM.mutate(
       grants.map((g) => {
-        if (keyOf(g.provider, g.model_id) !== k) return g;
+        if (keyOf(g.provider, g.model_id, g.credentialId) !== k) return g;
         const has = g.businessUnitIds.includes(unitId);
         return {
           ...g,
@@ -142,9 +148,11 @@ export default function ProviderDetailPage() {
     );
   }
 
+  /** Revokes THIS subscription's grant, not the model everywhere — the other
+   *  key's grant is a separate decision and survives. */
   function revokeModel(row: ModelGrantMatrixRow) {
-    const k = keyOf(row.provider, row.model_id);
-    saveM.mutate(grants.filter((g) => keyOf(g.provider, g.model_id) !== k));
+    const k = keyOf(row.provider, row.model_id, row.credentialId);
+    saveM.mutate(grants.filter((g) => keyOf(g.provider, g.model_id, g.credentialId) !== k));
   }
 
   if (role !== null && role !== "org_admin") {
@@ -285,9 +293,8 @@ export default function ProviderDetailPage() {
                     <tbody className="divide-line-soft divide-y">
                       {rows.map((row) => {
                         const isGlobal = row.visibility === "global";
-                        const serving = credentialsFor(row.model_id);
                         return (
-                          <tr key={row.model_id}>
+                          <tr key={`${row.model_id}::${row.credentialId ?? ""}`}>
                             <td className="py-2.5 pr-3">
                               <div className="flex flex-wrap items-center gap-2">
                                 <span className="font-mono text-[12px]">{row.model_id}</span>
@@ -306,17 +313,24 @@ export default function ProviderDetailPage() {
 
                             <td className="px-2 py-2.5 text-right font-mono text-[12px] tabular-nums">
                               {spendQ.data ? usd(spendByModel.get(row.model_id) ?? 0) : "—"}
+                              {sharedModels.has(row.model_id) && (
+                                // The figure is the MODEL's, not this key's —
+                                // usage is not recorded per subscription, and
+                                // printing it unqualified on two rows would
+                                // read as twice the money.
+                                <span className="text-muted-foreground ml-1 block font-sans text-[10px] font-normal">
+                                  across all keys
+                                </span>
+                              )}
                             </td>
 
                             <td className="px-2 py-2.5">
-                              {serving.length === 0 ? (
+                              {row.credentialName ? (
+                                <span className="text-[11.5px]">{row.credentialName}</span>
+                              ) : (
                                 <span className="text-warning inline-flex items-center gap-1 font-mono text-[10px] tracking-wide uppercase">
                                   <KeyRound className="size-2.5" aria-hidden />
                                   No key
-                                </span>
-                              ) : (
-                                <span className="text-[11.5px]">
-                                  {serving.map((c) => c.display_name).join(", ")}
                                 </span>
                               )}
                             </td>

@@ -124,23 +124,40 @@ function isNamedEntry(entry: ModelAllowEntry): boolean {
  * as a dead one.
  */
 let ORG_GRANTS: OrgModelGrant[] = [
-  { provider: "anthropic", model_id: "claude-sonnet-4-6", visibility: "global", businessUnitIds: [] },
-  { provider: "anthropic", model_id: "claude-haiku-4-5", visibility: "global", businessUnitIds: [] },
+  { provider: "anthropic", model_id: "claude-sonnet-4-6", credentialId: "prov_anthropic", visibility: "global", businessUnitIds: [] },
+  { provider: "anthropic", model_id: "claude-haiku-4-5", credentialId: "prov_anthropic", visibility: "global", businessUnitIds: [] },
   {
     provider: "anthropic",
     model_id: "claude-opus-4-7",
+    credentialId: "prov_anthropic_ent",
     visibility: "specific",
     businessUnitIds: ["ws_payments"],
   },
   {
+    provider: "anthropic",
+    model_id: "claude-sonnet-4-6",
+    credentialId: "prov_anthropic_eu",
+    visibility: "specific",
+    businessUnitIds: ["ws_lending"],
+  },
+  {
     provider: "openai",
     model_id: "gpt-5.1",
+    credentialId: "prov_openai_lending",
     visibility: "specific",
     businessUnitIds: ["ws_lending", "ws_payments"],
   },
 ];
 
-const entryKey = (e: { provider: string; model_id: string }) => `${e.provider}::${e.model_id}`;
+/**
+ * A grant's identity is (provider, model, subscription).
+ *
+ * Keying on provider+model alone meant a second key for the same model
+ * overwrote the first — which is exactly why Sonnet could not be granted twice.
+ * The empty segment is the legacy "any key" grant.
+ */
+const entryKey = (e: { provider: string; model_id: string; credentialId?: string | null }) =>
+  `${e.provider}::${e.model_id}::${e.credentialId ?? ""}`;
 
 export function getOrgModelGrants(): OrgModelGrant[] {
   return ORG_GRANTS.map((g) => ({ ...g, businessUnitIds: [...g.businessUnitIds] }));
@@ -159,6 +176,7 @@ export function setOrgModelGrants(grants: OrgModelGrant[]): OrgModelGrant[] {
       {
         provider: g.provider,
         model_id: g.model_id,
+        credentialId: g.credentialId ?? null,
         visibility: g.visibility,
         businessUnitIds: g.visibility === "specific" ? [...new Set(g.businessUnitIds)] : [],
       },
@@ -179,6 +197,10 @@ export function getBuAllowedModels(workspaceId: string): ModelAllowEntry[] {
   return ORG_GRANTS.filter((g) => grantReaches(g, workspaceId)).map((g) => ({
     provider: g.provider,
     model_id: g.model_id,
+    credentialId: g.credentialId ?? null,
+    credentialName: g.credentialId
+      ? (PROVIDERS.find((p) => p.id === g.credentialId)?.display_name ?? null)
+      : null,
   }));
 }
 
@@ -214,13 +236,24 @@ export function setBuModelGrants(workspaceId: string, entries: ModelAllowEntry[]
  * key before it can be used. See `ModelAvailability`.
  */
 export function getBuModelAvailability(workspaceId: string): ModelAvailability[] {
-  return ORG_GRANTS.filter((g) => grantReaches(g, workspaceId)).map((g) => ({
-    provider: g.provider,
-    model_id: g.model_id,
-    visibility: g.visibility,
-    centrallyCredentialed: hasCredentialFor(null, g.provider, g.model_id),
-    locallyCredentialed: hasCredentialFor(workspaceId, g.provider, g.model_id),
-  }));
+  return ORG_GRANTS.filter((g) => grantReaches(g, workspaceId)).map((g) => {
+    const cred = g.credentialId
+      ? PROVIDERS.find((p) => p.id === g.credentialId)
+      : undefined;
+    return {
+      provider: g.provider,
+      model_id: g.model_id,
+      credentialId: g.credentialId ?? null,
+      credentialName: cred?.display_name ?? null,
+      visibility: g.visibility,
+      // Named subscription → that key's own state decides. Only a keyed,
+      // org-wide one relieves the unit of bringing its own.
+      centrallyCredentialed: cred
+        ? cred.workspaceId === null && cred.hasKey && cred.approvalStatus === "active"
+        : hasCredentialFor(null, g.provider, g.model_id),
+      locallyCredentialed: hasCredentialFor(workspaceId, g.provider, g.model_id),
+    };
+  });
 }
 
 /**
@@ -254,22 +287,44 @@ export function getModelGrantMatrix(): {
   const byKey = new Map(ORG_GRANTS.map((g) => [entryKey(g), g]));
 
   const rows = getModelCatalog().flatMap((cp) =>
-    cp.models.map((m) => {
-      const grant = byKey.get(`${cp.provider}::${m.model_id}`);
-      const central = hasCredentialFor(null, cp.provider, m.model_id);
-      return {
-        provider: cp.provider,
-        model_id: m.model_id,
-        granted: !!grant,
-        visibility: grant ? grant.visibility : null,
-        centrallyCredentialed: central,
-        units: units.map((u) => ({
-          id: u.id,
-          name: u.name,
-          hasAccess: grant ? grantReaches(grant, u.id) : false,
-          locallyCredentialed: hasCredentialFor(u.id, cp.provider, m.model_id),
-        })),
+    cp.models.flatMap((m) => {
+      // Every subscription that offers this model. Two keys serving the same
+      // model produce TWO rows — they are different endpoints, rates and
+      // limits, so collapsing them would hide a choice that has consequences.
+      const serving = PROVIDERS.filter(
+        (p) =>
+          p.provider === cp.provider &&
+          p.approvalStatus === "active" &&
+          p.offerings.some((o) => o.enabled && o.model_id === m.model_id),
+      );
+
+      const build = (cred: (typeof PROVIDERS)[number] | null) => {
+        const grant =
+          byKey.get(`${cp.provider}::${m.model_id}::${cred?.id ?? ""}`) ??
+          // Legacy grants carry no credential; they apply whichever key serves.
+          byKey.get(`${cp.provider}::${m.model_id}::`);
+        return {
+          provider: cp.provider,
+          model_id: m.model_id,
+          credentialId: cred?.id ?? null,
+          credentialName: cred?.display_name ?? null,
+          granted: !!grant,
+          visibility: grant ? grant.visibility : null,
+          // A subscription with no secret cannot serve a run, so it is not a
+          // central credential however org-wide it is.
+          centrallyCredentialed: !!cred && cred.workspaceId === null && cred.hasKey,
+          units: units.map((u) => ({
+            id: u.id,
+            name: u.name,
+            hasAccess: grant ? grantReaches(grant, u.id) : false,
+            locallyCredentialed: hasCredentialFor(u.id, cp.provider, m.model_id),
+          })),
+        };
       };
+
+      // No key at all → still one row, so the model can be granted and go
+      // inert rather than disappearing from the screen that governs it.
+      return serving.length === 0 ? [build(null)] : serving.map(build);
     }),
   );
 
@@ -470,6 +525,29 @@ const PROVIDERS: ModelProvider[] = [
     approvalReason: null,
     offerings: [
       { id: "off_anthropic_opus", provider_id: "prov_anthropic_ent", model_id: "claude-opus-4-7", enabled: true, is_default: false, input_price_per_million: 15, output_price_per_million: 75, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
+  {
+    // THE CASE THIS EXISTS FOR: the same model on a second key, different
+    // endpoint. Sonnet is served both by the shared platform contract and by
+    // an EU-resident gateway — not interchangeable, so both are offered and
+    // whoever runs it chooses.
+    id: "prov_anthropic_eu",
+    provider: "anthropic",
+    display_name: "Anthropic — EU gateway",
+    status: "valid",
+    api_base: "https://eu.anthropic-gateway.internal/v1",
+    is_custom: false,
+    hasKey: true,
+    last_verified_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString(),
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_anthropic_eu_sonnet", provider_id: "prov_anthropic_eu", model_id: "claude-sonnet-4-6", enabled: true, is_default: false, input_price_per_million: 3.3, output_price_per_million: 16, rpm_limit: 600, tpm_limit: null, cost_limit_usd: null },
     ],
   },
   {
