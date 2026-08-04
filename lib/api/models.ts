@@ -18,6 +18,10 @@ import { api } from "./client";
 export const getModelCatalog = () => api("/model/catalog", { schema: z.array(CatalogProvider) });
 
 /** null/omitted = org-wide providers; a workspace id = that BU's scoped providers. */
+/** Every connection the caller may see — org-wide AND unit-scoped. */
+export const listAllModelProviders = () =>
+  api("/model/providers", { query: { scope: "all" }, schema: z.array(ModelProvider) });
+
 export const listModelProviders = (workspaceId?: string | null) =>
   api("/model/providers", {
     query: { workspaceId: workspaceId || undefined },

@@ -91,6 +91,7 @@ import {
   getBuModelAvailability,
   getModelCatalog,
   getModelGrantMatrix,
+  listAllModelProviders,
   getOrgModelGrants,
   getProjectModelSelection,
   listModelProviders,
@@ -885,9 +886,17 @@ export const handlers = [
     );
   }),
 
-  http.get("/api/model/providers", async ({ request }) => {
+  http.get("/api/model/providers", async ({ request, cookies }) => {
     await lag();
     const url = new URL(request.url);
+    // Mirrors the route's `scope=all` — see that file for why one scope
+    // cannot answer "which providers is this organization using".
+    if (url.searchParams.get("scope") === "all") {
+      const scope = scopeFromCookies(cookies);
+      return HttpResponse.json(
+        listAllModelProviders(scope.isOrgWide ? null : scope.businessUnitIds),
+      );
+    }
     const workspaceId = url.searchParams.get("workspaceId");
     return HttpResponse.json(listModelProviders(workspaceId || null));
   }),

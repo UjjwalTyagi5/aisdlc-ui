@@ -56,6 +56,7 @@ import {
   deleteModelProvider,
   getBuAllowedModels,
   getModelCatalog,
+  listAllModelProviders,
   listModelProviders,
   setModelDefault,
   updateModelProvider,
@@ -138,8 +139,11 @@ export default function ModelProvidersPage() {
     queries: isOrg
       ? [
           {
-            queryKey: qk.model.providers(null),
-            queryFn: () => listModelProviders(null),
+            // EVERY connection, not just org-wide. Asking for one scope made a
+            // subscription onboarded by a Business Unit invisible here, so the
+            // page answered "which providers are we using" with only half.
+            queryKey: qk.model.providers("all"),
+            queryFn: () => listAllModelProviders(),
             staleTime: 0,
           },
         ]
