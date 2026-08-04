@@ -23,7 +23,7 @@ import {
 import { useCan } from "@/hooks/use-can";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { NoScopeAccess } from "@/components/auth/scope-empty-state";
 import { archiveProject, listProjects, restoreProject } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
@@ -102,7 +102,6 @@ export default function ProjectsPage() {
   const { data: workspaces = [] } = useWorkspaces();
   const {
     scope,
-    role,
     level,
     isOrgWide,
     managedProjectIds,
@@ -238,7 +237,6 @@ export default function ProjectsPage() {
                 name={scopeName}
                 size="sm"
               />
-              <PersonaBadge role={role} />
             </div>
           )}
 

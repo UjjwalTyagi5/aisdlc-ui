@@ -30,9 +30,8 @@ import {
   budgetTone,
   usd,
 } from "@/components/app/stat-tile";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { SpendPanel } from "@/components/app/spend-panel";
-import { ActiveBadge } from "@/components/app/active-badge";
 import { NoScopeAccess } from "@/components/auth/scope-empty-state";
 import { useSession } from "@/hooks/use-session";
 import { useWorkspaces } from "@/hooks/use-workspaces";
@@ -47,6 +46,7 @@ import { TRACK_META } from "@/lib/tracks";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { listApprovals } from "@/lib/api/approvals";
 import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
+import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
 import { listConnectors } from "@/lib/api/connectors";
 import { listProjects } from "@/lib/api/projects";
 import { getOrgOverview } from "@/lib/api/org";
@@ -161,7 +161,7 @@ export default function DashboardPage() {
     [approvalsQ.data, isGovernanceTier],
   );
   const governanceApprovals = React.useMemo(
-    () => (governanceQ.data ?? []).filter((g) => g.status === "pending"),
+    () => (governanceQ.data ?? []).filter((g) => OPEN_REQUEST_STATUSES.includes(g.status)),
     [governanceQ.data],
   );
   const connectors = React.useMemo(() => connectorsQ.data ?? [], [connectorsQ.data]);
@@ -319,9 +319,13 @@ export default function DashboardPage() {
           animationFillMode: "both",
         }}
       >
+        {/* A fixed section eyebrow, not the role name. Printing the role here
+            made it the third statement of the same fact in one header — beside
+            the persona badge below and the account menu above — and an eyebrow
+            is a place marker, not a status readout. */}
         <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
           <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          {role ? ROLE_META[role].label : "Overview"}
+          Overview
         </div>
         <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
           Dashboard
@@ -337,7 +341,6 @@ export default function DashboardPage() {
               name={contextName}
               size="sm"
             />
-            <PersonaBadge role={role} showScope />
           </div>
         )}
 
@@ -466,8 +469,44 @@ export default function DashboardPage() {
             <SpendPanel workspaces={units.map((w) => ({ id: String(w.id), displayName: w.displayName }))} />
           )}
 
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.55fr_1fr]">
-            {/* ── Work in progress ──────────────────────────────────────── */}
+          {/* The way through to the unit directory, which the removed Business
+              Units list used to provide. The chart above names every unit in
+              its legend and filter, so this is the only thing that list carried
+              which the chart does not. */}
+          {isOrg && (
+            <div className="-mt-2 flex justify-end">
+              <Link
+                href="/workspaces"
+                className="text-muted-foreground hover:text-foreground font-mono text-[11px] transition-colors"
+              >
+                View all {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} →
+              </Link>
+            </div>
+          )}
+
+          {/* Two columns only when there is a list to sit beside the attention
+              feed. The Organization Admin no longer has one — see below — so
+              their attention list takes the full width instead of being pinned
+              into a 1fr column beside empty space. */}
+          <div
+            className={cn(
+              "grid grid-cols-1 gap-6",
+              !isOrg && "lg:grid-cols-[1.55fr_1fr]",
+            )}
+          >
+            {/* ── Work in progress ──────────────────────────────────────────
+                Not rendered for the Organization Admin.
+
+                It listed every Business Unit with its spend and budget bar,
+                directly beneath a chart plotting the same spend per unit over
+                six months — the unit's current figure was the chart's last bar,
+                restated. The unit directory it also carried (project and member
+                counts, cost centre) lives on /workspaces, which the chart's own
+                header now links to.
+
+                Every other variant still gets this: for them it lists PROJECTS,
+                which nothing else on the page shows. */}
+            {!isOrg && (
             <section
               aria-labelledby="wip-heading"
               className="border-line-soft bg-panel-elevated rounded-xl border"
@@ -477,96 +516,17 @@ export default function DashboardPage() {
                   id="wip-heading"
                   className="font-display text-[13px] font-semibold tracking-tight"
                 >
-                  {isOrg
-                    ? BUSINESS_UNIT_LABEL_PLURAL
-                    : variant === "contributor"
-                      ? "Your work in progress"
-                      : "Work in progress"}
+                  {variant === "contributor" ? "Your work in progress" : "Work in progress"}
                 </h2>
                 <Link
-                  href={isOrg ? "/workspaces" : "/projects"}
+                  href="/projects"
                   className="text-muted-foreground hover:text-foreground font-mono text-[11px] transition-colors"
                 >
                   View all →
                 </Link>
               </div>
 
-              {/* Organization Admin sees every unit with budget usage and
-                  project count (PRD §15.2). */}
-              {isOrg ? (
-                units.length === 0 ? (
-                  <EmptyState
-                    icon={Building2}
-                    title={`No ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet`}
-                    description="Create the first business unit to give budgets, connections and projects a home."
-                  />
-                ) : (
-                  <ul className="divide-line-soft divide-y">
-                    {units.map((w) => {
-                      const cap = w.monthlyBudgetUsd ?? 0;
-                      const ratio = cap > 0 ? w.monthlySpendUsd / cap : 0;
-                      return (
-                        <li key={w.id}>
-                          <Link
-                            href={`/workspaces/${w.id}`}
-                            className="hover:bg-surface-1 flex items-center gap-4 px-4 py-3 transition-colors"
-                          >
-                            <span className="min-w-0 flex-1">
-                              <span className="flex items-center gap-2 text-[13px] font-medium">
-                                {w.displayName}
-                                <ActiveBadge isActive={w.isActive} />
-                              </span>
-                              <span className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 text-[11.5px]">
-                                <span>{w.projectCount} projects</span>
-                                <span aria-hidden>·</span>
-                                <span>{w.memberCount} members</span>
-                                {w.costCenter && (
-                                  <>
-                                    <span aria-hidden>·</span>
-                                    <span className="font-mono">{w.costCenter}</span>
-                                  </>
-                                )}
-                              </span>
-                            </span>
-
-                            <span className="w-32 shrink-0 text-right">
-                              <span
-                                className={cn(
-                                  "block font-mono text-[12px]",
-                                  ratio >= 1
-                                    ? "text-destructive"
-                                    : ratio >= 0.8
-                                      ? "text-warning"
-                                      : "text-foreground",
-                                )}
-                              >
-                                {usd(w.monthlySpendUsd)}
-                              </span>
-                              {cap > 0 && (
-                                <span className="bg-surface-2 mt-1.5 block h-1 w-full overflow-hidden rounded-full">
-                                  <span
-                                    className={cn(
-                                      "block h-full rounded-full",
-                                      ratio >= 1
-                                        ? "bg-destructive"
-                                        : ratio >= 0.8
-                                          ? "bg-warning"
-                                          : "bg-primary",
-                                    )}
-                                    style={{
-                                      width: `${Math.min(100, ratio * 100)}%`,
-                                    }}
-                                  />
-                                </span>
-                              )}
-                            </span>
-                          </Link>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )
-              ) : projects.length === 0 ? (
+              {projects.length === 0 ? (
                 <EmptyState
                   icon={FolderKanban}
                   title={
@@ -651,6 +611,7 @@ export default function DashboardPage() {
                 </ul>
               )}
             </section>
+            )}
 
             {/* ── Attention list ────────────────────────────────────────── */}
             <AttentionList items={attention} />

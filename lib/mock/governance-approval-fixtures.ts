@@ -8,13 +8,53 @@
  * DUMMY-DATA source; a real backend governance service replaces the
  * route-handler bodies, not these shapes.
  */
+import { emitNotification } from "@/lib/mock/notification-fixtures";
+import { initialApproverRole, nextApproverRole } from "@/lib/requests/routing";
+import { ROLE_META, type PlatformRole } from "@/lib/roles";
 import type {
   GovernanceApproval,
   GovernanceApprovalDecision,
   GovernanceApprovalType,
+  RequestAttachment,
+  RequestEventKind,
+  RequestPriority,
+  RequestTimelineEvent,
 } from "@/lib/schemas/governance-approval";
 
 let nextId = 4;
+let nextEventId = 1;
+
+/** Append-only: every state change leaves a row, nothing is ever rewritten. */
+function event(
+  kind: RequestEventKind,
+  actor: string,
+  extra?: Partial<Pick<RequestTimelineEvent, "actorRole" | "toRole" | "note">>,
+  at?: string,
+): RequestTimelineEvent {
+  return {
+    id: `ev_${nextEventId++}`,
+    kind,
+    at: at ?? new Date().toISOString(),
+    actor,
+    actorRole: extra?.actorRole ?? null,
+    toRole: extra?.toRole ?? null,
+    note: extra?.note ?? null,
+  };
+}
+
+/** The opening two entries every seeded request shares. */
+function seedTimeline(
+  actor: string,
+  actorRole: PlatformRole,
+  toRole: PlatformRole,
+  atIso: string,
+): RequestTimelineEvent[] {
+  return [
+    event("created", actor, { actorRole }, atIso),
+    event("submitted", actor, { actorRole }, atIso),
+    event("assigned", "System", { toRole }, atIso),
+  ];
+}
 /**
  * Seeded pending approvals — one per Business Unit that has a governance
  * approver persona, so the "a Business Unit Admin sees only their own unit's
@@ -36,7 +76,7 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
   {
     id: "gov_1",
     type: "project_creation",
-    status: "pending",
+    status: "pending_review",
     workspaceId: "ws_lending",
     workspaceName: "Lending",
     projectId: "regional-alerts",
@@ -50,11 +90,25 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
     decidedAt: null,
     reason: null,
     targetRef: "regional-alerts",
+    requestedById: "idn_grace",
+    requestedByRole: "project_admin",
+    description:
+      "Lending needs a standalone greenfield web app for regional outage alerting, separate from the existing ledger work. Track 1, eight agents.",
+    priority: "normal",
+    attachments: [],
+    currentApproverRole: "bu_admin",
+    escalationCount: 0,
+    timeline: seedTimeline(
+      "Grace Hopper",
+      "project_admin",
+      "bu_admin",
+      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    ),
   },
   {
     id: "gov_2",
     type: "model_credential",
-    status: "pending",
+    status: "pending_review",
     workspaceId: "ws_platform",
     workspaceName: "Platform Engineering",
     projectId: "recon-bots",
@@ -68,11 +122,27 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
     decidedAt: null,
     reason: null,
     targetRef: "azure-openai-gpt4o",
+    requestedById: "idn_lena",
+    requestedByRole: "project_admin",
+    description:
+      "Reconciliation bots needs GPT-4o for the document-extraction stage. The shared Azure credential is already onboarded at the org; this asks for it to reach the project.",
+    priority: "high",
+    attachments: [
+      { name: "extraction-benchmark.pdf", sizeBytes: 512_000, contentType: "application/pdf" },
+    ],
+    currentApproverRole: "bu_admin",
+    escalationCount: 0,
+    timeline: seedTimeline(
+      "Lena Fischer",
+      "project_admin",
+      "bu_admin",
+      new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+    ),
   },
   {
     id: "gov_3",
     type: "budget_increase",
-    status: "pending",
+    status: "pending_review",
     workspaceId: "ws_payments",
     workspaceName: "Payments",
     projectId: null,
@@ -86,6 +156,22 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
     decidedAt: null,
     reason: null,
     targetRef: "ws_payments",
+    requestedById: "idn_marcus",
+    requestedByRole: "bu_admin",
+    description:
+      "Payments will breach its cap before the period closes. The overrun is driven by the SCA exemption defect triage, which was not in the original forecast.",
+    priority: "urgent",
+    attachments: [
+      { name: "payments-spend-forecast.xlsx", sizeBytes: 88_400, contentType: "application/vnd.ms-excel" },
+    ],
+    currentApproverRole: "org_admin",
+    escalationCount: 0,
+    timeline: seedTimeline(
+      "Marcus Reyes",
+      "bu_admin",
+      "org_admin",
+      new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
+    ),
   },
 ];
 
@@ -111,11 +197,22 @@ export function createGovernanceApproval(input: {
   requestedBy: string;
   targetRef: string;
   payload?: Record<string, unknown> | null;
+  // ── Hand-raised requests supply these; side-effect creates do not ─────────
+  requestedById?: string | null;
+  requestedByRole?: PlatformRole | null;
+  description?: string | null;
+  priority?: RequestPriority;
+  attachments?: RequestAttachment[];
 }): GovernanceApproval {
+  const requesterRole = input.requestedByRole ?? null;
+  // Routing decides the approver — never the caller. A create path that could
+  // name its own approver would be the hole every other rule here is guarding.
+  const approver = initialApproverRole(input.type, requesterRole);
+  const now = new Date().toISOString();
   const created: GovernanceApproval = {
     id: `gov_${nextId++}`,
     type: input.type,
-    status: "pending",
+    status: "pending_review",
     workspaceId: input.workspaceId,
     workspaceName: input.workspaceName,
     projectId: input.projectId ?? null,
@@ -129,9 +226,116 @@ export function createGovernanceApproval(input: {
     reason: null,
     targetRef: input.targetRef,
     payload: input.payload ?? null,
+    requestedById: input.requestedById ?? null,
+    requestedByRole: requesterRole,
+    description: input.description ?? null,
+    priority: input.priority ?? "normal",
+    attachments: input.attachments ?? [],
+    currentApproverRole: approver,
+    escalationCount: 0,
+    timeline: [
+      event("created", input.requestedBy, { actorRole: requesterRole }, now),
+      event("submitted", input.requestedBy, { actorRole: requesterRole }, now),
+      event("assigned", "System", { toRole: approver }, now),
+    ],
   };
   GOVERNANCE_APPROVALS.push(created);
+
+  // Emitted HERE rather than in the route handlers, so the Next route and the
+  // MSW mirror cannot drift into notifying differently — the transition and
+  // its notification are one thing.
+  emitNotification({
+    kind: "request_created",
+    title: "Request raised",
+    body: created.title,
+    href: "/approvals",
+    identityId: created.requestedById,
+  });
+  if (approver) {
+    emitNotification({
+      kind: "request_approval_required",
+      title: "Approval required",
+      body: `${created.requestedBy} raised "${created.title}".`,
+      href: "/approvals",
+      role: approver,
+    });
+  }
   return created;
+}
+
+/**
+ * Withdraw a request you raised.
+ *
+ * Only the initiator, and only while it is still open — a decided request is
+ * part of the record, and letting someone cancel one after the fact would make
+ * the audit trail editable by whoever the decision went against.
+ */
+export function cancelGovernanceApproval(
+  id: string,
+  actor: string,
+  actorIdentityId: string | null,
+  reason?: string,
+): GovernanceApproval | undefined | "forbidden" {
+  const item = GOVERNANCE_APPROVALS.find((a) => a.id === id);
+  if (!item) return undefined;
+  if (item.status === "approved" || item.status === "rejected" || item.status === "cancelled") {
+    return "forbidden";
+  }
+  if (item.requestedById && actorIdentityId && item.requestedById !== actorIdentityId) {
+    return "forbidden";
+  }
+  item.status = "cancelled";
+  item.currentApproverRole = null;
+  item.reason = reason ?? null;
+  item.timeline = [...item.timeline, event("cancelled", actor, { note: reason ?? null })];
+  return item;
+}
+
+/**
+ * Send the request one tier up.
+ *
+ * The climb is the request lane's whole fallback story (PRD §33.2: "None — it
+ * climbs until a tier can grant it"), so the only thing that stops it is
+ * running out of ladder. Refused at the top rather than silently no-op'd: an
+ * Org Admin pressing escalate deserves to be told there is nobody above them.
+ *
+ * Status becomes `escalated`, not `pending_review` — a queue that showed a
+ * climbed request as ordinary pending would hide that its first approver never
+ * answered, which is the one thing an escalation exists to make visible.
+ */
+export function escalateGovernanceApproval(
+  id: string,
+  actor: string,
+  reason?: string,
+): GovernanceApproval | undefined | "top" {
+  const item = GOVERNANCE_APPROVALS.find((a) => a.id === id);
+  if (!item) return undefined;
+  const next = nextApproverRole((item.currentApproverRole as PlatformRole | null) ?? null);
+  if (next === null) return "top";
+
+  item.status = "escalated";
+  item.currentApproverRole = next;
+  item.escalationCount += 1;
+  item.timeline = [
+    ...item.timeline,
+    event("escalated", actor, { toRole: next, note: reason ?? null }),
+  ];
+
+  emitNotification({
+    kind: "request_escalated",
+    title: "Request escalated",
+    body: `"${item.title}" moved to the ${ROLE_META[next].label}.`,
+    href: "/approvals",
+    identityId: item.requestedById,
+  });
+  emitNotification({
+    kind: "request_assigned",
+    title: "Request assigned to you",
+    body: `"${item.title}" was escalated to your queue.`,
+    href: "/approvals",
+    role: next,
+  });
+  return item;
 }
 
 export function decideGovernanceApproval(
@@ -146,5 +350,24 @@ export function decideGovernanceApproval(
   item.decidedBy = decidedBy;
   item.decidedAt = new Date().toISOString();
   item.reason = reason ?? null;
+  // Nobody holds it any more — a decided request with a live approver would
+  // keep showing up in that role's queue.
+  item.currentApproverRole = null;
+  item.timeline = [
+    ...item.timeline,
+    event(decision === "approve" ? "approved" : "rejected", decidedBy, {
+      note: reason ?? null,
+    }),
+  ];
+
+  // The outcome goes to whoever raised it — "the outcome of something you
+  // raised" is one of the three things PRD §33.2 says lands in your queue.
+  emitNotification({
+    kind: decision === "approve" ? "request_approved" : "request_rejected",
+    title: decision === "approve" ? "Request approved" : "Request rejected",
+    body: `${decidedBy} ${decision === "approve" ? "approved" : "rejected"} "${item.title}".`,
+    href: "/approvals",
+    identityId: item.requestedById,
+  });
   return item;
 }

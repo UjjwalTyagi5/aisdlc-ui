@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/table";
 import { getBudgets, getCostBreakdown, type CostBreakdown, type CostBreakdownRow } from "@/lib/api/cost";
 import { qk } from "@/lib/api/query-keys";
+import { PHASE_LABEL } from "@/lib/agents";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 
 export const WINDOW_OPTIONS = [7, 30, 90] as const;
@@ -58,9 +59,22 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
-/** Pure helper: row key for React lists — one row per model. */
+/**
+ * Pure helper: row key for React lists — one row per (agent, model) pair.
+ *
+ * The model alone stopped being unique once rows carry an agent: Development
+ * and Testing both run on Sonnet, and two rows sharing a key make React reuse
+ * one row's DOM for the other's data.
+ */
 export function rowKey(row: CostBreakdownRow): string {
-  return row.model;
+  return `${row.agentType}::${row.model}`;
+}
+
+/** Pure helper: the agents present in a breakdown, in spend order. */
+export function agentsInBreakdown(rows: CostBreakdownRow[]): string[] {
+  const spend = new Map<string, number>();
+  for (const r of rows) spend.set(r.agentType, (spend.get(r.agentType) ?? 0) + r.costUsd);
+  return [...spend.entries()].sort((a, b) => b[1] - a[1]).map(([agent]) => agent);
 }
 
 export function CostDashboard() {
@@ -150,6 +164,32 @@ export function CostDashboard() {
 function CostDashboardBody({ data }: { data: CostBreakdown }) {
   const tone = budgetTone(data);
 
+  /**
+   * The agent filter narrows the BREAKDOWN only — never the meter above it.
+   *
+   * Deliberate, and the opposite of the Business Unit filter, which does refetch
+   * and move the headline. A budget belongs to a scope, not to an agent: there
+   * is no "Development budget" to be 40% through, so recomputing utilization
+   * against a filtered slice would draw a progress bar against a denominator
+   * that does not exist. The meter stays "what your scope spent and may spend";
+   * the table answers "where did it go", and the subtotal states how much of the
+   * total the current slice accounts for.
+   *
+   * Client-side for the same reason: nothing it changes needs the server, so a
+   * round-trip would only add latency to a dropdown.
+   */
+  const [agent, setAgent] = React.useState<string>("all");
+  const agents = React.useMemo(() => agentsInBreakdown(data.rows), [data.rows]);
+
+  // A filter left pinned to an agent that vanished — after switching unit or
+  // window — would show an empty table with nothing explaining why.
+  React.useEffect(() => {
+    if (agent !== "all" && !agents.includes(agent)) setAgent("all");
+  }, [agents, agent]);
+
+  const rows = agent === "all" ? data.rows : data.rows.filter((r) => r.agentType === agent);
+  const filteredUsd = rows.reduce((a, r) => a + r.costUsd, 0);
+
   return (
     <div className="space-y-6">
       {/* Total spend tile — reuses CostMeter for the headline + budget bar */}
@@ -187,17 +227,36 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
         />
       ) : (
         <div className="overflow-hidden rounded-xl border border-line-soft bg-panel-elevated shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_8px_20px_-8px_oklch(0_0_0_/_0.35)]">
-          <div className="flex items-center gap-2 border-b border-line-soft px-5 py-3.5">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-5 py-3.5">
             <span className="font-display text-[13.5px] font-bold tracking-[-0.01em]">
               Breakdown
             </span>
             <span className="font-mono text-[10.5px] text-muted-foreground">
-              {data.rows.length} rows
+              {rows.length} row{rows.length === 1 ? "" : "s"}
             </span>
+            {agent !== "all" && (
+              <span className="font-mono text-[10.5px] text-muted-foreground">
+                · {formatUsd(filteredUsd)} of {formatUsd(data.totalCostUsd)}
+              </span>
+            )}
+            <Select value={agent} onValueChange={setAgent}>
+              <SelectTrigger className="ml-auto h-8 w-48 border-line-soft" aria-label="Filter by agent">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All agents</SelectItem>
+                {agents.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {PHASE_LABEL[a as keyof typeof PHASE_LABEL] ?? a}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead>Agent</TableHead>
                 <TableHead>Model</TableHead>
                 <TableHead className="text-right">In</TableHead>
                 <TableHead className="text-right">Out</TableHead>
@@ -206,9 +265,12 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={rowKey(row)}>
-                  <TableCell className="font-mono text-[12px] font-medium">
+                  <TableCell className="text-[12px] font-medium">
+                    {PHASE_LABEL[row.agentType] ?? row.agentType}
+                  </TableCell>
+                  <TableCell className="font-mono text-[12px]">
                     {row.model}
                   </TableCell>
                   <TableCell className="text-right font-mono text-[12px]">

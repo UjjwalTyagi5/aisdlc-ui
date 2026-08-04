@@ -25,7 +25,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useSession } from "@/hooks/use-session";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { listWorkspaceMembers } from "@/lib/api/workspaces";
@@ -359,7 +359,6 @@ export default function UsersPage() {
                   }
                   size="sm"
                 />
-                <PersonaBadge role={role} />
               </div>
             )}
 

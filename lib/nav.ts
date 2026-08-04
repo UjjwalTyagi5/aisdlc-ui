@@ -94,7 +94,7 @@ export const deliverNav: NavItem[] = [
     prdSection: "§36",
   },
   {
-    label: "Approvals",
+    label: "Requests & Approvals",
     href: "/approvals",
     icon: Inbox,
     segment: "approvals",
@@ -377,7 +377,7 @@ export const segmentLabels: Record<string, string> = {
   security: "Security",
   testing: "Testing",
   runs: "Workstreams",
-  approvals: "Approvals",
+  approvals: "Requests & Approvals",
   new: "New project",
   onboarding: "Onboarding",
   deployment: "Deployment",

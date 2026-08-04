@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { cn } from "@/lib/utils";
+import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 
@@ -18,6 +19,14 @@ import { hasPermission } from "@/lib/auth/permissions";
  *
  * Visibility is permission-gated, matching the screen → role matrix (§35):
  * traces and audit are admin + Security Engineer only.
+ *
+ * NOT ADVERTISED HERE — Workstreams, Orchestrator, Approvals and Capabilities.
+ * Their routes still exist and still resolve: this list decides what the strip
+ * offers, not what the app can reach, so bookmarks and in-page links keep
+ * working. Each has a home elsewhere that is the one people actually use —
+ * Orchestrator and Approvals are top-level sidebar destinations spanning every
+ * project, and an eight-tab strip made the four that matter per project harder
+ * to find than the four that did not. Re-advertising one is a single line.
  */
 
 interface ProjectTab {
@@ -25,28 +34,40 @@ interface ProjectTab {
   /** Path suffix appended to /projects/[id]; "" is the overview. */
   segment: string;
   requirePermission?: string;
+  /**
+   * Admins-only: this project's own admin, its Business Unit's admin, or an
+   * organization-scoped role. Checked against the access scope rather than a
+   * permission, because "administers THIS project" is a question about a
+   * binding and no permission can express it.
+   */
+  adminOnly?: boolean;
 }
 
 const TABS: ProjectTab[] = [
   { label: "Overview", segment: "" },
-  { label: "Workstreams", segment: "workstreams" },
-  { label: "Orchestrator", segment: "orchestrator" },
-  { label: "Approvals", segment: "approvals", requirePermission: "artifact:view" },
   { label: "Members", segment: "members" },
-  { label: "Cost", segment: "cost", requirePermission: "cost:view" },
-  { label: "Capabilities", segment: "capabilities" },
+  // Spend is treated as commercially sensitive rather than ambient — a
+  // deliberate narrowing of PRD §34.5, which would show it to every builder.
+  // The page enforces the same rule (projects/[id]/cost/page.tsx); this only
+  // stops the strip advertising a door that refuses.
+  { label: "Cost", segment: "cost", adminOnly: true },
   { label: "Settings", segment: "settings" },
 ];
 
 export function ProjectTabs({ projectId }: { projectId: string }) {
   const pathname = usePathname();
   const session = useSession();
+  // Fails closed while resolving: a tab that appears and then vanishes is
+  // worse than one that arrives a beat late.
+  const canSeeCost = useCanSeeProjectCost(projectId);
 
   const base = `/projects/${projectId}`;
 
-  const visible = TABS.filter(
-    (t) => !t.requirePermission || hasPermission(session, t.requirePermission),
-  );
+  const visible = TABS.filter((t) => {
+    if (t.requirePermission && !hasPermission(session, t.requirePermission)) return false;
+    if (t.adminOnly && !canSeeCost) return false;
+    return true;
+  });
 
   return (
     <nav

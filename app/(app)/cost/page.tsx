@@ -3,7 +3,7 @@
 import { CostDashboard } from "@/components/app/cost-dashboard";
 import { BudgetHub } from "@/components/app/budget-hub";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -11,7 +11,7 @@ import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 
 export default function CostPage() {
   const session = useSession({ required: true });
-  const { scope, role, level, isOrgWide, bindings, managedBusinessUnitIds } = useAccessScope();
+  const { scope, level, isOrgWide, bindings, managedBusinessUnitIds } = useAccessScope();
 
   // T-9.2-10: defense-in-depth client gate — server enforces
   // require_permission("cost:view") authoritatively (RLS + permission
@@ -63,7 +63,6 @@ export default function CostPage() {
                 name={scopeName}
                 size="sm"
               />
-              <PersonaBadge role={role} />
             </div>
           )}
 

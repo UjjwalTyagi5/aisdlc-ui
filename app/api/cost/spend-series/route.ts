@@ -3,7 +3,7 @@ import { type NextRequest } from "next/server";
 import { buildSpendSeries, type SpendGroupBy } from "@/lib/mock/cost-fixtures";
 import { getSession } from "@/lib/auth/session";
 import { resolveSessionScope } from "@/lib/auth/access-scope";
-import { canReadBusinessUnit } from "@/lib/mock/access-scope";
+import { canReadBusinessUnit, canReadProject } from "@/lib/mock/access-scope";
 
 // DUMMY-DATA SEAM: derives from the workspace/project fixtures — see
 // lib/mock/cost-fixtures.ts. Mirrored in mocks/handlers.ts, per
@@ -42,12 +42,22 @@ export async function GET(req: NextRequest) {
     return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
   }
 
+  // A project's own Overview asks for exactly its own series. Refused rather
+  // than ignored when unreadable, for the same reason as `workspaceId`: quietly
+  // widening to every project would answer a question about someone else's
+  // project with the viewer's own totals.
+  const projectId = params.get("projectId");
+  if (projectId && !canReadProject(scope, projectId)) {
+    return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
+  }
+
   return Response.json(
     buildSpendSeries(
       months,
       scope.isOrgWide ? null : scope.businessUnitIds,
       groupBy,
       workspaceId,
+      projectId,
     ),
   );
 }

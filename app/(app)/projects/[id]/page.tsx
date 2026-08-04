@@ -6,13 +6,10 @@ import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  AlertTriangle,
-  CheckCircle2,
   Clock,
   FolderOpen,
   Plug,
   Play,
-  Puzzle,
   Settings,
   ShieldAlert,
   XCircle,
@@ -29,10 +26,10 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Separator } from "@/components/ui/separator";
-import { CostMeter } from "@/components/app/cost-meter";
 import { ModelSelector } from "@/components/app/model-selector";
 import { PhasePipeline } from "@/components/app/phase-pipeline";
 import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
+import { ProjectCostPanel } from "@/components/app/project-cost-panel";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
 import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
 import { RequireRole } from "@/components/auth/require-role";
@@ -41,6 +38,7 @@ import { ApiRequestError } from "@/lib/api/client";
 import { listArtifacts } from "@/lib/api/artifacts";
 import { listConnectors } from "@/lib/api/connectors";
 import { getProject, updateProject } from "@/lib/api/projects";
+import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useRawSession } from "@/components/auth/session-provider";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import {
@@ -48,10 +46,9 @@ import {
   type ProjectDeliveryStatus,
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
-import { getProjectCostSummary } from "@/lib/api/traces";
 import { qk } from "@/lib/api/query-keys";
 import { phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
-import type { Artifact, Connector, Project, ProjectId, Run } from "@/lib/schemas";
+import type { Artifact, Connector, Project, ProjectId } from "@/lib/schemas";
 
 const TEMPLATE_LABEL: Record<Project["template"], string> = {
   web_app: "Web app",
@@ -70,6 +67,7 @@ export default function ProjectOverviewPage() {
   // as Project.default_offering_id (Phase 3).
   const [projectOffering, setProjectOffering] = React.useState<string>();
   const session = useRawSession();
+  const canSeeCost = useCanSeeProjectCost(id);
   const queryClient = useQueryClient();
 
   const projectQ = useQuery({
@@ -107,12 +105,6 @@ export default function ProjectOverviewPage() {
   const connectorsQ = useQuery({
     queryKey: qk.connectors.list(),
     queryFn: () => listConnectors(),
-  });
-
-  // Project LLM spend + tokens (last 7 days), Langfuse-sourced via /traces.
-  const costSummaryQ = useQuery({
-    queryKey: qk.traces.projectSummary(id, 7),
-    queryFn: () => getProjectCostSummary(id, 7),
   });
 
   if (projectQ.isLoading) {
@@ -164,32 +156,9 @@ export default function ProjectOverviewPage() {
   const artifacts = artifactsQ.data ?? [];
 
   const recentRuns = runs.slice(0, 10);
-  const blockers = runs.filter((r) => r.status === "awaiting_approval");
   const recentArtifacts = [...artifacts]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 8);
-
-  // Project spend + tokens (last 7 days): prefer the Langfuse-sourced summary; fall
-  // back to run-derived aggregation if it hasn't loaded (or tracing is disabled).
-  const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
-  const summary = costSummaryQ.data;
-  const weeklyCost = summary
-    ? {
-        usd: summary.totalCostUsd,
-        inputTokens: summary.inputTokens,
-        outputTokens: summary.outputTokens,
-      }
-    : runs
-        .filter((r) => new Date(r.startedAt).getTime() >= weekAgo)
-        .reduce(
-          (acc, r) => ({
-            usd: acc.usd + r.cost.usd,
-            inputTokens: acc.inputTokens + r.cost.inputTokens,
-            outputTokens: acc.outputTokens + r.cost.outputTokens,
-          }),
-          { usd: 0, inputTokens: 0, outputTokens: 0 },
-        );
-  const weeklyCostSeries = groupCostByDay(runs, 7);
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -230,13 +199,6 @@ export default function ProjectOverviewPage() {
               Run agent
             </Button>
           </RequireRole>
-          <Button
-            variant="outline"
-            onClick={() => router.push(`/projects/${project.id}/capabilities`)}
-          >
-            <Puzzle />
-            Capabilities
-          </Button>
           <Button variant="outline" onClick={() => router.push(`/projects/${project.id}/settings`)}>
             <Settings />
             Settings
@@ -289,6 +251,26 @@ export default function ProjectOverviewPage() {
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Main column */}
         <div className="space-y-6 lg:col-span-2">
+          {/* Spend leads the column: it is the only thing here that reports on
+              the project as a whole rather than listing its latest events, and
+              it is now the page's single cost reading. In the two-thirds column
+              rather than full width — the chart scales to its container, and
+              six single-series bars spread across the whole page is ~14% ink
+              and 86% background, which reads as an empty block.
+
+              Behind the same gate as the Cost tab and page. Restricting those
+              two while leaving the month's spend plotted on the landing page
+              would not be a restriction at all. */}
+          {canSeeCost && (
+            <ProjectCostPanel
+              projectId={project.id}
+              projectName={project.name}
+              track={project.track}
+              monthlyBudgetUsd={project.monthlyBudgetUsd ?? null}
+              monthlySpendUsd={project.monthlySpendUsd ?? 0}
+            />
+          )}
+
           {/* Recent runs */}
           <section aria-labelledby="runs-heading" className="space-y-3">
             <div className="flex items-baseline justify-between">
@@ -330,19 +312,21 @@ export default function ProjectOverviewPage() {
 
         {/* Right rail */}
         <aside className="space-y-4">
-          {/* Blockers */}
-          <BlockersPanel blockers={blockers} isLoading={runsQ.isLoading} />
+          {/* The "Awaiting approval" panel used to lead this rail. It restated
+              what Recent runs already shows — the same runs, with the same
+              "Awaiting approval" status badge, in the column beside it — and
+              Approvals is a top-level destination that gathers them across
+              every project. A per-project copy of a cross-project queue earns
+              its space only by saying something the list beside it does not.
 
-          {/* Cost this week */}
-          <section aria-labelledby="cost-heading" className="space-y-2">
-            <h2
-              id="cost-heading"
-              className="text-muted-foreground text-xs font-semibold uppercase tracking-wider"
-            >
-              Cost this week
-            </h2>
-            <CostMeter cost={weeklyCost} series={weeklyCostSeries} />
-          </section>
+              "Cost this week" used to sit here too. Two cost readings on one page
+              disagreed on their own terms — this tile summed per-run LLM cents
+              to $0.192 while the panel above reports the project's $2,680 month
+              — and a reader has no way to tell which is the project's spend.
+              The panel answers the same question with the trend and the agent
+              split beside it, so this was the one to go. It also took the
+              trend badge's "258000%" with it: a week-over-week percentage off a
+              near-zero base is arithmetic, not information. */}
 
           {/* Connectors */}
           <ConnectorsPanel
@@ -404,74 +388,6 @@ export default function ProjectOverviewPage() {
 // ───────────────────────────────────────────────────────────
 //  Right-rail sub-components
 // ───────────────────────────────────────────────────────────
-
-function BlockersPanel({
-  blockers,
-  isLoading,
-}: {
-  blockers: Run[];
-  isLoading?: boolean;
-}) {
-  return (
-    <section aria-labelledby="blockers-heading" className="space-y-2">
-      <div className="flex items-baseline justify-between">
-        <h2
-          id="blockers-heading"
-          className="text-muted-foreground text-xs font-semibold uppercase tracking-wider"
-        >
-          Awaiting approval
-        </h2>
-        {blockers.length > 0 && (
-          <Badge variant="warning" className="h-5 px-2 text-[10px]">
-            {blockers.length}
-          </Badge>
-        )}
-      </div>
-      <Card>
-        <CardContent className="p-3">
-          {isLoading ? (
-            <div className="space-y-2">
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-full" />
-            </div>
-          ) : blockers.length === 0 ? (
-            <div className="text-muted-foreground flex items-center gap-2 p-2 text-sm">
-              <CheckCircle2 className="text-success size-4" aria-hidden />
-              Nothing waiting on you.
-            </div>
-          ) : (
-            <ul className="space-y-1">
-              {blockers.slice(0, 5).map((r) => (
-                <li key={r.id}>
-                  <Link
-                    href={`/runs/${r.id}`}
-                    className={cn(
-                      "flex items-start gap-2 rounded-md border p-2 text-sm transition-colors",
-                      "hover:bg-accent hover:text-accent-foreground",
-                    )}
-                  >
-                    <AlertTriangle
-                      className="text-warning mt-0.5 size-4 shrink-0"
-                      aria-hidden
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-medium">{r.title}</p>
-                      <p className="text-muted-foreground flex items-center gap-2 text-xs">
-                        <Clock className="size-3" aria-hidden />
-                        {formatDistanceToNow(new Date(r.startedAt), { addSuffix: true })}
-                      </p>
-                    </div>
-                    <StatusBadge status={r.status} iconOnly />
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
 
 function RecentArtifactsList({
   projectId,
@@ -601,19 +517,3 @@ function HealthDot({ health }: { health: Connector["health"] }) {
   );
 }
 
-// Helpers ---------------------------------------------------
-
-function groupCostByDay(runs: readonly Run[], days: number): number[] {
-  const buckets = new Array(days).fill(0);
-  const now = Date.now();
-  const dayMs = 24 * 3600 * 1000;
-  for (const r of runs) {
-    const ago = now - new Date(r.startedAt).getTime();
-    const idx = days - 1 - Math.floor(ago / dayMs);
-    if (idx < 0 || idx >= days) continue;
-    buckets[idx] += r.cost.usd;
-  }
-  // Cumulative for a nicer sparkline shape
-  for (let i = 1; i < buckets.length; i++) buckets[i] += buckets[i - 1];
-  return buckets;
-}

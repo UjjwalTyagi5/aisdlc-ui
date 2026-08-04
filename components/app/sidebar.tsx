@@ -28,7 +28,6 @@ import {
 import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { useAccessScope } from "@/hooks/use-access-scope";
 
-import { ScopeChip } from "./scope-indicator";
 import { OrgHeader } from "./org-header";
 
 const APP_VERSION = "0.1.0";
@@ -250,7 +249,6 @@ export function Sidebar() {
     businessUnitIds,
     managedBusinessUnitIds,
     scope,
-    level,
     isLoading: scopeLoading,
     isError: scopeError,
     refetch: refetchScope,
@@ -314,18 +312,14 @@ export function Sidebar() {
           dimmed={!hasWorkspace && !wsPending}
         />
 
-        {/* What KIND of scope bounds these links — an Organization Admin and a
-            Project Admin see the same menu over very different sets. */}
-        {!collapsed && scope !== null && (
-          <div className="mb-1.5 px-2">
-            <ScopeChip
-              kind={isOrgWide ? "organization" : level}
-              access={isOrgWide || managedBusinessUnitIds.length > 0 ? "manage" : "read"}
-              size="sm"
-              className="w-full"
-            />
-          </div>
-        )}
+        {/* No scope chip here.
+
+            It said the same word as the chip each page prints above its own
+            figures, so "ORGANIZATION" appeared twice on every screen — and the
+            nav is the wrong place for it: these links go to the same routes
+            whoever you are, so labelling the MENU with a boundary explains
+            nothing. The page states it where it changes the reading, next to
+            the numbers it bounds. */}
 
         {hasWorkspace || wsPending ? (
           // Deliver hrefs are static (lib/nav.ts) and don't depend on the

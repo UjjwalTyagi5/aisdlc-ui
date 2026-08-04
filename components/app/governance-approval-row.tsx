@@ -10,18 +10,25 @@ import { formatDistanceToNow } from "date-fns";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { decideGovernanceApproval } from "@/lib/api/governance-approvals";
 import { GOVERNANCE_APPROVER_ROLE } from "@/lib/governance";
-import { ROLE_META } from "@/lib/roles";
+import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import { REQUEST_TYPE_LABEL } from "@/lib/schemas/governance-approval";
 import type { GovernanceApproval } from "@/lib/schemas";
 
-const TYPE_LABEL: Record<GovernanceApproval["type"], string> = {
-  project_creation: "Project creation",
-  model_credential: "Model credential",
-  budget_increase: "Budget increase",
-  project_archive: "Project archive",
-  agent_default_org: "Org agent default",
-  agent_default_workspace: "Business Unit agent default",
-  agent_default_project: "Project agent default",
-};
+/**
+ * The role actually holding it — `currentApproverRole` when the request has
+ * one, falling back to the type's default route.
+ *
+ * The fallback is not cosmetic: after an escalation the two disagree, and the
+ * type map is the stale answer. A row that kept naming the original tier would
+ * tell a BU Admin a request was still with the Project Admin it had already
+ * climbed past.
+ */
+function approverRoleOf(approval: GovernanceApproval): PlatformRole {
+  return (
+    (approval.currentApproverRole as PlatformRole | null) ??
+    GOVERNANCE_APPROVER_ROLE[approval.type]
+  );
+}
 
 /**
  * One pending governance approval — project creation or model-credential
@@ -57,7 +64,7 @@ export function GovernanceApprovalRow({
     <li className="space-y-2">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[11.5px]">
         <span className="border-line-soft text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.08em]">
-          {TYPE_LABEL[approval.type]}
+          {REQUEST_TYPE_LABEL[approval.type]}
         </span>
         <span className="text-brand-bright inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em]">
           <ShieldCheck className="size-3" aria-hidden />
@@ -67,7 +74,7 @@ export function GovernanceApprovalRow({
         <span className="text-muted-foreground">
           Waiting on{" "}
           <span className="text-foreground font-medium">
-            {ROLE_META[GOVERNANCE_APPROVER_ROLE[approval.type]].label}
+            {ROLE_META[approverRoleOf(approval)].label}
           </span>
         </span>
         <span className="text-muted-foreground">

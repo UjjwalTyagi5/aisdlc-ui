@@ -53,11 +53,23 @@ import {
   type ProjectUpdatePatch,
 } from "@/lib/mock/project-fixtures";
 import {
+  cancelGovernanceApproval,
   createGovernanceApproval,
   decideGovernanceApproval,
+  escalateGovernanceApproval,
   getGovernanceApproval,
   listGovernanceApprovals,
 } from "@/lib/mock/governance-approval-fixtures";
+import {
+  listNotifications,
+  markNotificationsRead,
+} from "@/lib/mock/notification-fixtures";
+import { canDecideRequest, canRaiseRequest, canRaiseType } from "@/lib/requests/routing";
+import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import {
+  REQUEST_TYPE_LABEL,
+  RequestCreateInput,
+} from "@/lib/schemas/governance-approval";
 import type { GovernanceApprovalDecisionInput } from "@/lib/schemas/governance-approval";
 import { MOCK_COOKIE_NAME, decodeSession } from "@/lib/auth/mock";
 import { resolveSessionScope } from "@/lib/auth/access-scope";
@@ -391,10 +403,153 @@ export const handlers = [
     const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
     const scope = scopeFromCookies(cookies);
     return HttpResponse.json(
-      listGovernanceApprovals(workspaceId).filter((a) =>
-        canReadGovernanceApproval(scope, a.workspaceId, a.projectId),
+      listGovernanceApprovals(workspaceId).filter(
+        (a) =>
+          canReadGovernanceApproval(scope, a.workspaceId, a.projectId) ||
+          // You always see what you raised, wherever it climbed to.
+          (a.requestedById != null && a.requestedById === scope.identityId),
       ),
     );
+  }),
+
+  // ───── Notifications ─────
+  // Mirrors app/api/notifications/route.ts. Addressed to an identity or a
+  // role; never an "everything" list.
+  http.get("/api/notifications", async ({ cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    return HttpResponse.json(
+      listNotifications(scopeFromCookies(cookies).identityId, effectivePlatformRole(session)),
+    );
+  }),
+  http.post("/api/notifications", async ({ cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    return HttpResponse.json({
+      marked: markNotificationsRead(
+        scopeFromCookies(cookies).identityId,
+        effectivePlatformRole(session),
+      ),
+    });
+  }),
+
+  // Raise a request. Mirrors app/api/governance-approvals/route.ts::POST.
+  http.post("/api/governance-approvals", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const role = effectivePlatformRole(session);
+    if (!canRaiseRequest(role)) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message:
+            "Organization Admins are the final approval authority and cannot raise requests.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const parsed = RequestCreateInput.safeParse(await request.json());
+    if (!parsed.success) {
+      return HttpResponse.json(
+        { code: "invalid", message: parsed.error.issues[0]?.message ?? "Invalid request" },
+        { status: 400 },
+      );
+    }
+    const input = parsed.data;
+    // Mirrors the route's tier check — see that file.
+    if (!canRaiseType(role, input.type)) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: `A ${role ? ROLE_META[role].label : "viewer"} cannot raise a ${REQUEST_TYPE_LABEL[input.type]} request.`,
+        },
+        { status: 403 },
+      );
+    }
+    const scope = scopeFromCookies(cookies);
+    if (!scope.isOrgWide && !scope.businessUnitIds.includes(input.workspaceId)) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+
+    const unit = fxListWorkspaces().find((w) => String(w.id) === input.workspaceId);
+    if (!unit) return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    const project = input.projectId
+      ? PROJECTS.find((p) => String(p.id) === input.projectId)
+      : undefined;
+
+    return HttpResponse.json(
+      createGovernanceApproval({
+        type: input.type,
+        workspaceId: String(unit.id),
+        workspaceName: unit.displayName,
+        projectId: project ? String(project.id) : null,
+        projectName: project?.name ?? null,
+        title: input.title,
+        summary: `${REQUEST_TYPE_LABEL[input.type]} requested by ${session.user.name}.`,
+        description: input.description,
+        priority: input.priority,
+        attachments: input.attachments,
+        requestedBy: session.user.name,
+        requestedById: scope.identityId,
+        requestedByRole: role,
+        targetRef: input.projectId ?? String(unit.id),
+      }),
+      { status: 201 },
+    );
+  }),
+
+  // Withdraw your own request. Mirrors .../[id]/cancel/route.ts.
+  http.post("/api/governance-approvals/:id/cancel", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const body = (await request.json().catch(() => ({}))) as { reason?: string };
+    const result = cancelGovernanceApproval(
+      String(params.id),
+      session.user.name,
+      scopeFromCookies(cookies).identityId,
+      body.reason,
+    );
+    if (result === undefined) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    if (result === "forbidden") {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message:
+            "Only the person who raised a request can withdraw it, and only while it is open.",
+        },
+        { status: 403 },
+      );
+    }
+    return HttpResponse.json(result);
+  }),
+
+  // Climb one tier. Mirrors .../[id]/escalate/route.ts.
+  http.post("/api/governance-approvals/:id/escalate", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const body = (await request.json().catch(() => ({}))) as { reason?: string };
+    const result = escalateGovernanceApproval(String(params.id), session.user.name, body.reason);
+    if (result === undefined) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    if (result === "top") {
+      return HttpResponse.json(
+        {
+          code: "conflict",
+          message:
+            "This request is already with the Organization Admin — there is no tier above to escalate to.",
+        },
+        { status: 409 },
+      );
+    }
+    return HttpResponse.json(result);
   }),
   http.post("/api/governance-approvals/:id/decide", async ({ params, request, cookies }) => {
     await lag();
@@ -405,6 +560,22 @@ export const handlers = [
     const body = (await request.json()) as GovernanceApprovalDecisionInput;
     const approval = getGovernanceApproval(id);
     if (!approval) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+
+    // Mirrors the route's eligibility gate — see that file for why the
+    // endpoint enforces this and not only the sheet.
+    const eligibility = canDecideRequest({
+      currentApproverRole: (approval.currentApproverRole as PlatformRole | null) ?? null,
+      requestedById: approval.requestedById,
+      status: approval.status,
+      viewerRole: effectivePlatformRole(session),
+      viewerIdentityId: scopeFromCookies(cookies).identityId,
+    });
+    if (!eligibility.allowed) {
+      return HttpResponse.json(
+        { code: "forbidden", message: eligibility.reason ?? "Not yours to decide." },
+        { status: 403 },
+      );
+    }
 
     const decided = decideGovernanceApproval(id, body.decision, session.user.name, body.reason);
     if (!decided) return HttpResponse.json({ code: "not_found" }, { status: 404 });
@@ -1239,12 +1410,18 @@ export const handlers = [
       return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
     }
 
+    const projectId = url.searchParams.get("projectId");
+    if (projectId && !canReadProject(scope, projectId)) {
+      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
+    }
+
     return HttpResponse.json(
       buildSpendSeries(
         months,
         scope.isOrgWide ? null : scope.businessUnitIds,
         groupBy,
         workspaceId,
+        projectId,
       ),
     );
   }),

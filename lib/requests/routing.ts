@@ -1,0 +1,245 @@
+/**
+ * Where a REQUEST goes, and where it goes next.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * REQUESTS ARE NOT APPROVALS. PRD §33.2 sets them apart on every axis, and this
+ * module implements only the first column:
+ *
+ *                  Request                        Approval
+ *   Triggered by   a person needing something     an agent about to act
+ *   Routes to      the first tier that can grant  the agent's OWNING role
+ *   Direction      UPWARD: PA → BU → Org          SIDEWAYS, never to governance
+ *   Fallback       none — it climbs               Project Admin, audited as such
+ *
+ * Agent-gate routing lives in `lib/agents.ts` (`GATE_POLICY`, `AGENT_OWNER_ROLE`)
+ * and must stay there. Merging the two would breach "approvals never route to a
+ * governance tier" and the "no approval laundering" guardrail (§33.2), which
+ * exist so a consequential action cannot be signed off by someone who never had
+ * the standing to judge it.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+import { GOVERNANCE_APPROVER_ROLE } from "@/lib/governance";
+import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import type { GovernanceApprovalType } from "@/lib/schemas/governance-approval";
+
+/**
+ * The ladder a request climbs, lowest rung first.
+ *
+ * Everything below `project_admin` — every delivery contributor — enters at the
+ * bottom, which is why the chain starts there rather than enumerating twelve
+ * roles: a BA and a Developer escalate identically, and encoding each of them
+ * separately would only create twelve places for the ladder to drift.
+ */
+export const REQUEST_ESCALATION_CHAIN: readonly PlatformRole[] = [
+  "project_admin",
+  "bu_admin",
+  "org_admin",
+];
+
+/**
+ * The seven types whose approver is fixed by the TYPE, not the requester —
+ * a project creation goes to the BU Admin no matter who filed it. Hand-raised
+ * types are absent and fall through to tier routing.
+ */
+const TYPE_ROUTED = new Set<GovernanceApprovalType>([
+  "project_creation",
+  "model_credential",
+  "budget_increase",
+  "project_archive",
+  "agent_default_org",
+  "agent_default_workspace",
+  "agent_default_project",
+  // Onboarding a provider is an organization-wide act whoever asks — see
+  // GOVERNANCE_APPROVER_ROLE.
+  "model_provider_access",
+]);
+
+/**
+ * WHAT EACH TIER MAY ASK FOR.
+ *
+ * One rule generates all three lists: YOU REQUEST WHAT YOU CANNOT GRANT
+ * YOURSELF. A flat list shown to everyone got this wrong in both directions —
+ * it offered a Developer "Project creation" and "Budget headroom", neither of
+ * which is theirs to ask at that level, while giving a Business Unit Admin the
+ * project-scoped "Model credential" when the thing they actually lack is an
+ * org-wide provider.
+ *
+ * The same noun therefore appears at two tiers meaning two different asks, and
+ * that is deliberate rather than duplication:
+ *
+ *   model_credential        "grant this model to my project"     (below the BU)
+ *   model_provider_access   "onboard this provider org-wide"     (BU → Org)
+ *
+ *   user_onboarding at any tier means the same thing — bring someone onto the
+ *   platform who is not on it yet. A Project Admin already holds `member:manage`
+ *   and can add an EXISTING person to their project without asking anyone; what
+ *   they cannot do is create the person.
+ */
+const CONTRIBUTOR_RAISABLE: readonly GovernanceApprovalType[] = [
+  "access_request",
+  "model_credential",
+  "connector_access",
+  "mcp_server",
+  "user_onboarding",
+  "other",
+];
+
+const PROJECT_ADMIN_RAISABLE: readonly GovernanceApprovalType[] = [
+  "user_onboarding",
+  "model_credential",
+  "connector_access",
+  "mcp_server",
+  "budget_increase",
+  "project_creation",
+  "access_request",
+  "other",
+];
+
+const BU_ADMIN_RAISABLE: readonly GovernanceApprovalType[] = [
+  "model_provider_access",
+  "user_onboarding",
+  "connector_access",
+  "budget_increase",
+  "access_request",
+  "other",
+];
+
+/**
+ * The types this role may raise, in the order the picker offers them —
+ * likeliest ask first, `other` always last.
+ *
+ * Enforced server-side too (`app/api/governance-approvals/route.ts`): a picker
+ * that merely hides an option is a suggestion, and the whole point of scoping
+ * these is that a request filed at the wrong tier wastes the approver's time
+ * before it wastes the requester's.
+ */
+export function raisableTypesFor(role: PlatformRole | null): readonly GovernanceApprovalType[] {
+  if (role === null || role === "org_admin") return [];
+  if (role === "bu_admin") return BU_ADMIN_RAISABLE;
+  if (role === "project_admin") return PROJECT_ADMIN_RAISABLE;
+  return CONTRIBUTOR_RAISABLE;
+}
+
+export function canRaiseType(
+  role: PlatformRole | null,
+  type: GovernanceApprovalType,
+): boolean {
+  return raisableTypesFor(role).includes(type);
+}
+
+/**
+ * May this role raise a request at all?
+ *
+ * False for the Organization Admin alone, and not as a restriction so much as
+ * an arithmetic fact: the chain ends at them, so a request they raised would
+ * have no one to decide it. They are the ceiling, so they only ever receive.
+ */
+export function canRaiseRequest(role: PlatformRole | null): boolean {
+  return role !== null && role !== "org_admin";
+}
+
+/** The next rung up, or null at the top of the ladder. */
+export function nextApproverRole(current: PlatformRole | null): PlatformRole | null {
+  if (current === null) return REQUEST_ESCALATION_CHAIN[0] ?? null;
+  const i = REQUEST_ESCALATION_CHAIN.indexOf(current);
+  // A role off the ladder (any delivery contributor) enters at the bottom.
+  if (i === -1) return REQUEST_ESCALATION_CHAIN[0] ?? null;
+  return REQUEST_ESCALATION_CHAIN[i + 1] ?? null;
+}
+
+/**
+ * Who decides this request first.
+ *
+ * Two rules, in order:
+ *  1. A type-routed request goes where its type says.
+ *  2. Anything else goes one tier above whoever raised it.
+ *
+ * Then one override on top of both: if that lands on the requester's own role,
+ * it climbs. "No one approves their own request — it escalates instead"
+ * (§33.2) is not a UI courtesy; routing has to enforce it, or a BU Admin filing
+ * a BU-Admin-routed request would silently become their own approver.
+ */
+export function initialApproverRole(
+  type: GovernanceApprovalType,
+  requesterRole: PlatformRole | null,
+): PlatformRole | null {
+  const routed = TYPE_ROUTED.has(type)
+    ? GOVERNANCE_APPROVER_ROLE[type]
+    : nextApproverRole(requesterRole);
+
+  if (routed !== null && routed === requesterRole) return nextApproverRole(routed);
+  return routed;
+}
+
+/**
+ * The full ladder this request will climb from where it now sits — for the
+ * form's "who will see this" preview and the detail view's remaining path.
+ * Showing the whole route up front is what makes an escalation later read as
+ * the process working rather than the request being passed around.
+ */
+export function approverChainFrom(role: PlatformRole | null): PlatformRole[] {
+  const chain: PlatformRole[] = [];
+  let cur = role;
+  while (cur !== null) {
+    chain.push(cur);
+    cur = nextApproverRole(cur);
+  }
+  return chain;
+}
+
+export interface DecideEligibility {
+  allowed: boolean;
+  /** Why not — shown to the viewer rather than a disabled button with no cause. */
+  reason?: string;
+}
+
+/**
+ * May this viewer decide this request?
+ *
+ * Three gates, and the order is deliberate: the self-approval block comes
+ * first, so a Project Admin who raised their own request is told *that* rather
+ * than "not your queue" — the second message is true but misleading, and would
+ * send them looking for a permission they already hold.
+ */
+export function canDecideRequest(args: {
+  currentApproverRole: PlatformRole | null;
+  requestedById: string | null | undefined;
+  status: string;
+  viewerRole: PlatformRole | null;
+  viewerIdentityId: string | null;
+}): DecideEligibility {
+  const { currentApproverRole, requestedById, status, viewerRole, viewerIdentityId } = args;
+
+  if (status !== "submitted" && status !== "pending_review" && status !== "escalated") {
+    return { allowed: false, reason: "This request is already closed." };
+  }
+  if (requestedById && viewerIdentityId && requestedById === viewerIdentityId) {
+    return { allowed: false, reason: "You raised this request — it escalates rather than self-approving." };
+  }
+  if (viewerRole === null || currentApproverRole === null) {
+    return { allowed: false, reason: "This request is not waiting on you." };
+  }
+  if (viewerRole !== currentApproverRole) {
+    return {
+      allowed: false,
+      reason: `Waiting on the ${ROLE_META[currentApproverRole].label}.`,
+    };
+  }
+  return { allowed: true };
+}
+
+/**
+ * May this request climb another tier?
+ *
+ * False at the top: the Organization Admin has no one above them, so an
+ * "escalate" there would be a button that quietly does nothing. A request that
+ * reaches them is decided there or not at all — which is the PRD's own answer
+ * for the request lane ("None — it climbs until a tier can grant it").
+ *
+ * NOTE this is the REQUEST ladder only. Agent sign-offs do not escalate this
+ * way: §44.5 makes the security and release sign-offs unwaivable "by any role,
+ * including the Organization Admin", so nothing here may be pointed at them.
+ */
+export function canEscalate(currentApproverRole: PlatformRole | null): boolean {
+  return nextApproverRole(currentApproverRole) !== null;
+}

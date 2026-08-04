@@ -18,9 +18,9 @@ import {
   BudgetWindowSummary,
 } from "@/components/app/budget-window-fields";
 import { BudgetAllocationNotice } from "@/components/app/budget-allocation-notice";
+import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useSession } from "@/hooks/use-session";
 import { useActiveWorkspace } from "@/hooks/use-workspaces";
-import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { getProject, listProjects, updateProject } from "@/lib/api/projects";
 import { listRuns } from "@/lib/api/runs";
@@ -45,6 +45,7 @@ export default function ProjectCostPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
   const session = useSession({ required: true });
+  const canSeeCost = useCanSeeProjectCost(id);
   const role = effectivePlatformRole(session);
 
   const projectQ = useQuery({
@@ -56,10 +57,6 @@ export default function ProjectCostPage() {
     queryKey: qk.runs.forProject(id),
     queryFn: () => listRuns({ projectId: id, pageSize: 100 }),
   });
-
-  if (!hasPermission(session, "cost:view") && !hasPermission(session, "artifact:view")) {
-    return <RestrictedAccess description="Project spend requires access to this project." />;
-  }
 
   if (projectQ.isLoading) {
     return (
@@ -78,6 +75,13 @@ export default function ProjectCostPage() {
   }
 
   const project = projectQ.data;
+
+  if (!canSeeCost) {
+    return (
+      <RestrictedAccess description="Project spend is visible to this project's admin, its business unit admin, and organization admins." />
+    );
+  }
+
   const runs = runsQ.data?.items ?? [];
 
   const spend = project.monthlySpendUsd ?? 0;

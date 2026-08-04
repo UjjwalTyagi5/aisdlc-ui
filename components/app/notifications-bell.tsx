@@ -1,7 +1,10 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -13,21 +16,54 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { listNotifications, markNotificationsRead } from "@/lib/api/notifications";
+import { qk } from "@/lib/api/query-keys";
 import { useUiStore } from "@/stores/ui-store";
 
 /**
- * Bell with live unread count. The SSE workspace stream bumps the count via
- * `useUiStore.bumpUnread()` (see `<StreamSubscriber />`); opening the
- * dropdown clears it.
+ * Bell with live unread count.
  *
- * Inbox content is still illustrative — a full notifications page is post-MVP.
+ * The list is REAL now — request lifecycle events land in the notification
+ * store and are addressed to an identity or a role
+ * (`lib/mock/notification-fixtures.ts`). It previously showed two hard-coded
+ * rows ("Design awaiting approval", "Test run failed") with nothing behind
+ * them, which meant the bell could never tell you anything you did not already
+ * know, and "Mark read" cleared a counter rather than any actual item.
+ *
+ * Two sources of unread, deliberately summed: the SSE stream still bumps
+ * `useUiStore` for live run events, and the store carries the durable ones.
+ * Opening the dropdown clears both — the count exists to get you to look, and
+ * you have looked.
  */
 export function NotificationsBell() {
-  const count = useUiStore((s) => s.unreadCount);
-  const reset = useUiStore((s) => s.resetUnread);
+  const queryClient = useQueryClient();
+  const streamCount = useUiStore((s) => s.unreadCount);
+  const resetStream = useUiStore((s) => s.resetUnread);
+
+  const q = useQuery({
+    queryKey: qk.notifications.list(),
+    queryFn: listNotifications,
+    staleTime: 15_000,
+    // Cheap, and it is the one control whose whole job is to be current.
+    refetchInterval: 30_000,
+  });
+
+  const items = q.data ?? [];
+  const unreadStored = items.filter((n) => n.readAt === null).length;
+  const count = streamCount + unreadStored;
+
+  const markRead = useMutation({
+    mutationFn: markNotificationsRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.notifications.list() }),
+  });
+
+  function clear() {
+    if (streamCount > 0) resetStream();
+    if (unreadStored > 0) markRead.mutate();
+  }
 
   return (
-    <DropdownMenu onOpenChange={(open) => open && count > 0 && reset()}>
+    <DropdownMenu onOpenChange={(open) => open && count > 0 && clear()}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -49,13 +85,16 @@ export function NotificationsBell() {
         </Button>
       </DropdownMenuTrigger>
       {/* Elevated panel: border-line-soft, bg-panel-elevated surface */}
-      <DropdownMenuContent align="end" className="w-80 border-line-soft bg-panel-elevated">
+      <DropdownMenuContent
+        align="end"
+        className="w-80 border-line-soft bg-panel-elevated max-h-[70vh] overflow-y-auto"
+      >
         <DropdownMenuLabel className="flex items-center justify-between">
           <span className="font-display font-semibold">Notifications</span>
           {count > 0 && (
             <button
               type="button"
-              onClick={reset}
+              onClick={clear}
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 font-mono text-xs"
             >
               <Check className="size-3" aria-hidden />
@@ -64,14 +103,40 @@ export function NotificationsBell() {
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="bg-line-soft" />
-        <DropdownMenuItem className="flex flex-col items-start gap-0.5">
-          <span className="text-sm font-medium">Design awaiting approval</span>
-          <span className="font-mono text-muted-foreground text-xs">ingest · live</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem className="flex flex-col items-start gap-0.5">
-          <span className="text-sm font-medium">Test run failed</span>
-          <span className="font-mono text-muted-foreground text-xs">checkout · 1h ago</span>
-        </DropdownMenuItem>
+
+        {items.length === 0 ? (
+          <p className="text-muted-foreground px-2 py-6 text-center text-[12.5px]">
+            Nothing yet.
+          </p>
+        ) : (
+          items.map((n) => {
+            const row = (
+              <>
+                <span className="flex w-full items-center gap-2">
+                  {n.readAt === null && (
+                    <span className="bg-brand-bright size-1.5 shrink-0 rounded-full" aria-hidden />
+                  )}
+                  <span className="truncate text-sm font-medium">{n.title}</span>
+                </span>
+                {n.body && (
+                  <span className="text-muted-foreground line-clamp-2 text-xs">{n.body}</span>
+                )}
+                <span className="text-muted-foreground font-mono text-[10.5px]">
+                  {formatDistanceToNow(new Date(n.createdAt), { addSuffix: true })}
+                </span>
+              </>
+            );
+            return (
+              <DropdownMenuItem
+                key={n.id}
+                asChild={!!n.href}
+                className="flex flex-col items-start gap-0.5"
+              >
+                {n.href ? <Link href={n.href}>{row}</Link> : <div>{row}</div>}
+              </DropdownMenuItem>
+            );
+          })
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

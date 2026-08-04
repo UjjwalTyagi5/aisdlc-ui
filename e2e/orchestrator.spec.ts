@@ -144,16 +144,17 @@ test.describe("Orchestrator — auto-sequencing cockpit", () => {
   }) => {
     await signInAsPlatformRole(page, /^Project Admin\b/i);
 
-    // Reach it the way a user does — from the project's own tab strip.
+    // Straight to the route. The project tab strip no longer advertises
+    // Orchestrator — the sidebar's cross-project entry is the way in now — but
+    // the per-project route still resolves, and that is exactly what this test
+    // exists to prove: arriving with the project already fixed behaves the same
+    // as choosing one.
     await page.goto("/projects", { waitUntil: "domcontentloaded" });
     await page.getByRole("link", { name: /Payments API/i }).first().click();
-    // Scope to the project's own tab strip — the sidebar has an "Orchestrator"
-    // link too, and that one goes to the global route.
-    await page
-      .getByRole("navigation", { name: "Project sections" })
-      .getByRole("link", { name: /^Orchestrator$/i })
-      .click();
-    await page.waitForURL(/\/projects\/[^/]+\/orchestrator/);
+    await page.waitForURL(/\/projects\/[^/]+$/);
+    await page.goto(`${new URL(page.url()).pathname}/orchestrator`, {
+      waitUntil: "domcontentloaded",
+    });
 
     // No project picker here: the route already fixes the project.
     await expect(page.getByRole("combobox", { name: "Project" })).toHaveCount(0);

@@ -301,24 +301,28 @@ export function SpendBarChart({
         )}
       </div>
 
-      {/* Legend — always present for ≥ 2 series, so identity is never colour
-          alone. Bars carry no direct labels: a number on every bar in a
-          6×3 grid is 18 numbers, which is noise, not information. */}
-      <ul className="flex flex-wrap items-center gap-1.5">
-        {plotted.map((s, idx) => (
-          <li
-            key={s.id}
-            className="border-line-soft bg-surface-1 flex items-center gap-1.5 rounded-full border px-2.5 py-1"
-          >
-            <span
-              className="size-2 shrink-0 rounded-full"
-              style={{ background: SERIES_COLORS[idx] }}
-              aria-hidden
-            />
-            <span className="text-muted-foreground text-[11.5px]">{s.name}</span>
-          </li>
-        ))}
-      </ul>
+      {/* Legend — present for ≥ 2 series, so identity is never colour alone.
+          A single series gets none: there is nothing to tell apart, and one
+          chip repeating the panel's own heading is furniture. Bars carry no
+          direct labels either: a number on every bar in a 6×3 grid is 18
+          numbers, which is noise, not information. */}
+      {plotted.length > 1 && (
+        <ul className="flex flex-wrap items-center gap-1.5">
+          {plotted.map((s, idx) => (
+            <li
+              key={s.id}
+              className="border-line-soft bg-surface-1 flex items-center gap-1.5 rounded-full border px-2.5 py-1"
+            >
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{ background: SERIES_COLORS[idx] }}
+                aria-hidden
+              />
+              <span className="text-muted-foreground text-[11.5px]">{s.name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {/* The same numbers as a table — the non-visual route to this chart. */}
       <details className="group">

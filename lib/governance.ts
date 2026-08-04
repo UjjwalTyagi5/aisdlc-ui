@@ -26,6 +26,22 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   agent_default_org: "org_admin",
   agent_default_workspace: "bu_admin",
   agent_default_project: "project_admin",
+  // ── Hand-raised types ─────────────────────────────────────────────────────
+  // These are TIER-routed, not type-routed: who decides depends on who asked,
+  // so `lib/requests/routing.ts::initialApproverRole` computes the real
+  // approver and writes it to the request's `currentApproverRole`. The entries
+  // below are the floor used when no requester role is known — they keep this
+  // Record exhaustive so a new type cannot be added without a decision here.
+  connector_access: "project_admin",
+  mcp_server: "project_admin",
+  access_request: "project_admin",
+  user_onboarding: "project_admin",
+  other: "project_admin",
+  // The one hand-raised type that IS type-routed: onboarding a provider is an
+  // organization-wide act whoever asks for it, so it goes to the Org Admin
+  // rather than one tier above the requester. A Business Unit Admin asking
+  // would land there anyway; this makes it true for everyone.
+  model_provider_access: "org_admin",
 };
 
 /**

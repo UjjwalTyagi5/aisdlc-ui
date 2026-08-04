@@ -1,51 +1,137 @@
 "use client";
 
+import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Plus } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { LoadingState } from "@/components/ui/loading-state";
+import { ErrorState } from "@/components/ui/error-state";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
+import { ApprovalQueue } from "@/components/app/approval-queue";
+import { ScopeChip } from "@/components/app/scope-indicator";
+import { RaiseRequestDialog } from "@/components/requests/raise-request-dialog";
+import { RequestDetailSheet } from "@/components/requests/request-detail-sheet";
+import {
+  RequestSummaryCards,
+  countRequests,
+} from "@/components/requests/request-summary-cards";
+import { RequestTable } from "@/components/requests/request-table";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { hasPermission } from "@/lib/auth/permissions";
-import { ApprovalQueue } from "@/components/app/approval-queue";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
+import { listProjects } from "@/lib/api/projects";
+import { qk } from "@/lib/api/query-keys";
+import { canRaiseRequest } from "@/lib/requests/routing";
+import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import type { GovernanceApproval } from "@/lib/schemas";
 
-export default function ApprovalsPage() {
+/**
+ * Requests & Approvals — the personal queue, and the place you raise things.
+ *
+ * TWO LANES, ONE PAGE. PRD §33.2 separates them on every axis and this page
+ * keeps that separation visible rather than flattening it:
+ *
+ *   An APPROVAL is an agent about to do something consequential now. It routes
+ *   SIDEWAYS to the role that owns that agent, never up to a governance tier,
+ *   and its only fallback is the Project Admin — audited as a fallback.
+ *   Rendered by `ApprovalQueue`, unchanged.
+ *
+ *   A REQUEST is a person needing something they don't have. It routes UPWARD
+ *   and climbs a tier at a time until someone can grant it. Everything under
+ *   `components/requests/` is this lane.
+ *
+ * Merging them would breach "approvals never route to a governance tier" and
+ * the "no approval laundering" guardrail — a consequential action would become
+ * signable by someone who never had the standing to judge it. So the two share
+ * a page and a set of counts, and nothing else.
+ *
+ * THREE TABS, THREE QUESTIONS. "Inbox" is what is waiting on you. "My
+ * requests" is what you asked for and where it got to. "All" is everything in
+ * scope. One list with a filter would answer all three worse than three lists
+ * answer one each.
+ */
+export default function RequestsAndApprovalsPage() {
   const session = useSession({ required: true });
   const { scope, role, level, isOrgWide, bindings, managedBusinessUnitIds } = useAccessScope();
 
-  // artifact:view is the floor for agent-run approval gates — approver roles
-  // all hold it, and stakeholders without it see an empty queue since no gate
-  // routes to them. workspace:manage is the separate floor for governance
-  // approvals (project creation, model credentials), held by org_admin/
-  // bu_admin, who hold neither artifact:view nor any delivery-tier permission
-  // (PRD §14.8's governance tier never touches agent runs) — so either one
-  // earns access to this page. Backend stays authoritative either way.
+  const [raiseOpen, setRaiseOpen] = React.useState(false);
+  const [selected, setSelected] = React.useState<GovernanceApproval | null>(null);
+
+  const requestsQ = useQuery({
+    queryKey: qk.governanceApprovals.list(),
+    queryFn: () => listGovernanceApprovals(),
+  });
+
+  // Only for the Raise dialog's project picker — already scope-filtered
+  // server-side, so this never widens what the person may file against.
+  const projectsQ = useQuery({
+    queryKey: qk.projects.list({ pageSize: 100 }),
+    queryFn: () => listProjects({ pageSize: 100 }),
+    staleTime: 60_000,
+  });
+
+  const requests = React.useMemo(() => requestsQ.data ?? [], [requestsQ.data]);
+  const identityId = scope?.identityId ?? null;
+  const counts = React.useMemo(
+    () => countRequests(requests, identityId),
+    [requests, identityId],
+  );
+
+  // Keep the open sheet in step with a refetch — after a decision it would
+  // otherwise still be showing the pre-decision copy of the request.
+  const selectedLive = React.useMemo(
+    () => (selected ? (requests.find((r) => r.id === selected.id) ?? selected) : null),
+    [requests, selected],
+  );
+
+  const inboxRequests = React.useMemo(
+    () =>
+      requests.filter(
+        (r) =>
+          OPEN_REQUEST_STATUSES.includes(r.status) &&
+          role !== null &&
+          r.currentApproverRole === role &&
+          // Never your own — it escalates rather than self-approving (§33.2).
+          !(identityId && r.requestedById === identityId),
+      ),
+    [requests, role, identityId],
+  );
+
+  const myRequests = React.useMemo(
+    () => (identityId ? requests.filter((r) => r.requestedById === identityId) : []),
+    [requests, identityId],
+  );
+
   const canSeeQueue =
     hasPermission(session, "artifact:view") || hasPermission(session, "workspace:manage");
   if (!canSeeQueue) {
     return (
-      <RestrictedAccess description="Approvals require the artifact:view or workspace:manage permission. Ask your admin for access." />
+      <RestrictedAccess description="Requests & Approvals requires the artifact:view or workspace:manage permission. Ask your admin for access." />
     );
   }
 
-  // Name the scope the queue is drawn from. A multi-scope viewer gets a count
-  // rather than an arbitrary first name — picking one would misrepresent the
-  // queue as narrower than it is.
   const unitBindings = bindings.filter((b) => b.kind === "business_unit");
   const projectBindings = bindings.filter((b) => b.kind === "project");
   const scopeName = isOrgWide
     ? null
     : level === "business_unit"
-      ? (managedBusinessUnitIds.length === 1
+      ? ((managedBusinessUnitIds.length === 1
           ? unitBindings.find((b) => b.scopeId === managedBusinessUnitIds[0])?.scopeName
-          : undefined) ?? `${managedBusinessUnitIds.length} business units`
+          : undefined) ?? `${managedBusinessUnitIds.length} business units`)
       : projectBindings.length === 1
         ? projectBindings[0]!.scopeName
         : `${projectBindings.length} projects`;
 
+  const mayRaise = canRaiseRequest(role);
+
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
       <header
-        className="flex flex-col items-start gap-1"
+        className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
         style={{
           animationName: "rise",
           animationDuration: "0.6s",
@@ -53,34 +139,134 @@ export default function ApprovalsPage() {
           animationFillMode: "both",
         }}
       >
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          Act
-        </div>
-        <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-          Approvals
-        </h1>
-
-        {/* An approval queue is the one screen where an unstated boundary is
-            actively dangerous: "you're all caught up" must be legible as "in
-            Payments", not as "in the organisation". */}
-        {scope !== null && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <ScopeChip kind={isOrgWide ? "organization" : level} name={scopeName} size="sm" />
-            <PersonaBadge role={role} />
+        <div>
+          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
+            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
+            Act
           </div>
-        )}
+          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
+            Requests &amp; Approvals
+          </h1>
 
-        <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-          {isOrgWide
-            ? "Everything across the organisation that's waiting on your decision — phase sign-offs, agent questions and governance requests, routed to your role."
-            : level === "business_unit"
-              ? `Everything in your ${BUSINESS_UNIT_LABEL.toLowerCase()} that's waiting on your decision. Approvals from other ${BUSINESS_UNIT_LABEL.toLowerCase()}s are not shown and are not yours to make.`
-              : "Everything across the projects you're assigned to that's waiting on your decision — phase sign-offs and agent questions, routed to your role."}
-        </p>
+          {/* An approval queue is the one screen where an unstated boundary is
+              actively dangerous: "you're all caught up" must be legible as "in
+              Payments", not as "in the organisation". */}
+          {scope !== null && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <ScopeChip kind={isOrgWide ? "organization" : level} name={scopeName} size="sm" />
+            </div>
+          )}
+
+          <p className="text-muted-foreground mt-2 max-w-[600px] text-[14px]">
+            {isOrgWide
+              ? "Everything across the organisation waiting on your decision — phase sign-offs, agent questions and requests that have climbed to you. As Organization Admin you are the final authority, so you decide rather than raise."
+              : level === "business_unit"
+                ? `Everything in your ${BUSINESS_UNIT_LABEL.toLowerCase()} waiting on your decision, and anything you've raised. Other ${BUSINESS_UNIT_LABEL.toLowerCase()}s' items are not shown and are not yours to decide.`
+                : "Everything across your projects waiting on your decision, and anything you've raised. Requests climb one tier at a time until someone can grant them."}
+          </p>
+        </div>
+
+        {/* Hidden for the Organization Admin — nothing sits above them to
+            decide it. The endpoint refuses independently (403); this only
+            stops the page offering a door that closes. */}
+        {mayRaise && (
+          <Button className="shrink-0 gap-1.5" onClick={() => setRaiseOpen(true)}>
+            <Plus className="size-4" aria-hidden />
+            Raise request
+          </Button>
+        )}
       </header>
 
-      <ApprovalQueue />
+      <RequestSummaryCards counts={counts} />
+
+      <Tabs defaultValue="inbox" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="inbox">
+            Inbox
+            {inboxRequests.length > 0 && (
+              <span className="bg-warning/15 text-warning ml-1.5 rounded-full px-1.5 font-mono text-[10px]">
+                {inboxRequests.length}
+              </span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="mine">
+            My requests
+            {myRequests.length > 0 && (
+              <span className="text-muted-foreground ml-1.5 font-mono text-[10px]">
+                {myRequests.length}
+              </span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="all">All</TabsTrigger>
+        </TabsList>
+
+        {/* ── Inbox: requests routed to this role, then the agent gates ───── */}
+        <TabsContent value="inbox" className="space-y-6">
+          {requestsQ.isError ? (
+            <ErrorState title="Couldn't load requests" onRetry={() => requestsQ.refetch()} />
+          ) : requestsQ.isLoading ? (
+            <LoadingState variant="list" rows={3} />
+          ) : (
+            inboxRequests.length > 0 && (
+              <section className="space-y-2">
+                <h2 className="text-muted-foreground font-mono text-[10px] tracking-[0.14em] uppercase">
+                  Requests waiting on you
+                </h2>
+                <RequestTable
+                  requests={inboxRequests}
+                  onOpen={setSelected}
+                  emptyTitle="Nothing waiting on you"
+                  emptyDescription="Requests routed to your role appear here."
+                />
+              </section>
+            )
+          )}
+
+          {/* The approval lane, untouched — agent gates and clarifications. */}
+          <ApprovalQueue />
+        </TabsContent>
+
+        <TabsContent value="mine">
+          {requestsQ.isLoading ? (
+            <LoadingState variant="list" rows={3} />
+          ) : (
+            <RequestTable
+              requests={myRequests}
+              onOpen={setSelected}
+              emptyTitle="You haven't raised anything"
+              emptyDescription={
+                mayRaise
+                  ? "Use Raise request when you need access, a model, a connector or budget headroom."
+                  : "Organization Admins decide requests rather than raising them."
+              }
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="all">
+          {requestsQ.isLoading ? (
+            <LoadingState variant="list" rows={4} />
+          ) : (
+            <RequestTable
+              requests={requests}
+              onOpen={setSelected}
+              emptyTitle="No requests in scope"
+              emptyDescription="Requests raised in the business units and projects you can see appear here."
+            />
+          )}
+        </TabsContent>
+      </Tabs>
+
+      <RaiseRequestDialog
+        open={raiseOpen}
+        onOpenChange={setRaiseOpen}
+        projects={projectsQ.data?.items ?? []}
+      />
+      <RequestDetailSheet
+        request={selectedLive}
+        open={selected !== null}
+        onOpenChange={(o) => !o && setSelected(null)}
+      />
     </div>
   );
 }

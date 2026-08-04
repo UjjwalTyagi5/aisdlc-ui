@@ -13,6 +13,7 @@ import { ApprovalQueueStrip } from "@/components/app/approval-queue-strip";
 import { GovernanceApprovalRow } from "@/components/app/governance-approval-row";
 import { listApprovals, type ApprovalFilters } from "@/lib/api/approvals";
 import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
+import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
@@ -94,7 +95,10 @@ export function ApprovalQueue() {
   // Each governance approval routes to exactly one role — never show a BU
   // Admin's project/model requests to an Org Admin or vice versa.
   const visibleGovernance = (governanceQ.data ?? []).filter(
-    (g) => g.status === "pending" && role !== null && GOVERNANCE_APPROVER_ROLE[g.type] === role,
+    (g) =>
+      OPEN_REQUEST_STATUSES.includes(g.status) &&
+      role !== null &&
+      GOVERNANCE_APPROVER_ROLE[g.type] === role,
   );
 
   // Sectioned by business unit, then by project within it — a governance

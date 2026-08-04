@@ -9,7 +9,6 @@ import { Breadcrumbs } from "./breadcrumbs";
 import { GlobalSearchTrigger } from "./global-search-trigger";
 import { MobileSidebar } from "./mobile-sidebar";
 import { NotificationsBell } from "./notifications-bell";
-import { ScopeContextBar } from "./scope-indicator";
 import { UserMenu } from "./user-menu";
 
 /**
@@ -33,13 +32,15 @@ export function TopBar() {
         <Breadcrumbs />
       </div>
       <div className="ml-auto flex items-center gap-1 sm:gap-2">
-        {/* The active scope and acting role, always on screen. Every list in the
-            app is now scope-filtered, so the boundary has to be stated
-            somewhere persistent — otherwise two people see different counts on
-            the same page with nothing explaining why. Hidden below lg, where
-            the per-page scope line carries it instead. */}
-        <ScopeContextBar className="mr-1 hidden lg:flex" />
-        <Separator orientation="vertical" className="mx-1 hidden h-6 lg:block" />
+        {/* No scope or role chip here.
+
+            This bar used to carry both, which — with the sidebar's scope chip
+            and the chip each page states above its own numbers — put the same
+            two facts on screen up to four times at once, and the role three
+            times on the dashboard alone. The boundary still has to be stated,
+            so it is: once per page, next to the figures it qualifies. The role
+            you are acting as lives in the account menu to the right, which is
+            where people look to check it. */}
         <GlobalSearchTrigger className="hidden md:flex" />
         <Separator orientation="vertical" className="mx-1 hidden h-6 md:block" />
         <NotificationsBell />

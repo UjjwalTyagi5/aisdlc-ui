@@ -10,6 +10,7 @@
 import { PROJECTS } from "@/mocks/fixtures";
 import { listWorkspaces } from "@/lib/mock/workspace-fixtures";
 import type { BudgetRow, CostBreakdown, CostBreakdownRow } from "@/lib/api/cost";
+import type { Phase } from "@/lib/schemas/enums";
 
 const GENERATED_AT = new Date(Date.UTC(2026, 5, 17, 12, 0, 0)).toISOString();
 
@@ -113,12 +114,20 @@ function backcast(current: number, months: number, seriesIndex: number): number[
  * @param allowedWorkspaceIds units the viewer may read, or null when unbounded.
  * @param workspaceId         the viewer's narrowing choice ("all" → no filter),
  *                            applied on top of what they're allowed to see.
+ * @param projectId           a single project to report on, for a project's own
+ *                            Overview. Implies `groupBy: "project"` and returns
+ *                            at most one series. It exists so that page can ask
+ *                            for one project rather than fetching every
+ *                            project's series and picking one in the browser —
+ *                            a client-side pick still ships the other projects'
+ *                            spend to a viewer who has no reason to hold it.
  */
 export function buildSpendSeries(
   months = 6,
   allowedWorkspaceIds?: string[] | null,
   groupBy: SpendGroupBy = "business_unit",
   workspaceId?: string | null,
+  projectId?: string | null,
 ): {
   months: string[];
   groupBy: SpendGroupBy;
@@ -131,6 +140,31 @@ export function buildSpendSeries(
   );
   const scoped = workspaceId ? readable.filter((w) => String(w.id) === workspaceId) : readable;
   const scopedIds = new Set(scoped.map((w) => String(w.id)));
+
+  // One named project — still bounded by the units the viewer may read, so an
+  // id they cannot reach yields an empty series rather than that project's
+  // numbers. The caller checks readability too and 404s; this is the backstop.
+  if (projectId) {
+    const project = PROJECTS.find(
+      (p) =>
+        String(p.id) === projectId &&
+        p.workspaceId != null &&
+        readable.some((w) => String(w.id) === String(p.workspaceId)),
+    );
+    return {
+      months: labels,
+      groupBy: "project",
+      series: project
+        ? [
+            {
+              id: String(project.id),
+              name: project.name,
+              points: backcast(project.monthlySpendUsd ?? 0, months, 0),
+            },
+          ]
+        : [],
+    };
+  }
 
   if (groupBy === "business_unit") {
     return {
@@ -162,8 +196,9 @@ export function buildSpendSeries(
     };
   }
 
-  // Model: the scoped total redistributed by the same share table the Cost
-  // page's per-model breakdown uses, so the two agree.
+  // Model: the scoped total redistributed by the same shares the Cost page's
+  // breakdown sums to, so the chart and the table agree. Both now read from the
+  // agent × model matrix (see MODEL_SHARE) rather than two separate tables.
   const total = scoped.reduce((a, w) => a + w.monthlySpendUsd, 0);
   return {
     months: labels,
@@ -176,12 +211,80 @@ export function buildSpendSeries(
   };
 }
 
-/** Per-model breakdown, weighted toward the models already used across fixtures/traces. */
-const MODEL_SHARE: Array<{ model: string; share: number }> = [
-  { model: "claude-sonnet-4-6", share: 0.62 },
-  { model: "claude-opus-4-7", share: 0.23 },
-  { model: "claude-haiku-4-5", share: 0.15 },
+/**
+ * Per-agent breakdown, over the eight agents of the core pipeline.
+ *
+ * Weighted the way a real programme spends: Development dominates because it
+ * generates the most tokens per run, Requirements and Design are front-loaded
+ * but cheaper, and Documentation trails. Shares sum to 1 so the per-agent split
+ * of any total is that total — the same discipline MODEL_SHARE follows, and the
+ * reason the two can be crossed without either drifting from the headline.
+ */
+const AGENT_SHARE: Array<{ agentType: Phase; share: number }> = [
+  { agentType: "development", share: 0.31 },
+  { agentType: "testing", share: 0.17 },
+  { agentType: "design", share: 0.14 },
+  { agentType: "review", share: 0.12 },
+  { agentType: "requirements", share: 0.1 },
+  { agentType: "security", share: 0.08 },
+  { agentType: "deployment", share: 0.05 },
+  { agentType: "documentation", share: 0.03 },
 ];
+
+/**
+ * Which models an agent actually runs on.
+ *
+ * A uniform cross-product would be the wrong picture: it says every agent uses
+ * every model in the same proportion, which erases the one insight this table
+ * exists to give — that the expensive agents are expensive partly because of
+ * what they run ON. Development leans on Opus, Documentation lives on Haiku,
+ * and the reviewers sit in between. Weights are per-agent and sum to 1.
+ */
+const AGENT_MODEL_MIX: Record<Phase, Partial<Record<string, number>>> = {
+  requirements: { "claude-sonnet-4-6": 0.75, "claude-haiku-4-5": 0.25 },
+  design: { "claude-sonnet-4-6": 0.6, "claude-opus-4-7": 0.4 },
+  development: { "claude-opus-4-7": 0.55, "claude-sonnet-4-6": 0.45 },
+  review: { "claude-sonnet-4-6": 0.7, "claude-opus-4-7": 0.3 },
+  security: { "claude-opus-4-7": 0.5, "claude-sonnet-4-6": 0.5 },
+  testing: { "claude-sonnet-4-6": 0.65, "claude-haiku-4-5": 0.35 },
+  deployment: { "claude-sonnet-4-6": 0.8, "claude-haiku-4-5": 0.2 },
+  documentation: { "claude-haiku-4-5": 0.7, "claude-sonnet-4-6": 0.3 },
+  // Track-specific agents draw no spend in these fixtures; listed so the record
+  // stays exhaustive over Phase and a new phase cannot be forgotten here.
+  discovery: {},
+  strategy: {},
+  migration_mapping: {},
+  validation: {},
+  data_engineering: {},
+};
+
+/**
+ * Per-model breakdown — DERIVED from the agent × model matrix above, never
+ * stated separately.
+ *
+ * It used to be its own hand-written table (sonnet .62 / opus .23 / haiku .15),
+ * which was fine while the model split was the only split. The moment agents
+ * got their own mix, two independent tables described one distribution and
+ * promptly disagreed: the matrix puts Opus at 30% of spend because Development
+ * and Security lean on it, while the standalone table still said 23%. Nothing
+ * surfaced the contradiction — the Cost breakdown summed one way and the
+ * dashboard's "by model" chart drew the other, from the same headline total.
+ *
+ * Deriving it means the agent mix is the single fact and every model figure in
+ * the app is a view of it. Editing one agent's mix moves the chart too, which
+ * is the only behaviour that can stay true.
+ */
+const MODEL_SHARE: Array<{ model: string; share: number }> = (() => {
+  const acc = new Map<string, number>();
+  for (const { agentType, share } of AGENT_SHARE) {
+    for (const [model, weight] of Object.entries(AGENT_MODEL_MIX[agentType])) {
+      acc.set(model, (acc.get(model) ?? 0) + share * (weight ?? 0));
+    }
+  }
+  return [...acc.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([model, share]) => ({ model, share }));
+})();
 
 /**
  * @param workspaceId          the caller's narrowing choice (a Business Unit
@@ -205,19 +308,30 @@ export function buildCostBreakdown(
   const totalCostUsd = Number(scoped.reduce((a, w) => a + w.monthlySpendUsd, 0).toFixed(2));
   const budgetUsd = scoped.reduce((a, w) => a + (w.monthlyBudgetUsd ?? 0), 0);
 
-  const rows: CostBreakdownRow[] = MODEL_SHARE.map(({ model, share }) => {
-    const costUsd = Number((totalCostUsd * share).toFixed(2));
-    // ~68% of spend is input tokens at this fixture's blended price point.
-    const inputTokens = Math.round((costUsd * 0.68 * 1_000_000) / 3);
-    const outputTokens = Math.round((costUsd * 0.32 * 1_000_000) / 15);
-    return {
-      model,
-      inputTokens,
-      outputTokens,
-      costUsd,
-      callCount: Math.max(1, Math.round(costUsd * 4)),
-    };
-  });
+  // One row per (agent, model) the agent actually runs on. Crossing the two
+  // share tables keeps every lens reconcilable: summing rows by model still
+  // yields MODEL_SHARE of the total, summing by agent yields AGENT_SHARE, and
+  // both sum to the headline. A breakdown whose columns disagreed with the tile
+  // above them would read as a bug in the tile.
+  const rows: CostBreakdownRow[] = AGENT_SHARE.flatMap(({ agentType, share }) =>
+    Object.entries(AGENT_MODEL_MIX[agentType])
+      .map(([model, weight]) => {
+        const costUsd = Number((totalCostUsd * share * (weight ?? 0)).toFixed(2));
+        // ~68% of spend is input tokens at this fixture's blended price point.
+        const inputTokens = Math.round((costUsd * 0.68 * 1_000_000) / 3);
+        const outputTokens = Math.round((costUsd * 0.32 * 1_000_000) / 15);
+        return {
+          agentType,
+          model,
+          inputTokens,
+          outputTokens,
+          costUsd,
+          callCount: Math.max(1, Math.round(costUsd * 4)),
+        };
+      })
+      // A zero-dollar row is noise in a table you scan for the expensive ones.
+      .filter((r) => r.costUsd > 0),
+  ).sort((a, b) => b.costUsd - a.costUsd);
 
   return {
     windowDays,

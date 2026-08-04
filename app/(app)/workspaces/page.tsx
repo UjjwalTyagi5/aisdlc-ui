@@ -35,7 +35,7 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
 import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { archiveWorkspace } from "@/lib/api/workspaces";
@@ -62,7 +62,7 @@ export default function WorkspacesPage() {
 
   const workspacesQ = useWorkspaces();
   const { active, setActive } = useActiveWorkspace();
-  const { role, isOrgWide, level, scope, managedBusinessUnitIds } = useAccessScope();
+  const { isOrgWide, level, scope, managedBusinessUnitIds } = useAccessScope();
   const canManage = hasPermission(session, "workspace:manage");
 
   // Creating a Business Unit is an Organization Admin action — this page's own
@@ -151,7 +151,6 @@ export default function WorkspacesPage() {
                 }
                 size="sm"
               />
-              <PersonaBadge role={role} />
             </div>
           )}
 

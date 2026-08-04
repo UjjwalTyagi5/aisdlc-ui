@@ -1,6 +1,10 @@
 import { type NextRequest } from "next/server";
 
 import { getSession } from "@/lib/auth/session";
+import { sessionIdentityId } from "@/lib/auth/access-scope";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { canDecideRequest } from "@/lib/requests/routing";
+import type { PlatformRole } from "@/lib/roles";
 import {
   decideGovernanceApproval,
   getGovernanceApproval,
@@ -21,6 +25,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const body = (await req.json()) as GovernanceApprovalDecisionInput;
   const approval = getGovernanceApproval(id);
   if (!approval) return Response.json({ code: "not_found" }, { status: 404 });
+
+  // ENFORCED HERE, not only in the sheet. `canDecideRequest` renders the
+  // buttons; without this the endpoint accepted a decision from anyone signed
+  // in — an Organization Admin could close a request still sitting with a
+  // Business Unit Admin, skipping the ladder that the escalate route exists to
+  // walk. Self-approval is blocked for the same reason it is in routing:
+  // §33.2 makes it a rule, not a nicety.
+  const eligibility = canDecideRequest({
+    currentApproverRole: (approval.currentApproverRole as PlatformRole | null) ?? null,
+    requestedById: approval.requestedById,
+    status: approval.status,
+    viewerRole: effectivePlatformRole(session),
+    viewerIdentityId: sessionIdentityId(session),
+  });
+  if (!eligibility.allowed) {
+    return Response.json(
+      { code: "forbidden", message: eligibility.reason ?? "Not yours to decide." },
+      { status: 403 },
+    );
+  }
 
   const decided = decideGovernanceApproval(id, body.decision, session.user.name, body.reason);
   if (!decided) return Response.json({ code: "not_found" }, { status: 404 });

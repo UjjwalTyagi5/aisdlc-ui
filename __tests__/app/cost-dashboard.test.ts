@@ -17,6 +17,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  agentsInBreakdown,
   budgetTone,
   formatUsd,
   formatTokens,
@@ -41,6 +42,7 @@ function buildBreakdown(overrides: Partial<CostBreakdown> = {}): CostBreakdown {
 }
 
 const ROW: CostBreakdownRow = {
+  agentType: "development",
   model: "claude-sonnet-4-6",
   inputTokens: 50_000,
   outputTokens: 10_000,
@@ -67,8 +69,43 @@ describe("CostDashboard formatting helpers", () => {
     expect(formatTokens(2_000_000)).toBe("2.0M");
   });
 
-  it("derives a stable per-model row key", () => {
-    expect(rowKey(ROW)).toBe("claude-sonnet-4-6");
+  it("derives a stable per-(agent, model) row key", () => {
+    expect(rowKey(ROW)).toBe("development::claude-sonnet-4-6");
+  });
+
+  // The model alone was the key until rows carried an agent. Two agents on the
+  // same model is the common case, not an edge one, and a shared key makes
+  // React reuse one row's DOM for the other's numbers.
+  it("distinguishes two agents sharing a model", () => {
+    expect(rowKey(ROW)).not.toBe(rowKey({ ...ROW, agentType: "testing" }));
+  });
+});
+
+describe("CostDashboard agent filter options", () => {
+  it("lists the agents present, heaviest spender first", () => {
+    expect(
+      agentsInBreakdown([
+        { ...ROW, agentType: "testing", costUsd: 5 },
+        { ...ROW, agentType: "development", costUsd: 30 },
+        { ...ROW, agentType: "design", costUsd: 12 },
+      ]),
+    ).toEqual(["development", "design", "testing"]);
+  });
+
+  // An agent's spend is split across the models it runs on, so ranking on a
+  // single row would rank on whichever model happened to come first.
+  it("ranks on an agent's total across its models, not one row", () => {
+    expect(
+      agentsInBreakdown([
+        { ...ROW, agentType: "development", model: "claude-opus-4-7", costUsd: 6 },
+        { ...ROW, agentType: "development", model: "claude-sonnet-4-6", costUsd: 6 },
+        { ...ROW, agentType: "testing", model: "claude-sonnet-4-6", costUsd: 9 },
+      ]),
+    ).toEqual(["development", "testing"]);
+  });
+
+  it("returns nothing for an empty breakdown", () => {
+    expect(agentsInBreakdown([])).toEqual([]);
   });
 });
 

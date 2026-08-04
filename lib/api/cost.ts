@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { SpendSeries, type SpendGroupBy } from "@/lib/schemas/spend-series";
+import { Phase } from "@/lib/schemas/enums";
 
 import { Timestamp } from "@/lib/schemas/primitives";
 
@@ -8,9 +9,18 @@ import { api } from "./client";
 
 /**
  * Schema matching CostBreakdownRow from agentic_app/shared/routers/_schemas.py
- * (REQ-M9-07/08/09) — one per-model aggregate row (grouped by model only).
+ * (REQ-M9-07/08/09) — one aggregate row per (agent, model) pair.
+ *
+ * Grouped by model ALONE until now, which left agent-level attribution (PRD
+ * FR-09) reachable only from a single project's own Cost tab: you could see
+ * that Opus cost $31 across the organisation, but not which agent spent it, and
+ * "which agent is expensive" is the question that decides where to tune a
+ * prompt or downgrade a model. The page's own copy had promised both splits for
+ * some time; this is the field that makes it true.
  */
 export const CostBreakdownRow = z.object({
+  /** The agent that consumed it, as a pipeline phase (`PHASE_LABEL` renders it). */
+  agentType: Phase,
   model: z.string(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
@@ -91,12 +101,15 @@ export const getSpendSeries = (params?: {
   groupBy?: SpendGroupBy;
   workspaceId?: string | null;
   months?: number;
+  /** One project's own series — implies `groupBy: "project"` server-side. */
+  projectId?: string | null;
 }) =>
   api("/cost/spend-series", {
     query: {
       groupBy: params?.groupBy ?? "business_unit",
       workspaceId: params?.workspaceId ?? "all",
       months: params?.months ?? 6,
+      projectId: params?.projectId || undefined,
     },
     schema: SpendSeries,
   });

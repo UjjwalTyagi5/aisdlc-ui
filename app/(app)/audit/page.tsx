@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/select";
 import { ActivityTabs } from "@/components/app/activity-tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
-import { PersonaBadge, ScopeChip } from "@/components/app/scope-indicator";
+import { ScopeChip } from "@/components/app/scope-indicator";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useSession } from "@/hooks/use-session";
@@ -85,7 +85,7 @@ export default function AuditPage() {
 function AuditPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { scope, role, level, isOrgWide } = useAccessScope();
+  const { scope, level, isOrgWide } = useAccessScope();
 
   const actionFilter = (searchParams.get("action") ?? "all") as "all" | AuditAction;
   const actorFilter = searchParams.get("actor") ?? "all";
@@ -215,7 +215,6 @@ function AuditPageInner() {
           {scope !== null && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <ScopeChip kind={isOrgWide ? "organization" : level} size="sm" />
-              <PersonaBadge role={role} />
             </div>
           )}
 

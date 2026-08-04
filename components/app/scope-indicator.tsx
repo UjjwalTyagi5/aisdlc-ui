@@ -167,14 +167,22 @@ export function PersonaBadge({
 // ─── Composed context bar ─────────────────────────────────────────────────────
 
 /**
- * The viewer's active context, for the top bar: which scope they are working in
- * and as which role. Renders nothing until the scope resolves rather than
- * flashing a provisional boundary — a chip that says "Organization" for one
- * frame before correcting itself to "Business Unit / Payments" is worse than a
- * chip that appears a moment late.
+ * The viewer's active scope, for the mobile navigation sheet — the one place
+ * the desktop sidebar's scope chip has no equivalent.
+ *
+ * Scope only, no role: the account menu states the role, and repeating it in
+ * the chrome is what made it appear three times on a single page header. What
+ * the chrome owes the viewer is the BOUNDARY the numbers are drawn inside,
+ * because two people otherwise see different counts on the same screen with
+ * nothing explaining why. Which of them is a Business Unit Admin is a separate
+ * question, and not one the numbers depend on.
+ *
+ * Renders nothing until the scope resolves rather than flashing a provisional
+ * boundary — a chip reading "Organization" for one frame before correcting
+ * itself to "Business Unit / Payments" is worse than one that arrives late.
  */
 export function ScopeContextBar({ className }: { className?: string }) {
-  const { scope, role, level, isLoading, isError, managedBusinessUnitIds, bindings } =
+  const { scope, level, isLoading, isError, managedBusinessUnitIds, bindings } =
     useAccessScope();
 
   if (isLoading || isError || !scope) return null;
@@ -200,7 +208,6 @@ export function ScopeContextBar({ className }: { className?: string }) {
   return (
     <div className={cn("flex min-w-0 items-center gap-2", className)}>
       <ScopeChip kind={scope.isOrgWide ? "organization" : level} name={name} size="sm" />
-      <PersonaBadge role={role} />
     </div>
   );
 }
