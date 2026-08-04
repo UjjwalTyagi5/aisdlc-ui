@@ -301,6 +301,29 @@ export default function ModelProvidersPage() {
   // One flat list across every unit in view; each provider still knows which
   // unit it belongs to, so the cards can say so when there is more than one.
   const providers = providerQueries.flatMap((q) => q.data ?? []);
+
+  /**
+   * One card per PROVIDER, not per connection.
+   *
+   * A subscription is a credential, not a provider. Rendering a card each gave
+   * two "Anthropic" tiles that both claimed the provider's whole spend — the
+   * figure is keyed by provider, so splitting the card double-counted it — and
+   * split one vendor's models across two places for no reason a reader could
+   * see. The subscriptions live on the detail screen, which already lists them
+   * and is where testing, editing and removing a key belongs.
+   */
+  const providerGroups = ((): [string, typeof providers][] => {
+    // Plain function, not useMemo: this sits below an early return, so a hook
+    // here would change hook order between renders. Grouping a handful of
+    // connections is far cheaper than the bug that would buy.
+    const by = new Map<string, typeof providers>();
+    for (const p of providers) {
+      const list = by.get(p.provider) ?? [];
+      list.push(p);
+      by.set(p.provider, list);
+    }
+    return [...by.entries()];
+  })();
   const catalog = catalogQ.data ?? [];
   const unitNameById = new Map(scopedUnits.map((u) => [u.id, u.name] as const));
 
@@ -429,23 +452,23 @@ export default function ModelProvidersPage() {
           className="grid gap-3 sm:grid-cols-2"
           aria-label={isOrg ? "Org-wide default model" : "Enabled models"}
         >
-          {providers.map((p) => (
+          {providerGroups.map(([kind, group]) => (
             <ProviderCard
-              key={p.id}
-              provider={p}
+              key={kind}
+              connections={group}
               radioDisabled={!isOrg}
               // Only worth naming when there's more than one unit in view;
               // otherwise it repeats the card above on every tile.
               unitName={
-                scopedUnits.length > 1 && p.workspaceId
-                  ? (unitNameById.get(String(p.workspaceId)) ?? null)
+                scopedUnits.length > 1 && group[0]?.workspaceId
+                  ? (unitNameById.get(String(group[0].workspaceId)) ?? null)
                   : null
               }
-              verifying={verifyMutation.isPending && verifyingId === p.id}
-              onVerify={() => verifyMutation.mutate(p.id)}
-              onEdit={() => setEditFor(p)}
-              onRemove={() => setRemoveFor(p)}
-              spendUsd={spendQ.data ? (spendByProvider.get(p.provider) ?? 0) : null}
+              verifying={verifyMutation.isPending && group.some((c) => c.id === verifyingId)}
+              onVerify={(id) => verifyMutation.mutate(id)}
+              onEdit={(c) => setEditFor(c)}
+              onRemove={(c) => setRemoveFor(c)}
+              spendUsd={spendQ.data ? (spendByProvider.get(kind) ?? 0) : null}
             />
           ))}
         </RadioGroup>
@@ -491,7 +514,7 @@ export default function ModelProvidersPage() {
 // ───────── Provider card ─────────
 
 function ProviderCard({
-  provider,
+  connections,
   verifying,
   onVerify,
   onEdit,
@@ -500,11 +523,12 @@ function ProviderCard({
   unitName,
   spendUsd,
 }: {
-  provider: ModelProvider;
+  /** Every subscription onboarded for this provider — at least one. */
+  connections: ModelProvider[];
   verifying?: boolean;
-  onVerify: () => void;
-  onEdit: () => void;
-  onRemove: () => void;
+  onVerify: (id: string) => void;
+  onEdit: (connection: ModelProvider) => void;
+  onRemove: (connection: ModelProvider) => void;
   /** True outside org scope — no scoped provider participates in the single
    *  org-wide default, so the radio is shown inert rather than interactive. */
   radioDisabled?: boolean;
@@ -515,22 +539,48 @@ function ProviderCard({
   /** This month's spend for the provider KIND, or null while it loads. */
   spendUsd?: number | null;
 }) {
+  const provider = connections[0]!;
   const label = providerLabel(provider.provider);
-  const enabledOfferings = provider.offerings.filter((o) => o.enabled);
-  const pending = provider.approvalStatus === "pending_approval";
+  const multi = connections.length > 1;
+
+  /**
+   * Models across EVERY subscription, de-duplicated.
+   *
+   * A model can appear on two keys; listing it twice would suggest two models.
+   * Which key serves which is the detail screen's job — this card only claims
+   * the provider offers it.
+   */
+  const enabledOfferings = (() => {
+    const seen = new Set<string>();
+    return connections
+      .flatMap((c) => c.offerings.filter((o) => o.enabled))
+      .filter((o) => (seen.has(o.model_id) ? false : (seen.add(o.model_id), true)));
+  })();
+
+  // Worst status wins: one broken key means the provider is not wholly healthy,
+  // and a green card over a dead subscription is the wrong reassurance.
+  const worst =
+    connections.find((c) => c.status === "invalid") ??
+    connections.find((c) => c.status !== "valid") ??
+    provider;
+  const pending = connections.some((c) => c.approvalStatus === "pending_approval");
   const rejected = provider.approvalStatus === "rejected";
 
   return (
     <Card className="border-line-soft bg-panel-elevated flex flex-col overflow-hidden shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
       <CardHeader className="pb-3">
         <div className="flex items-start gap-3">
-          <ProviderGlyph label={provider.display_name || label} />
+          <ProviderGlyph label={label} />
           <div className="min-w-0 flex-1">
-            <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
-              {provider.display_name}
-            </h3>
+            {/* The PROVIDER names the card, not a subscription. With the
+                connections merged, borrowing the first one's display name
+                titled the whole card after one of the several contracts
+                listed inside it. */}
+            <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">{label}</h3>
             <p className="text-muted-foreground mt-0.5 truncate text-[12px]">
-              {label}
+              {multi
+                ? `${connections.length} subscriptions`
+                : provider.display_name}
               {unitName && (
                 <>
                   {" · "}
@@ -555,7 +605,7 @@ function ProviderCard({
             )}
           </div>
           <div className="flex shrink-0 flex-col items-end gap-1">
-            <StatusPill status={provider.status} />
+            <StatusPill status={worst.status} />
             {pending && (
               <span className="text-warning bg-warning/10 border-warning/30 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider">
                 <Clock className="size-2.5" aria-hidden />
@@ -602,43 +652,69 @@ function ProviderCard({
           <ArrowRight className="size-3" aria-hidden />
         </Link>
 
-        <div className="mt-auto flex gap-1.5">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onVerify}
-            disabled={verifying}
-            aria-busy={verifying}
-            aria-label={`Test ${provider.display_name}`}
-            className="border-line-soft"
-          >
-            {verifying ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            ) : (
-              <CheckCircle2 className="size-4" aria-hidden />
-            )}
-            {verifying ? "Testing…" : "Test"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onEdit}
-            aria-label={`Edit ${provider.display_name}`}
-            className="border-line-soft"
-          >
-            <Pencil className="size-4" aria-hidden />
-            Edit
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRemove}
-            aria-label={`Remove ${provider.display_name}`}
-            className="border-line-soft ml-auto"
-          >
-            <Trash2 className="size-4" aria-hidden />
-            Remove
-          </Button>
+        {/* SUBSCRIPTIONS, each with its own actions.
+            Testing, editing and removing act on a KEY, so once a provider holds
+            more than one they cannot sit on the card as a whole — "Test
+            Anthropic" has no answer when two contracts serve it. Naming each
+            subscription and giving it its own row keeps every action
+            unambiguous, and reads as one line when there is only one. */}
+        <div className="mt-auto space-y-1.5">
+          {multi && (
+            <p className="text-muted-foreground font-mono text-[10px] tracking-[0.1em] uppercase">
+              {connections.length} subscriptions
+            </p>
+          )}
+          {connections.map((c) => (
+            <div
+              key={c.id}
+              className={cn(
+                "flex flex-wrap items-center gap-1.5",
+                multi && "border-line-soft bg-surface-1/60 rounded-lg border px-2 py-1.5",
+              )}
+            >
+              {multi && (
+                <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
+                  {c.display_name}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onVerify(c.id)}
+                disabled={verifying}
+                aria-busy={verifying}
+                aria-label={`Test ${c.display_name}`}
+                className="border-line-soft"
+              >
+                {verifying ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : (
+                  <CheckCircle2 className="size-4" aria-hidden />
+                )}
+                {verifying ? "Testing…" : "Test"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onEdit(c)}
+                aria-label={`Edit ${c.display_name}`}
+                className="border-line-soft"
+              >
+                <Pencil className="size-4" aria-hidden />
+                Edit
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onRemove(c)}
+                aria-label={`Remove ${c.display_name}`}
+                className={cn("border-line-soft", !multi && "ml-auto")}
+              >
+                <Trash2 className="size-4" aria-hidden />
+                Remove
+              </Button>
+            </div>
+          ))}
         </div>
       </CardContent>
     </Card>
