@@ -18,6 +18,7 @@ import {
   UserCircle,
   Users,
   Waypoints,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 
@@ -102,6 +103,31 @@ export const deliverNav: NavItem[] = [
     // org_admin/bu_admin hold the latter but never the former.
     requirePermission: ["artifact:view", "workspace:manage"],
     prdSection: "§33.2",
+  },
+  {
+    /**
+     * The cross-project auto-sequencing cockpit — pick a project, pick one of
+     * the models it is allowed to run on, and it executes that project's agent
+     * roster in hand-off order.
+     *
+     * Distinct from the per-project Orchestrator at
+     * `/projects/[id]/orchestrator`, which is the PRD §34.11 reading (a
+     * conversation partner that never auto-advances). Both routes are live;
+     * this entry points at the sequencing one because that is the surface you
+     * come to the sidebar to start work in.
+     *
+     * Gated on `artifact:view` and nothing else, deliberately matching
+     * `/projects/[id]/orchestrator`: anyone who can open that page can open
+     * this one. Driving is narrower than opening — the page itself renders
+     * read-only for everyone but the Project Admin (PRD §15.5–§15.11), the
+     * same split the per-project page already makes.
+     */
+    label: "Orchestrator",
+    href: "/orchestrator",
+    icon: Workflow,
+    segment: "orchestrator",
+    requirePermission: "artifact:view",
+    prdSection: "§34.11",
   },
   {
     label: "Agent Studio",

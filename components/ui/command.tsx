@@ -148,6 +148,27 @@ const CommandItem = React.forwardRef<
 ));
 CommandItem.displayName = CommandPrimitive.Item.displayName;
 
+/**
+ * A plain case-insensitive substring filter, for `<Command filter={…}>`.
+ *
+ * cmdk's default is a fuzzy *subsequence* scorer, which suits the command
+ * palette — you half-remember a command and type at it. It suits a picker of
+ * known proper nouns badly: searching a project list for "ledger" matches
+ * "Regional outage alerts" (r-e-g-i-o-n-a-**l**-…) and can rank it *above*
+ * "Core ledger", because a long spread-out subsequence still scores. The user
+ * typing a name they can see on screen reads that as the search being broken.
+ *
+ * Substring matching has no such surprises, and returning a flat 1 leaves ties
+ * in DOM order — so a grouped list keeps its own ordering (delivery track,
+ * provider) instead of being resorted by an invisible score.
+ */
+export function substringFilter(value: string, search: string, keywords?: string[]): number {
+  const needle = search.trim().toLowerCase();
+  if (!needle) return 1;
+  const haystack = [value, ...(keywords ?? [])].join(" ").toLowerCase();
+  return haystack.includes(needle) ? 1 : 0;
+}
+
 const CommandShortcut = ({ className, ...props }: React.HTMLAttributes<HTMLSpanElement>) => (
   <span
     className={cn("text-muted-foreground ml-auto text-xs tracking-widest", className)}
