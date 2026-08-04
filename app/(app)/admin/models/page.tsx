@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -13,6 +14,7 @@ import {
   Lock,
   Pencil,
   Plus,
+  ArrowRight,
   Trash2,
   XCircle,
   type LucideIcon,
@@ -44,10 +46,8 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
 import { GrantVisibilityControl } from "@/components/app/grant-visibility-control";
 import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
-import { ModelAccessMatrix } from "@/components/app/model-access-matrix";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -63,6 +63,7 @@ import {
 } from "@/lib/api/models";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { getSpendSeries } from "@/lib/api/cost";
 import { qk } from "@/lib/api/query-keys";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
@@ -148,6 +149,27 @@ export default function ModelProvidersPage() {
           staleTime: 0,
         })),
   });
+
+  /**
+   * This month's spend per provider — rendered ON each card rather than in a
+   * chart above them. A separate bar chart repeated the provider list and put
+   * the number furthest from the thing it describes; a provider is what you
+   * onboard, credential and pay for, so the figure belongs on its card.
+   */
+  const spendQ = useQuery({
+    queryKey: qk.cost.spendSeries("provider", "all", 6),
+    queryFn: () => getSpendSeries({ groupBy: "provider", months: 6 }),
+    staleTime: 60_000,
+  });
+  const spendByProvider = React.useMemo(() => {
+    const m = new Map<string, number>();
+    for (const entry of spendQ.data?.series ?? []) {
+      // Last point is the current month — the same figure Cost & Budget
+      // prints, so the two cannot disagree.
+      m.set(entry.id, entry.points[entry.points.length - 1] ?? 0);
+    }
+    return m;
+  }, [spendQ.data]);
 
   const catalogQ = useQuery({
     queryKey: qk.model.catalog(),
@@ -351,11 +373,6 @@ export default function ModelProvidersPage() {
         </Button>
       </header>
 
-      {/* Cost by PROVIDER, not model: a provider is what you onboard,
-          credential and pay — the same axis the cards below are organised on.
-          The per-model split lives on Cost & Budget, one click away. */}
-      <SpendBreakdownCard groupBy="provider" />
-
       {/* One card per unit the viewer is bound to. Someone in two units gets
           two, each named — no arbitrary winner, and no hidden second unit. */}
       {!isOrg && scopedUnits.length === 0 && (
@@ -428,19 +445,10 @@ export default function ModelProvidersPage() {
               onVerify={() => verifyMutation.mutate(p.id)}
               onEdit={() => setEditFor(p)}
               onRemove={() => setRemoveFor(p)}
+              spendUsd={spendQ.data ? (spendByProvider.get(p.provider) ?? 0) : null}
             />
           ))}
         </RadioGroup>
-      )}
-
-      {/* DISTRIBUTION, below supply. The cards above own what is onboarded and
-          whose key it runs on; this owns who may use it. Splitting them is why
-          provider → model is now listed once on this page instead of three
-          times. Org Admin only — the matrix names every unit's standing. */}
-      {scope === "org" && (
-        <ModelAccessMatrix
-          workspaces={scopedUnits.map((u) => ({ id: String(u.id), displayName: u.name }))}
-        />
       )}
 
       <AddProviderDialog
@@ -490,6 +498,7 @@ function ProviderCard({
   onRemove,
   radioDisabled,
   unitName,
+  spendUsd,
 }: {
   provider: ModelProvider;
   verifying?: boolean;
@@ -503,6 +512,8 @@ function ProviderCard({
    *  is looking at more than one, since otherwise every card would repeat the
    *  same name the section above already gives. */
   unitName?: string | null;
+  /** This month's spend for the provider KIND, or null while it loads. */
+  spendUsd?: number | null;
 }) {
   const label = providerLabel(provider.provider);
   const enabledOfferings = provider.offerings.filter((o) => o.enabled);
@@ -527,6 +538,21 @@ function ProviderCard({
                 </>
               )}
             </p>
+            {/* The provider's own spend, on the provider's own card. The
+                figure that used to sit in a chart above the list, next to the
+                thing it describes. */}
+            {typeof spendUsd === "number" && (
+              <p className="mt-1 font-mono text-[12.5px] font-semibold tabular-nums">
+                {spendUsd.toLocaleString(undefined, {
+                  style: "currency",
+                  currency: "USD",
+                  maximumFractionDigits: 0,
+                })}
+                <span className="text-muted-foreground ml-1 font-sans text-[11px] font-normal">
+                  this month
+                </span>
+              </p>
+            )}
           </div>
           <div className="flex shrink-0 flex-col items-end gap-1">
             <StatusPill status={provider.status} />
@@ -563,6 +589,18 @@ function ProviderCard({
               ? `Verified ${formatDistanceToNow(new Date(provider.last_verified_at))} ago`
               : "Not verified yet"}
         </p>
+
+        {/* Drill-in. The card answers "is this provider healthy and what does
+            it cost"; everything model-level — per-model spend, which credential
+            serves each one, which units have it — lives one screen deeper so
+            this list stays scannable. */}
+        <Link
+          href={`/admin/models/${encodeURIComponent(provider.provider)}`}
+          className="text-brand-bright mb-2.5 inline-flex items-center gap-1 font-mono text-[11px] underline-offset-2 hover:underline"
+        >
+          Models &amp; access
+          <ArrowRight className="size-3" aria-hidden />
+        </Link>
 
         <div className="mt-auto flex gap-1.5">
           <Button

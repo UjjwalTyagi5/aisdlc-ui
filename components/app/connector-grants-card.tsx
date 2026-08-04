@@ -26,7 +26,7 @@ interface DraftGrant {
 
 /**
  * The Organization Admin's connector policy — the exact counterpart of
- * `ModelAccessMatrix`, and deliberately the same shape: the two cascades govern
+ * the model grant matrix, and deliberately the same shape: the two cascades govern
  * different resources but the same way, and an admin who has learned one
  * should not have to learn the other.
  *
