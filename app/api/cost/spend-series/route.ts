@@ -9,7 +9,7 @@ import { canReadBusinessUnit, canReadProject } from "@/lib/mock/access-scope";
 // lib/mock/cost-fixtures.ts. Mirrored in mocks/handlers.ts, per
 // [[msw-dual-runtime-mutation-rule]].
 
-const GROUP_BY = new Set<SpendGroupBy>(["business_unit", "project", "model"]);
+const GROUP_BY = new Set<SpendGroupBy>(["business_unit", "project", "model", "provider"]);
 
 export const dynamic = "force-dynamic";
 

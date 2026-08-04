@@ -9,13 +9,20 @@ import { z } from "zod";
  * touches a filter. Folding them together would make a group-by click refetch
  * the connector and people counts for no reason.
  */
-export const SpendGroupBy = z.enum(["business_unit", "project", "model"]);
+/**
+ * `provider` rolls the model split up one level — Anthropic rather than each
+ * Claude. It is the grouping Model Management wants, because a provider is
+ * what you onboard, credential and pay; a model is what you grant. Derived
+ * from the same per-model figures, so the two views reconcile.
+ */
+export const SpendGroupBy = z.enum(["business_unit", "project", "model", "provider"]);
 export type SpendGroupBy = z.infer<typeof SpendGroupBy>;
 
 export const SPEND_GROUP_BY_LABEL: Record<SpendGroupBy, string> = {
   business_unit: "Business unit",
   project: "Project",
   model: "Model",
+  provider: "Provider",
 };
 
 export const SpendSeriesEntry = z.object({

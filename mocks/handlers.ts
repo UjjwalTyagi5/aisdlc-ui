@@ -1405,10 +1405,10 @@ export const handlers = [
     const url = new URL(request.url);
 
     const raw = url.searchParams.get("groupBy") ?? "business_unit";
-    const groupBy = (["business_unit", "project", "model"] as const).includes(
+    const groupBy = (["business_unit", "project", "model", "provider"] as const).includes(
       raw as "business_unit",
     )
-      ? (raw as "business_unit" | "project" | "model")
+      ? (raw as "business_unit" | "project" | "model" | "provider")
       : "business_unit";
 
     const monthsRaw = Number(url.searchParams.get("months") ?? 6);

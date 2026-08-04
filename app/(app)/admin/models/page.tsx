@@ -47,7 +47,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
 import { GrantVisibilityControl } from "@/components/app/grant-visibility-control";
 import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
-import { ModelGrantsCard } from "@/components/app/model-grants-card";
+import { ModelAccessMatrix } from "@/components/app/model-access-matrix";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -351,12 +351,10 @@ export default function ModelProvidersPage() {
         </Button>
       </header>
 
-      {/* What the models below are actually costing, per model. */}
-      <SpendBreakdownCard groupBy="model" />
-
-      {/* The catalogue policy itself — Org Admin only. Everyone below reads
-          its consequences rather than editing it. */}
-      {scope === "org" && <ModelGrantsCard />}
+      {/* Cost by PROVIDER, not model: a provider is what you onboard,
+          credential and pay — the same axis the cards below are organised on.
+          The per-model split lives on Cost & Budget, one click away. */}
+      <SpendBreakdownCard groupBy="provider" />
 
       {/* One card per unit the viewer is bound to. Someone in two units gets
           two, each named — no arbitrary winner, and no hidden second unit. */}
@@ -433,6 +431,16 @@ export default function ModelProvidersPage() {
             />
           ))}
         </RadioGroup>
+      )}
+
+      {/* DISTRIBUTION, below supply. The cards above own what is onboarded and
+          whose key it runs on; this owns who may use it. Splitting them is why
+          provider → model is now listed once on this page instead of three
+          times. Org Admin only — the matrix names every unit's standing. */}
+      {scope === "org" && (
+        <ModelAccessMatrix
+          workspaces={scopedUnits.map((u) => ({ id: String(u.id), displayName: u.name }))}
+        />
       )}
 
       <AddProviderDialog

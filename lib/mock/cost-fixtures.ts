@@ -71,7 +71,7 @@ export function buildBudgets(
 }
 
 /** What the spend chart splits its bars by. */
-export type SpendGroupBy = "business_unit" | "project" | "model";
+export type SpendGroupBy = "business_unit" | "project" | "model" | "provider";
 
 /** `YYYY-MM` labels ending at the current month, oldest first. */
 function monthLabels(months: number): string[] {
@@ -196,10 +196,33 @@ export function buildSpendSeries(
     };
   }
 
-  // Model: the scoped total redistributed by the same shares the Cost page's
-  // breakdown sums to, so the chart and the table agree. Both now read from the
-  // agent × model matrix (see MODEL_SHARE) rather than two separate tables.
+  // Model / provider: the scoped total redistributed by the same shares the
+  // Cost page's breakdown sums to, so chart and table agree. Both read from
+  // the agent × model matrix (see MODEL_SHARE) rather than a second table.
   const total = scoped.reduce((a, w) => a + w.monthlySpendUsd, 0);
+
+  if (groupBy === "provider") {
+    // Rolled up from the SAME per-model shares rather than seeded separately —
+    // a provider total that disagreed with its own models summed would be the
+    // exact failure the derived MODEL_SHARE exists to prevent.
+    const byProvider = new Map<string, number>();
+    for (const { model, share } of MODEL_SHARE) {
+      const provider = providerOfModel(model);
+      byProvider.set(provider, (byProvider.get(provider) ?? 0) + share);
+    }
+    return {
+      months: labels,
+      groupBy,
+      series: [...byProvider.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([provider, share], i) => ({
+          id: provider,
+          name: PROVIDER_LABEL[provider] ?? provider,
+          points: backcast(total * share, months, i),
+        })),
+    };
+  }
+
   return {
     months: labels,
     groupBy,
@@ -210,6 +233,28 @@ export function buildSpendSeries(
     })),
   };
 }
+
+/**
+ * Which provider a model id belongs to.
+ *
+ * Prefix matching rather than a lookup table: the catalogue grows, and a table
+ * here would silently drop a newly-added model into no provider at all —
+ * losing its spend from the provider view while the model view still showed
+ * it, which is the disagreement this whole file works to avoid.
+ */
+function providerOfModel(modelId: string): string {
+  if (modelId.startsWith("claude")) return "anthropic";
+  if (modelId.startsWith("gpt") || modelId.startsWith("o1")) return "openai";
+  if (modelId.startsWith("gemini")) return "google";
+  return "other";
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google",
+  other: "Other",
+};
 
 /**
  * Per-agent breakdown, over the eight agents of the core pipeline.
