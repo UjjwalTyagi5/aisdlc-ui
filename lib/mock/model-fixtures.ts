@@ -410,12 +410,26 @@ export function setProjectModelSelection(
 //  Onboarded providers (credentialed connections)
 // ───────────────────────────────────────────────────────────────────────
 
-let nextProviderSeq = 2;
+let nextProviderSeq = 4;
+/**
+ * Seeded connections — three, deliberately, because one hid the two cases
+ * this screen exists to explain.
+ *
+ *   SEVERAL KEYS ON ONE PROVIDER. An organisation rarely has a single
+ *   subscription: the shared platform contract covers the everyday models,
+ *   while a business unit with different commercial terms holds its own for
+ *   the expensive one. `display_name` is that SUBSCRIPTION's name, not the
+ *   vendor's — "Anthropic" on three rows told nobody which contract paid.
+ *
+ *   A UNIT-SCOPED KEY. OpenAI is onboarded by Lending alone, so gpt-5.1 is
+ *   granted to two units but usable only by the one that keyed it. That is
+ *   the "granted but inert" state, seeded rather than described.
+ */
 const PROVIDERS: ModelProvider[] = [
   {
     id: "prov_anthropic",
     provider: "anthropic",
-    display_name: "Anthropic",
+    display_name: "Anthropic — Shared platform",
     status: "valid",
     api_base: null,
     is_custom: false,
@@ -428,8 +442,47 @@ const PROVIDERS: ModelProvider[] = [
     approvalReason: null,
     offerings: [
       { id: "off_anthropic_sonnet", provider_id: "prov_anthropic", model_id: "claude-sonnet-4-6", enabled: true, is_default: true, input_price_per_million: 3, output_price_per_million: 15, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
-      { id: "off_anthropic_opus", provider_id: "prov_anthropic", model_id: "claude-opus-4-7", enabled: true, is_default: false, input_price_per_million: 15, output_price_per_million: 75, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
       { id: "off_anthropic_haiku", provider_id: "prov_anthropic", model_id: "claude-haiku-4-5", enabled: true, is_default: false, input_price_per_million: 0.8, output_price_per_million: 4, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
+  {
+    id: "prov_anthropic_ent",
+    provider: "anthropic",
+    display_name: "Anthropic — Payments enterprise",
+    status: "valid",
+    api_base: null,
+    is_custom: false,
+    last_verified_at: new Date(Date.now() - 6 * 24 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 21 * 24 * 3600 * 1000).toISOString(),
+    // Org-wide so the platform holds the key, but it only offers Opus — the
+    // commercial terms that justify the expensive model sit on this contract.
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_anthropic_opus", provider_id: "prov_anthropic_ent", model_id: "claude-opus-4-7", enabled: true, is_default: false, input_price_per_million: 15, output_price_per_million: 75, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
+  {
+    id: "prov_openai_lending",
+    provider: "openai",
+    display_name: "OpenAI — Lending trial",
+    status: "valid",
+    api_base: null,
+    is_custom: false,
+    last_verified_at: new Date(Date.now() - 1 * 24 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 9 * 24 * 3600 * 1000).toISOString(),
+    // Lending keyed this themselves. Payments is granted gpt-5.1 too and
+    // cannot run it — the inert state, made visible.
+    workspaceId: "ws_lending",
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_openai_gpt51", provider_id: "prov_openai_lending", model_id: "gpt-5.1", enabled: true, is_default: false, input_price_per_million: 5, output_price_per_million: 20, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
     ],
   },
 ];

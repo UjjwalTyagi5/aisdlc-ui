@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronsUpDown, Eye, Pencil, PencilRuler } from "lucide-react";
 
@@ -334,9 +335,9 @@ export function ToolsStagePicker({
     return (
       <p className="text-[12px] text-muted-foreground">
         Nothing to assign yet. Add MCP servers or connect tools in{" "}
-        <a href="/integrations" className="text-brand-bright underline">
+        <Link href="/integrations" className="text-brand-bright underline">
           Integrations
-        </a>
+        </Link>
         .
       </p>
     );

@@ -1,4 +1,5 @@
 import * as React from "react";
+import Link from "next/link";
 import { FolderPlus } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -67,7 +68,7 @@ export function EmptyProjects({
             </Button>
           )}
           <Button variant="outline" className="border-line-soft" asChild>
-            <a href="/integrations">Connect tools</a>
+            <Link href="/integrations">Connect tools</Link>
           </Button>
         </div>
       )}

@@ -5,15 +5,15 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, Check, KeyRound, Loader2, Minus } from "lucide-react";
+import { ArrowLeft, KeyRound, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
+import { UnitAccessPicker } from "@/components/app/unit-access-picker";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import { getSpendSeries } from "@/lib/api/cost";
@@ -232,7 +232,8 @@ export default function ProviderDetailPage() {
                         {c.workspaceId === null ? "Platform credential" : "Unit-scoped"}
                       </span>
                       <span className="text-muted-foreground font-mono text-[10.5px]">
-                        {c.offerings.filter((o) => o.enabled).length} models
+                        {c.offerings.filter((o) => o.enabled).length}{" "}
+                        {c.offerings.filter((o) => o.enabled).length === 1 ? "model" : "models"}
                       </span>
                       <span className="text-muted-foreground ml-auto font-mono text-[10.5px]">
                         {c.status}
@@ -251,8 +252,9 @@ export default function ProviderDetailPage() {
                 Models &amp; access
               </h2>
               <p className="text-muted-foreground text-[12px]">
-                Click a cell to grant or revoke that model for a{" "}
-                {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase().replace(/s$/, "")}.
+                Open a model&apos;s access to grant or revoke it per{" "}
+                {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase().replace(/s$/, "")}, or revoke it
+                everywhere.
               </p>
             </CardHeader>
             <CardContent className="pt-0">
@@ -274,14 +276,9 @@ export default function ProviderDetailPage() {
                         <th className="text-muted-foreground px-2 py-2 font-mono text-[10px] font-semibold tracking-wider uppercase">
                           Credential
                         </th>
-                        {units.map((u) => (
-                          <th
-                            key={u.id}
-                            className="text-muted-foreground px-2 py-2 text-center font-mono text-[10px] font-semibold tracking-wider uppercase"
-                          >
-                            {u.name}
-                          </th>
-                        ))}
+                        <th className="text-muted-foreground px-2 py-2 font-mono text-[10px] font-semibold tracking-wider uppercase">
+                          Access
+                        </th>
                         <th className="w-10" />
                       </tr>
                     </thead>
@@ -324,59 +321,15 @@ export default function ProviderDetailPage() {
                               )}
                             </td>
 
-                            {units.map((u) => {
-                              const unit = row.units.find((x) => x.id === u.id);
-                              const has = unit?.hasAccess ?? false;
-                              return (
-                                <td key={u.id} className="px-2 py-2.5 text-center">
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <button
-                                        type="button"
-                                        disabled={isGlobal || !row.granted || saveM.isPending}
-                                        onClick={() => toggleCell(row, u.id)}
-                                        aria-label={`${has ? "Revoke" : "Grant"} ${row.model_id} for ${u.name}`}
-                                        className="focus-visible:ring-ring block w-full rounded-md focus-visible:ring-2 focus-visible:outline-none disabled:cursor-default"
-                                      >
-                                        <span
-                                          className={cn(
-                                            "mx-auto grid size-6 place-items-center rounded-md border transition-colors",
-                                            has
-                                              ? "border-success/40 bg-success/10 text-success"
-                                              : "border-line-soft text-muted-foreground/40",
-                                            isGlobal && "opacity-70",
-                                          )}
-                                        >
-                                          {has ? (
-                                            <Check className="size-3.5" aria-hidden />
-                                          ) : (
-                                            <Minus className="size-3" aria-hidden />
-                                          )}
-                                        </span>
-                                      </button>
-                                    </TooltipTrigger>
-                                    <TooltipContent side="top" className="max-w-[240px]">
-                                      {!row.granted ? (
-                                        <p>Grant this model on the Models page first.</p>
-                                      ) : isGlobal ? (
-                                        <p>
-                                          Granted globally — reaches every unit. Switch it to
-                                          specific to name units.
-                                        </p>
-                                      ) : has ? (
-                                        <p>
-                                          {u.name} has this.
-                                          {serving.length === 0 &&
-                                            " No key yet — granted but inert."}
-                                        </p>
-                                      ) : (
-                                        <p>Click to grant {u.name} this model.</p>
-                                      )}
-                                    </TooltipContent>
-                                  </Tooltip>
-                                </td>
-                              );
-                            })}
+                            <td className="px-2 py-2.5">
+                              <UnitAccessPicker
+                                units={units.map((u) => ({ id: u.id, name: u.name }))}
+                                selected={row.units.filter((x) => x.hasAccess).map((x) => x.id)}
+                                isGlobal={isGlobal}
+                                disabled={!row.granted || saveM.isPending}
+                                onToggle={(unitId) => toggleCell(row, unitId)}
+                              />
+                            </td>
 
                             <td className="py-2.5 text-right">
                               {row.granted && (

@@ -1029,13 +1029,24 @@ function AddProviderDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="display-name">Display name</Label>
+            <Label htmlFor="display-name">Subscription name</Label>
             <Input
               id="display-name"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Mistral (production)"
+              placeholder="e.g. Anthropic — Payments enterprise"
             />
+            {/* Names the CONTRACT, not the vendor. An organisation can hold
+                several subscriptions with the same provider — a shared platform
+                one for everyday models, a business unit's own for the expensive
+                one — and every screen that says "which key runs this model"
+                shows this string. Three rows all reading "Anthropic" answer
+                that question with nothing. */}
+            <p className="text-muted-foreground text-[11.5px]">
+              Name the subscription, not the vendor — you may hold several with
+              the same provider, and this is what every screen shows when it says
+              which key runs a model.
+            </p>
           </div>
 
           <div className="space-y-1.5">
