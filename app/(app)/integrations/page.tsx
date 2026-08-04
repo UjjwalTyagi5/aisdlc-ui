@@ -1,10 +1,12 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  ArrowRight,
   CheckCircle2,
   CircleDashed,
   Eye,
@@ -835,6 +837,16 @@ function FeaturedConnectorRow({ connector, busy, ...handlers }: ActionProps) {
                 Live validation pending — OAuth app registration required
               </p>
             )}
+            {/* Drill-in, matching the provider cards on Models: the card says
+                whether it is connected and healthy, the detail says which
+                business units may use it and where its credentials live. */}
+            <Link
+              href={`/integrations/${encodeURIComponent(connector.kind)}`}
+              className="text-brand-bright mt-2 inline-flex items-center gap-1 font-mono text-[11px] underline-offset-2 hover:underline"
+            >
+              Connections &amp; access
+              <ArrowRight className="size-3" aria-hidden />
+            </Link>
           </div>
         </div>
         <div className="relative flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
