@@ -5,6 +5,7 @@ import {
   CatalogProvider,
   ModelAllowEntry,
   ModelAvailability,
+  ModelGrantMatrix,
   ModelOptions,
   ModelProvider,
   OrgModelGrant,
@@ -113,3 +114,11 @@ export const setModelDefault = (offeringId: string) =>
   api("/model/default", { method: "PUT", body: { offering_id: offeringId } });
 
 export const getModelOptions = () => api("/model/options", { schema: ModelOptions });
+
+/**
+ * The Organization Admin's grant matrix — every catalogue model, whether it is
+ * granted, whether anyone still has to key it, and which units it reaches.
+ * One request rather than an availability call per Business Unit.
+ */
+export const getModelGrantMatrix = () =>
+  api("/model/grant-matrix", { schema: ModelGrantMatrix });

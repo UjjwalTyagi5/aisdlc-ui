@@ -61,6 +61,8 @@ export const qk = {
     orgGrants: () => ["model", "allowed", "org"] as const,
     buAllowed: (workspaceId: string) => ["model", "allowed", "bu", workspaceId] as const,
     availability: (workspaceId: string) => ["model", "availability", workspaceId] as const,
+    /** Org Admin only: every model crossed with every business unit. */
+    grantMatrix: () => ["model", "grant-matrix"] as const,
   },
   mcp: {
     list: (activeOnly?: boolean) => ["mcp", "list", activeOnly ?? false] as const,

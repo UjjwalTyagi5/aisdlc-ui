@@ -30,7 +30,7 @@ import type {
 } from "@/lib/schemas/model";
 import { grantReaches, type GrantVisibility } from "@/lib/schemas/grant";
 import { createGovernanceApproval } from "@/lib/mock/governance-approval-fixtures";
-import { getWorkspace } from "@/lib/mock/workspace-fixtures";
+import { getWorkspace, listWorkspaces } from "@/lib/mock/workspace-fixtures";
 import type { PlatformRole } from "@/lib/roles";
 
 export const MODEL_OPTIONS: ModelOption[] = [
@@ -221,6 +221,73 @@ export function getBuModelAvailability(workspaceId: string): ModelAvailability[]
     centrallyCredentialed: hasCredentialFor(null, g.provider, g.model_id),
     locallyCredentialed: hasCredentialFor(workspaceId, g.provider, g.model_id),
   }));
+}
+
+/**
+ * The Organization Admin's grant matrix — every catalogue model crossed with
+ * every Business Unit, in one pass.
+ *
+ * Built server-side because the answer needs three sources at once: the
+ * catalogue (what exists), the grants (who may use it) and the provider
+ * connections (whether anyone still has to key it). Composing it in the
+ * browser would be one availability request per unit — N+1 calls to restate
+ * something already known here.
+ *
+ * `units` is present on EVERY row, granted or not, so the card can show a
+ * revoked model's former reach without a second shape. `hasAccess` is the
+ * grant's reach; `locallyCredentialed` matters only where there is no central
+ * key, and is what turns "granted but inert" into "granted, and Lending sorted
+ * it out themselves".
+ */
+export function getModelGrantMatrix(): {
+  rows: Array<{
+    provider: string;
+    model_id: string;
+    granted: boolean;
+    visibility: "global" | "specific" | null;
+    centrallyCredentialed: boolean;
+    units: Array<{ id: string; name: string; hasAccess: boolean; locallyCredentialed: boolean }>;
+  }>;
+  centrallyKeyedProviders: string[];
+} {
+  const units = listWorkspaces().map((w) => ({ id: String(w.id), name: w.displayName }));
+  const byKey = new Map(ORG_GRANTS.map((g) => [entryKey(g), g]));
+
+  const rows = getModelCatalog().flatMap((cp) =>
+    cp.models.map((m) => {
+      const grant = byKey.get(`${cp.provider}::${m.model_id}`);
+      const central = hasCredentialFor(null, cp.provider, m.model_id);
+      return {
+        provider: cp.provider,
+        model_id: m.model_id,
+        granted: !!grant,
+        visibility: grant ? grant.visibility : null,
+        centrallyCredentialed: central,
+        units: units.map((u) => ({
+          id: u.id,
+          name: u.name,
+          hasAccess: grant ? grantReaches(grant, u.id) : false,
+          locallyCredentialed: hasCredentialFor(u.id, cp.provider, m.model_id),
+        })),
+      };
+    }),
+  );
+
+  // A provider counts as org-keyed when it has an active org-wide connection
+  // with at least one enabled offering — the badge that tells an admin the
+  // whole provider needs nothing from anyone downstream.
+  const centrallyKeyedProviders = [
+    ...new Set(
+      PROVIDERS.filter(
+        (p) =>
+          p.workspaceId === null &&
+          p.approvalStatus === "active" &&
+          p.offerings.some((o) => o.enabled),
+      ).map((p) => p.provider),
+    ),
+  ];
+
+  return { rows, centrallyKeyedProviders };
 }
 
 /**

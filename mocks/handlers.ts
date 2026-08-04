@@ -90,6 +90,7 @@ import {
   getBuAllowedModels,
   getBuModelAvailability,
   getModelCatalog,
+  getModelGrantMatrix,
   getOrgModelGrants,
   getProjectModelSelection,
   listModelProviders,
@@ -771,6 +772,17 @@ export const handlers = [
   http.get("/api/model/catalog", async () => {
     await lag();
     return HttpResponse.json(getModelCatalog());
+  }),
+  // Mirrors app/api/model/grant-matrix/route.ts. Org Admin only — the matrix
+  // is every unit's standing against every model.
+  http.get("/api/model/grant-matrix", async ({ cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json({ code: "forbidden", message: "not found" }, { status: 403 });
+    }
+    return HttpResponse.json(getModelGrantMatrix());
   }),
   http.get("/api/model/allowed/org", async () => {
     await lag();

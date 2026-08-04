@@ -70,6 +70,48 @@ export const ModelAvailability = z.object({
 });
 export type ModelAvailability = z.infer<typeof ModelAvailability>;
 
+/** One Business Unit's standing against a single model. */
+export const ModelUnitAccess = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** The grant reaches this unit — globally, or by being named on it. */
+  hasAccess: z.boolean(),
+  /** This unit onboarded its own key. Only meaningful where there is no
+   *  central one; where there is, nobody downstream needs to do anything. */
+  locallyCredentialed: z.boolean(),
+});
+export type ModelUnitAccess = z.infer<typeof ModelUnitAccess>;
+
+/**
+ * The Organization Admin's view of one model: whether it is granted, how far,
+ * whether anyone still has to supply a key, and which units it reaches.
+ *
+ * WHY THIS IS ONE PAYLOAD. All four facts have to be read together to answer
+ * the only question the grants screen exists for — "if I tick this, can they
+ * use it?" Granting a model with no central key does not make it usable; it
+ * makes it visible and inert until some unit keys it. Composing that answer in
+ * the browser from a catalogue call plus one availability call per unit would
+ * be N+1 requests to state something the server already knows in one pass.
+ */
+export const ModelGrantMatrixRow = z.object({
+  provider: ModelProviderKind,
+  model_id: z.string(),
+  granted: z.boolean(),
+  visibility: GrantVisibility.nullable(),
+  /** An org-wide, active provider connection already offers this model, so no
+   *  Business Unit or project has to supply anything. */
+  centrallyCredentialed: z.boolean(),
+  units: z.array(ModelUnitAccess),
+});
+export type ModelGrantMatrixRow = z.infer<typeof ModelGrantMatrixRow>;
+
+export const ModelGrantMatrix = z.object({
+  rows: z.array(ModelGrantMatrixRow),
+  /** Providers with an org-wide active connection — the "org-keyed" badge. */
+  centrallyKeyedProviders: z.array(ModelProviderKind),
+});
+export type ModelGrantMatrix = z.infer<typeof ModelGrantMatrix>;
+
 /**
  * What one project actually uses, and where its options came from.
  *
