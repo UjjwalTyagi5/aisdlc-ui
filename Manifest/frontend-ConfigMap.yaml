@@ -1,4 +1,4 @@
-# Runtime (server-side) config. Nothing secret lives here — the app currently runs
+# Runtime (server-side) config. Nothing secret lives here â€” the app currently runs
 # mock-only (no Auth0 credentials, no DB, no API keys), so there is no Key Vault
 # and no Secret to create.
 #
@@ -17,4 +17,3 @@ metadata:
 data:
   NODE_ENV: "production"
   PORT: "3000"
-

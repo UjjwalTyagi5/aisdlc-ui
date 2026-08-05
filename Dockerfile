@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Next.js 15 standalone image. Build for linux/amd64 — the AKS node pool is x86 B-series.
+# Next.js 15 standalone image. Build for linux/amd64 â€” the AKS node pool is x86 B-series.
 #
 #   docker build --platform linux/amd64 -t aisdlcacr2026.azurecr.io/frontend:dev .
 
@@ -14,7 +14,7 @@ WORKDIR /app
 RUN corepack enable
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# NEXT_PUBLIC_* are inlined into the client bundle at BUILD time — a ConfigMap can't
+# NEXT_PUBLIC_* are inlined into the client bundle at BUILD time â€” a ConfigMap can't
 # change them afterwards. To flip the app off mocks, rebuild with different --build-arg.
 ARG NEXT_PUBLIC_AUTH_MODE=mock
 ARG NEXT_PUBLIC_API_MOCKS=enabled
@@ -39,4 +39,3 @@ COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 USER nextjs
 EXPOSE 3000
 CMD ["node", "server.js"]
-

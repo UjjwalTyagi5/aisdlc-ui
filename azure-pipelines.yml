@@ -1,11 +1,11 @@
 # ==============================================================================
-# AISDLC frontend CI/CD — build + GitOps handoff (same flow as AgentCore).
+# AISDLC frontend CI/CD â€” build + GitOps handoff (same flow as AgentCore).
 #
 #   push to main -> build amd64 image -> push to ACR as :<BuildId> and :latest
 #   -> rewrite the image tag in Manifest/frontend-deploy.yaml -> git push [skip ci]
 #   -> ArgoCD sees the commit and syncs the cluster. No manual kubectl.
 #
-# Single service, so there's no change-detection stage — the path filters below
+# Single service, so there's no change-detection stage â€” the path filters below
 # already scope what triggers a build.
 #
 # Required pipeline variables (Pipeline > Edit > Variables):
@@ -95,4 +95,3 @@ jobs:
         displayName: 'Update manifest image tag + push (GitOps)'
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-

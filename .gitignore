@@ -74,4 +74,8 @@ package-lock.json
 # Claude Code — settings.json is shared, settings.local.json is per-machine
 # (it accumulates absolute local paths)
 .claude/settings.local.json
+# Real env files never belong in the repo — .env.example carries the shape.
 .env
+
+# Deployment audit trail — local working record, never pushed
+AUDIT_LOG.md

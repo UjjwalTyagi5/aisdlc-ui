@@ -1,6 +1,6 @@
 # HTTPS is REQUIRED, not a nice-to-have. next.config.ts ships `upgrade-insecure-requests`
 # in the production CSP, so over plain HTTP the browser rewrites every /_next/static asset
-# request to https:// — with no TLS listener those all fail and the page renders as raw
+# request to https:// â€” with no TLS listener those all fail and the page renders as raw
 # unstyled HTML. The server returns 200 for those assets the whole time, so this looks
 # nothing like a server fault. Do not remove the tls block.
 #
@@ -28,12 +28,12 @@ metadata:
     # This rewrites the upstream Location header. It is a band-aid on the symptom:
     # the real fix is in app code (derive the origin from the forwarded headers in
     # app/api/auth/{mock/signin,mock/logout,logout}/route.ts). Once that ships,
-    # delete these two lines — they are host-specific and will silently rot if the
+    # delete these two lines â€” they are host-specific and will silently rot if the
     # ingress host ever changes.
     nginx.ingress.kubernetes.io/proxy-redirect-from: "https://0.0.0.0:3000/"
     nginx.ingress.kubernetes.io/proxy-redirect-to: "https://aisdlc.20.216.44.167.nip.io/"
     nginx.ingress.kubernetes.io/proxy-body-size: "25m"
-    # Next.js streams (SSE/chat) — don't let nginx buffer or time them out early.
+    # Next.js streams (SSE/chat) â€” don't let nginx buffer or time them out early.
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
 spec:
@@ -53,4 +53,3 @@ spec:
                 name: frontend
                 port:
                   number: 80
-
