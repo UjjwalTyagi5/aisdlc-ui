@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -10,7 +10,6 @@ import {
   FolderOpen,
   Plug,
   Play,
-  Settings,
   ShieldAlert,
   XCircle,
 } from "lucide-react";
@@ -68,7 +67,6 @@ const TEMPLATE_LABEL: Record<Project["template"], string> = {
 export default function ProjectOverviewPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
-  const router = useRouter();
   const [runOpen, setRunOpen] = React.useState(false);
   // Project-level model choice (an offering id = provider connection + model). Local
   // for now; it pre-selects the offering in the Run dialog. TODO(byok-model): persist
@@ -258,10 +256,10 @@ export default function ProjectOverviewPage() {
               requesterRole={role}
             />
           )}
-          <Button variant="outline" onClick={() => router.push(`/projects/${project.id}/settings`)}>
-            <Settings />
-            Settings
-          </Button>
+          {/* No Settings button. The tab bar directly above already carries
+              one, and two controls three inches apart going to the same page
+              is not two ways in — it is one destination the reader has to
+              decide between. The tab is the one that shows where you are. */}
         </div>
       </header>
 

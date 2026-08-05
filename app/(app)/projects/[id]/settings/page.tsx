@@ -37,6 +37,9 @@ import { ProjectModelSelectionCard } from "@/components/app/project-model-select
 import { ToolsStagePicker, type AccessModeMap, type StageMap } from "@/components/app/tools-stage-picker";
 import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
+import { agentsForTrack, TRACK_META } from "@/lib/tracks";
+import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
+import { budgetWindowError, type BudgetWindow } from "@/lib/schemas/budget-window";
 import { useCan } from "@/hooks/use-can";
 import { listConnectors } from "@/lib/api/connectors";
 import {
@@ -135,7 +138,11 @@ export default function ProjectSettingsPage() {
   // Budget edits are gated by the backend on workspace:manage (delivery lead + admin),
   // NOT the legacy project:update capability — mirror that here so the UI matches.
   const session = useRawSession();
-  const canManageBudget = hasPermission(session, "workspace:manage");
+  // `project:update`, not `workspace:manage`. The budget is now set at creation
+  // and the person who set it is the Project Admin — who does NOT hold
+  // workspace:manage, so gating on that left them unable to change the figure
+  // they had just been made to choose.
+  const canManageBudget = hasPermission(session, "project:update");
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -226,8 +233,11 @@ export default function ProjectSettingsPage() {
   });
 
   const budgetMutation = useMutation({
-    mutationFn: (monthlyBudgetUsd: number | null) =>
-      updateProject(projectId, { monthlyBudgetUsd }),
+    mutationFn: (patch: {
+      monthlyBudgetUsd: number | null;
+      budgetStartDate: string | null;
+      budgetEndDate: string | null;
+    }) => updateProject(projectId, patch),
     onSuccess: () => {
       toast.success("Budget updated");
       queryClient.invalidateQueries({ queryKey: qk.projects.detail(projectId) });
@@ -295,6 +305,29 @@ export default function ProjectSettingsPage() {
               <CardDescription>Basic project metadata.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Delivery track, chosen at creation and shown here READ-ONLY.
+                  It selects the agent roster, the required evidence and the
+                  approval route (PRD §6), so changing it mid-flight would
+                  swap the pipeline under runs that have already produced
+                  artifacts against the old one. It was missing from this page
+                  entirely, which left the setting invisible after creation —
+                  stating it is not the same as offering to change it. */}
+              <div className="space-y-1.5">
+                <Label>Delivery track</Label>
+                <div className="border-line-soft bg-surface-1 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
+                  <span className="text-[13px] font-medium">
+                    {TRACK_META[project.track].label}
+                  </span>
+                  <span className="text-muted-foreground font-mono text-[11px]">
+                    Track {TRACK_META[project.track].number} ·{" "}
+                    {agentsForTrack(project.track).length} agents
+                  </span>
+                </div>
+                <p className="text-muted-foreground text-[11.5px]">
+                  Fixed after creation — it selects the agent roster and the approval route.
+                </p>
+              </div>
+
               {form && (
                 <>
                   <div className="space-y-1.5">
@@ -400,9 +433,19 @@ export default function ProjectSettingsPage() {
           <ProjectBudgetCard
             spend={project.monthlySpendUsd ?? 0}
             budget={project.monthlyBudgetUsd ?? null}
+            window={{
+              budgetStartDate: project.budgetStartDate ?? null,
+              budgetEndDate: project.budgetEndDate ?? null,
+            }}
             canManage={canManageBudget}
             saving={budgetMutation.isPending}
-            onSave={(v) => budgetMutation.mutate(v)}
+            onSave={(v, w) =>
+              budgetMutation.mutate({
+                monthlyBudgetUsd: v,
+                budgetStartDate: w.budgetStartDate ?? null,
+                budgetEndDate: w.budgetEndDate ?? null,
+              })
+            }
           />
 
           <Card>
@@ -547,20 +590,30 @@ function fmtUsd(n: number): string {
 function ProjectBudgetCard({
   spend,
   budget,
+  window,
   canManage,
   saving,
   onSave,
 }: {
   spend: number;
   budget: number | null;
+  /** The period the cap is valid for — asked at creation, editable here. */
+  window: BudgetWindow;
   canManage: boolean;
   saving: boolean;
-  onSave: (v: number | null) => void;
+  onSave: (v: number | null, w: BudgetWindow) => void;
 }) {
   const [value, setValue] = React.useState<string>(budget !== null ? String(budget) : "");
+  const [start, setStart] = React.useState(window.budgetStartDate ?? "");
+  const [end, setEnd] = React.useState(window.budgetEndDate ?? "");
   React.useEffect(() => {
     setValue(budget !== null ? String(budget) : "");
   }, [budget]);
+  React.useEffect(() => {
+    setStart(window.budgetStartDate ?? "");
+    setEnd(window.budgetEndDate ?? "");
+  }, [window.budgetStartDate, window.budgetEndDate]);
+  const windowError = budgetWindowError({ budgetStartDate: start, budgetEndDate: end });
 
   const pct = budget && budget > 0 ? Math.min(100, (spend / budget) * 100) : 0;
   const over = budget !== null && budget > 0 && spend >= budget;
@@ -574,7 +627,17 @@ function ProjectBudgetCard({
       toast.error("Enter a valid non-negative amount");
       return;
     }
-    onSave(parsed === 0 ? null : parsed);
+    if (windowError) {
+      toast.error(windowError);
+      return;
+    }
+    // Clearing the cap clears its window: a validity period for a budget that
+    // no longer exists is a date range about nothing.
+    const cleared = parsed === 0;
+    onSave(cleared ? null : parsed, {
+      budgetStartDate: cleared ? null : start || null,
+      budgetEndDate: cleared ? null : end || null,
+    });
   };
 
   return (
@@ -620,11 +683,27 @@ function ProjectBudgetCard({
           />
           <span className="text-muted-foreground text-xs">per month</span>
           <div className="flex-1" />
-          <Button disabled={!canManage || saving} aria-busy={saving} onClick={commit}>
+          <Button
+            disabled={!canManage || saving || windowError !== null}
+            aria-busy={saving}
+            onClick={commit}
+          >
             {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
             Save budget
           </Button>
         </div>
+
+        {/* Asked for at creation and then unreachable — the cap could be
+            changed here but the period it applied to could not, so a project
+            whose funding window moved had no way to say so. */}
+        <BudgetWindowFieldsInput
+          start={start}
+          end={end}
+          onStartChange={setStart}
+          onEndChange={setEnd}
+          error={windowError}
+          disabled={!canManage}
+        />
       </CardContent>
     </Card>
   );

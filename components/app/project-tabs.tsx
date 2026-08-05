@@ -62,7 +62,11 @@ const TABS: ProjectTab[] = [
   // The page enforces the same rule (projects/[id]/cost/page.tsx); this only
   // stops the strip advertising a door that refuses.
   { label: "Cost", segment: "cost", adminOnly: true },
-  { label: "Settings", segment: "settings" },
+  // Gated: everything on Settings is administering the project, and a
+  // contributor holds none of it. The page already disables every control for
+  // them, which is a read-only screen about somebody else's job — the tab is
+  // the honest place to say so.
+  { label: "Settings", segment: "settings", requirePermission: "project:update" },
 ];
 
 export function ProjectTabs({ projectId }: { projectId: string }) {
