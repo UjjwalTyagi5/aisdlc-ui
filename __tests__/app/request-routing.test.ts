@@ -28,6 +28,17 @@ describe("what each tier may ask for", () => {
     expect(canRaiseType("developer", "model_provider_access")).toBe(false);
   });
 
+  it("routes a model request to whoever can actually grant it", () => {
+    // `model_credential` used to be TYPE-routed to the Business Unit Admin,
+    // which skipped the one person who can satisfy a contributor's ask by
+    // ticking a box: the Project Admin owns the project's model selection.
+    // Tier routing lands both cases — and a Project Admin's own ask, which is
+    // for a model the unit was never granted, still climbs to the BU Admin.
+    expect(initialApproverRole("model_credential", "developer")).toBe("project_admin");
+    expect(initialApproverRole("model_credential", "ba")).toBe("project_admin");
+    expect(initialApproverRole("model_credential", "project_admin")).toBe("bu_admin");
+  });
+
   it("offers a contributor the things they genuinely cannot do", () => {
     for (const t of ["access_request", "model_credential", "mcp_server", "user_onboarding"] as const) {
       expect(canRaiseType("developer", t)).toBe(true);

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/card";
 import { getProjectModelSelection, setProjectModelSelection } from "@/lib/api/models";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import type { ModelAllowEntry } from "@/lib/schemas/model";
 
 const keyOf = (e: ModelAllowEntry) => `${e.provider}::${e.model_id}`;
@@ -208,8 +209,7 @@ export function ProjectModelSelectionCard({
                       <Check className="size-3" aria-hidden />
                       default
                     </Badge>
-                  ) : (
-                    canManage &&
+                  ) : canManage ? (
                     on && (
                       <Button
                         variant="ghost"
@@ -220,6 +220,24 @@ export function ProjectModelSelectionCard({
                       >
                         Make default
                       </Button>
+                    )
+                  ) : (
+                    // The contributor's half of this row. A model the unit
+                    // holds but the project has not turned on is the one thing
+                    // they can actually do something about — and the person
+                    // who grants it is the Project Admin, one tick away on
+                    // this very card. `model_credential` tier-routes there.
+                    !on && (
+                      <RequestAccessButton
+                        label="Request access"
+                        className="h-7"
+                        prefill={{
+                          type: "model_credential",
+                          title: `${e.model_id} on this project`,
+                          description: `Requesting ${e.model_id} (${e.provider}). It is granted to the ${BUSINESS_UNIT_LABEL.toLowerCase()} but not turned on for this project.`,
+                          projectId,
+                        }}
+                      />
                     )
                   )}
                 </li>

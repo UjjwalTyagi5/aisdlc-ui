@@ -44,7 +44,18 @@ export const REQUEST_ESCALATION_CHAIN: readonly PlatformRole[] = [
  */
 const TYPE_ROUTED = new Set<GovernanceApprovalType>([
   "project_creation",
-  "model_credential",
+  // `model_credential` is NO LONGER type-routed. Its meaning is "make a model
+  // available to my project", and who can do that depends on who is asking:
+  //
+  //   contributor    → Project Admin, who ticks the box on the project's own
+  //                    model selection (they hold `model:manage`).
+  //   Project Admin  → Business Unit Admin, because the model they lack is one
+  //                    the unit was never granted.
+  //
+  // Fixed to `bu_admin` it always skipped the Project Admin — sending a
+  // contributor's "can I use Opus on this project" to a tier that would have
+  // to ask the Project Admin anyway. Tier routing lands both cases correctly;
+  // the escalation still climbs if the first rung cannot grant it.
   "budget_increase",
   "project_archive",
   "agent_default_org",
