@@ -34,7 +34,6 @@ import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
-import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
 import { PageTitle } from "@/components/app/page-title";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
@@ -270,7 +269,6 @@ function WorkspaceCard({
   onArchive?: () => void;
 }) {
   const [adminOpen, setAdminOpen] = React.useState(false);
-  const [editOpen, setEditOpen] = React.useState(false);
 
   return (
     <li className="h-full">
@@ -313,9 +311,14 @@ function WorkspaceCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="border-line-soft bg-panel-elevated">
-                  <DropdownMenuItem onSelect={() => setEditOpen(true)}>
-                    <Pencil className="size-4" aria-hidden />
-                    Edit details
+                  {/* Editing a unit is the unit's own screen, not a dialog over
+                      the list: budget, admin and the details form all live
+                      there, and only one of the three ever fitted in a popover. */}
+                  <DropdownMenuItem asChild>
+                    <Link href={`/workspaces/${ws.id}`}>
+                      <Pencil className="size-4" aria-hidden />
+                      Edit details
+                    </Link>
                   </DropdownMenuItem>
                   {/* Appointing a unit's admin is the Org Admin's call, not the
                       sitting admin's — `canManage` alone would show this to the
@@ -351,12 +354,17 @@ function WorkspaceCard({
         {/* CTA row */}
         {!archived && (
           <div className="flex items-center gap-2">
+            {/* People live in the directory, not on the unit. A person is one
+                row with bindings in several scopes, and the unit page could
+                only ever show the slice belonging to it — so "members" now
+                opens Users pre-filtered to this unit instead of a second,
+                narrower member list that drifted from the first. */}
             <Button
               asChild
               size="sm"
               className="from-brand-gradient-from to-brand-gradient-to flex-1 bg-gradient-to-br font-semibold text-white shadow-[0_3px_10px_-4px_oklch(0.6_0.2_35_/_0.5)]"
             >
-              <Link href={`/workspaces/${ws.id}`}>
+              <Link href={`/users?bu=${encodeURIComponent(String(ws.id))}`}>
                 <Users className="size-3.5" aria-hidden />
                 Members ({ws.memberCount})
               </Link>
@@ -374,10 +382,6 @@ function WorkspaceCard({
           </div>
         )}
       </Card>
-
-      {canManage && !archived && (
-        <EditBuDetailsDialog workspace={ws} open={editOpen} onOpenChange={setEditOpen} />
-      )}
 
       {canChangeAdmin && (
         <ChangeBuAdminDialog

@@ -279,10 +279,12 @@ export default function ProjectsPage() {
             foot={archivedCount > 0 ? `${archivedCount} archived` : undefined}
             delay={0.06}
           />
+          {/* No footer: the Running tile immediately to the right IS the
+              running count, and stating it twice in adjacent tiles reads as
+              two different figures that happen to agree. */}
           <MetricTile
             label="Active"
             value={activeCount}
-            foot={runningCount > 0 ? `${runningCount} running` : "none running"}
             delay={0.12}
           />
           <MetricTile

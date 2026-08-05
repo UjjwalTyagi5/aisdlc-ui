@@ -2,9 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Search, ShieldCheck, UserPlus, Users as UsersIcon } from "lucide-react";
+import { Search, ShieldCheck, UserPlus, Users as UsersIcon, X } from "lucide-react";
 
 import { PageTitle } from "@/components/app/page-title";
 import { ManageUserRolesDialog } from "@/components/app/manage-user-roles-dialog";
@@ -183,6 +184,11 @@ function RoleChip({ label, role }: { label: string; role: PlatformRole | null })
 export default function UsersPage() {
   const session = useSession({ required: true });
   const role = effectivePlatformRole(session);
+  // `?bu=<id>` — the directory narrowed to one Business Unit. This is where
+  // "who is in this unit" is answered now: the unit's own screen used to carry
+  // a second member list, and two lists of the same people is one too many.
+  const searchParams = useSearchParams();
+  const buFilter = searchParams.get("bu");
   const [query, setQuery] = React.useState("");
   const [inviteOpen, setInviteOpen] = React.useState(false);
   const [managing, setManaging] = React.useState<DirectoryRow | null>(null);
@@ -304,10 +310,38 @@ export default function UsersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [units, projects, memberQueriesUpdatedAt, projectMemberQueriesUpdatedAt]);
 
+  /** The unit named by `?bu=`, once the scoped unit list has loaded. Null when
+   *  no filter is asked for, or when the id names a unit outside the viewer's
+   *  scope — `units` is already scope-filtered, so an unresolvable id must not
+   *  quietly widen back to the whole directory. */
+  const filterUnit = React.useMemo(
+    () => (buFilter ? (units.find((u) => String(u.id) === buFilter) ?? null) : null),
+    [buFilter, units],
+  );
+
+  /**
+   * Rows narrowed to the filtered unit: only people bound to it, showing only
+   * the bindings that sit inside it (the unit itself, and its projects). A
+   * person who is BA in Payments and Architect in Lending should read as a
+   * Payments BA here — their Lending binding is true but is not what this
+   * screen was opened to answer.
+   */
+  const scoped = React.useMemo<DirectoryRow[]>(() => {
+    if (!buFilter) return rows;
+    return rows
+      .map((r) => ({
+        ...r,
+        bindings: r.bindings.filter((b) =>
+          b.scope === "workspace" ? b.id === buFilter : b.parentId === buFilter,
+        ),
+      }))
+      .filter((r) => r.bindings.length > 0);
+  }, [rows, buFilter]);
+
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(
+    if (!q) return scoped;
+    return scoped.filter(
       (r) =>
         r.displayName.toLowerCase().includes(q) ||
         (r.email ?? "").toLowerCase().includes(q) ||
@@ -318,7 +352,7 @@ export default function UsersPage() {
             roleLabel(b.role).toLowerCase().includes(q),
         ),
     );
-  }, [rows, query, roleLabel]);
+  }, [scoped, query, roleLabel]);
 
   // Users is an admin surface: Organization Admin manages, Business Unit Admin
   // views its own unit. Builders have no access at all (PRD §35).
@@ -369,19 +403,36 @@ export default function UsersPage() {
         </div>
       </header>
 
-      {/* Search */}
-      <div className="relative max-w-sm">
-        <Search
-          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-          aria-hidden
-        />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search people, units, projects or roles…"
-          className="border-line-soft bg-surface-1 pl-9"
-          aria-label="Search the people directory"
-        />
+      {/* Search, and the Business Unit filter when one is asked for. The filter
+          is a removable chip rather than a silent narrowing: an empty list has
+          to be able to say "in THIS unit", or it reads as an empty directory. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative w-full max-w-sm">
+          <Search
+            className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+            aria-hidden
+          />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search people, units, projects or roles…"
+            className="border-line-soft bg-surface-1 pl-9"
+            aria-label="Search the people directory"
+          />
+        </div>
+
+        {buFilter && (
+          <span className="border-brand-bright/35 bg-brand-bright/10 text-brand-bright inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
+            {BUSINESS_UNIT_LABEL}: {filterUnit?.displayName ?? buFilter}
+            <Link
+              href="/users"
+              aria-label={`Clear the ${BUSINESS_UNIT_LABEL.toLowerCase()} filter`}
+              className="hover:text-foreground transition-colors"
+            >
+              <X className="size-3" aria-hidden />
+            </Link>
+          </span>
+        )}
       </div>
 
       {loading ? (
@@ -389,11 +440,19 @@ export default function UsersPage() {
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={UsersIcon}
-          title={query ? "No one matches that search" : "No people yet"}
+          title={
+            query
+              ? "No one matches that search"
+              : buFilter
+                ? `Nobody is in ${filterUnit?.displayName ?? `this ${BUSINESS_UNIT_LABEL.toLowerCase()}`} yet`
+                : "No people yet"
+          }
           description={
             query
               ? "Try a different name, email, business unit, project or role."
-              : "Invite people to the organisation, then assign their roles per scope on Roles & Access."
+              : buFilter
+                ? "Invite someone into it, or clear the filter to see the whole directory."
+                : "Invite people to the organisation, then assign their roles per scope on Roles & Access."
           }
         />
       ) : (
@@ -515,7 +574,11 @@ export default function UsersPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setManaging(r)}
+                            /* The UNFILTERED row: the dialog checks for
+                               separation-of-duties conflicts across every
+                               scope, so handing it the one-unit slice would
+                               hide exactly the clash it exists to catch. */
+                            onClick={() => setManaging(rows.find((x) => x.userId === r.userId) ?? r)}
                             aria-label={`Manage roles for ${r.displayName}`}
                             className="border-line-soft mt-1.5 h-7 px-2 text-[11px]"
                           >

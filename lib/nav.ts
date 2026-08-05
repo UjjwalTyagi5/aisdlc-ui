@@ -127,6 +127,11 @@ export const deliverNav: NavItem[] = [
     icon: Workflow,
     segment: "orchestrator",
     requirePermission: "artifact:view",
+    // Hidden from the governance tier for the same reason as Agent Studio: it
+    // is a cockpit for RUNNING a project's agent roster, and neither admin tier
+    // has agent access at all (PRD §14.8). They govern who may run what; the
+    // running itself belongs to the delivery roles inside a project.
+    hideForRoles: ["org_admin", "bu_admin"],
     prdSection: "§34.11",
   },
   {
