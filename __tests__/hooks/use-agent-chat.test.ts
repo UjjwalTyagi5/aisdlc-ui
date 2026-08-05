@@ -15,11 +15,39 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
+import * as React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // API_BASE is the only import from the api client used by useAgentChat.
 vi.mock("@/lib/api/client", () => ({ API_BASE: "http://test.local/api" }));
 
 import { useAgentChat } from "@/hooks/use-agent-chat";
+
+/**
+ * `useAgentChat` calls `useQueryClient`, so it cannot render outside a
+ * provider — it gained that dependency after these tests were written, which
+ * is what broke them ("No QueryClient set").
+ *
+ * A FRESH CLIENT PER TEST. A shared one would carry cache and in-flight state
+ * between cases, and the whole point of these two is that each observes its
+ * own single POST. Retries are off for the same reason: a retry would call the
+ * fetch mock twice and fail the count assertion for a reason that has nothing
+ * to do with the context payload being tested.
+ *
+ * `React.createElement` rather than JSX because this file is `.ts` — adding a
+ * `.tsx` rename would churn the path for one wrapper.
+ */
+function withQueryClient() {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false },
+    },
+  });
+  return function Wrapper({ children }: { children: React.ReactNode }) {
+    return React.createElement(QueryClientProvider, { client }, children);
+  };
+}
 
 function emptySseResponse(): Response {
   const stream = new ReadableStream<Uint8Array>({
@@ -51,7 +79,9 @@ describe("useAgentChat context channel", () => {
         all_story_refs: ["1234", "1235", "1236"],
       },
     };
-    const { result } = renderHook(() => useAgentChat({ context }));
+    const { result } = renderHook(() => useAgentChat({ context }), {
+      wrapper: withQueryClient(),
+    });
 
     await act(async () => {
       await result.current.send("create a story");
@@ -74,7 +104,9 @@ describe("useAgentChat context channel", () => {
         all_story_refs: ["1234"],
       },
     };
-    const { result } = renderHook(() => useAgentChat({ context }));
+    const { result } = renderHook(() => useAgentChat({ context }), {
+      wrapper: withQueryClient(),
+    });
 
     await act(async () => {
       await result.current.send("normalise everything");
