@@ -26,6 +26,22 @@ import {
 export type Role = "admin" | "member" | "viewer";
 
 /**
+ * SIDEBAR GROUP LABELS vs the identifiers below.
+ *
+ * The three groups render as Build, Control plane and Observability. The
+ * exported arrays are still `deliverNav`, `governNav` and `observeNav`, and
+ * that mismatch is deliberate rather than an oversight: renaming the symbols
+ * would touch the sidebar, the mobile sidebar, the command palette and their
+ * tests for no behavioural gain, and the labels are the kind of thing that
+ * gets revised again. The mapping is stated here so the next reader does not
+ * go looking for a `buildNav` that never existed.
+ *
+ *   deliverNav → "Build"          the work itself
+ *   governNav  → "Control plane"  who may do what (PRD §32.2)
+ *   observeNav → "Observability"  what happened, and what it cost
+ */
+
+/**
  * Roles for whom the GLOBAL Agent Studio entry is not the way in.
  *
  * Derived from `AGENT_DEFAULT_OWNER_ROLE` rather than listed: the three roles
@@ -99,7 +115,7 @@ export interface NavItem {
  * the URL is the codebase's. See `lib/scope.ts`.
  */
 
-// ─── Deliver — the work itself ────────────────────────────────────────────────
+// ─── Build — the work itself ──────────────────────────────────────────────────
 export const deliverNav: NavItem[] = [
   {
     label: "Dashboard",
@@ -182,7 +198,7 @@ export const deliverNav: NavItem[] = [
   },
 ];
 
-// ─── Govern — the control plane (PRD §32.2) ───────────────────────────────────
+// ─── Control plane (PRD §32.2) ────────────────────────────────────────────────
 export const governNav: NavItem[] = [
   {
     label: "Business Units",
@@ -243,7 +259,7 @@ export const governNav: NavItem[] = [
   },
 ];
 
-// ─── Observe — the evidence surface (PRD §34.8, §34.9) ────────────────────────
+// ─── Observability — the evidence surface (PRD §34.8, §34.9) ──────────────────
 /**
  * Traces and the Audit Trail answer the same question — *what happened* —
  * at two altitudes: agent execution spans, and the governance decisions
@@ -254,14 +270,13 @@ export const governNav: NavItem[] = [
  * `audit:view`), which is why the entry points at `/activity` — a redirect
  * that lands each viewer on the tab they actually hold.
  *
- * Cost & Budget sits here too. It was under Govern on the argument that "what
- * did this cost against which cap" is a budget question rather than an
- * evidence one — but in practice spend is read the same way a trace is: you
+ * Cost & Budget sits here too. It was under the control plane on the argument
+ * that "what did this cost against which cap" is a budget question rather than
+ * an evidence one — but in practice spend is read the same way a trace is: you
  * come to it after the fact, to find out what happened. The cap-setting it
- * also carries is the exception, not the reason you open the page, and the
- * page's own header has always called itself "Observe"
- * (app/(app)/cost/page.tsx). Govern is now uniformly "who may do what";
- * Observe is uniformly "what did happen, and what did it cost".
+ * also carries is the exception, not the reason you open the page. The control
+ * plane is now uniformly "who may do what"; Observability is uniformly "what
+ * did happen, and what did it cost".
  */
 export const observeNav: NavItem[] = [
   {

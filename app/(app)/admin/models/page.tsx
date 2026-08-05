@@ -421,12 +421,12 @@ export default function ModelProvidersPage() {
 
   const HEADER_COPY: Record<"org" | "bu" | "project", { eyebrow: string; title: string; body: string }> = {
     org: {
-      eyebrow: "Govern",
+      eyebrow: "Control plane",
       title: "Models",
       body: "Approve the models this organization may use, decide which business units get each one, and bring your own LLM keys. Agent runs use these models — and only these.",
     },
     bu: {
-      eyebrow: "Govern",
+      eyebrow: "Control plane",
       title: "Models",
       body: `The models your Organization Admin granted this ${BUSINESS_UNIT_LABEL.toLowerCase()}. Anything they keyed centrally works as-is; for the rest, connect this ${BUSINESS_UNIT_LABEL.toLowerCase()}'s own credentials.`,
     },

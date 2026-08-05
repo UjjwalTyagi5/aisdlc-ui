@@ -329,12 +329,12 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto p-2" aria-label="Main navigation">
 
-        {/* ── Deliver — the work itself ─────────────────────────────────── */}
+        {/* ── Build — the work itself ───────────────────────────────────── */}
         {/* Named for what the group IS, not for a Business Unit. This label
             used to carry the active unit's name, which was a lie for anyone
             bound to more than one — see components/app/org-header.tsx. */}
         <SectionLabel
-          label="Deliver"
+          label="Build"
           collapsed={collapsed}
           dimmed={!hasWorkspace && !wsPending}
         />
@@ -421,10 +421,10 @@ export function Sidebar() {
           </>
         )}
 
-        {/* ── Govern — the control plane (PRD §32.2) ────────────────────── */}
+        {/* ── Control plane (PRD §32.2) ─────────────────────────────────── */}
         {governItems.length > 0 && (
           <>
-            <SectionLabel label="Govern" collapsed={collapsed} />
+            <SectionLabel label="Control plane" collapsed={collapsed} />
             <ul className="flex flex-col gap-0.5">
               {governItems.map((item) => (
                 <li key={item.href + item.label}>
@@ -435,10 +435,10 @@ export function Sidebar() {
           </>
         )}
 
-        {/* ── Observe — traces & audit (PRD §34.8, §34.9) ───────────────── */}
+        {/* ── Observability — traces & audit (PRD §34.8, §34.9) ─────────── */}
         {observeItems.length > 0 && (
           <>
-            <SectionLabel label="Observe" collapsed={collapsed} />
+            <SectionLabel label="Observability" collapsed={collapsed} />
             <ul className="flex flex-col gap-0.5">
               {observeItems.map((item) => (
                 <li key={item.href + item.label}>
