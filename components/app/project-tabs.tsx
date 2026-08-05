@@ -52,6 +52,9 @@ const TABS: ProjectTab[] = [
   // else to look. Gated on connector:view, which every delivery role holds and
   // the stakeholder does not.
   { label: "Integrations", segment: "integrations", requirePermission: "connector:view" },
+  // Ungated: the list is what this project may run on, which everyone working
+  // in it needs, and the page itself is read-only without `model:manage`.
+  { label: "Models", segment: "models" },
   // Spend is treated as commercially sensitive rather than ambient — a
   // deliberate narrowing of PRD §34.5, which would show it to every builder.
   // The page enforces the same rule (projects/[id]/cost/page.tsx); this only

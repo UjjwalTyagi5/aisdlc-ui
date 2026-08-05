@@ -1,4 +1,5 @@
-import type { PlatformRole } from "@/lib/roles";
+import { ROLE_ORDER, type PlatformRole } from "@/lib/roles";
+import { AGENT_DEFAULT_OWNER_ROLE } from "@/lib/governance";
 import {
   Activity,
   Boxes,
@@ -23,6 +24,27 @@ import {
 } from "lucide-react";
 
 export type Role = "admin" | "member" | "viewer";
+
+/**
+ * Roles for whom the GLOBAL Agent Studio entry is not the way in.
+ *
+ * Derived from `AGENT_DEFAULT_OWNER_ROLE` rather than listed: the three roles
+ * that own a shared tier of the cascade (Org, Business Unit, Project) are the
+ * ones who arrive at Agent Studio to publish a default other people inherit,
+ * and they need it reachable from anywhere. Everyone else has only their
+ * Personal tier, which is an override applied to their own runs inside a
+ * project — so their way in is the project's own entry, seeded with that
+ * project (`projectNav` below), and Personal is one click from there.
+ *
+ * Listing the nine contributor roles by hand would be the same set today and
+ * the first thing to drift when a role is added.
+ */
+const AGENT_STUDIO_TIER_OWNERS = new Set<PlatformRole>(
+  Object.values(AGENT_DEFAULT_OWNER_ROLE).filter((r): r is PlatformRole => r !== null),
+);
+const AGENT_STUDIO_GLOBAL_HIDDEN: readonly PlatformRole[] = ROLE_ORDER.filter(
+  (r) => !AGENT_STUDIO_TIER_OWNERS.has(r),
+);
 
 export interface NavItem {
   label: string;
@@ -150,6 +172,12 @@ export const deliverNav: NavItem[] = [
     //
     // Orchestrator stays hidden, and the difference is the point — that one
     // IS running agents.
+    //
+    // Hidden from contributors, who hold no shared tier — see
+    // AGENT_STUDIO_GLOBAL_HIDDEN. Not a loss of access: their Personal tier
+    // is reached from the project they are working in, where the override
+    // actually applies.
+    hideForRoles: AGENT_STUDIO_GLOBAL_HIDDEN,
     prdSection: "§34.6",
   },
 ];
@@ -299,10 +327,11 @@ export interface ProjectNavItem {
 
 export const projectNav: ProjectNavItem[] = [
   { label: "Integrations", to: "/integrations", icon: Plug, segment: "integrations" },
-  // Deep-links the Settings page's Model tab. Models are not a page of their
-  // own inside a project — the selection lives with the project's settings,
-  // and inventing a second screen for it would split one decision in two.
-  { label: "Models", to: "/settings?tab=model", icon: Boxes, segment: "settings" },
+  // A page of its own now, not a deep link into Settings. "Which models can I
+  // use here" is not a settings question for the people who most often ask it,
+  // and the Settings tab stays — both render the same card, so the selection
+  // cannot disagree between them.
+  { label: "Models", to: "/models", icon: Boxes, segment: "models" },
   // Points at the GLOBAL Agent Studio seeded with this project (`?project=`),
   // not at a project-local route — there isn't one, and there shouldn't be.
   // The studio is a drill-down through one cascade (Org → BU → Project →
@@ -447,7 +476,9 @@ export const segmentLabels: Record<string, string> = {
   admin: "Administration",
   access: "Roles & Access",
   roles: "Roles & Access",
-  models: "Model Management",
+  // "Models", not "Model Management" — the segment is now shared with the
+  // project-scoped page, and both screens title themselves Models anyway.
+  models: "Models",
   cost: "Cost & Budget",
   catalogue: "Agent Catalogue",
   activity: "Activity",

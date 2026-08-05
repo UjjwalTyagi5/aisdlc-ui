@@ -52,13 +52,18 @@ describe("visibleNav — role and scope", () => {
     }
   });
 
-  it("keeps Agent Studio for delivery roles", () => {
-    expect(hrefsFor(ROLE_PERMISSIONS.project_admin, { role: "project_admin" })).toContain(
-      "/agent-studio",
-    );
-    expect(hrefsFor(ROLE_PERMISSIONS.developer, { role: "developer" })).toContain(
-      "/agent-studio",
-    );
+  it("keeps the global Agent Studio for the three tier owners only", () => {
+    // The global entry is for publishing a default other people inherit, so it
+    // belongs to whoever OWNS a shared tier (AGENT_DEFAULT_OWNER_ROLE).
+    for (const role of ["org_admin", "bu_admin", "project_admin"] as const) {
+      expect(hrefsFor(ROLE_PERMISSIONS[role], { role })).toContain("/agent-studio");
+    }
+    // A contributor holds only their Personal tier — an override applied to
+    // their own runs inside a project — so their way in is the project-scoped
+    // entry, not a top-level link to a cascade they own no rung of.
+    for (const role of ["developer", "ba", "qa"] as const) {
+      expect(hrefsFor(ROLE_PERMISSIONS[role], { role })).not.toContain("/agent-studio");
+    }
   });
 
   it("still hides Orchestrator from the governance tier", () => {
