@@ -40,6 +40,7 @@ import {
   REQUEST_TYPE_HINT,
   REQUEST_TYPE_LABEL,
   RequestCreateInput,
+  type GovernanceApprovalType,
   type RequestAttachment,
   type RequestPriority,
 } from "@/lib/schemas/governance-approval";
@@ -73,15 +74,41 @@ function fileSize(bytes: number): string {
  * endpoint refuses independently (403), because a dialog that cannot be opened
  * is not an access control.
  */
+/**
+ * What the caller already knows, when the request is raised from the thing it
+ * is about rather than from a blank form.
+ *
+ * The point is not to save typing. A request filed from Requests & Approvals
+ * names its subject in prose — "we need Slack" — and the approver then has to
+ * work out which connector kind that is and whether it even exists. Raised from
+ * the Slack tile, the subject is unambiguous by construction.
+ */
+export interface RaiseRequestPrefill {
+  /** Must be one this role may raise; otherwise the dialog falls back. */
+  type: GovernanceApprovalType;
+  title: string;
+  description?: string;
+  workspaceId?: string;
+  projectId?: string;
+}
+
 export function RaiseRequestDialog({
   open,
   onOpenChange,
   projects,
+  prefill,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Projects the viewer may file against — already scope-filtered upstream. */
   projects: Project[];
+  /**
+   * Seeded from the model/connector/agent the request is about. The type is
+   * LOCKED when prefilled: it was derived from what the person clicked, and a
+   * picker that let them change it to something else while the title still
+   * said "Slack" would produce a request no approver could act on.
+   */
+  prefill?: RaiseRequestPrefill;
 }) {
   const queryClient = useQueryClient();
   const { role } = useAccessScope();
@@ -89,7 +116,11 @@ export function RaiseRequestDialog({
 
   // Scoped to what this role may actually ask for — see raisableTypesFor.
   const raisable = raisableTypesFor(role);
-  const [type, setType] = React.useState<string>(() => raisable[0] ?? "other");
+  // A prefilled type this role may not raise is ignored rather than obeyed: the
+  // endpoint would refuse it anyway (403), and a locked picker showing an
+  // impossible type is a dead end with no way back to a valid one.
+  const seeded = prefill && raisable.includes(prefill.type) ? prefill : undefined;
+  const [type, setType] = React.useState<string>(() => seeded?.type ?? raisable[0] ?? "other");
   const [title, setTitle] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [priority, setPriority] = React.useState<RequestPriority>("normal");
@@ -106,6 +137,21 @@ export function RaiseRequestDialog({
       setType(raisable[0]!);
     }
   }, [raisable, type]);
+
+  // Seed on OPEN, not on mount: these dialogs are kept mounted and reopened for
+  // a different model or connector, so a mount-time seed would show the first
+  // subject the page ever asked about for every one after it.
+  React.useEffect(() => {
+    if (!open || !seeded) return;
+    setType(seeded.type);
+    setTitle(seeded.title);
+    setDescription(seeded.description ?? "");
+    if (seeded.workspaceId) setWorkspaceId(seeded.workspaceId);
+    if (seeded.projectId) setProjectId(seeded.projectId);
+    // Keyed on the prefill's identity so reopening for a different subject
+    // reseeds, while typing inside an open dialog is never overwritten.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, seeded?.type, seeded?.title]);
 
   // One unit to choose from is not a choice — preselect rather than making the
   // person open a dropdown to pick the only option.
@@ -212,7 +258,7 @@ export function RaiseRequestDialog({
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="req-type">Request type</Label>
-              <Select value={type} onValueChange={setType}>
+              <Select value={type} onValueChange={setType} disabled={seeded !== undefined}>
                 <SelectTrigger id="req-type" className="border-line-soft">
                   <SelectValue />
                 </SelectTrigger>

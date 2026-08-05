@@ -2,14 +2,15 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Building2, CheckCircle2, Globe, KeyRound } from "lucide-react";
+import { Building2, CheckCircle2, ChevronRight, Globe, KeyRound } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { getModelAvailability } from "@/lib/api/models";
 import { qk } from "@/lib/api/query-keys";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
-import type { ModelAvailability } from "@/lib/schemas/model";
+import type { CatalogProvider, ModelAvailability } from "@/lib/schemas/model";
 
 /**
  * What this Business Unit has been given, and what (if anything) it still has
@@ -28,10 +29,22 @@ export function ModelAvailabilityCard({
   /** Copy differs for a Project Admin: the credentials they add are theirs,
    *  and go to their {BUSINESS_UNIT_LABEL} Admin for approval first. */
   audience,
+  catalog = [],
 }: {
   workspaceId: string;
   workspaceName: string;
   audience: "bu" | "project";
+  /**
+   * The full model catalogue. Everything in here that this unit was NOT
+   * granted is listed below the granted set, dimmed and requestable — the
+   * page previously showed only what you hold, which left "we were never
+   * granted Opus" and "Opus isn't on this platform" looking identical.
+   *
+   * This leaks nothing: the catalogue endpoint already answers in full to
+   * every role. What is scoped is the GRANT, and that is still exactly the
+   * `rows` below.
+   */
+  catalog?: CatalogProvider[];
 }) {
   const q = useQuery({
     queryKey: qk.model.availability(workspaceId),
@@ -39,8 +52,38 @@ export function ModelAvailabilityCard({
     enabled: !!workspaceId,
   });
 
-  const rows = q.data ?? [];
+  // Memoised because `ungranted` below depends on it: `q.data ?? []` produces
+  // a fresh array on every render when the query has no data, which would make
+  // that memo recompute the whole catalogue diff each time.
+  const rows = React.useMemo(() => q.data ?? [], [q.data]);
   const needsKey = rows.filter((r) => !r.centrallyCredentialed && !r.locallyCredentialed);
+
+  /**
+   * A Business Unit Admin and a Project Admin lack different things, so they
+   * ask for different things (see lib/requests/routing.ts).
+   *
+   *   bu       → `model_provider_access`, decided by the Org Admin. What they
+   *              lack is an org-wide grant; a project-scoped credential
+   *              request would be answered by themselves.
+   *   project  → `model_credential`, decided by the BU Admin above them.
+   */
+  const requestType = audience === "bu" ? "model_provider_access" : "model_credential";
+
+  const ungranted = React.useMemo(() => {
+    const held = new Set(rows.map((r) => `${r.provider}::${r.model_id}`));
+    // Deduped on the way out as well as filtered: a provider listing the same
+    // model_id twice would otherwise produce two identical "request this" rows
+    // for one model, which reads as two different models with one name.
+    const seen = new Set<string>();
+    return catalog.flatMap((p) =>
+      p.models.flatMap((m) => {
+        const key = `${p.provider}::${m.model_id}`;
+        if (held.has(key) || seen.has(key)) return [];
+        seen.add(key);
+        return [{ provider: p.provider, providerLabel: p.label, ...m }];
+      }),
+    );
+  }, [catalog, rows]);
 
   return (
     <Card className="border-line-soft bg-panel-elevated">
@@ -86,14 +129,38 @@ export function ModelAvailabilityCard({
             </button>
           </p>
         ) : rows.length === 0 ? (
-          <p className="text-muted-foreground text-[12.5px]">
-            Your Organization Admin hasn&apos;t granted this {BUSINESS_UNIT_LABEL.toLowerCase()} any
-            models yet. Nothing can be onboarded or run until they do.
-          </p>
+          <div className="space-y-3">
+            <p className="text-muted-foreground text-[12.5px]">
+              Your Organization Admin hasn&apos;t granted this {BUSINESS_UNIT_LABEL.toLowerCase()}{" "}
+              any models yet. Nothing can be onboarded or run until they do
+              {ungranted.length > 0 && " — the catalogue below is what you could ask for"}.
+            </p>
+            {ungranted.length === 0 && (
+              <RequestAccessButton
+                label="Request model access"
+                prefill={{
+                  type: requestType,
+                  title: "Model access",
+                  description: `${workspaceName} holds no models. Which we need, and what for:`,
+                  workspaceId,
+                }}
+              />
+            )}
+          </div>
         ) : (
           <ul className="divide-line-soft border-line-soft divide-y rounded-xl border">
-            {rows.map((r) => (
-              <AvailabilityRow key={`${r.provider}::${r.model_id}`} row={r} audience={audience} />
+            {/* Index in the key, not just provider::model_id. The SAME model
+                can reach a unit twice — once org-wide and once as a grant to
+                this unit specifically, each its own row with its own badge —
+                and keying on the pair alone made React treat them as one
+                (duplicate-key warning, and the second row liable to be
+                dropped). */}
+            {rows.map((r, i) => (
+              <AvailabilityRow
+                key={`${r.provider}::${r.model_id}::${i}`}
+                row={r}
+                audience={audience}
+              />
             ))}
           </ul>
         )}
@@ -104,6 +171,49 @@ export function ModelAvailabilityCard({
               ? "Models keyed centrally need nothing from you. For the rest, add a provider below with your own credentials."
               : `Models keyed centrally need nothing from you. For the rest, add a provider below — your ${BUSINESS_UNIT_LABEL} Admin approves it before it goes live.`}
           </p>
+        )}
+
+        {/* Everything the platform offers that this scope wasn't given. Kept
+            behind a disclosure rather than inline: it is the longer list and
+            the less important one, and expanding the answer to "what can we
+            use" with forty things you can't would bury it. */}
+        {ungranted.length > 0 && (
+          <details className="border-line-soft group mt-4 rounded-xl border border-dashed">
+            <summary className="text-muted-foreground hover:text-foreground flex cursor-pointer items-center gap-2 px-3 py-2.5 font-mono text-[11.5px] transition-colors">
+              <ChevronRight
+                className="size-3.5 shrink-0 transition-transform group-open:rotate-90"
+                aria-hidden
+              />
+              {ungranted.length} more {ungranted.length === 1 ? "model" : "models"} exist that{" "}
+              {workspaceName} wasn&apos;t granted
+            </summary>
+            <ul className="divide-line-soft border-line-soft divide-y border-t">
+              {ungranted.map((m) => (
+                <li
+                  key={`${m.provider}::${m.model_id}`}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3 opacity-75 transition-opacity hover:opacity-100"
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                    {m.model_id}
+                  </span>
+                  <span className="text-muted-foreground shrink-0 font-mono text-[10.5px]">
+                    {m.providerLabel}
+                  </span>
+                  <RequestAccessButton
+                    prefill={{
+                      type: requestType,
+                      title: `${m.label} access`,
+                      description:
+                        audience === "bu"
+                          ? `Requesting ${m.label} (${m.providerLabel}) for ${workspaceName}. It isn't granted to us today.`
+                          : `Requesting ${m.label} (${m.providerLabel}) for our project. ${workspaceName} doesn't hold it today.`,
+                      workspaceId,
+                    }}
+                  />
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </CardContent>
     </Card>

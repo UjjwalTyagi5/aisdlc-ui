@@ -28,6 +28,8 @@ import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
 import { listIntegrationAccess } from "@/lib/api/integration-access";
 import { AddMcpServerDialog } from "@/components/app/add-mcp-server-dialog";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
+import type { RaiseRequestPrefill } from "@/components/requests/raise-request-dialog";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -338,7 +340,14 @@ export default function IntegrationsPage() {
   const permittedKinds = isOrgAdmin
     ? new Set<string>(ALL_KINDS)
     : new Set<string>((grantsQ.data ?? []).map((g) => g.kind));
-  const visibleKinds = ALL_KINDS.filter((k) => permittedKinds.has(k));
+  // EVERY kind is rendered now, granted or not. Hiding the ungranted ones kept
+  // a dead "Connect" button off the page, which was right, but it also made
+  // "we were never given Slack" indistinguishable from "Slack isn't a thing
+  // this platform does" — and the person who needs to tell those apart is
+  // exactly the one who would go on to ask for it. An ungranted tile carries a
+  // Request access button instead of a Connect one, so the affordance matches
+  // the standing.
+  const visibleKinds = ALL_KINDS;
   const resolved = visibleKinds.map(
     (k): Connector =>
       byKind.get(k) ?? {
@@ -430,12 +439,16 @@ export default function IntegrationsPage() {
         )}
       </div>
 
-      {!isOrgAdmin && visibleKinds.length === 0 && !grantsQ.isLoading && (
+      {/* Keyed on the GRANT count, not on how many tiles render — every kind
+          is on the page now, so "nothing rendered" stopped being the signal
+          for "you hold nothing". Each tile carries its own Request access
+          button, so this says what the state IS and leaves the asking to them. */}
+      {!isOrgAdmin && permittedKinds.size === 0 && !grantsQ.isLoading && (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
             Your Organization Admin hasn&apos;t permitted any connectors for this{" "}
-            {BUSINESS_UNIT_LABEL.toLowerCase()} yet. Ask them to grant the integrations your teams
-            need — nothing can be connected until they do.
+            {BUSINESS_UNIT_LABEL.toLowerCase()} yet. Everything below is the catalogue — request
+            the ones your teams need, and nothing can be connected until they&apos;re granted.
           </p>
         </div>
       )}
@@ -454,7 +467,7 @@ export default function IntegrationsPage() {
           blurb={
             isOrgAdmin
               ? `Open one to see which ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} hold it, which projects use it, and to revoke either.`
-              : `Open one to see what your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} hold and which of your projects use it.`
+              : `Solid tiles are yours to use. Dashed ones exist but weren't granted to you — request those.`
           }
         />
         {catalogueConnectors.length === 0 ? (
@@ -471,6 +484,12 @@ export default function IntegrationsPage() {
                 category={chipLabel(c.kind)}
                 glyph={<KindGlyph kind={c.kind} />}
                 access={accessByKind.get(`connector:${c.kind}`)}
+                granted={permittedKinds.has(c.kind)}
+                requestPrefill={{
+                  type: "connector_access",
+                  title: `${KIND_LABEL[c.kind]} access`,
+                  description: `Requesting ${KIND_LABEL[c.kind]} for our work. It isn't granted to us today.`,
+                }}
               />
             ))}
           </ul>
@@ -491,8 +510,25 @@ export default function IntegrationsPage() {
           />
           {/* Connectors need no equivalent — their kinds ship in the catalogue.
               An MCP server is whatever someone stood up, so it does not exist
-              until it is named here. */}
-          {isOrgAdmin && <AddMcpServerDialog />}
+              until it is named here.
+
+              And because it does not exist until then, there is no dashed tile
+              to request from either: the ask is "stand this one up", which is
+              a description, not a pick from a list. Hence a section-level
+              button for everyone who cannot add one themselves. */}
+          {isOrgAdmin ? (
+            <AddMcpServerDialog />
+          ) : (
+            <RequestAccessButton
+              label="Request an MCP server"
+              prefill={{
+                type: "mcp_server",
+                title: "New MCP server",
+                description:
+                  "Which server, where it runs, and what our agents would call it for:",
+              }}
+            />
+          )}
         </div>
         {mcpRows.length === 0 ? (
           <Card className="text-muted-foreground p-8 text-center text-sm">
@@ -581,19 +617,32 @@ function IntegrationCard({
   category,
   glyph,
   access,
+  granted = true,
+  requestPrefill,
 }: {
   href: string;
   label: string;
   category: string;
   glyph: React.ReactNode;
   access?: { units: number; projects: number };
+  /** False when the viewer's scope holds no grant for this kind. */
+  granted?: boolean;
+  /** Seeds the request raised from an ungranted tile. */
+  requestPrefill?: RaiseRequestPrefill;
 }) {
   return (
     <li className="h-full">
       {/* Stretched link, not an onClick: a div with a handler is invisible to
           a keyboard and cannot be opened in a new tab, which is what people do
           with a grid of things to compare. The CTA below sits above it. */}
-      <Card className="border-line-soft bg-panel-elevated/70 focus-within:ring-ring relative flex h-full flex-col gap-3 rounded-2xl border p-4 shadow-[0_1px_0_oklch(1_0_0_/_0.03)_inset] transition-[transform,box-shadow,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_30px_-16px_oklch(0_0_0_/_0.5)] hover:ring-1 hover:ring-brand-bright/20 focus-within:ring-2">
+      <Card
+        className={cn(
+          "border-line-soft bg-panel-elevated/70 focus-within:ring-ring relative flex h-full flex-col gap-3 rounded-2xl border p-4 shadow-[0_1px_0_oklch(1_0_0_/_0.03)_inset] transition-[transform,box-shadow,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_30px_-16px_oklch(0_0_0_/_0.5)] hover:ring-1 hover:ring-brand-bright/20 focus-within:ring-2",
+          // Dimmed, not disabled. The tile still opens — seeing WHO does hold a
+          // connector is half the answer to whether asking for it is reasonable.
+          !granted && "border-dashed opacity-70 hover:opacity-100",
+        )}
+      >
         <div className="flex items-start justify-between gap-2">
           {glyph}
           <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
@@ -604,26 +653,44 @@ function IntegrationCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="font-display truncate text-[14.5px] font-bold tracking-[-0.01em]">
-              <Link
-                href={href}
-                className="rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
-              >
-                {label}
-              </Link>
+              {/* NOT a link when ungranted. The detail page answers "which
+                  business units hold this", which is Org/BU Admin territory —
+                  a Project Admin following it lands on Access restricted. A
+                  tile whose only affordance leads to a wall is worse than one
+                  that just states its status and offers the ask. */}
+              {granted ? (
+                <Link
+                  href={href}
+                  className="rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+                >
+                  {label}
+                </Link>
+              ) : (
+                label
+              )}
             </h3>
           </div>
           {/* NO tagline. "Read issues + write sub-tasks" explains what Jira is,
               which is useful exactly once and then sits on the card forever for
               the people who read it daily. The reach below is the fact that
               changes, and the only one worth the row. */}
-          {access && (
+          {granted && access && (
             <p className="text-muted-foreground mt-2 font-mono text-[11px]">
               {access.units} {access.units === 1 ? "business unit" : "business units"}
               {" · "}
               {access.projects} {access.projects === 1 ? "project" : "projects"}
             </p>
           )}
+          {!granted && (
+            <p className="text-muted-foreground mt-2 font-mono text-[11px]">
+              Not granted to you
+            </p>
+          )}
         </div>
+
+        {!granted && requestPrefill && (
+          <RequestAccessButton prefill={requestPrefill} className="w-full justify-center" />
+        )}
 
         {/* NO connect / credential action.
             Neither admin tier ever authenticates to a connector: the

@@ -49,6 +49,7 @@ import {
   agentsOwnedBy,
   tracksForAgent,
 } from "@/lib/catalogue";
+import { AgentReadinessSection } from "@/components/catalogue/agent-readiness-section";
 import {
   CapabilityClassChip,
   CatalogueSection,
@@ -418,6 +419,19 @@ export default function AgentCataloguePage() {
             ))}
           </ul>
         </div>
+      </CatalogueSection>
+
+      {/* ── Readiness ─────────────────────────────────────────────────────────
+          Sits directly under the roster, because "what does it do" and "can I
+          run it" are the same question asked twice, and the second one used to
+          have no answer anywhere on this page. */}
+      <CatalogueSection
+        id="readiness"
+        eyebrow="Your access"
+        title="What each agent needs, and what you hold"
+        lead="An agent is only as available as the connectors it reads and writes. This is your scope's standing against each one — not the organization's."
+      >
+        <AgentReadinessSection />
       </CatalogueSection>
 
       {/* ── Delivery tracks ───────────────────────────────────────────────── */}

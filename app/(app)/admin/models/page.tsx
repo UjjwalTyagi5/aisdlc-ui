@@ -489,6 +489,10 @@ export default function ModelProvidersPage() {
             workspaceId={u.id}
             workspaceName={u.name}
             audience={scope === "project" ? "project" : "bu"}
+            /* The UNFILTERED catalogue, deliberately — `effectiveCatalog` is
+               narrowed to what this scope was granted, which is precisely the
+               list the card already shows. What it needs on top is the rest. */
+            catalog={catalog}
           />
         ))}
 
