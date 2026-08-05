@@ -17,6 +17,7 @@ import { SessionRail } from "@/components/orchestrator/session-rail";
 import { StageRail } from "@/components/orchestrator/stage-rail";
 import { Thread } from "@/components/orchestrator/thread";
 import { useAccessScope } from "@/hooks/use-access-scope";
+import { roleAgentSplit } from "@/lib/agent-access";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import { getProject, listProjects } from "@/lib/api/projects";
@@ -212,6 +213,12 @@ export function OrchestratorCockpit({
     [ensureSession, controls],
   );
 
+  // Above the early return below, because hooks cannot be called conditionally.
+  const reachableAgents = React.useMemo(
+    () => (scope.role ? roleAgentSplit(scope.role, project?.track).reachable : []),
+    [scope.role, project?.track],
+  );
+
   // ── Access ────────────────────────────────────────────────────────────────
   if (!hasPermission(session, "artifact:view")) {
     return (
@@ -220,37 +227,32 @@ export function OrchestratorCockpit({
   }
   // ── Who may drive ─────────────────────────────────────────────────────────
   //
-  // Driving is a `project_admin` binding on *the project being driven* — which
-  // is exactly what `managedProjectIds` holds (`lib/mock/access-scope.ts`), so
-  // the access scope answers this on its own and no permission check is
-  // layered on top.
+  // MEMBERSHIP PLUS AGENT REACH, not a Project Admin binding.
   //
-  // Deliberately NOT `hasPermission(session, "run:create")`: that verb means
-  // "start a run", and Developer, BA, Architect and Data Engineer all hold it
-  // (`lib/auth/role-permissions.ts`) because they invoke their own agent. PRD
-  // §15.5–§15.11 is narrower — every role but the Project Admin "cannot drive
-  // the Orchestrator" — so gating on `run:create` would hand the whole pipeline
-  // to four roles the PRD excludes. The converse is free: every identity with a
-  // `project_admin` binding holds `run:create` anyway, so the scope check is
-  // strictly the right one rather than merely the stricter one.
+  // The old rule was "only the Project Admin drives", which made this screen
+  // read-only for the people it is for. A Developer opening the Orchestrator on
+  // their own project was told to go to Approvals — but they are not waiting on
+  // a gate, they are trying to run the Development agent they own.
   //
-  // The replaced check was `role === "project_admin" || role === "org_admin"`,
-  // a *global* role test. On the cross-project `/orchestrator` that let the
-  // admin of one project select another and auto-close its gates; the
-  // per-project form closes that. Org-scoped roles are `isOrgWide` and still
-  // pass everywhere.
+  // What actually bounds a person here is the same thing that bounds them
+  // everywhere else: the agents their role reaches in this project
+  // (`AGENT_OWNERSHIP` via `roleAgentSplit`). A BA drives Requirements and
+  // Design; a Developer drives Development; the Project Admin reaches every
+  // agent and so drives the whole roster — which is the PRD reading, arrived at
+  // by their access rather than by a special case for them.
   //
-  // Before a project is chosen there is nothing to scope against, so the
-  // question becomes "do you administer anything at all" — otherwise the
-  // read-only banner would greet a Project Admin on an empty page, and a
-  // Developer would not see it until after picking a project.
-  //
-  // `canManageProject` fails closed while the scope request is in flight, so
-  // `scopeReady` holds the controls disabled until it lands.
+  // Two conditions, both necessary:
+  //   1. You are bound to the project (`projectIds`), or org-wide. Reaching an
+  //      agent in the abstract is not standing to run it on someone else's work.
+  //   2. Your role reaches at least one agent in this project's track. The
+  //      governance tier reaches none by design (PRD §14.8), so they still get
+  //      the read-only view — correctly, since they never run agents.
   const scopeReady = !scope.isLoading;
-  const managesAnyProject = scope.isOrgWide || scope.managedProjectIds.length > 0;
+  const reachesAnyAgent = reachableAgents.length > 0;
+  const inProject = (id: string | null) =>
+    scope.isOrgWide || (id !== null && scope.projectIds.includes(id));
   const canDrive =
-    scopeReady && (projectId ? scope.canManageProject(projectId) : managesAnyProject);
+    scopeReady && reachesAnyAgent && (projectId ? inProject(projectId) : true);
 
   if (!mounted) {
     return (
@@ -390,27 +392,29 @@ export function OrchestratorCockpit({
           <div className="border-line-soft text-muted-foreground flex shrink-0 items-start gap-2 border-b px-4 py-2 text-[12.5px] md:px-6">
             <Info className="mt-px size-4 shrink-0" aria-hidden />
             <p>
-              {!managesAnyProject ? (
+              {/* Two genuinely different reasons, and conflating them was the
+                  old copy's failure: it told a Developer that driving "is the
+                  Project Admin's role" when in fact they drive their own
+                  agents, and were only blocked because they are not on this
+                  project. */}
+              {!reachesAnyAgent ? (
                 <>
-                  You&apos;re viewing the Orchestrator read-only — driving it across agents is the
-                  Project Admin&apos;s role. You act on your own agent&apos;s gates from{" "}
+                  Your role has no agent access, so there is nothing here for you to run —
+                  the Orchestrator drives agents, and yours is a governance role. You approve
+                  what others run from{" "}
                   <Link href="/approvals" className="text-brand-bright underline underline-offset-2">
-                    Approvals
+                    Requests &amp; Approvals
                   </Link>
                   .
                 </>
               ) : (
                 <>
-                  Read-only here — you don&apos;t administer{" "}
+                  Read-only — you&apos;re not a member of{" "}
                   <span className="text-foreground font-medium">
                     {project?.name ?? "this project"}
                   </span>
-                  , so you can&apos;t drive its pipeline. Its Project Admin can, and you act on your
-                  own agent&apos;s gates from{" "}
-                  <Link href="/approvals" className="text-brand-bright underline underline-offset-2">
-                    Approvals
-                  </Link>
-                  .
+                  . Reaching an agent elsewhere isn&apos;t standing to run it on this team&apos;s
+                  work; ask its Project Admin to add you.
                 </>
               )}
             </p>

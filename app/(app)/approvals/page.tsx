@@ -203,7 +203,19 @@ export default function RequestsAndApprovalsPage() {
                   requests={inboxRequests}
                   onOpen={setSelected}
                   emptyTitle="Nothing waiting on you"
-                  emptyDescription="Requests routed to your role appear here."
+                  /* Named by ROLE, because "requests routed to your role" is
+                     true of everyone and tells nobody what to expect. What
+                     lands here differs sharply by tier, and an empty queue is
+                     exactly when someone wants to know what would fill it. */
+                  emptyDescription={
+                    role === "org_admin"
+                      ? "Onboarding a model provider org-wide, granting a connector or MCP server to a business unit, adding someone to the platform, a business unit's budget increase, and archiving a project all land here."
+                      : role === "bu_admin"
+                        ? "New projects in your business units, model credentials, connector and MCP requests from your Project Admins, and onboarding someone new all land here."
+                        : role === "project_admin"
+                          ? "Your contributors' asks land here — a model for the project, a connector or MCP server, agent access, and anyone needing onboarding."
+                          : "Agent gates you own, and clarifications on runs you are part of, appear here."
+                  }
                 />
               </section>
             )
@@ -223,7 +235,7 @@ export default function RequestsAndApprovalsPage() {
               emptyTitle="You haven't raised anything"
               emptyDescription={
                 mayRaise
-                  ? "Use Raise request when you need access, a model, a connector or budget headroom."
+                  ? "Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
                   : "Organization Admins decide requests rather than raising them."
               }
             />

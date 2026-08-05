@@ -67,13 +67,20 @@ const formSchema = z
     /** PRD §6 / FR-01 — the delivery track selects the agent roster and gates. */
     track: DeliveryTrack,
     workspaceId: z.string().min(1, `Choose a ${BUSINESS_UNIT_LABEL}`),
-    // String, not number: blank has to mean "inherit the Business Unit's cap",
-    // which is a different state from a cap of 0. Same reasoning as
-    // create-workspace-dialog.tsx.
+    // String, not number, so the field can hold a partly-typed value without
+    // react-hook-form coercing it to NaN mid-keystroke.
+    /**
+     * REQUIRED. A project used to be able to start with no cap of its own and
+     * inherit the business unit's, which meant the unit's entire budget was
+     * silently available to every project in it — and nobody chose that, it
+     * was just what happened when the field was left alone. Naming a figure
+     * at creation is the moment the person has the context to do it.
+     */
     monthlyBudgetUsd: z
       .string()
-      .refine((v) => v.trim() === "" || (Number.isFinite(Number(v)) && Number(v) >= 0), {
-        message: "Enter a positive amount, or leave blank to inherit",
+      .min(1, "Set a monthly budget for this project")
+      .refine((v) => Number.isFinite(Number(v)) && Number(v) > 0, {
+        message: "Enter an amount greater than zero",
       }),
     budgetStartDate: z.string(),
     budgetEndDate: z.string(),
@@ -407,8 +414,7 @@ export function CreateProjectDialog({
       template: DEFAULT_TEMPLATE,
       description: values.description || undefined,
       workspaceId: values.workspaceId,
-      monthlyBudgetUsd:
-        values.monthlyBudgetUsd.trim() === "" ? null : Number(values.monthlyBudgetUsd),
+      monthlyBudgetUsd: Number(values.monthlyBudgetUsd),
       budgetStartDate: values.budgetStartDate || null,
       budgetEndDate: values.budgetEndDate || null,
       contributors: contributors.length
@@ -522,8 +528,7 @@ export function CreateProjectDialog({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                    Monthly budget{" "}
-                    <span className="text-muted-foreground/60 normal-case">(optional)</span>
+                    Monthly budget
                   </FormLabel>
                   <FormControl>
                     <div className="relative">
@@ -532,7 +537,7 @@ export function CreateProjectDialog({
                       </span>
                       <Input
                         inputMode="decimal"
-                        placeholder={`Inherit the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s cap`}
+                        placeholder="e.g. 2000"
                         autoComplete="off"
                         className="border-line-soft bg-surface-1 pl-7 font-mono"
                         {...field}
