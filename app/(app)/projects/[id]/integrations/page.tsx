@@ -41,10 +41,11 @@ import type { Phase } from "@/lib/schemas/enums";
  * it to stages in Settings → Tools per stage. Re-offering that choice here
  * would be a second place for it to disagree with itself.
  *
- * What IS the project's own is the credential it presents. A shared tenant
- * token authenticates the organization; a repo bot, a board account or a
- * database role authenticates this team, and that is the piece that had
- * nowhere to live while consumption sat with the admin tiers.
+ * What IS configured here is YOUR credential. A shared tenant token
+ * authenticates the organization; the repo bot, board account or database
+ * role you present authenticates you, and it is keyed on (you, project,
+ * integration) — a colleague configuring the same tool in the same project
+ * has their own, and neither overwrites the other. You never see theirs.
  */
 export default function ProjectIntegrationsPage({
   params,
@@ -97,7 +98,7 @@ export default function ProjectIntegrationsPage({
           <KeyRound className="text-warning mt-0.5 size-4 shrink-0" aria-hidden />
           <p className="text-[13px]">
             {missingCredentials} {missingCredentials === 1 ? "integration needs" : "integrations need"}{" "}
-            a credential from this project before agents can use{" "}
+            a credential from you before your agent runs can use{" "}
             {missingCredentials === 1 ? "it" : "them"}.
           </p>
         </Card>

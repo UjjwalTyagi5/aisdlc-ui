@@ -100,6 +100,11 @@ import {
 } from "@/lib/mock/access-scope";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { canCreateProject } from "@/lib/auth/permissions";
+
+/** Mirrors `viewerId` in app/api/projects/[id]/integrations/route.ts — a
+ *  credential belongs to a person, and both runtimes must agree on which. */
+const mswViewerId = (s: { user?: { id?: string; email?: string; name?: string } }): string =>
+  s.user?.id ?? s.user?.email ?? s.user?.name ?? "unknown";
 import type { ProjectCreateInput } from "@/lib/schemas/project";
 import {
   activateModelProvider,
@@ -1174,7 +1179,7 @@ export const handlers = [
       scope.isOrgWide ||
       (project.workspaceId ? scope.businessUnitIds.includes(String(project.workspaceId)) : false);
     if (!reachable) return HttpResponse.json({ code: "not_found" }, { status: 404 });
-    return HttpResponse.json(listProjectIntegrations(id));
+    return HttpResponse.json(listProjectIntegrations(id, mswViewerId(session)));
   }),
   http.put("/api/projects/:id/integrations", async ({ request, params, cookies }) => {
     await lag();
@@ -1196,7 +1201,7 @@ export const handlers = [
         { status: 400 },
       );
     }
-    const approved = listProjectIntegrations(id);
+    const approved = listProjectIntegrations(id, mswViewerId(session));
     if (!approved.some((i) => i.kind === parsed.data.kind && i.id === parsed.data.targetId)) {
       return HttpResponse.json(
         { code: "forbidden", message: "That integration is not approved for this project." },
@@ -1204,7 +1209,7 @@ export const handlers = [
       );
     }
     const who = session.user?.name ?? session.user?.email ?? "Someone";
-    return HttpResponse.json(upsertProjectCredential(id, parsed.data, who));
+    return HttpResponse.json(upsertProjectCredential(id, parsed.data, who, mswViewerId(session)));
   }),
 
   // Built-in role permissions. Mirrors app/api/admin/role-permissions/route.ts.

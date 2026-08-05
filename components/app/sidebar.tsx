@@ -271,8 +271,8 @@ export function Sidebar() {
     isOrgWide: scope === null ? undefined : isOrgWide,
     managedBusinessUnitIds: scope === null ? undefined : managedBusinessUnitIds,
   };
-  const deliverItems = visibleDeliverNav(perms, navCtx);
-  const governItems = visibleGovernNav(perms, navCtx);
+  const deliverItemsAll = visibleDeliverNav(perms, navCtx);
+  const governItemsAll = visibleGovernNav(perms, navCtx);
   const observeItems = visibleObserveNav(perms, navCtx);
 
   /**
@@ -283,6 +283,22 @@ export function Sidebar() {
    */
   const openProject = openProjectId(pathname);
   const projectItems = openProject ? projectNavFor(openProject) : [];
+
+  /**
+   * While a project is open, the global twin of anything the project section
+   * names is dropped.
+   *
+   * "Integrations" appearing twice in one sidebar is not two destinations, it
+   * is one noun with an unstated scope — and the reader has to click to find
+   * out which is which. The project's own is the one that answers the question
+   * you have while standing in a project, so it wins here; the org-wide view
+   * is one click away via Projects, where the section disappears again.
+   */
+  const shadowed = new Set(projectItems.map((i) => i.segment));
+  const dedupe = (items: NavItem[]) =>
+    projectItems.length > 0 ? items.filter((i) => !shadowed.has(i.segment)) : items;
+  const deliverItems = dedupe(deliverItemsAll);
+  const governItems = dedupe(governItemsAll);
 
   // Three distinct states, not two: a slow/failed request must never read as
   // "loaded, you have zero access" — that's a false access-denied message.

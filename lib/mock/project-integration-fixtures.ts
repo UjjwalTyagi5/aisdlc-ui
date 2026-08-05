@@ -34,6 +34,7 @@ let CREDENTIALS: ProjectIntegrationCredential[] = [
   {
     id: "pic_1",
     projectId: "payments-api",
+    ownerId: "u_priya",
     kind: "connector",
     targetId: "jira",
     label: "Payments delivery bot",
@@ -45,6 +46,7 @@ let CREDENTIALS: ProjectIntegrationCredential[] = [
   {
     id: "pic_2",
     projectId: "mobile-onboarding",
+    ownerId: "u_grace",
     kind: "connector",
     targetId: "github",
     label: "Onboarding CI bot",
@@ -55,8 +57,33 @@ let CREDENTIALS: ProjectIntegrationCredential[] = [
   },
 ];
 
-export function listProjectCredentials(projectId: string): ProjectIntegrationCredential[] {
-  return CREDENTIALS.filter((c) => c.projectId === projectId).map((c) => ({ ...c }));
+/**
+ * ONE PERSON's credentials in a project.
+ *
+ * `ownerId` is required, not optional-with-a-fallback: an omitted owner would
+ * quietly return everyone's, which is the exact leak this key exists to
+ * prevent. A secret is never returned either way (`hasSecret` only), but the
+ * account name and label identify a colleague's service identity and are not
+ * yours to read.
+ */
+export function listProjectCredentials(
+  projectId: string,
+  ownerId: string,
+): ProjectIntegrationCredential[] {
+  return CREDENTIALS.filter((c) => c.projectId === projectId && c.ownerId === ownerId).map(
+    (c) => ({ ...c }),
+  );
+}
+
+/** How many people have configured this integration — for "3 configured". */
+export function projectCredentialHolderCount(
+  projectId: string,
+  kind: string,
+  targetId: string,
+): number {
+  return CREDENTIALS.filter(
+    (c) => c.projectId === projectId && c.kind === kind && c.targetId === targetId,
+  ).length;
 }
 
 /**
@@ -73,9 +100,17 @@ export function upsertProjectCredential(
   projectId: string,
   input: ProjectIntegrationCredentialInput,
   updatedBy: string,
+  ownerId: string,
 ): ProjectIntegrationCredential {
+  // Matched on the OWNER as well, so saving yours rotates yours and leaves a
+  // colleague's alone. Without it the second person to configure a tool
+  // overwrote the first.
   const existing = CREDENTIALS.find(
-    (c) => c.projectId === projectId && c.kind === input.kind && c.targetId === input.targetId,
+    (c) =>
+      c.projectId === projectId &&
+      c.ownerId === ownerId &&
+      c.kind === input.kind &&
+      c.targetId === input.targetId,
   );
   const now = new Date().toISOString();
 
@@ -91,6 +126,7 @@ export function upsertProjectCredential(
   const created: ProjectIntegrationCredential = {
     id: `pic_${Date.now().toString(36)}`,
     projectId,
+    ownerId,
     kind: input.kind,
     targetId: input.targetId,
     label: input.label,
@@ -103,9 +139,16 @@ export function upsertProjectCredential(
   return { ...created };
 }
 
-export function removeProjectCredential(projectId: string, id: string): boolean {
+/** Only your own — an id alone must not let you delete a colleague's. */
+export function removeProjectCredential(
+  projectId: string,
+  id: string,
+  ownerId: string,
+): boolean {
   const before = CREDENTIALS.length;
-  CREDENTIALS = CREDENTIALS.filter((c) => !(c.id === id && c.projectId === projectId));
+  CREDENTIALS = CREDENTIALS.filter(
+    (c) => !(c.id === id && c.projectId === projectId && c.ownerId === ownerId),
+  );
   return CREDENTIALS.length < before;
 }
 
@@ -119,11 +162,15 @@ export function removeProjectCredential(projectId: string, id: string): boolean 
  * than leaving a tool the project can see and cannot call — which is the
  * failure the whole cascade exists to prevent.
  */
-export function listProjectIntegrations(projectId: string): ProjectIntegration[] {
+export function listProjectIntegrations(
+  projectId: string,
+  /** The VIEWER — credentials returned are theirs alone. */
+  ownerId: string,
+): ProjectIntegration[] {
   const project = PROJECTS.find((p) => String(p.id) === projectId);
   if (!project) return [];
   const workspaceId = project.workspaceId ?? null;
-  const credentials = listProjectCredentials(projectId);
+  const credentials = listProjectCredentials(projectId, ownerId);
   const out: ProjectIntegration[] = [];
 
   // ── Connectors, by kind, with the stages they are wired to ──

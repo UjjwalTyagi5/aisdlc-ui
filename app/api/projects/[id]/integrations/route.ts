@@ -31,12 +31,23 @@ async function guard(id: string) {
   return { session, project };
 }
 
-/** The integrations approved for this project, with its own credentials. */
+/**
+ * The stable identity a credential belongs to. Falls back through the fields a
+ * mock session may carry — never to a constant, which would make everyone one
+ * owner again and undo the whole point of the key.
+ */
+function viewerId(session: { user?: { id?: string; email?: string; name?: string } }): string {
+  const u = session.user;
+  return u?.id ?? u?.email ?? u?.name ?? "unknown";
+}
+
+/** The integrations approved for this project, with the caller's credentials. */
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const g = await guard(id);
   if (g.error) return g.error;
-  return Response.json(listProjectIntegrations(id));
+  // Scoped to the caller: a credential is the person's, not the project's.
+  return Response.json(listProjectIntegrations(id, viewerId(g.session!)));
 }
 
 /**
@@ -63,7 +74,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   // Only against something the project actually has. A credential for an
   // integration nobody granted is a way to pre-stage access the cascade denied.
-  const approved = listProjectIntegrations(id);
+  const approved = listProjectIntegrations(id, viewerId(g.session!));
   const target = approved.find(
     (i) => i.kind === parsed.data.kind && i.id === parsed.data.targetId,
   );
@@ -75,5 +86,5 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
 
   const who = g.session!.user?.name ?? g.session!.user?.email ?? "Someone";
-  return Response.json(upsertProjectCredential(id, parsed.data, who));
+  return Response.json(upsertProjectCredential(id, parsed.data, who, viewerId(g.session!)));
 }

@@ -28,6 +28,18 @@ export type ProjectIntegrationKind = z.infer<typeof ProjectIntegrationKind>;
 export const ProjectIntegrationCredential = z.object({
   id: z.string(),
   projectId: z.string(),
+  /**
+   * WHOSE credential this is.
+   *
+   * A credential authenticates a PERSON against a tool, not a project: a repo
+   * bot, a board account, a database role are each somebody's. Keyed on the
+   * project alone, the second contributor to configure Jira silently replaced
+   * the first — same key, same row — and neither could tell.
+   *
+   * The project still scopes it (you configure it inside a project, and it is
+   * only usable there), but the identity owns it.
+   */
+  ownerId: z.string(),
   kind: ProjectIntegrationKind,
   /** A connector kind (`jira`) or an MCP server id (`mcp_postgres`). */
   targetId: z.string(),
