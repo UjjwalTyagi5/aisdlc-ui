@@ -48,6 +48,11 @@ import {
 } from "@/lib/mock/integration-access";
 import { grantMcpToUnit, revokeMcpGrant } from "@/lib/mock/mcp-fixtures";
 import {
+  listRolePermissions,
+  resetRolePermissions,
+  setRolePermissions,
+} from "@/lib/mock/role-permission-overrides";
+import {
   listProjectIntegrations,
   upsertProjectCredential,
 } from "@/lib/mock/project-integration-fixtures";
@@ -1181,6 +1186,46 @@ export const handlers = [
     return HttpResponse.json(upsertProjectCredential(id, parsed.data, who));
   }),
 
+  // Built-in role permissions. Mirrors app/api/admin/role-permissions/route.ts.
+  http.get("/api/admin/role-permissions", async ({ cookies }) => {
+    await lag();
+    if (!sessionFromCookies(cookies)) {
+      return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    }
+    return HttpResponse.json(listRolePermissions());
+  }),
+  http.put("/api/admin/role-permissions", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Only an Organization Admin can change a role." },
+        { status: 403 },
+      );
+    }
+    const body = (await request.json()) as {
+      role?: string;
+      permissions?: string[];
+      reset?: boolean;
+    };
+    if (!body.role) {
+      return HttpResponse.json({ code: "bad_request", message: "Name the role." }, { status: 400 });
+    }
+    try {
+      return HttpResponse.json(
+        body.reset
+          ? resetRolePermissions(body.role as PlatformRole)
+          : setRolePermissions(body.role as PlatformRole, body.permissions ?? []),
+      );
+    } catch (e) {
+      return HttpResponse.json(
+        { code: "forbidden", message: e instanceof Error ? e.message : "Cannot change that role." },
+        { status: 403 },
+      );
+    }
+  }),
+
   // The access matrix. Mirrors app/api/integrations/access/route.ts.
   http.get("/api/integrations/access", async ({ cookies }) => {
     await lag();
@@ -1488,6 +1533,27 @@ export const handlers = [
   http.post("/api/admin/assignments", async ({ request }) => {
     await lag();
     const b = (await request.json()) as { user_id: string; workspace_id: string; role_name: string };
+
+    // One Business Unit per admin. Enforced here and not only in the dialog:
+    // a picker that merely disables a button is a suggestion.
+    if (b.role_name === "bu_admin") {
+      const elsewhere = Object.entries(ACCESS_MEMBERS).find(
+        ([wsId, members]) =>
+          wsId !== b.workspace_id &&
+          members.some((m) => m.userId === b.user_id && m.roles.includes("bu_admin")),
+      );
+      if (elsewhere) {
+        return HttpResponse.json(
+          {
+            code: "conflict",
+            message:
+              "They already run another business unit. A person administers one business unit.",
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const list = (ACCESS_MEMBERS[b.workspace_id] ??= []);
     let m = list.find((x) => x.userId === b.user_id);
     if (!m) {

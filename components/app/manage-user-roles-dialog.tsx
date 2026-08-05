@@ -25,7 +25,7 @@ import {
 import { assignAccessRole, listAccessWorkspaces, revokeAccessRole } from "@/lib/api/access";
 import { qk } from "@/lib/api/query-keys";
 import { useAssignableRoles } from "@/hooks/use-assignable-roles";
-import { ROLE_META, scopeTierConflicts, type PlatformRole } from "@/lib/roles";
+import { buAdminElsewhere, ROLE_META, scopeTierConflicts, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 export interface UserRoleBinding {
@@ -118,6 +118,16 @@ export function ManageUserRolesDialog({
     return held.find((r) => ROLE_META[r as PlatformRole]?.tier !== newTier) ?? null;
   }, [workspaceId, roleName, bindings]);
 
+  /**
+   * Administering a second Business Unit — a different refusal from the tier
+   * conflict, and it has to be named separately: the tier rule is about one
+   * scope, this one is about holding the same role in two.
+   */
+  const otherUnit = React.useMemo(
+    () => (workspaceId && roleName ? buAdminElsewhere(bindings, workspaceId, roleName) : null),
+    [bindings, workspaceId, roleName],
+  );
+
   const alreadyHeld = bindings.some((b) => b.scopeId === workspaceId && b.role === roleName);
 
   return (
@@ -209,13 +219,27 @@ export function ManageUserRolesDialog({
                 delivery in one scope would let them approve their own work.
               </p>
             )}
-            {alreadyHeld && !conflict && (
+            {otherUnit && (
+              <p className="text-destructive text-[11.5px]">
+                They already run {otherUnit.scopeName ?? "another " + BUSINESS_UNIT_LABEL.toLowerCase()}.
+                A person administers one {BUSINESS_UNIT_LABEL.toLowerCase()} — remove that first,
+                or give them a delivery role here instead.
+              </p>
+            )}
+            {alreadyHeld && !conflict && !otherUnit && (
               <p className="text-muted-foreground text-[11.5px]">They already hold this here.</p>
             )}
 
             <Button
               size="sm"
-              disabled={!workspaceId || !roleName || Boolean(conflict) || alreadyHeld || assign.isPending}
+              disabled={
+                !workspaceId ||
+                !roleName ||
+                Boolean(conflict) ||
+                Boolean(otherUnit) ||
+                alreadyHeld ||
+                assign.isPending
+              }
               onClick={() => assign.mutate()}
             >
               {assign.isPending && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
@@ -223,12 +247,16 @@ export function ManageUserRolesDialog({
             </Button>
           </div>
 
-          <p className="text-muted-foreground text-[11.5px]">
-            <Badge variant="outline" className="mr-1 font-mono text-[9.5px]">
+          {/* A div, not a paragraph. Badge renders a div, and a div inside a
+              paragraph is invalid HTML — the browser closes the paragraph
+              early, so React's server and client trees disagree and it warns
+              about hydration. */}
+          <div className="text-muted-foreground flex items-center gap-1.5 text-[11.5px]">
+            <Badge variant="outline" className="font-mono text-[9.5px]">
               audited
             </Badge>
-            Every grant and revoke is written to the audit trail.
-          </p>
+            <span>Every grant and revoke is written to the audit trail.</span>
+          </div>
         </div>
       </DialogContent>
     </Dialog>

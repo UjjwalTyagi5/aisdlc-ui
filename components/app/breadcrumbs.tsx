@@ -45,10 +45,15 @@ const RESERVED_PROJECT_SEGMENTS = new Set(["new"]);
  * does not have (Model Management lives under GOVERN). Dropping it makes the
  * trail agree with the navigation the reader can actually see.
  *
+ * `/admin/access` joined it once it became a redirect to its own `/roles`
+ * child. Both map to "Roles & Access" in `segmentLabels`, so the trail read
+ * "Roles & Access › Roles & Access" — the same label twice, one of which
+ * bounced you to the other.
+ *
  * Add a segment here only when it has no page of its own — a crumb that omits
  * a real ancestor is a worse bug than one that includes a routing artefact.
  */
-const NON_PAGE_SEGMENTS = new Set(["admin"]);
+const NON_PAGE_SEGMENTS = new Set(["admin", "access"]);
 
 /**
  * Derives a breadcrumb from the current pathname using `segmentLabels`

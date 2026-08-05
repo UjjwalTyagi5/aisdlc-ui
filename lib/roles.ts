@@ -411,6 +411,34 @@ export interface ScopedRoles {
  * Unknown role strings (custom roles, or a deleted role still referenced by an
  * old binding) carry no tier and are ignored rather than treated as suspect.
  */
+/**
+ * A person administers AT MOST ONE Business Unit.
+ *
+ * "Runs one business unit" is the role's whole definition (PRD §15.3) — its
+ * budget, its connections, its members, its project creation. Someone holding
+ * it twice is an org-wide administrator without the title, accountable for two
+ * budgets and able to move work between them with nobody above either.
+ *
+ * What this deliberately does NOT restrict is presence elsewhere. A Business
+ * Unit Admin of Lending may be a Developer, a BA or a Project Admin on a
+ * Payments project — a delivery role in another unit is ordinary, and blocking
+ * it would stop people working across the organisation for no safety gain.
+ * The tier rule (`scopeTierConflicts`) still applies WITHIN each scope.
+ *
+ * Returns the unit they already administer, or null when the grant is fine.
+ */
+export function buAdminElsewhere(
+  bindings: readonly { scopeId: string; scopeName?: string; role: string }[],
+  targetScopeId: string,
+  roleName: string,
+): { scopeId: string; scopeName?: string } | null {
+  if (roleName !== "bu_admin") return null;
+  const held = bindings.find(
+    (b) => b.role === "bu_admin" && String(b.scopeId) !== String(targetScopeId),
+  );
+  return held ? { scopeId: held.scopeId, scopeName: held.scopeName } : null;
+}
+
 export function scopeTierConflicts(scopes: ScopedRoles[]): string[] {
   return scopes
     .filter((s) => {

@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { ShieldCheck, Wrench } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { AccessHeader, AccessTabs } from "@/components/app/access-tabs";
+import { RolePermissionsPanel } from "@/components/app/role-permissions-panel";
 import {
   Table,
   TableBody,
@@ -17,6 +17,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import {
   AGENT_OWNERSHIP,
   ROLE_META,
@@ -25,7 +26,7 @@ import {
   type PlatformRole,
 } from "@/lib/roles";
 import { PHASE_LABEL } from "@/lib/agents";
-import { PHASE_ORDER } from "@/lib/agents";
+import { PHASE_ALL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas";
 
 /**
@@ -35,8 +36,10 @@ import type { Phase } from "@/lib/schemas";
  * roles, the two tiers that never cross, and the role × agent ownership
  * matrix that decides where every approval routes.
  *
- * Read-only. Assigning a role is the Assignments view; composing a bundle is
- * the Custom roles view.
+ * Assigning a role to a person is Users — you arrive there thinking about the
+ * person, not the scope. This screen is what a role MEANS: the permissions it
+ * holds (editable by an Organization Admin), the agents it owns, and the two
+ * tiers that never cross.
  */
 
 const INVOLVEMENT_GLYPH: Record<Involvement, string> = {
@@ -68,6 +71,8 @@ const INVOLVEMENT_TONE: Record<Involvement, string> = {
 
 export default function BuiltInRolesPage() {
   const session = useSession({ required: true });
+  // Editing what a role holds is org-wide policy, not unit administration.
+  const isOrgAdmin = effectivePlatformRole(session) === "org_admin";
 
   if (!hasPermission(session, "member:manage")) {
     return (
@@ -77,71 +82,42 @@ export default function BuiltInRolesPage() {
 
   // The matrix shows the eight shared agents; track-specific agents follow the
   // same ownership rules and are listed under each role's detail.
-  const agents: readonly Phase[] = PHASE_ORDER;
+  /**
+   * ALL THIRTEEN agents, not the eight `PHASE_ORDER` lists.
+   *
+   * That constant is the greenfield pipeline — the stages a Track 1 project
+   * runs. Ownership is a property of the ROLE, not of a track, so a matrix
+   * built from it silently omitted Discovery, Strategy, Migration mapping,
+   * Validation and Data engineering, and the Data Engineer's own agent was
+   * missing from the row describing them.
+   */
+  const agents: readonly Phase[] = PHASE_ALL;
 
   return (
     <div className="w-full space-y-5 p-4 md:px-10 md:py-8">
-      <AccessHeader description="The platform's twelve built-in roles, what each one owns, and where every approval routes. Read-only — assign a role from Assignments, compose one from Custom roles." />
+      <AccessHeader description="What each built-in role can do, what it owns, and where every approval routes. An Organization Admin can change what a role holds; roles are given to people on Users." />
 
       <AccessTabs />
 
-      {/* ── The twelve roles ─────────────────────────────────────────────── */}
+      {/* The twelve role cards used to sit here — name, PRD section, one-line
+          description, scope. Reference material: true once, then a screenful
+          of prose above the thing you came to change. The Permissions section
+          below names every role anyway, and the ownership matrix says which
+          agents each one owns. */}
+
+      {/* ── What each role can DO ────────────────────────────────────────
+          Above the ownership matrix: "what am I allowed to do" is the question
+          people arrive with, and ownership is the follow-up about agents. */}
       <section className="space-y-3">
         <h2 className="font-display text-[13px] font-semibold tracking-tight">
-          The twelve roles
+          Permissions
         </h2>
-
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-          {ROLE_ORDER.map((r) => {
-            const meta = ROLE_META[r];
-            return (
-              <div
-                key={r}
-                className="border-line-soft bg-panel-elevated rounded-lg border px-3.5 py-3"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  {meta.tier === "governance" ? (
-                    <ShieldCheck className="text-brand-bright size-3.5 shrink-0" aria-hidden />
-                  ) : (
-                    <Wrench className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
-                  )}
-                  <span className="text-[13px] font-semibold">{meta.label}</span>
-                  <span
-                    className={cn(
-                      "rounded-full px-1.5 py-px font-mono text-[10px] tracking-wide uppercase",
-                      meta.tier === "governance"
-                        ? "bg-primary/10 text-primary"
-                        : "bg-surface-2 text-muted-foreground",
-                    )}
-                  >
-                    {meta.tier}
-                  </span>
-                  <span className="text-muted-foreground ml-auto font-mono text-[10px]">
-                    {meta.prdSection}
-                  </span>
-                </div>
-
-                <p className="text-muted-foreground mt-1.5 text-[12.5px] leading-snug">
-                  {meta.oneLiner}
-                </p>
-
-                <p className="text-muted-foreground/70 mt-1.5 font-mono text-[10.5px] tracking-wide uppercase">
-                  Scope: {meta.scope.replace(/_/g, " ")}
-                  {meta.governanceOnly && " · never builds or approves delivery work"}
-                </p>
-              </div>
-            );
-          })}
-        </div>
-
-        <p className="border-line-soft text-muted-foreground rounded-lg border border-dashed px-4 py-3 text-[12.5px]">
-          <strong className="text-foreground font-medium">
-            Two tiers that never cross.
-          </strong>{" "}
-          A person may hold several roles within one tier — Business Unit Admin
-          of several units, or Project Admin plus Developer — but never one from
-          each. Granting across the line is blocked with a reason.
+        <p className="text-muted-foreground text-[12.5px]">
+          The permission behind every button. Open a role to see exactly what it
+          holds — an Organization Admin can change it, and a changed role says so
+          and can be put back.
         </p>
+        <RolePermissionsPanel canEdit={isOrgAdmin} />
       </section>
 
       {/* ── Ownership matrix ─────────────────────────────────────────────── */}

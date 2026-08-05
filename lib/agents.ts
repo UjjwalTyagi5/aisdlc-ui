@@ -29,6 +29,23 @@ export const PHASE_ORDER: readonly Phase[] = [
   "documentation",
 ] as const;
 
+/**
+ * EVERY agent, in pipeline-then-track order — what `PHASE_ORDER` is not.
+ *
+ * `PHASE_ORDER` is the greenfield pipeline: the stages a Track 1 project runs.
+ * Anything describing the platform's agents as such (role ownership, a
+ * capability matrix) needs all thirteen, and reaching for `PHASE_ORDER`
+ * silently drops the five track-specific ones.
+ */
+export const PHASE_ALL: readonly Phase[] = [
+  ...PHASE_ORDER,
+  "discovery",
+  "strategy",
+  "migration_mapping",
+  "validation",
+  "data_engineering",
+] as const;
+
 /** Human-readable label per phase/agent — all 13. */
 export const PHASE_LABEL: Record<Phase, string> = {
   requirements: "Requirements",

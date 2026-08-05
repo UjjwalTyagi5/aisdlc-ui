@@ -77,6 +77,15 @@ const SEEDED: { projectId: string; identityId: string; role: string }[] = [
   // Platform Engineering — reconciliation bots
   { projectId: "recon-bots", identityId: "idn_farah", role: "project_admin" },
   { projectId: "recon-bots", identityId: "idn_lena", role: "devops_engineer" },
+
+  // Noah runs Platform Engineering AND builds on a Lending project.
+  //
+  // Seeded to make the shape of the rule visible: a person administers exactly
+  // one Business Unit, and is free to be a contributor anywhere else. Without
+  // a case like this the directory only ever showed admins confined to their
+  // own unit, and the allowed half of `buAdminElsewhere` looked like a rule
+  // nothing exercises ([[scoped-fixtures-need-coverage]]).
+  { projectId: "core-ledger", identityId: "idn_noah", role: "developer" },
 ];
 
 let nextId = 1;
