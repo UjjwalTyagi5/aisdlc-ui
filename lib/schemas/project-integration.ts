@@ -73,8 +73,6 @@ export const ProjectIntegration = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string().nullable().optional(),
-  /** Where it was onboarded — answers "why do I have this". */
-  origin: z.enum(["organization", "business_unit"]),
   /** The delivery stages it is wired to. Empty for an MCP server. */
   stages: z.array(z.string()).default([]),
   /** Whether this integration expects a project-specific credential at all. */

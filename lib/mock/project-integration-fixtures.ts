@@ -191,7 +191,6 @@ export function listProjectIntegrations(
       id: kind,
       name: connection?.name ?? CONNECTOR_KIND_LABEL[kind as keyof typeof CONNECTOR_KIND_LABEL] ?? kind,
       description: null,
-      origin: "organization",
       stages,
       needsProjectCredential: PROJECT_CREDENTIAL_KINDS.has(kind),
       credential:
@@ -217,9 +216,6 @@ export function listProjectIntegrations(
       id,
       name: server.server_name,
       description: server.description ?? null,
-      // Every integration is org-level now; a unit holds it by grant, not by
-      // owning it. The field survives for connectors written before that.
-      origin: "organization",
       stages: [],
       // A server declaring env vars or headers is one expecting per-caller
       // configuration; one that declares neither runs on the connection alone.

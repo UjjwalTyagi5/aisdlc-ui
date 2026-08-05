@@ -4,7 +4,7 @@ import * as React from "react";
 import { use } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Building2, Globe, KeyRound, Plug, ShieldCheck, Terminal } from "lucide-react";
+import { KeyRound, Plug, ShieldCheck, Terminal } from "lucide-react";
 
 import { PageTitle } from "@/components/app/page-title";
 import { Badge } from "@/components/ui/badge";
@@ -212,16 +212,14 @@ function Section({
             <li key={`${i.kind}:${i.id}`}>
               <Card className="flex flex-wrap items-start justify-between gap-3 p-4">
                 <div className="min-w-0 space-y-1">
+                  {/* No origin badge. It read "org-wide" on every row because
+                      `origin` was hardcoded to "organization" — every
+                      integration is org-level and a unit holds it by GRANT,
+                      not by owning it. A label with one possible value tells
+                      the reader nothing and implies a distinction the cascade
+                      does not make. */}
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[13.5px] font-medium">{i.name}</span>
-                    <Badge variant="outline" className="gap-1 font-mono text-[10px]">
-                      {i.origin === "organization" ? (
-                        <Globe className="size-3" aria-hidden />
-                      ) : (
-                        <Building2 className="size-3" aria-hidden />
-                      )}
-                      {i.origin === "organization" ? "org-wide" : BUSINESS_UNIT_LABEL.toLowerCase()}
-                    </Badge>
                   </div>
                   {i.description && (
                     <p className="text-muted-foreground text-[12.5px]">{i.description}</p>
