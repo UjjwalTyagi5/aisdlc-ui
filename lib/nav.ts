@@ -258,6 +258,73 @@ export const observeNav: NavItem[] = [
  * exactly one role a link to an empty page. Hidden until it has content;
  * the route is untouched.
  */
+/**
+ * THE OPEN PROJECT'S OWN NAV, shown only while you are inside one.
+ *
+ * The global entries above answer governance questions — which models the
+ * organization approved, which connectors it permits. A contributor opening
+ * their project has a narrower and more immediate one: what can *this*
+ * project use, and where do I put my key. Those answers live on
+ * project-scoped screens that were previously reachable only through the
+ * tabs at the top of a project page, which is a different place to look for
+ * the same three nouns the sidebar already names.
+ *
+ * Rendered as a separate section rather than folded into Deliver, because
+ * these hrefs are not static: each one belongs to whichever project is open,
+ * and a link that silently changes meaning depending on where you stand
+ * should say so by sitting under the project's name.
+ *
+ * `segment` is matched against the path AFTER the project id — see
+ * `projectNavFor` below, which builds the real hrefs.
+ */
+export interface ProjectNavItem {
+  label: string;
+  /** Path suffix under /projects/[id], including any query. */
+  to: string;
+  icon: LucideIcon;
+  /** Segment used for the active-state match. */
+  segment: string;
+}
+
+export const projectNav: ProjectNavItem[] = [
+  { label: "Integrations", to: "/integrations", icon: Plug, segment: "integrations" },
+  // Deep-links the Settings page's Model tab. Models are not a page of their
+  // own inside a project — the selection lives with the project's settings,
+  // and inventing a second screen for it would split one decision in two.
+  { label: "Models", to: "/settings?tab=model", icon: Boxes, segment: "settings" },
+  // Points at the GLOBAL Agent Studio seeded with this project (`?project=`),
+  // not at a project-local route — there isn't one, and there shouldn't be.
+  // The studio is a drill-down through one cascade (Org → BU → Project →
+  // Personal); a second copy rooted at the project would cut it off from the
+  // tiers it inherits from, which is the thing you most need to see when
+  // deciding whether to override.
+  { label: "Agent Studio", to: "", icon: SlidersHorizontal, segment: "agent-studio" },
+];
+
+/** The open project's nav, with real hrefs. */
+export function projectNavFor(projectId: string): (ProjectNavItem & { href: string })[] {
+  return projectNav.map((i) => ({
+    ...i,
+    // An empty `to` means the entry lives outside /projects and carries the
+    // project as a query instead — Agent Studio is the only such case.
+    href: i.to
+      ? `/projects/${projectId}${i.to}`
+      : `/${i.segment}?project=${encodeURIComponent(projectId)}`,
+  }));
+}
+
+/**
+ * The project id in the current path, or null when we are not inside one.
+ *
+ * Matches `/projects/<id>` and anything below it, but NOT `/projects` itself —
+ * the list page has no project open, so a project section there would name
+ * nothing.
+ */
+export function openProjectId(pathname: string): string | null {
+  const m = /^\/projects\/([^/?#]+)/.exec(pathname);
+  return m ? (m[1] ?? null) : null;
+}
+
 export const utilityNav: NavItem[] = [
   {
     /**

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -124,6 +124,12 @@ const AGENT_ROUTING: Array<{
 export default function ProjectSettingsPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id as ProjectId;
+  // `?tab=model` — an unknown value falls back to General rather than
+  // rendering an empty tab panel for a name that no longer exists.
+  const tabParam = useSearchParams().get("tab");
+  const initialTab = ["general", "connectors", "policies", "model"].includes(tabParam ?? "")
+    ? tabParam!
+    : "general";
   const queryClient = useQueryClient();
   const canUpdate = useCan("project:update");
   // Budget edits are gated by the backend on workspace:manage (delivery lead + admin),
@@ -270,7 +276,10 @@ export default function ProjectSettingsPage() {
         </p>
       </header>
 
-      <Tabs defaultValue="general">
+      {/* Deep-linkable, so the sidebar's project-scoped "Models" entry can
+          land on the Model tab rather than dropping you on General to hunt
+          for it. `defaultValue` alone made the tab unaddressable. */}
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="connectors">Connectors</TabsTrigger>

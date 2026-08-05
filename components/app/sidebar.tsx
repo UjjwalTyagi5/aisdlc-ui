@@ -20,6 +20,8 @@ import { useUiStore } from "@/stores/ui-store";
 import { useSession } from "@/hooks/use-session";
 import {
   isActiveNav,
+  openProjectId,
+  projectNavFor,
   visibleDeliverNav,
   visibleGovernNav,
   visibleObserveNav,
@@ -273,6 +275,15 @@ export function Sidebar() {
   const governItems = visibleGovernNav(perms, navCtx);
   const observeItems = visibleObserveNav(perms, navCtx);
 
+  /**
+   * The open project's own entries. Not permission-filtered here: each target
+   * gates itself, and the two that matter to a contributor (their credentials,
+   * their models) are exactly the ones they may open. Gating the LINK on a
+   * manage permission would hide the read-only view they are entitled to.
+   */
+  const openProject = openProjectId(pathname);
+  const projectItems = openProject ? projectNavFor(openProject) : [];
+
   // Three distinct states, not two: a slow/failed request must never read as
   // "loaded, you have zero access" — that's a false access-denied message.
   //
@@ -364,6 +375,33 @@ export function Sidebar() {
               ))}
             </ul>
             <NoWorkspaceSection collapsed={collapsed} />
+          </>
+        )}
+
+        {/* ── This project — only while one is open ─────────────────────
+            The three nouns the sidebar already names, answered for the
+            project you are standing in rather than for the organization.
+            Absent on /projects and everywhere else, because there is no
+            project to scope them to. */}
+        {projectItems.length > 0 && (
+          <>
+            <SectionLabel label="This project" collapsed={collapsed} />
+            <ul className="flex flex-col gap-0.5">
+              {projectItems.map((item) => (
+                <li key={item.href}>
+                  <NavLink
+                    item={{
+                      label: item.label,
+                      href: item.href,
+                      icon: item.icon,
+                      segment: item.segment,
+                    }}
+                    pathname={pathname}
+                    collapsed={collapsed}
+                  />
+                </li>
+              ))}
+            </ul>
           </>
         )}
 

@@ -7,6 +7,7 @@ import { ChevronRight, User } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
+import { useSearchParams } from "next/navigation";
 import { useRawSession } from "@/components/auth/session-provider";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { AGENT_DEFAULT_OWNER_ROLE } from "@/lib/governance";
@@ -40,6 +41,16 @@ const TIER_RANK: Record<ProfileScope, number> = { user: 0, project: 1, workspace
  */
 export function AgentStudio() {
   const session = useRawSession();
+  /**
+   * `?project=<id>` — arrive already standing in a project's tier.
+   *
+   * The sidebar's project-scoped Agent Studio entry uses it, so someone
+   * inside a project lands on that project's skills rather than on Personal
+   * with three drill-downs between them and what they came for. A one-shot
+   * seed, not a binding: it resolves once and clears itself, so a later
+   * drill elsewhere is not yanked back on the next render.
+   */
+  const seedProjectId = useSearchParams().get("project");
   const role = effectivePlatformRole(session);
   const {
     active: myWorkspace,
@@ -59,7 +70,9 @@ export function AgentStudio() {
   // own business unit; everyone else lands on Personal.
   const homedRef = React.useRef(false);
   React.useEffect(() => {
-    if (homedRef.current || wsLoading) return;
+    // A `?project=` seed owns the landing tier; let it resolve first rather
+    // than homing to Personal and snapping away a frame later.
+    if (homedRef.current || wsLoading || seedProjectId) return;
     if (role === "org_admin") {
       homedRef.current = true;
     } else if (role === "bu_admin") {
@@ -71,7 +84,27 @@ export function AgentStudio() {
       setPersonal(true);
       homedRef.current = true;
     }
-  }, [role, myWorkspace, wsLoading]);
+  }, [role, myWorkspace, wsLoading, seedProjectId]);
+
+  // Resolving `?project=` needs the project's parent unit — the cascade is a
+  // drill-down, so standing in a project means standing in its Business Unit
+  // too. Fetched unscoped-by-BU precisely because we do not know the BU yet.
+  const seedQ = useQuery({
+    queryKey: ["agent-studio", "seed-project", seedProjectId],
+    queryFn: () => listProjects({ pageSize: 200 }),
+    enabled: Boolean(seedProjectId) && !homedRef.current,
+    staleTime: 30_000,
+  });
+
+  React.useEffect(() => {
+    if (!seedProjectId || homedRef.current) return;
+    const p = seedQ.data?.items.find((x) => String(x.id) === seedProjectId);
+    if (!p) return;
+    if (p.workspaceId) setBuId(String(p.workspaceId));
+    setProjectId(String(p.id));
+    setPersonal(false);
+    homedRef.current = true;
+  }, [seedProjectId, seedQ.data]);
 
   const bu = workspaces.find((w) => w.id === buId) ?? null;
 
