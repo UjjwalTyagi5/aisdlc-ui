@@ -1,0 +1,20 @@
+# Runtime (server-side) config. Nothing secret lives here — the app currently runs
+# mock-only (no Auth0 credentials, no DB, no API keys), so there is no Key Vault
+# and no Secret to create.
+#
+# NEXT_PUBLIC_* vars are deliberately absent: Next.js inlines them into the client
+# bundle at BUILD time, so they're --build-arg in the pipeline, not ConfigMap keys.
+#
+# When real auth lands, put AUTH0_SECRET / AUTH0_CLIENT_SECRET in a Secret named
+# `frontend-secrets` created out-of-band, so ArgoCD never prunes or logs it:
+#   kubectl create secret generic frontend-secrets -n aisdlc --from-literal=AUTH0_SECRET=...
+# The Deployment already mounts it with optional: true.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-env
+  namespace: aisdlc
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+
