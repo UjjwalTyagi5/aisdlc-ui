@@ -199,7 +199,18 @@ export const governNav: NavItem[] = [
     href: "/integrations",
     icon: Plug,
     segment: "integrations",
-    requirePermission: ["connector:view", "connector:manage"],
+    // `connector:manage`, NOT `connector:view`. This is the estate — which
+    // kinds the organization permits and which units hold them — and it is
+    // only actionable for the three tiers that grant: Org Admin, Business
+    // Unit Admin, Project Admin.
+    //
+    // Every delivery role holds `connector:view`, so the OR gate put this in
+    // a contributor's sidebar too, where it answered a question they don't
+    // have. Theirs is "which integrations may I use here, and where does my
+    // key go" — that is the project's own Integrations screen, which they
+    // still reach both from the project tabs and from the "This project"
+    // section of this sidebar.
+    requirePermission: "connector:manage",
     prdSection: "§34.3, §34.4",
   },
 ];
