@@ -13,6 +13,7 @@
  * a 403 from FastAPI on the actual call (T-7.2-25, accepted).
  */
 import type { Phase } from "@/lib/schemas/enums";
+import type { PlatformRole } from "@/lib/roles";
 
 import type { Permission, Session } from "./types";
 
@@ -60,4 +61,30 @@ export function approvePermissionForPhase(phase: Phase | string): string {
       // so no non-admin role can ever hold it — hasPermission stays fail-closed.
       return "artifact:approve_review";
   }
+}
+
+/**
+ * May this role create a project?
+ *
+ * A ROLE CHECK, NOT A PERMISSION CHECK, and that is the whole point. The
+ * permission `project:create` is held by `bu_admin` and `project_admin`
+ * alone — the Organization Admin was never granted it. They passed anyway,
+ * because they hold `admin:*` and `hasPermission` treats that as a wildcard
+ * over everything.
+ *
+ * The wildcard is right for most of what it covers: an Org Admin genuinely
+ * can do the things below them. This is one of the few cases where it is
+ * wrong, because project creation is not an administrative capability they
+ * happen to outrank — it is a step in a flow that belongs to someone else.
+ * A project is created inside a Business Unit, against that unit's budget,
+ * with that unit's members and grants (PRD §15.2: the Org Admin creates
+ * business units and appoints their admins; the unit runs itself from
+ * there). An Org Admin creating one has to guess at all four.
+ *
+ * Enforced in the API route and the MSW handler as well as the button —
+ * project creation had NO server-side check at all, so hiding the button was
+ * the entire control.
+ */
+export function canCreateProject(role: PlatformRole | null): boolean {
+  return role === "bu_admin" || role === "project_admin";
 }

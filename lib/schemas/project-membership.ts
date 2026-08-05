@@ -24,6 +24,13 @@ export const ProjectMember = z.object({
   role: z.string(),
   status: MembershipStatus,
   addedAt: Timestamp,
+  /**
+   * Agents this person reaches BEYOND what their role already grants
+   * (`AGENT_OWNERSHIP`). Additive, never subtractive: a role's own roster is
+   * not editable per person, because that would make "what does a BA reach"
+   * unanswerable without inspecting every membership.
+   */
+  extraAgents: z.array(z.string()).optional(),
 });
 export type ProjectMember = z.infer<typeof ProjectMember>;
 
@@ -32,5 +39,7 @@ export const ProjectMemberCreateInput = z.object({
   email: z.string().email(),
   displayName: z.string().optional(),
   roleName: z.string().min(1),
+  /** See ProjectMember.extraAgents. */
+  extraAgents: z.array(z.string()).optional(),
 });
 export type ProjectMemberCreateInput = z.infer<typeof ProjectMemberCreateInput>;

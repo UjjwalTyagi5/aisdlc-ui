@@ -17,6 +17,8 @@ interface ProjectMembershipRow {
   role: string;
   status: "active" | "invited" | "deactivated";
   addedAt: string;
+  /** Agents granted on top of the role's own reach — see ProjectMember. */
+  extraAgents?: string[];
 }
 
 /**
@@ -108,6 +110,7 @@ function toProjectMember(row: ProjectMembershipRow): ProjectMember | null {
     role: row.role,
     status: row.status,
     addedAt: row.addedAt,
+    extraAgents: row.extraAgents,
   };
 }
 
@@ -138,7 +141,7 @@ export function listProjectMembershipsForIdentity(
  */
 export function addProjectMember(
   projectId: string,
-  input: { email: string; displayName?: string; roleName: string },
+  input: { email: string; displayName?: string; roleName: string; extraAgents?: string[] },
 ): ProjectMember {
   const identity = findOrCreateIdentity(input.email, input.displayName);
   // findOrCreateIdentity stamps a "pending|" ssoSubject only on identities it
@@ -153,6 +156,9 @@ export function addProjectMember(
     role: input.roleName,
     status: isNewPerson ? "invited" : "active",
     addedAt: new Date().toISOString(),
+    // Undefined rather than [] when none were granted — see the note on the
+    // create input; the two must not become distinguishable states.
+    extraAgents: input.extraAgents?.length ? [...input.extraAgents] : undefined,
   };
   PROJECT_MEMBERSHIPS.push(row);
   return toProjectMember(row)!;

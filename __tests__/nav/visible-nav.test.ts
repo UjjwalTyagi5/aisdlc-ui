@@ -40,12 +40,15 @@ describe("visibleNav — role and scope", () => {
   const hrefsFor = (perms: readonly string[], ctx?: Parameters<typeof visibleNav>[1]) =>
     visibleNav([...perms], ctx).map((i) => i.href);
 
-  it("hides Agent Studio from the governance tier", () => {
-    // Both hold permissions that would pass the permission gate; neither has any
-    // agent access at all (PRD §14.8), so a prompt editor is not a scoped
-    // version of the page for them — it is a page about a capability they lack.
+  it("keeps Agent Studio for the governance tier", () => {
+    // It was hidden from both, on the reading that a role with no agent access
+    // has no business in a prompt editor. That was right about RUNNING an agent
+    // and wrong about this page: it is where each tier publishes the defaults
+    // the tiers beneath it inherit, and Organization and Business Unit are the
+    // two tiers these roles OWN (AGENT_DEFAULT_OWNER_ROLE). Hiding it left both
+    // ownerless — no one could set an org-wide default at all.
     for (const role of ["org_admin", "bu_admin"] as const) {
-      expect(hrefsFor(ROLE_PERMISSIONS[role], { role })).not.toContain("/agent-studio");
+      expect(hrefsFor(ROLE_PERMISSIONS[role], { role })).toContain("/agent-studio");
     }
   });
 
@@ -55,6 +58,18 @@ describe("visibleNav — role and scope", () => {
     );
     expect(hrefsFor(ROLE_PERMISSIONS.developer, { role: "developer" })).toContain(
       "/agent-studio",
+    );
+  });
+
+  it("still hides Orchestrator from the governance tier", () => {
+    // The distinction Agent Studio's un-hiding turns on: Orchestrator IS
+    // running agents, which neither admin tier does (PRD §14.8). If these two
+    // ever agree again, one of them has drifted.
+    for (const role of ["org_admin", "bu_admin"] as const) {
+      expect(hrefsFor(ROLE_PERMISSIONS[role], { role })).not.toContain("/orchestrator");
+    }
+    expect(hrefsFor(ROLE_PERMISSIONS.project_admin, { role: "project_admin" })).toContain(
+      "/orchestrator",
     );
   });
 

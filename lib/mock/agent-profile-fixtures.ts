@@ -218,6 +218,19 @@ export function createDraft(input: {
   return toApi(record);
 }
 
+/**
+ * Which tier a draft belongs to — for the caller that has to decide whether
+ * the person publishing it owns that tier.
+ *
+ * Exported rather than inlined at the route because both runtimes need the
+ * same answer: the Next handler and the MSW handler each authorize the
+ * publish, and a check living in only one of them is a check you can route
+ * around ([[msw-dual-runtime-mutation-rule]]).
+ */
+export function versionScope(id: string): ProfileScope | undefined {
+  return VERSIONS.find((v) => v.id === id)?.scope;
+}
+
 /** `publishedBy` is the acting user — the tier owner when they publish their
  *  own draft directly, or the approver's name when this resolves a
  *  governance approval (see agentDefaultApprovalType, lib/governance.ts). */

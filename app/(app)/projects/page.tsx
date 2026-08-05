@@ -12,7 +12,6 @@ import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { EmptyProjects } from "@/components/feedback/empty-projects";
-import { RequireRole } from "@/components/auth/require-role";
 import { CreateProjectDialog } from "@/components/app/create-project-dialog";
 import { ProjectCard } from "@/components/app/project-card";
 import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
@@ -21,8 +20,10 @@ import {
   type ProjectsToolbarState,
   type TemplateFilter,
 } from "@/components/app/projects-toolbar";
-import { useCan } from "@/hooks/use-can";
 import { useWorkspaces } from "@/hooks/use-workspaces";
+import { useRawSession } from "@/components/auth/session-provider";
+import { canCreateProject } from "@/lib/auth/permissions";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { NoScopeAccess } from "@/components/auth/scope-empty-state";
@@ -37,7 +38,11 @@ export default function ProjectsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
-  const canCreate = useCan("project:create");
+  const session = useRawSession();
+  // Role, not capability. `admin:*` makes the Org Admin pass every permission
+  // check including `project:create`, which they were never granted — see
+  // canCreateProject (lib/auth/permissions.ts).
+  const canCreate = canCreateProject(effectivePlatformRole(session));
 
   // Filters + view in URL so refresh preserves state.
   const toolbarState: ProjectsToolbarState = {
@@ -73,9 +78,13 @@ export default function ProjectsPage() {
   // Create dialog state
   const createRequested = searchParams.get("new") === "1";
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  // `?new=1` is a deep link (the command palette pushes it), so it needs the
+  // same gate as the button beside it — it opened the dialog unconditionally,
+  // which made the URL alone enough to bypass the check. Same fix the
+  // Business Units page already carries for its own `?new=1`.
   React.useEffect(() => {
-    if (createRequested) setDialogOpen(true);
-  }, [createRequested]);
+    if (createRequested && canCreate) setDialogOpen(true);
+  }, [createRequested, canCreate]);
   const closeDialog = (open: boolean) => {
     setDialogOpen(open);
     if (!open && createRequested) {
@@ -248,15 +257,10 @@ export default function ProjectsPage() {
           </div>
         </div>
 
-        <RequireRole
-          capability="project:create"
-          fallback={
-            <Button disabled title="Your role cannot create projects" className="shrink-0">
-              <Plus className="size-4" aria-hidden />
-              New project
-            </Button>
-          }
-        >
+        {/* Absent for a role that cannot create, not disabled. A permanently
+            dead button on the Org Admin's own screen implies a permission
+            they might obtain; project creation is simply not theirs. */}
+        {canCreate && (
           <Button
             onClick={() => setDialogOpen(true)}
             className="shrink-0 bg-gradient-to-br from-brand-gradient-from to-brand-gradient-to font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
@@ -264,7 +268,7 @@ export default function ProjectsPage() {
             <Plus className="size-4" aria-hidden />
             New project
           </Button>
-        </RequireRole>
+        )}
       </header>
 
       {/* Metric strip — real counts from listProjects data */}

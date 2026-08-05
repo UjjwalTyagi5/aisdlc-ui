@@ -8,6 +8,7 @@ import {
   CircleDot,
   GitMerge,
   Loader2,
+  Lock,
   Pause,
   XCircle,
   type LucideIcon,
@@ -98,6 +99,18 @@ export interface PhasePipelineProps {
    * don't have a dedicated page yet) — the node still renders in the pipeline.
    */
   hrefFor?: (phase: Phase) => string | undefined;
+  /**
+   * Agents this viewer's role cannot reach (`lib/agent-access.ts`).
+   *
+   * Rendered locked rather than hidden: the pipeline is the project's shape,
+   * and dropping stages from it would make the same project look different to
+   * different people — you could not ask "what happened at Security?" of
+   * someone who cannot see Security. Locked keeps the shape and states the
+   * standing.
+   */
+  lockedPhases?: ReadonlySet<Phase>;
+  /** Rendered inside a locked row — the ask, in context. */
+  renderLockedAction?: (phase: Phase) => React.ReactNode;
   /** Visual density. "compact" drops the phase labels — used inside project cards. */
   density?: "default" | "compact";
   /**
@@ -126,6 +139,8 @@ export function PhasePipeline({
   slaDeadline,
   track,
   className,
+  lockedPhases,
+  renderLockedAction,
 }: PhasePipelineProps) {
   const active =
     activePhase ??
@@ -209,6 +224,8 @@ export function PhasePipeline({
             hrefFor,
             false,
             undefined,
+            lockedPhases?.has(phase) ?? false,
+            renderLockedAction,
           );
         }
         // Attach SLA deadline only to the phase that is awaiting approval
@@ -216,7 +233,17 @@ export function PhasePipeline({
           entry.status === "awaiting_approval" && entry.phase === active
             ? slaDeadline
             : undefined;
-        return renderPhaseRow(entry, i, roster.length, active, hrefFor, true, phaseDeadline);
+        return renderPhaseRow(
+          entry,
+          i,
+          roster.length,
+          active,
+          hrefFor,
+          true,
+          phaseDeadline,
+          lockedPhases?.has(phase) ?? false,
+          renderLockedAction,
+        );
       })}
     </ol>
   );
@@ -230,6 +257,8 @@ function renderPhaseRow(
   hrefFor: ((phase: Phase) => string | undefined) | undefined,
   hasData: boolean,
   slaDeadline?: string,
+  locked = false,
+  renderLockedAction?: (phase: Phase) => React.ReactNode,
 ) {
   const isActivePh = entry.phase === active;
   const done = isDone(entry.status);
@@ -312,25 +341,48 @@ function renderPhaseRow(
       className={cn(
         "flex flex-1 items-start justify-between gap-3 py-3 pr-3",
         index > 0 && "border-line-soft border-t",
+        // Dimmed as a whole, so the contrast between what you can work on and
+        // what you cannot reads down the rail at a glance rather than needing
+        // each row inspected for a badge.
+        locked && "opacity-55",
       )}
     >
       <div className="min-w-0 flex-1">
         <p
           className={cn(
-            "font-display text-[14.5px] font-bold leading-tight tracking-tight",
-            !hasData && "text-muted-foreground",
+            "font-display flex items-center gap-1.5 text-[14.5px] font-bold leading-tight tracking-tight",
+            (!hasData || locked) && "text-muted-foreground",
           )}
         >
+          {locked && <Lock className="size-3.5 shrink-0" aria-hidden />}
           {PHASE_LABELS[entry.phase]}
+          {locked && (
+            <span className="sr-only">
+              {" "}
+              — you do not have access to this agent
+            </span>
+          )}
         </p>
         {metaEl}
-        {progressBar}
+        {!locked && progressBar}
         {/* SLA countdown — only for the phase currently awaiting approval (D-04) */}
-        {slaDeadline && entry.status === "awaiting_approval" && (
+        {!locked && slaDeadline && entry.status === "awaiting_approval" && (
           <SlaCountdown deadline={slaDeadline} className="mt-2" />
         )}
+        {locked && renderLockedAction && (
+          <div className="mt-2">{renderLockedAction(entry.phase)}</div>
+        )}
       </div>
-      {statusLabel}
+      {/* The run's status is suppressed on a locked row. "Awaiting approval"
+          is a call to act, and showing it to someone who cannot act on this
+          agent reads as a task they are ignoring. The lock is the status. */}
+      {locked ? (
+        <span className="bg-muted text-muted-foreground shrink-0 self-start rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
+          No access
+        </span>
+      ) : (
+        statusLabel
+      )}
     </div>
   );
 
@@ -344,7 +396,11 @@ function renderPhaseRow(
 
       {/* Content */}
       {(() => {
-        const href = hrefFor?.(entry.phase);
+        // A locked row is never a link. Its destination is the agent's own
+        // page, which would refuse the viewer — and a link that only ever
+        // leads to a wall is worse than no link, because it costs a click to
+        // learn what the lock already said.
+        const href = locked ? undefined : hrefFor?.(entry.phase);
         return href ? (
           <Link
             href={href}

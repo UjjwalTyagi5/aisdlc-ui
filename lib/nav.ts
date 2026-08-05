@@ -139,10 +139,17 @@ export const deliverNav: NavItem[] = [
     href: "/agent-studio",
     icon: SlidersHorizontal,
     segment: "agent-studio",
-    // Governance-tier roles have NO agent access at all (PRD §14.8), so a
-    // prompt editor is not a scoped version of this page for them — it is a
-    // page about a capability they don't hold.
-    hideForRoles: ["org_admin", "bu_admin"],
+    // NO LONGER HIDDEN from the governance tier. The original reading — "they
+    // have no agent access, so a prompt editor is a page about a capability
+    // they don't hold" — was right about RUNNING an agent and wrong about
+    // this page, which is not where agents are run. It is where each tier
+    // publishes the default instructions the tiers beneath it inherit, and
+    // the Org and Business Unit tiers of that cascade are precisely the two
+    // these roles own (AGENT_DEFAULT_OWNER_ROLE). Hiding it left both tiers
+    // ownerless: nobody could set an org-wide or unit-wide default at all.
+    //
+    // Orchestrator stays hidden, and the difference is the point — that one
+    // IS running agents.
     prdSection: "§34.6",
   },
 ];

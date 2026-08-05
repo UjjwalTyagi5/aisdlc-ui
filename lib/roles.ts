@@ -210,21 +210,10 @@ export const ROLE_META: Record<PlatformRole, RoleMeta> = {
  */
 export type Involvement = "owner" | "primary" | "build" | "requests" | "use" | "none";
 
-const ALL_USE: Record<Phase, Involvement> = {
-  requirements: "use",
-  design: "use",
-  development: "use",
-  review: "use",
-  security: "use",
-  testing: "use",
-  deployment: "use",
-  documentation: "use",
-  discovery: "use",
-  strategy: "use",
-  migration_mapping: "use",
-  validation: "use",
-  data_engineering: "use",
-};
+// `ALL_USE` is deliberately gone. Every delivery role was built from it and
+// then subtracted, which is the wrong default for an access table: a role
+// nobody thought about reached everything. Roles are composed from ALL_NONE
+// upward now, so a forgotten grant denies rather than permits.
 
 const ALL_NONE: Record<Phase, Involvement> = {
   requirements: "none",
@@ -277,62 +266,107 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Fallback approver on every agent, subject to the risk-aware limits in §14.5.
   project_admin: { ...ALL_OWNER },
 
-  ba: { ...ALL_USE, requirements: "primary" },
+  // ── Delivery roles ──────────────────────────────────────────────────────
+  //
+  // SPREAD FROM `ALL_NONE`, NOT `ALL_USE`. Every delivery role used to start
+  // from "use everything" and subtract, which made least privilege something
+  // you had to remember to apply — and mostly it wasn't: a BA reached all
+  // thirteen agents. Starting from nothing and adding makes each role's list
+  // exactly what it is allowed to touch, and makes an omission fail closed.
+  //
+  // TWO INVARIANTS hold this table together, and `agent-ownership.test.ts`
+  // enforces both:
+  //
+  //   1. A phase's owner (`AGENT_OWNER_ROLE`) always reaches its own agent.
+  //      An owner who cannot open the agent they sign off for is a gate with
+  //      nobody behind it.
+  //   2. Documentation is reachable by every delivery role. Its acceptance is
+  //      automatic and every role writes into it; it is the one genuinely
+  //      shared surface.
 
+  // Requirements is the BA's. Design is downstream of their output and they
+  // stay in it; nothing else is theirs to drive.
+  ba: {
+    ...ALL_NONE,
+    requirements: "primary",
+    design: "use",
+    documentation: "use",
+  },
+
+  // The broadest delivery role, because it owns the most gates — Design,
+  // Development and Code Review, plus the three modernization-track agents.
+  //
+  // Code Review is here as OWNER even though it was not in the requested list:
+  // `AGENT_OWNER_ROLE.review` is `architect`, so removing it would leave Code
+  // Review's sign-off routed to a role that cannot open it. Reassigning that
+  // gate is a separate decision from narrowing access, and not one to make as
+  // a side effect.
   architect: {
-    ...ALL_USE,
+    ...ALL_NONE,
+    requirements: "use",
     design: "primary",
     development: "primary",
     review: "primary",
+    security: "use",
+    testing: "use",
+    documentation: "use",
     discovery: "primary",
     strategy: "primary",
     migration_mapping: "primary",
   },
 
+  // Builds Development; the Architect approves it, so this is `build` and not
+  // `primary` — never self-approval.
   developer: {
-    ...ALL_USE,
-    design: "none",
+    ...ALL_NONE,
     development: "build",
-    review: "requests",
-    deployment: "none",
+    documentation: "use",
   },
 
+  // Owns Testing, and Validation on the modernization tracks. Reads
+  // Development because that is what it tests.
   qa: {
-    ...ALL_USE,
-    design: "none",
-    review: "none",
+    ...ALL_NONE,
+    development: "use",
     testing: "primary",
+    documentation: "use",
     validation: "primary",
-    deployment: "none",
   },
 
+  // Owns Security. Reads the code it assesses and the review it feeds.
   security_engineer: {
-    ...ALL_USE,
+    ...ALL_NONE,
+    development: "use",
+    review: "use",
     security: "primary",
-    testing: "none",
-    documentation: "none",
+    documentation: "use",
   },
 
+  // Owns Deployment. Reads Development because that is what it ships.
   devops_engineer: {
-    ...ALL_USE,
-    requirements: "none",
-    design: "none",
-    development: "requests",
-    review: "none",
+    ...ALL_NONE,
+    development: "use",
     deployment: "primary",
-    data_engineering: "none",
+    documentation: "use",
   },
 
+  // Owns Data Engineering. Reads Development for the pipelines' surroundings.
   data_engineer: {
-    ...ALL_USE,
-    development: "none",
-    review: "none",
-    deployment: "none",
+    ...ALL_NONE,
+    development: "use",
+    documentation: "use",
     data_engineering: "primary",
   },
 
-  // Cross-cutting coordinator: visibility into every stage, owns none of them.
-  scrum_master: { ...ALL_USE },
+  // Cross-cutting coordinator who owns no gate. Coordination is not agent
+  // operation, so visibility into the two stages that describe the work is
+  // the whole of it — the run history and approvals queue are where a Scrum
+  // Master actually watches progress, and neither needs agent access.
+  scrum_master: {
+    ...ALL_NONE,
+    requirements: "use",
+    documentation: "use",
+  },
 
   // Composed per assignment — the builder picks exact agent access (PRD §14.9).
   custom: { ...ALL_NONE },

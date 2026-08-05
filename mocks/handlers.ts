@@ -99,6 +99,7 @@ import {
   filterByProject,
 } from "@/lib/mock/access-scope";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { canCreateProject } from "@/lib/auth/permissions";
 import type { ProjectCreateInput } from "@/lib/schemas/project";
 import {
   activateModelProvider,
@@ -157,8 +158,9 @@ import {
   listVersions,
   publishVersion,
   unpublishVersion,
+  versionScope,
 } from "@/lib/mock/agent-profile-fixtures";
-import { agentDefaultApprovalType } from "@/lib/governance";
+import { agentDefaultApprovalType, canPublishAtTier } from "@/lib/governance";
 import type { AgentProfileDraftInput, ProfileScope } from "@/lib/schemas/agent-profiles";
 
 /**
@@ -312,6 +314,14 @@ export const handlers = [
       );
     }
     const role = effectivePlatformRole(session);
+    // Mirrors app/api/projects/route.ts. In the browser THIS handler answers,
+    // so a check only in the Next route would not be a check at all.
+    if (!canCreateProject(role)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Your role cannot create projects." },
+        { status: 403 },
+      );
+    }
     const created = createProjectRecord(body, {
       role,
       displayName: session.user.name,
@@ -698,6 +708,17 @@ export const handlers = [
     await lag();
     const session = sessionFromCookies(cookies);
     if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    // Mirrors app/api/agent-profiles/[id]/publish/route.ts. In the browser THIS
+    // is the handler that answers, so an ownership rule enforced only in the
+    // Next route would not be enforced at all where people actually click.
+    const scope = versionScope(String(params.id));
+    if (!scope) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    if (!canPublishAtTier(effectivePlatformRole(session), scope)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "You don't own this tier's defaults." },
+        { status: 403 },
+      );
+    }
     const published = publishVersion(String(params.id), session.user.name);
     if (!published) return HttpResponse.json({ code: "not_found" }, { status: 404 });
     return HttpResponse.json(published);

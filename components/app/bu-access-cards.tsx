@@ -186,7 +186,11 @@ export function BuModelAccessCard({
           <p className="text-muted-foreground text-[12.5px]">No models granted yet.</p>
         ) : (
           <ul className="flex flex-wrap gap-1.5">
-            {allowed.map((e) => (
+            {/* Deduped: `allowed` is one row per GRANT, and a model granted
+                both org-wide and to this unit appears twice. As a flat list of
+                model names those two rows are the same chip printed twice —
+                and they collided on `keyOf`, which is provider::model_id. */}
+            {[...new Map(allowed.map((e) => [keyOf(e), e] as const)).values()].map((e) => (
               <li
                 key={keyOf(e)}
                 className="border-line-soft bg-surface-1 text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[10.5px]"

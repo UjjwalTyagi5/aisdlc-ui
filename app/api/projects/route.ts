@@ -4,6 +4,7 @@ import { createProjectRecord } from "@/lib/mock/project-fixtures";
 import { PROJECTS } from "@/mocks/fixtures";
 import { getSession } from "@/lib/auth/session";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { canCreateProject } from "@/lib/auth/permissions";
 import { resolveSessionScope } from "@/lib/auth/access-scope";
 import { canReadProject } from "@/lib/mock/access-scope";
 import type { ProjectCreateInput } from "@/lib/schemas/project";
@@ -57,6 +58,17 @@ export async function POST(req: NextRequest) {
   }
 
   const role = effectivePlatformRole(session);
+  // Project creation had NO server-side check — hiding the button was the
+  // whole control, so any signed-in person could POST one. A project belongs
+  // to a Business Unit and is created by that unit or by a Project Admin
+  // inside it; the Org Admin creates the UNITS (PRD §15.2), not what runs in
+  // them.
+  if (!canCreateProject(role)) {
+    return Response.json(
+      { code: "forbidden", message: "Your role cannot create projects." },
+      { status: 403 },
+    );
+  }
   const created = createProjectRecord(body, {
     role,
     displayName: session.user.name,

@@ -570,7 +570,15 @@ export default function UsersPage() {
                         {/* Assigning lives on the row it applies to. It used to
                             be a screen of its own that made you pick a scope
                             first and then hunt the person inside it. */}
-                        {isOrgAdmin && (
+                        {/* `canManage` (member:manage), NOT isOrgAdmin. The
+                            Business Unit Admin holds it and runs their unit's
+                            membership (PRD §15.2) — gating on Org Admin left
+                            them able to SEE their people and not to change a
+                            single role, which is not a scoped version of this
+                            page but a broken one. The dialog's scope picker is
+                            already filtered server-side, so a BU Admin is
+                            offered only their own units. */}
+                        {canManage && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -615,8 +623,11 @@ export default function UsersPage() {
             ? `You are viewing this directory scoped to ${units[0]!.displayName}`
             : `You are viewing this directory scoped to the ${units.length} ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} you administer`}
           . People in {managedBusinessUnitIds.length === 1 ? "other" : "any other"}{" "}
-          {BUSINESS_UNIT_LABEL.toLowerCase()} are not listed. Inviting and deactivating people is an
-          Organization Admin action.
+          {BUSINESS_UNIT_LABEL.toLowerCase()} are not listed. You can change roles within your own{" "}
+          {managedBusinessUnitIds.length === 1
+            ? BUSINESS_UNIT_LABEL.toLowerCase()
+            : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}
+          ; inviting and deactivating people is an Organization Admin action.
         </p>
       )}
 

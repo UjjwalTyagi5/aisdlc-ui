@@ -166,7 +166,19 @@ export const ProjectCreateInput = z.object({
    *  AGENT_OWNERSHIP. Reuses the same onboarding primitive as the Members
    *  page, so an unrecognized email is onboarded, never rejected. */
   contributors: z
-    .array(z.object({ email: z.string().email(), roleName: z.string().min(1) }))
+    .array(
+      z.object({
+        email: z.string().email(),
+        roleName: z.string().min(1),
+        /**
+         * Agents granted on top of what `roleName` already reaches
+         * (`AGENT_OWNERSHIP`). Optional and additive — absent means "the
+         * role's own roster", which is what every contributor added before
+         * this field existed meant, so old payloads keep their meaning.
+         */
+        extraAgents: z.array(z.string()).optional(),
+      }),
+    )
     .optional(),
   /** Stage→MCP-server mapping {agent_id: [mcp_server_id, ...]} chosen at creation. */
   mcp_servers: z.record(z.string(), z.array(z.string())).optional(),

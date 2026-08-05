@@ -47,12 +47,16 @@ import {
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { roleAgentSplit } from "@/lib/agent-access";
+import { ROLE_META } from "@/lib/roles";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-dialog";
 import { canRaiseType } from "@/lib/requests/routing";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import type { Artifact, Connector, Project, ProjectId } from "@/lib/schemas";
+import type { Phase } from "@/lib/schemas/enums";
 
 const TEMPLATE_LABEL: Record<Project["template"], string> = {
   web_app: "Web app",
@@ -90,6 +94,29 @@ export default function ProjectOverviewPage() {
   // two governance tiers hold none by design (PRD §14.8) — offering them a
   // request would suggest that decision is negotiable.
   const canRequestAgentAccess = canRaiseType(role, "agent_access");
+  const viewerRole = role;
+
+  /**
+   * Agents this viewer's role doesn't reach, for the pipeline's locked state.
+   *
+   * NOT APPLIED to a role that reaches nothing at all. The governance tier
+   * holds no agent access by design (PRD §14.8), and locking all eight rows
+   * for them would read as "you are missing access" when in fact operating
+   * agents was never their job — they are here to see status. A pipeline of
+   * eight padlocks tells an Org Admin nothing they can act on and hides the
+   * run states they came for.
+   *
+   * The lock is for the partially-blocked case, which is the only one where
+   * the distinction between "yours" and "not yours" is information.
+   */
+  const lockedPhases = React.useMemo(() => {
+    const track = projectQ.data?.track;
+    if (!viewerRole || !track) return undefined;
+    const { reachable, locked } = roleAgentSplit(viewerRole, track);
+    if (reachable.length === 0) return undefined;
+    return new Set<Phase>(locked);
+  }, [viewerRole, projectQ.data?.track]);
+
   // The unit's real name, not the word "Business Unit" — the request names the
   // scope it is being raised in, and a label there says nothing.
   const { units: scopedUnits } = useScopedBusinessUnits();
@@ -158,6 +185,7 @@ export default function ProjectOverviewPage() {
   }
 
   const project = projectQ.data;
+
   // A project a Project Admin created stays pending until its BU Admin
   // approves it (governance approval, not an agent gate) — pipeline/agent
   // actions are disabled until then, and a rejected project can't run at all.
@@ -276,6 +304,20 @@ export default function ProjectOverviewPage() {
         hrefFor={(p) =>
           !actionsLocked && ROUTABLE_PHASES.has(p) ? phaseHref(project.id, p) : undefined
         }
+        lockedPhases={lockedPhases}
+        renderLockedAction={(p) => (
+          <RequestAccessButton
+            label="Request access"
+            className="h-7"
+            prefill={{
+              type: "agent_access",
+              title: `${PHASE_LABEL[p]} agent access`,
+              description: `Requesting the ${PHASE_LABEL[p]} agent on ${project.name}. My role (${viewerRole ? ROLE_META[viewerRole].label : "current role"}) doesn't reach it.`,
+              projectId: project.id,
+              workspaceId: project.workspaceId ? String(project.workspaceId) : undefined,
+            }}
+          />
+        )}
       />
 
       {/* ─── Main grid ────────────────────────────────────── */}

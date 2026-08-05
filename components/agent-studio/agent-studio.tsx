@@ -104,8 +104,27 @@ export function AgentStudio() {
     userId: personal ? (session?.user.id ?? null) : null,
   };
 
+  /**
+   * The governance tier has no PERSONAL agent instructions.
+   *
+   * Personal is the bottom of the cascade — the individual override someone
+   * applies to their own runs. An Org or Business Unit Admin never runs an
+   * agent (PRD §14.8), so a personal override for them would be instructions
+   * that can never take effect: a tier of one, inherited by nobody, applied to
+   * no run. Worse, it is a governance role editing agent behaviour outside the
+   * cascade everyone else can see and inherit from, which is exactly the
+   * visibility the tiered defaults exist to provide.
+   *
+   * They own a tier each — Organization and Business Unit — and those are
+   * where their instructions belong.
+   */
+  const mayHavePersonalTier = role !== "org_admin" && role !== "bu_admin";
+
   const ownerRole = tier === "user" ? null : AGENT_DEFAULT_OWNER_ROLE[tier];
-  const isOwner = tier === "user" ? Boolean(session) : role !== null && role === ownerRole;
+  const isOwner =
+    tier === "user"
+      ? mayHavePersonalTier && Boolean(session)
+      : role !== null && role === ownerRole;
   const ownerRoleLabel = ownerRole ? ROLE_META[ownerRole].label : null;
 
   // Escalation only ever flows one rung up, from a person's OWN tier — never
@@ -211,7 +230,10 @@ export function AgentStudio() {
           />
         )}
 
-        {!personal && (
+        {/* Absent, not disabled, for the governance tier — see
+            `mayHavePersonalTier`. A greyed-out link would imply a personal
+            tier they could unlock, and there isn't one to unlock. */}
+        {!personal && mayHavePersonalTier && (
           <button
             type="button"
             onClick={() => setPersonal(true)}

@@ -79,7 +79,11 @@ export function createProjectRecord(input: ProjectCreateInput, creator: ProjectC
   PROJECTS.unshift(created);
 
   for (const c of input.contributors ?? []) {
-    addProjectMember(created.id, { email: c.email, roleName: c.roleName });
+    addProjectMember(created.id, {
+      email: c.email,
+      roleName: c.roleName,
+      extraAgents: c.extraAgents,
+    });
   }
 
   if (needsApproval) {

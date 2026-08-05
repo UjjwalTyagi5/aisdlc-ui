@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { Boxes, ChevronDown, Loader2, ShieldAlert, Trash2, UserPlus, Wrench } from "lucide-react";
+import { Boxes, Check, ChevronDown, Loader2, Plus, ShieldAlert, Trash2, UserPlus, Wrench } from "lucide-react";
 import { z } from "zod";
 
 import { cn } from "@/lib/utils";
@@ -52,6 +52,10 @@ import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
 import { listWorkspaceMembers } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
 import { agentsForTrack, TRACK_META, TRACK_ORDER } from "@/lib/tracks";
+import { PHASE_LABEL } from "@/lib/agents";
+import { roleAgentSplit } from "@/lib/agent-access";
+import { AGENT_OWNERSHIP, type PlatformRole } from "@/lib/roles";
+import type { Phase } from "@/lib/schemas/enums";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { DeliveryTrack, type Project, type ProjectCreateInput } from "@/lib/schemas";
 import { resolveRoleLabel, useAllCustomRoles, useAssignableRoles } from "@/hooks/use-assignable-roles";
@@ -83,6 +87,16 @@ type FormValues = z.infer<typeof formSchema>;
 interface ContributorRow {
   email: string;
   roleName: string;
+  /**
+   * Agents granted ON TOP of the role's own reach (`AGENT_OWNERSHIP`).
+   *
+   * Kept separate from `roleName` rather than folded into a flat agent list,
+   * because the two decay differently: the role's reach should follow the role
+   * if the platform's involvement table changes, while an extra is a decision
+   * this Project Admin made about this person on this project and must survive
+   * that. Storing the union would make them indistinguishable a week later.
+   */
+  extraAgents: Phase[];
 }
 
 // No repository-template picker at creation — the delivery track alone
@@ -131,7 +145,15 @@ export function CreateProjectDialog({
   const [contributors, setContributors] = React.useState<ContributorRow[]>([]);
   const [contribEmail, setContribEmail] = React.useState("");
   const [contribRole, setContribRole] = React.useState<string>(contributorRoles[0]?.value ?? "");
+  const [contribExtraAgents, setContribExtraAgents] = React.useState<Phase[]>([]);
   const [contributorsOpen, setContributorsOpen] = React.useState(false);
+
+  // Extras are chosen against a ROLE, so they can't outlive a change of role —
+  // ticking Deployment for a Developer and then switching to Architect (who
+  // already reaches it) would otherwise leave a meaningless extra behind.
+  React.useEffect(() => {
+    setContribExtraAgents([]);
+  }, [contribRole]);
 
   // Which of the Business Unit's models this project runs on.
   //
@@ -190,6 +212,10 @@ export function CreateProjectDialog({
   // instead of only inviting by email. Re-fetches if they switch the BU
   // picker mid-dialog.
   const selectedWorkspaceId = form.watch("workspaceId");
+  // The track decides the roster (PRD §6), so the agent preview has to follow
+  // it — offering Data Engineering on a Greenfield project would grant an
+  // agent that project never runs.
+  const selectedTrack = form.watch("track");
   const membersQ = useQuery({
     queryKey: qk.workspaces.members(selectedWorkspaceId),
     queryFn: () => listWorkspaceMembers(selectedWorkspaceId),
@@ -207,7 +233,26 @@ export function CreateProjectDialog({
     queryFn: () => getModelAvailability(selectedWorkspaceId),
     enabled: open && !!selectedWorkspaceId,
   });
-  const availableModels = React.useMemo(() => modelsQ.data ?? [], [modelsQ.data]);
+  /**
+   * Deduped on `provider::model_id` — the same identity the checkboxes below
+   * key their selection by.
+   *
+   * A model granted BOTH org-wide and to this unit specifically comes back as
+   * two availability rows for one model. In a picker those are one choice, so
+   * two rows meant two checkboxes bound to the same value; the React duplicate
+   * key warning was the symptom, the double row was the bug. The first row
+   * wins, which is the org-wide one — its credential status is the one that
+   * applies when both exist.
+   */
+  const availableModels = React.useMemo(() => {
+    const seen = new Set<string>();
+    return (modelsQ.data ?? []).filter((m) => {
+      const k = `${m.provider}::${m.model_id}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [modelsQ.data]);
 
   // Switching Business Unit invalidates any picks: they came from the other
   // unit's grants and may not exist here.
@@ -367,7 +412,13 @@ export function CreateProjectDialog({
       budgetStartDate: values.budgetStartDate || null,
       budgetEndDate: values.budgetEndDate || null,
       contributors: contributors.length
-        ? contributors.map((c) => ({ email: c.email, roleName: c.roleName }))
+        ? contributors.map((c) => ({
+            email: c.email,
+            roleName: c.roleName,
+            // Omitted when empty rather than sent as [], so "no extras" and
+            // "this payload predates extras" stay the same thing on the wire.
+            extraAgents: c.extraAgents.length ? c.extraAgents : undefined,
+          }))
         : undefined,
       mcp_servers: Object.keys(mcp_servers).length ? mcp_servers : undefined,
       connectors: Object.keys(connectors).length ? connectors : undefined,
@@ -377,7 +428,9 @@ export function CreateProjectDialog({
 
   const addContributorEmail = (email: string, roleName: string) => {
     if (contributors.some((c) => c.email.toLowerCase() === email.toLowerCase())) return;
-    setContributors((prev) => [...prev, { email, roleName }]);
+    setContributors((prev) => [...prev, { email, roleName, extraAgents: contribExtraAgents }]);
+    // The extras belonged to the person just added, not to the next one.
+    setContribExtraAgents([]);
   };
 
   const addContributor = () => {
@@ -626,7 +679,19 @@ export function CreateProjectDialog({
                           key={c.email}
                           className="flex items-center justify-between gap-2 rounded-md border border-line-soft bg-panel-elevated px-2.5 py-1.5"
                         >
-                          <span className="min-w-0 flex-1 truncate text-[12.5px]">{c.email}</span>
+                          <span className="min-w-0 flex-1 truncate text-[12.5px]">
+                            {c.email}
+                            {/* Only the EXTRAS are named on the row. Listing
+                                the role's own agents too would repeat, per
+                                person, a fact the role badge already states —
+                                what is worth seeing here is the bit that
+                                differs from the default. */}
+                            {c.extraAgents.length > 0 && (
+                              <span className="text-brand-bright ml-1.5 font-mono text-[10.5px]">
+                                +{c.extraAgents.map((p) => PHASE_LABEL[p]).join(", ")}
+                              </span>
+                            )}
+                          </span>
                           <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
                             {resolveRoleLabel(c.roleName, allCustomRoles)}
                           </Badge>
@@ -686,6 +751,24 @@ export function CreateProjectDialog({
                       </SelectContent>
                     </Select>
                   </div>
+
+                  {/* What the chosen role actually gets, named. "BA" tells you
+                      nothing about which agents that person will be able to
+                      open; the point of assigning at creation is that you can
+                      see it before you commit, and add to it in the same
+                      breath rather than discovering the gap on the pipeline. */}
+                  <RoleAgentPreview
+                    roleName={contribRole}
+                    track={selectedTrack}
+                    extra={contribExtraAgents}
+                    onToggleExtra={(phase) =>
+                      setContribExtraAgents((prev) =>
+                        prev.includes(phase)
+                          ? prev.filter((p) => p !== phase)
+                          : [...prev, phase],
+                      )
+                    }
+                  />
 
                   <div className="flex items-center gap-2">
                     <Input
@@ -942,5 +1025,111 @@ export function CreateProjectDialog({
         </Form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The agents a chosen role reaches, named — plus the ones it doesn't, as
+ * checkboxes.
+ *
+ * WHY IT SHOWS THE LOCKED ONES AT ALL. Granting extra access is only a real
+ * choice if you can see what is missing; a list of what the role already has
+ * answers "is this enough?" with no way to act on "no". The split is the
+ * whole component: reachable agents are stated as fact, unreachable ones are
+ * offered as a decision.
+ *
+ * Both halves come from `AGENT_OWNERSHIP` via `roleAgentSplit`, narrowed to
+ * the track's roster. A custom role has no entry in that table, so it falls
+ * back to naming nothing rather than guessing — see the note below.
+ */
+function RoleAgentPreview({
+  roleName,
+  track,
+  extra,
+  onToggleExtra,
+}: {
+  roleName: string;
+  track: DeliveryTrack;
+  extra: Phase[];
+  onToggleExtra: (phase: Phase) => void;
+}) {
+  const isBuiltIn = roleName in AGENT_OWNERSHIP;
+  const split = React.useMemo(
+    () =>
+      isBuiltIn
+        ? roleAgentSplit(roleName as PlatformRole, track)
+        : { reachable: [], locked: [] },
+    [isBuiltIn, roleName, track],
+  );
+
+  if (!isBuiltIn) {
+    return (
+      <p className="text-muted-foreground text-[11.5px]">
+        Agent access for a custom role is whatever its permissions grant — it
+        isn&apos;t in the platform&apos;s role × agent table, so there is no default roster to
+        preview here.
+      </p>
+    );
+  }
+
+  return (
+    <div className="border-line-soft bg-panel-elevated space-y-2.5 rounded-lg border p-2.5">
+      <div>
+        <p className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
+          Gets these agents
+        </p>
+        {split.reachable.length === 0 ? (
+          <p className="text-muted-foreground mt-1 text-[11.5px]">
+            None by default on this track.
+          </p>
+        ) : (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {split.reachable.map((p) => (
+              <span
+                key={p}
+                className="border-success/30 bg-success/10 text-success inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10.5px]"
+              >
+                <Check className="size-2.5" aria-hidden />
+                {PHASE_LABEL[p]}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {split.locked.length > 0 && (
+        <div className="border-line-soft border-t pt-2.5">
+          <p className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
+            Grant extra · optional
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {split.locked.map((p) => {
+              const on = extra.includes(p);
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => onToggleExtra(p)}
+                  aria-pressed={on}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10.5px] transition-colors",
+                    on
+                      ? "border-brand-bright/40 bg-brand-bright/10 text-brand-bright"
+                      : "border-line-soft bg-surface-1 text-muted-foreground border-dashed hover:text-foreground",
+                  )}
+                >
+                  {on ? (
+                    <Check className="size-2.5" aria-hidden />
+                  ) : (
+                    <Plus className="size-2.5" aria-hidden />
+                  )}
+                  {PHASE_LABEL[p]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

@@ -21,6 +21,8 @@ import { useRawSession } from "@/components/auth/session-provider";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { can } from "@/lib/auth/capabilities";
 import { visibleNav } from "@/lib/nav";
+import { canCreateProject } from "@/lib/auth/permissions";
+import type { PlatformRole } from "@/lib/roles";
 import type { Capability } from "@/lib/auth/types";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
@@ -33,6 +35,15 @@ interface CommandEntry {
   shortcut?: string[];
   /** Hide this entry unless the current role has this capability. */
   requireCapability?: Capability;
+  /**
+   * A role predicate, for actions a capability check gets wrong.
+   *
+   * `can()` (and `hasPermission`) treat the Org Admin's `admin:*` as a
+   * wildcard over everything, which is right for most of what they outrank
+   * and wrong for the handful of actions that belong to a tier below them
+   * rather than being an administrative power they hold more of.
+   */
+  requireRolePredicate?: (role: PlatformRole | null) => boolean;
   run: (ctx: CommandContext) => void;
 }
 
@@ -78,6 +89,10 @@ const COMMANDS: CommandEntry[] = [
     keywords: "new project create",
     shortcut: ["N"],
     requireCapability: "project:create",
+    // The Org Admin passes `project:create` via `admin:*` but cannot create
+    // projects — without this the palette would offer them an action that
+    // lands on a page whose dialog refuses to open.
+    requireRolePredicate: canCreateProject,
     run: ({ router, close }) => {
       router.push("/projects?new=1");
       close();
@@ -191,10 +206,13 @@ export function CommandPalette() {
       if (c.requireCapability && (!session || !can(session.role, c.requireCapability))) {
         continue;
       }
+      if (c.requireRolePredicate && !c.requireRolePredicate(role)) {
+        continue;
+      }
       (g[c.group] ??= []).push(c);
     }
     return g;
-  }, [session, navCommands]);
+  }, [session, navCommands, role]);
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>

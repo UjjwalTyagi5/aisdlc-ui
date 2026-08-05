@@ -65,6 +65,31 @@ export const AGENT_DEFAULT_OWNER_ROLE: Record<ProfileScope, PlatformRole | null>
   user: null,
 };
 
+/**
+ * May this role publish a default at this tier directly?
+ *
+ * The three shared tiers answer from `AGENT_DEFAULT_OWNER_ROLE`: you publish
+ * your own tier and propose to the one above it. `user` is the exception in
+ * both directions — everyone owns their own personal override, EXCEPT the two
+ * governance roles, who never run an agent (PRD §14.8) and so would be writing
+ * instructions that can never take effect, outside the cascade everyone else
+ * can see and inherit from. They own Organization and Business Unit; that is
+ * where their instructions go.
+ *
+ * Shared by the client gate and BOTH server runtimes deliberately. A rule the
+ * UI merely hides is a suggestion — see the note on `raisableTypesFor`
+ * (lib/requests/routing.ts), which was scoped the same way for the same
+ * reason.
+ */
+export function canPublishAtTier(
+  role: PlatformRole | null,
+  scope: ProfileScope,
+): boolean {
+  if (role === null) return false;
+  if (scope === "user") return role !== "org_admin" && role !== "bu_admin";
+  return role === AGENT_DEFAULT_OWNER_ROLE[scope];
+}
+
 /** `agent_default_org` | `agent_default_workspace` | `agent_default_project`
  *  for the three tiers that can be proposed-and-approved; `user` never is. */
 export function agentDefaultApprovalType(

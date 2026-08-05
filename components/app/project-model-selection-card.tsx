@@ -74,7 +74,29 @@ export function ProjectModelSelectionCard({
   });
 
   const data = selectionQ.data;
-  const inherited = data?.inherited ?? [];
+  /**
+   * Deduped on `keyOf`, because that key is the SELECTION IDENTITY here, not
+   * just a React key.
+   *
+   * The same model reaches a unit more than once when it is granted both
+   * org-wide and to that unit specifically — two grant rows, one model. On a
+   * screen that says "which models may this project use" they are one choice,
+   * and rendering both produced two identical rows wired to the same
+   * checkbox: ticking either appeared to tick both, and React warned about
+   * the duplicate key on top.
+   *
+   * Making the key unique instead would have been the wrong fix — it would
+   * have silenced the warning and left the two indistinguishable rows.
+   */
+  const inherited = React.useMemo(() => {
+    const seen = new Set<string>();
+    return (data?.inherited ?? []).filter((e) => {
+      const k = keyOf(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [data]);
   const serverSelected = React.useMemo(
     () => new Set((data?.selected ?? []).map(keyOf)),
     [data],
