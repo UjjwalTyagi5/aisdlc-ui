@@ -11,6 +11,7 @@
 import { emitNotification } from "@/lib/mock/notification-fixtures";
 import {
   agentAccessApprover,
+  escalationCeilingFor,
   initialApproverRole,
   nextAgentAccessStage,
   nextApproverRole,
@@ -320,7 +321,14 @@ export function escalateGovernanceApproval(
 ): GovernanceApproval | undefined | "top" {
   const item = GOVERNANCE_APPROVALS.find((a) => a.id === id);
   if (!item) return undefined;
-  const next = nextApproverRole((item.currentApproverRole as PlatformRole | null) ?? null);
+  const current = (item.currentApproverRole as PlatformRole | null) ?? null;
+  // A contributor's request ends at the Project Admin — it does not climb past
+  // the person accountable for the project it is about. When the Project Admin
+  // needs something from above, they raise their own request, which climbs
+  // from their tier (see escalationCeilingFor).
+  const ceiling = escalationCeilingFor((item.requestedByRole as PlatformRole | null) ?? null);
+  if (current === ceiling) return "top";
+  const next = nextApproverRole(current);
   if (next === null) return "top";
 
   item.status = "escalated";

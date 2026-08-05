@@ -187,7 +187,9 @@ export function RaiseRequestDialog({
     type as Parameters<typeof initialApproverRole>[0],
     role,
   );
-  const chain = approverChainFrom(approver);
+  // The viewer's own role, so the preview shows where THEIR request actually
+  // ends. A contributor's stops at the Project Admin.
+  const chain = approverChainFrom(approver, role);
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -438,8 +440,21 @@ export function RaiseRequestDialog({
                   ))}
                 </p>
                 <p className="text-muted-foreground text-[11.5px]">
-                  Goes to the {ROLE_META[approver].label} first. If they can&apos;t grant it, it
-                  climbs one tier at a time — it never stalls without an approver.
+                  {chain.length > 1 ? (
+                    <>
+                      Goes to the {ROLE_META[approver].label} first. If they can&apos;t grant it,
+                      it climbs one tier at a time — it never stalls without an approver.
+                    </>
+                  ) : (
+                    <>
+                      {/* One rung means one decision. Saying "it climbs" here
+                          would promise an escalation that will not happen, and
+                          set the expectation that waiting is enough. */}
+                      Goes to the {ROLE_META[approver].label}, who owns this project and decides
+                      it. If they need something from above to grant it, they raise that
+                      themselves.
+                    </>
+                  )}
                 </p>
               </>
             ) : (

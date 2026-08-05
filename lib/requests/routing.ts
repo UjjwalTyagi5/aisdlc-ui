@@ -244,16 +244,52 @@ export function initialApproverRole(
 }
 
 /**
+ * HOW FAR A REQUEST MAY CLIMB, given who raised it.
+ *
+ * A contributor's request stops at their Project Admin. The Project Admin owns
+ * the project the ask is about — its members, its models, its tools — and is
+ * the person who either grants it or decides it is not worth pursuing. Letting
+ * it climb past them on its own would put an ask about one project in front of
+ * an Org Admin who has no context for it, and would route around the person
+ * accountable for that project rather than through them.
+ *
+ * That does NOT dead-end an ask the Project Admin cannot grant. When what they
+ * lack is a grant from above — a model the business unit was never given — they
+ * raise their own request for it (PROJECT_ADMIN_RAISABLE), which climbs from
+ * their tier. The escalation is explicit and owned rather than automatic and
+ * anonymous, and the contributor's request stays where someone can answer it.
+ *
+ * The two admin tiers keep the full ladder: their asks are genuinely about the
+ * tier above them, so there is no one below to route through.
+ */
+export function escalationCeilingFor(requesterRole: PlatformRole | null): PlatformRole {
+  if (requesterRole === null) return "org_admin";
+  const i = REQUEST_ESCALATION_CHAIN.indexOf(requesterRole);
+  // Off the ladder = a delivery contributor. Their ceiling is the bottom rung.
+  return i === -1 ? "project_admin" : "org_admin";
+}
+
+/**
  * The full ladder this request will climb from where it now sits — for the
  * form's "who will see this" preview and the detail view's remaining path.
  * Showing the whole route up front is what makes an escalation later read as
  * the process working rather than the request being passed around.
+ *
+ * Truncated at the requester's ceiling: showing a contributor
+ * "Project Admin → Business Unit Admin → Organization Admin" promised a climb
+ * that will not happen, which is worse than showing one name — it sets the
+ * expectation that waiting is enough.
  */
-export function approverChainFrom(role: PlatformRole | null): PlatformRole[] {
+export function approverChainFrom(
+  role: PlatformRole | null,
+  requesterRole?: PlatformRole | null,
+): PlatformRole[] {
+  const ceiling = requesterRole === undefined ? "org_admin" : escalationCeilingFor(requesterRole);
   const chain: PlatformRole[] = [];
   let cur = role;
   while (cur !== null) {
     chain.push(cur);
+    if (cur === ceiling) break;
     cur = nextApproverRole(cur);
   }
   return chain;

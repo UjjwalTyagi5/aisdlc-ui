@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   approverChainFrom,
+  escalationCeilingFor,
   canDecideRequest,
   canEscalate,
   canRaiseRequest,
@@ -111,6 +112,33 @@ describe("the upward ladder", () => {
       "org_admin",
     ]);
     expect(approverChainFrom("org_admin")).toEqual(["org_admin"]);
+  });
+
+  it("stops a contributor's request at their Project Admin", () => {
+    // The Project Admin owns the project the ask is about. Climbing past them
+    // would put a project-shaped question in front of an Org Admin with no
+    // context for it, and route around the person accountable rather than
+    // through them. What the PA cannot grant, they request themselves.
+    for (const role of ["developer", "ba", "qa", "architect"] as const) {
+      expect(escalationCeilingFor(role)).toBe("project_admin");
+      expect(approverChainFrom("project_admin", role)).toEqual(["project_admin"]);
+    }
+  });
+
+  it("keeps the full ladder for the tiers that are on it", () => {
+    // Their asks genuinely are about the tier above, so there is nobody below
+    // to route through — the ceiling only truncates for people off the ladder.
+    expect(escalationCeilingFor("project_admin")).toBe("org_admin");
+    expect(escalationCeilingFor("bu_admin")).toBe("org_admin");
+    expect(approverChainFrom("bu_admin", "project_admin")).toEqual([
+      "bu_admin",
+      "org_admin",
+    ]);
+  });
+
+  it("keeps the untruncated chain when no requester is given", () => {
+    // Callers that do not know who asked must not silently get the short one.
+    expect(approverChainFrom("project_admin")).toHaveLength(3);
   });
 });
 
