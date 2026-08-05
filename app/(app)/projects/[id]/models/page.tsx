@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Boxes } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ProjectModelSelectionCard } from "@/components/app/project-model-selection-card";
 import { useRawSession } from "@/components/auth/session-provider";
@@ -48,7 +49,8 @@ export default function ProjectModelsPage({
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
-      <header className="space-y-1">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
         <div className="flex items-center gap-2">
           <Boxes className="text-brand-bright size-4" aria-hidden />
           <h1 className="font-display text-[22px] font-bold tracking-[-0.02em]">Models</h1>
@@ -58,6 +60,26 @@ export default function ProjectModelsPage({
             ? `Which of this project's inherited models it actually runs on. The list comes down the cascade — your Organization Admin grants models to the ${BUSINESS_UNIT_LABEL.toLowerCase()}, and this narrows it.`
             : `The models this project can run on. You can't change the list — ask for one that isn't here and it goes to your Project Admin, who can turn it on.`}
         </p>
+        </div>
+
+        {/* For a model that is not on the list at all — as opposed to the
+            per-row Request access below, which asks to switch on something
+            the business unit already holds. A blank ask needs a description,
+            so the template gives the approver the three things they will
+            otherwise have to come back and ask for. */}
+        <RequestAccessButton
+          label="Request a model"
+          prefill={{
+            type: "model_credential",
+            title: "New model for this project",
+            description: [
+              "Model and provider:",
+              "What we need it for:",
+              "Why the models we already have don't cover it:",
+            ].join("\n"),
+            projectId: id,
+          }}
+        />
       </header>
 
       {q.isLoading ? (

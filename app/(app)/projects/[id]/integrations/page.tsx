@@ -28,7 +28,28 @@ import {
   saveProjectCredential,
   type ProjectIntegration,
 } from "@/lib/api/project-integrations";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+
+/**
+ * Prompts, not prose.
+ *
+ * A blank description gets "we need Slack", and the approver then has to come
+ * back for the stage, the scope and the reason before they can decide. Naming
+ * the three questions up front turns one round trip into none — and the person
+ * asking usually knows all three, they just weren't asked.
+ */
+const CONNECTOR_TEMPLATE = [
+  "Which connector:",
+  "Which agent stage needs it:",
+  "Read-only, or does it need to write:",
+].join("\n");
+
+const MCP_TEMPLATE = [
+  "Which server, and where it runs:",
+  "What our agents would call it for:",
+  "Read-only, or does it need to write:",
+].join("\n");
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
 
@@ -111,6 +132,17 @@ export default function ProjectIntegrationsPage({
         items={connectors}
         onConfigure={setEditing}
         empty="No connector is enabled on this project yet. Your Project Admin enables them in Settings → Tools per stage."
+        action={
+          <RequestAccessButton
+            label="Request a connector"
+            prefill={{
+              type: "connector_access",
+              title: "New connector for this project",
+              description: CONNECTOR_TEMPLATE,
+              projectId: id,
+            }}
+          />
+        }
       />
 
       <Section
@@ -120,6 +152,17 @@ export default function ProjectIntegrationsPage({
         items={servers}
         onConfigure={setEditing}
         empty="No MCP server is assigned to this project yet."
+        action={
+          <RequestAccessButton
+            label="Request an MCP server"
+            prefill={{
+              type: "mcp_server",
+              title: "New MCP server for this project",
+              description: MCP_TEMPLATE,
+              projectId: id,
+            }}
+          />
+        }
       />
 
       <CredentialDialog
@@ -138,6 +181,7 @@ function Section({
   items,
   empty,
   onConfigure,
+  action,
 }: {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -145,14 +189,19 @@ function Section({
   items: ProjectIntegration[];
   empty: string;
   onConfigure: (i: ProjectIntegration) => void;
+  /** The section's own "ask for one that isn't here" control. */
+  action?: React.ReactNode;
 }) {
   return (
     <section className="space-y-3">
-      <div className="flex flex-col gap-0.5">
-        <h2 className="font-display flex items-center gap-2 text-lg font-bold tracking-[-0.015em]">
-          <Icon className="size-4" aria-hidden /> {title}
-        </h2>
-        <p className="text-muted-foreground text-[12.5px]">{blurb}</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <h2 className="font-display flex items-center gap-2 text-lg font-bold tracking-[-0.015em]">
+            <Icon className="size-4" aria-hidden /> {title}
+          </h2>
+          <p className="text-muted-foreground text-[12.5px]">{blurb}</p>
+        </div>
+        {action}
       </div>
 
       {items.length === 0 ? (
