@@ -1,0 +1,334 @@
+"use client";
+
+import * as React from "react";
+import { use } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Building2, Globe, KeyRound, Plug, ShieldCheck, Terminal } from "lucide-react";
+
+import { PageTitle } from "@/components/app/page-title";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { LoadingState } from "@/components/ui/loading-state";
+import { ApiErrorState } from "@/components/feedback/api-error-state";
+import { qk } from "@/lib/api/query-keys";
+import {
+  listProjectIntegrations,
+  saveProjectCredential,
+  type ProjectIntegration,
+} from "@/lib/api/project-integrations";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { PHASE_LABEL } from "@/lib/agents";
+import type { Phase } from "@/lib/schemas/enums";
+
+/**
+ * The project's own Integrations screen — where consumption actually happens.
+ *
+ * Everything on it is READ-ONLY except the credentials. Which integrations a
+ * project has is decided above it: the organization permits a kind, a
+ * {BUSINESS_UNIT_LABEL} inherits or onboards it, and the Project Admin wires
+ * it to stages in Settings → Tools per stage. Re-offering that choice here
+ * would be a second place for it to disagree with itself.
+ *
+ * What IS the project's own is the credential it presents. A shared tenant
+ * token authenticates the organization; a repo bot, a board account or a
+ * database role authenticates this team, and that is the piece that had
+ * nowhere to live while consumption sat with the admin tiers.
+ */
+export default function ProjectIntegrationsPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const [editing, setEditing] = React.useState<ProjectIntegration | null>(null);
+
+  const q = useQuery({
+    queryKey: qk.projects.integrations(id),
+    queryFn: () => listProjectIntegrations(id),
+  });
+
+  if (q.isLoading) {
+    return (
+      <div className="w-full p-4 md:px-10 md:py-8">
+        <LoadingState variant="list" rows={4} />
+      </div>
+    );
+  }
+
+  if (q.isError) {
+    return (
+      <div className="w-full p-4 md:px-10 md:py-8">
+        <ApiErrorState
+          title="Couldn't load this project's integrations"
+          description={q.error instanceof Error ? q.error.message : undefined}
+          onRetry={() => q.refetch()}
+        />
+      </div>
+    );
+  }
+
+  const items = q.data ?? [];
+  const connectors = items.filter((i) => i.kind === "connector");
+  const servers = items.filter((i) => i.kind === "mcp");
+  const missingCredentials = items.filter(
+    (i) => i.needsProjectCredential && !i.credential,
+  ).length;
+
+  return (
+    <div className="w-full space-y-8 p-4 md:px-10 md:py-8">
+      <header className="flex flex-col items-start gap-1">
+        <PageTitle>Integrations</PageTitle>
+      </header>
+
+      {missingCredentials > 0 && (
+        <Card className="border-warning/40 bg-warning/5 flex items-start gap-3 p-4">
+          <KeyRound className="text-warning mt-0.5 size-4 shrink-0" aria-hidden />
+          <p className="text-[13px]">
+            {missingCredentials} {missingCredentials === 1 ? "integration needs" : "integrations need"}{" "}
+            a credential from this project before agents can use{" "}
+            {missingCredentials === 1 ? "it" : "them"}.
+          </p>
+        </Card>
+      )}
+
+      <Section
+        title="Connectors"
+        icon={Plug}
+        blurb={`Wired to stages by this project's Admin, from what your ${BUSINESS_UNIT_LABEL.toLowerCase()} was granted.`}
+        items={connectors}
+        onConfigure={setEditing}
+        empty="No connector is enabled on this project yet. Your Project Admin enables them in Settings → Tools per stage."
+      />
+
+      <Section
+        title="MCP servers"
+        icon={Terminal}
+        blurb="Tool servers this project's agents may call."
+        items={servers}
+        onConfigure={setEditing}
+        empty="No MCP server is assigned to this project yet."
+      />
+
+      <CredentialDialog
+        projectId={id}
+        integration={editing}
+        onClose={() => setEditing(null)}
+      />
+    </div>
+  );
+}
+
+function Section({
+  title,
+  icon: Icon,
+  blurb,
+  items,
+  empty,
+  onConfigure,
+}: {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  blurb: string;
+  items: ProjectIntegration[];
+  empty: string;
+  onConfigure: (i: ProjectIntegration) => void;
+}) {
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-col gap-0.5">
+        <h2 className="font-display flex items-center gap-2 text-lg font-bold tracking-[-0.015em]">
+          <Icon className="size-4" aria-hidden /> {title}
+        </h2>
+        <p className="text-muted-foreground text-[12.5px]">{blurb}</p>
+      </div>
+
+      {items.length === 0 ? (
+        <Card className="text-muted-foreground p-6 text-center text-sm">{empty}</Card>
+      ) : (
+        <ul className="space-y-2">
+          {items.map((i) => (
+            <li key={`${i.kind}:${i.id}`}>
+              <Card className="flex flex-wrap items-start justify-between gap-3 p-4">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[13.5px] font-medium">{i.name}</span>
+                    <Badge variant="outline" className="gap-1 font-mono text-[10px]">
+                      {i.origin === "organization" ? (
+                        <Globe className="size-3" aria-hidden />
+                      ) : (
+                        <Building2 className="size-3" aria-hidden />
+                      )}
+                      {i.origin === "organization" ? "org-wide" : BUSINESS_UNIT_LABEL.toLowerCase()}
+                    </Badge>
+                  </div>
+                  {i.description && (
+                    <p className="text-muted-foreground text-[12.5px]">{i.description}</p>
+                  )}
+                  {i.stages.length > 0 && (
+                    <p className="text-muted-foreground text-[11.5px]">
+                      {i.stages.map((s) => PHASE_LABEL[s as Phase] ?? s).join(" · ")}
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex shrink-0 items-center gap-2">
+                  <CredentialState integration={i} />
+                  {i.needsProjectCredential && (
+                    <Button variant="outline" size="sm" onClick={() => onConfigure(i)}>
+                      <KeyRound className="mr-1 size-3.5" aria-hidden />
+                      {i.credential ? "Update" : "Configure"}
+                    </Button>
+                  )}
+                </div>
+              </Card>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** The credential's state in words, because "no badge" and "no credential
+ *  needed" look identical and mean opposite things. */
+function CredentialState({ integration }: { integration: ProjectIntegration }) {
+  if (!integration.needsProjectCredential) {
+    return (
+      <Badge variant="outline" className="text-muted-foreground gap-1 font-mono text-[10px]">
+        <ShieldCheck className="size-3" aria-hidden />
+        Runs on the shared key
+      </Badge>
+    );
+  }
+  if (!integration.credential) {
+    return (
+      <Badge variant="outline" className="border-warning/50 text-warning gap-1 font-mono text-[10px]">
+        <KeyRound className="size-3" aria-hidden />
+        Needs a credential
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="text-muted-foreground gap-1 font-mono text-[10px]">
+      <KeyRound className="size-3" aria-hidden />
+      {integration.credential.account ?? integration.credential.label}
+    </Badge>
+  );
+}
+
+function CredentialDialog({
+  projectId,
+  integration,
+  onClose,
+}: {
+  projectId: string;
+  integration: ProjectIntegration | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [label, setLabel] = React.useState("");
+  const [account, setAccount] = React.useState("");
+  const [secret, setSecret] = React.useState("");
+
+  // Reset to the integration being edited each time the dialog opens, so a
+  // second Configure never shows the previous target's values.
+  React.useEffect(() => {
+    setLabel(integration?.credential?.label ?? "");
+    setAccount(integration?.credential?.account ?? "");
+    setSecret("");
+  }, [integration]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      saveProjectCredential(projectId, {
+        kind: integration!.kind,
+        targetId: integration!.id,
+        label: label.trim(),
+        account: account.trim() || null,
+        secret: secret || undefined,
+      }),
+    onSuccess: () => {
+      toast.success("Credential saved");
+      queryClient.invalidateQueries({ queryKey: qk.projects.integrations(projectId) });
+      onClose();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const isUpdate = Boolean(integration?.credential);
+
+  return (
+    <Dialog open={integration !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            {isUpdate ? "Update" : "Configure"} {integration?.name} credential
+          </DialogTitle>
+          <DialogDescription>
+            How this project authenticates to {integration?.name}. The organization already
+            approved the integration; this identifies your team to it.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="pic-label">Name</Label>
+            <Input
+              id="pic-label"
+              value={label}
+              placeholder="Payments delivery bot"
+              onChange={(e) => setLabel(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pic-account">Account</Label>
+            <Input
+              id="pic-account"
+              value={account}
+              placeholder="svc-payments@acme.test"
+              onChange={(e) => setAccount(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pic-secret">{isUpdate ? "New secret" : "Secret"}</Label>
+            <Input
+              id="pic-secret"
+              type="password"
+              value={secret}
+              autoComplete="off"
+              placeholder={isUpdate ? "Leave blank to keep the current one" : "Token or key"}
+              onChange={(e) => setSecret(e.target.value)}
+            />
+            <p className="text-muted-foreground text-[11.5px]">
+              Stored in the tenant&apos;s secrets vault and never echoed back.
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={!label.trim() || save.isPending || (!isUpdate && !secret)}
+          >
+            {save.isPending ? "Saving…" : "Save credential"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

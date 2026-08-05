@@ -17,13 +17,8 @@ import {
 } from "@/components/ui/select";
 import { getModelOptions } from "@/lib/api/models";
 import { qk } from "@/lib/api/query-keys";
+import { providerLabel } from "@/lib/models/provider-labels";
 import type { ModelOption, ModelProviderKind } from "@/lib/schemas/model";
-
-const PROVIDER_LABEL: Record<ModelProviderKind, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-};
 
 /** Subtle per-provider dot — mirrors the admin Model Providers vocabulary without
  * inventing a second icon set. Tints stay quiet (a dot, not a badge). */
@@ -175,7 +170,7 @@ export function ModelSelector({
                 />
                 <span className="truncate font-semibold">{displayName}</span>
                 <span className="text-muted-foreground/70 font-mono text-[10px] tracking-wide uppercase">
-                  {PROVIDER_LABEL[models[0]!.provider]}
+                  {providerLabel(models[0]!.provider)}
                 </span>
               </SelectLabel>
               {models.map((m) => (

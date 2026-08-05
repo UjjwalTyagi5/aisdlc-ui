@@ -1,5 +1,6 @@
 "use client";
 
+import { PageTitle } from "@/components/app/page-title";
 import { CostDashboard } from "@/components/app/cost-dashboard";
 import { BudgetHub } from "@/components/app/budget-hub";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
@@ -7,7 +8,7 @@ import { ScopeChip } from "@/components/app/scope-indicator";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { hasPermission } from "@/lib/auth/permissions";
-import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 
 export default function CostPage() {
   const session = useSession({ required: true });
@@ -48,16 +49,14 @@ export default function CostPage() {
         }}
       >
         <div>
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            Observe
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            Cost
-          </h1>
+          <PageTitle>Cost</PageTitle>
 
+          {/* The chip stays, and matters more here than anywhere: every total
+              below is scope-filtered server-side, so a Business Unit Admin's
+              figures exclude every sibling. An unlabelled number would read as
+              the organisation's. */}
           {scope !== null && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <ScopeChip
                 kind={isOrgWide ? "organization" : level}
                 name={scopeName}
@@ -65,22 +64,6 @@ export default function CostPage() {
               />
             </div>
           )}
-
-          <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-            {/* Spend figures are scope-filtered server-side (app/api/cost),
-                so the totals below are the viewer's own. Saying "your tenant's
-                spend" to a Business Unit Admin would misdescribe a number that
-                excludes every sibling unit. */}
-            {isOrgWide
-              ? "Your organisation's LLM spend by agent and model, across every business unit."
-              : level === "business_unit"
-                ? `LLM spend by agent and model for the ${
-                    managedBusinessUnitIds.length === 1
-                      ? BUSINESS_UNIT_LABEL.toLowerCase()
-                      : `${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`
-                  } you administer. Other ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} are excluded from every total here.`
-                : "LLM spend by agent and model for the projects you're assigned to."}
-          </p>
         </div>
       </header>
 

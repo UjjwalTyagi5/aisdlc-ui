@@ -63,6 +63,20 @@ export function ScopeChip({
   className,
   size = "md",
 }: ScopeChipProps) {
+  /**
+   * An unnamed organization scope renders NOTHING.
+   *
+   * The chip exists to stop a filtered number being misread as the whole — a
+   * Business Unit Admin seeing "3 projects" has to know it means their unit.
+   * An org-wide viewer has no narrower scope to confuse it with: everything
+   * they see is everything there is, so "ORGANIZATION" restated the default on
+   * every screen and taught nobody anything.
+   *
+   * A NAMED organization scope still renders, because a name is information.
+   * The rule is about the bare tier label, not about the tier.
+   */
+  if (kind === "organization" && !name) return null;
+
   const Icon = SCOPE_ICON[kind];
   const label = scopeKindLabel(kind);
 

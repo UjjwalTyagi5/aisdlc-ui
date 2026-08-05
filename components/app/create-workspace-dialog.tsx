@@ -195,10 +195,18 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
 
   const restrictedModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "specific");
   const globalModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "global");
-  const restrictedConnectors = (connectorGrantsQ.data ?? []).filter(
-    (g) => g.visibility === "specific",
+  /**
+   * EVERY connector kind is offered, not only the already-granted ones.
+   *
+   * This dialog is where a unit's connector access is decided, and with
+   * global/specific gone there is no set of kinds a new unit gets
+   * automatically. Offering only kinds some other unit already holds would
+   * make the first unit to want something unable to ask for it here.
+   */
+  const restrictedConnectors = (Object.keys(CONNECTOR_KIND_LABEL) as ConnectorKind[]).map(
+    (kind) => ({ kind, businessUnitIds: [] as string[] }),
   );
-  const globalConnectors = (connectorGrantsQ.data ?? []).filter((g) => g.visibility === "global");
+  const globalConnectors: { kind: ConnectorKind }[] = [];
 
   const [grantedModels, setGrantedModels] = React.useState<string[]>([]);
   const [grantedConnectors, setGrantedConnectors] = React.useState<string[]>([]);
@@ -292,8 +300,14 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-line-soft bg-panel-elevated max-w-lg">
-        <DialogHeader>
+      {/* This form is long — name, cost centre, budget, status, per-model and
+          per-connector access, then the admin. Scrolling the whole dialog
+          worked but left Create somewhere below the fold with no sign it was
+          there. So the body scrolls and the header and footer stay put: the
+          primary action is always visible, and the inner model list keeps its
+          own scroller without competing with the page. */}
+      <DialogContent className="border-line-soft bg-panel-elevated flex max-h-[calc(100dvh-2rem)] max-w-lg flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
           <div className="text-brand-bright mb-1 font-mono text-[11px] tracking-widest uppercase">
             New {BUSINESS_UNIT_LABEL.toLowerCase()}
           </div>
@@ -307,7 +321,8 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         </DialogHeader>
 
         <Form {...form}>
-          <form onSubmit={submit} className="space-y-5">
+          <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 pb-5">
             <FormField
               control={form.control}
               name="displayName"
@@ -555,8 +570,9 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                 Members list.
               </p>
             </div>
+            </div>
 
-            <DialogFooter>
+            <DialogFooter className="border-line-soft shrink-0 border-t px-6 py-4">
               <Button
                 type="button"
                 variant="outline"

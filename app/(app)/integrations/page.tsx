@@ -6,21 +6,13 @@ import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  ArrowRight,
-  CheckCircle2,
-  CircleDashed,
-  Eye,
-  KeyRound,
   Loader2,
-  Plug,
-  ShieldAlert,
+  Search,
   Unplug,
-  type LucideIcon,
 } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -34,16 +26,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
-import { ConnectorGrantsCard } from "@/components/app/connector-grants-card";
-import { McpServersPanel } from "@/components/app/mcp-servers-panel";
-import { RequireRole } from "@/components/auth/require-role";
+import { listIntegrationAccess } from "@/lib/api/integration-access";
+import { AddMcpServerDialog } from "@/components/app/add-mcp-server-dialog";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   disconnectConnector,
-  installConnector,
   listConnectorGrants,
   listConnectors,
   setConnectorCredentials,
@@ -52,24 +41,12 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
 import { onboardingScopeFor } from "@/lib/mock/connector-scope";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { qk } from "@/lib/api/query-keys";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
-import type { Capability, Connector, ConnectorKind } from "@/lib/schemas";
+import type { Connector, ConnectorKind } from "@/lib/schemas";
 
 const KIND_LABEL = CONNECTOR_KIND_LABEL;
-
-const KIND_TAGLINE: Record<ConnectorKind, string> = {
-  jira: "Read issues + write sub-tasks. Webhook-driven.",
-  azure_devops:
-    "Boards, Repos & Pipelines — work items, pull requests, and CI/CD from one connection.",
-  github: "Read repos + open PRs + post check-runs via a GitHub App.",
-  azure_repos: "Read repos + commit + open PRs.",
-  github_actions: "Trigger workflows + read run status via a PAT.",
-  slack: "HITL notifications + interactive approvals.",
-  sso_okta: "SAML + OIDC identity provider.",
-  sso_entra: "SAML + OIDC identity provider.",
-};
 
 /** Brand-colored monogram tile per provider (short mark + official brand color). */
 const KIND_BRAND: Record<ConnectorKind, { mark: string; bg: string }> = {
@@ -79,6 +56,8 @@ const KIND_BRAND: Record<ConnectorKind, { mark: string; bg: string }> = {
   azure_repos: { mark: "AR", bg: "#C8511B" }, // Azure Repos orange
   github_actions: { mark: "GA", bg: "#2088FF" }, // GitHub Actions blue
   slack: { mark: "S", bg: "#4A154B" }, // Slack aubergine
+  ms_teams: { mark: "T", bg: "#4B53BC" }, // Teams indigo
+  sharepoint: { mark: "SP", bg: "#038387" }, // SharePoint teal
   sso_okta: { mark: "OK", bg: "#007DC1" }, // Okta blue
   sso_entra: { mark: "ME", bg: "#0A66C2" }, // Microsoft Entra blue
 };
@@ -96,6 +75,19 @@ const KIND_LOGO: Partial<Record<ConnectorKind, { src: string; fit: "contain" | "
 /** Shared gradient for primary CTAs — the app's brand-gradient button. */
 const PRIMARY_CTA =
   "from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]";
+
+/** A neutral monogram for integrations with no vendor brand of their own —
+ *  MCP servers are named by whoever registered them. */
+function GenericGlyph({ mark }: { mark: string }) {
+  return (
+    <div
+      aria-hidden
+      className="border-line-soft bg-surface-2 text-muted-foreground grid size-10 shrink-0 place-items-center rounded-lg border font-mono text-[13px] font-semibold"
+    >
+      {mark}
+    </div>
+  );
+}
 
 function KindGlyph({ kind, size = 10 }: { kind: ConnectorKind; size?: 10 | 12 }): React.ReactElement {
   const dim = size === 12 ? "size-12" : "size-10";
@@ -138,10 +130,8 @@ function KindGlyph({ kind, size = 10 }: { kind: ConnectorKind; size?: 10 | 12 })
 }
 
 /** Provider kinds that have live validation deferred — show "pending" annotation. */
-const VALIDATION_PENDING_KINDS: ConnectorKind[] = ["github", "azure_repos", "slack"];
 
 /** Provider kinds connected by pasting a credential (PAT / API token) instead of OAuth. */
-const CREDENTIAL_KINDS: ConnectorKind[] = ["azure_devops", "jira", "github_actions"];
 
 /** Connector categories — the page is grouped by what each integration is FOR.
  *  Azure Repos is intentionally absent: Azure DevOps is now one consolidated tile
@@ -169,7 +159,13 @@ const CATEGORIES: { id: string; title: string; blurb: string; kinds: ConnectorKi
     id: "notifications",
     title: "Notifications & approvals",
     blurb: "Human-in-the-loop alerts and gate approvals.",
-    kinds: ["slack"],
+    kinds: ["slack", "ms_teams"],
+  },
+  {
+    id: "documents",
+    title: "Documents & knowledge",
+    blurb: "Read specifications and file generated documentation where the business looks for it.",
+    kinds: ["sharepoint"],
   },
 ];
 
@@ -196,10 +192,6 @@ function chipLabel(kind: ConnectorKind): string {
 /** A connector is "connected" only when installed AND its health isn't disconnected.
  * The global env probe can mark a connector installed while it's actually disconnected,
  * so this is the single source of truth for status pills, counts, and card actions. */
-function isConnected(c: Connector): boolean {
-  return c.installed && c.health !== "disconnected";
-}
-
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
   const session = useRawSession();
@@ -231,10 +223,29 @@ export default function IntegrationsPage() {
     enabled: !isOrgAdmin,
   });
 
-  const [installing, setInstalling] = React.useState<ConnectorKind | null>(null);
-  const [scopeFor, setScopeFor] = React.useState<Connector | null>(null);
   const [disconnectFor, setDisconnectFor] = React.useState<Connector | null>(null);
   const [credentialsFor, setCredentialsFor] = React.useState<ConnectorKind | null>(null);
+  // Shared by the matrix, the catalogue and the MCP panel — one box, one term,
+  // whichever half of the page the answer is in.
+  const [query, setQuery] = React.useState("");
+
+  // Access counts for the cards, in one call rather than one per card.
+  const accessQ = useQuery({
+    queryKey: qk.integrationAccess.list(),
+    queryFn: () => listIntegrationAccess(),
+  });
+  // Keyed by `kind:id` so connectors and MCP servers share one lookup.
+  //
+  // `grantedUnitCount`, NOT `units.length` — the payload lists every unit as a
+  // candidate so the grant picker has something to offer, and counting those
+  // told every card "3 business units" whatever its grant actually said.
+  const accessByKind = React.useMemo(() => {
+    const m = new Map<string, { units: number; projects: number }>();
+    for (const r of accessQ.data ?? []) {
+      m.set(`${r.kind}:${r.id}`, { units: r.grantedUnitCount, projects: r.projectCount });
+    }
+    return m;
+  }, [accessQ.data]);
 
   // On mount: read ?connected={kind} param set by OAuthCallbackHandler and fire
   // a success toast (Connect Flow step 5 — UI-SPEC Copywriting Contract).
@@ -250,31 +261,6 @@ export default function IntegrationsPage() {
 
   // install / disconnect mutations — Wave C: replace setTimeout stub with real
   // OAuth redirect handling (UI-SPEC Connect Flow steps 1-2).
-  const installMutation = useMutation({
-    mutationFn: async (kind: ConnectorKind) => {
-      setInstalling(kind);
-      return installConnector(kind);
-    },
-    onSuccess: (data) => {
-      // Wave C: if FastAPI returned {redirectUrl}, navigate to the provider OAuth
-      // consent page (Connect Flow step 2). The browser navigates away; button
-      // state is moot after this point.
-      if ("redirectUrl" in data && typeof data.redirectUrl === "string") {
-        window.location.assign(data.redirectUrl);
-        return;
-      }
-      // Non-OAuth / direct-install path (backward-compat): data is a Connector.
-      const c = data as Connector;
-      toast.success(`${c.name} connected`);
-      queryClient.invalidateQueries({ queryKey: ["connectors"] });
-    },
-    onError: (err, kind) =>
-      toast.error(`Couldn't connect ${KIND_LABEL[kind]}`, {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-    onSettled: () => setInstalling(null),
-  });
-
   const disconnectMutation = useMutation({
     mutationFn: (kind: ConnectorKind) => disconnectConnector(kind),
     onSuccess: (c) => {
@@ -378,28 +364,33 @@ export default function IntegrationsPage() {
   // Split for the control-panel layout: connected integrations are featured at the
   // top; everything else becomes a quiet "available to connect" grid. Tiles keep
   // CATEGORIES order so the IA (work-tracking → SCM → deployment → ...) is preserved.
-  const connected = resolved.filter((c) => isConnected(c));
-  const available = resolved.filter((c) => !isConnected(c));
-  const attentionCount = connected.filter((c) => c.health === "degraded").length;
 
-  // Connected connectors split by the level they were onboarded at, so the
-  // cascade is visible rather than implied: an org-wide connector is inherited
-  // by every unit and cannot be disconnected from inside one.
-  const orgConnected = connected.filter((c) => c.scope === "organization");
-  const unitConnected = connected.filter((c) => c.scope === "business_unit");
-
-  // Defense-in-depth gate: M7.2 connector:manage permission (UI-SPEC Permission Gating Contract).
-  // Passed down to the action buttons so they can disable + tooltip when false.
-  const canManage = hasPermission(session, "connector:manage");
-
-  const actionHandlers = {
-    canManage,
-    onInstall: (c: Connector) => installMutation.mutate(c.kind),
-    onInspect: (c: Connector) => setScopeFor(c),
-    onDisconnect: (c: Connector) => setDisconnectFor(c),
-    onAddCredentials: (c: Connector) => setCredentialsFor(c.kind),
-    isInstalling: (c: Connector) => installMutation.isPending && installing === c.kind,
+  // The catalogue answers to the same search box as the matrix. Counts above
+  // stay unfiltered: a total that moved as you typed would read as a filtered
+  // total rather than the estate's size.
+  const matchesQuery = (c: Connector) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (KIND_LABEL[c.kind] ?? "").toLowerCase().includes(q) ||
+      c.kind.toLowerCase().includes(q) ||
+      (c.name ?? "").toLowerCase().includes(q)
+    );
   };
+  const catalogueConnectors = resolved.filter(matchesQuery);
+
+  const mcpRows = (accessQ.data ?? [])
+    .filter((r) => r.kind === "mcp")
+    .filter((r) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return true;
+      return r.name.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q);
+    });
+
+  // The catalogue no longer splits by onboarding level. That split existed to
+  // show the cascade, and the access matrix above now shows it properly — per
+  // integration, per unit, per project — so repeating it as two headings said
+  // less in more space.
 
   return (
     <div className="w-full space-y-10 p-4 md:px-10 md:py-8">
@@ -413,29 +404,31 @@ export default function IntegrationsPage() {
           animationFillMode: "both",
         }}
       >
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          Govern
-        </div>
-        <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-          Integrations
-        </h1>
-        <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-          {isOrgAdmin
-            ? `OAuth- and key-based connectors. Permit a kind below and choose who gets it — globally, or only the ${BUSINESS_UNIT_LABEL.toLowerCase()}s you name. Credentials live in the tenant's secrets vault, never echoed back; revocation is a one-click action.`
-            : `The integrations your Organization Admin permitted this ${BUSINESS_UNIT_LABEL.toLowerCase()}. Connect the ones your teams need — credentials live in the tenant's secrets vault, never echoed back.`}
-        </p>
+        <PageTitle>Integrations</PageTitle>
       </header>
 
-      {/* Status anchor — the focal summary that breaks the uniform-grid monotony */}
-      <StatusStrip
-        connected={connected.length}
-        attention={attentionCount}
-        available={available.length}
-      />
-
-      {/* The policy itself, at the top — everything below is its consequence. */}
-      {isOrgAdmin && <ConnectorGrantsCard kinds={ALL_KINDS} kindLabel={(k) => KIND_LABEL[k]} />}
+      {/* One search across both halves of the page: the catalogue you onboard
+          from, and the matrix of who holds what. Splitting it into two boxes
+          would ask the reader to know which half their answer is in. */}
+      <div className="border-line-soft bg-surface-1 flex max-w-md items-center gap-2 rounded-lg border px-2.5">
+        <Search className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Search integrations, ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} or projects…`}
+          aria-label={`Search integrations, ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} or projects`}
+          className="h-9 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            className="text-muted-foreground hover:text-foreground shrink-0 font-mono text-[10.5px] transition-colors"
+          >
+            Clear
+          </button>
+        )}
+      </div>
 
       {!isOrgAdmin && visibleKinds.length === 0 && !grantsQ.isLoading && (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
@@ -447,82 +440,82 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {/* Available — quiet, dense, scannable grid */}
-      {available.length > 0 && (
-        <section aria-labelledby="available-heading" className="space-y-4">
-          <SectionLabel
-            id="available-heading"
-            eyebrow="Catalog"
-            title="Available to connect"
-            blurb="Connect a provider to unlock the agents that depend on it."
-          />
+      {/* ── Connectors ──────────────────────────────────────────────────────
+          ONE grid, not three lists. Connected and available differ by a health
+          pill and a call to action, which the card already carries — splitting
+          them into sections made you look in two places for one vendor, and
+          the access matrix made a third. Everything an integration needs doing
+          to it now lives on its own screen, one click in. */}
+      <section aria-labelledby="connectors-heading" className="space-y-4">
+        <SectionLabel
+          id="connectors-heading"
+          eyebrow="Connectors"
+          title="Connectors"
+          blurb={
+            isOrgAdmin
+              ? `Open one to see which ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} hold it, which projects use it, and to revoke either.`
+              : `Open one to see what your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} hold and which of your projects use it.`
+          }
+        />
+        {catalogueConnectors.length === 0 ? (
+          <Card className="text-muted-foreground p-8 text-center text-sm">
+            No connector matches &ldquo;{query.trim()}&rdquo;.
+          </Card>
+        ) : (
           <ul className="grid items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {available.map((c) => (
-              <AvailableConnectorTile
+            {catalogueConnectors.map((c) => (
+              <IntegrationCard
                 key={c.id}
-                connector={c}
-                busy={actionHandlers.isInstalling(c)}
-                {...actionHandlers}
+                href={`/integrations/${encodeURIComponent(c.kind)}`}
+                label={KIND_LABEL[c.kind]}
+                category={chipLabel(c.kind)}
+                glyph={<KindGlyph kind={c.kind} />}
+                access={accessByKind.get(`connector:${c.kind}`)}
               />
             ))}
           </ul>
-        </section>
-      )}
-
-      {/* Connected — featured control rows, one section per onboarding level */}
-      {orgConnected.length > 0 && (
-        <section aria-labelledby="connected-org-heading" className="space-y-4">
-          <SectionLabel
-            id="connected-org-heading"
-            eyebrow="Active · Organization"
-            title="Onboarded org-wide"
-            blurb={`Managed by an Organization Admin and inherited by every ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
-          />
-          <ul className="space-y-3">
-            {orgConnected.map((c) => (
-              <FeaturedConnectorRow
-                key={c.id}
-                connector={c}
-                busy={actionHandlers.isInstalling(c)}
-                {...actionHandlers}
-              />
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {unitConnected.length > 0 && (
-        <section aria-labelledby="connected-unit-heading" className="space-y-4">
-          <SectionLabel
-            id="connected-unit-heading"
-            eyebrow={`Active · ${BUSINESS_UNIT_LABEL}`}
-            title={
-              scopedUnits.length === 1
-                ? `Onboarded in ${scopedUnits[0]!.name}`
-                : `Onboarded in a ${BUSINESS_UNIT_LABEL.toLowerCase()}`
-            }
-            blurb={`Managed by the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s own Admin. Not visible to any other ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
-          />
-          <ul className="space-y-3">
-            {unitConnected.map((c) => (
-              <FeaturedConnectorRow
-                key={c.id}
-                connector={c}
-                busy={actionHandlers.isInstalling(c)}
-                {...actionHandlers}
-              />
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {/* MCP servers — user-registered, creator-scoped (distinct from tenant connectors) */}
-      <section aria-labelledby="mcp-heading" className="space-y-4">
-        <McpServersPanel />
+        )}
       </section>
 
-      {/* Scope inspector */}
-      <ScopeInspector connector={scopeFor} onClose={() => setScopeFor(null)} />
+      {/* MCP servers, in the same grid shape. They are governed identically —
+          granted to units, consumed by projects — so a reader scanning for
+          "who can reach Postgres" should not have to learn a second layout to
+          find it. */}
+      <section aria-labelledby="mcp-heading" className="space-y-4">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <SectionLabel
+            id="mcp-heading"
+            eyebrow="MCP"
+            title="MCP servers"
+            blurb="Tool servers your projects' agents can call. Open one to see who holds it."
+          />
+          {/* Connectors need no equivalent — their kinds ship in the catalogue.
+              An MCP server is whatever someone stood up, so it does not exist
+              until it is named here. */}
+          {isOrgAdmin && <AddMcpServerDialog />}
+        </div>
+        {mcpRows.length === 0 ? (
+          <Card className="text-muted-foreground p-8 text-center text-sm">
+            {query.trim()
+              ? `No MCP server matches "${query.trim()}".`
+              : "No MCP server is registered yet."}
+          </Card>
+        ) : (
+          <ul className="grid items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {mcpRows.map((r) => (
+              <IntegrationCard
+                key={r.id}
+                href={`/integrations/${encodeURIComponent(r.id)}`}
+                label={r.name}
+                category="MCP server"
+                glyph={<GenericGlyph mark={r.name.slice(0, 2).toUpperCase()} />}
+                access={accessByKind.get(`mcp:${r.id}`)}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
 
       {/* Disconnect confirm */}
       <DisconnectConfirm
@@ -571,415 +564,75 @@ function SectionLabel({
   );
 }
 
-// ───────── Status strip — control-panel summary anchor ─────────
+// ───────── Integration card ─────────
 
-function StatusStrip({
-  connected,
-  attention,
-  available,
+/**
+ * One card per integration, and the whole card opens its screen.
+ *
+ * The page used to be three lists — available, connected org-wide, connected
+ * in a unit — plus a separate access matrix. Four places to look for one
+ * integration. A card carries what you scan for (what it is, whether it works,
+ * how far it reaches) and everything you act on lives one click deeper, on the
+ * screen that has the context for it.
+ */
+function IntegrationCard({
+  href,
+  label,
+  category,
+  glyph,
+  access,
 }: {
-  connected: number;
-  attention: number;
-  available: number;
+  href: string;
+  label: string;
+  category: string;
+  glyph: React.ReactNode;
+  access?: { units: number; projects: number };
 }) {
-  const segments: {
-    icon: LucideIcon;
-    value: number;
-    label: string;
-    tone: string;
-    dim?: boolean;
-  }[] = [
-    {
-      icon: CheckCircle2,
-      value: connected,
-      label: "Connected",
-      tone: "text-success bg-success/12",
-    },
-    {
-      icon: ShieldAlert,
-      value: attention,
-      label: attention === 1 ? "Needs attention" : "Need attention",
-      tone: "text-warning bg-warning/15",
-      dim: attention === 0,
-    },
-    {
-      icon: CircleDashed,
-      value: available,
-      label: "Available",
-      tone: "text-info bg-info/12",
-    },
-  ];
-  return (
-    <div
-      className="border-line-soft bg-panel-elevated grid grid-cols-3 overflow-hidden rounded-2xl border shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_8px_24px_-12px_oklch(0_0_0_/_0.4)]"
-      style={{
-        animationName: "rise",
-        animationDuration: "0.6s",
-        animationDelay: "0.05s",
-        animationTimingFunction: "cubic-bezier(0.2, 0.7, 0.2, 1)",
-        animationFillMode: "both",
-      }}
-    >
-      {segments.map((s, i) => (
-        <div
-          key={s.label}
-          className={cn(
-            "flex items-center gap-3.5 px-5 py-4",
-            i > 0 && "border-line-soft border-l",
-            s.dim && "opacity-55",
-          )}
-        >
-          <span className={cn("grid size-9 shrink-0 place-items-center rounded-xl", s.tone)}>
-            <s.icon className="size-4.5" aria-hidden />
-          </span>
-          <div className="flex min-w-0 flex-col">
-            <span className="font-display text-2xl leading-none font-bold tabular-nums">
-              {s.value}
-            </span>
-            <span className="text-muted-foreground mt-1 text-[12px]">{s.label}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ───────── Shared permission-gated action buttons ─────────
-
-type ActionProps = {
-  connector: Connector;
-  busy?: boolean;
-  canManage?: boolean;
-  onInstall: (c: Connector) => void;
-  onInspect: (c: Connector) => void;
-  onDisconnect: (c: Connector) => void;
-  onAddCredentials: (c: Connector) => void;
-};
-
-/** Renders exactly the right buttons for a connector's state + the caller's RBAC.
- * `block` makes the single primary CTA fill its container (used by the tile). */
-function ConnectorActions({
-  connector,
-  busy,
-  canManage,
-  connected,
-  block,
-  onInstall,
-  onInspect,
-  onDisconnect,
-  onAddCredentials,
-}: ActionProps & { connected: boolean; block?: boolean }) {
-  const isCredentialKind = CREDENTIAL_KINDS.includes(connector.kind);
-  const label = KIND_LABEL[connector.kind];
-
-  if (connected) {
-    return (
-      <>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => onInspect(connector)}
-          aria-label={`Inspect ${label} scopes`}
-        >
-          <Eye className="size-4" aria-hidden />
-        </Button>
-        {isCredentialKind && canManage && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onAddCredentials(connector)}
-            className="border-line-soft"
-            aria-label={`Update ${label} credentials`}
-          >
-            <KeyRound className="size-4" aria-hidden />
-            Update key
-          </Button>
-        )}
-        <RequireRole capability="connector:revoke">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onDisconnect(connector)}
-            className="border-line-soft"
-          >
-            <Unplug className="size-4" aria-hidden />
-            Disconnect
-          </Button>
-        </RequireRole>
-      </>
-    );
-  }
-
-  // Credential-based providers (ADO / Jira) — primary action opens the key dialog.
-  if (isCredentialKind) {
-    return canManage ? (
-      <Button
-        size="sm"
-        onClick={() => onAddCredentials(connector)}
-        aria-label={`Add ${label} credentials`}
-        className={cn(PRIMARY_CTA, block && "w-full")}
-      >
-        <KeyRound className="size-4" aria-hidden />
-        Add credentials
-      </Button>
-    ) : (
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span tabIndex={0} className={cn(block && "w-full")}>
-              <Button
-                size="sm"
-                disabled
-                aria-label={`Add ${label} credentials`}
-                className={cn(block && "w-full")}
-              >
-                <KeyRound className="size-4" aria-hidden />
-                Add credentials
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>
-            You need the connector:manage permission to configure integrations.
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    );
-  }
-
-  // OAuth providers — Connect button (gated on connector:manage / legacy install).
-  const connectBtn = (disabled?: boolean) => (
-    <Button
-      size="sm"
-      onClick={disabled ? undefined : () => onInstall(connector)}
-      disabled={disabled || busy}
-      aria-busy={busy}
-      aria-label={`Connect ${label}`}
-      className={cn(PRIMARY_CTA, block && "w-full")}
-    >
-      {busy ? (
-        <Loader2 className="size-4 animate-spin" aria-hidden />
-      ) : (
-        <Plug className="size-4" aria-hidden />
-      )}
-      {busy ? "Authenticating…" : "Connect"}
-    </Button>
-  );
-
-  return canManage ? (
-    connectBtn()
-  ) : (
-    <RequireRole
-      capability="connector:install"
-      fallback={
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span tabIndex={0} className={cn(block && "w-full")}>
-                <Button
-                  size="sm"
-                  disabled
-                  aria-label={`Connect ${label}`}
-                  className={cn(block && "w-full")}
-                >
-                  <Plug className="size-4" aria-hidden />
-                  Connect
-                </Button>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>
-              You need the connector:manage permission to connect integrations.
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      }
-    >
-      {connectBtn()}
-    </RequireRole>
-  );
-}
-
-// ───────── Featured connected row ─────────
-
-function FeaturedConnectorRow({ connector, busy, ...handlers }: ActionProps) {
-  const isPendingValidation =
-    connector.health === "degraded" && VALIDATION_PENDING_KINDS.includes(connector.kind);
-  return (
-    <li>
-      <Card className="border-brand-bright/25 group bg-panel-elevated relative flex flex-col gap-4 overflow-hidden rounded-2xl border p-5 shadow-[0_1px_0_oklch(1_0_0_/_0.05)_inset,0_10px_30px_-14px_oklch(0_0_0_/_0.5)] ring-1 ring-brand-bright/10 transition-shadow hover:shadow-[0_16px_40px_-16px_oklch(0_0_0_/_0.55)] sm:flex-row sm:items-center">
-        {/* Soft brand wash so the connected row reads as the page's focal element */}
-        <span
-          aria-hidden
-          className="from-brand-bright/[0.06] pointer-events-none absolute inset-0 bg-gradient-to-r to-transparent"
-        />
-        <div className="relative flex min-w-0 flex-1 items-center gap-4">
-          <KindGlyph kind={connector.kind} size={12} />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h3 className="font-display truncate text-[16px] font-bold tracking-[-0.01em]">
-                {KIND_LABEL[connector.kind]}
-              </h3>
-              <HealthPill connector={connector} />
-            </div>
-            <p className="text-muted-foreground mt-0.5 truncate text-[12.5px]">
-              {KIND_TAGLINE[connector.kind]}
-            </p>
-            <div className="text-muted-foreground mt-2 flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-[11px]">
-              {connector.account && <span className="truncate">{connector.account}</span>}
-              {connector.lastCheckedAt && (
-                <span>
-                  Synced{" "}
-                  {formatDistanceToNow(new Date(connector.lastCheckedAt), { addSuffix: true })}
-                </span>
-              )}
-            </div>
-            {isPendingValidation && (
-              <p className="text-warning mt-1.5 font-mono text-[11px]">
-                Live validation pending — OAuth app registration required
-              </p>
-            )}
-            {/* Drill-in, matching the provider cards on Models: the card says
-                whether it is connected and healthy, the detail says which
-                business units may use it and where its credentials live. */}
-            <Link
-              href={`/integrations/${encodeURIComponent(connector.kind)}`}
-              className="text-brand-bright mt-2 inline-flex items-center gap-1 font-mono text-[11px] underline-offset-2 hover:underline"
-            >
-              Connections &amp; access
-              <ArrowRight className="size-3" aria-hidden />
-            </Link>
-          </div>
-        </div>
-        <div className="relative flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
-          <ConnectorActions connector={connector} busy={busy} connected {...handlers} />
-        </div>
-      </Card>
-    </li>
-  );
-}
-
-// ───────── Available connector tile ─────────
-
-function AvailableConnectorTile({ connector, busy, ...handlers }: ActionProps) {
-  const wasInstalled = connector.installed; // disconnected but still installed → show status
   return (
     <li className="h-full">
-      <Card className="border-line-soft bg-panel-elevated/70 hover:border-line-soft/0 flex h-full flex-col gap-3 rounded-2xl border p-4 shadow-[0_1px_0_oklch(1_0_0_/_0.03)_inset] transition-[transform,box-shadow,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_30px_-16px_oklch(0_0_0_/_0.5)] hover:ring-1 hover:ring-brand-bright/20">
+      {/* Stretched link, not an onClick: a div with a handler is invisible to
+          a keyboard and cannot be opened in a new tab, which is what people do
+          with a grid of things to compare. The CTA below sits above it. */}
+      <Card className="border-line-soft bg-panel-elevated/70 focus-within:ring-ring relative flex h-full flex-col gap-3 rounded-2xl border p-4 shadow-[0_1px_0_oklch(1_0_0_/_0.03)_inset] transition-[transform,box-shadow,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:shadow-[0_14px_30px_-16px_oklch(0_0_0_/_0.5)] hover:ring-1 hover:ring-brand-bright/20 focus-within:ring-2">
         <div className="flex items-start justify-between gap-2">
-          <KindGlyph kind={connector.kind} />
+          {glyph}
           <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
-            {chipLabel(connector.kind)}
+            {category}
           </span>
         </div>
+
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="font-display truncate text-[14.5px] font-bold tracking-[-0.01em]">
-              {KIND_LABEL[connector.kind]}
+              <Link
+                href={href}
+                className="rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+              >
+                {label}
+              </Link>
             </h3>
-            {wasInstalled && <HealthPill connector={connector} compact />}
           </div>
-          <p className="text-muted-foreground mt-1 line-clamp-2 text-[12px] leading-snug">
-            {KIND_TAGLINE[connector.kind]}
-          </p>
+          {/* NO tagline. "Read issues + write sub-tasks" explains what Jira is,
+              which is useful exactly once and then sits on the card forever for
+              the people who read it daily. The reach below is the fact that
+              changes, and the only one worth the row. */}
+          {access && (
+            <p className="text-muted-foreground mt-2 font-mono text-[11px]">
+              {access.units} {access.units === 1 ? "business unit" : "business units"}
+              {" · "}
+              {access.projects} {access.projects === 1 ? "project" : "projects"}
+            </p>
+          )}
         </div>
-        <div className="mt-1">
-          <ConnectorActions
-            connector={connector}
-            busy={busy}
-            connected={false}
-            block
-            {...handlers}
-          />
-        </div>
+
+        {/* NO connect / credential action.
+            Neither admin tier ever authenticates to a connector: the
+            organization decides which integrations exist and who may use them,
+            and each PROJECT supplies the identity it calls with
+            (/projects/[id]/integrations). An "Add credentials" button here
+            offered a step that belongs to somebody else. */}
       </Card>
     </li>
-  );
-}
-
-// ───────── Health pill — ConnectorHealth tones via tokens ─────────
-
-function HealthPill({ connector, compact }: { connector: Connector; compact?: boolean }) {
-  if (!connector.installed) return null;
-  const tone =
-    connector.health === "healthy"
-      ? "text-success bg-success/10 border-success/30"
-      : connector.health === "degraded"
-        ? "text-warning bg-warning/15 border-warning/40"
-        : "text-destructive bg-destructive/10 border-destructive/30";
-  const Icon: LucideIcon =
-    connector.health === "healthy"
-      ? CheckCircle2
-      : connector.health === "degraded"
-        ? ShieldAlert
-        : Unplug;
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-full border font-mono font-semibold capitalize",
-        compact ? "px-1.5 py-0 text-[9px]" : "px-2 py-0.5 text-[10px]",
-        tone,
-      )}
-    >
-      <Icon className={compact ? "size-2.5" : "size-3"} aria-hidden />
-      {connector.health}
-    </span>
-  );
-}
-
-// ───────── Scope inspector ─────────
-
-function ScopeInspector({
-  connector,
-  onClose,
-}: {
-  connector: Connector | null;
-  onClose: () => void;
-}) {
-  const open = !!connector;
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="font-display">
-            Scope · <span className="font-mono text-sm font-normal">{connector?.name}</span>
-          </DialogTitle>
-          <DialogDescription>
-            Exactly what this token is allowed to do. Requested at install time.
-          </DialogDescription>
-        </DialogHeader>
-        {connector && (
-          <ul className="divide-line-soft border-line-soft divide-y rounded-xl border">
-            {connector.capabilities.length === 0 ? (
-              <li className="text-muted-foreground p-3 text-sm">No capabilities declared.</li>
-            ) : (
-              connector.capabilities.map((cap: Capability) => (
-                <li key={cap.key} className="flex items-center gap-3 p-3 text-sm">
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      "w-14 justify-center font-mono text-[10px] uppercase",
-                      cap.mode === "read" && "text-info",
-                      cap.mode === "write" && "text-warning",
-                      cap.mode === "event" && "text-muted-foreground",
-                    )}
-                  >
-                    {cap.mode}
-                  </Badge>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-mono text-xs">{cap.key}</div>
-                    <div className="text-muted-foreground text-xs">{cap.description}</div>
-                  </div>
-                </li>
-              ))
-            )}
-          </ul>
-        )}
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="border-line-soft">
-            Close
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

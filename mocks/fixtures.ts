@@ -63,6 +63,20 @@ export const PROJECTS: Project[] = [
       { phase: "deployment", status: "queued" },
       { phase: "documentation", status: "queued" },
     ],
+    // Integrations this project actually consumes. Seeded because consumption
+    // is now the only place it happens: with the admin tiers reduced to
+    // onboarding and granting, an empty map here would make both the project's
+    // own Integrations page and every reach figure above it read as broken
+    // rather than as empty ([[scoped-fixtures-need-coverage]]).
+    connectors: {
+      requirements: ["jira"],
+      development: ["github"],
+      deployment: ["github_actions"],
+    },
+    mcpServers: {
+      development: ["mcp_filesystem"],
+      testing: ["mcp_postgres"],
+    },
     monthlyBudgetUsd: 4000,
     monthlySpendUsd: 2680,
     lastActivityAt: iso(0, 0, 4),
@@ -92,6 +106,17 @@ export const PROJECTS: Project[] = [
       { phase: "deployment", status: "queued" },
       { phase: "documentation", status: "queued" },
     ],
+    // Slack and the card-scheme sandbox are both Payments-only — the pair that
+    // proves a unit-scoped integration reaches its own projects and no others.
+    connectors: {
+      requirements: ["jira"],
+      development: ["github"],
+      review: ["slack"],
+    },
+    mcpServers: {
+      development: ["mcp_filesystem"],
+      testing: ["mcp_card_scheme"],
+    },
     monthlyBudgetUsd: 2500,
     monthlySpendUsd: 1140,
     lastActivityAt: iso(0, 3),
@@ -126,6 +151,13 @@ export const PROJECTS: Project[] = [
       { phase: "deployment", status: "queued" },
       { phase: "documentation", status: "queued" },
     ],
+    connectors: {
+      development: ["github"],
+      requirements: ["jira"],
+    },
+    mcpServers: {
+      development: ["mcp_filesystem"],
+    },
     monthlyBudgetUsd: 9000,
     monthlySpendUsd: 7420,
     lastActivityAt: iso(0, 5),
@@ -155,6 +187,10 @@ export const PROJECTS: Project[] = [
       { phase: "deployment", status: "queued" },
       { phase: "documentation", status: "queued" },
     ],
+    // Deliberately consumes nothing. Platform is granted the three global
+    // connector kinds and uses none of them, which is what an un-taken-up
+    // grant looks like — the state `unusedUnitCount` exists to surface, and
+    // one that vanishes if every seeded unit is a consumer.
     monthlyBudgetUsd: 6000,
     monthlySpendUsd: 5880,
     lastActivityAt: iso(0, 0, 40),
@@ -185,6 +221,13 @@ export const PROJECTS: Project[] = [
       { phase: "deployment", status: "queued" },
       { phase: "documentation", status: "queued" },
     ],
+    connectors: {
+      requirements: ["jira"],
+      data_engineering: ["github"],
+    },
+    mcpServers: {
+      data_engineering: ["mcp_postgres"],
+    },
     monthlyBudgetUsd: 5000,
     monthlySpendUsd: 1960,
     lastActivityAt: iso(0, 2),

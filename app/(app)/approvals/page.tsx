@@ -4,6 +4,7 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 
+import { PageTitle } from "@/components/app/page-title";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -26,7 +27,6 @@ import { listProjects } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import { canRaiseRequest } from "@/lib/requests/routing";
 import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { GovernanceApproval } from "@/lib/schemas";
 
 /**
@@ -140,30 +140,17 @@ export default function RequestsAndApprovalsPage() {
         }}
       >
         <div>
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            Act
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            Requests &amp; Approvals
-          </h1>
+          <PageTitle>Requests &amp; Approvals</PageTitle>
 
-          {/* An approval queue is the one screen where an unstated boundary is
-              actively dangerous: "you're all caught up" must be legible as "in
-              Payments", not as "in the organisation". */}
+          {/* A scoped viewer still needs the boundary named: "you're all caught
+              up" must be legible as "in Payments", not "in the organisation".
+              The chip itself is silent for an org-wide viewer, who has no
+              narrower scope to be confused with (see ScopeChip). */}
           {scope !== null && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <ScopeChip kind={isOrgWide ? "organization" : level} name={scopeName} size="sm" />
             </div>
           )}
-
-          <p className="text-muted-foreground mt-2 max-w-[600px] text-[14px]">
-            {isOrgWide
-              ? "Everything across the organisation waiting on your decision — phase sign-offs, agent questions and requests that have climbed to you. As Organization Admin you are the final authority, so you decide rather than raise."
-              : level === "business_unit"
-                ? `Everything in your ${BUSINESS_UNIT_LABEL.toLowerCase()} waiting on your decision, and anything you've raised. Other ${BUSINESS_UNIT_LABEL.toLowerCase()}s' items are not shown and are not yours to decide.`
-                : "Everything across your projects waiting on your decision, and anything you've raised. Requests climb one tier at a time until someone can grant them."}
-          </p>
         </div>
 
         {/* Hidden for the Organization Admin — nothing sits above them to

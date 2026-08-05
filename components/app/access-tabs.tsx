@@ -18,8 +18,15 @@ import { cn } from "@/lib/utils";
  * as the single screen the PRD specifies, without moving any existing route.
  */
 
+/**
+ * No "Assignments" tab.
+ *
+ * Assigning a role moved to Users, where the person is. This screen is about
+ * what a role MEANS — the built-in permissions, and the custom-role builder.
+ * Defining and assigning are different jobs, and keeping them on one screen
+ * made you pick a scope before you could find a person.
+ */
 const TABS = [
-  { label: "Assignments", href: "/admin/access" },
   { label: "Built-in roles", href: "/admin/access/roles" },
   { label: "Custom roles", href: "/admin/roles" },
 ];

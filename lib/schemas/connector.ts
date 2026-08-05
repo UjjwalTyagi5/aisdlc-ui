@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { ConnectorId, TenantId } from "./ids";
 import { ConnectorHealth, ConnectorKind } from "./enums";
-import { GrantVisibility } from "./grant";
 import { Timestamp } from "./primitives";
 
 /** Declares what a connector can read/write. Rendered in the scope inspector. */
@@ -30,20 +29,23 @@ export const ConnectorScope = z.enum(["organization", "business_unit"]);
 export type ConnectorScope = z.infer<typeof ConnectorScope>;
 
 /**
- * Which connector KINDS the Organization Admin permits, and how far each
- * permission reaches — the connector twin of `OrgModelGrant`.
+ * Which Business Units may use a connector KIND.
  *
  * `scope` above records where an existing connection was onboarded. This
  * records something earlier and stricter: whether a kind may be onboarded or
- * used at all, and by whom. A kind with no grant is absent from every Business
- * Unit's catalogue — a BU or Project Admin cannot connect it, and an org-wide
- * connection of that kind stops being inherited. A `specific` grant reaches
- * only the named units.
+ * used at all, and by whom. A kind reaching no unit is absent from every
+ * catalogue — nobody below can connect it, and an org-wide connection of that
+ * kind stops being inherited.
+ *
+ * NO `visibility` FIELD, deliberately — unlike `OrgModelGrant`, which keeps
+ * it. "Global" and "specific" were two ways of saying the same thing about one
+ * list, and they disagreed: a global grant carried an empty `businessUnitIds`
+ * that the UI then had to special-case everywhere, and revoking one unit from
+ * a global grant had no meaning at all. An explicit list of units says it
+ * once. Every unit = every id, which is a fact rather than a mode.
  */
 export const ConnectorGrant = z.object({
   kind: ConnectorKind,
-  visibility: GrantVisibility.default("global"),
-  /** Meaningful only when `visibility === "specific"`. */
   businessUnitIds: z.array(z.string()).default([]),
 });
 export type ConnectorGrant = z.infer<typeof ConnectorGrant>;

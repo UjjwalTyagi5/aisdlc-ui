@@ -13,42 +13,43 @@
  * a grant, the kind is absent from that unit's catalogue and any org-wide
  * connection of that kind stops being inherited by it.
  */
-import { grantReaches } from "@/lib/schemas/grant";
 import type { Connector, ConnectorGrant } from "@/lib/schemas/connector";
 import type { ConnectorKind } from "@/lib/schemas/enums";
 
 /**
- * Seeded so both visibilities carry real data: the three integrations every
- * unit needs are global, while the two that tend to be team-specific are
- * granted to named units only. With everything global the per-unit grant UI
- * would never render a selection and would read as broken.
+ * Seeded so every state the access screen can show carries real data.
+ *
+ * Crucially `azure_devops` reaches only two of the three units. With every
+ * org-wide kind granted to everyone there was NO ungranted unit anywhere, so
+ * the "grant this unit" control had nothing to render and the screen looked
+ * like it could only ever revoke ([[scoped-fixtures-need-coverage]]).
  */
+const ALL_UNITS = ["ws_lending", "ws_payments", "ws_platform"];
+
 let GRANTS: ConnectorGrant[] = [
-  { kind: "jira", visibility: "global", businessUnitIds: [] },
-  { kind: "github", visibility: "global", businessUnitIds: [] },
-  { kind: "azure_devops", visibility: "global", businessUnitIds: [] },
-  { kind: "slack", visibility: "specific", businessUnitIds: ["ws_payments"] },
-  { kind: "github_actions", visibility: "specific", businessUnitIds: ["ws_payments", "ws_lending"] },
+  { kind: "jira", businessUnitIds: [...ALL_UNITS] },
+  { kind: "github", businessUnitIds: [...ALL_UNITS] },
+  { kind: "azure_devops", businessUnitIds: ["ws_lending", "ws_payments"] },
+  { kind: "slack", businessUnitIds: ["ws_payments"] },
+  { kind: "github_actions", businessUnitIds: ["ws_payments", "ws_lending"] },
+  { kind: "ms_teams", businessUnitIds: ["ws_platform"] },
+  { kind: "sharepoint", businessUnitIds: ["ws_lending"] },
 ];
 
 export function listConnectorGrants(): ConnectorGrant[] {
   return GRANTS.map((g) => ({ ...g, businessUnitIds: [...g.businessUnitIds] }));
 }
 
-/** Replace the whole list. A `global` grant's unit list is cleared, since it
- *  reaches every unit regardless and a stale list only misleads. */
+/** Replace the whole list. A kind granted to no unit is dropped rather than
+ *  stored empty: "granted to nobody" and "not granted" are the same state, and
+ *  keeping both invites a UI that distinguishes them. */
 export function setConnectorGrants(grants: ConnectorGrant[]): ConnectorGrant[] {
   const seen = new Set<string>();
   GRANTS = grants.flatMap((g) => {
     if (seen.has(g.kind)) return [];
     seen.add(g.kind);
-    return [
-      {
-        kind: g.kind,
-        visibility: g.visibility,
-        businessUnitIds: g.visibility === "specific" ? [...new Set(g.businessUnitIds)] : [],
-      },
-    ];
+    const units = [...new Set(g.businessUnitIds)];
+    return units.length > 0 ? [{ kind: g.kind, businessUnitIds: units }] : [];
   });
   return listConnectorGrants();
 }
@@ -58,26 +59,28 @@ export function setConnectorGrants(grants: ConnectorGrant[]): ConnectorGrant[] {
  *  to this unit), which is the difference between "everyone has this" and
  *  "someone chose to give you this". */
 export function connectorGrantsForWorkspace(workspaceId: string): ConnectorGrant[] {
-  return listConnectorGrants().filter((g) => grantReaches(g, workspaceId));
+  return listConnectorGrants().filter((g) => g.businessUnitIds.includes(String(workspaceId)));
 }
 
 /**
  * The union of grants reaching ANY of a viewer's units — what someone bound to
  * two units may connect, without asking them which unit they meant.
  *
- * `businessUnitIds` is deliberately emptied. A viewer bounded to Lending has no
- * business learning that a grant also names Payments; the only thing they need
- * from the record is that the kind is permitted and whether it arrived globally
- * or by a specific grant. The org-wide `listConnectorGrants()` keeps the ids,
- * because the Org Admin is the one who wrote them.
+ * `businessUnitIds` is narrowed to the viewer's OWN units rather than emptied.
+ * Emptying it now would read as "granted to nobody", which is exactly what an
+ * absent grant means since visibility went away. A viewer bounded to Lending
+ * still has no business learning that a grant also names Payments, so the
+ * sibling ids are filtered out — the org-wide `listConnectorGrants()` keeps
+ * them all, because the Org Admin is the one who wrote them.
  */
 export function connectorGrantsForWorkspaces(workspaceIds: string[]): ConnectorGrant[] {
+  const own = new Set(workspaceIds.map(String));
   const seen = new Set<string>();
   return workspaceIds.flatMap((id) =>
     connectorGrantsForWorkspace(id).flatMap((g) => {
       if (seen.has(g.kind)) return [];
       seen.add(g.kind);
-      return [{ ...g, businessUnitIds: [] }];
+      return [{ ...g, businessUnitIds: g.businessUnitIds.filter((x) => own.has(String(x))) }];
     }),
   );
 }
@@ -89,19 +92,20 @@ export function permittedConnectorKinds(workspaceId: string): ConnectorKind[] {
 
 /**
  * Grant a Business Unit exactly `kinds` — the Org Admin's per-unit control,
- * used when creating a unit and from its management page.
+ * used when creating a unit and from the Integrations access matrix.
  *
- * Only `specific` grants are touched, for the same reason
- * `setBuModelGrants` skips global models: a globally granted kind reaches
- * every unit by definition, so revoking it *here* could only mean demoting it
- * for the whole organization, which is not what "manage this unit" means.
- * A kind with no grant at all is ignored — a unit cannot be given something
- * the organization has not permitted.
+ * Every kind is now touchable, where before only `specific` grants were: with
+ * one explicit list per kind there is no "global" whose revocation would have
+ * meant demoting it for the whole organization. Removing a unit here removes
+ * exactly that unit.
+ *
+ * A kind absent from the catalogue is CREATED rather than ignored — granting
+ * the first unit is how a kind enters the estate now that nothing is implicitly
+ * available to everyone.
  */
 export function setBuConnectorGrants(workspaceId: string, kinds: string[]): ConnectorGrant[] {
   const wanted = new Set(kinds);
   for (const grant of GRANTS) {
-    if (grant.visibility !== "specific") continue;
     const has = grant.businessUnitIds.includes(workspaceId);
     const want = wanted.has(grant.kind);
     if (want && !has) grant.businessUnitIds.push(workspaceId);
@@ -109,7 +113,50 @@ export function setBuConnectorGrants(workspaceId: string, kinds: string[]): Conn
       grant.businessUnitIds = grant.businessUnitIds.filter((id) => id !== workspaceId);
     }
   }
+  for (const kind of wanted) {
+    if (!GRANTS.some((g) => g.kind === kind)) {
+      GRANTS.push({ kind: kind as ConnectorKind, businessUnitIds: [workspaceId] });
+    }
+  }
+  // A kind left reaching nobody is not granted at all — see setConnectorGrants.
+  GRANTS = GRANTS.filter((g) => g.businessUnitIds.length > 0);
   return connectorGrantsForWorkspace(workspaceId);
+}
+
+/**
+ * Give ONE unit access to one kind — the inverse of `revokeConnectorGrant`,
+ * and the only way a unit gains an integration after it was created.
+ *
+ * Creates the grant when the kind has none, so the first unit to be given
+ * something is also what puts it in the estate.
+ */
+export function grantConnectorToUnit(kind: string, workspaceId: string): string[] {
+  let grant = GRANTS.find((g) => g.kind === kind);
+  if (!grant) {
+    grant = { kind: kind as ConnectorKind, businessUnitIds: [] };
+    GRANTS.push(grant);
+  }
+  if (!grant.businessUnitIds.includes(String(workspaceId))) {
+    grant.businessUnitIds.push(String(workspaceId));
+  }
+  return [...grant.businessUnitIds];
+}
+
+/**
+ * Revoke ONE unit's access to one kind — the Org Admin's action on the access
+ * matrix, where the row is a kind and the cell is a unit.
+ *
+ * Returns the surviving units so the caller can render the consequence without
+ * a refetch: revoking the last one removes the kind from the estate entirely,
+ * and that is worth saying out loud rather than watching a row vanish.
+ */
+export function revokeConnectorGrant(kind: string, workspaceId: string): string[] {
+  const grant = GRANTS.find((g) => g.kind === kind);
+  if (!grant) return [];
+  grant.businessUnitIds = grant.businessUnitIds.filter((id) => id !== String(workspaceId));
+  const left = [...grant.businessUnitIds];
+  GRANTS = GRANTS.filter((g) => g.businessUnitIds.length > 0);
+  return left;
 }
 
 /**

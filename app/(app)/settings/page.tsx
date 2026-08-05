@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 
+import { PageTitle } from "@/components/app/page-title";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getSession } from "@/lib/auth/session";
 import { hasPermission } from "@/lib/auth/permissions";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -18,14 +18,7 @@ export default async function SettingsPage() {
     <div className="max-w-4xl space-y-6 p-4 md:px-10 md:py-8">
       {/* Editorial page header — Mission Control elevation */}
       <div className="space-y-1">
-        <p className="text-brand-bright font-mono text-[11px] font-semibold tracking-[0.14em] uppercase">
-          {BUSINESS_UNIT_LABEL}
-        </p>
-        <h1 className="font-display text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground text-sm">
-          Placeholder — profile, preferences, and {BUSINESS_UNIT_LABEL.toLowerCase()} settings expand
-          in Chunk 13.
-        </p>
+        <PageTitle>Settings</PageTitle>
       </div>
 
       <Card className="border-line-soft bg-panel-elevated shadow-none">

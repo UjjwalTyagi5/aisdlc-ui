@@ -188,7 +188,19 @@ export function RequestDetailSheet({
             </Field>
             <Field label="Current approver">
               {approverRole ? (
-                ROLE_META[approverRole].label
+                <>
+                  {ROLE_META[approverRole].label}
+                  {/* An agent-access request is answered twice. Without this,
+                      a requester whose Project Admin has already approved sees
+                      a still-open request and reads it as nobody acting. */}
+                  {request.approvalStage && (
+                    <span className="text-muted-foreground ml-1.5 text-[11.5px]">
+                      {request.approvalStage === "project_admin"
+                        ? "· step 1 of 2"
+                        : "· step 2 of 2, final sign-off"}
+                    </span>
+                  )}
+                </>
               ) : (
                 <span className="text-muted-foreground">
                   {isOpen ? "Unassigned" : "Closed"}

@@ -48,6 +48,10 @@ import {
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-dialog";
+import { canRaiseType } from "@/lib/requests/routing";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import type { Artifact, Connector, Project, ProjectId } from "@/lib/schemas";
 
 const TEMPLATE_LABEL: Record<Project["template"], string> = {
@@ -81,6 +85,14 @@ export default function ProjectOverviewPage() {
   const role = effectivePlatformRole(session);
   const canSetDeliveryStatus =
     role === "project_admin" || role === "bu_admin" || role === "org_admin";
+
+  // Only contributors ask. A Project Admin owns every agent already, and the
+  // two governance tiers hold none by design (PRD §14.8) — offering them a
+  // request would suggest that decision is negotiable.
+  const canRequestAgentAccess = canRaiseType(role, "agent_access");
+  // The unit's real name, not the word "Business Unit" — the request names the
+  // scope it is being raised in, and a label there says nothing.
+  const { units: scopedUnits } = useScopedBusinessUnits();
 
   const deliveryStatusMutation = useMutation({
     mutationFn: (deliveryStatus: ProjectDeliveryStatus) => updateProject(id, { deliveryStatus }),
@@ -152,6 +164,11 @@ export default function ProjectOverviewPage() {
   const isPendingApproval = project.approvalStatus === "pending_approval";
   const isRejected = project.approvalStatus === "rejected";
   const actionsLocked = isPendingApproval || isRejected;
+  // Falls back to the generic label rather than an empty string: a viewer bound
+  // to no unit still sees a sentence that reads.
+  const projectUnitName =
+    scopedUnits.find((u) => String(u.id) === String(project.workspaceId))?.name ??
+    BUSINESS_UNIT_LABEL;
   const runs = runsQ.data?.items ?? [];
   const artifacts = artifactsQ.data ?? [];
 
@@ -199,6 +216,20 @@ export default function ProjectOverviewPage() {
               Run agent
             </Button>
           </RequireRole>
+          {/* Raised from here rather than the Requests page because this is
+              where someone discovers the agent they need is closed to them.
+              Renders nothing when their role already reaches every agent this
+              project runs. */}
+          {canRequestAgentAccess && (
+            <RequestAgentAccessDialog
+              projectId={String(project.id)}
+              projectName={project.name}
+              workspaceId={String(project.workspaceId ?? "")}
+              workspaceName={projectUnitName}
+              phases={project.pipeline.map((p) => p.phase)}
+              requesterRole={role}
+            />
+          )}
           <Button variant="outline" onClick={() => router.push(`/projects/${project.id}/settings`)}>
             <Settings />
             Settings

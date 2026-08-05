@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
@@ -323,13 +324,7 @@ export default function DashboardPage() {
             made it the third statement of the same fact in one header — beside
             the persona badge below and the account menu above — and an eyebrow
             is a place marker, not a status readout. */}
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          Overview
-        </div>
-        <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-          Dashboard
-        </h1>
+        <PageTitle>Dashboard</PageTitle>
 
         {/* The boundary this dashboard is drawn inside, stated on the page
             itself and not only in the top bar — the numbers below are

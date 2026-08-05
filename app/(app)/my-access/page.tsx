@@ -11,6 +11,7 @@ import {
   Wrench,
 } from "lucide-react";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -148,14 +149,8 @@ export default function MyAccessPage() {
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
       <header className="flex flex-col items-start gap-1" style={RISE}>
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          You
-        </div>
-        <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-          My access
-        </h1>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <PageTitle>My access</PageTitle>
+        <div className="flex flex-wrap items-center gap-2">
           <PersonaBadge role={role} showScope />
           {isWildcard && (
             <Badge variant="secondary" className="font-mono text-[10.5px]">

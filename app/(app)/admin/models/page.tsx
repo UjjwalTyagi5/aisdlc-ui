@@ -11,16 +11,16 @@ import {
   ChevronsUpDown,
   Clock,
   Loader2,
-  Lock,
-  Pencil,
   Plus,
   ArrowRight,
+  Search,
   Trash2,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -47,25 +47,29 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { GrantVisibilityControl } from "@/components/app/grant-visibility-control";
+import {
+  ModelGovernanceSummary,
+  countModelGovernance,
+} from "@/components/app/model-governance-summary";
 import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import {
   addModelProvider,
-  deleteModelProvider,
   getBuAllowedModels,
   getModelCatalog,
+  getModelGrantMatrix,
   listAllModelProviders,
   listModelProviders,
   setModelDefault,
-  updateModelProvider,
   verifyModelProvider,
 } from "@/lib/api/models";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { getSpendSeries } from "@/lib/api/cost";
 import { qk } from "@/lib/api/query-keys";
+import { providerLabel } from "@/lib/models/provider-labels";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
@@ -79,14 +83,76 @@ import type {
   ModelProviderStatus,
 } from "@/lib/schemas/model";
 
-const PROVIDER_LABEL: Record<ModelProviderKind, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
+/**
+ * Providers with no vendor-wide endpoint — the URL is part of the credential,
+ * not an override of it.
+ *
+ * Azure gives every resource its own hostname, Bedrock and Vertex route by
+ * region, and none of the three can be called without one. Saving such a
+ * connection with a blank base produces a credential that cannot be used and
+ * cannot say why, so these are required rather than merely hinted.
+ *
+ * A table of known cases, not a rule: an unlisted provider stays optional,
+ * because guessing that some new slug needs an endpoint would block onboarding
+ * on our ignorance rather than on the provider's requirements.
+ */
+const ENDPOINT_REQUIRED: Record<string, { placeholder: string; why: string }> = {
+  azure: {
+    placeholder: "https://<resource>.openai.azure.com/openai/deployments/<deployment>",
+    why: "Azure has no shared endpoint — every resource has its own, so the deployment URL is part of this credential.",
+  },
+  bedrock: {
+    placeholder: "https://bedrock-runtime.<region>.amazonaws.com",
+    why: "The region endpoint decides where inference runs, and therefore where the prompts go.",
+  },
+  vertex_ai: {
+    placeholder: "https://<location>-aiplatform.googleapis.com",
+    why: "Vertex routes by location, so the endpoint is what pins this credential to a region.",
+  },
 };
 
-function providerLabel(kind: ModelProviderKind): string {
-  return PROVIDER_LABEL[kind] ?? kind;
+/**
+ * One numbered step of the onboarding form.
+ *
+ * The form discloses in order — provider, then models, then the credential —
+ * because each answer decides what the next one may contain, and asking for an
+ * API key first asks for the hardest value before anything explains which one.
+ * Numbering makes the reveal read as progress rather than as fields appearing
+ * from nowhere.
+ */
+function Step({
+  n,
+  title,
+  hint,
+  aside,
+  children,
+}: {
+  n: number;
+  title: string;
+  hint?: React.ReactNode;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="flex items-start gap-2.5">
+        <span
+          aria-hidden
+          className="border-line-soft bg-surface-2 text-muted-foreground mt-px grid size-5 shrink-0 place-items-center rounded-full border font-mono text-[10.5px]"
+        >
+          {n}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-[13px] font-medium">{title}</div>
+            {aside}
+          </div>
+          {hint && <p className="text-muted-foreground mt-0.5 text-[11.5px]">{hint}</p>}
+        </div>
+      </div>
+      <div className="space-y-2.5 pl-[30px]">{children}</div>
+    </section>
+  );
 }
 
 function ProviderGlyph({ label }: { label: string }) {
@@ -180,6 +246,19 @@ export default function ModelProvidersPage() {
     queryFn: () => getModelCatalog(),
   });
 
+  // The estate's shape, for the summary row. Org Admin only — the matrix is
+  // every unit's standing against every model, which is precisely what a BU or
+  // Project Admin may not see.
+  const matrixQ = useQuery({
+    queryKey: qk.model.grantMatrix(),
+    queryFn: getModelGrantMatrix,
+    enabled: isOrg,
+  });
+  const governance = React.useMemo(
+    () => countModelGovernance(matrixQ.data?.rows ?? []),
+    [matrixQ.data],
+  );
+
   // What each unit was granted — the universe a BU or Project Admin may
   // credential from, per unit. An Org Admin doesn't need it: they define it.
   const allowedQueries = useQueries({
@@ -208,10 +287,11 @@ export default function ModelProvidersPage() {
     [allWorkspaces],
   );
 
+  // No edit/remove/verify state here any more. Those act on a single key and
+  // now live on the provider's own screen, which is the only place that also
+  // shows what each key serves.
   const [addOpen, setAddOpen] = React.useState(false);
-  const [editFor, setEditFor] = React.useState<ModelProvider | null>(null);
-  const [removeFor, setRemoveFor] = React.useState<ModelProvider | null>(null);
-  const [verifyingId, setVerifyingId] = React.useState<string | null>(null);
+  const [query, setQuery] = React.useState("");
 
   // Prefix-invalidate: with one query per unit there is no single key to name,
   // and a provider added to one unit still changes this page's totals.
@@ -226,38 +306,6 @@ export default function ModelProvidersPage() {
     },
     onError: (err) =>
       toast.error("Couldn't set default model", {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-  });
-
-  const verifyMutation = useMutation({
-    mutationFn: (id: string) => {
-      setVerifyingId(id);
-      return verifyModelProvider(id);
-    },
-    onSuccess: (result) => {
-      if (result.status === "valid") {
-        toast.success("Provider verified ✓");
-      } else {
-        toast.error("Key rejected — verification failed");
-      }
-      invalidateProviders();
-    },
-    onError: (err) =>
-      toast.error("Verification failed", {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-    onSettled: () => setVerifyingId(null),
-  });
-
-  const removeMutation = useMutation({
-    mutationFn: (id: string) => deleteModelProvider(id),
-    onSuccess: () => {
-      toast.success("Provider removed");
-      invalidateProviders();
-    },
-    onError: (err) =>
-      toast.error("Couldn't remove provider", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -328,6 +376,30 @@ export default function ModelProvidersPage() {
     }
     return [...by.entries()];
   })();
+
+  /**
+   * Search across all three things a provider card carries: the vendor, the
+   * subscriptions under it, and the models those cover.
+   *
+   * Matching the vendor name alone would answer the question nobody has — you
+   * can already see the vendors. The questions that bring you here are "which
+   * contract is the EU one" and "who serves gpt-5.1", and the second is only
+   * answerable by searching the models inside the cards.
+   */
+  const q = query.trim().toLowerCase();
+  const visibleGroups = q
+    ? providerGroups.filter(
+        ([kind, group]) =>
+          providerLabel(kind).toLowerCase().includes(q) ||
+          kind.toLowerCase().includes(q) ||
+          group.some(
+            (p) =>
+              p.display_name.toLowerCase().includes(q) ||
+              p.offerings.some((o) => o.model_id.toLowerCase().includes(q)),
+          ),
+      )
+    : providerGroups;
+
   const catalog = catalogQ.data ?? [];
   const unitNameById = new Map(scopedUnits.map((u) => [u.id, u.name] as const));
 
@@ -379,14 +451,7 @@ export default function ModelProvidersPage() {
         }}
       >
         <div>
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            {copy.eyebrow}
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            {copy.title}
-          </h1>
-          <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">{copy.body}</p>
+          <PageTitle>{copy.title}</PageTitle>
         </div>
 
         <Button
@@ -399,6 +464,12 @@ export default function ModelProvidersPage() {
           Add provider
         </Button>
       </header>
+
+      {/* The estate before the inventory: how many models exist, how far they
+          reach, and how many are inert. Above the search deliberately — these
+          describe everything, not the filtered view, and a count that moved
+          when you typed would read as a filtered total. */}
+      {isOrg && matrixQ.data && <ModelGovernanceSummary counts={governance} />}
 
       {/* One card per unit the viewer is bound to. Someone in two units gets
           two, each named — no arbitrary winner, and no hidden second unit. */}
@@ -450,13 +521,51 @@ export default function ModelProvidersPage() {
           </Button>
         </div>
       ) : (
+        <div className="space-y-3">
+          {/* Searches vendors, subscriptions AND the models inside them, so
+              "who serves gpt-5.1" is answerable from the list screen rather
+              than by opening every card. */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="border-line-soft bg-surface-1 flex max-w-sm flex-1 items-center gap-2 rounded-lg border px-2.5">
+              <Search className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search providers, subscriptions or models…"
+                aria-label="Search providers, subscriptions or models"
+                className="h-9 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="text-muted-foreground hover:text-foreground shrink-0 font-mono text-[10.5px] transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {q && (
+              <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+                {visibleGroups.length} of {providerGroups.length} providers
+              </span>
+            )}
+          </div>
+
+          {visibleGroups.length === 0 ? (
+            <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
+              <p className="text-muted-foreground text-sm">
+                No provider, subscription or model matches &ldquo;{query.trim()}&rdquo;.
+              </p>
+            </div>
+          ) : (
         <RadioGroup
           value={isOrg ? (defaultOfferingId ?? "") : ""}
           onValueChange={(v) => isOrg && setDefaultMutation.mutate(v)}
           className="grid gap-3 sm:grid-cols-2"
           aria-label={isOrg ? "Org-wide default model" : "Enabled models"}
         >
-          {providerGroups.map(([kind, group]) => (
+          {visibleGroups.map(([kind, group]) => (
             <ProviderCard
               key={kind}
               connections={group}
@@ -468,14 +577,12 @@ export default function ModelProvidersPage() {
                   ? (unitNameById.get(String(group[0].workspaceId)) ?? null)
                   : null
               }
-              verifying={verifyMutation.isPending && group.some((c) => c.id === verifyingId)}
-              onVerify={(id) => verifyMutation.mutate(id)}
-              onEdit={(c) => setEditFor(c)}
-              onRemove={(c) => setRemoveFor(c)}
               spendUsd={spendQ.data ? (spendByProvider.get(kind) ?? 0) : null}
             />
           ))}
         </RadioGroup>
+          )}
+        </div>
       )}
 
       <AddProviderDialog
@@ -496,21 +603,6 @@ export default function ModelProvidersPage() {
         }}
       />
 
-      <EditProviderDialog
-        provider={editFor}
-        catalog={catalog}
-        onClose={() => setEditFor(null)}
-        onSaved={invalidateProviders}
-      />
-
-      <RemoveConfirm
-        provider={removeFor}
-        onClose={() => setRemoveFor(null)}
-        onConfirm={(p) => {
-          setRemoveFor(null);
-          removeMutation.mutate(p.id);
-        }}
-      />
     </div>
   );
 }
@@ -519,20 +611,12 @@ export default function ModelProvidersPage() {
 
 function ProviderCard({
   connections,
-  verifying,
-  onVerify,
-  onEdit,
-  onRemove,
   radioDisabled,
   unitName,
   spendUsd,
 }: {
   /** Every subscription onboarded for this provider — at least one. */
   connections: ModelProvider[];
-  verifying?: boolean;
-  onVerify: (id: string) => void;
-  onEdit: (connection: ModelProvider) => void;
-  onRemove: (connection: ModelProvider) => void;
   /** True outside org scope — no scoped provider participates in the single
    *  org-wide default, so the radio is shown inert rather than interactive. */
   radioDisabled?: boolean;
@@ -571,7 +655,10 @@ function ProviderCard({
   const rejected = provider.approvalStatus === "rejected";
 
   return (
-    <Card className="border-line-soft bg-panel-elevated flex flex-col overflow-hidden shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
+    /* The whole card is the drill-in.
+       `overflow-hidden` is gone deliberately: it clips the stretched link's
+       ::after overlay, which is what makes the card clickable. */
+    <Card className="border-line-soft bg-panel-elevated relative flex flex-col shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)] focus-within:ring-ring focus-within:ring-2">
       <CardHeader className="pb-3">
         <div className="flex items-start gap-3">
           <ProviderGlyph label={label} />
@@ -579,8 +666,21 @@ function ProviderCard({
             {/* The PROVIDER names the card, not a subscription. With the
                 connections merged, borrowing the first one's display name
                 titled the whole card after one of the several contracts
-                listed inside it. */}
-            <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">{label}</h3>
+                listed inside it.
+
+                ONE link, stretched over the card by its ::after — not a click
+                handler on the Card. A div with an onClick is invisible to a
+                keyboard and to a screen reader's link list, and cannot be
+                middle-clicked or opened in a new tab, which is exactly what
+                people do with a grid of things to compare. */}
+            <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
+              <Link
+                href={`/admin/models/${encodeURIComponent(provider.provider)}`}
+                className="rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+              >
+                {label}
+              </Link>
+            </h3>
             <p className="text-muted-foreground mt-0.5 truncate text-[12px]">
               {multi
                 ? `${connections.length} subscriptions`
@@ -629,7 +729,10 @@ function ProviderCard({
         {enabledOfferings.length === 0 ? (
           <p className="text-muted-foreground text-[12px]">No models enabled for this provider.</p>
         ) : (
-          <ul className="space-y-1.5">
+          /* Lifted above the stretched link. These radios choose the one
+             org-wide default model, and the card-wide overlay would otherwise
+             swallow the click and navigate instead of selecting. */
+          <ul className="relative z-10 space-y-1.5">
             {enabledOfferings.map((o) => (
               <OfferingRow key={o.id} offering={o} radioDisabled={radioDisabled} />
             ))}
@@ -644,82 +747,16 @@ function ProviderCard({
               : "Not verified yet"}
         </p>
 
-        {/* Drill-in. The card answers "is this provider healthy and what does
-            it cost"; everything model-level — per-model spend, which credential
-            serves each one, which units have it — lives one screen deeper so
-            this list stays scannable. */}
-        <Link
-          href={`/admin/models/${encodeURIComponent(provider.provider)}`}
-          className="text-brand-bright mb-2.5 inline-flex items-center gap-1 font-mono text-[11px] underline-offset-2 hover:underline"
-        >
-          Models &amp; access
+        {/* Where the subscription actions used to be. Testing, editing and
+            removing act on a KEY, and a provider can hold several — so the card
+            carried up to three buttons per contract, and the list stopped being
+            a list of providers. They now live on the provider's own screen,
+            beside the models each key actually serves, which is the context you
+            need to decide whether removing one is safe. */}
+        <p className="text-muted-foreground mt-auto inline-flex items-center gap-1 font-mono text-[11px]">
+          {multi ? `${connections.length} subscriptions` : "1 subscription"}
           <ArrowRight className="size-3" aria-hidden />
-        </Link>
-
-        {/* SUBSCRIPTIONS, each with its own actions.
-            Testing, editing and removing act on a KEY, so once a provider holds
-            more than one they cannot sit on the card as a whole — "Test
-            Anthropic" has no answer when two contracts serve it. Naming each
-            subscription and giving it its own row keeps every action
-            unambiguous, and reads as one line when there is only one. */}
-        <div className="mt-auto space-y-1.5">
-          {multi && (
-            <p className="text-muted-foreground font-mono text-[10px] tracking-[0.1em] uppercase">
-              {connections.length} subscriptions
-            </p>
-          )}
-          {connections.map((c) => (
-            <div
-              key={c.id}
-              className={cn(
-                "flex flex-wrap items-center gap-1.5",
-                multi && "border-line-soft bg-surface-1/60 rounded-lg border px-2 py-1.5",
-              )}
-            >
-              {multi && (
-                <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
-                  {c.display_name}
-                </span>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onVerify(c.id)}
-                disabled={verifying}
-                aria-busy={verifying}
-                aria-label={`Test ${c.display_name}`}
-                className="border-line-soft"
-              >
-                {verifying ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                ) : (
-                  <CheckCircle2 className="size-4" aria-hidden />
-                )}
-                {verifying ? "Testing…" : "Test"}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onEdit(c)}
-                aria-label={`Edit ${c.display_name}`}
-                className="border-line-soft"
-              >
-                <Pencil className="size-4" aria-hidden />
-                Edit
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onRemove(c)}
-                aria-label={`Remove ${c.display_name}`}
-                className={cn("border-line-soft", !multi && "ml-auto")}
-              >
-                <Trash2 className="size-4" aria-hidden />
-                Remove
-              </Button>
-            </div>
-          ))}
-        </div>
+        </p>
       </CardContent>
     </Card>
   );
@@ -843,6 +880,8 @@ function AddProviderDialog({
   const [rpmLimit, setRpmLimit] = React.useState("");
   const [tpmLimit, setTpmLimit] = React.useState("");
   const [costLimit, setCostLimit] = React.useState("");
+  // Limits are the one section that is genuinely skippable, so it starts shut.
+  const [limitsOpen, setLimitsOpen] = React.useState(false);
   // Org-wide onboarding only — how far the models added here reach.
   const [visibility, setVisibility] = React.useState<GrantVisibility>("global");
   const [grantedUnits, setGrantedUnits] = React.useState<string[]>([]);
@@ -878,6 +917,7 @@ function AddProviderDialog({
       setRpmLimit("");
       setTpmLimit("");
       setCostLimit("");
+      setLimitsOpen(false);
       setVisibility("global");
       setGrantedUnits([]);
       setTargetUnitId("");
@@ -922,21 +962,36 @@ function AddProviderDialog({
       Number(m.output) >= 0,
   );
 
+  // Which models this credential will carry — and the gate for every step
+  // after it, since a credential for no models is not a thing worth naming.
+  const chosenModelCount = enabledModels.length + validCustomModels.length;
+  const hasModels = chosenModelCount > 0;
+
   // The KEY IS OPTIONAL. Registering a provider without one is a real choice:
   // its models enter the catalogue and can be granted, and each Business Unit
   // brings its own secret. Demanding a key here made that impossible, so an
   // organisation approving a provider it does not itself pay for had no route.
   const sharedValid = displayName.trim().length > 0;
-  // A `specific` grant that names nobody would credential models no one can
-  // use — a silent no-op that reads as a failed save.
-  const grantValid = !grantableWorkspaces || visibility === "global" || grantedUnits.length > 0;
+  const endpoint = provider ? ENDPOINT_REQUIRED[provider] : undefined;
+  const endpointValid = !endpoint || apiBase.trim().length > 0;
+  // Reach is genuinely optional HERE, and only here: onboarding a provider and
+  // deciding who may use it are two decisions, and an admin who holds the key
+  // but not yet the answer must still be able to save. Editing an existing
+  // grant is the opposite case — emptying it there means "revoke everywhere",
+  // which is a thing to warn about rather than to wave through.
   const targetValid = !targetUnits || !!resolvedTargetId;
-  const canSubmit =
-    !!provider &&
-    sharedValid &&
-    grantValid &&
-    targetValid &&
-    enabledModels.length + validCustomModels.length > 0;
+  const canSubmit = !!provider && hasModels && sharedValid && endpointValid && targetValid;
+
+  // Numbered so the reveal reads as progress. Availability exists only for the
+  // Org Admin, so the step after it shifts up rather than leaving a hole.
+  const STEP = {
+    provider: 1,
+    models: 2,
+    credential: 3,
+    availability: 4,
+    limits: grantableWorkspaces ? 5 : 4,
+  };
+  const limitCount = [rpmLimit, tpmLimit, costLimit].filter((v) => v.trim() !== "").length;
 
   const updateCustomModel = (i: number, patch: Partial<(typeof customModels)[number]>) =>
     setCustomModels((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
@@ -988,6 +1043,12 @@ function AddProviderDialog({
         toast.info("Sent for approval", {
           description: `A Business Unit Admin needs to approve ${created.display_name} before it's usable.`,
         });
+      } else if (!apiKey.trim()) {
+        // Nothing to probe. Reporting "verified" over a connection that cannot
+        // make a call would be the one lie this dialog must not tell.
+        toast.success("Provider registered", {
+          description: `${created.display_name} has no key yet — its models can be granted, but stay inert until one is added.`,
+        });
       } else {
         const result = await verifyModelProvider(created.id);
         if (result.status === "valid") {
@@ -1014,8 +1075,8 @@ function AddProviderDialog({
           <DialogTitle className="font-display">Add model provider</DialogTitle>
           <DialogDescription>
             {needsApproval
-              ? "The key is stored in the tenant's secrets vault and never shown again. Your Business Unit Admin approves before it's live — no live verification runs until then."
-              : "The key is stored in the tenant's secrets vault and never shown again. We run a 1-token live probe to verify it on save."}
+              ? "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again. Your Business Unit Admin approves before it's live — no live verification runs until then."
+              : "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again, and we run a 1-token live probe to verify it on save."}
           </DialogDescription>
         </DialogHeader>
 
@@ -1055,9 +1116,13 @@ function AddProviderDialog({
             </div>
           )}
 
-          {/* Provider — searchable combobox over LiteLLM's full provider catalog */}
-          <div className="space-y-1.5">
-            <Label>Provider</Label>
+          {/* Searchable combobox over LiteLLM's full provider catalog. First
+              because every other answer depends on it. */}
+          <Step
+            n={STEP.provider}
+            title="Provider"
+            hint="Any provider LiteLLM supports — Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Vertex, xAI. Pick one to see its models with pricing."
+          >
             <Popover open={providerOpen} onOpenChange={setProviderOpen}>
               <PopoverTrigger asChild>
                 <Button
@@ -1107,77 +1172,25 @@ function AddProviderDialog({
                 </Command>
               </PopoverContent>
             </Popover>
-            <p className="text-muted-foreground text-[11px]">
-              Any provider LiteLLM supports. Pick one to see its models with pricing.
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="display-name">Subscription name</Label>
-            <Input
-              id="display-name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Anthropic — Payments enterprise"
-            />
-            {/* Names the CONTRACT, not the vendor. An organisation can hold
-                several subscriptions with the same provider — a shared platform
-                one for everyday models, a business unit's own for the expensive
-                one — and every screen that says "which key runs this model"
-                shows this string. Three rows all reading "Anthropic" answer
-                that question with nothing. */}
-            <p className="text-muted-foreground text-[11.5px]">
-              Name the subscription, not the vendor — you may hold several with
-              the same provider, and this is what every screen shows when it says
-              which key runs a model.
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="api-key">
-              API key{" "}
-              <span className="text-muted-foreground/60 font-normal normal-case">(optional)</span>
-            </Label>
-            <Input
-              id="api-key"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-… — leave blank to let each unit bring its own"
-              autoComplete="off"
-            />
-            <p className="text-muted-foreground text-[11.5px]">
-              {apiKey.trim().length > 0
-                ? "The platform pays for these models — no business unit needs a key."
-                : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="api-base">
-              API base{" "}
-              <span className="text-muted-foreground/60 font-normal normal-case">(optional)</span>
-            </Label>
-            <Input
-              id="api-base"
-              value={apiBase}
-              onChange={(e) => setApiBase(e.target.value)}
-              placeholder="https://your-gateway.internal/v1 — for self-hosted / gateway"
-              autoComplete="off"
-              className="font-mono"
-            />
-          </div>
+          </Step>
 
           {/* Models for the chosen provider — auto-listed from LiteLLM, searchable,
               pricing prefilled. */}
           {provider && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>Models</Label>
+            <Step
+              n={STEP.models}
+              title="Models"
+              hint={
+                hasModels
+                  ? `${chosenModelCount} chosen — this credential will carry ${chosenModelCount === 1 ? "it" : "them"}.`
+                  : "Which of this provider's models this subscription covers. A second subscription can cover the others."
+              }
+              aside={
                 <span className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
                   USD / 1M tokens
                 </span>
-              </div>
+              }
+            >
               {providerModels.length > 0 ? (
                 <>
                   <Input
@@ -1291,71 +1304,184 @@ function AddProviderDialog({
                 <Plus className="size-4" aria-hidden />
                 Add a model not listed
               </Button>
-            </div>
+            </Step>
           )}
-        </div>
 
-        {/* Who the models onboarded here reach — the grant, written in the
-            same act as the key so a credentialed model can't land invisible. */}
-        {grantableWorkspaces && (
-          <div className="border-line-soft space-y-2 rounded-xl border p-3.5">
-            <div className="text-[13px] font-medium">Availability</div>
-            <p className="text-muted-foreground text-[12px]">
-              Global reaches every {BUSINESS_UNIT_LABEL.toLowerCase()} and project automatically.
-              Specific reaches only the ones you name — you can change this later from Model access.
-            </p>
-            <GrantVisibilityControl
-              idPrefix="add-provider-grant"
-              value={{ visibility, businessUnitIds: grantedUnits }}
-              workspaces={grantableWorkspaces}
-              disabled={pending}
-              onChange={(next) => {
-                setVisibility(next.visibility);
-                setGrantedUnits(next.businessUnitIds);
-              }}
-            />
-          </div>
-        )}
+          {/* The credential itself — revealed once there are models for it to
+              carry. Its name comes first because the name is what every other
+              screen shows when it answers "which key runs this model". */}
+          {hasModels && (
+            <Step
+              n={STEP.credential}
+              title="Credential"
+              hint="How the platform authenticates to this provider — and what the rest of the product calls this subscription."
+            >
+              <div className="space-y-1.5">
+                <Label htmlFor="display-name">Subscription name</Label>
+                <Input
+                  id="display-name"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder={`e.g. ${selectedCatalog?.label ?? "Anthropic"} — Payments enterprise`}
+                />
+                {/* Names the CONTRACT, not the vendor. An organisation can hold
+                    several subscriptions with the same provider — a shared platform
+                    one for everyday models, a business unit's own for the expensive
+                    one — and every screen that says "which key runs this model"
+                    shows this string. Three rows all reading "Anthropic" answer
+                    that question with nothing. */}
+                <p className="text-muted-foreground text-[11.5px]">
+                  Name the subscription, not the vendor — you may hold several with the same
+                  provider, and this is what every screen shows when it says which key runs a model.
+                </p>
+              </div>
 
-        {/* Optional per-model usage limits — applied to every model added here. */}
-        <div className="space-y-2">
-          <div className="text-[13px] font-medium">Usage limits (optional)</div>
-          <p className="text-muted-foreground text-[12px]">
-            Applied to every model added here. Leave blank for no limit. RPM (requests/min)
-            is enforced live; TPM (tokens/min) and cost ($/month) are recorded.
-          </p>
-          <div className="grid grid-cols-3 gap-2">
-            <Input
-              type="number"
-              min={0}
-              step="1"
-              value={rpmLimit}
-              onChange={(e) => setRpmLimit(e.target.value)}
-              placeholder="RPM"
-              aria-label="Requests per minute limit"
-              className="font-mono text-[12px]"
-            />
-            <Input
-              type="number"
-              min={0}
-              step="1"
-              value={tpmLimit}
-              onChange={(e) => setTpmLimit(e.target.value)}
-              placeholder="TPM"
-              aria-label="Tokens per minute limit"
-              className="font-mono text-[12px]"
-            />
-            <Input
-              type="number"
-              min={0}
-              step="0.01"
-              value={costLimit}
-              onChange={(e) => setCostLimit(e.target.value)}
-              placeholder="Cost $/mo"
-              aria-label="Monthly cost limit in USD"
-              className="font-mono text-[12px]"
-            />
-          </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="api-key">
+                  API key{" "}
+                  <span className="text-muted-foreground/60 font-normal normal-case">
+                    (optional)
+                  </span>
+                </Label>
+                <Input
+                  id="api-key"
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="sk-… — leave blank to let each unit bring its own"
+                  autoComplete="off"
+                />
+                <p className="text-muted-foreground text-[11.5px]">
+                  {apiKey.trim().length > 0
+                    ? "The platform pays for these models — no business unit needs a key."
+                    : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="api-base">
+                  API base{" "}
+                  <span className="text-muted-foreground/60 font-normal normal-case">
+                    {endpoint ? "(required)" : "(optional)"}
+                  </span>
+                </Label>
+                <Input
+                  id="api-base"
+                  value={apiBase}
+                  onChange={(e) => setApiBase(e.target.value)}
+                  placeholder={
+                    endpoint?.placeholder ??
+                    "https://your-gateway.internal/v1 — for self-hosted / gateway"
+                  }
+                  aria-invalid={!endpointValid}
+                  autoComplete="off"
+                  className="font-mono"
+                />
+                {endpoint && (
+                  <p
+                    className={cn(
+                      "text-[11.5px]",
+                      endpointValid ? "text-muted-foreground" : "text-warning",
+                    )}
+                  >
+                    {endpoint.why}
+                  </p>
+                )}
+              </div>
+            </Step>
+          )}
+
+          {/* Who the models onboarded here reach — the grant, written in the
+              same act as the key so a credentialed model can't land invisible. */}
+          {hasModels && grantableWorkspaces && (
+            <Step
+              n={STEP.availability}
+              title="Availability"
+              hint={`Global reaches every ${BUSINESS_UNIT_LABEL.toLowerCase()} and project automatically. Specific reaches only the ones you name — changeable later from Model access.`}
+            >
+              <GrantVisibilityControl
+                idPrefix="add-provider-grant"
+                value={{ visibility, businessUnitIds: grantedUnits }}
+                workspaces={grantableWorkspaces}
+                disabled={pending}
+                optional
+                onChange={(next) => {
+                  setVisibility(next.visibility);
+                  setGrantedUnits(next.businessUnitIds);
+                }}
+              />
+            </Step>
+          )}
+
+          {/* Limits — the only section that is genuinely skippable, so it is
+              the only one that stays shut. Expanded by default it read as four
+              more required fields between the admin and the save button. */}
+          {hasModels && (
+            <Step
+              n={STEP.limits}
+              title="Usage limits"
+              hint="Optional. Applied to every model in this subscription; blank means no limit."
+              aside={
+                limitCount > 0 ? (
+                  <span className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
+                    {limitCount} set
+                  </span>
+                ) : undefined
+              }
+            >
+              {limitsOpen ? (
+                <>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="1"
+                      value={rpmLimit}
+                      onChange={(e) => setRpmLimit(e.target.value)}
+                      placeholder="RPM"
+                      aria-label="Requests per minute limit"
+                      className="font-mono text-[12px]"
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      step="1"
+                      value={tpmLimit}
+                      onChange={(e) => setTpmLimit(e.target.value)}
+                      placeholder="TPM"
+                      aria-label="Tokens per minute limit"
+                      className="font-mono text-[12px]"
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={costLimit}
+                      onChange={(e) => setCostLimit(e.target.value)}
+                      placeholder="Cost $/mo"
+                      aria-label="Monthly cost limit in USD"
+                      className="font-mono text-[12px]"
+                    />
+                  </div>
+                  <p className="text-muted-foreground text-[11.5px]">
+                    RPM (requests/min) is enforced live; TPM (tokens/min) and cost ($/month) are
+                    recorded. All three are editable later from Edit on this subscription.
+                  </p>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setLimitsOpen(true)}
+                  className="border-line-soft"
+                >
+                  <Plus className="size-4" aria-hidden />
+                  Set RPM, TPM or a monthly cap
+                </Button>
+              )}
+            </Step>
+          )}
         </div>
 
         <DialogFooter>
@@ -1374,7 +1500,8 @@ function AddProviderDialog({
             className="from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
           >
             {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-            {pending ? "Testing…" : "Test & Save"}
+            {/* A save with no key runs no probe, so it must not promise a test. */}
+            {pending ? (apiKey.trim() ? "Testing…" : "Saving…") : apiKey.trim() ? "Test & Save" : "Save"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1382,381 +1509,6 @@ function AddProviderDialog({
   );
 }
 
-// ───────── Edit provider dialog ─────────
-
-function EditProviderDialog({
-  provider,
-  catalog,
-  onClose,
-  onSaved,
-}: {
-  provider: ModelProvider | null;
-  catalog: CatalogProvider[];
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const open = !!provider;
-  const [displayName, setDisplayName] = React.useState("");
-  const [enabled, setEnabled] = React.useState<Record<string, boolean>>({});
-  const [modelQuery, setModelQuery] = React.useState("");
-  const [pending, setPending] = React.useState(false);
-  // Rotation only: the stored secret is never read back, so this starts empty
-  // and an empty value means "leave it alone" rather than "clear it".
-  const [newKey, setNewKey] = React.useState("");
-  const [clearKey, setClearKey] = React.useState(false);
-  const [apiBase, setApiBase] = React.useState("");
-  const [rpm, setRpm] = React.useState("");
-  const [tpm, setTpm] = React.useState("");
-  const [costCap, setCostCap] = React.useState("");
-
-  // Snapshot of the opened provider — used for dirty-checking and the default-model lock.
-  // The org-wide default may only be disabled from the default radio, never from here,
-  // so a disabled+default offering (which would block all runs) can never be produced.
-  const original = React.useMemo(() => {
-    if (!provider) return null;
-    const enabledMap: Record<string, boolean> = {};
-    for (const o of provider.offerings) if (o.enabled) enabledMap[o.model_id] = true;
-    const lockedModelId =
-      provider.offerings.find((o) => o.is_default && o.enabled)?.model_id ?? null;
-    const first = provider.offerings.find((o) => o.enabled) ?? provider.offerings[0];
-    return {
-      displayName: provider.display_name,
-      enabledKeys: Object.keys(enabledMap).sort(),
-      lockedModelId,
-      rpm: first?.rpm_limit != null ? String(first.rpm_limit) : "",
-      tpm: first?.tpm_limit != null ? String(first.tpm_limit) : "",
-      cost: first?.cost_limit_usd != null ? String(first.cost_limit_usd) : "",
-    };
-  }, [provider]);
-
-  // Re-seed the form each time a different provider is opened.
-  React.useEffect(() => {
-    if (!provider) return;
-    setDisplayName(provider.display_name);
-    const seed: Record<string, boolean> = {};
-    for (const o of provider.offerings) if (o.enabled) seed[o.model_id] = true;
-    setEnabled(seed);
-    setModelQuery("");
-    setPending(false);
-    setNewKey("");
-    setClearKey(false);
-    setApiBase(provider.api_base ?? "");
-    // Limits are per-offering but set connection-wide, so the first enabled
-    // offering is a faithful reading of the connection's current setting.
-    const first = provider.offerings.find((o) => o.enabled) ?? provider.offerings[0];
-    setRpm(first?.rpm_limit != null ? String(first.rpm_limit) : "");
-    setTpm(first?.tpm_limit != null ? String(first.tpm_limit) : "");
-    setCostCap(first?.cost_limit_usd != null ? String(first.cost_limit_usd) : "");
-  }, [provider]);
-
-  const models = provider
-    ? (catalog.find((c) => c.provider === provider.provider)?.models ?? [])
-    : [];
-  const filteredModels = models.filter((m) =>
-    m.model_id.toLowerCase().includes(modelQuery.trim().toLowerCase()),
-  );
-
-  const enabledModels = Object.entries(enabled)
-    .filter(([, v]) => v)
-    .map(([k]) => k);
-
-  const trimmedName = displayName.trim();
-  const limitsDirty =
-    !!provider &&
-    (apiBase.trim() !== (provider.api_base ?? "") ||
-      rpm !== (original?.rpm ?? "") ||
-      tpm !== (original?.tpm ?? "") ||
-      costCap !== (original?.cost ?? ""));
-  const dirty =
-    !!original &&
-    (trimmedName !== original.displayName ||
-      enabledModels.slice().sort().join(" ") !== original.enabledKeys.join(" ") ||
-      newKey.trim().length > 0 ||
-      clearKey ||
-      limitsDirty);
-
-  const canSubmit = trimmedName.length > 0 && enabledModels.length > 0 && dirty;
-  const lockedModelId = original?.lockedModelId ?? null;
-
-  const handleSubmit = async () => {
-    if (!provider || !canSubmit || pending) return;
-    setPending(true);
-    try {
-      const num = (v: string) => (v.trim() === "" ? null : Number(v));
-      await updateModelProvider(provider.id, {
-        display_name: trimmedName,
-        enabled_models: enabledModels,
-        // undefined = untouched. Only an explicit rotation or clear is sent,
-        // so saving a rename never disturbs the stored secret.
-        api_key: clearKey ? "" : newKey.trim() ? newKey.trim() : undefined,
-        api_base: apiBase.trim() || null,
-        rpm_limit: num(rpm),
-        tpm_limit: num(tpm),
-        cost_limit_usd: num(costCap),
-      });
-      toast.success("Provider updated");
-      onSaved();
-      onClose();
-    } catch (err) {
-      toast.error("Couldn't update provider", {
-        description: err instanceof Error ? err.message : undefined,
-      });
-    } finally {
-      setPending(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => !pending && !v && onClose()}>
-      <DialogContent className="max-h-[92vh] max-w-lg overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="font-display">Edit {provider?.display_name}</DialogTitle>
-          <DialogDescription>
-            Rename this subscription, rotate its key, point it at a different endpoint, change
-            which models it offers, or adjust its limits. The provider itself can&apos;t change
-            &mdash; that would be a different subscription.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-display-name">Display name</Label>
-            <Input
-              id="edit-display-name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Anthropic — Payments enterprise"
-            />
-          </div>
-
-          {/* ── Credential ─────────────────────────────────────────────────
-              The stored secret is never read back, so this is rotation only:
-              blank leaves it alone. "Remove the key" is offered explicitly
-              because a connection with no key is a valid state, not a
-              half-finished one — the models stay grantable and go inert. */}
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-api-key">
-              API key{" "}
-              <span className="text-muted-foreground/60 font-normal normal-case">
-                {provider?.hasKey ? "(leave blank to keep)" : "(none stored)"}
-              </span>
-            </Label>
-            <Input
-              id="edit-api-key"
-              type="password"
-              value={newKey}
-              disabled={clearKey}
-              onChange={(e) => setNewKey(e.target.value)}
-              placeholder={provider?.hasKey ? "Enter a new key to rotate" : "sk-…"}
-              autoComplete="off"
-            />
-            {provider?.hasKey && (
-              <label className="text-muted-foreground flex items-center gap-2 text-[11.5px]">
-                <Checkbox
-                  checked={clearKey}
-                  onCheckedChange={(v) => {
-                    setClearKey(v === true);
-                    if (v === true) setNewKey("");
-                  }}
-                />
-                Remove the key — units bring their own
-              </label>
-            )}
-            {(newKey.trim().length > 0 || clearKey) && (
-              <p className="text-warning text-[11.5px]">
-                Changing the key resets this connection to unverified — test it after saving.
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-api-base">
-              API base{" "}
-              <span className="text-muted-foreground/60 font-normal normal-case">(optional)</span>
-            </Label>
-            <Input
-              id="edit-api-base"
-              value={apiBase}
-              onChange={(e) => setApiBase(e.target.value)}
-              placeholder="https://your-gateway.internal/v1"
-              autoComplete="off"
-              className="font-mono"
-            />
-          </div>
-
-          {/* ── Limits ─────────────────────────────────────────────────────
-              Applied to every model on this subscription, which is how they
-              were set at creation. Blank means no limit — an empty field and a
-              zero are different answers and must not collapse. */}
-          <div className="space-y-1.5">
-            <Label>Usage limits</Label>
-            <div className="grid grid-cols-3 gap-2">
-              <Input
-                aria-label="Requests per minute"
-                inputMode="numeric"
-                value={rpm}
-                onChange={(e) => setRpm(e.target.value)}
-                placeholder="RPM"
-                className="font-mono text-[12px]"
-              />
-              <Input
-                aria-label="Tokens per minute"
-                inputMode="numeric"
-                value={tpm}
-                onChange={(e) => setTpm(e.target.value)}
-                placeholder="TPM"
-                className="font-mono text-[12px]"
-              />
-              <Input
-                aria-label="Monthly cost cap in USD"
-                inputMode="decimal"
-                value={costCap}
-                onChange={(e) => setCostCap(e.target.value)}
-                placeholder="$ / month"
-                className="font-mono text-[12px]"
-              />
-            </div>
-            <p className="text-muted-foreground text-[11.5px]">
-              Blank means no limit. Applied to every model on this subscription.
-            </p>
-          </div>
-
-          {models.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>Enabled models</Label>
-                <span className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
-                  USD / 1M tokens
-                </span>
-              </div>
-              {models.length > 6 && (
-                <Input
-                  value={modelQuery}
-                  onChange={(e) => setModelQuery(e.target.value)}
-                  placeholder={`Search ${models.length} models…`}
-                  autoComplete="off"
-                  className="h-9"
-                />
-              )}
-              <ul className="divide-line-soft border-line-soft max-h-56 divide-y overflow-y-auto rounded-xl border">
-                {filteredModels.length === 0 ? (
-                  <li className="text-muted-foreground p-3 text-[12px]">No models match.</li>
-                ) : (
-                  filteredModels.map((m) => {
-                    const checkboxId = `edit-enable-${m.model_id}`;
-                    const isLocked = m.model_id === lockedModelId;
-                    const priced =
-                      typeof m.input_price_per_million === "number" &&
-                      typeof m.output_price_per_million === "number";
-                    return (
-                      <li key={m.model_id} className="flex items-center gap-3 p-2.5">
-                        <Checkbox
-                          id={checkboxId}
-                          checked={enabled[m.model_id] ?? false}
-                          disabled={isLocked}
-                          onCheckedChange={(v) =>
-                            setEnabled((prev) => ({ ...prev, [m.model_id]: v === true }))
-                          }
-                        />
-                        <Label
-                          htmlFor={checkboxId}
-                          className={cn(
-                            "flex min-w-0 flex-1 items-center justify-between gap-2 font-normal",
-                            isLocked ? "cursor-default" : "cursor-pointer",
-                          )}
-                        >
-                          <span className="truncate font-mono text-[12px]">{m.model_id}</span>
-                          {isLocked ? (
-                            <span className="text-muted-foreground inline-flex shrink-0 items-center gap-1 font-mono text-[10px] uppercase">
-                              <Lock className="size-3" aria-hidden />
-                              Org default
-                            </span>
-                          ) : priced ? (
-                            <span className="text-muted-foreground shrink-0 font-mono text-[10.5px] tabular-nums">
-                              ${m.input_price_per_million} / ${m.output_price_per_million}
-                            </span>
-                          ) : m.tier_hint ? (
-                            <span className="text-muted-foreground shrink-0 font-mono text-[10px] uppercase">
-                              {m.tier_hint}
-                            </span>
-                          ) : null}
-                        </Label>
-                      </li>
-                    );
-                  })
-                )}
-              </ul>
-              {lockedModelId && (
-                <p className="text-muted-foreground text-[12px]">
-                  <span className="font-mono text-[11px]">{lockedModelId}</span> is your org&apos;s
-                  default and can&apos;t be disabled here. Set a different default first.
-                </p>
-              )}
-              {enabledModels.length === 0 && (
-                <p className="text-warning text-[12px]">Enable at least one model.</p>
-              )}
-            </div>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={onClose}
-            disabled={pending}
-            className="border-line-soft"
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={!canSubmit || pending}
-            aria-busy={pending}
-            className="from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
-          >
-            {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-            {pending ? "Saving…" : "Save changes"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ───────── Remove confirm ─────────
-
-function RemoveConfirm({
-  provider,
-  onClose,
-  onConfirm,
-}: {
-  provider: ModelProvider | null;
-  onClose: () => void;
-  onConfirm: (p: ModelProvider) => void;
-}) {
-  const open = !!provider;
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="font-display flex items-center gap-2">
-            <Trash2 className="text-destructive size-5" aria-hidden />
-            Remove {provider?.display_name}?
-          </DialogTitle>
-          <DialogDescription>
-            The stored key is deleted from the secrets vault. Runs using this provider&apos;s default
-            model will be blocked until another provider is configured.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="border-line-soft">
-            Keep
-          </Button>
-          <Button variant="destructive" onClick={() => provider && onConfirm(provider)}>
-            Remove
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
+// The remove confirm moved to the provider screen with the action itself. It
+// gained something this one could not have: the models that lose their only
+// key, named. This list has no idea what a subscription serves.

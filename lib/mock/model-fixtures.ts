@@ -101,6 +101,61 @@ export const CATALOG: CatalogProvider[] = [
       { model_id: "gemini-3-flash", label: "Gemini 3 Flash", input_price_per_million: 0.5, output_price_per_million: 2 },
     ],
   },
+  /**
+   * The providers below exist to make the shapes onboarding has to cope with
+   * concrete, not to pad the list:
+   *
+   *   azure    — the SAME models as OpenAI on a different contract and a
+   *              per-tenant endpoint. The case for "API base" existing at all,
+   *              and the clearest example of why one model can need two keys.
+   *   bedrock  — Anthropic's models resold by AWS under AWS ids and AWS
+   *              billing. Same weights, different vendor, different invoice.
+   *   vertex_ai— the same for Google's.
+   *   xai      — a single-vendor provider with no gateway story, i.e. the
+   *              simple case, so the form is not designed only for the hard one.
+   */
+  {
+    provider: "azure",
+    // Ids carry the `azure/` prefix LiteLLM routes on, and that prefix is load-
+    // bearing here: a bare `gpt-5.1` under Azure would be attributed to OpenAI
+    // by the cost fixture's prefix rule, putting one contract's bill on
+    // another's page.
+    label: "Azure OpenAI",
+    models: [
+      { model_id: "azure/gpt-5.1", label: "GPT-5.1 (Azure deployment)", input_price_per_million: 5, output_price_per_million: 20 },
+      { model_id: "azure/gpt-5.1-mini", label: "GPT-5.1 Mini (Azure deployment)", input_price_per_million: 1, output_price_per_million: 4 },
+    ],
+  },
+  {
+    provider: "bedrock",
+    label: "AWS Bedrock",
+    models: [
+      { model_id: "anthropic.claude-sonnet-4-6-v1:0", label: "Claude Sonnet 4.6 (Bedrock)", input_price_per_million: 3, output_price_per_million: 15 },
+      { model_id: "amazon.nova-pro-v1:0", label: "Amazon Nova Pro", input_price_per_million: 0.8, output_price_per_million: 3.2 },
+    ],
+  },
+  {
+    provider: "vertex_ai",
+    label: "Google Vertex AI",
+    models: [
+      { model_id: "vertex_ai/gemini-3-pro", label: "Gemini 3 Pro (Vertex)", input_price_per_million: 4, output_price_per_million: 16 },
+    ],
+  },
+  {
+    provider: "xai",
+    label: "xAI (Grok)",
+    models: [
+      { model_id: "grok-4", label: "Grok 4", input_price_per_million: 3, output_price_per_million: 15 },
+      { model_id: "grok-4-mini", label: "Grok 4 Mini", input_price_per_million: 0.3, output_price_per_million: 1.5 },
+    ],
+  },
+  {
+    provider: "mistral",
+    label: "Mistral",
+    models: [
+      { model_id: "mistral-large-3", label: "Mistral Large 3", input_price_per_million: 2, output_price_per_million: 6 },
+    ],
+  },
 ];
 
 export function getModelCatalog(): CatalogProvider[] {
@@ -147,6 +202,32 @@ let ORG_GRANTS: OrgModelGrant[] = [
     visibility: "specific",
     businessUnitIds: ["ws_lending", "ws_payments"],
   },
+  // Azure's deployment goes to the unit whose contract it is.
+  {
+    provider: "azure",
+    model_id: "azure/gpt-5.1",
+    credentialId: "prov_azure_payments",
+    visibility: "specific",
+    businessUnitIds: ["ws_payments"],
+  },
+  // Granted to everyone, on a subscription with no key: the whole organisation
+  // can see it and none of them can run it. Seeded because "granted but inert"
+  // is the state admins most often misread as working.
+  {
+    provider: "bedrock",
+    model_id: "anthropic.claude-sonnet-4-6-v1:0",
+    credentialId: "prov_bedrock",
+    visibility: "global",
+    businessUnitIds: [],
+  },
+  {
+    provider: "vertex_ai",
+    model_id: "vertex_ai/gemini-3-pro",
+    credentialId: "prov_vertex",
+    visibility: "specific",
+    businessUnitIds: ["ws_platform"],
+  },
+  // Nothing for xAI on purpose — onboarded, granted to nobody.
 ];
 
 /**
@@ -276,6 +357,9 @@ export function getModelGrantMatrix(): {
   rows: Array<{
     provider: string;
     model_id: string;
+    credentialId: string | null;
+    credentialName: string | null;
+    credentialHasKey: boolean | null;
     granted: boolean;
     visibility: "global" | "specific" | null;
     centrallyCredentialed: boolean;
@@ -308,6 +392,7 @@ export function getModelGrantMatrix(): {
           model_id: m.model_id,
           credentialId: cred?.id ?? null,
           credentialName: cred?.display_name ?? null,
+          credentialHasKey: cred ? cred.hasKey : null,
           granted: !!grant,
           visibility: grant ? grant.visibility : null,
           // A subscription with no secret cannot serve a run, so it is not a
@@ -571,6 +656,102 @@ const PROVIDERS: ModelProvider[] = [
       { id: "off_openai_gpt51", provider_id: "prov_openai_lending", model_id: "gpt-5.1", enabled: true, is_default: false, input_price_per_million: 5, output_price_per_million: 20, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
     ],
   },
+  {
+    // A SECOND CONTRACT FOR THE SAME MODEL FAMILY, at a different vendor.
+    // Azure resells OpenAI's models under Azure's billing and a per-tenant
+    // endpoint, so this is not "OpenAI again": different invoice, different
+    // region, different key. The endpoint is part of the credential, which is
+    // why the add form makes it required for this provider.
+    id: "prov_azure_payments",
+    provider: "azure",
+    display_name: "Azure OpenAI — Payments (West Europe)",
+    status: "valid",
+    api_base: "https://acme-payments.openai.azure.com/openai/deployments/gpt-51",
+    is_custom: false,
+    hasKey: true,
+    last_verified_at: new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 18 * 24 * 3600 * 1000).toISOString(),
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_azure_gpt51", provider_id: "prov_azure_payments", model_id: "azure/gpt-5.1", enabled: true, is_default: false, input_price_per_million: 5, output_price_per_million: 20, rpm_limit: 900, tpm_limit: null, cost_limit_usd: null },
+      { id: "off_azure_gpt51_mini", provider_id: "prov_azure_payments", model_id: "azure/gpt-5.1-mini", enabled: true, is_default: false, input_price_per_million: 1, output_price_per_million: 4, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
+  {
+    // REGISTERED WITHOUT A KEY. The organisation has approved Bedrock and
+    // granted Sonnet through it to everyone, but nobody has supplied a secret,
+    // so every grant it carries is visible and inert. This is the state the
+    // keyless onboarding path creates, and the reason `verifyModelProvider`
+    // refuses to call it valid — a green card here would be a lie.
+    id: "prov_bedrock",
+    provider: "bedrock",
+    display_name: "AWS Bedrock — Platform (us-east-1)",
+    status: "unverified",
+    api_base: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    is_custom: false,
+    hasKey: false,
+    last_verified_at: null,
+    created_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_bedrock_sonnet", provider_id: "prov_bedrock", model_id: "anthropic.claude-sonnet-4-6-v1:0", enabled: true, is_default: false, input_price_per_million: 3, output_price_per_million: 15, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+      { id: "off_bedrock_nova", provider_id: "prov_bedrock", model_id: "amazon.nova-pro-v1:0", enabled: true, is_default: false, input_price_per_million: 0.8, output_price_per_million: 3.2, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
+  {
+    // LIMITS IN FORCE. The only seeded subscription carrying a monthly cap, so
+    // the limits column has something to show and the Edit dialog has something
+    // to load — a control that only ever renders empty reads as broken.
+    id: "prov_vertex",
+    provider: "vertex_ai",
+    display_name: "Google Vertex — Data Science (europe-west4)",
+    status: "valid",
+    api_base: "https://europe-west4-aiplatform.googleapis.com",
+    is_custom: false,
+    hasKey: true,
+    last_verified_at: new Date(Date.now() - 8 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 11 * 24 * 3600 * 1000).toISOString(),
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_vertex_gemini_pro", provider_id: "prov_vertex", model_id: "vertex_ai/gemini-3-pro", enabled: true, is_default: false, input_price_per_million: 4, output_price_per_million: 16, rpm_limit: 300, tpm_limit: 120000, cost_limit_usd: 2000 },
+    ],
+  },
+  {
+    // ONBOARDED, GRANTED TO NOBODY. A key that works and reaches no one is a
+    // real end state — you approve a vendor before you decide who gets it —
+    // and it is what the add form now produces when the reach question is left
+    // unanswered. Without it seeded, "0 units" never appears anywhere.
+    id: "prov_xai",
+    provider: "xai",
+    display_name: "xAI — Grok evaluation",
+    status: "valid",
+    api_base: null,
+    is_custom: false,
+    hasKey: true,
+    last_verified_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
+    workspaceId: null,
+    approvalStatus: "active",
+    approvalDecidedBy: null,
+    approvalDecidedAt: null,
+    approvalReason: null,
+    offerings: [
+      { id: "off_xai_grok4", provider_id: "prov_xai", model_id: "grok-4", enabled: true, is_default: false, input_price_per_million: 3, output_price_per_million: 15, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+      { id: "off_xai_grok4_mini", provider_id: "prov_xai", model_id: "grok-4-mini", enabled: true, is_default: false, input_price_per_million: 0.3, output_price_per_million: 1.5, rpm_limit: null, tpm_limit: null, cost_limit_usd: null },
+    ],
+  },
 ];
 
 export interface ModelProviderCreator {
@@ -800,6 +981,15 @@ export function deleteModelProvider(id: string): boolean {
 export function verifyModelProvider(id: string): { id: string; status: ModelProviderStatus } | undefined {
   const provider = PROVIDERS.find((p) => p.id === id);
   if (!provider) return undefined;
+  // A connection registered without a key has nothing to probe. Stamping it
+  // `valid` would put a green card and a fresh "verified just now" over a
+  // credential that cannot make a single call — the one reassurance this field
+  // must never give. It stays unverified until a key is added and tested.
+  if (!provider.hasKey) {
+    provider.status = "unverified";
+    provider.last_verified_at = null;
+    return { id: provider.id, status: provider.status };
+  }
   provider.status = "valid";
   provider.last_verified_at = new Date().toISOString();
   return { id: provider.id, status: provider.status };

@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading-state";
@@ -218,41 +219,33 @@ export default function ProjectsPage() {
         }}
       >
         <div>
-          {/* Eyebrow — mono uppercase brand accent */}
-          <div className="mb-2.5 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-brand-bright">
-            <span
-              className="inline-block h-px w-5 bg-brand-bright"
-              aria-hidden
-            />
-            {BUSINESS_UNIT_LABEL}
-          </div>
-          <h1 className="font-display text-[38px] font-bold leading-[1.02] tracking-[-0.03em]">
-            Projects
-          </h1>
+          <PageTitle>Projects</PageTitle>
 
-          {scope !== null && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {scope !== null && (
               <ScopeChip
                 kind={isOrgWide ? "organization" : level}
                 name={scopeName}
                 size="sm"
               />
-            </div>
-          )}
-
-          <p className="mt-2 max-w-[560px] text-[14px] text-muted-foreground">
-            {/* The count is of AUTHORIZED projects, not of all projects — the
-                server filtered before paging (app/api/projects/route.ts), so
-                this total is honest for the viewer rather than an org-wide
-                figure they can only partly open. */}
-            {pagination
-              ? `${pagination.total} project${pagination.total === 1 ? "" : "s"} you can access across ${groups.length} ${groups.length === 1 ? BUSINESS_UNIT_LABEL.toLowerCase() : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}.${
-                  managedProjectIds.length > 0 && !isOrgWide
-                    ? ` You administer ${managedProjectIds.length} of them.`
-                    : ""
-                } Each card shows its live track pipeline.`
-              : "Loading projects…"}
-          </p>
+            )}
+            {/* The count stays; the sentence explaining what a project card
+                looks like does not. The count is of AUTHORIZED projects — the
+                server filtered before paging (app/api/projects/route.ts) — so
+                it is honest for the viewer rather than an org-wide figure they
+                can only partly open. */}
+            {pagination && (
+              <span className="text-muted-foreground font-mono text-[11.5px]">
+                {pagination.total} of {groups.length}{" "}
+                {groups.length === 1
+                  ? BUSINESS_UNIT_LABEL.toLowerCase()
+                  : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}
+                {managedProjectIds.length > 0 && !isOrgWide
+                  ? ` · you administer ${managedProjectIds.length}`
+                  : ""}
+              </span>
+            )}
+          </div>
         </div>
 
         <RequireRole

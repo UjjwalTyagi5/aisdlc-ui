@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, ScrollText, User } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -128,20 +129,7 @@ function OrgAuditPageInner() {
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
-      {/* Header */}
-      <div className="flex flex-col gap-1">
-        <div className="text-brand-bright flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          Organisation
-        </div>
-        <h1 className="font-display text-[32px] font-bold leading-none tracking-[-0.03em]">
-          Audit log
-        </h1>
-        <p className="text-muted-foreground mt-1 max-w-xl text-[14px]">
-          All events across every {BUSINESS_UNIT_LABEL.toLowerCase()}. Filter by{" "}
-          {BUSINESS_UNIT_LABEL.toLowerCase()} to compare activity or isolate an incident.
-        </p>
-      </div>
+      <PageTitle>Audit log</PageTitle>
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">

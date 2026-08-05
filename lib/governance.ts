@@ -42,6 +42,11 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   // rather than one tier above the requester. A Business Unit Admin asking
   // would land there anyway; this makes it true for everyone.
   model_provider_access: "org_admin",
+  // Type-routed to stage one's approver. The second stage is the agent's own
+  // owner, which depends on the PHASE being asked for and so cannot live in a
+  // map keyed by type — `lib/requests/routing.ts::agentAccessApprover` derives
+  // it, and the request carries the stage it has reached.
+  agent_access: "project_admin",
 };
 
 /**

@@ -15,6 +15,8 @@ export const CONNECTOR_KIND_LABEL: Record<ConnectorKind, string> = {
   azure_repos: "Azure Repos",
   github_actions: "GitHub Actions",
   slack: "Slack",
+  ms_teams: "Microsoft Teams",
+  sharepoint: "SharePoint",
   sso_okta: "Okta SSO",
   sso_entra: "Microsoft Entra SSO",
 };

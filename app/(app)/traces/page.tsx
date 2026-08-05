@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import { PageTitle } from "@/components/app/page-title";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -61,17 +62,7 @@ export default function TracesPage() {
         }}
       >
         <div>
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            Observe
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            Activity
-          </h1>
-          <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-            Per-agent execution traces — spans, latency, errors, and quality scores. The same
-            Langfuse-sourced data as Cost, viewed for debugging.
-          </p>
+          <PageTitle>Traces</PageTitle>
         </div>
 
         <Select value={String(windowDays)} onValueChange={(v) => setWindowDays(Number(v))}>

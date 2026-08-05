@@ -19,7 +19,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { GOVERNANCE_APPROVER_ROLE } from "@/lib/governance";
-import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import { AGENT_OWNER_ROLE, ROLE_META, type PlatformRole } from "@/lib/roles";
+import type { Phase } from "@/lib/schemas/enums";
 import type { GovernanceApprovalType } from "@/lib/schemas/governance-approval";
 
 /**
@@ -52,7 +53,66 @@ const TYPE_ROUTED = new Set<GovernanceApprovalType>([
   // Onboarding a provider is an organization-wide act whoever asks — see
   // GOVERNANCE_APPROVER_ROLE.
   "model_provider_access",
+  // Always starts with the Project Admin, whoever raised it — stage one of two.
+  // See AGENT_ACCESS_STAGES.
+  "agent_access",
 ]);
+
+/**
+ * The one type answered twice, and by whom.
+ *
+ * The Project Admin goes first because theirs is the cheaper question — "should
+ * this person be doing this work" — and a no there saves the agent's owner a
+ * decision entirely. The owner goes second because theirs is the one that
+ * cannot be delegated: §44.5 keeps agent sign-offs with the roles that own
+ * them, and a Project Admin who could grant an agent outright would be
+ * approving on the owner's behalf.
+ */
+export const AGENT_ACCESS_STAGES = ["project_admin", "agent_owner"] as const;
+export type AgentAccessStage = (typeof AGENT_ACCESS_STAGES)[number];
+
+/**
+ * Who owns an agent — the role that decides stage two.
+ *
+ * Deliberately a re-export of `AGENT_OWNER_ROLE` rather than a fresh
+ * derivation over `AGENT_OWNERSHIP`. The two would agree today and that is
+ * exactly the trap: the canonical map encodes decisions the involvement table
+ * cannot express — Development is BUILT by the Developer and APPROVED by the
+ * Architect, and Documentation's owner is the Project Admin because acceptance
+ * there is automatic. A second source for "who owns this agent" would drift
+ * from the one the gates already use.
+ */
+export function agentOwnerRole(phase: Phase): PlatformRole {
+  return AGENT_OWNER_ROLE[phase];
+}
+
+/**
+ * The approver for a given stage of an agent-access request.
+ *
+ * Kept next to `agentOwnerRole` rather than inlined at the call sites so the
+ * two stages cannot drift: the queue, the decide step and the "who sees this"
+ * preview all have to name the same person.
+ */
+export function agentAccessApprover(stage: AgentAccessStage, phase: Phase): PlatformRole {
+  return stage === "project_admin" ? "project_admin" : agentOwnerRole(phase);
+}
+
+/**
+ * The stage after this one, or null when the request is fully decided.
+ *
+ * Needs the phase, because whether a second stage EXISTS depends on it. Where
+ * the Project Admin is themselves the agent's owner — Documentation, whose
+ * acceptance is automatic — stage one already was the owner's decision, and
+ * advancing would hand the request back to the person who just made it. One
+ * approver, asked once.
+ */
+export function nextAgentAccessStage(
+  stage: AgentAccessStage | null,
+  phase: Phase,
+): AgentAccessStage | null {
+  if (stage !== "project_admin") return null;
+  return agentOwnerRole(phase) === "project_admin" ? null : "agent_owner";
+}
 
 /**
  * WHAT EACH TIER MAY ASK FOR.
@@ -76,6 +136,7 @@ const TYPE_ROUTED = new Set<GovernanceApprovalType>([
  *   they cannot do is create the person.
  */
 const CONTRIBUTOR_RAISABLE: readonly GovernanceApprovalType[] = [
+  "agent_access",
   "access_request",
   "model_credential",
   "connector_access",

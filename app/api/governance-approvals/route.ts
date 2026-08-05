@@ -128,6 +128,10 @@ export async function POST(req: NextRequest) {
     // Hand-raised requests carry no external target to apply on approval —
     // the decision is the outcome, not a switch to flip elsewhere.
     targetRef: input.projectId ?? String(unit.id),
+    // The agent being asked for. `decideGovernanceApproval` reads it to find
+    // the owner who decides stage two, so an agent_access request without it
+    // would route its second stage by a default rather than by the ask.
+    payload: input.phase ? { phase: input.phase } : null,
   });
 
   return Response.json(created, { status: 201 });

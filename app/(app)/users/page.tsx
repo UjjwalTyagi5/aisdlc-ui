@@ -6,6 +6,8 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Search, ShieldCheck, UserPlus, Users as UsersIcon } from "lucide-react";
 
+import { PageTitle } from "@/components/app/page-title";
+import { ManageUserRolesDialog } from "@/components/app/manage-user-roles-dialog";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -183,6 +185,7 @@ export default function UsersPage() {
   const role = effectivePlatformRole(session);
   const [query, setQuery] = React.useState("");
   const [inviteOpen, setInviteOpen] = React.useState(false);
+  const [managing, setManaging] = React.useState<DirectoryRow | null>(null);
   const queryClient = useQueryClient();
 
   const canManage = hasPermission(session, "member:manage");
@@ -336,18 +339,12 @@ export default function UsersPage() {
           animationFillMode: "both",
         }}
       >
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          Govern
-        </div>
         <div className="flex w-full flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-              Users
-            </h1>
+            <PageTitle>Users</PageTitle>
 
             {scope !== null && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <ScopeChip
                   kind={isOrgWide ? "organization" : level}
                   name={
@@ -361,17 +358,6 @@ export default function UsersPage() {
                 />
               </div>
             )}
-
-            <p className="text-muted-foreground mt-2 max-w-[620px] text-[14px]">
-              {isOrgWide
-                ? "Everyone in the organisation, grouped by "
-                : `Everyone in the ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} you administer, grouped by `}
-              {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} with their projects nested beneath. The
-              same person can govern one unit and deliver on a project in another — separation of
-              duties applies within a scope, not across them. Click a name for the full breakdown,
-              including permissions and agent access. Roles are assigned per scope on{" "}
-              <span className="text-foreground">Roles &amp; Access</span>.
-            </p>
           </div>
 
           {isOrgAdmin && (
@@ -514,13 +500,27 @@ export default function UsersPage() {
                       </TableCell>
 
                       <TableCell className="py-3 text-right align-top">
-                        <span className="text-muted-foreground font-mono text-[10.5px]">
+                        <span className="text-muted-foreground block font-mono text-[10.5px]">
                           {groups.length} {groups.length === 1 ? "unit" : "units"}
                         </span>
                         {conflicted.length > 0 && (
                           <span className="text-destructive mt-0.5 block font-mono text-[10px]">
                             {conflicted.length} conflict{conflicted.length === 1 ? "" : "s"}
                           </span>
+                        )}
+                        {/* Assigning lives on the row it applies to. It used to
+                            be a screen of its own that made you pick a scope
+                            first and then hunt the person inside it. */}
+                        {isOrgAdmin && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setManaging(r)}
+                            aria-label={`Manage roles for ${r.displayName}`}
+                            className="border-line-soft mt-1.5 h-7 px-2 text-[11px]"
+                          >
+                            Manage roles
+                          </Button>
                         )}
                       </TableCell>
                     </TableRow>
@@ -530,6 +530,20 @@ export default function UsersPage() {
             </Table>
           </div>
         </div>
+      )}
+
+      {managing && (
+        <ManageUserRolesDialog
+          open
+          onOpenChange={(o) => !o && setManaging(null)}
+          userId={managing.userId}
+          displayName={managing.displayName}
+          bindings={managing.bindings.map((b) => ({
+            scopeId: b.id,
+            scopeName: b.name,
+            role: b.role,
+          }))}
+        />
       )}
 
       {!isOrgAdmin && (

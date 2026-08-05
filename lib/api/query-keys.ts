@@ -24,6 +24,8 @@ export const qk = {
     list: (filters?: Record<string, unknown>) =>
       ["projects", "list", filters ?? {}] as const,
     detail: (id: ProjectId) => ["projects", "detail", id] as const,
+    /** The integrations approved for a project, with its own credentials. */
+    integrations: (id: string) => ["projects", "integrations", id] as const,
   },
   projectMembers: {
     list: (id: ProjectId) => ["project-members", "list", id] as const,
@@ -53,6 +55,10 @@ export const qk = {
     list: (workspaceId?: string | null) => ["connectors", workspaceId ?? ""] as const,
     detail: (kind: string) => ["connectors", kind] as const,
     grants: (workspaceId?: string | null) => ["connectors", "grants", workspaceId ?? ""] as const,
+  },
+  /** The whole estate crossed with who holds it — the Integrations matrix. */
+  integrationAccess: {
+    list: () => ["integration-access", "list"] as const,
   },
   model: {
     catalog: () => ["model", "catalog"] as const,

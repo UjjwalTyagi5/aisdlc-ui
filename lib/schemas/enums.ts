@@ -127,6 +127,8 @@ export const ConnectorKind = z.enum([
   "azure_repos",
   "github_actions",
   "slack",
+  "ms_teams",
+  "sharepoint",
   "sso_okta",
   "sso_entra",
 ]);

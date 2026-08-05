@@ -15,7 +15,7 @@ import {
 } from "@/lib/api/connectors";
 import { getBuAllowedModels, getOrgModelGrants, setBuModelGrants } from "@/lib/api/models";
 import { qk } from "@/lib/api/query-keys";
-import { CONNECTOR_KIND_LABEL, connectorKindLabel } from "@/lib/connectors";
+import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { ConnectorGrant } from "@/lib/schemas/connector";
 import type { ConnectorKind } from "@/lib/schemas/enums";
@@ -314,14 +314,10 @@ export function BuConnectorAccessCard({
   });
 
   const policy: ConnectorGrant[] = React.useMemo(() => policyQ.data ?? [], [policyQ.data]);
-  const restricted = React.useMemo(
-    () => policy.filter((g) => g.visibility === "specific"),
-    [policy],
-  );
-  const globals = React.useMemo(
-    () => policy.filter((g) => g.visibility === "global").map((g) => connectorKindLabel(g.kind)),
-    [policy],
-  );
+  // Every kind is per-unit now — connectors have no "global" tier, so there is
+  // no always-on list to render beside the selectable one.
+  const restricted = policy;
+  const globals: string[] = React.useMemo(() => [], []);
 
   const serverSelected = React.useMemo(
     () =>

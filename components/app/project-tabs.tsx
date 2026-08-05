@@ -46,6 +46,12 @@ interface ProjectTab {
 const TABS: ProjectTab[] = [
   { label: "Overview", segment: "" },
   { label: "Members", segment: "members" },
+  // Advertised, unlike Capabilities: this is now the only screen where anyone
+  // uses an integration at all. The admin tiers onboard and grant and never
+  // consume, so a project that could not find its own tools would have nowhere
+  // else to look. Gated on connector:view, which every delivery role holds and
+  // the stakeholder does not.
+  { label: "Integrations", segment: "integrations", requirePermission: "connector:view" },
   // Spend is treated as commercially sensitive rather than ambient — a
   // deliberate narrowing of PRD §34.5, which would show it to every builder.
   // The page enforces the same rule (projects/[id]/cost/page.tsx); this only

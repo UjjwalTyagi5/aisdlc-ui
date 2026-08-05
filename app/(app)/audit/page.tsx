@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Bot, Download, ScrollText, User } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -203,33 +204,24 @@ function AuditPageInner() {
         }}
       >
         <div>
-          {/* Eyebrow */}
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            Observe
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            Activity
-          </h1>
+          <PageTitle>Activity</PageTitle>
 
-          {scope !== null && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {scope !== null && (
               <ScopeChip kind={isOrgWide ? "organization" : level} size="sm" />
-            </div>
-          )}
-
-          <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-            {/* "Immutable record of EVERY action" is only true org-wide. For a
-                scoped viewer the trail is filtered to their projects
-                (app/api/audit/route.ts), and overstating its completeness in an
-                audit context is exactly the wrong error to make. */}
-            {isOrgWide
-              ? "Immutable record of every agent + human action."
-              : "Immutable record of every agent + human action in the projects you're assigned to."}{" "}
-            {pagination
-              ? `${pagination.total} events · page ${pagination.page} of ${totalPages}`
-              : ""}
-          </p>
+            )}
+            {/* The count survives the prose around it: it is the state of the
+                list, not a description of the page. The chip beside it carries
+                what the sentence used to — for a scoped viewer the trail is
+                filtered to their projects (app/api/audit/route.ts), and
+                overstating its completeness in an audit context is exactly the
+                wrong error to make. */}
+            {pagination && (
+              <span className="text-muted-foreground font-mono text-[11.5px]">
+                {pagination.total} events · page {pagination.page} of {totalPages}
+              </span>
+            )}
+          </div>
         </div>
         {/* Export actions */}
         <div className="flex gap-2">

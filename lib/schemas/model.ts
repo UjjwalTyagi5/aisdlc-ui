@@ -122,6 +122,17 @@ export const ModelGrantMatrixRow = z.object({
   /** One row per (model, subscription). Null when no key offers it yet. */
   credentialId: z.string().nullable(),
   credentialName: z.string().nullable(),
+  /**
+   * Whether that named subscription actually holds a secret. Null when there is
+   * no subscription at all.
+   *
+   * Distinct from `centrallyCredentialed`, which is false for a perfectly good
+   * unit-scoped key as well as for a keyless one — so it cannot be used to
+   * decide whether to warn. Since a provider can now be registered with no key,
+   * naming a credential is no longer proof that anything can run: the screen
+   * would print a subscription name beside a model nobody can call.
+   */
+  credentialHasKey: z.boolean().nullable(),
   granted: z.boolean(),
   visibility: GrantVisibility.nullable(),
   /** An org-wide, active provider connection already offers this model, so no

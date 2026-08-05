@@ -9,8 +9,14 @@
  * route-handler bodies, not these shapes.
  */
 import { emitNotification } from "@/lib/mock/notification-fixtures";
-import { initialApproverRole, nextApproverRole } from "@/lib/requests/routing";
+import {
+  agentAccessApprover,
+  initialApproverRole,
+  nextAgentAccessStage,
+  nextApproverRole,
+} from "@/lib/requests/routing";
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import type { Phase } from "@/lib/schemas/enums";
 import type {
   GovernanceApproval,
   GovernanceApprovalDecision,
@@ -232,6 +238,10 @@ export function createGovernanceApproval(input: {
     priority: input.priority ?? "normal",
     attachments: input.attachments ?? [],
     currentApproverRole: approver,
+    // Only agent access is answered twice; everything else has a null stage,
+    // which is what `nextAgentAccessStage` reads as "this one closes on the
+    // first decision".
+    approvalStage: input.type === "agent_access" ? "project_admin" : null,
     escalationCount: 0,
     timeline: [
       event("created", input.requestedBy, { actorRole: requesterRole }, now),
@@ -346,6 +356,37 @@ export function decideGovernanceApproval(
 ): GovernanceApproval | undefined {
   const item = GOVERNANCE_APPROVALS.find((a) => a.id === id);
   if (!item) return undefined;
+
+  // A multi-stage request that is approved at a non-final stage ADVANCES; only
+  // the last stage closes it. Rejection closes it at any stage — one no is
+  // enough, and carrying a rejected request to the next approver would ask
+  // them to overturn a decision that was theirs to defer to.
+  const phase = (item.payload?.phase as Phase | undefined) ?? "development";
+  const nextStage =
+    decision === "approve" ? nextAgentAccessStage(item.approvalStage ?? null, phase) : null;
+  if (nextStage) {
+    const nextApprover = agentAccessApprover(nextStage, phase);
+    item.approvalStage = nextStage;
+    item.currentApproverRole = nextApprover;
+    item.status = "pending_review";
+    item.timeline = [
+      ...item.timeline,
+      event("approved", decidedBy, { note: reason ?? null }),
+      // `assigned`, not `escalated`: the first approver answered, and the
+      // request moving on is the process working rather than stalling.
+      event("assigned", "System", { toRole: nextApprover }),
+    ];
+    emitNotification({
+      kind: "request_approved",
+      title: "Request approved — now with the agent's owner",
+      body: `${decidedBy} approved "${item.title}". It now needs the agent owner's sign-off.`,
+      href: "/approvals",
+      identityId: item.requestedById,
+    });
+    return item;
+  }
+
+  item.approvalStage = null;
   item.status = decision === "approve" ? "approved" : "rejected";
   item.decidedBy = decidedBy;
   item.decidedAt = new Date().toISOString();

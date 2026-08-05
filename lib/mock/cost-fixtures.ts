@@ -9,6 +9,7 @@
  */
 import { PROJECTS } from "@/mocks/fixtures";
 import { listWorkspaces } from "@/lib/mock/workspace-fixtures";
+import { providerLabel } from "@/lib/models/provider-labels";
 import type { BudgetRow, CostBreakdown, CostBreakdownRow } from "@/lib/api/cost";
 import type { Phase } from "@/lib/schemas/enums";
 
@@ -217,7 +218,9 @@ export function buildSpendSeries(
         .sort((a, b) => b[1] - a[1])
         .map(([provider, share], i) => ({
           id: provider,
-          name: PROVIDER_LABEL[provider] ?? provider,
+          // "other" is a bucket, not a slug, so it has no place in the shared
+          // vendor table — but it still has to read as a word, not a key.
+          name: provider === "other" ? "Other" : providerLabel(provider),
           points: backcast(total * share, months, i),
         })),
     };
@@ -243,18 +246,23 @@ export function buildSpendSeries(
  * it, which is the disagreement this whole file works to avoid.
  */
 function providerOfModel(modelId: string): string {
+  // Resold families first: a Bedrock id is `anthropic.claude-…`, which the
+  // `claude` test below would happily claim for Anthropic — attributing AWS's
+  // invoice to a vendor the organisation may not even hold a contract with.
+  // Routed families first — `azure/gpt-5.1` and `anthropic.claude-…` both name
+  // a model some OTHER vendor resells, and the plain-family tests below would
+  // hand each to the vendor whose model it is rather than the one billing for
+  // it. That would put one contract's spend on another contract's page.
+  const routed = modelId.match(/^(azure|vertex_ai|bedrock|openrouter)\//);
+  if (routed) return routed[1]!;
+  if (/^(anthropic|amazon|meta|mistral)\./.test(modelId)) return "bedrock";
   if (modelId.startsWith("claude")) return "anthropic";
   if (modelId.startsWith("gpt") || modelId.startsWith("o1")) return "openai";
   if (modelId.startsWith("gemini")) return "google";
+  if (modelId.startsWith("grok")) return "xai";
+  if (modelId.startsWith("mistral")) return "mistral";
   return "other";
 }
-
-const PROVIDER_LABEL: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-  other: "Other",
-};
 
 /**
  * Per-agent breakdown, over the eight agents of the core pipeline.

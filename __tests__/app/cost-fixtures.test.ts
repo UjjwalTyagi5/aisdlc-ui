@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { buildCostBreakdown } from "@/lib/mock/cost-fixtures";
+import { buildCostBreakdown, buildSpendSeries } from "@/lib/mock/cost-fixtures";
 
 /** Cents, not floats — these are money figures rounded per row. */
 const CENT = 0.011;
@@ -76,5 +76,38 @@ describe("cost breakdown scope filtering", () => {
     expect(none.totalCostUsd).toBe(0);
     expect(none.rows).toHaveLength(0);
     expect(all.totalCostUsd).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Which vendor a model's spend is charged to.
+ *
+ * Attribution is by prefix rather than a table, deliberately: a table would
+ * silently drop a newly catalogued model into no provider at all, losing its
+ * spend from the provider view while the model view still showed it. The cost
+ * of that choice is that prefixes can overlap — a Bedrock id is
+ * `anthropic.claude-…`, which a naive `claude` test hands to Anthropic and so
+ * bills a vendor the organisation may hold no contract with. These pin both
+ * halves: nothing falls through, and nothing is charged to the wrong vendor.
+ */
+describe("spend attribution by provider", () => {
+  const byProvider = buildSpendSeries(6, null, "provider");
+  const byModel = buildSpendSeries(6, null, "model");
+
+  const latest = (s: { points: number[] }) => s.points[s.points.length - 1] ?? 0;
+  const total = (series: Array<{ points: number[] }>) => series.reduce((a, s) => a + latest(s), 0);
+
+  it("sums to the same month as the per-model roll-up", () => {
+    expect(Math.abs(total(byProvider.series) - total(byModel.series))).toBeLessThan(1);
+  });
+
+  it("charges every model to a named vendor, never the 'Other' bucket", () => {
+    // "Other" reaching the screen means a catalogued family has no prefix here.
+    expect(byProvider.series.map((s) => s.id)).not.toContain("other");
+  });
+
+  it("names vendors in words rather than leaking the routing slug", () => {
+    const anthropic = byProvider.series.find((s) => s.id === "anthropic");
+    expect(anthropic?.name).toBe("Anthropic");
   });
 });

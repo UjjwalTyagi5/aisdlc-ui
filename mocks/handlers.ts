@@ -39,7 +39,19 @@ import {
   permittedConnectorKinds,
   setBuConnectorGrants,
   setConnectorGrants,
+  grantConnectorToUnit,
+  revokeConnectorGrant,
 } from "@/lib/mock/connector-grants";
+import {
+  listIntegrationAccess,
+  revokeProjectIntegration,
+} from "@/lib/mock/integration-access";
+import { grantMcpToUnit, revokeMcpGrant } from "@/lib/mock/mcp-fixtures";
+import {
+  listProjectIntegrations,
+  upsertProjectCredential,
+} from "@/lib/mock/project-integration-fixtures";
+import { ProjectIntegrationCredentialInput } from "@/lib/schemas/project-integration";
 import { buildOrgOverview } from "@/lib/mock/org-overview-fixtures";
 import { buildSpendSeries } from "@/lib/mock/cost-fixtures";
 import {
@@ -113,7 +125,11 @@ import {
 } from "@/lib/mock/agent-access-override-fixtures";
 import type { AgentAccessOverrideInput, InvolvementLevel } from "@/lib/schemas/agent-access";
 import type { Phase } from "@/lib/schemas/enums";
-import { listMcpServers } from "@/lib/mock/mcp-fixtures";
+import {
+  createMcpServer as createMcpServerRecord,
+  listMcpServersForScope,
+} from "@/lib/mock/mcp-fixtures";
+import type { McpServer } from "@/lib/schemas/mcp";
 import { getProjectCapabilitiesData, setCuratedDisabled } from "@/lib/mock/capabilities-fixtures";
 import {
   createCustomRole as fxCreateCustomRole,
@@ -500,6 +516,8 @@ export const handlers = [
         requestedById: scope.identityId,
         requestedByRole: role,
         targetRef: input.projectId ?? String(unit.id),
+        // The agent asked for — what routes stage two. See the Next route.
+        payload: input.phase ? { phase: input.phase } : null,
       }),
       { status: 201 },
     );
@@ -1061,11 +1079,39 @@ export const handlers = [
   // ───── MCP registry ─────
   // Mirrors app/api/mcp/registry/route.ts's GET exactly — see
   // [[msw-dual-runtime-mutation-rule]].
-  http.get("/api/mcp/registry", async ({ request }) => {
+  http.get("/api/mcp/registry", async ({ request, cookies }) => {
     await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
     const url = new URL(request.url);
     const activeOnly = url.searchParams.get("active_only") === "true";
-    return HttpResponse.json(listMcpServers(activeOnly));
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      listMcpServersForScope(scope.isOrgWide ? null : scope.businessUnitIds, activeOnly),
+    );
+  }),
+  // Registering lands at the level the registrar governs. Mirrors the POST in
+  // app/api/mcp/registry/route.ts — a browser-side write and a route write
+  // never share memory, so both runtimes need the rule.
+  http.post("/api/mcp/registry", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const role = effectivePlatformRole(session);
+    if (role !== "org_admin" && role !== "bu_admin") {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: "Only an Organization or Business Unit Admin registers an MCP server.",
+        },
+        { status: 403 },
+      );
+    }
+    const body = (await request.json()) as Partial<McpServer> & { server_name?: string };
+    if (!body.server_name) {
+      return HttpResponse.json({ code: "bad_request", message: "Name the server." }, { status: 400 });
+    }
+    return HttpResponse.json(createMcpServerRecord({ ...body, server_name: body.server_name }));
   }),
 
   // ───── Connectors ─────
@@ -1088,6 +1134,165 @@ export const handlers = [
       ),
     );
   }),
+  // What a project may use, and its own credentials against those things.
+  // Mirrors app/api/projects/[id]/integrations/route.ts.
+  http.get("/api/projects/:id/integrations", async ({ params, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const id = String(params.id);
+    const project = PROJECTS.find((p) => String(p.id) === id);
+    if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    const scope = scopeFromCookies(cookies);
+    const reachable =
+      scope.isOrgWide ||
+      (project.workspaceId ? scope.businessUnitIds.includes(String(project.workspaceId)) : false);
+    if (!reachable) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(listProjectIntegrations(id));
+  }),
+  http.put("/api/projects/:id/integrations", async ({ request, params, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const id = String(params.id);
+    const project = PROJECTS.find((p) => String(p.id) === id);
+    if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    const scope = scopeFromCookies(cookies);
+    const reachable =
+      scope.isOrgWide ||
+      (project.workspaceId ? scope.businessUnitIds.includes(String(project.workspaceId)) : false);
+    if (!reachable) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+
+    const parsed = ProjectIntegrationCredentialInput.safeParse(await request.json());
+    if (!parsed.success) {
+      return HttpResponse.json(
+        { code: "bad_request", message: parsed.error.issues[0]?.message ?? "Invalid credential." },
+        { status: 400 },
+      );
+    }
+    const approved = listProjectIntegrations(id);
+    if (!approved.some((i) => i.kind === parsed.data.kind && i.id === parsed.data.targetId)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "That integration is not approved for this project." },
+        { status: 403 },
+      );
+    }
+    const who = session.user?.name ?? session.user?.email ?? "Someone";
+    return HttpResponse.json(upsertProjectCredential(id, parsed.data, who));
+  }),
+
+  // The access matrix. Mirrors app/api/integrations/access/route.ts.
+  http.get("/api/integrations/access", async ({ cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      listIntegrationAccess(scope.isOrgWide ? null : scope.businessUnitIds),
+    );
+  }),
+  http.post("/api/integrations/access", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const p = new URL(request.url).searchParams;
+    if (effectivePlatformRole(session) !== "org_admin") {
+      return HttpResponse.json(
+        { code: "forbidden", message: "Only an Organization Admin grants integration access." },
+        { status: 403 },
+      );
+    }
+    const kind = p.get("kind") === "mcp" ? "mcp" : "connector";
+    const targetId = p.get("id");
+    if (!targetId) {
+      return HttpResponse.json(
+        { code: "bad_request", message: "Name the integration." },
+        { status: 400 },
+      );
+    }
+    const workspaceId = p.get("workspaceId");
+    if (!workspaceId) {
+      return HttpResponse.json(
+        { code: "bad_request", message: "Name the business unit." },
+        { status: 400 },
+      );
+    }
+    const units =
+      kind === "mcp"
+        ? grantMcpToUnit(targetId, workspaceId)
+        : grantConnectorToUnit(targetId, workspaceId);
+    return HttpResponse.json({ ok: true, remainingUnits: units });
+  }),
+  http.delete("/api/integrations/access", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const p = new URL(request.url).searchParams;
+    const kind = p.get("kind") === "mcp" ? "mcp" : "connector";
+    const targetId = p.get("id");
+    const level = p.get("level");
+    if (!targetId) {
+      return HttpResponse.json(
+        { code: "bad_request", message: "Name the integration." },
+        { status: 400 },
+      );
+    }
+    const role = effectivePlatformRole(session);
+    const scope = scopeFromCookies(cookies);
+
+    if (level === "unit") {
+      const workspaceId = p.get("workspaceId");
+      if (!workspaceId) {
+        return HttpResponse.json({ code: "bad_request", message: "Name the unit." }, { status: 400 });
+      }
+      if (role !== "org_admin") {
+        return HttpResponse.json(
+          {
+            code: "forbidden",
+            message: "Only an Organization Admin can take an integration away from a business unit.",
+          },
+          { status: 403 },
+        );
+      }
+      const left =
+        kind === "mcp"
+          ? revokeMcpGrant(targetId, workspaceId)
+          : revokeConnectorGrant(targetId, workspaceId);
+      return HttpResponse.json({ ok: true, remainingUnits: left });
+    }
+
+    if (level === "project") {
+      const projectId = p.get("projectId");
+      if (!projectId) {
+        return HttpResponse.json(
+          { code: "bad_request", message: "Name the project." },
+          { status: 400 },
+        );
+      }
+      if (role !== "org_admin" && role !== "bu_admin") {
+        return HttpResponse.json(
+          { code: "forbidden", message: "Only an admin tier can revoke a project's integration." },
+          { status: 403 },
+        );
+      }
+      const project = PROJECTS.find((x) => String(x.id) === projectId);
+      if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+      if (!scope.isOrgWide && !scope.businessUnitIds.includes(String(project.workspaceId))) {
+        return HttpResponse.json({ code: "not_found" }, { status: 404 });
+      }
+      return HttpResponse.json({
+        ok: true,
+        changed: revokeProjectIntegration(projectId, kind, targetId),
+      });
+    }
+
+    return HttpResponse.json(
+      { code: "bad_request", message: "level must be 'unit' or 'project'." },
+      { status: 400 },
+    );
+  }),
+
   // Which connector kinds the Org Admin permits. Mirrors
   // app/api/connectors/grants/route.ts — the static `grants` segment wins over
   // the `:kind` matcher below, so this must stay declared before it.

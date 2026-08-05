@@ -35,6 +35,7 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
 import { EditBuDetailsDialog } from "@/components/app/edit-bu-details-dialog";
+import { PageTitle } from "@/components/app/page-title";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { useWorkspaces, useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
@@ -130,16 +131,13 @@ export default function WorkspacesPage() {
     <div className="w-full space-y-8 p-4 md:px-10 md:py-8">
       <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end" style={RISE}>
         <div>
-          <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-            <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-            Govern
-          </div>
-          <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-            Business Units
-          </h1>
+          <PageTitle>Business Units</PageTitle>
 
+          {/* The chip stays. It is not decoration or explanation — it says
+              WHOSE units these are, which changes what the list below means
+              for a viewer bound to some of them rather than all. */}
           {scope !== null && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <ScopeChip
                 kind={isOrgWide ? "organization" : level}
                 name={
@@ -151,25 +149,15 @@ export default function WorkspacesPage() {
                 }
                 size="sm"
               />
+              {!isOrgWide && managedBusinessUnitIds.length > 0 && (
+                <span className="text-muted-foreground text-[12.5px]">
+                  {managedBusinessUnitIds.length === 1
+                    ? "The unit you administer"
+                    : `The ${managedBusinessUnitIds.length} units you administer`}
+                </span>
+              )}
             </div>
           )}
-
-          <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-            A business unit isolates a department&apos;s budget, connections and
-            data: its own spend cap, its own connected Jira or Azure DevOps
-            instance, and no visibility into the others. Only the Organization
-            Admin creates one.
-            {!isOrgWide && managedBusinessUnitIds.length > 0 && (
-              <>
-                {" "}
-                You&apos;re seeing the{" "}
-                {managedBusinessUnitIds.length === 1
-                  ? "unit you administer"
-                  : `${managedBusinessUnitIds.length} units you administer`}
-                .
-              </>
-            )}
-          </p>
         </div>
         {canCreate && (
           <Button

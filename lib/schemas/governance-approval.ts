@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { Phase } from "./enums";
 import { Timestamp } from "./primitives";
 
 /**
@@ -50,6 +51,7 @@ export const GovernanceApprovalType = z.enum([
   "agent_default_project",
   "connector_access",
   "mcp_server",
+  "agent_access",
   "access_request",
   "user_onboarding",
   "model_provider_access",
@@ -67,6 +69,7 @@ export const REQUEST_TYPE_LABEL: Record<GovernanceApprovalType, string> = {
   agent_default_project: "Agent default — project",
   connector_access: "Connector access",
   mcp_server: "MCP server",
+  agent_access: "Agent access",
   access_request: "Access or permission",
   user_onboarding: "User onboarding",
   model_provider_access: "Model provider access",
@@ -88,6 +91,7 @@ export const REQUEST_TYPE_HINT: Partial<Record<GovernanceApprovalType, string>> 
   model_provider_access: "Onboard a provider for the whole organisation.",
   connector_access: "Connect a tool your work depends on.",
   mcp_server: "Add an MCP server to your project's toolset.",
+  agent_access: "Work with an agent your role doesn't reach. Your Project Admin sees it first, then the agent's owner.",
   user_onboarding: "Bring someone onto the platform who isn't on it yet.",
   budget_increase: "Raise a spending cap that is about to bind.",
   project_creation: "Stand up a new project.",
@@ -209,6 +213,22 @@ export const GovernanceApproval = z.object({
   timeline: z.array(RequestTimelineEvent).default([]),
   /** The role currently holding it — null once decided or cancelled. */
   currentApproverRole: z.string().nullable().optional(),
+  /**
+   * Where a multi-stage request has got to. Null for the single-decision types,
+   * which is all of them but `agent_access`.
+   *
+   * An agent-access request is answered TWICE, by two people asking different
+   * questions: the Project Admin decides whether this person should be doing
+   * this work at all, and the agent's owner decides whether the agent should
+   * be doing it for them. Neither can answer the other's question, so neither
+   * approval alone grants access.
+   *
+   * This is a stage, deliberately, and not an escalation. An escalation means
+   * the first approver did not answer; here they did, and the request moving
+   * on is the process working. Recording them apart is what lets the queue and
+   * the timeline say which happened.
+   */
+  approvalStage: z.enum(["project_admin", "agent_owner"]).nullable().optional(),
   /** How many tiers it has climbed. 0 = still with its first approver. */
   escalationCount: z.number().int().nonnegative().default(0),
   /** The project id, model-credential id, or workspace id (for
@@ -247,6 +267,16 @@ export const RequestCreateInput = z.object({
   workspaceId: z.string().min(1, "Choose a business unit"),
   projectId: z.string().nullable().optional(),
   attachments: z.array(RequestAttachment).max(10).default([]),
+  /**
+   * WHAT is being asked for, when the type needs one — currently the delivery
+   * phase of an `agent_access` request.
+   *
+   * This is content, not routing, and the distinction is why it is allowed
+   * here at all: the requester names the agent they want, and the platform
+   * derives who owns it. A client naming its own approver is the hole the
+   * docblock above guards; a client naming its own ask is just the ask.
+   */
+  phase: Phase.optional(),
 });
 export type RequestCreateInput = z.infer<typeof RequestCreateInput>;
 

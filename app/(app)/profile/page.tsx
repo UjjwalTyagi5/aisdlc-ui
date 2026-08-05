@@ -11,6 +11,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -117,17 +118,7 @@ export default function ProfilePage() {
           animationFillMode: "both",
         }}
       >
-        <div className="text-brand-bright mb-2.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] uppercase">
-          <span className="bg-brand-bright inline-block h-px w-5" aria-hidden />
-          You
-        </div>
-        <h1 className="font-display text-[38px] leading-[1.02] font-bold tracking-[-0.03em]">
-          Profile
-        </h1>
-        <p className="text-muted-foreground mt-2 max-w-[560px] text-[14px]">
-          Your personal settings and the external accounts agents act as on your
-          behalf.
-        </p>
+        <PageTitle>Profile</PageTitle>
       </header>
 
       {/* ── Identity ─────────────────────────────────────────────────────── */}

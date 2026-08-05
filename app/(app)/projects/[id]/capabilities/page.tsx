@@ -22,7 +22,6 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ProjectConnectorsCard } from "@/components/app/project-connectors-card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
@@ -172,9 +171,10 @@ export default function CapabilitiesPage() {
         )}
       </header>
 
-      {/* What the project inherited and turned on — read-only for every role,
-          including the admin who chose it (see the component's docblock). */}
-      <ProjectConnectorsCard projectId={id} />
+      {/* The connectors this project runs on used to be restated here. They now
+          have a screen of their own — Integrations — which also carries the
+          project's credentials against them. Two lists of the same tools was
+          one more than could stay in agreement. */}
 
       <RoleAccessOverridesCard
         projectId={id}
