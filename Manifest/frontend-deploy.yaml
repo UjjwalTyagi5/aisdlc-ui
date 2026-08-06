@@ -39,7 +39,7 @@ spec:
       containers:
         - name: frontend
           # Tag is rewritten by azure-pipelines.yml on every build; ArgoCD syncs the change.
-          image: aisdlcacr2026.azurecr.io/frontend:41
+          image: aisdlcacr2026.azurecr.io/frontend:42
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
