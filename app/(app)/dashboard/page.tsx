@@ -427,7 +427,7 @@ export default function DashboardPage() {
                   href="/integrations"
                 />
                 <StatTile
-                  label="People"
+                  label="Users"
                   value={overview ? String(overview.userCount) : "—"}
                   sub="across every business unit"
                   icon={Users}
@@ -437,7 +437,7 @@ export default function DashboardPage() {
             )}
 
             <StatTile
-              label="Waiting on you"
+              label="Approvals pending"
               value={String(waitingCount)}
               sub={
                 waitingCount === 0

@@ -173,9 +173,6 @@ export default function ProjectsPage() {
   // Metric strip counts — derived from real listProjects data
   const activeCount = items.filter((p) => !p.archived).length;
   const archivedCount = items.filter((p) => p.archived).length;
-  const runningCount = items.filter((p) =>
-    p.pipeline.some((e) => e.status === "running"),
-  ).length;
   const awaitingCount = items.filter((p) =>
     p.pipeline.some((e) => e.status === "awaiting_approval"),
   ).length;
@@ -274,7 +271,7 @@ export default function ProjectsPage() {
       {/* Metric strip — real counts from listProjects data */}
       {data && (
         <div
-          className="grid grid-cols-2 gap-3 sm:grid-cols-4"
+          className="grid grid-cols-2 gap-3 sm:grid-cols-3"
           aria-label="Project metrics"
         >
           <MetricTile
@@ -283,27 +280,17 @@ export default function ProjectsPage() {
             foot={archivedCount > 0 ? `${archivedCount} archived` : undefined}
             delay={0.06}
           />
-          {/* No footer: the Running tile immediately to the right IS the
-              running count, and stating it twice in adjacent tiles reads as
-              two different figures that happen to agree. */}
           <MetricTile
             label="Active"
             value={activeCount}
             delay={0.12}
           />
           <MetricTile
-            label="Running"
-            value={runningCount}
-            foot={runningCount > 0 ? "in progress" : "all idle"}
-            accent={runningCount > 0}
-            delay={0.18}
-          />
-          <MetricTile
             label="Awaiting approval"
             value={awaitingCount}
             foot={awaitingCount > 0 ? "needs review" : "none pending"}
             accent={awaitingCount > 0}
-            delay={0.24}
+            delay={0.18}
           />
         </div>
       )}
