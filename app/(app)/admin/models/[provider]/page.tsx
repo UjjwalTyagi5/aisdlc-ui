@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, KeyRound, Loader2, Pencil, Search, Trash2 } from "lucide-react";
+import { ArrowLeft, KeyRound, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -21,10 +21,13 @@ import { Input } from "@/components/ui/input";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
+import { AddModelDialog } from "@/components/app/add-model-dialog";
 import { EditProviderDialog } from "@/components/app/edit-provider-dialog";
+import { SpendRankedBars } from "@/components/app/spend-bar-chart";
 import { UnitAccessPicker } from "@/components/app/unit-access-picker";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
+import { useWorkspaces } from "@/hooks/use-workspaces";
 import { getSpendSeries } from "@/lib/api/cost";
 import {
   deleteModelProvider,
@@ -32,12 +35,18 @@ import {
   getModelGrantMatrix,
   getOrgModelGrants,
   listAllModelProviders,
+  setModelDefault,
   setOrgModelGrants,
 } from "@/lib/api/models";
 import { qk } from "@/lib/api/query-keys";
 import { providerLabel } from "@/lib/models/provider-labels";
 import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
-import type { ModelGrantMatrixRow, ModelProvider, OrgModelGrant } from "@/lib/schemas/model";
+import type {
+  ModelGrantMatrixRow,
+  ModelOffering,
+  ModelProvider,
+  OrgModelGrant,
+} from "@/lib/schemas/model";
 
 const usd = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -48,15 +57,25 @@ const keyOf = (provider: string, modelId: string, credentialId?: string | null) 
 /**
  * One provider, in full.
  *
- * The list screen answers "is this provider healthy and what does it cost".
- * This answers everything model-level, which is what made that list unreadable
- * when it all lived there:
+ * The list screen answers "which vendors do we run on". This answers everything
+ * model-level, as ONE VERTICAL COLUMN — the table of models first, then the
+ * selected model's own analytics beneath it. A side-by-side master/detail was
+ * tried and put the models in a narrow rail with the chart squeezed beside it;
+ * stacking gives both the full width, and the reading order matches the act:
+ * scan the table, pick a row, read what it costs.
  *
- *   what each MODEL costs
+ * The table carries what is true of a (model, credential) PAIR:
+ *
+ *   what each MODEL costs this month
  *   which CREDENTIAL serves it — a provider may hold several, each covering
  *     different models, which is how one key can run production models and
  *     another the cheap ones
  *   which BUSINESS UNITS have it, revocable here
+ *
+ * The panel below carries what is true of the MODEL: its price per token, and
+ * six months of spend as bars. That split is why the chart is not a column — a
+ * history has no cell width, and a single "this month" figure cannot tell a
+ * step change from a steady bill.
  *
  * Org Admin only. The grant matrix names every unit's standing against every
  * model, which is the organisation's whole posture in one screen.
@@ -83,6 +102,12 @@ export default function ProviderDetailPage() {
     queryFn: () => getSpendSeries({ groupBy: "model", months: 6 }),
     staleTime: 60_000,
   });
+  const catalogQ = useQuery({ queryKey: qk.model.catalog(), queryFn: getModelCatalog });
+  const { data: allWorkspaces } = useWorkspaces();
+  const grantableWorkspaces = React.useMemo(
+    () => (allWorkspaces ?? []).filter((w) => w.status === "active"),
+    [allWorkspaces],
+  );
 
   const grants = React.useMemo(() => grantsQ.data ?? [], [grantsQ.data]);
 
@@ -140,6 +165,34 @@ export default function ProviderDetailPage() {
   }, [rows, spendByModel]);
 
   /**
+   * Every model this provider serves, with what it cost this month — the top
+   * card's bars.
+   *
+   * Distinct model ids, not rows: a model on two keys is one bill, and a
+   * ranking that listed it twice would let the same money win two places.
+   */
+  const modelSpendRows = React.useMemo(() => {
+    const ids = new Set(rows.map((r) => r.model_id));
+    return [...ids].map((id) => ({ id, name: id, value: spendByModel.get(id) ?? 0 }));
+  }, [rows, spendByModel]);
+
+  /**
+   * The provider's own six-month series, summed from its models.
+   *
+   * Not fetched separately with `groupBy: "provider"` — that call exists and
+   * the list screen uses it, but summing the per-model figures already on hand
+   * guarantees the header total and the bars beneath it cannot disagree, which
+   * two independent aggregations eventually would.
+   */
+  const providerHistory = React.useMemo(() => {
+    const months = spendQ.data?.months ?? [];
+    const ids = new Set(rows.map((r) => r.model_id));
+    const mine = (spendQ.data?.series ?? []).filter((s) => ids.has(s.id));
+    const points = months.map((_, i) => mine.reduce((a, s) => a + (s.points[i] ?? 0), 0));
+    return { months, points, total: points.reduce((a, v) => a + v, 0) };
+  }, [rows, spendQ.data]);
+
+  /**
    * Filtering the access table.
    *
    * Matches the model, the credential serving it, and the units that hold it —
@@ -171,6 +224,31 @@ export default function ProviderDetailPage() {
   }, [rows]);
 
   /**
+   * Which model the panel below is showing.
+   *
+   * Held as a model id, not a row: a model on two keys is two rows and one
+   * bill, so selecting either must open the same history. Null means "not
+   * chosen yet", which resolves to the first visible row — a panel that stayed
+   * blank until you clicked would hide the new part of the page behind a step
+   * nothing asks you to take.
+   */
+  /**
+   * The offering behind each model, from whichever key carries it.
+   *
+   * The matrix row says whether a model is granted and to whom; only the
+   * offering knows whether it is the org-wide default. That is the one fact the
+   * table needs from outside the matrix, so it is resolved once here rather
+   * than searched per row.
+   */
+  const offeringByModel = React.useMemo(() => {
+    const m = new Map<string, ModelOffering>();
+    for (const c of credentials) {
+      for (const o of c.offerings) if (!m.has(o.model_id)) m.set(o.model_id, o);
+    }
+    return m;
+  }, [credentials]);
+
+  /**
    * The subscription being edited.
    *
    * Rotating a key was reachable only from the Models list card, which is the
@@ -181,7 +259,7 @@ export default function ProviderDetailPage() {
    */
   const [editing, setEditing] = React.useState<ModelProvider | null>(null);
   const [removing, setRemoving] = React.useState<ModelProvider | null>(null);
-  const catalogQ = useQuery({ queryKey: qk.model.catalog(), queryFn: getModelCatalog });
+  const [addOpen, setAddOpen] = React.useState(false);
 
   const invalidateProviders = () =>
     queryClient.invalidateQueries({ queryKey: ["model"] });
@@ -207,6 +285,27 @@ export default function ProviderDetailPage() {
     },
     onError: (err) =>
       toast.error("Couldn't update model access", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  });
+
+  /**
+   * The one org-wide default model.
+   *
+   * It used to be a radio group across the provider cards, which put a choice
+   * that is singular for the whole organisation into a grid where nothing said
+   * so — six cards each showing their own radios read as six independent
+   * settings. It belongs against one model, on the screen that says everything
+   * else about that model.
+   */
+  const defaultM = useMutation({
+    mutationFn: (offeringId: string) => setModelDefault(offeringId),
+    onSuccess: () => {
+      toast.success("Default model updated");
+      invalidateProviders();
+    },
+    onError: (err) =>
+      toast.error("Couldn't set default model", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -311,16 +410,28 @@ export default function ProviderDetailPage() {
               {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} may use it.
             </p>
           </div>
-          {spendQ.data && (
-            <div className="text-right">
-              <p className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
-                This month
-              </p>
-              <p className="font-display text-[26px] leading-none font-bold tabular-nums">
-                {usd(providerSpend)}
-              </p>
-            </div>
-          )}
+          <div className="flex items-end gap-5">
+            {spendQ.data && (
+              <div className="text-right">
+                <p className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
+                  This month
+                </p>
+                <p className="font-display text-[26px] leading-none font-bold tabular-nums">
+                  {usd(providerSpend)}
+                </p>
+              </div>
+            )}
+            {/* The vendor is not asked for again — this button knows which
+                provider it is standing on, and the dialog opens with it
+                already chosen. */}
+            <Button
+              onClick={() => setAddOpen(true)}
+              className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+            >
+              <Plus className="size-4" aria-hidden />
+              Add model
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -330,6 +441,54 @@ export default function ProviderDetailPage() {
         <LoadingState variant="card" />
       ) : (
         <>
+          {/* ── Cost first: every model, side by side ───────────────────────
+              At the TOP because "what is this provider costing us, and which
+              model is doing it" is the question you arrive with; the access
+              table below is what you do about it. Horizontal bars rather than
+              the stacked monthly chart: this compares models to each other, and
+              a horizontal form scales to as many as the provider has, where the
+              grouped chart folds everything past the third into "Other". */}
+          <Card className="border-line-soft bg-panel-elevated">
+            <CardHeader className="pb-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-display text-[14px] font-bold tracking-[-0.01em]">
+                  Cost by model
+                </h2>
+                <span className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
+                  This month
+                </span>
+              </div>
+              <p className="text-muted-foreground text-[12px]">
+                All {modelSpendRows.length} {label} models, ranked by what they cost this month.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* The provider's totals as one horizontal strip — the context
+                  the bars are a share of. */}
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                <Stat label="This month" value={spendQ.data ? usd(providerSpend) : "—"} />
+                <Stat
+                  label={`Last ${providerHistory.points.length || 6} months`}
+                  value={spendQ.data ? usd(providerHistory.total) : "—"}
+                />
+                <Stat
+                  label="Monthly average"
+                  value={
+                    spendQ.data && providerHistory.points.length > 0
+                      ? usd(providerHistory.total / providerHistory.points.length)
+                      : "—"
+                  }
+                />
+                <Stat label="Models" value={String(modelSpendRows.length)} />
+              </div>
+
+              <SpendRankedBars
+                rows={modelSpendRows}
+                emptyLabel={`No ${label} spend this month.`}
+              />
+            </CardContent>
+          </Card>
+
           {/* ── Models: cost, credential, access ────────────────────────────
               One card, not two. A separate Credentials list restated what the
               Credential column already says — the same subscription names, read
@@ -419,11 +578,21 @@ export default function ProviderDetailPage() {
                         const credential = row.credentialId
                           ? (credentialById.get(row.credentialId) ?? null)
                           : null;
+                        const offering = offeringByModel.get(row.model_id) ?? null;
                         return (
                           <tr key={`${row.model_id}::${row.credentialId ?? ""}`}>
                             <td className="py-2.5 pr-3">
                               <div className="flex flex-wrap items-center gap-2">
                                 <span className="font-mono text-[12px]">{row.model_id}</span>
+                                {/* The org-wide default, marked where the model
+                                    is. It used to be a radio on the provider
+                                    cards, which showed one singular setting as
+                                    six independent ones. */}
+                                {offering?.is_default && (
+                                  <span className="text-success bg-success/10 border-success/30 shrink-0 rounded-full border px-1.5 py-px font-mono text-[9px] font-semibold tracking-wide uppercase">
+                                    Default
+                                  </span>
+                                )}
                                 {!row.granted && (
                                   <span className="text-muted-foreground border-line-soft shrink-0 rounded-full border px-1.5 py-px font-mono text-[9px] tracking-wide uppercase">
                                     Not granted
@@ -531,6 +700,26 @@ export default function ProviderDetailPage() {
                                 repeated those same names. */}
                             <td className="py-2.5 pl-2">
                               <div className="flex items-center justify-end gap-1">
+                                {/* Offered only where it is a change: a model
+                                    with no offering has nothing to promote, and
+                                    one already default has nowhere to go. */}
+                                {offering && !offering.is_default && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-muted-foreground hover:text-foreground h-7 px-2 text-[11px]"
+                                    disabled={defaultM.isPending}
+                                    onClick={() => defaultM.mutate(offering.id)}
+                                    title={`Make ${row.model_id} the org-wide default model`}
+                                  >
+                                    {defaultM.isPending ? (
+                                      <Loader2 className="size-3 animate-spin" aria-hidden />
+                                    ) : (
+                                      "Make default"
+                                    )}
+                                  </Button>
+                                )}
+
                                 {row.granted ? (
                                   <Button
                                     variant="ghost"
@@ -607,69 +796,100 @@ export default function ProviderDetailPage() {
             </CardContent>
           </Card>
 
-          <EditProviderDialog
-            provider={editing}
-            catalog={catalogQ.data ?? []}
-            onClose={() => setEditing(null)}
-            onSaved={() => queryClient.invalidateQueries({ queryKey: ["model"] })}
-          />
-
-          {/* Names the models that lose their key, not just the subscription.
-              "Remove Anthropic — EU gateway?" is answerable only if you already
-              know what runs on it, and the whole reason this action moved here
-              is that this screen does. */}
-          <Dialog open={removing !== null} onOpenChange={(o) => !o && setRemoving(null)}>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle>Remove {removing?.display_name}?</DialogTitle>
-                <DialogDescription>
-                  The key is deleted from the tenant&apos;s vault. This cannot be undone.
-                </DialogDescription>
-              </DialogHeader>
-              {removing &&
-                (() => {
-                  // Models this key alone serves — the ones left with nothing.
-                  const orphaned = rows
-                    .filter((r) => r.credentialId === removing.id)
-                    .filter(
-                      (r) =>
-                        !rows.some(
-                          (o) => o.model_id === r.model_id && o.credentialId !== removing.id,
-                        ),
-                    )
-                    .map((r) => r.model_id);
-                  return orphaned.length === 0 ? (
-                    <p className="text-muted-foreground text-[13px]">
-                      Every model this subscription serves is also served by another key here.
-                    </p>
-                  ) : (
-                    <div className="border-warning/40 bg-warning/5 rounded-lg border p-3">
-                      <p className="text-[13px] font-medium">
-                        {orphaned.length} {orphaned.length === 1 ? "model" : "models"} will have no
-                        key behind {orphaned.length === 1 ? "it" : "them"}:
-                      </p>
-                      <p className="text-muted-foreground mt-1 font-mono text-[11.5px]">
-                        {orphaned.join(", ")}
-                      </p>
-                    </div>
-                  );
-                })()}
-              <DialogFooter>
-                <Button variant="ghost" onClick={() => setRemoving(null)}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="destructive"
-                  disabled={removeM.isPending}
-                  onClick={() => removing && removeM.mutate(removing.id)}
-                >
-                  {removeM.isPending ? "Removing…" : "Remove subscription"}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
         </>
       )}
+
+      <AddModelDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        catalog={catalogQ.data ?? []}
+        catalogLoading={catalogQ.isLoading}
+        /* Org-wide: this screen is the Org Admin's, and their onboarding is
+           never scoped to a single unit. */
+        targetUnits={null}
+        allowedByUnit={{}}
+        fullCatalog={catalogQ.data ?? []}
+        needsApproval={false}
+        grantableWorkspaces={grantableWorkspaces}
+        initialProvider={providerKind}
+        onAdded={() => queryClient.invalidateQueries({ queryKey: ["model"] })}
+      />
+
+      <EditProviderDialog
+        provider={editing}
+        catalog={catalogQ.data ?? []}
+        onClose={() => setEditing(null)}
+        onSaved={() => queryClient.invalidateQueries({ queryKey: ["model"] })}
+      />
+
+      {/* Names the models that lose their key, not just the subscription.
+          "Remove Anthropic — EU gateway?" is answerable only if you already
+          know what runs on it, and the whole reason this action moved here
+          is that this screen does. */}
+      <Dialog open={removing !== null} onOpenChange={(o) => !o && setRemoving(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove {removing?.display_name}?</DialogTitle>
+            <DialogDescription>
+              The key is deleted from the tenant&apos;s vault. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {removing &&
+            (() => {
+              // Models this key alone serves — the ones left with nothing.
+              const orphaned = rows
+                .filter((r) => r.credentialId === removing.id)
+                .filter(
+                  (r) =>
+                    !rows.some(
+                      (o) => o.model_id === r.model_id && o.credentialId !== removing.id,
+                    ),
+                )
+                .map((r) => r.model_id);
+              return orphaned.length === 0 ? (
+                <p className="text-muted-foreground text-[13px]">
+                  Every model this subscription serves is also served by another key here.
+                </p>
+              ) : (
+                <div className="border-warning/40 bg-warning/5 rounded-lg border p-3">
+                  <p className="text-[13px] font-medium">
+                    {orphaned.length} {orphaned.length === 1 ? "model" : "models"} will have no
+                    key behind {orphaned.length === 1 ? "it" : "them"}:
+                  </p>
+                  <p className="text-muted-foreground mt-1 font-mono text-[11.5px]">
+                    {orphaned.join(", ")}
+                  </p>
+                </div>
+              );
+            })()}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRemoving(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={removeM.isPending}
+              onClick={() => removing && removeM.mutate(removing.id)}
+            >
+              {removeM.isPending ? "Removing…" : "Remove subscription"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ───────── The selected model's analytics ─────────
+
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="border-line-soft bg-surface-1 rounded-xl border px-3 py-2.5">
+      <p className="text-muted-foreground font-mono text-[9.5px] tracking-[0.12em] uppercase">
+        {label}
+      </p>
+      <p className="font-display mt-1 text-[20px] leading-none font-bold tabular-nums">{value}</p>
+      {sub && <p className="text-muted-foreground mt-1 text-[11px]">{sub}</p>}
     </div>
   );
 }

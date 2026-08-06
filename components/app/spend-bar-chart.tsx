@@ -379,7 +379,7 @@ export function SpendRankedBars({
   emptyLabel = "No spend recorded yet.",
   className,
 }: {
-  rows: Array<{ id: string; name: string; value: number; href?: string }>;
+  rows: Array<{ id: string; name: string; value: number }>;
   emptyLabel?: string;
   className?: string;
 }) {
