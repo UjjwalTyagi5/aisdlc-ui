@@ -53,6 +53,12 @@ import type { GovernanceApproval } from "@/lib/schemas";
  * requests" is what you asked for and where it got to. "All" is everything in
  * scope. One list with a filter would answer all three worse than three lists
  * answer one each.
+ *
+ * THE ORGANIZATION ADMIN GETS ONE. They sit at the top of the routing ladder:
+ * nothing is above them to decide their asks, so `canRaiseRequest` is false for
+ * them and "My requests" is structurally empty rather than merely empty today.
+ * With only the inbox left, the tab bar names nothing worth choosing between,
+ * so it goes too and the inbox is simply the page.
  */
 export default function RequestsAndApprovalsPage() {
   const session = useSession({ required: true });
@@ -127,6 +133,7 @@ export default function RequestsAndApprovalsPage() {
         : `${projectBindings.length} projects`;
 
   const mayRaise = canRaiseRequest(role);
+  const isOrgAdmin = role === "org_admin";
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -167,25 +174,27 @@ export default function RequestsAndApprovalsPage() {
       <RequestSummaryCards counts={counts} />
 
       <Tabs defaultValue="inbox" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="inbox">
-            Inbox
-            {inboxRequests.length > 0 && (
-              <span className="bg-warning/15 text-warning ml-1.5 rounded-full px-1.5 font-mono text-[10px]">
-                {inboxRequests.length}
-              </span>
-            )}
-          </TabsTrigger>
-          <TabsTrigger value="mine">
-            My requests
-            {myRequests.length > 0 && (
-              <span className="text-muted-foreground ml-1.5 font-mono text-[10px]">
-                {myRequests.length}
-              </span>
-            )}
-          </TabsTrigger>
-          <TabsTrigger value="all">All</TabsTrigger>
-        </TabsList>
+        {!isOrgAdmin && (
+          <TabsList>
+            <TabsTrigger value="inbox">
+              Inbox
+              {inboxRequests.length > 0 && (
+                <span className="bg-warning/15 text-warning ml-1.5 rounded-full px-1.5 font-mono text-[10px]">
+                  {inboxRequests.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="mine">
+              My requests
+              {myRequests.length > 0 && (
+                <span className="text-muted-foreground ml-1.5 font-mono text-[10px]">
+                  {myRequests.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="all">All</TabsTrigger>
+          </TabsList>
+        )}
 
         {/* ── Inbox: requests routed to this role, then the agent gates ───── */}
         <TabsContent value="inbox" className="space-y-6">
@@ -225,35 +234,35 @@ export default function RequestsAndApprovalsPage() {
           <ApprovalQueue />
         </TabsContent>
 
-        <TabsContent value="mine">
-          {requestsQ.isLoading ? (
-            <LoadingState variant="list" rows={3} />
-          ) : (
-            <RequestTable
-              requests={myRequests}
-              onOpen={setSelected}
-              emptyTitle="You haven't raised anything"
-              emptyDescription={
-                mayRaise
-                  ? "Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
-                  : "Organization Admins decide requests rather than raising them."
-              }
-            />
-          )}
-        </TabsContent>
+        {!isOrgAdmin && (
+          <TabsContent value="mine">
+            {requestsQ.isLoading ? (
+              <LoadingState variant="list" rows={3} />
+            ) : (
+              <RequestTable
+                requests={myRequests}
+                onOpen={setSelected}
+                emptyTitle="You haven't raised anything"
+                emptyDescription="Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
+              />
+            )}
+          </TabsContent>
+        )}
 
-        <TabsContent value="all">
-          {requestsQ.isLoading ? (
-            <LoadingState variant="list" rows={4} />
-          ) : (
-            <RequestTable
-              requests={requests}
-              onOpen={setSelected}
-              emptyTitle="No requests in scope"
-              emptyDescription="Requests raised in the business units and projects you can see appear here."
-            />
-          )}
-        </TabsContent>
+        {!isOrgAdmin && (
+          <TabsContent value="all">
+            {requestsQ.isLoading ? (
+              <LoadingState variant="list" rows={4} />
+            ) : (
+              <RequestTable
+                requests={requests}
+                onOpen={setSelected}
+                emptyTitle="No requests in scope"
+                emptyDescription="Requests raised in the business units and projects you can see appear here."
+              />
+            )}
+          </TabsContent>
+        )}
       </Tabs>
 
       <RaiseRequestDialog

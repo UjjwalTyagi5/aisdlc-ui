@@ -9,7 +9,6 @@ import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ApprovalGateRow } from "@/components/app/approval-gate-row";
-import { ApprovalQueueStrip } from "@/components/app/approval-queue-strip";
 import { GovernanceApprovalRow } from "@/components/app/governance-approval-row";
 import { listApprovals, type ApprovalFilters } from "@/lib/api/approvals";
 import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
@@ -24,21 +23,11 @@ import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import type { ApprovalGate, GovernanceApproval } from "@/lib/schemas";
 
-type TypeFilter = "all" | "approval" | "clarification" | "outcome";
 type Scope = "mine" | "all";
-
-/** The three things that land in a personal queue (PRD §33.2). */
-const TYPE_TABS: { id: TypeFilter; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "approval", label: "Approvals & sign-offs" },
-  { id: "clarification", label: "Clarifications" },
-  { id: "outcome", label: "Outcomes" },
-];
 
 export function ApprovalQueue() {
   const session = useRawSession();
   const queryClient = useQueryClient();
-  const [type, setType] = React.useState<TypeFilter>("all");
   const [scope, setScope] = React.useState<Scope>("mine");
   const { active: activeWorkspace } = useActiveWorkspace();
   const {
@@ -60,7 +49,10 @@ export function ApprovalQueue() {
   // governance-tier role (no ApprovalGate ever applies to them), so hidden.
   const isAdmin = !isGovernanceTier && hasPermission(session, "admin:*");
 
-  const filters: ApprovalFilters = { type: type === "all" ? undefined : type };
+  // The queue no longer narrows by type — every kind of gate that reaches this
+  // viewer is listed together. `filters` stays a typed object so the query key
+  // and the endpoint keep their shape for a future filter.
+  const filters: ApprovalFilters = {};
 
   const gatesQ = useQuery({
     queryKey: qk.approvals.list(filters),
@@ -81,7 +73,7 @@ export function ApprovalQueue() {
   const governanceQ = useQuery({
     queryKey: qk.governanceApprovals.list(governanceWorkspaceScope),
     queryFn: () => listGovernanceApprovals(governanceWorkspaceScope),
-    enabled: canSeeGovernance && (type === "all" || type === "approval"),
+    enabled: canSeeGovernance,
   });
 
   // Role-scoping: "mine" keeps only gates the viewer can action.
@@ -157,51 +149,12 @@ export function ApprovalQueue() {
     return null;
   }, [accessBindings, isOrgWide, scopeLevel]);
 
-  // Computed from the same already-role-filtered data the list below
-  // renders — never a separate, unfiltered server count. That mismatch was
-  // a real bug: a governance-tier viewer's "You're all caught up" list sat
-  // under a metrics strip still claiming outstanding approvals, because
-  // /api/approvals/metrics counts every gate in the system with no
-  // awareness of who's asking.
-  const metrics = React.useMemo(() => {
-    const now = Date.now();
-    const ages = [...visible, ...visibleGovernance].map(
-      (g) => (now - new Date(g.requestedAt).getTime()) / 60_000,
-    );
-    return {
-      approvals: visible.filter((g) => g.type === "approval").length + visibleGovernance.length,
-      clarifications: visible.filter((g) => g.type === "clarification").length,
-      oldestMinutes: ages.length ? Math.round(Math.max(...ages)) : 0,
-      generatedAt: new Date().toISOString(),
-    };
-  }, [visible, visibleGovernance]);
-
   return (
     <div className="space-y-4">
-      {!isLoading && !gatesQ.isError && <ApprovalQueueStrip metrics={metrics} />}
-
-      {/* Filters: type tabs + scope toggle */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="border-line-soft inline-flex rounded-lg border p-0.5">
-          {TYPE_TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setType(t.id)}
-              className={cn(
-                "rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors",
-                type === t.id
-                  ? "bg-surface-2 text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-              aria-pressed={type === t.id}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        {isAdmin && (
+      {/* Scope toggle — admins only; the type filter it used to sit beside is
+          gone, so this row is empty for everyone else. */}
+      {isAdmin && (
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <div className="border-line-soft inline-flex rounded-lg border p-0.5">
             <button
               type="button"
@@ -230,8 +183,8 @@ export function ApprovalQueue() {
               All pending
             </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {gatesQ.isError ? (
         <ApiErrorState
