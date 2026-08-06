@@ -42,6 +42,7 @@ import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
 import { budgetWindowError, type BudgetWindow } from "@/lib/schemas/budget-window";
 import { useCan } from "@/hooks/use-can";
 import { listConnectors } from "@/lib/api/connectors";
+import { connectorStatusLabel } from "@/lib/connectors";
 import {
   archiveProject,
   getProject,
@@ -522,8 +523,8 @@ export default function ProjectSettingsPage() {
                           </span>
                         )}
                       </div>
-                      <span className="text-muted-foreground text-xs capitalize">
-                        {c.health}
+                      <span className="text-muted-foreground text-xs">
+                        {connectorStatusLabel(c.health)}
                       </span>
                     </li>
                   ))}

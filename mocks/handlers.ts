@@ -167,6 +167,16 @@ import {
 } from "@/lib/mock/agent-profile-fixtures";
 import { agentDefaultApprovalType, canPublishAtTier } from "@/lib/governance";
 import type { AgentProfileDraftInput, ProfileScope } from "@/lib/schemas/agent-profiles";
+import {
+  createAgentSkill as fxCreateAgentSkill,
+  deleteAgentSkill as fxDeleteAgentSkill,
+  getAgentSkill as fxGetAgentSkill,
+  listAgentSkills as fxListAgentSkills,
+  listAgentSkillVersions as fxListAgentSkillVersions,
+  toggleAgentSkill as fxToggleAgentSkill,
+  updateAgentSkill as fxUpdateAgentSkill,
+} from "@/lib/mock/agent-skill-fixtures";
+import type { SkillScope } from "@/lib/schemas/agent-skills";
 
 /**
  * Read the signed-in session from MSW's parsed cookie jar — MSW handlers run
@@ -785,6 +795,132 @@ export const handlers = [
       payload: { agentId: body.agentId, scope: body.scope },
     });
     return HttpResponse.json(created, { status: 201 });
+  }),
+
+  // ───── Agent Studio skills (Skills tab) ─────
+  // Mirrors app/api/agent-skills/** exactly — see [[msw-dual-runtime-mutation-rule]].
+  http.get("/api/agent-skills", async ({ request }) => {
+    await lag();
+    const sp = new URL(request.url).searchParams;
+    const agentId = sp.get("agent_id");
+    if (!agentId) {
+      return HttpResponse.json({ code: "invalid_input", message: "agent_id is required" }, { status: 422 });
+    }
+    const scope = (sp.get("scope") ?? "workspace") as SkillScope;
+    const scopeId = sp.get("scope_id");
+    return HttpResponse.json({ skills: fxListAgentSkills(agentId, scope, scopeId) });
+  }),
+  // Registered BEFORE the generic ":origin/:skillKey" detail route below —
+  // both are 2-segment GET paths, and MSW matches in registration order, so
+  // the more specific "/versions" literal has to win first or every version
+  // list request would be swallowed as a (nonexistent) skill detail lookup.
+  http.get("/api/agent-skills/:skillKey/versions", async ({ params, request }) => {
+    await lag();
+    const sp = new URL(request.url).searchParams;
+    const agentId = sp.get("agent_id");
+    const scope = (sp.get("scope") ?? "workspace") as SkillScope;
+    const scopeId = sp.get("scope_id");
+    if (!agentId) {
+      return HttpResponse.json({ code: "invalid_input", message: "agent_id is required" }, { status: 422 });
+    }
+    return HttpResponse.json({
+      versions: fxListAgentSkillVersions(String(params.skillKey), agentId, scope, scopeId),
+    });
+  }),
+  http.get("/api/agent-skills/:origin/:skillKey", async ({ params, request }) => {
+    await lag();
+    const sp = new URL(request.url).searchParams;
+    const agentId = sp.get("agent_id");
+    const scope = (sp.get("scope") ?? "workspace") as SkillScope;
+    const scopeId = sp.get("scope_id");
+    if (!agentId) {
+      return HttpResponse.json({ code: "invalid_input", message: "agent_id is required" }, { status: 422 });
+    }
+    const skill = fxGetAgentSkill(String(params.skillKey), agentId, scope, scopeId);
+    if (!skill) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(skill);
+  }),
+  http.post("/api/agent-skills", async ({ request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const body = (await request.json()) as {
+      agent_id: string;
+      scope: SkillScope;
+      scope_id?: string | null;
+      skill_key: string;
+      display_name: string;
+      description?: string;
+      when_to_use?: string;
+      body: string;
+    };
+    if (!body?.agent_id || !body?.scope || !body?.skill_key || !body?.display_name || !body?.body) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "agent_id, scope, skill_key, display_name and body are required" },
+        { status: 422 },
+      );
+    }
+    const created = fxCreateAgentSkill({
+      agentId: body.agent_id,
+      scope: body.scope,
+      scopeId: body.scope_id ?? null,
+      skillKey: body.skill_key,
+      displayName: body.display_name,
+      description: body.description ?? "",
+      whenToUse: body.when_to_use ?? "",
+      body: body.body,
+      createdBy: session.user.name,
+    });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+  http.put("/api/agent-skills/:skillKey", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+    const body = (await request.json()) as {
+      agent_id: string;
+      scope: SkillScope;
+      scope_id?: string | null;
+      display_name: string;
+      description?: string;
+      when_to_use?: string;
+      body: string;
+    };
+    const updated = fxUpdateAgentSkill(String(params.skillKey), body.agent_id, body.scope, body.scope_id ?? null, {
+      displayName: body.display_name,
+      description: body.description ?? "",
+      whenToUse: body.when_to_use ?? "",
+      body: body.body,
+      updatedBy: session.user.name,
+    });
+    if (!updated) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json(updated);
+  }),
+  http.delete("/api/agent-skills/:skillKey", async ({ params, request }) => {
+    await lag();
+    const sp = new URL(request.url).searchParams;
+    const agentId = sp.get("agent_id");
+    const scope = (sp.get("scope") ?? "workspace") as SkillScope;
+    const scopeId = sp.get("scope_id");
+    if (!agentId) {
+      return HttpResponse.json({ code: "invalid_input", message: "agent_id is required" }, { status: 422 });
+    }
+    const deleted = fxDeleteAgentSkill(String(params.skillKey), agentId, scope, scopeId);
+    if (!deleted) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    return HttpResponse.json({ deleted: true });
+  }),
+  http.post("/api/agent-skills/toggle", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as {
+      agent_id: string;
+      scope: SkillScope;
+      scope_id?: string | null;
+      origin: "vendor" | "custom";
+      skill_key: string;
+      enabled: boolean;
+    };
+    fxToggleAgentSkill(body.skill_key, body.agent_id, body.scope, body.scope_id ?? null, body.enabled);
+    return HttpResponse.json({ origin: body.origin, skill_key: body.skill_key, enabled: body.enabled });
   }),
 
   http.post("/api/workspaces/:id/budget-increase-request", async ({ params, request, cookies }) => {

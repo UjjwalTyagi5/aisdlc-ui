@@ -36,6 +36,7 @@ import { OutOfScope } from "@/components/auth/scope-empty-state";
 import { ApiRequestError } from "@/lib/api/client";
 import { listArtifacts } from "@/lib/api/artifacts";
 import { listConnectors } from "@/lib/api/connectors";
+import { connectorStatusLabel } from "@/lib/connectors";
 import { getProject, updateProject } from "@/lib/api/projects";
 import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useRawSession } from "@/components/auth/session-provider";
@@ -577,13 +578,14 @@ function HealthDot({ health }: { health: Connector["health"] }) {
       : health === "degraded"
         ? "bg-warning"
         : "bg-destructive";
+  const label = connectorStatusLabel(health);
   return (
     <span className="flex items-center gap-1.5">
       <span
         className={cn("inline-block size-2 rounded-full", tone)}
-        aria-label={`Connector ${health}`}
+        aria-label={`Connector ${label}`}
       />
-      <span className="text-muted-foreground text-xs capitalize">{health}</span>
+      <span className="text-muted-foreground text-xs">{label}</span>
     </span>
   );
 }

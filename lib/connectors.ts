@@ -1,4 +1,4 @@
-import type { ConnectorKind } from "@/lib/schemas/enums";
+import type { ConnectorHealth, ConnectorKind } from "@/lib/schemas/enums";
 
 /**
  * Display names for connector kinds.
@@ -23,4 +23,17 @@ export const CONNECTOR_KIND_LABEL: Record<ConnectorKind, string> = {
 
 export function connectorKindLabel(kind: string): string {
   return CONNECTOR_KIND_LABEL[kind as ConnectorKind] ?? kind;
+}
+
+/**
+ * User-facing status word for a connector's health.
+ *
+ * The backend still tracks three states (`healthy` / `degraded` /
+ * `disconnected`) so alerts and diagnostics can tell "flaky" apart from
+ * "down". But the UI collapses that to the two words a user actually acts
+ * on: only a fully healthy connector reads as "Connected" — anything less
+ * reads as "Disconnected", since degraded is still a problem to fix.
+ */
+export function connectorStatusLabel(health: ConnectorHealth): "Connected" | "Disconnected" {
+  return health === "healthy" ? "Connected" : "Disconnected";
 }
