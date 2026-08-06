@@ -29,6 +29,9 @@ export function createCustomRole(input: {
   permissions: string[];
   agentAccess?: Partial<Record<Phase, InvolvementLevel>>;
   scope: CustomRoleScope;
+  /** The owning Business Unit, or null for an org-wide role. Decided by the
+   *  route handler from the caller's scope, never taken from the browser. */
+  businessUnitId?: string | null;
 }): CustomRole {
   const role: CustomRole = {
     id: `role_${nextId++}`,
@@ -37,6 +40,7 @@ export function createCustomRole(input: {
     permissions: input.permissions,
     agentAccess: input.agentAccess,
     scope: input.scope,
+    businessUnitId: input.businessUnitId ?? null,
   };
   CUSTOM_ROLES.push(role);
   return role;
@@ -63,4 +67,60 @@ export function deleteCustomRole(id: string): boolean {
   if (i === -1) return false;
   CUSTOM_ROLES.splice(i, 1);
   return true;
+}
+
+// ─── Ownership (who may write which role) ────────────────────────────────────
+
+/** The bit of an access scope this module needs — kept structural so both the
+ *  route handlers and the MSW handlers can pass what they already resolved,
+ *  without this file importing the scope resolver. */
+export interface RoleOwnerScope {
+  isOrgWide: boolean;
+  managedBusinessUnitIds: string[];
+}
+
+/**
+ * Which Business Unit a caller's new role belongs to, or a refusal.
+ *
+ * The server decides ownership; `businessUnitId` arriving from the browser is
+ * treated as a request, not a fact. A Business Unit Admin who could name any
+ * unit here would be able to plant an assignable role inside someone else's —
+ * a quiet way to grant permissions in a unit you do not run.
+ *
+ *   org-wide caller   may create an org-wide role (null) or one pinned to any
+ *                     unit they name.
+ *   unit admin        gets their own unit, and is refused if they name another.
+ *                     With several administered units the request must say
+ *                     which, because guessing would silently pin the role to a
+ *                     unit whose people it was never meant for.
+ */
+export function resolveRoleOwner(
+  scope: RoleOwnerScope,
+  requested: string | null | undefined,
+): { businessUnitId: string | null } | { error: string } {
+  if (scope.isOrgWide) return { businessUnitId: requested ?? null };
+
+  const managed = scope.managedBusinessUnitIds;
+  if (managed.length === 0) return { error: "You do not administer a business unit." };
+  if (requested) {
+    return managed.includes(String(requested))
+      ? { businessUnitId: String(requested) }
+      : { error: "You can only define roles for a business unit you administer." };
+  }
+  if (managed.length > 1) {
+    return { error: "Say which business unit this role belongs to." };
+  }
+  return { businessUnitId: managed[0]! };
+}
+
+/**
+ * May this caller change or delete this role?
+ *
+ * An org-wide role (`businessUnitId: null`) is the Organization Admin's: a unit
+ * admin assigns it but must not be able to rewrite what it grants everywhere
+ * else. Their own unit's roles are theirs entirely.
+ */
+export function canWriteCustomRole(scope: RoleOwnerScope, role: CustomRole): boolean {
+  if (scope.isOrgWide) return true;
+  return role.businessUnitId !== null && scope.managedBusinessUnitIds.includes(role.businessUnitId);
 }

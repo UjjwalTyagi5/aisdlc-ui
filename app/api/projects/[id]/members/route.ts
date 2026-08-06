@@ -1,6 +1,10 @@
 import { type NextRequest } from "next/server";
 
-import { addProjectMember, listProjectMembers } from "@/lib/mock/project-membership-fixtures";
+import {
+  addProjectMember,
+  listProjectMembers,
+  projectMembershipBlock,
+} from "@/lib/mock/project-membership-fixtures";
 
 // DUMMY-DATA SEAM: reads/writes the in-memory fixture store directly — this
 // is a net-new project-scoped role model with no backend equivalent yet.
@@ -17,6 +21,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return Response.json({ code: "invalid_input", message: "email and roleName are required" }, {
       status: 422,
     });
+  }
+  const blocked = projectMembershipBlock(id, body.email);
+  if (blocked) {
+    return Response.json({ code: "forbidden", message: blocked }, { status: 422 });
   }
   const member = addProjectMember(id, body);
   return Response.json(member, { status: 201 });

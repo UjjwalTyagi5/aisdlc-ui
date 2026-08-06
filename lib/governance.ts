@@ -37,6 +37,12 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   access_request: "project_admin",
   user_onboarding: "project_admin",
   other: "project_admin",
+  // Type-routed, and the only type that routes DOWNWARD. The Organization
+  // Admin raises it when they place a Contributor in a unit; the unit's admin
+  // is the only person who can say what that person does there. Tier routing
+  // would compute "one above the requester" and find nobody, because the
+  // requester is already at the top.
+  role_assignment: "bu_admin",
   // The one hand-raised type that IS type-routed: onboarding a provider is an
   // organization-wide act whoever asks for it, so it goes to the Org Admin
   // rather than one tier above the requester. A Business Unit Admin asking

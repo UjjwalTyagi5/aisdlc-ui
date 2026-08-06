@@ -59,7 +59,13 @@ import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 // Only delivery-tier roles are offered here: per the ownership cascade
 // (§14.3) a Business Unit owner grants Project Admin, builders and custom —
 // never a governance role, which would be tier escalation (§14.5).
-const ROLES = ROLE_ORDER.filter((r) => ROLE_META[r].tier === "delivery").map((r) => ({
+//
+// `contributor` is excluded for a different reason than the governance roles:
+// it is not a job but the absence of one, the placeholder a person carries
+// between being onboarded and being given a role here.
+const ROLES = ROLE_ORDER.filter(
+  (r) => ROLE_META[r].tier === "delivery" && r !== "contributor",
+).map((r) => ({
   name: r,
   label: ROLE_META[r].label,
   description: ROLE_META[r].oneLiner,

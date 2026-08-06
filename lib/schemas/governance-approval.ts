@@ -54,6 +54,15 @@ export const GovernanceApprovalType = z.enum([
   "agent_access",
   "access_request",
   "user_onboarding",
+  /**
+   * A Contributor was onboarded into a Business Unit and needs a role from its
+   * admin. The one type that travels DOWNWARD — the Organization Admin raises
+   * it and the unit's admin answers, because the answer is theirs to give and
+   * not theirs to ask for. It is also the one type not closed by a plain
+   * approve/reject: it closes when a role is actually assigned, from either
+   * Users or this queue.
+   */
+  "role_assignment",
   "model_provider_access",
   "other",
 ]);
@@ -72,6 +81,7 @@ export const REQUEST_TYPE_LABEL: Record<GovernanceApprovalType, string> = {
   agent_access: "Agent access",
   access_request: "Access or permission",
   user_onboarding: "User onboarding",
+  role_assignment: "Role assignment",
   model_provider_access: "Model provider access",
   other: "Other",
 };

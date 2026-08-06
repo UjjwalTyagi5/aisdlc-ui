@@ -26,6 +26,10 @@ export const NotificationKind = z.enum([
   "request_approved",
   "request_rejected",
   "request_escalated",
+  /** A Contributor was onboarded into a Business Unit and is waiting for its
+   *  admin to give them a role. Addressed to that unit's admins, never
+   *  broadcast — it is an item of work, not news. */
+  "member_awaiting_role",
 ]);
 export type NotificationKind = z.infer<typeof NotificationKind>;
 

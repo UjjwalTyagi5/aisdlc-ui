@@ -1,51 +1,33 @@
 import { type NextRequest } from "next/server";
 
-import { createMembership, findOrCreateIdentity, getWorkspace } from "@/lib/mock/workspace-fixtures";
-import { addAccessMember } from "@/lib/mock/access-fixtures";
+import { getSession } from "@/lib/auth/session";
+import { hasPermission } from "@/lib/auth/permissions";
+import { onboardIntoOrganization, type OnboardingInput } from "@/lib/mock/onboarding";
 
-// DUMMY-DATA SEAM: reads/writes the in-memory fixture store directly. Handles
-// org- and Business-Unit-scope onboarding (org_admin inviting into either
-// tier — an org-level appointment is just a membership whose role is
-// "org_admin", still recorded against a workspace since Membership has no
-// org-only variant). Project scope is a separate endpoint:
-// POST /api/projects/[id]/members.
+// DUMMY-DATA SEAM: the whole transaction lives in lib/mock/onboarding.ts so
+// this handler and its MSW twin can never drift — see that file, and
+// [[msw-dual-runtime-mutation-rule]].
+//
+// Admitting someone to the organisation is the Organization Admin's act:
+// `admin:*` is the only permission that passes, so a Business Unit Admin
+// (who holds `member:manage` and assigns roles inside their own unit) cannot
+// bring in someone new.
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as {
-    email: string;
-    displayName?: string;
-    workspaceId: string;
-    role: string;
-  };
-  if (!body?.email || !body?.workspaceId || !body?.role) {
+  const session = await getSession();
+  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+  if (!hasPermission(session, "admin:*")) {
     return Response.json(
-      { code: "invalid_input", message: "email, workspaceId and role are required" },
-      { status: 422 },
+      { code: "forbidden", message: "Onboarding is an Organization Admin action." },
+      { status: 403 },
     );
   }
-  if (!getWorkspace(body.workspaceId)) {
-    return Response.json({ code: "not_found", message: "Unknown workspace" }, { status: 404 });
-  }
 
-  const identity = findOrCreateIdentity(body.email, body.displayName);
-  const membership = createMembership(body.workspaceId, identity.id, body.role);
-  // Keep the Roles & Access screen's separate member list (mocks/handlers.ts's
-  // ACCESS_MEMBERS) in sync — it doesn't read from workspace-fixtures.ts.
-  addAccessMember(
-    body.workspaceId,
-    { userId: identity.ssoSubject, name: identity.displayName, email: identity.email },
-    body.role,
-  );
-
-  return Response.json(
-    {
-      identityId: identity.id,
-      email: identity.email,
-      displayName: identity.displayName,
-      initials: identity.initials,
-      workspaceId: membership.workspaceId,
-      role: membership.role,
-      membershipStatus: "invited",
-    },
-    { status: 201 },
-  );
+  const body = (await req.json()) as OnboardingInput;
+  // `actorName` comes from the session, never the body — it is the "raised by"
+  // line on the request the unit's admin will answer.
+  const { status, body: payload } = onboardIntoOrganization({
+    ...body,
+    actorName: session.user?.name,
+  });
+  return Response.json(payload, { status });
 }

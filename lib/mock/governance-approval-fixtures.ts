@@ -180,6 +180,71 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
       new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
     ),
   },
+  // ── Role assignments, one per seeded Contributor ──────────────────────────
+  // These match the `contributor` memberships in workspace-fixtures.ts. Seeding
+  // the memberships without the requests would have split the handover in two:
+  // the pending list on Users would show someone waiting while Requests &
+  // Approvals — the screen an admin actually works from — showed nothing owed.
+  // One obligation, two surfaces, so it has to be seeded into both.
+  ...(
+    [
+      {
+        id: "gov_role_tomas",
+        identityId: "idn_tomas",
+        ssoSubject: "okta|tomas",
+        name: "Tomas Bauer",
+        email: "tomas@abcbank.com",
+        workspaceId: "ws_platform",
+        workspaceName: "Platform Engineering",
+      },
+      {
+        id: "gov_role_amara",
+        identityId: "idn_amara",
+        ssoSubject: "okta|amara",
+        name: "Amara Okafor",
+        email: "amara@abcbank.com",
+        workspaceId: "ws_payments",
+        workspaceName: "Payments",
+      },
+      {
+        id: "gov_role_elif",
+        identityId: "idn_elif",
+        ssoSubject: "okta|elif",
+        name: "Elif Demir",
+        email: "elif@abcbank.com",
+        workspaceId: "ws_lending",
+        workspaceName: "Lending",
+      },
+    ] as const
+  ).map((p, i): GovernanceApproval => {
+    const at = new Date(Date.now() - (i + 1) * 19 * 60 * 60 * 1000).toISOString();
+    return {
+      id: p.id,
+      type: "role_assignment",
+      status: "pending_review",
+      workspaceId: p.workspaceId,
+      workspaceName: p.workspaceName,
+      projectId: null,
+      projectName: null,
+      title: `Role needed: ${p.name} in ${p.workspaceName}`,
+      summary: `${p.name} was onboarded as a Contributor and holds no permissions until you assign a role.`,
+      description: `${p.name} (${p.email}) was placed in ${p.workspaceName} by the Organization Admin. Assign a built-in role or one you compose for this business unit; until then they can sign in and do nothing.`,
+      requestedBy: "Sarthak Kapoor",
+      requestedById: "idn_sarthak",
+      requestedByRole: "org_admin",
+      requestedAt: at,
+      decidedBy: null,
+      decidedAt: null,
+      reason: null,
+      targetRef: p.identityId,
+      payload: { identityId: p.identityId, userId: p.ssoSubject, displayName: p.name },
+      priority: "normal",
+      attachments: [],
+      currentApproverRole: "bu_admin",
+      escalationCount: 0,
+      timeline: seedTimeline("Sarthak Kapoor", "org_admin", "bu_admin", at),
+    };
+  }),
 ];
 
 export function listGovernanceApprovals(workspaceId?: string): GovernanceApproval[] {
@@ -210,6 +275,18 @@ export function createGovernanceApproval(input: {
   description?: string | null;
   priority?: RequestPriority;
   attachments?: RequestAttachment[];
+  /**
+   * Suppress the two notifications this function normally emits.
+   *
+   * For the one caller that has already sent a better one. A `role_assignment`
+   * is raised as a side effect of onboarding, and its handover message is
+   * written where the handover is understood (`lib/mock/onboarding.ts`) —
+   * addressed to the unit's admins by identity rather than broadcast to every
+   * `bu_admin`, and pointing at the screen where the role is actually assigned.
+   * Letting this function also fire would ping the same person twice for one
+   * item of work, with the vaguer of the two messages arriving second.
+   */
+  notify?: boolean;
 }): GovernanceApproval {
   const requesterRole = input.requestedByRole ?? null;
   // Routing decides the approver — never the caller. A create path that could
@@ -251,6 +328,8 @@ export function createGovernanceApproval(input: {
     ],
   };
   GOVERNANCE_APPROVALS.push(created);
+
+  if (input.notify === false) return created;
 
   // Emitted HERE rather than in the route handlers, so the Next route and the
   // MSW mirror cannot drift into notifying differently — the transition and
@@ -354,6 +433,51 @@ export function escalateGovernanceApproval(
     role: next,
   });
   return item;
+}
+
+/**
+ * The open `role_assignment` request for one person in one unit, if any.
+ *
+ * By `targetRef` (the identity id) rather than by title: the request and the
+ * membership are two records describing one obligation, and matching them on
+ * anything a human wrote would break the moment someone was renamed.
+ */
+export function findOpenRoleAssignment(
+  workspaceId: string,
+  identityId: string,
+): GovernanceApproval | undefined {
+  return GOVERNANCE_APPROVALS.find(
+    (a) =>
+      a.type === "role_assignment" &&
+      a.workspaceId === workspaceId &&
+      a.targetRef === String(identityId) &&
+      OPEN_STATUSES.has(a.status),
+  );
+}
+
+const OPEN_STATUSES = new Set(["submitted", "pending_review", "escalated"]);
+
+/**
+ * Close the request because the role was actually assigned.
+ *
+ * THE ASSIGNMENT IS THE DECISION. A `role_assignment` has no approve/reject
+ * shape — "approved, but nobody said which role" would be a closed request that
+ * changed nothing. So this is called from the membership write itself, which
+ * means the request closes identically whether the admin acted from the queue
+ * or from Users. Two surfaces, one obligation, one place it is discharged.
+ *
+ * A no-op when no request is open: a role changed for any other reason (a
+ * correction, a move) must not invent a request to close.
+ */
+export function completeRoleAssignment(
+  workspaceId: string,
+  identityId: string,
+  roleLabel: string,
+  decidedBy: string,
+): GovernanceApproval | undefined {
+  const open = findOpenRoleAssignment(workspaceId, identityId);
+  if (!open) return undefined;
+  return decideGovernanceApproval(open.id, "approve", decidedBy, `Assigned ${roleLabel}.`);
 }
 
 export function decideGovernanceApproval(

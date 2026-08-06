@@ -30,6 +30,11 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "cost:view",
     "workspace:manage",
   ],
+  // Onboarded, placed in a unit, and holding nothing until that unit's admin
+  // assigns a real role. `artifact:view` is the read-only floor — enough to
+  // sign in and see the shell rather than an error page, and deliberately not
+  // enough to open an agent, raise a run or read a cost figure.
+  contributor: ["artifact:view"],
   project_admin: [
     "member:manage",
     "project:create",

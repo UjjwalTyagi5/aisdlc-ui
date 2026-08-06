@@ -58,14 +58,34 @@ export interface RoleDialogProps {
   onOpenChange: (open: boolean) => void;
   /** When set, the dialog edits this role instead of creating a new one. */
   initialRole?: CustomRole | null;
-  onSaved: () => void;
+  /**
+   * Pin the scope picker instead of offering it — used when the dialog is
+   * opened from somewhere that already knows the answer (composing a role
+   * mid-assignment). Offering the choice there would let an admin build a
+   * project-scoped role the picker they came from cannot then offer.
+   */
+  lockedScope?: CustomRoleScope;
+  /** The unit this role will belong to. The server decides ownership from the
+   *  session regardless — this only makes the choice visible. */
+  businessUnitId?: string | null;
+  businessUnitName?: string | null;
+  /** Receives the saved role so a caller can select it straight away. */
+  onSaved: (role?: CustomRole) => void;
 }
 
-export function RoleDialog({ open, onOpenChange, initialRole, onSaved }: RoleDialogProps) {
+export function RoleDialog({
+  open,
+  onOpenChange,
+  initialRole,
+  lockedScope,
+  businessUnitId,
+  businessUnitName,
+  onSaved,
+}: RoleDialogProps) {
   const editing = Boolean(initialRole);
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
-  const [scope, setScope] = React.useState<CustomRoleScope>("project");
+  const [scope, setScope] = React.useState<CustomRoleScope>(lockedScope ?? "project");
   const [perms, setPerms] = React.useState<Set<string>>(new Set());
   const [agentAccess, setAgentAccess] = React.useState<Partial<Record<Phase, InvolvementLevel>>>({});
   const [busy, setBusy] = React.useState(false);
@@ -75,11 +95,11 @@ export function RoleDialog({ open, onOpenChange, initialRole, onSaved }: RoleDia
     if (!open) return;
     setName(initialRole?.name ?? "");
     setDescription(initialRole?.description ?? "");
-    setScope(initialRole?.scope ?? "project");
+    setScope(initialRole?.scope ?? lockedScope ?? "project");
     setPerms(new Set(initialRole?.permissions ?? []));
     setAgentAccess(initialRole?.agentAccess ?? {});
     setErr(null);
-  }, [open, initialRole]);
+  }, [open, initialRole, lockedScope]);
 
   function toggle(id: string, on: boolean | string) {
     setPerms((prev) => {
@@ -105,15 +125,18 @@ export function RoleDialog({ open, onOpenChange, initialRole, onSaved }: RoleDia
         agentAccess: Object.keys(nonNoneAccess).length ? nonNoneAccess : undefined,
         scope,
       };
+      let saved: CustomRole;
       if (editing && initialRole) {
-        await updateCustomRole(initialRole.id, payload);
+        saved = await updateCustomRole(initialRole.id, payload);
         toast.success(`Role "${name.trim()}" updated`);
       } else {
-        await createCustomRole(payload);
+        // `businessUnitId` is a request, not a decision: the server pins the
+        // role to a unit the caller actually administers (see resolveRoleOwner).
+        saved = await createCustomRole({ ...payload, businessUnitId: businessUnitId ?? null });
         toast.success(`Role "${name.trim()}" created`);
       }
       onOpenChange(false);
-      onSaved();
+      onSaved(saved);
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : `Could not ${editing ? "update" : "create"} role`);
     } finally {
@@ -148,22 +171,35 @@ export function RoleDialog({ open, onOpenChange, initialRole, onSaved }: RoleDia
                 onChange={(e) => setDescription(e.target.value)}
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="role-scope">Scope</Label>
-              <Select value={scope} onValueChange={(v) => setScope(v as CustomRoleScope)}>
-                <SelectTrigger id="role-scope">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(Object.keys(SCOPE_LABEL) as CustomRoleScope[]).map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {SCOPE_LABEL[s]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-muted-foreground text-[11px]">{SCOPE_HINT[scope]}</p>
-            </div>
+            {lockedScope ? (
+              <p className="border-line-soft bg-surface-1 text-muted-foreground rounded-md border px-3 py-2 text-[11.5px]">
+                {businessUnitName ? (
+                  <>
+                    Belongs to <span className="text-foreground font-medium">{businessUnitName}</span>{" "}
+                    — offered when assigning a role there, and nowhere else.
+                  </>
+                ) : (
+                  SCOPE_HINT[lockedScope]
+                )}
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="role-scope">Scope</Label>
+                <Select value={scope} onValueChange={(v) => setScope(v as CustomRoleScope)}>
+                  <SelectTrigger id="role-scope">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(SCOPE_LABEL) as CustomRoleScope[]).map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {SCOPE_LABEL[s]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-muted-foreground text-[11px]">{SCOPE_HINT[scope]}</p>
+              </div>
+            )}
             <div className="space-y-3">
               {PERMISSION_CATALOG.map((g) => (
                 <div key={g.group} className="space-y-1.5">

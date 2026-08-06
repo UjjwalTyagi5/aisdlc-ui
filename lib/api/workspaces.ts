@@ -78,10 +78,12 @@ export const addWorkspaceMember = (
     schema: WorkspaceMemberOut,
   });
 
+/** `roleLabel` is optional and cosmetic-with-teeth: a custom role's name lives
+ *  in the roles store, and without it the audit trail records a raw `role_3`. */
 export const updateWorkspaceMemberRole = (
   id: string,
   userId: string,
-  body: { roleName: string },
+  body: { roleName: string; roleLabel?: string },
 ) =>
   api(`/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`, {
     method: "PATCH",

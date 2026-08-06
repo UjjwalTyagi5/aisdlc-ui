@@ -115,6 +115,175 @@ const IDENTITIES: Identity[] = [
     idpSource: "Okta",
     links: [],
   },
+  // ── Delivery people ───────────────────────────────────────────────────────
+  // Added when the governance tier was taken off every project
+  // (project-membership-fixtures.ts): the seats Marcus, Farah and Noah held
+  // were real delivery seats, so removing them without replacements would have
+  // left two projects with no admin and the roster thinner than the product it
+  // describes.
+  {
+    id: "idn_yuki",
+    ssoSubject: "okta|yuki",
+    email: "yuki@abcbank.com",
+    displayName: "Yuki Tanaka",
+    initials: "YT",
+    idpSource: "Okta",
+    links: [
+      { id: "lnk_7", identityId: "idn_yuki", system: "jira", externalId: "5c22ff10a3d", handle: "yuki.tanaka", verified: true, provenance: "oauth", linkedAt: now },
+    ],
+  },
+  {
+    id: "idn_ravi",
+    ssoSubject: "okta|ravi",
+    email: "ravi@abcbank.com",
+    displayName: "Ravi Sharma",
+    initials: "RS",
+    idpSource: "Okta",
+    links: [
+      { id: "lnk_8", identityId: "idn_ravi", system: "github", externalId: "MDQ6VXNlcjM", handle: "rsharma", verified: true, provenance: "oauth", linkedAt: now },
+    ],
+  },
+  {
+    id: "idn_sofia",
+    ssoSubject: "okta|sofia",
+    email: "sofia@abcbank.com",
+    displayName: "Sofia Rossi",
+    initials: "SR",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_omar",
+    ssoSubject: "okta|omar",
+    email: "omar@abcbank.com",
+    displayName: "Omar Nasser",
+    initials: "ON",
+    idpSource: "Okta",
+    links: [
+      { id: "lnk_9", identityId: "idn_omar", system: "github", externalId: "", handle: "omar-n", verified: false, provenance: "admin", linkedAt: null },
+    ],
+  },
+  {
+    id: "idn_hana",
+    ssoSubject: "okta|hana",
+    email: "hana@abcbank.com",
+    displayName: "Hana Kim",
+    initials: "HK",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_luca",
+    ssoSubject: "okta|luca",
+    email: "luca@abcbank.com",
+    displayName: "Luca Moretti",
+    initials: "LM",
+    idpSource: "Okta",
+    links: [],
+  },
+  // Added when every project team was rebuilt inside its own unit. Diego and
+  // Lena used to cover two units each, which is what let a Payments person show
+  // up on a Lending project; each unit now staffs its own projects, and that
+  // needs more people than a roster built around two who spanned everything.
+  {
+    id: "idn_iris",
+    ssoSubject: "okta|iris",
+    email: "iris@abcbank.com",
+    displayName: "Iris Chen",
+    initials: "IC",
+    idpSource: "Okta",
+    links: [
+      { id: "lnk_10", identityId: "idn_iris", system: "github", externalId: "MDQ6VXNlcjQ", handle: "irischen", verified: true, provenance: "oauth", linkedAt: now },
+    ],
+  },
+  {
+    id: "idn_bruno",
+    ssoSubject: "okta|bruno",
+    email: "bruno@abcbank.com",
+    displayName: "Bruno Alves",
+    initials: "BA",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_ana",
+    ssoSubject: "okta|ana",
+    email: "ana@abcbank.com",
+    displayName: "Ana Silva",
+    initials: "AS",
+    idpSource: "Okta",
+    links: [
+      { id: "lnk_11", identityId: "idn_ana", system: "jira", externalId: "6d31aa9c1f2", handle: "ana.silva", verified: true, provenance: "scim", linkedAt: now },
+    ],
+  },
+  {
+    id: "idn_rafael",
+    ssoSubject: "okta|rafael",
+    email: "rafael@abcbank.com",
+    displayName: "Rafael Costa",
+    initials: "RC",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_ingrid",
+    ssoSubject: "okta|ingrid",
+    email: "ingrid@abcbank.com",
+    displayName: "Ingrid Larsen",
+    initials: "IL",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_nadia",
+    ssoSubject: "okta|nadia",
+    email: "nadia@abcbank.com",
+    displayName: "Nadia Petrov",
+    initials: "NP",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_sam",
+    ssoSubject: "okta|sam",
+    email: "sam@abcbank.com",
+    displayName: "Sam Okoye",
+    initials: "SO",
+    idpSource: "Okta",
+    links: [],
+  },
+  // Contributors the Org Admin has onboarded into a unit and nobody has given a
+  // job to yet — the `contributor` placeholder. Seeded, not merely reachable by
+  // onboarding someone: a Business Unit Admin's pending-assignment queue that is
+  // empty on every fresh process looks like a broken feature rather than an
+  // empty one, and the queue is the whole point of the handover.
+  {
+    id: "idn_tomas",
+    ssoSubject: "okta|tomas",
+    email: "tomas@abcbank.com",
+    displayName: "Tomas Bauer",
+    initials: "TB",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_amara",
+    ssoSubject: "okta|amara",
+    email: "amara@abcbank.com",
+    displayName: "Amara Okafor",
+    initials: "AO",
+    idpSource: "Okta",
+    links: [],
+  },
+  {
+    id: "idn_elif",
+    ssoSubject: "okta|elif",
+    email: "elif@abcbank.com",
+    displayName: "Elif Demir",
+    initials: "ED",
+    idpSource: "Okta",
+    links: [],
+  },
 ] as Identity[];
 
 // ───────── Workspaces (Business Units — PRD §12) ─────────
@@ -142,26 +311,65 @@ const WORKSPACES: Workspace[] = ([
 // Roles are drawn strictly from the platform's twelve (PRD §33.1 plus Scrum Master) — there is
 // no "Product Manager", "QA Lead" or "Release Manager" in the role catalogue.
 //
-// Diego is `developer` in Payments AND `architect` in Lending — a role is a
-// binding of (user, scope, role), not a property of the person (PRD §33.1).
+// ONE BUSINESS UNIT PER PERSON, and the Organization Admin is the only
+// exception. A person belongs to the unit that onboarded them, and every
+// project they can be put on lives inside it (`projectMembershipBlock`); the
+// unit is what makes them reachable, budgeted and governed at all.
+//
+// Diego used to be `developer` in Payments AND `architect` in Lending, and Lena
+// sat in Lending AND Platform Engineering. That made a role a binding, which is
+// true — but it also let a Payments person appear on a Lending project's roster
+// and in Lending's people list, which is not. The demonstration survives inside
+// one unit: Diego is Developer on one Payments project and Architect on
+// another, so a role is still a binding of (person, scope, role).
+//
+// The Org Admin holds a row in every unit because their authority is org-wide
+// rather than a membership — they are never on a project either way.
 //
 // Tier separation is per-scope (PRD §14.6, `lib/roles.ts::scopeTierConflicts`):
-// no one holds a governance AND a delivery role in the SAME unit, but Marcus
-// and Farah are each `bu_admin` here and delivery contributors on projects in
-// *other* units — see the seeded roster in project-membership-fixtures.ts.
+// no one holds a governance AND a delivery role in the SAME unit. The three
+// `bu_admin` rows below hold NOTHING else anywhere — a governance role is never
+// a project member, in their own unit or any other (see the note at the top of
+// project-membership-fixtures.ts).
 const MEMBERSHIPS: Membership[] = ([
   { id: "mb_1", identityId: "idn_sarthak", workspaceId: "ws_payments", role: "org_admin", status: "active" },
-  { id: "mb_2", identityId: "idn_priya", workspaceId: "ws_payments", role: "ba", status: "active" },
+  { id: "mb_5", identityId: "idn_sarthak", workspaceId: "ws_lending", role: "org_admin", status: "active" },
+  { id: "mb_8", identityId: "idn_sarthak", workspaceId: "ws_platform", role: "org_admin", status: "active" },
+
+  // ── Payments ──────────────────────────────────────────────────────────────
+  { id: "mb_10", identityId: "idn_marcus", workspaceId: "ws_payments", role: "bu_admin", status: "active" },
+  { id: "mb_2", identityId: "idn_priya", workspaceId: "ws_payments", role: "project_admin", status: "active" },
   { id: "mb_3", identityId: "idn_diego", workspaceId: "ws_payments", role: "developer", status: "active" },
   { id: "mb_4", identityId: "idn_wei", workspaceId: "ws_payments", role: "qa", status: "invited", invitedAt: now },
-  { id: "mb_5", identityId: "idn_sarthak", workspaceId: "ws_lending", role: "org_admin", status: "active" },
-  { id: "mb_6", identityId: "idn_diego", workspaceId: "ws_lending", role: "architect", status: "active" },
-  { id: "mb_7", identityId: "idn_lena", workspaceId: "ws_lending", role: "devops_engineer", status: "active" },
-  { id: "mb_8", identityId: "idn_sarthak", workspaceId: "ws_platform", role: "org_admin", status: "active" },
-  { id: "mb_9", identityId: "idn_lena", workspaceId: "ws_platform", role: "devops_engineer", status: "active" },
-  { id: "mb_10", identityId: "idn_marcus", workspaceId: "ws_payments", role: "bu_admin", status: "active" },
+  { id: "mb_19", identityId: "idn_hana", workspaceId: "ws_payments", role: "security_engineer", status: "active" },
+  { id: "mb_22", identityId: "idn_iris", workspaceId: "ws_payments", role: "architect", status: "active" },
+  { id: "mb_23", identityId: "idn_bruno", workspaceId: "ws_payments", role: "data_engineer", status: "active" },
+
+  // ── Lending ───────────────────────────────────────────────────────────────
   { id: "mb_11", identityId: "idn_farah", workspaceId: "ws_lending", role: "bu_admin", status: "active" },
+  { id: "mb_15", identityId: "idn_yuki", workspaceId: "ws_lending", role: "project_admin", status: "active" },
+  { id: "mb_24", identityId: "idn_ana", workspaceId: "ws_lending", role: "project_admin", status: "active" },
+  { id: "mb_16", identityId: "idn_sofia", workspaceId: "ws_lending", role: "ba", status: "active" },
+  { id: "mb_25", identityId: "idn_rafael", workspaceId: "ws_lending", role: "architect", status: "active" },
+  { id: "mb_7", identityId: "idn_lena", workspaceId: "ws_lending", role: "devops_engineer", status: "active" },
+  { id: "mb_26", identityId: "idn_ingrid", workspaceId: "ws_lending", role: "qa", status: "active" },
+
+  // ── Platform Engineering ──────────────────────────────────────────────────
   { id: "mb_12", identityId: "idn_noah", workspaceId: "ws_platform", role: "bu_admin", status: "active" },
+  { id: "mb_17", identityId: "idn_ravi", workspaceId: "ws_platform", role: "project_admin", status: "active" },
+  { id: "mb_18", identityId: "idn_omar", workspaceId: "ws_platform", role: "developer", status: "active" },
+  { id: "mb_27", identityId: "idn_nadia", workspaceId: "ws_platform", role: "devops_engineer", status: "active" },
+  { id: "mb_28", identityId: "idn_sam", workspaceId: "ws_platform", role: "qa", status: "active" },
+  { id: "mb_20", identityId: "idn_luca", workspaceId: "ws_payments", role: "scrum_master", status: "active" },
+
+  // Awaiting a Business Unit role — ONE PER UNIT, so the queue is non-empty
+  // whichever admin signs in and is visibly per-unit rather than global. Each
+  // has a matching `role_assignment` request seeded in
+  // governance-approval-fixtures.ts; the two are one obligation and drift apart
+  // if only one is seeded.
+  { id: "mb_13", identityId: "idn_tomas", workspaceId: "ws_platform", role: "contributor", status: "invited", invitedAt: now },
+  { id: "mb_14", identityId: "idn_amara", workspaceId: "ws_payments", role: "contributor", status: "invited", invitedAt: now },
+  { id: "mb_21", identityId: "idn_elif", workspaceId: "ws_lending", role: "contributor", status: "invited", invitedAt: now },
 ] as Membership[]);
 
 function slugify(s: string): string {
@@ -178,8 +386,45 @@ function buAdminNameFor(workspaceId: string): string | null {
   return IDENTITIES.find((i) => i.id === membership.identityId)?.displayName ?? null;
 }
 
+/**
+ * Decorate a unit with the two fields that are answers ABOUT the membership
+ * store rather than facts stored on the unit.
+ *
+ * `memberCount` is derived rather than maintained. It used to be a hand-written
+ * seed number that three mutators kept nudging, and the seeds had already
+ * drifted from the rows: Payments said four members while six memberships named
+ * it. A count that disagrees with the list it counts is worse than no count,
+ * and every way of keeping the two in step by hand is a way of forgetting to.
+ */
 function withBuAdmin(w: Workspace): Workspace {
-  return { ...w, buAdminName: buAdminNameFor(w.id) };
+  return {
+    ...w,
+    buAdminName: buAdminNameFor(w.id),
+    memberCount: MEMBERSHIPS.filter((m) => m.workspaceId === w.id).length,
+  };
+}
+
+/**
+ * Who to tell when something happens to a Business Unit's membership — the
+ * identity ids of its active admins.
+ *
+ * A LIST, though `buAdminNameFor` above resolves one. Reading a single admin is
+ * right for a label (a unit has one holder to name); addressing a notification
+ * to only the first would silently drop the message during the window where a
+ * unit has two rows, which is exactly when a handover is in progress and the
+ * message matters most.
+ */
+export function buAdminIdentityIdsFor(workspaceId: string): string[] {
+  return MEMBERSHIPS.filter(
+    (m) => m.workspaceId === workspaceId && m.role === "bu_admin" && m.status === "active",
+  ).map((m) => String(m.identityId));
+}
+
+/** Every membership row, for the org-wide people directory. Callers filter;
+ *  this returns the whole store deliberately (the directory is org-wide by
+ *  design — see app/api/admin/directory/route.ts). */
+export function listAllMemberships(): Membership[] {
+  return [...MEMBERSHIPS];
 }
 
 // ───────── Pure accessors / mutators (in-memory; resets on server restart) ─────────
@@ -335,8 +580,6 @@ export function createMembership(workspaceId: string, identityId: string, role: 
     invitedAt: now,
   };
   MEMBERSHIPS.push(created);
-  const workspace = WORKSPACES.find((w) => w.id === workspaceId);
-  if (workspace) workspace.memberCount += 1;
   return created;
 }
 
@@ -390,8 +633,6 @@ export function setMembershipRole(workspaceId: string, identityId: string, role:
     status: "active",
   };
   MEMBERSHIPS.push(created);
-  const workspace = WORKSPACES.find((w) => w.id === workspaceId);
-  if (workspace) workspace.memberCount += 1;
   return created;
 }
 
@@ -431,8 +672,8 @@ export function setBusinessUnitAdmin(
   const replaced = outgoing ? (IDENTITIES.find((i) => i.id === outgoing.identityId) ?? null) : null;
   if (outgoing) outgoing.role = previousRole;
 
-  // A newcomer needs the membership row created (createMembership is what
-  // maintains `memberCount`); someone already in the unit does not.
+  // A newcomer needs the membership row created; someone already in the unit
+  // does not.
   const already = MEMBERSHIPS.some(
     (m) => m.workspaceId === workspaceId && m.identityId === identity.id,
   );
@@ -456,7 +697,5 @@ export function removeMembership(workspaceId: string, identityId: string): boole
   const idx = MEMBERSHIPS.findIndex((m) => m.workspaceId === workspaceId && m.identityId === identityId);
   if (idx === -1) return false;
   MEMBERSHIPS.splice(idx, 1);
-  const workspace = WORKSPACES.find((w) => w.id === workspaceId);
-  if (workspace) workspace.memberCount = Math.max(0, workspace.memberCount - 1);
   return true;
 }

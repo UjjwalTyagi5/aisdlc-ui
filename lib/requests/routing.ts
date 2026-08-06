@@ -67,6 +67,10 @@ const TYPE_ROUTED = new Set<GovernanceApprovalType>([
   // Always starts with the Project Admin, whoever raised it — stage one of two.
   // See AGENT_ACCESS_STAGES.
   "agent_access",
+  // The unit's own admin, always. Tier routing climbs from the requester, and
+  // this request is raised by the Organization Admin, who has nobody above
+  // them — the answer is one tier DOWN, which only the type knows.
+  "role_assignment",
 ]);
 
 /**

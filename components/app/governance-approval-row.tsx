@@ -8,6 +8,8 @@ import { ExternalLink, ShieldCheck } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 import { ApprovalCard } from "@/components/app/approval-card";
+import { AssignBusinessUnitRoleDialog } from "@/components/app/assign-bu-role-dialog";
+import { Button } from "@/components/ui/button";
 import { decideGovernanceApproval } from "@/lib/api/governance-approvals";
 import { GOVERNANCE_APPROVER_ROLE } from "@/lib/governance";
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
@@ -44,6 +46,7 @@ export function GovernanceApprovalRow({
   approval: GovernanceApproval;
   onResolved: (id: string) => void;
 }) {
+  const [assigning, setAssigning] = React.useState(false);
   const decide = useMutation({
     mutationFn: (input: { decision: "approve" | "reject"; reason?: string }) =>
       decideGovernanceApproval(approval.id, input),
@@ -59,6 +62,23 @@ export function GovernanceApprovalRow({
 
   const pendingDecision = decide.isPending ? (decide.variables?.decision ?? null) : null;
   const age = formatDistanceToNow(new Date(approval.requestedAt), { addSuffix: true });
+
+  /**
+   * A role assignment is not approved — it is DONE.
+   *
+   * Approve/reject is the wrong shape for it twice over: "approved" would close
+   * the request without anyone having said which role, and "rejected" would
+   * leave a person the Organization Admin already placed in this unit sitting
+   * in it with no permissions and nobody obliged to fix that. So this row opens
+   * the same dialog the Users page does, and the request closes because the
+   * membership changed (`completeRoleAssignment`), not because a button here
+   * decided anything.
+   */
+  const isRoleAssignment = approval.type === "role_assignment";
+  const target = (approval.payload ?? {}) as {
+    userId?: string;
+    displayName?: string;
+  };
 
   return (
     <li className="space-y-2">
@@ -91,15 +111,49 @@ export function GovernanceApprovalRow({
         )}
       </div>
 
-      <ApprovalCard
-        status="awaiting_approval"
-        title={approval.title}
-        description={approval.summary}
-        pending={decide.isPending}
-        pendingDecision={pendingDecision}
-        onApprove={() => decide.mutate({ decision: "approve" })}
-        onReject={(reason) => decide.mutate({ decision: "reject", reason })}
-      />
+      {isRoleAssignment ? (
+        <div className="border-line-soft bg-panel-elevated space-y-3 rounded-xl border p-4">
+          <div>
+            <p className="text-[13px] font-medium">{approval.title}</p>
+            <p className="text-muted-foreground mt-0.5 text-[12px]">{approval.summary}</p>
+          </div>
+          <Button size="sm" onClick={() => setAssigning(true)} disabled={!target.userId}>
+            Assign role
+          </Button>
+          {!target.userId && (
+            <p className="text-muted-foreground text-[11.5px]">
+              This request names no one to assign — open Users to find them.
+            </p>
+          )}
+        </div>
+      ) : (
+        <ApprovalCard
+          status="awaiting_approval"
+          title={approval.title}
+          description={approval.summary}
+          pending={decide.isPending}
+          pendingDecision={pendingDecision}
+          onApprove={() => decide.mutate({ decision: "approve" })}
+          onReject={(reason) => decide.mutate({ decision: "reject", reason })}
+        />
+      )}
+
+      {assigning && target.userId && (
+        <AssignBusinessUnitRoleDialog
+          open
+          onOpenChange={(o) => !o && setAssigning(false)}
+          userId={target.userId}
+          displayName={target.displayName ?? approval.title}
+          businessUnitId={approval.workspaceId}
+          businessUnitName={approval.workspaceName}
+          currentRole="contributor"
+          /* The one binding that matters for the two refusals: what they hold
+             in THIS unit. They hold the placeholder — that is why this request
+             exists — so there is nothing here to conflict with. */
+          allBindings={[]}
+          onAssigned={() => onResolved(approval.id)}
+        />
+      )}
     </li>
   );
 }

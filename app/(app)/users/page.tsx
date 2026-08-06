@@ -3,18 +3,17 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { Search, ShieldCheck, UserPlus, Users as UsersIcon, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Lock, Search, ShieldCheck, Upload, UserPlus, Users as UsersIcon, X } from "lucide-react";
 
 import { PageTitle } from "@/components/app/page-title";
-import { ManageUserRolesDialog } from "@/components/app/manage-user-roles-dialog";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
+import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import {
   Table,
@@ -29,151 +28,72 @@ import { useSession } from "@/hooks/use-session";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { ScopeChip } from "@/components/app/scope-indicator";
+import { AssignBusinessUnitRoleDialog } from "@/components/app/assign-bu-role-dialog";
+import { ChangeAppointmentDialog } from "@/components/app/change-appointment-dialog";
+import { BulkOnboardDialog } from "@/components/app/bulk-onboard-dialog";
+import { OnboardUserDialog } from "@/components/app/onboard-user-dialog";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import { listWorkspaceMembers } from "@/lib/api/workspaces";
-import { listProjectMembers } from "@/lib/api/project-members";
-import { listProjects } from "@/lib/api/projects";
-import { onboardPerson } from "@/lib/api/onboarding";
+import { listUserDirectory } from "@/lib/api/users";
 import { qk } from "@/lib/api/query-keys";
-import { ROLE_META, ROLE_ORDER, scopeTierConflicts, type PlatformRole } from "@/lib/roles";
+import { awaitsBusinessUnitRole, ROLE_META, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
-import { OnboardPersonDialog } from "@/components/app/onboard-person-dialog";
-import {
-  resolveRoleLabel,
-  toRoleOption,
-  useAllCustomRoles,
-  useCustomRolesForScope,
-  type AssignableRole,
-} from "@/hooks/use-assignable-roles";
-
-// Every built-in role an Org Admin may appoint someone into from this
-// directory — governance tier plus every delivery-tier contributor. Merged
-// with any business_unit-scoped custom role below (not `custom` itself,
-// which is a placeholder, not a real role).
-const INVITE_BUILTIN_ROLES = ROLE_ORDER.filter((r) => r !== "custom");
+import { resolveRoleLabel, useAllCustomRoles } from "@/hooks/use-assignable-roles";
+import type { DirectoryEntry } from "@/lib/schemas/user-directory";
 
 /**
- * Users — the organisation-wide people directory (PRD §36, §15.2).
+ * Users & Roles — who is in the organisation, and what each of them holds.
  *
- * Organization Admin: invite people, deactivate leavers, reset sign-in
- * factors, and see where each person belongs.
- * Business Unit Admin: view only, scoped to its own unit (PRD §35).
+ * TWO PEOPLE ONBOARD SOMEONE, and this page is where the handover between them
+ * happens (PRD §36, §15.2–§15.3):
  *
- * Shows every role a person holds, across every scope — Business Units AND
- * projects. A role is a binding of (person, scope, role): the same person
- * can be Developer in one Business Unit and Architect in another, or Project
- * Admin on one project and BA on another (PRD §33.1). Click a name for the
- * full breakdown, including permissions and agent-access levels.
+ *   Organization Admin  admits people and says whether each one RUNS a business
+ *                       unit or WORKS in one. Two answers, and nothing more —
+ *                       the eleven working roles are not theirs to guess at.
+ *   Business Unit Admin picks up every Contributor placed in their unit and
+ *                       says what that person actually does, from the built-in
+ *                       roles or one they compose.
  *
- * The directory is composed client-side from the existing per-unit and
- * per-project member endpoints; no new list API is introduced (the
- * click-through detail view does introduce one — see app/(app)/users/[id]).
+ * The directory is ORG-WIDE for both, which is the change that made the second
+ * half workable. It used to be scope-filtered, so a Business Unit Admin's copy
+ * of this page was their own unit's member list under a directory's name, and
+ * "who else is here" had no answer anywhere. Every row is now visible; only the
+ * rows in units the viewer administers are actionable, and the write endpoints
+ * enforce that independently (see app/api/workspaces/[id]/members/**).
  */
-
-interface DirectoryBinding {
-  scope: "workspace" | "project";
-  id: string;
-  name: string;
-  /** For a project binding, its parent Business Unit — used to nest it. */
-  parentId?: string;
-  parentName?: string;
-  role: string;
-}
-
-interface DirectoryRow {
-  userId: string;
-  displayName: string;
-  email: string | null;
-  initials: string;
-  /** Every (scope, role) binding this person holds. */
-  bindings: DirectoryBinding[];
-}
 
 /**
- * One Business Unit's worth of a person's bindings: the role they hold in the
- * unit itself (if any), plus their role on each project inside it.
+ * A role chip, tinted by tier so a governance binding is legible without
+ * reading the label.
  *
- * Grouping this way is the whole point of the page — the same person can be
- * BU Admin of Payments, Project Admin on a Lending project and BA on another,
- * and a flat chip row makes that unreadable past two or three bindings.
+ * `placeholder` is passed in rather than inferred from the role, because
+ * `contributor` means two different things in the two columns it appears in.
+ * As an org-level APPOINTMENT it is a real answer — this person works in a
+ * unit — and printing "no role yet" there would report a decision that was
+ * made as one that wasn't. As a binding INSIDE a unit it is the absence of a
+ * role, and dressing it up as one hides the gap the queue exists to close.
  */
-interface ScopeGroup {
-  unitId: string;
-  unitName: string;
-  /** Roles held on the Business Unit itself. */
-  unitRoles: string[];
-  projects: { id: string; name: string; roles: string[] }[];
-  /** True when this one unit mixes governance and delivery — see below. */
-  conflict: boolean;
-}
-
-/** Projects whose parent Business Unit we couldn't resolve. */
-const UNGROUPED = "__ungrouped__";
-
-function groupBindings(bindings: DirectoryBinding[]): ScopeGroup[] {
-  const byUnit = new Map<string, ScopeGroup>();
-  const group = (id: string, name: string) => {
-    let g = byUnit.get(id);
-    if (!g) {
-      g = { unitId: id, unitName: name, unitRoles: [], projects: [], conflict: false };
-      byUnit.set(id, g);
-    }
-    return g;
-  };
-
-  for (const b of bindings) {
-    if (b.scope === "workspace") {
-      group(b.id, b.name).unitRoles.push(b.role);
-    } else {
-      const g = group(b.parentId ?? UNGROUPED, b.parentName ?? "Other projects");
-      const existing = g.projects.find((p) => p.id === b.id);
-      if (existing) existing.roles.push(b.role);
-      else g.projects.push({ id: b.id, name: b.name, roles: [b.role] });
-    }
-  }
-
-  // Separation of duties is a per-scope rule: holding a governance role in one
-  // unit and a delivery role in another is legitimate, so the check runs once
-  // per scope rather than once per person (lib/roles.ts::scopeTierConflicts).
-  for (const g of byUnit.values()) {
-    const conflicts = scopeTierConflicts([
-      { scopeId: g.unitId, roles: g.unitRoles },
-      ...g.projects.map((p) => ({ scopeId: p.id, roles: p.roles })),
-    ]);
-    g.conflict = conflicts.length > 0;
-    g.projects.sort((a, b2) => a.name.localeCompare(b2.name));
-  }
-
-  return [...byUnit.values()].sort((a, b) => {
-    if (a.unitId === UNGROUPED) return 1;
-    if (b.unitId === UNGROUPED) return -1;
-    return a.unitName.localeCompare(b.unitName);
-  });
-}
-
-/** Maps a stored role name onto the platform's twelve roles, when it is one. */
-function asPlatformRole(name: string): PlatformRole | null {
-  return name in ROLE_META ? (name as PlatformRole) : null;
-}
-
-/**
- * A single role held in a single scope. Governance roles carry the shield and
- * the brand tint so the tier a binding sits in is legible without reading the
- * label — which is what makes a mixed-tier *person* scannable now that mixing
- * across scopes is legitimate.
- */
-function RoleChip({ label, role }: { label: string; role: PlatformRole | null }) {
-  const governance = role !== null && ROLE_META[role].tier === "governance";
+function RoleChip({
+  label,
+  role,
+  placeholder = false,
+}: {
+  label: string;
+  role: PlatformRole | null;
+  placeholder?: boolean;
+}) {
+  const governance = role !== null && !placeholder && ROLE_META[role].tier === "governance";
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10.5px]",
-        governance
-          ? "border-brand-bright/35 bg-brand-bright/10 text-brand-bright"
-          : "border-line-soft bg-surface-1 text-muted-foreground",
+        "inline-flex w-fit items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10.5px]",
+        placeholder
+          ? "border-warning/35 bg-warning/10 text-warning border-dashed"
+          : governance
+            ? "border-brand-bright/35 bg-brand-bright/10 text-brand-bright"
+            : "border-line-soft bg-surface-1 text-muted-foreground",
       )}
-      title={governance ? "Governance role" : "Delivery role"}
+      title={placeholder ? "No role yet" : governance ? "Governance role" : "Delivery role"}
     >
       {governance && <ShieldCheck className="size-3" aria-hidden />}
       {label}
@@ -181,181 +101,111 @@ function RoleChip({ label, role }: { label: string; role: PlatformRole | null })
   );
 }
 
+function asPlatformRole(name: string): PlatformRole | null {
+  return name in ROLE_META ? (name as PlatformRole) : null;
+}
+
 export default function UsersPage() {
   const session = useSession({ required: true });
-  const role = effectivePlatformRole(session);
-  // `?bu=<id>` — the directory narrowed to one Business Unit. This is where
-  // "who is in this unit" is answered now: the unit's own screen used to carry
-  // a second member list, and two lists of the same people is one too many.
+  const viewerRole = effectivePlatformRole(session);
   const searchParams = useSearchParams();
   const buFilter = searchParams.get("bu");
+  // `?awaiting=1` — where the "someone needs a role" notification lands.
+  const awaitingOnly = searchParams.get("awaiting") === "1";
+
   const [query, setQuery] = React.useState("");
-  const [inviteOpen, setInviteOpen] = React.useState(false);
-  const [managing, setManaging] = React.useState<DirectoryRow | null>(null);
-  const queryClient = useQueryClient();
+  const [onboarding, setOnboarding] = React.useState(false);
+  const [bulkOpen, setBulkOpen] = React.useState(false);
+  const [assigning, setAssigning] = React.useState<DirectoryEntry | null>(null);
+  const [reappointing, setReappointing] = React.useState<DirectoryEntry | null>(null);
 
   const canManage = hasPermission(session, "member:manage");
-  const isOrgAdmin = role === "org_admin";
+  const isOrgAdmin = viewerRole === "org_admin";
+  const isBuAdmin = viewerRole === "bu_admin";
 
-  // Custom roles scoped to a business unit are offerable in the invite picker
-  // too — merged with the built-in list (see hooks/use-assignable-roles.ts).
-  const customBuRoles = useCustomRolesForScope("business_unit");
-  const inviteRoleOptions: AssignableRole[] = React.useMemo(
-    () => [...INVITE_BUILTIN_ROLES.map(toRoleOption), ...customBuRoles],
-    [customBuRoles],
-  );
-  // A binding's role can be ANY custom role (business_unit- or
-  // project-scoped) — label resolution needs the full list, not just the
-  // invite picker's business_unit-scoped subset.
-  const allCustomRoles = useAllCustomRoles();
-  const roleLabel = React.useCallback(
-    (name: string) => resolveRoleLabel(name, allCustomRoles),
-    [allCustomRoles],
-  );
-
-  const { scope, level, isOrgWide, managedBusinessUnitIds } = useAccessScope();
-
-  // `useWorkspaces()` is already scope-filtered server-side, so the per-unit
-  // member queries below can only ever join units the viewer may read — which
-  // is what finally makes the "scoped to your own Business Unit" note at the
-  // bottom of this page true. It previously said that while listing every unit
-  // in the organisation, because /api/workspaces returned all of them.
+  const { managedBusinessUnitIds } = useAccessScope();
   const workspacesQ = useWorkspaces();
   const units = React.useMemo(
     () => (workspacesQ.data ?? []).filter((w) => w.status === "active"),
     [workspacesQ.data],
   );
 
-  // One query per unit; the directory is the join of their member lists.
-  const memberQueries = useQueries({
-    queries: units.map((u) => ({
-      queryKey: qk.workspaces.members(u.id),
-      queryFn: () => listWorkspaceMembers(u.id),
-      staleTime: 60_000,
-    })),
-  });
-
-  const projectsQ = useQuery({
-    queryKey: ["users-directory", "projects"],
-    queryFn: () => listProjects({ pageSize: 200 }),
+  // ONE query. The old page fanned out over every unit plus every project —
+  // roughly a dozen requests, each scope-filtered on its own, which is why it
+  // could never show a Business Unit Admin the whole organisation.
+  const directoryQ = useQuery({
+    queryKey: qk.users.directory(),
+    queryFn: listUserDirectory,
     staleTime: 60_000,
   });
-  const projects = React.useMemo(() => projectsQ.data?.items ?? [], [projectsQ.data]);
 
-  // One query per project; folded into the same directory join as the
-  // per-unit member lists, mirroring that exact pattern.
-  const projectMemberQueries = useQueries({
-    queries: projects.map((p) => ({
-      queryKey: qk.projectMembers.list(p.id),
-      queryFn: () => listProjectMembers(p.id),
-      staleTime: 60_000,
-    })),
-  });
+  const allCustomRoles = useAllCustomRoles();
+  const roleLabel = React.useCallback(
+    (name: string) => resolveRoleLabel(name, allCustomRoles),
+    [allCustomRoles],
+  );
 
-  const loading =
-    workspacesQ.isLoading ||
-    projectsQ.isLoading ||
-    memberQueries.some((q) => q.isLoading) ||
-    projectMemberQueries.some((q) => q.isLoading);
+  const rows = React.useMemo(() => directoryQ.data ?? [], [directoryQ.data]);
 
-  const memberQueriesUpdatedAt = memberQueries.map((q) => q.dataUpdatedAt).join(",");
-  const projectMemberQueriesUpdatedAt = projectMemberQueries.map((q) => q.dataUpdatedAt).join(",");
+  /**
+   * May the viewer change what this person holds?
+   *
+   * Gated on the viewer's ROLE, not on their managed units. An Organization
+   * Admin's scope contains every unit, so a units-only test would hand them the
+   * delivery-role picker for the whole organisation — the exact thing this
+   * redesign takes away from them. They get the appointment dialog instead.
+   */
+  const canAssignRoleFor = React.useCallback(
+    (entry: DirectoryEntry) =>
+      isBuAdmin &&
+      // The Organization Admin holds a row in every unit, so they turn up in a
+      // unit admin's list — but they are appointed from above, not managed from
+      // inside. Their tier would make any delivery role a separation-of-duties
+      // clash anyway; the button should not be offered in the first place.
+      entry.orgRole !== "org_admin" &&
+      entry.businessUnitId !== null &&
+      managedBusinessUnitIds.includes(entry.businessUnitId),
+    [isBuAdmin, managedBusinessUnitIds],
+  );
 
-  const rows = React.useMemo<DirectoryRow[]>(() => {
-    const byUser = new Map<string, DirectoryRow>();
-    const getRow = (userId: string, displayName: string, email: string | null, initials: string) => {
-      const existing = byUser.get(userId);
-      if (existing) return existing;
-      const created: DirectoryRow = { userId, displayName, email, initials, bindings: [] };
-      byUser.set(userId, created);
-      return created;
-    };
+  /** People in the viewer's own units who are still holding the placeholder —
+   *  the queue the notification points at. */
+  const awaiting = React.useMemo(
+    () => rows.filter((r) => r.awaitingRole && canAssignRoleFor(r)),
+    [rows, canAssignRoleFor],
+  );
 
-    memberQueries.forEach((q, i) => {
-      const unit = units[i];
-      if (!unit || !q.data) return;
-      for (const m of q.data) {
-        const row = getRow(m.userId, m.displayName ?? m.email ?? m.userId, m.email ?? null, m.initials);
-        row.bindings.push({ scope: "workspace", id: unit.id, name: unit.displayName, role: m.roleName });
-      }
-    });
-
-    projectMemberQueries.forEach((q, i) => {
-      const project = projects[i];
-      if (!project || !q.data) return;
-      const parentUnit = units.find((u) => u.id === project.workspaceId);
-      for (const m of q.data) {
-        const row = getRow(
-          m.identity.ssoSubject,
-          m.identity.displayName,
-          m.identity.email,
-          m.identity.initials,
-        );
-        row.bindings.push({
-          scope: "project",
-          id: project.id,
-          name: project.name,
-          parentId: parentUnit?.id,
-          parentName: parentUnit?.displayName,
-          role: m.role,
-        });
-      }
-    });
-
-    return [...byUser.values()].sort((a, b) =>
-      a.displayName.localeCompare(b.displayName),
-    );
-    // memberQueries/projectMemberQueries are recreated every render by
-    // useQueries — depend on their derived dataUpdatedAt strings instead.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [units, projects, memberQueriesUpdatedAt, projectMemberQueriesUpdatedAt]);
-
-  /** The unit named by `?bu=`, once the scoped unit list has loaded. Null when
-   *  no filter is asked for, or when the id names a unit outside the viewer's
-   *  scope — `units` is already scope-filtered, so an unresolvable id must not
-   *  quietly widen back to the whole directory. */
   const filterUnit = React.useMemo(
     () => (buFilter ? (units.find((u) => String(u.id) === buFilter) ?? null) : null),
     [buFilter, units],
   );
 
-  /**
-   * Rows narrowed to the filtered unit: only people bound to it, showing only
-   * the bindings that sit inside it (the unit itself, and its projects). A
-   * person who is BA in Payments and Architect in Lending should read as a
-   * Payments BA here — their Lending binding is true but is not what this
-   * screen was opened to answer.
-   */
-  const scoped = React.useMemo<DirectoryRow[]>(() => {
-    if (!buFilter) return rows;
-    return rows
-      .map((r) => ({
-        ...r,
-        bindings: r.bindings.filter((b) =>
-          b.scope === "workspace" ? b.id === buFilter : b.parentId === buFilter,
-        ),
-      }))
-      .filter((r) => r.bindings.length > 0);
-  }, [rows, buFilter]);
-
   const filtered = React.useMemo(() => {
+    let list = rows;
+    if (buFilter) {
+      list = list.filter(
+        (r) => r.businessUnitId === buFilter || r.bindings.some((b) => b.businessUnitId === buFilter),
+      );
+    }
+    if (awaitingOnly) list = list.filter((r) => r.awaitingRole);
+
     const q = query.trim().toLowerCase();
-    if (!q) return scoped;
-    return scoped.filter(
+    if (!q) return list;
+    return list.filter(
       (r) =>
         r.displayName.toLowerCase().includes(q) ||
         (r.email ?? "").toLowerCase().includes(q) ||
+        (r.businessUnitName ?? "").toLowerCase().includes(q) ||
+        roleLabel(r.unitRole ?? r.orgRole).toLowerCase().includes(q) ||
         r.bindings.some(
-          (b) =>
-            b.name.toLowerCase().includes(q) ||
-            (b.parentName ?? "").toLowerCase().includes(q) ||
-            roleLabel(b.role).toLowerCase().includes(q),
+          (b) => b.name.toLowerCase().includes(q) || roleLabel(b.role).toLowerCase().includes(q),
         ),
     );
-  }, [scoped, query, roleLabel]);
+  }, [rows, buFilter, awaitingOnly, query, roleLabel]);
 
-  // Users is an admin surface: Organization Admin manages, Business Unit Admin
-  // views its own unit. Builders have no access at all (PRD §35).
+  // Users is an administrator surface: the Organization Admin runs it, a
+  // Business Unit Admin works their own unit's half of it. Builders never see
+  // it — it names every colleague's email and role.
   if (!canManage) {
     return (
       <RestrictedAccess description="The people directory is an administrator surface. Ask your Organization Admin if you need access." />
@@ -375,37 +225,100 @@ export default function UsersPage() {
       >
         <div className="flex w-full flex-wrap items-end justify-between gap-4">
           <div>
-            <PageTitle>Users</PageTitle>
-
-            {scope !== null && (
-              <div className="flex flex-wrap items-center gap-2">
-                <ScopeChip
-                  kind={isOrgWide ? "organization" : level}
-                  name={
-                    isOrgWide
-                      ? null
-                      : units.length === 1
-                        ? units[0]!.displayName
-                        : `${units.length} ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`
-                  }
-                  size="sm"
-                />
+            <PageTitle>Users &amp; Roles</PageTitle>
+            {/* No explanatory paragraph — see components/app/page-title.tsx.
+                The one thing a Business Unit Admin cannot infer from the table
+                is why most of it is read-only, and that is said on the rows it
+                applies to. The chip is here for them too: an org-wide list is
+                the surprising part of their copy of this page, and unlabelled
+                it reads as a scope leak. */}
+            {/* The chip has to match what is actually in front of them. Only
+                the Organization Admin reads the organisation; everyone else is
+                looking at one Business Unit, and naming an org-wide scope to
+                them would be worse than saying nothing. */}
+            {!isOrgAdmin && (
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <ScopeChip kind="business_unit" name={null} size="sm" />
+                <span className="text-muted-foreground text-[11.5px]">
+                  {isBuAdmin
+                    ? `Everyone in your ${
+                        managedBusinessUnitIds.length === 1
+                          ? BUSINESS_UNIT_LABEL.toLowerCase()
+                          : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()
+                      }, and the roles you assign them.`
+                    : `Everyone in the ${BUSINESS_UNIT_LABEL.toLowerCase()} you work in. Roles here are its admin's to set — your project's own roster is on the project.`}
+                </span>
               </div>
             )}
           </div>
 
           {isOrgAdmin && (
-            <Button className="gap-2" onClick={() => setInviteOpen(true)}>
-              <UserPlus className="size-4" aria-hidden />
-              Invite people
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Secondary, and deliberately so: a roster arrives a few times a
+                  year and one person arrives most weeks. */}
+              <Button
+                variant="outline"
+                className="border-line-soft gap-2"
+                onClick={() => setBulkOpen(true)}
+              >
+                <Upload className="size-4" aria-hidden />
+                Bulk upload
+              </Button>
+              <Button className="gap-2" onClick={() => setOnboarding(true)}>
+                <UserPlus className="size-4" aria-hidden />
+                Onboard someone
+              </Button>
+            </div>
           )}
         </div>
       </header>
 
-      {/* Search, and the Business Unit filter when one is asked for. The filter
-          is a removable chip rather than a silent narrowing: an empty list has
-          to be able to say "in THIS unit", or it reads as an empty directory. */}
+      {/* The handover, made into work rather than a notification that scrolls
+          away. This is the whole reason a Business Unit Admin opens this page. */}
+      {awaiting.length > 0 && (
+        <section className="border-warning/30 bg-warning/5 space-y-3 rounded-xl border p-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-[13px] font-semibold">
+              {awaiting.length} {awaiting.length === 1 ? "person needs" : "people need"} a role from
+              you
+            </h2>
+            <span className="text-muted-foreground font-mono text-[10.5px] tracking-wider uppercase">
+              Awaiting assignment
+            </span>
+          </div>
+          <p className="text-muted-foreground text-[12px]">
+            Onboarded into your {managedBusinessUnitIds.length === 1
+              ? BUSINESS_UNIT_LABEL.toLowerCase()
+              : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}{" "}
+            and holding no permissions until you say what they do.
+          </p>
+          <ul className="flex flex-col gap-2">
+            {awaiting.map((p) => (
+              <li
+                key={p.userId}
+                className="border-line-soft bg-surface-1 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2"
+              >
+                <span
+                  className="bg-surface-2 text-foreground/80 flex size-7 shrink-0 items-center justify-center rounded-full font-mono text-[10.5px]"
+                  aria-hidden
+                >
+                  {p.initials}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[12.5px] font-medium">{p.displayName}</span>
+                  <span className="text-muted-foreground block truncate text-[11px]">
+                    {p.email} · {p.businessUnitName}
+                  </span>
+                </span>
+                <Button size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => setAssigning(p)}>
+                  Assign role
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative w-full max-w-sm">
           <Search
@@ -415,18 +328,18 @@ export default function UsersPage() {
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people, units, projects or roles…"
+            placeholder="Search people, units or roles…"
             className="border-line-soft bg-surface-1 pl-9"
             aria-label="Search the people directory"
           />
         </div>
 
-        {buFilter && (
+        {(buFilter || awaitingOnly) && (
           <span className="border-brand-bright/35 bg-brand-bright/10 text-brand-bright inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
-            {BUSINESS_UNIT_LABEL}: {filterUnit?.displayName ?? buFilter}
+            {awaitingOnly ? "Awaiting a role" : `${BUSINESS_UNIT_LABEL}: ${filterUnit?.displayName ?? buFilter}`}
             <Link
               href="/users"
-              aria-label={`Clear the ${BUSINESS_UNIT_LABEL.toLowerCase()} filter`}
+              aria-label="Clear the filter"
               className="hover:text-foreground transition-colors"
             >
               <X className="size-3" aria-hidden />
@@ -435,24 +348,23 @@ export default function UsersPage() {
         )}
       </div>
 
-      {loading ? (
+      {directoryQ.isLoading ? (
         <LoadingState variant="list" rows={5} />
+      ) : directoryQ.isError ? (
+        <ApiErrorState
+          title="Couldn't load the people directory"
+          onRetry={() => void directoryQ.refetch()}
+        />
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={UsersIcon}
-          title={
-            query
-              ? "No one matches that search"
-              : buFilter
-                ? `Nobody is in ${filterUnit?.displayName ?? `this ${BUSINESS_UNIT_LABEL.toLowerCase()}`} yet`
-                : "No people yet"
-          }
+          title={query ? "No one matches that search" : "No people yet"}
           description={
             query
-              ? "Try a different name, email, business unit, project or role."
-              : buFilter
-                ? "Invite someone into it, or clear the filter to see the whole directory."
-                : "Invite people to the organisation, then assign their roles per scope on Roles & Access."
+              ? "Try a different name, email, business unit or role."
+              : isOrgAdmin
+                ? "Onboard someone to get started."
+                : "Nobody has been onboarded into the organisation yet."
           }
         />
       ) : (
@@ -464,18 +376,34 @@ export default function UsersPage() {
                   <TableHead className="text-muted-foreground font-mono text-[10.5px] tracking-widest uppercase">
                     Person
                   </TableHead>
+                  {/* WHAT they are, then WHERE they work. The first column
+                      used to print the org-level appointment and so stayed on
+                      "Contributor" after a unit admin had made them a
+                      Developer; the second listed the unit binding next to the
+                      project ones, which is where that change actually showed
+                      up. One column per question fixes both. */}
                   <TableHead className="text-muted-foreground font-mono text-[10.5px] tracking-widest uppercase">
-                    Roles by scope
+                    Role
                   </TableHead>
-                  <TableHead className="text-muted-foreground w-24 text-right font-mono text-[10.5px] tracking-widest uppercase">
-                    Scopes
+                  <TableHead className="text-muted-foreground font-mono text-[10.5px] tracking-widest uppercase">
+                    Project roles
+                  </TableHead>
+                  <TableHead className="text-muted-foreground w-32 text-right font-mono text-[10.5px] tracking-widest uppercase">
+                    <span className="sr-only">Actions</span>
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filtered.map((r) => {
-                  const groups = groupBindings(r.bindings);
-                  const conflicted = groups.filter((g) => g.conflict);
+                  const assignable = canAssignRoleFor(r);
+                  // Only the project work. Their role in the unit is the column
+                  // to the left; repeating it here made the two columns
+                  // disagree about which one answered "what is this person".
+                  const projectBindings = r.bindings.filter((b) => b.scope === "project");
+                  // What they are: the unit role once assigned, the appointment
+                  // until then. `contributor` is the placeholder either way.
+                  const roleName = r.unitRole ?? r.orgRole;
+                  const isPlaceholder = awaitsBusinessUnitRole(roleName);
 
                   return (
                     <TableRow key={r.userId} className="border-line-soft">
@@ -503,95 +431,103 @@ export default function UsersPage() {
                         </div>
                       </TableCell>
 
-                      {/* One block per Business Unit, its projects nested
-                          beneath — so "BU Admin here, BA over there" reads at
-                          a glance instead of as an undifferentiated chip row. */}
-                      <TableCell className="py-3">
-                        <div className="flex flex-col gap-2.5">
-                          {groups.map((g) => (
-                            <div key={g.unitId} className="flex flex-col gap-1">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-foreground text-[12.5px] font-medium">
-                                  {g.unitName}
-                                </span>
-                                {g.unitRoles.map((rn) => (
-                                  <RoleChip key={rn} label={roleLabel(rn)} role={asPlatformRole(rn)} />
-                                ))}
-                                {g.conflict && (
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Badge variant="destructive" className="font-mono text-[9.5px]">
-                                        Conflict
-                                      </Badge>
-                                    </TooltipTrigger>
-                                    <TooltipContent side="left" className="max-w-[260px]">
-                                      Within this one scope they hold both a
-                                      governance and a delivery role, which
-                                      would let them approve their own work.
-                                      Roles in <em>different</em> scopes are
-                                      fine — review on Roles &amp; Access.
-                                    </TooltipContent>
-                                  </Tooltip>
-                                )}
-                              </div>
-
-                              {g.projects.length > 0 && (
-                                <ul className="border-line-soft ml-1 flex flex-col gap-1 border-l pl-3">
-                                  {g.projects.map((p) => (
-                                    <li key={p.id} className="flex flex-wrap items-center gap-1.5">
-                                      <span className="text-muted-foreground text-[11.5px]">
-                                        {p.name}
-                                      </span>
-                                      {p.roles.map((rn) => (
-                                        <RoleChip
-                                          key={rn}
-                                          label={roleLabel(rn)}
-                                          role={asPlatformRole(rn)}
-                                        />
-                                      ))}
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          ))}
+                      <TableCell className="py-3 align-top">
+                        <div className="flex flex-col items-start gap-1">
+                          <RoleChip
+                            label={isPlaceholder ? "No role yet" : roleLabel(roleName)}
+                            role={asPlatformRole(roleName)}
+                            placeholder={isPlaceholder}
+                          />
+                          <span className="text-muted-foreground text-[11.5px]">
+                            {r.businessUnitName ?? (
+                              <em className="not-italic opacity-70">
+                                {r.orgRole === "org_admin"
+                                  ? "Every " + BUSINESS_UNIT_LABEL.toLowerCase()
+                                  : `No ${BUSINESS_UNIT_LABEL.toLowerCase()} yet`}
+                              </em>
+                            )}
+                          </span>
                         </div>
                       </TableCell>
 
-                      <TableCell className="py-3 text-right align-top">
-                        <span className="text-muted-foreground block font-mono text-[10.5px]">
-                          {groups.length} {groups.length === 1 ? "unit" : "units"}
-                        </span>
-                        {conflicted.length > 0 && (
-                          <span className="text-destructive mt-0.5 block font-mono text-[10px]">
-                            {conflicted.length} conflict{conflicted.length === 1 ? "" : "s"}
+                      <TableCell className="py-3 align-top">
+                        {projectBindings.length === 0 ? (
+                          <span className="text-muted-foreground text-[11.5px]">
+                            {/* Not an empty cell. The governance tier is never
+                                on a project, so "none" is the rule holding
+                                rather than data missing. */}
+                            {r.orgRole === "org_admin" || roleName === "bu_admin"
+                              ? "Governs, doesn't deliver"
+                              : "—"}
                           </span>
+                        ) : (
+                          <div className="flex flex-col gap-1">
+                            {projectBindings.map((b) => (
+                              <span
+                                key={`${b.id}:${b.role}`}
+                                className="flex flex-wrap items-center gap-1.5"
+                              >
+                                <span className="text-muted-foreground text-[11.5px]">
+                                  {b.name}
+                                </span>
+                                <RoleChip
+                                  label={roleLabel(b.role)}
+                                  role={asPlatformRole(b.role)}
+                                />
+                              </span>
+                            ))}
+                          </div>
                         )}
-                        {/* Assigning lives on the row it applies to. It used to
-                            be a screen of its own that made you pick a scope
-                            first and then hunt the person inside it. */}
-                        {/* `canManage` (member:manage), NOT isOrgAdmin. The
-                            Business Unit Admin holds it and runs their unit's
-                            membership (PRD §15.2) — gating on Org Admin left
-                            them able to SEE their people and not to change a
-                            single role, which is not a scoped version of this
-                            page but a broken one. The dialog's scope picker is
-                            already filtered server-side, so a BU Admin is
-                            offered only their own units. */}
-                        {canManage && (
+                      </TableCell>
+
+                      <TableCell className="py-3 text-right align-top">
+                        {isOrgAdmin && r.orgRole !== "org_admin" ? (
                           <Button
                             variant="outline"
                             size="sm"
-                            /* The UNFILTERED row: the dialog checks for
-                               separation-of-duties conflicts across every
-                               scope, so handing it the one-unit slice would
-                               hide exactly the clash it exists to catch. */
-                            onClick={() => setManaging(rows.find((x) => x.userId === r.userId) ?? r)}
-                            aria-label={`Manage roles for ${r.displayName}`}
-                            className="border-line-soft mt-1.5 h-7 px-2 text-[11px]"
+                            onClick={() => setReappointing(r)}
+                            aria-label={`Manage the role for ${r.displayName}`}
+                            className="border-line-soft h-7 px-2 text-[11px]"
                           >
-                            Manage roles
+                            {/* Same words as the Business Unit Admin's button
+                                on the same column. "Appointment" named the
+                                internal concept rather than the action, and it
+                                was the only button on this page that did. */}
+                            Manage role
                           </Button>
+                        ) : assignable ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setAssigning(r)}
+                            aria-label={`Assign a role to ${r.displayName}`}
+                            className="border-line-soft h-7 px-2 text-[11px]"
+                          >
+                            {r.awaitingRole ? "Assign role" : "Change role"}
+                          </Button>
+                        ) : (
+                          /* Not a disabled button. A greyed-out control reads as
+                             "try again later"; this is never going to work from
+                             here, and saying which unit owns it says where it
+                             would. */
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant="outline"
+                                className="text-muted-foreground gap-1 font-mono text-[9.5px]"
+                              >
+                                <Lock className="size-2.5" aria-hidden />
+                                view only
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="left" className="max-w-[240px]">
+                              {r.orgRole === "org_admin"
+                                ? "The Organization Admin is appointed org-wide, not from inside a business unit."
+                                : r.businessUnitName
+                                  ? `${r.businessUnitName}'s admin assigns roles for this person.`
+                                  : `They belong to no ${BUSINESS_UNIT_LABEL.toLowerCase()} yet — the Organization Admin places them.`}
+                            </TooltipContent>
+                          </Tooltip>
                         )}
                       </TableCell>
                     </TableRow>
@@ -603,52 +539,52 @@ export default function UsersPage() {
         </div>
       )}
 
-      {managing && (
-        <ManageUserRolesDialog
+      {isOrgAdmin && (
+        <>
+          <OnboardUserDialog
+            open={onboarding}
+            onOpenChange={setOnboarding}
+            businessUnits={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
+            onOnboarded={() => void directoryQ.refetch()}
+          />
+          <BulkOnboardDialog
+            open={bulkOpen}
+            onOpenChange={setBulkOpen}
+            businessUnits={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
+            onFinished={() => void directoryQ.refetch()}
+          />
+        </>
+      )}
+
+      {reappointing && (
+        <ChangeAppointmentDialog
           open
-          onOpenChange={(o) => !o && setManaging(null)}
-          userId={managing.userId}
-          displayName={managing.displayName}
-          bindings={managing.bindings.map((b) => ({
-            scopeId: b.id,
-            scopeName: b.name,
-            role: b.role,
-          }))}
+          onOpenChange={(o) => !o && setReappointing(null)}
+          userId={reappointing.userId}
+          displayName={reappointing.displayName}
+          currentRole={reappointing.orgRole}
+          currentBusinessUnitId={reappointing.businessUnitId}
+          businessUnits={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
         />
       )}
 
-      {!isOrgAdmin && (
-        <p className="text-muted-foreground text-[12.5px]">
-          {units.length === 1
-            ? `You are viewing this directory scoped to ${units[0]!.displayName}`
-            : `You are viewing this directory scoped to the ${units.length} ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} you administer`}
-          . People in {managedBusinessUnitIds.length === 1 ? "other" : "any other"}{" "}
-          {BUSINESS_UNIT_LABEL.toLowerCase()} are not listed. You can change roles within your own{" "}
-          {managedBusinessUnitIds.length === 1
-            ? BUSINESS_UNIT_LABEL.toLowerCase()
-            : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}
-          ; inviting and deactivating people is an Organization Admin action.
-        </p>
-      )}
-
-      {isOrgAdmin && (
-        <OnboardPersonDialog
-          open={inviteOpen}
-          onOpenChange={setInviteOpen}
-          roleOptions={inviteRoleOptions}
-          workspaceOptions={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
-          title={`Invite to the ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`}
-          description="Onboards a new or existing person and grants them a role in the chosen Business Unit."
-          onSubmit={async (input) => {
-            const result = await onboardPerson({
-              email: input.email,
-              displayName: input.displayName,
-              workspaceId: input.workspaceId!,
-              role: input.roleName,
-            });
-            toast.success(`${result.displayName} invited as ${roleLabel(result.role)}`);
-            queryClient.invalidateQueries({ queryKey: qk.workspaces.members(input.workspaceId!) });
-          }}
+      {assigning && assigning.businessUnitId && (
+        <AssignBusinessUnitRoleDialog
+          open
+          onOpenChange={(o) => !o && setAssigning(null)}
+          userId={assigning.userId}
+          displayName={assigning.displayName}
+          businessUnitId={assigning.businessUnitId}
+          businessUnitName={assigning.businessUnitName ?? assigning.businessUnitId}
+          currentRole={
+            assigning.bindings.find((b) => b.businessUnitId === assigning.businessUnitId)?.role ??
+            null
+          }
+          allBindings={assigning.bindings.map((b) => ({
+            scopeId: b.businessUnitId ?? b.id,
+            scopeName: b.name,
+            role: b.role,
+          }))}
         />
       )}
     </div>

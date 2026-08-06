@@ -563,6 +563,24 @@ export interface NavContext {
 }
 
 function visibleTo(item: NavItem, perms: string[], ctx?: NavContext): boolean {
+  /**
+   * A Contributor has no working surface, because a Contributor has no job yet.
+   *
+   * The role is the placeholder someone carries between being onboarded and
+   * being given a role by their Business Unit Admin, and every page in this
+   * sidebar answers a question that presumes one: a Dashboard of the projects
+   * they are on (none), a Projects list (empty), an approvals queue (nothing
+   * routes to them). Four working links to four empty pages reads as a broken
+   * platform rather than as a pending assignment.
+   *
+   * Handled here rather than as `hideForRoles: ["contributor"]` on each entry,
+   * because the rule is about the ROLE holding nothing — not about these four
+   * pages — so the next entry added must inherit it without anyone remembering.
+   * What stays reachable is the utility rail (Agent Catalogue, Help & docs),
+   * which is exactly what someone waiting to be given work can usefully read.
+   */
+  if (ctx?.role === "contributor") return false;
+
   if (!holds(perms, item.requirePermission)) return false;
 
   if (ctx?.role && item.hideForRoles?.includes(ctx.role)) return false;

@@ -3,9 +3,7 @@ import { http, HttpResponse, delay } from "msw";
 import { ARTIFACTS, AUDIT_EVENTS, CONNECTORS, PROJECTS, RUNS, STEPS } from "./fixtures";
 import {
   archiveWorkspace as fxArchiveWorkspace,
-  createMembership as fxCreateMembership,
   createWorkspace as fxCreateWorkspace,
-  findOrCreateIdentity as fxFindOrCreateIdentity,
   findOrCreateIdentityBySsoSubject as fxFindOrCreateIdentityBySsoSubject,
   getWorkspace as fxGetWorkspace,
   listMembers as fxListMembers,
@@ -143,15 +141,27 @@ import {
 import type { McpServer } from "@/lib/schemas/mcp";
 import { getProjectCapabilitiesData, setCuratedDisabled } from "@/lib/mock/capabilities-fixtures";
 import {
+  canWriteCustomRole as fxCanWriteCustomRole,
   createCustomRole as fxCreateCustomRole,
   deleteCustomRole as fxDeleteCustomRole,
+  getCustomRole as fxGetCustomRole,
   listCustomRoles as fxListCustomRoles,
+  resolveRoleOwner as fxResolveRoleOwner,
   updateCustomRole as fxUpdateCustomRole,
 } from "@/lib/mock/custom-role-fixtures";
 import type { CustomRoleScope } from "@/lib/api/roles";
-import { getUserDetail as fxGetUserDetail } from "@/lib/mock/user-directory-fixtures";
+import {
+  getUserDetail as fxGetUserDetail,
+  scopeUserDirectory as fxScopeUserDirectory,
+} from "@/lib/mock/user-directory-fixtures";
+import {
+  assignBusinessUnitRole as fxAssignBusinessUnitRole,
+  changeOrgAppointment as fxChangeOrgAppointment,
+  onboardIntoOrganization as fxOnboardIntoOrganization,
+} from "@/lib/mock/onboarding";
 import {
   addProjectMember as fxAddProjectMember,
+  projectMembershipBlock as fxProjectMembershipBlock,
   listProjectMembers as fxListProjectMembers,
   removeProjectMember as fxRemoveProjectMember,
   updateProjectMemberRole as fxUpdateProjectMemberRole,
@@ -1755,40 +1765,17 @@ export const handlers = [
   // sides of a read/write pair must run in the SAME one.
   http.post("/api/onboarding", async ({ request }) => {
     await lag();
-    const body = (await request.json()) as {
-      email?: string;
-      displayName?: string;
-      workspaceId?: string;
-      role?: string;
-    };
-    if (!body?.email || !body?.workspaceId || !body?.role) {
-      return HttpResponse.json(
-        { code: "invalid_input", message: "email, workspaceId and role are required" },
-        { status: 422 },
-      );
-    }
-    if (!fxGetWorkspace(body.workspaceId)) {
-      return HttpResponse.json({ code: "not_found", message: "Unknown workspace" }, { status: 404 });
-    }
-    const identity = fxFindOrCreateIdentity(body.email, body.displayName);
-    const membership = fxCreateMembership(body.workspaceId, identity.id, body.role);
-    addAccessMember(
-      body.workspaceId,
-      { userId: identity.ssoSubject, name: identity.displayName, email: identity.email },
-      body.role,
-    );
-    return HttpResponse.json(
-      {
-        identityId: identity.id,
-        email: identity.email,
-        displayName: identity.displayName,
-        initials: identity.initials,
-        workspaceId: membership.workspaceId,
-        role: membership.role,
-        membershipStatus: "invited",
-      },
-      { status: 201 },
-    );
+    const body = (await request.json()) as Parameters<typeof fxOnboardIntoOrganization>[0];
+    const { status, body: payload } = fxOnboardIntoOrganization(body);
+    return HttpResponse.json(payload as Record<string, unknown>, { status });
+  }),
+
+  // ───── People directory (Users & Roles) ─────
+  // Mirrors app/api/admin/users/route.ts. Org-wide on purpose — see that file
+  // for why this one list is not scope-filtered.
+  http.get("/api/admin/users", async ({ cookies }) => {
+    await lag();
+    return HttpResponse.json(fxScopeUserDirectory(scopeFromCookies(cookies)));
   }),
 
   // ───── Custom roles (Roles & Access → Custom roles) ─────
@@ -1798,7 +1785,7 @@ export const handlers = [
     await lag();
     return HttpResponse.json(fxListCustomRoles());
   }),
-  http.post("/api/admin/custom-roles", async ({ request }) => {
+  http.post("/api/admin/custom-roles", async ({ request, cookies }) => {
     await lag();
     const body = (await request.json()) as {
       name: string;
@@ -1806,12 +1793,27 @@ export const handlers = [
       permissions: string[];
       agentAccess?: Partial<Record<Phase, InvolvementLevel>>;
       scope: CustomRoleScope;
+      businessUnitId?: string | null;
     };
-    const role = fxCreateCustomRole(body);
+    // Ownership from the session's scope, exactly as the route handler does —
+    // a role pinned to a unit the caller doesn't run is an escalation.
+    const owner = fxResolveRoleOwner(scopeFromCookies(cookies), body.businessUnitId);
+    if ("error" in owner) {
+      return HttpResponse.json({ code: "forbidden", message: owner.error }, { status: 403 });
+    }
+    const role = fxCreateCustomRole({ ...body, businessUnitId: owner.businessUnitId });
     return HttpResponse.json(role, { status: 201 });
   }),
-  http.patch("/api/admin/custom-roles/:id", async ({ params, request }) => {
+  http.patch("/api/admin/custom-roles/:id", async ({ params, request, cookies }) => {
     await lag();
+    const existing = fxGetCustomRole(String(params.id));
+    if (!existing) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    if (!fxCanWriteCustomRole(scopeFromCookies(cookies), existing)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "This role belongs to another business unit." },
+        { status: 403 },
+      );
+    }
     const body = (await request.json()) as Partial<{
       name: string;
       description: string | null;
@@ -1823,8 +1825,15 @@ export const handlers = [
     if (!role) return HttpResponse.json({ code: "not_found" }, { status: 404 });
     return HttpResponse.json(role);
   }),
-  http.delete("/api/admin/custom-roles/:id", async ({ params }) => {
+  http.delete("/api/admin/custom-roles/:id", async ({ params, cookies }) => {
     await lag();
+    const existing = fxGetCustomRole(String(params.id));
+    if (existing && !fxCanWriteCustomRole(scopeFromCookies(cookies), existing)) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "This role belongs to another business unit." },
+        { status: 403 },
+      );
+    }
     fxDeleteCustomRole(String(params.id));
     return new HttpResponse(null, { status: 204 });
   }),
@@ -1837,6 +1846,19 @@ export const handlers = [
     const detail = fxGetUserDetail(String(params.id));
     if (!detail) return HttpResponse.json({ code: "not_found" }, { status: 404 });
     return HttpResponse.json(detail);
+  }),
+  // Change an org-level appointment. Mirrors the route handler's PATCH.
+  http.patch("/api/admin/users/:id", async ({ params, request }) => {
+    await lag();
+    const body = (await request.json().catch(() => ({}))) as {
+      role?: string;
+      workspaceId?: string | null;
+    };
+    const { status, body: payload } = fxChangeOrgAppointment({
+      userId: String(params.id),
+      ...body,
+    });
+    return HttpResponse.json(payload as Record<string, unknown>, { status });
   }),
 
   http.get("/api/admin/audit", async ({ request }) => {
@@ -2059,8 +2081,17 @@ export const handlers = [
     }));
     return HttpResponse.json(members);
   }),
-  http.post("/api/workspaces/:id/members", async ({ params, request }) => {
+  // The three writes below carry the same `canManageBusinessUnit` guard as
+  // their route-handler twins: the people directory is org-wide, so "other
+  // units are view-only" has to be a property of the write, not of the page.
+  http.post("/api/workspaces/:id/members", async ({ params, request, cookies }) => {
     await lag();
+    if (!canManageBusinessUnit(scopeFromCookies(cookies), String(params.id))) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "You don't administer this business unit." },
+        { status: 403 },
+      );
+    }
     const body = (await request.json().catch(() => ({}))) as {
       userId?: string;
       roleName?: string;
@@ -2081,25 +2112,36 @@ export const handlers = [
       joinedAt: new Date().toISOString(),
     }, { status: 201 });
   }),
-  http.patch("/api/workspaces/:id/members/:userId", async ({ params, request }) => {
+  http.patch("/api/workspaces/:id/members/:userId", async ({ params, request, cookies }) => {
     await lag();
-    const body = (await request.json().catch(() => ({}))) as { roleName?: string };
-    if (!body.roleName) {
-      return HttpResponse.json({ code: "invalid_input", message: "roleName is required" }, { status: 422 });
+    if (!canManageBusinessUnit(scopeFromCookies(cookies), String(params.id))) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "You don't administer this business unit." },
+        { status: 403 },
+      );
     }
-    const identity = fxFindOrCreateIdentityBySsoSubject(String(params.userId));
-    fxSetMembershipRole(String(params.id), identity.id, body.roleName);
-    return HttpResponse.json({
-      userId: identity.ssoSubject,
-      email: identity.email,
-      displayName: identity.displayName,
-      initials: identity.initials,
-      roleName: body.roleName,
-      joinedAt: new Date().toISOString(),
+    const session = sessionFromCookies(cookies);
+    const body = (await request.json().catch(() => ({}))) as {
+      roleName?: string;
+      roleLabel?: string;
+    };
+    const { status, body: payload } = fxAssignBusinessUnitRole({
+      workspaceId: String(params.id),
+      userId: String(params.userId),
+      roleName: body.roleName ?? "",
+      roleLabel: body.roleLabel,
+      actorName: session?.user?.name,
     });
+    return HttpResponse.json(payload as Record<string, unknown>, { status });
   }),
-  http.delete("/api/workspaces/:id/members/:userId", async ({ params }) => {
+  http.delete("/api/workspaces/:id/members/:userId", async ({ params, cookies }) => {
     await lag();
+    if (!canManageBusinessUnit(scopeFromCookies(cookies), String(params.id))) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "You don't administer this business unit." },
+        { status: 403 },
+      );
+    }
     const identity = fxFindOrCreateIdentityBySsoSubject(String(params.userId));
     fxRemoveMembership(String(params.id), identity.id);
     return new HttpResponse(null, { status: 204 });
@@ -2120,6 +2162,13 @@ export const handlers = [
         { code: "invalid_input", message: "email and roleName are required" },
         { status: 422 },
       );
+    }
+    // The governance tier is never a project member, and a project is staffed
+    // from its own Business Unit — same guard as the route handler, because the
+    // add path takes an email no picker can filter.
+    const blocked = fxProjectMembershipBlock(String(params.id), body.email);
+    if (blocked) {
+      return HttpResponse.json({ code: "forbidden", message: blocked }, { status: 422 });
     }
     const member = fxAddProjectMember(String(params.id), body);
     return HttpResponse.json(member, { status: 201 });

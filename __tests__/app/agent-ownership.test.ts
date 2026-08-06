@@ -10,8 +10,15 @@ import {
 import { roleAgentSplit, roleReachesAgent } from "@/lib/agent-access";
 import { canCreateProject, hasPermission } from "@/lib/auth/permissions";
 
-/** Roles that hold no agent access by design, and are not "delivery". */
-const NO_AGENT_ROLES: PlatformRole[] = ["org_admin", "bu_admin", "custom"];
+/**
+ * Roles that hold no agent access by design.
+ *
+ * `contributor` is delivery-tier and still belongs here: it is the placeholder
+ * a person carries between being onboarded and being given a role by their
+ * Business Unit Admin. Reaching an agent with it would mean onboarding alone
+ * granted agent access, which is the thing the two-step flow exists to prevent.
+ */
+const NO_AGENT_ROLES: PlatformRole[] = ["org_admin", "bu_admin", "contributor", "custom"];
 const DELIVERY_ROLES = ROLE_ORDER.filter(
   (r) => !NO_AGENT_ROLES.includes(r) && r !== "project_admin",
 );

@@ -25,6 +25,16 @@ const CustomRole = z.object({
    *  lib/schemas/agent-access.ts::AgentAccessOverride. */
   agentAccess: z.record(Phase, InvolvementLevel).optional(),
   scope: CustomRoleScope,
+  /**
+   * The Business Unit that OWNS this role, or null for an org-wide one.
+   *
+   * Ownership, not merely a filter. A Business Unit Admin composes roles for
+   * their own unit's people — "Junior Dev, Payments' version" — and those must
+   * neither show up in another unit's assignment dropdown nor be editable from
+   * it. Null means the Organization Admin defined it once for everyone, which
+   * every unit may assign and only the Org Admin may change.
+   */
+  businessUnitId: z.string().nullable().default(null),
 });
 export type CustomRole = z.infer<typeof CustomRole>;
 
@@ -46,6 +56,9 @@ export function createCustomRole(input: {
   permissions: string[];
   agentAccess?: Partial<Record<Phase, InvolvementLevel>>;
   scope: CustomRoleScope;
+  /** Ignored for a Business Unit Admin — the server pins the role to the unit
+   *  they administer rather than trusting the caller with ownership. */
+  businessUnitId?: string | null;
 }) {
   return api("/admin/custom-roles", { method: "POST", body: input, schema: CustomRole });
 }

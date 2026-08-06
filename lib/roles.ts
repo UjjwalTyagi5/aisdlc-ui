@@ -20,6 +20,7 @@ import type { Phase } from "@/lib/schemas/enums";
 export type PlatformRole =
   | "org_admin"
   | "bu_admin"
+  | "contributor"
   | "project_admin"
   | "ba"
   | "architect"
@@ -64,6 +65,7 @@ export interface RoleMeta {
 export const ROLE_ORDER: readonly PlatformRole[] = [
   "org_admin",
   "bu_admin",
+  "contributor",
   "project_admin",
   "ba",
   "architect",
@@ -96,6 +98,16 @@ export const ROLE_META: Record<PlatformRole, RoleMeta> = {
       "Runs one business unit: its budget, connections, members, and project creation.",
     governanceOnly: true,
     prdSection: "§15.3",
+  },
+  contributor: {
+    label: "Contributor",
+    shortLabel: "Contributor",
+    scope: "business_unit",
+    tier: "delivery",
+    oneLiner:
+      "Belongs to a business unit and is waiting for its admin to say what they do there.",
+    governanceOnly: false,
+    prdSection: "— (platform addition: the org-level appointment, see ORG_ASSIGNABLE_ROLES)",
   },
   project_admin: {
     label: "Project Admin",
@@ -192,6 +204,49 @@ export const ROLE_META: Record<PlatformRole, RoleMeta> = {
   },
 };
 
+// ─── Who may appoint whom ─────────────────────────────────────────────────────
+
+/**
+ * The only two roles an Organization Admin appoints.
+ *
+ * Onboarding used to offer all eleven working roles, which asked the wrong
+ * person the wrong question: whether a new joiner is a Developer or a QA is a
+ * fact about a team the Org Admin does not run, and they were guessing at it
+ * for every hire in the organisation. So onboarding answers only what the Org
+ * Admin actually knows — does this person RUN a business unit, or do they work
+ * in one — and the unit's own admin, who does know, fills in the rest.
+ *
+ *   bu_admin     runs a unit. Its unit is optional at onboarding: appointing
+ *                the person and deciding which unit they get are separately
+ *                timed decisions, and blocking the first on the second is how
+ *                an admin ends up parked in a unit to be moved later.
+ *   contributor  works in a unit, which is therefore REQUIRED — a contributor
+ *                with no unit belongs to nobody, so nobody is prompted to give
+ *                them a role and they sit invisible with no access at all.
+ *
+ * Every other role is a Business Unit role, granted by that unit's admin —
+ * see `BUSINESS_UNIT_ASSIGNABLE_BUILTIN_ROLES` in hooks/use-assignable-roles.
+ */
+export const ORG_ASSIGNABLE_ROLES: readonly PlatformRole[] = ["bu_admin", "contributor"];
+
+/** Is this an org-level appointment (`ORG_ASSIGNABLE_ROLES`) rather than a
+ *  role held inside a unit? Org Admin writes are checked against it. */
+export function isOrgAssignableRole(role: string): role is PlatformRole {
+  return (ORG_ASSIGNABLE_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * Does a Business Unit membership still need its admin to act?
+ *
+ * `contributor` is a placeholder, not a job: it records that the Org Admin put
+ * this person in the unit and that nobody has yet said what they do there. The
+ * unit's pending-assignment queue is exactly the set of memberships where this
+ * is true.
+ */
+export function awaitsBusinessUnitRole(role: string): boolean {
+  return role === "contributor";
+}
+
 // ─── Ownership matrix — role × agent (PRD §14.7) ──────────────────────────────
 
 /**
@@ -262,6 +317,11 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Governance tier — no agent access whatsoever (PRD §14.8).
   org_admin: { ...ALL_NONE },
   bu_admin: { ...ALL_NONE },
+
+  // Not a job yet, so not an access level yet. A Contributor reaches nothing
+  // until their Business Unit Admin says which delivery role they hold; that
+  // assignment replaces this placeholder and brings its access with it.
+  contributor: { ...ALL_NONE },
 
   // Fallback approver on every agent, subject to the risk-aware limits in §14.5.
   project_admin: { ...ALL_OWNER },
@@ -453,11 +513,10 @@ export interface ScopedRoles {
  * it twice is an org-wide administrator without the title, accountable for two
  * budgets and able to move work between them with nobody above either.
  *
- * What this deliberately does NOT restrict is presence elsewhere. A Business
- * Unit Admin of Lending may be a Developer, a BA or a Project Admin on a
- * Payments project — a delivery role in another unit is ordinary, and blocking
- * it would stop people working across the organisation for no safety gain.
- * The tier rule (`scopeTierConflicts`) still applies WITHIN each scope.
+ * SEPARATELY, a governance role is never a project member at all — not in its
+ * own unit and not in anyone else's (`projectMembershipBlock` in
+ * lib/mock/project-membership-fixtures.ts). This function is only about holding
+ * `bu_admin` TWICE; the project rule is enforced where projects are joined.
  *
  * Returns the unit they already administer, or null when the grant is fine.
  */

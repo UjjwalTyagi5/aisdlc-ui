@@ -68,22 +68,23 @@ describe("resolveSessionScope", () => {
     const scope = scopeFor("project_admin");
 
     it("sees only the projects it administers", () => {
-      // Priya is project_admin on payments-api (Payments) AND core-ledger
-      // (Lending), and `ba` on mobile-onboarding. Two boundaries at once:
-      // acting AS Project Admin must not silently confer the BA binding's
-      // reach, and administering ONE project in Lending must not open the
-      // sibling project in the same unit.
-      expect([...scope.managedProjectIds].sort()).toEqual(["core-ledger", "payments-api"]);
+      // Priya administers both Payments projects. Administering them must not
+      // open a project in another unit, nor the sibling unit itself.
+      expect([...scope.managedProjectIds].sort()).toEqual(["fraud-features", "payments-api"]);
       expect(canReadProject(scope, "payments-api")).toBe(true);
-      expect(canReadProject(scope, "core-ledger")).toBe(true);
+      expect(canReadProject(scope, "fraud-features")).toBe(true);
+      expect(canReadProject(scope, "core-ledger")).toBe(false);
       expect(canReadProject(scope, "mobile-onboarding")).toBe(false);
     });
 
-    it("reads both parent units when it administers across two", () => {
-      // The multi-unit admin case the scoped pages union across — with no
-      // Business Unit switcher there is no "active" one to fall back to.
-      expect([...scope.businessUnitIds].sort()).toEqual(["ws_lending", "ws_payments"]);
-      expect(canManageBusinessUnit(scope, "ws_lending")).toBe(false);
+    it("reads exactly the one unit it belongs to", () => {
+      // A person belongs to ONE Business Unit and their projects all live in
+      // it, so a Project Admin's readable set is that single unit. It used to
+      // be two, because Priya administered projects in two units — which is
+      // also how a Payments person ended up reading Lending's people list.
+      expect([...scope.businessUnitIds].sort()).toEqual(["ws_payments"]);
+      expect(canReadBusinessUnit(scope, "ws_lending")).toBe(false);
+      expect(canManageBusinessUnit(scope, "ws_payments")).toBe(false);
     });
 
     it("reads the parent unit for context but cannot manage it", () => {
@@ -98,10 +99,23 @@ describe("resolveSessionScope", () => {
   });
 
   it("switches reach when the same person acts as a different role", () => {
-    // Priya again, acting as BA: the project_admin binding must not follow her.
-    const asBa = scopeFor("ba");
-    expect(canReadProject(asBa, "mobile-onboarding")).toBe(true);
-    expect(asBa.managedProjectIds).toEqual([]);
+    // Diego is `developer` in Payments and on payments-api, and `architect` on
+    // fraud-features — the same person, two roles, two scopes, one unit. Acting
+    // as one must not confer the other's reach.
+    const asDeveloper = resolveSessionScope({
+      ...buildMockSessionForPlatformRole("developer"),
+      identityId: "idn_diego",
+    });
+    expect(canReadProject(asDeveloper, "payments-api")).toBe(true);
+    expect(canReadProject(asDeveloper, "fraud-features")).toBe(false);
+
+    const asArchitect = resolveSessionScope({
+      ...buildMockSessionForPlatformRole("architect"),
+      identityId: "idn_diego",
+    });
+    expect(canReadProject(asArchitect, "fraud-features")).toBe(true);
+    expect(canReadProject(asArchitect, "payments-api")).toBe(false);
+    expect(asArchitect.managedProjectIds).toEqual([]);
   });
 
   it("fails closed for an unresolvable delivery-tier session", () => {
@@ -162,10 +176,12 @@ describe("filterByProject", () => {
     const scope = scopeFor("project_admin");
     const visible = filterByProject(scope, GATES, (g) => g.projectId);
     expect(visible.length).toBeGreaterThan(0);
-    // Exactly her two administered projects — notably NOT mobile-onboarding,
-    // which sits in the same unit as core-ledger and is hers only as a BA.
-    expect(visible.every((g) => ["payments-api", "core-ledger"].includes(g.projectId))).toBe(true);
-    expect(visible.some((g) => g.projectId === "mobile-onboarding")).toBe(false);
+    // Exactly her two administered projects — notably NOT core-ledger or
+    // mobile-onboarding, which belong to a unit she is not a member of.
+    expect(visible.every((g) => ["payments-api", "fraud-features"].includes(g.projectId))).toBe(
+      true,
+    );
+    expect(visible.some((g) => g.projectId === "core-ledger")).toBe(false);
     expect(visible.length).toBeLessThan(GATES.length);
   });
 

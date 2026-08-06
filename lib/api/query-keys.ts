@@ -31,6 +31,8 @@ export const qk = {
     list: (id: ProjectId) => ["project-members", "list", id] as const,
   },
   users: {
+    /** The org-wide people directory (Users & Roles). */
+    directory: () => ["users", "directory"] as const,
     detail: (id: string) => ["users", "detail", id] as const,
   },
   governanceApprovals: {

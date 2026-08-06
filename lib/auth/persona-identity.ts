@@ -12,19 +12,16 @@
  *   bu_admin       → Noah Bennett, `bu_admin` of Platform Engineering and
  *                    nothing else. A single-unit admin is the cleanest proof
  *                    that the other two units are gone from every surface.
- *   project_admin  → Priya Menon, `project_admin` on a Payments project AND a
- *                    Lending one, plus `ba` on a second Lending project. Two
- *                    things at once: a person who administers across two
- *                    Business Units (the case the scoped pages must answer now
- *                    that no switcher names an "active" one), and one whose
- *                    `ba` binding keeps "authorized on" visibly distinct from
- *                    "administers".
+ *   project_admin  → Priya Menon, `project_admin` on TWO Payments projects and
+ *                    a member of Payments and nothing else. Administering more
+ *                    than one project without administering the unit above them
+ *                    is the boundary the scoped pages have to hold.
  *   contributors   → people already seeded with that role somewhere.
  *
- * Marcus Reyes and Farah Haddad are deliberately NOT used here: each holds
- * governance in one unit and delivery in another (the per-scope tier case), and
- * signing in as them would blur the very boundary this map exists to make
- * visible. They stay in the people directory, which is where that case belongs.
+ * Marcus Reyes, Farah Haddad and Noah Bennett are deliberately NOT used for the
+ * delivery roles: they are Business Unit Admins, and a governance role is never
+ * on a project at all. They stay in the people directory, which is where that
+ * case belongs.
  *
  * MOCK-ONLY, and deliberately dependency-free (types only) so it can be
  * imported from the session builder without dragging the fixture graph along.
@@ -37,15 +34,25 @@ import type { PlatformRole } from "@/lib/roles";
 const PERSONA_IDENTITY: Partial<Record<PlatformRole, string>> = {
   org_admin: "idn_sarthak",
   bu_admin: "idn_noah",
+  // Tomas is in Platform Engineering with `contributor` and nothing else — the
+  // state right after onboarding, before Noah (the bu_admin persona above, who
+  // runs that same unit) has said what he does. Signing in as both shows the
+  // two ends of one handover.
+  contributor: "idn_tomas",
+  // Each persona signs in as someone who ACTUALLY HOLDS that role. Several
+  // used to point at whoever was nearest — `security_engineer` at the
+  // Organization Admin, `data_engineer` and `scrum_master` at people who held
+  // neither — which made `resolveAccessScope` fall through to "every binding
+  // they have" and quietly handed the persona the wrong reach.
   project_admin: "idn_priya",
-  ba: "idn_priya",
-  architect: "idn_diego",
+  ba: "idn_sofia",
+  architect: "idn_rafael",
   developer: "idn_diego",
   qa: "idn_wei",
   devops_engineer: "idn_lena",
-  data_engineer: "idn_lena",
-  security_engineer: "idn_sarthak",
-  scrum_master: "idn_priya",
+  data_engineer: "idn_bruno",
+  security_engineer: "idn_hana",
+  scrum_master: "idn_luca",
   // `custom` is intentionally absent: a composed bundle has no canonical
   // persona, and resolveAccessScope() falls back to every binding the
   // identity holds rather than inventing one.

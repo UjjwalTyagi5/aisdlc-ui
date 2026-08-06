@@ -311,6 +311,16 @@ export function Sidebar() {
   const wsFailed = !scopeLoading && scopeError;
   const hasWorkspace = !scopeLoading && !scopeError && (isOrgWide || businessUnitIds.length > 0);
 
+  /**
+   * Show the Build section at all.
+   *
+   * The two failure states below have something to SAY even with no links —
+   * "we couldn't load your scope" and "you belong to no business unit yet" —
+   * so they keep the heading. An empty list with neither is a heading over
+   * nothing, which is what a Contributor sees.
+   */
+  const showBuild = deliverItems.length > 0 || wsFailed || (!hasWorkspace && !wsPending);
+
   return (
     <aside
       data-collapsed={collapsed}
@@ -333,11 +343,17 @@ export function Sidebar() {
         {/* Named for what the group IS, not for a Business Unit. This label
             used to carry the active unit's name, which was a lie for anyone
             bound to more than one — see components/app/org-header.tsx. */}
-        <SectionLabel
-          label="Build"
-          collapsed={collapsed}
-          dimmed={!hasWorkspace && !wsPending}
-        />
+        {/* The heading only when there is something under it. Control plane and
+            Observability below already work this way; Build did not, so a
+            Contributor — who has no working surface until their unit admin
+            gives them a role — got a "BUILD" label over nothing at all. */}
+        {showBuild && (
+          <SectionLabel
+            label="Build"
+            collapsed={collapsed}
+            dimmed={!hasWorkspace && !wsPending}
+          />
+        )}
 
         {/* No scope chip here.
 
@@ -348,7 +364,7 @@ export function Sidebar() {
             nothing. The page states it where it changes the reading, next to
             the numbers it bounds. */}
 
-        {hasWorkspace || wsPending ? (
+        {!showBuild ? null : hasWorkspace || wsPending ? (
           // Deliver hrefs are static (lib/nav.ts) and don't depend on the
           // workspace query — keep them real links while pending so there is
           // no dead-nav window between sign-in and the query resolving.
