@@ -19,6 +19,7 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { Separator } from "@/components/ui/separator";
 import { useSession } from "@/hooks/use-session";
 import { listConnectors } from "@/lib/api/connectors";
+import { connectorStatusLabel } from "@/lib/connectors";
 import { qk } from "@/lib/api/query-keys";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { ROLE_META } from "@/lib/roles";
@@ -247,7 +248,7 @@ export default function ProfilePage() {
                       {c.health !== "healthy" && (
                         <span className="text-warning inline-flex items-center gap-1 font-mono text-[10px] tracking-wide uppercase">
                           <TriangleAlert className="size-3" aria-hidden />
-                          {c.health}
+                          {connectorStatusLabel(c.health)}
                         </span>
                       )}
                     </span>

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Plus, Search } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { PageTitle } from "@/components/app/page-title";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -36,7 +37,56 @@ import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import type { ModelAllowEntry, ModelProvider } from "@/lib/schemas/model";
 
-function ProviderGlyph({ label }: { label: string }) {
+/** Real brand logos (in public/brand), same scheme as the Integrations page. */
+const PROVIDER_LOGO: Partial<Record<string, { src: string; fit: "contain" | "cover-left" }>> = {
+  anthropic: { src: "/brand/anthropic.svg", fit: "contain" },
+  google: { src: "/brand/google.svg", fit: "contain" },
+  vertex_ai: { src: "/brand/google.svg", fit: "contain" },
+  azure: { src: "/brand/azure.png", fit: "contain" },
+};
+
+/** Brand-colored monogram for a provider with no logo file on hand. */
+const PROVIDER_BRAND: Record<string, { mark: string; bg: string }> = {
+  openai: { mark: "AI", bg: "#000000" }, // OpenAI black
+  bedrock: { mark: "AWS", bg: "#FF9900" }, // AWS orange
+  xai: { mark: "X", bg: "#000000" }, // xAI black
+  mistral: { mark: "M", bg: "#FA5210" }, // Mistral orange
+  cohere: { mark: "C", bg: "#39594D" }, // Cohere forest
+};
+
+function ProviderGlyph({ kind, label }: { kind: string; label: string }) {
+  const logo = PROVIDER_LOGO[kind];
+  if (logo) {
+    return (
+      <div
+        aria-hidden
+        className="border-line-soft grid size-10 shrink-0 place-items-center overflow-hidden rounded-lg border bg-white shadow-[0_1px_0_oklch(1_0_0_/_0.22)_inset,0_2px_8px_-3px_oklch(0_0_0_/_0.5)]"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element -- small static brand asset; <img> renders SVG+PNG uniformly without next/image SVG config */}
+        <img
+          src={logo.src}
+          alt=""
+          aria-hidden
+          className={cn(
+            "size-full",
+            logo.fit === "cover-left" ? "object-cover object-left" : "object-contain p-2",
+          )}
+        />
+      </div>
+    );
+  }
+  const brand = PROVIDER_BRAND[kind];
+  if (brand) {
+    return (
+      <div
+        aria-hidden
+        className="grid size-10 shrink-0 place-items-center rounded-lg font-mono text-[13px] font-bold tracking-tight text-white shadow-[0_1px_0_oklch(1_0_0_/_0.22)_inset,0_2px_8px_-3px_oklch(0_0_0_/_0.5)]"
+        style={{ backgroundColor: brand.bg }}
+      >
+        {brand.mark}
+      </div>
+    );
+  }
   return (
     <div
       aria-hidden
@@ -495,7 +545,7 @@ function ProviderCard({
 
   return (
     <Card className="border-line-soft bg-panel-elevated focus-within:ring-ring relative flex flex-row items-center gap-3 px-4 py-3.5 shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow focus-within:ring-2 hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
-      <ProviderGlyph label={label} />
+      <ProviderGlyph kind={kind} label={label} />
       <div className="min-w-0 flex-1">
         <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
           <Link

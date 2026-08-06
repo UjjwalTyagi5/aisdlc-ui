@@ -257,6 +257,122 @@ export function unpublishVersion(id: string): AgentProfileVersion | undefined {
   return toApi(record);
 }
 
+// ───────── Seed data ─────────
+//
+// One worked example — the Requirements agent's Organization-tier default —
+// published across two versions, so the Behavior tab arrives already showing
+// real instructions AND the Version History below it has a superseded
+// version to roll back to, instead of an Org Admin needing to author two
+// drafts themselves before they can see rollback do anything.
+VERSIONS.push(
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "requirements",
+    version: 1,
+    isActive: false,
+    promptPrepend:
+      "When drafting requirements, always confirm whether the target work-item system is Azure DevOps or Jira before writing anything, and default to Azure DevOps if the project hasn't said otherwise.",
+    promptAppend:
+      "Keep every story under 5 acceptance criteria — split it into two stories if it needs more.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-05-10T14:00:00.000Z",
+    updatedAt: "2026-05-10T14:00:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-05-10T14:00:00.000Z",
+  },
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "requirements",
+    version: 2,
+    isActive: true,
+    promptPrepend:
+      "When drafting requirements, always confirm the target work-item system before writing anything. For Azure DevOps, follow the org's \"Azure DevOps story format\" skill exactly rather than inventing a new template. Flag any requirement with no measurable acceptance criterion before marking a story ready for review.",
+    promptAppend:
+      "Keep every story under 5 acceptance criteria — split it into two stories if it needs more. List open questions separately from acceptance criteria so they don't get missed during review.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-07-22T10:30:00.000Z",
+    updatedAt: "2026-07-22T10:30:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-07-22T10:30:00.000Z",
+  },
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "design",
+    version: 1,
+    isActive: false,
+    promptPrepend:
+      "Before proposing a design, confirm which existing services or data stores the feature touches, and note them explicitly at the top of the design.",
+    promptAppend: "Flag any design that adds a new external dependency for extra review.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-05-15T11:00:00.000Z",
+    updatedAt: "2026-05-15T11:00:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-05-15T11:00:00.000Z",
+  },
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "design",
+    version: 2,
+    isActive: true,
+    promptPrepend:
+      "Before proposing a design, confirm which existing services or data stores the feature touches and list them explicitly at the top of the design. Use the org's \"Design doc structure\" skill format rather than a free-form writeup.",
+    promptAppend:
+      "Flag any design that adds a new external dependency or a new API surface for extra review. Call out backward-compatibility risk explicitly in the Rollout plan section.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-07-25T11:00:00.000Z",
+    updatedAt: "2026-07-25T11:00:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-07-25T11:00:00.000Z",
+  },
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "development",
+    version: 1,
+    isActive: false,
+    promptPrepend:
+      "Follow the repository's existing code style and folder conventions rather than introducing a new pattern for a single change.",
+    promptAppend: "Every PR must include a test plan, even for small changes.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-05-20T09:30:00.000Z",
+    updatedAt: "2026-05-20T09:30:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-05-20T09:30:00.000Z",
+  },
+  {
+    id: `profile_${nextId++}`,
+    scope: "org",
+    scopeId: null,
+    agentId: "development",
+    version: 2,
+    isActive: true,
+    promptPrepend:
+      "Follow the repository's existing code style and folder conventions rather than introducing a new pattern for a single change. Use the org's \"Commit & PR conventions\" skill for commit messages and PR descriptions.",
+    promptAppend:
+      "Every PR must include a test plan, even for small changes. Call out any change that touches authentication, payments, or PII handling in the PR summary.",
+    outputContractExtra: "",
+    createdBy: "Ada Lovelace",
+    createdAt: "2026-07-28T09:30:00.000Z",
+    updatedAt: "2026-07-28T09:30:00.000Z",
+    publishedBy: "Ada Lovelace",
+    publishedAt: "2026-07-28T09:30:00.000Z",
+  },
+);
+
 /**
  * The resolved layer stack for the Composition Preview panel — vendor base
  * (locked) → each ancestor tier that has an active version, outermost

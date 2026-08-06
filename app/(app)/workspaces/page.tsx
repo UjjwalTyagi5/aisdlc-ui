@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  Archive,
   Building2,
   Check,
   Coins,
@@ -13,7 +12,9 @@ import {
   MoreVertical,
   Pencil,
   Plus,
+  PowerOff,
   ShieldCheck,
+  TriangleAlert,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -22,6 +23,14 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -88,14 +97,14 @@ export default function WorkspacesPage() {
     router.replace("/workspaces");
   }, [searchParams, scopeResolved, canCreate, router]);
 
-  const archiveMutation = useMutation({
+  const deactivateMutation = useMutation({
     mutationFn: (id: string) => archiveWorkspace(id),
     onSuccess: (ws) => {
-      toast.success(`Business unit "${ws.displayName}" archived`);
+      toast.success(`Business unit "${ws.displayName}" deactivated`);
       queryClient.invalidateQueries({ queryKey: qk.workspaces.all() });
     },
     onError: (err) =>
-      toast.error("Couldn't archive business unit", {
+      toast.error("Couldn't deactivate business unit", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -203,7 +212,7 @@ export default function WorkspacesPage() {
                 queryClient.invalidateQueries();
                 toast.success(`Switched to ${ws.displayName}`);
               }}
-              onArchive={() => archiveMutation.mutate(ws.id)}
+              onDeactivate={() => deactivateMutation.mutate(ws.id)}
             />
           ))}
         </ul>
@@ -212,7 +221,7 @@ export default function WorkspacesPage() {
       {archived.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-muted-foreground font-mono text-[11px] tracking-[0.14em] uppercase">
-            Archived
+            Deactivated
           </h2>
           <ul className="grid items-stretch gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {archived.map((ws) => (
@@ -256,7 +265,7 @@ function WorkspaceCard({
   canManage,
   archived,
   onSetActive,
-  onArchive,
+  onDeactivate,
   canChangeAdmin,
 }: {
   workspace: Workspace;
@@ -266,9 +275,10 @@ function WorkspaceCard({
   canChangeAdmin?: boolean;
   archived?: boolean;
   onSetActive?: () => void;
-  onArchive?: () => void;
+  onDeactivate?: () => void;
 }) {
   const [adminOpen, setAdminOpen] = React.useState(false);
+  const [deactivateOpen, setDeactivateOpen] = React.useState(false);
 
   return (
     <li className="h-full">
@@ -329,9 +339,9 @@ function WorkspaceCard({
                       {ws.buAdminName ? "Change admin" : "Appoint admin"}
                     </DropdownMenuItem>
                   )}
-                  <DropdownMenuItem onSelect={() => onArchive?.()} className="text-destructive">
-                    <Archive className="size-4" aria-hidden />
-                    Archive business unit
+                  <DropdownMenuItem onSelect={() => setDeactivateOpen(true)} className="text-destructive">
+                    <PowerOff className="size-4" aria-hidden />
+                    Deactivate business unit
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -392,6 +402,41 @@ function WorkspaceCard({
           onOpenChange={setAdminOpen}
         />
       )}
+
+      <Dialog open={deactivateOpen} onOpenChange={setDeactivateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TriangleAlert className="text-destructive size-5" aria-hidden />
+              Deactivate {ws.displayName}?
+            </DialogTitle>
+            <DialogDescription>
+              You&apos;re deactivating this business unit. None of its projects or
+              agents will work — nobody will be able to do any work inside a
+              project that belongs to {ws.displayName} until it&apos;s reactivated.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              className="border-line-soft"
+              onClick={() => setDeactivateOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setDeactivateOpen(false);
+                onDeactivate?.();
+              }}
+            >
+              <PowerOff className="size-4" aria-hidden />
+              Deactivate business unit
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </li>
   );
 }
