@@ -3,8 +3,18 @@
 import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import { Lock, Search, ShieldCheck, Upload, UserPlus, Users as UsersIcon, X } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import {
+  Building2,
+  Lock,
+  Search,
+  ShieldCheck,
+  Upload,
+  UserPlus,
+  Users as UsersIcon,
+  X,
+} from "lucide-react";
 
 import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
@@ -31,10 +41,12 @@ import { ScopeChip } from "@/components/app/scope-indicator";
 import { AssignBusinessUnitRoleDialog } from "@/components/app/assign-bu-role-dialog";
 import { ChangeAppointmentDialog } from "@/components/app/change-appointment-dialog";
 import { BulkOnboardDialog } from "@/components/app/bulk-onboard-dialog";
+import { RequestCrossBuMemberDialog } from "@/components/app/request-cross-bu-member-dialog";
+import { listProjects } from "@/lib/api/projects";
 import { OnboardUserDialog } from "@/components/app/onboard-user-dialog";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import { listUserDirectory } from "@/lib/api/users";
+import { listCrossBuGrants, listUserDirectory, revokeCrossBuGrant } from "@/lib/api/users";
 import { qk } from "@/lib/api/query-keys";
 import { awaitsBusinessUnitRole, ROLE_META, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
@@ -54,12 +66,22 @@ import type { DirectoryEntry } from "@/lib/schemas/user-directory";
  *                       says what that person actually does, from the built-in
  *                       roles or one they compose.
  *
- * The directory is ORG-WIDE for both, which is the change that made the second
- * half workable. It used to be scope-filtered, so a Business Unit Admin's copy
- * of this page was their own unit's member list under a directory's name, and
- * "who else is here" had no answer anywhere. Every row is now visible; only the
- * rows in units the viewer administers are actionable, and the write endpoints
- * enforce that independently (see app/api/workspaces/[id]/members/**).
+ * READ ORG-WIDE, WRITE INSIDE YOUR OWN UNIT. Both admins above see every person
+ * in the organisation; only the rows in units the viewer administers carry a
+ * role control, and every other row says "view only" on its face. A Business
+ * Unit Admin has to be able to FIND someone in another unit — they borrow
+ * contributors across units, and the borrow dialog takes an email precisely
+ * because it cannot offer a picker — so a directory that stopped at their own
+ * boundary left that address unfindable anywhere in the product.
+ *
+ * A Project Admin is scoped to the unit they belong to: `member:manage` is
+ * theirs over their projects' rosters, not over the organisation's people.
+ * `scopeUserDirectory` (lib/mock/user-directory-fixtures.ts) draws both lines,
+ * and both runtimes apply it — app/api/admin/users/route.ts and the MSW handler.
+ *
+ * Reading is not the only boundary — the write endpoints check
+ * `canManageBusinessUnit` independently (see app/api/workspaces/[id]/members/**),
+ * so a row in view is still not a row you may edit.
  */
 
 /**
@@ -116,6 +138,8 @@ export default function UsersPage() {
   const [query, setQuery] = React.useState("");
   const [onboarding, setOnboarding] = React.useState(false);
   const [bulkOpen, setBulkOpen] = React.useState(false);
+  const [borrowOpen, setBorrowOpen] = React.useState(false);
+  const queryClient = useQueryClient();
   const [assigning, setAssigning] = React.useState<DirectoryEntry | null>(null);
   const [reappointing, setReappointing] = React.useState<DirectoryEntry | null>(null);
 
@@ -139,6 +163,47 @@ export default function UsersPage() {
     staleTime: 60_000,
   });
 
+  /**
+   * Cross-unit loans touching a unit this viewer administers.
+   *
+   * Surfaced on Users rather than only on the project, because the two admins
+   * involved read it from opposite ends: the borrowing side already sees the
+   * guest on their project's roster, while the LENDING side has no other place
+   * to learn that one of their people is working somewhere they cannot see.
+   * Ownership stays with the parent unit, so ending the loan has to live where
+   * that unit's admin already stands.
+   */
+  /** The projects a unit admin can borrow INTO — theirs, server-scoped. */
+  const projectsQ = useQuery({
+    queryKey: ["users-page", "projects"],
+    queryFn: () => listProjects({ pageSize: 200 }),
+    enabled: isBuAdmin,
+    staleTime: 60_000,
+  });
+
+  const grantsQ = useQuery({
+    queryKey: ["cross-bu-grants"],
+    queryFn: listCrossBuGrants,
+    enabled: isBuAdmin || isOrgAdmin,
+    staleTime: 60_000,
+  });
+  const grants = React.useMemo(() => grantsQ.data ?? [], [grantsQ.data]);
+  const loansByIdentity = React.useMemo(() => {
+    const m = new Map<string, typeof grants>();
+    for (const g of grants) m.set(g.identityId, [...(m.get(g.identityId) ?? []), g]);
+    return m;
+  }, [grants]);
+
+  const revokeLoan = useMutation({
+    mutationFn: (g: { identityId: string; projectId: string }) => revokeCrossBuGrant(g),
+    onSuccess: () => {
+      toast.success("Loan ended");
+      queryClient.invalidateQueries({ queryKey: ["cross-bu-grants"] });
+      queryClient.invalidateQueries({ queryKey: qk.users.directory() });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const allCustomRoles = useAllCustomRoles();
   const roleLabel = React.useCallback(
     (name: string) => resolveRoleLabel(name, allCustomRoles),
@@ -158,6 +223,10 @@ export default function UsersPage() {
   const canAssignRoleFor = React.useCallback(
     (entry: DirectoryEntry) =>
       isBuAdmin &&
+      // A guest is another unit's person. Their role here was fixed by the
+      // approval that lent them, and changing it is not this admin's to do —
+      // it would rewrite a decision the lending unit made.
+      !entry.isGuest &&
       // The Organization Admin holds a row in every unit, so they turn up in a
       // unit admin's list — but they are appointed from above, not managed from
       // inside. Their tier would make any delivery role a separation-of-duties
@@ -184,7 +253,8 @@ export default function UsersPage() {
     let list = rows;
     if (buFilter) {
       list = list.filter(
-        (r) => r.businessUnitId === buFilter || r.bindings.some((b) => b.businessUnitId === buFilter),
+        (r) =>
+          r.businessUnitId === buFilter || r.bindings.some((b) => b.businessUnitId === buFilter),
       );
     }
     if (awaitingOnly) list = list.filter((r) => r.awaitingRole);
@@ -196,7 +266,9 @@ export default function UsersPage() {
         r.displayName.toLowerCase().includes(q) ||
         (r.email ?? "").toLowerCase().includes(q) ||
         (r.businessUnitName ?? "").toLowerCase().includes(q) ||
-        roleLabel(r.unitRole ?? r.orgRole).toLowerCase().includes(q) ||
+        roleLabel(r.unitRole ?? r.orgRole)
+          .toLowerCase()
+          .includes(q) ||
         r.bindings.some(
           (b) => b.name.toLowerCase().includes(q) || roleLabel(b.role).toLowerCase().includes(q),
         ),
@@ -232,25 +304,45 @@ export default function UsersPage() {
                 applies to. The chip is here for them too: an org-wide list is
                 the surprising part of their copy of this page, and unlabelled
                 it reads as a scope leak. */}
-            {/* The chip has to match what is actually in front of them. Only
-                the Organization Admin reads the organisation; everyone else is
-                looking at one Business Unit, and naming an org-wide scope to
-                them would be worse than saying nothing. */}
+            {/* The chip has to match what is actually in front of them, and the
+                two non-org-admin readers are looking at different things: a unit
+                admin reads the organisation but writes in one unit, a project
+                admin reads one unit. Naming an org-wide scope to the second
+                would be worse than saying nothing. */}
             {!isOrgAdmin && (
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                <ScopeChip kind="business_unit" name={null} size="sm" />
+                <ScopeChip
+                  kind={isBuAdmin ? "organization" : "business_unit"}
+                  name={null}
+                  size="sm"
+                />
                 <span className="text-muted-foreground text-[11.5px]">
                   {isBuAdmin
-                    ? `Everyone in your ${
+                    ? `Everyone in the organization. You assign roles in your ${
                         managedBusinessUnitIds.length === 1
                           ? BUSINESS_UNIT_LABEL.toLowerCase()
                           : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()
-                      }, and the roles you assign them.`
+                      } — every other row is read-only.`
                     : `Everyone in the ${BUSINESS_UNIT_LABEL.toLowerCase()} you work in. Roles here are its admin's to set — your project's own roster is on the project.`}
                 </span>
               </div>
             )}
           </div>
+
+          {/* The Business Unit Admin's own way in. They staff their unit from
+              here, and the person they need is sometimes in another unit —
+              sending them into a project's Members screen to ask for one would
+              mean leaving the page where they do the rest of this job. */}
+          {isBuAdmin && (
+            <Button
+              variant="outline"
+              className="border-line-soft gap-2"
+              onClick={() => setBorrowOpen(true)}
+            >
+              <Building2 className="size-4" aria-hidden />
+              Borrow from another {BUSINESS_UNIT_LABEL.toLowerCase()}
+            </Button>
+          )}
 
           {isOrgAdmin && (
             <div className="flex flex-wrap items-center gap-2">
@@ -287,7 +379,8 @@ export default function UsersPage() {
             </span>
           </div>
           <p className="text-muted-foreground text-[12px]">
-            Onboarded into your {managedBusinessUnitIds.length === 1
+            Onboarded into your{" "}
+            {managedBusinessUnitIds.length === 1
               ? BUSINESS_UNIT_LABEL.toLowerCase()
               : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}{" "}
             and holding no permissions until you say what they do.
@@ -310,7 +403,11 @@ export default function UsersPage() {
                     {p.email} · {p.businessUnitName}
                   </span>
                 </span>
-                <Button size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => setAssigning(p)}>
+                <Button
+                  size="sm"
+                  className="h-7 px-2.5 text-[11px]"
+                  onClick={() => setAssigning(p)}
+                >
                   Assign role
                 </Button>
               </li>
@@ -336,7 +433,9 @@ export default function UsersPage() {
 
         {(buFilter || awaitingOnly) && (
           <span className="border-brand-bright/35 bg-brand-bright/10 text-brand-bright inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
-            {awaitingOnly ? "Awaiting a role" : `${BUSINESS_UNIT_LABEL}: ${filterUnit?.displayName ?? buFilter}`}
+            {awaitingOnly
+              ? "Awaiting a role"
+              : `${BUSINESS_UNIT_LABEL}: ${filterUnit?.displayName ?? buFilter}`}
             <Link
               href="/users"
               aria-label="Clear the filter"
@@ -438,7 +537,7 @@ export default function UsersPage() {
                             role={asPlatformRole(roleName)}
                             placeholder={isPlaceholder}
                           />
-                          <span className="text-muted-foreground text-[11.5px]">
+                          <span className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11.5px]">
                             {r.businessUnitName ?? (
                               <em className="not-italic opacity-70">
                                 {r.orgRole === "org_admin"
@@ -446,12 +545,53 @@ export default function UsersPage() {
                                   : `No ${BUSINESS_UNIT_LABEL.toLowerCase()} yet`}
                               </em>
                             )}
+                            {/* Working here, belonging elsewhere. The unit name
+                                above is theirs, not yours — without this chip
+                                the row reads as a member of another unit having
+                                leaked into your list. */}
+                            {r.isGuest && (
+                              <span className="border-brand-bright/35 bg-brand-bright/10 text-brand-bright inline-flex items-center gap-1 rounded-full border px-1.5 py-px font-mono text-[9.5px] tracking-wider uppercase">
+                                <Building2 className="size-2.5" aria-hidden />
+                                guest
+                              </span>
+                            )}
                           </span>
                         </div>
                       </TableCell>
 
                       <TableCell className="py-3 align-top">
-                        {projectBindings.length === 0 ? (
+                        {/* Loans first: a person working in another unit is the
+                            fact this admin cannot learn anywhere else. */}
+                        {(loansByIdentity.get(r.identityId) ?? []).map((g) => (
+                          <span
+                            key={g.id}
+                            className="mb-1 flex flex-wrap items-center gap-1.5 text-[11.5px]"
+                          >
+                            <Building2 className="text-brand-bright size-3" aria-hidden />
+                            <span className="text-muted-foreground">
+                              {g.projectName} · {g.targetWorkspaceName}
+                            </span>
+                            <RoleChip label={roleLabel(g.role)} role={asPlatformRole(g.role)} />
+                            {g.lentByYou && (
+                              <button
+                                type="button"
+                                disabled={revokeLoan.isPending}
+                                onClick={() =>
+                                  revokeLoan.mutate({
+                                    identityId: g.identityId,
+                                    projectId: g.projectId,
+                                  })
+                                }
+                                className="text-muted-foreground hover:text-destructive underline underline-offset-2 disabled:opacity-50"
+                              >
+                                End loan
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                        {projectBindings.length === 0 &&
+                        (loansByIdentity.get(r.identityId) ?? []).length >
+                          0 ? null : projectBindings.length === 0 ? (
                           <span className="text-muted-foreground text-[11.5px]">
                             {/* Not an empty cell. The governance tier is never
                                 on a project, so "none" is the rule holding
@@ -470,10 +610,7 @@ export default function UsersPage() {
                                 <span className="text-muted-foreground text-[11.5px]">
                                   {b.name}
                                 </span>
-                                <RoleChip
-                                  label={roleLabel(b.role)}
-                                  role={asPlatformRole(b.role)}
-                                />
+                                <RoleChip label={roleLabel(b.role)} role={asPlatformRole(b.role)} />
                               </span>
                             ))}
                           </div>
@@ -521,11 +658,13 @@ export default function UsersPage() {
                               </Badge>
                             </TooltipTrigger>
                             <TooltipContent side="left" className="max-w-[240px]">
-                              {r.orgRole === "org_admin"
-                                ? "The Organization Admin is appointed org-wide, not from inside a business unit."
-                                : r.businessUnitName
-                                  ? `${r.businessUnitName}'s admin assigns roles for this person.`
-                                  : `They belong to no ${BUSINESS_UNIT_LABEL.toLowerCase()} yet — the Organization Admin places them.`}
+                              {r.isGuest
+                                ? `On loan from ${r.businessUnitName}, who still own them. Their role here was set by the approval that lent them.`
+                                : r.orgRole === "org_admin"
+                                  ? "The Organization Admin is appointed org-wide, not from inside a business unit."
+                                  : r.businessUnitName
+                                    ? `${r.businessUnitName}'s admin assigns roles for this person.`
+                                    : `They belong to no ${BUSINESS_UNIT_LABEL.toLowerCase()} yet — the Organization Admin places them.`}
                             </TooltipContent>
                           </Tooltip>
                         )}
@@ -565,6 +704,15 @@ export default function UsersPage() {
           currentRole={reappointing.orgRole}
           currentBusinessUnitId={reappointing.businessUnitId}
           businessUnits={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
+        />
+      )}
+
+      {isBuAdmin && (
+        <RequestCrossBuMemberDialog
+          open={borrowOpen}
+          onOpenChange={setBorrowOpen}
+          projects={(projectsQ.data?.items ?? []).map((p) => ({ id: String(p.id), name: p.name }))}
+          onRaised={() => queryClient.invalidateQueries({ queryKey: ["governance-approvals"] })}
         />
       )}
 

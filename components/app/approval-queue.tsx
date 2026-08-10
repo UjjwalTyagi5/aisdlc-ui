@@ -34,7 +34,9 @@ export function ApprovalQueue() {
     isOrgWide,
     level: scopeLevel,
     bindings: accessBindings,
+    scope: accessScope,
   } = useAccessScope();
+  const identityId = accessScope?.identityId ?? null;
   const role = effectivePlatformRole(session);
 
   // Governance tier (org_admin, bu_admin) has NO agent access at all (PRD
@@ -90,7 +92,13 @@ export function ApprovalQueue() {
     (g) =>
       OPEN_REQUEST_STATUSES.includes(g.status) &&
       role !== null &&
-      GOVERNANCE_APPROVER_ROLE[g.type] === role,
+      GOVERNANCE_APPROVER_ROLE[g.type] === role &&
+      // Not the ones you raised. The endpoint already refuses self-approval, so
+      // leaving them here offered a decision that could only ever fail — and it
+      // only shows up for the types whose approver is a PEER rather than a tier
+      // above (`cross_bu_assignment`), where the requester and the approver
+      // hold the same role in different units.
+      !(g.requestedById != null && g.requestedById === identityId),
   );
 
   // Sectioned by business unit, then by project within it — a governance

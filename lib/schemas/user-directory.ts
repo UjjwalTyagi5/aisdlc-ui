@@ -105,6 +105,14 @@ export const DirectoryEntry = z.object({
   /** In a unit, holding only the `contributor` placeholder — the unit admin
    *  owes them a role. Drives the pending queue. */
   awaitingRole: z.boolean(),
+  /**
+   * They are in this list only because they are ON LOAN into a unit the viewer
+   * administers — they belong to another Business Unit, which still owns them.
+   *
+   * Always false for the Organization Admin's org-wide read, where everyone is
+   * listed on their own terms and "guest" would have no unit to be a guest of.
+   */
+  isGuest: z.boolean().default(false),
 });
 export type DirectoryEntry = z.infer<typeof DirectoryEntry>;
 

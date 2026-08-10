@@ -89,8 +89,7 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
     projectId: "regional-alerts",
     projectName: "Regional outage alerts",
     title: "New project: Regional outage alerts",
-    summary:
-      "Grace Hopper requested a new web app project on greenfield in Lending.",
+    summary: "Grace Hopper requested a new web app project on greenfield in Lending.",
     requestedBy: "Grace Hopper",
     requestedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
     decidedBy: null,
@@ -169,7 +168,11 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
       "Payments will breach its cap before the period closes. The overrun is driven by the SCA exemption defect triage, which was not in the original forecast.",
     priority: "urgent",
     attachments: [
-      { name: "payments-spend-forecast.xlsx", sizeBytes: 88_400, contentType: "application/vnd.ms-excel" },
+      {
+        name: "payments-spend-forecast.xlsx",
+        sizeBytes: 88_400,
+        contentType: "application/vnd.ms-excel",
+      },
     ],
     currentApproverRole: "org_admin",
     escalationCount: 0,
@@ -178,6 +181,69 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
       "bu_admin",
       "org_admin",
       new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
+    ),
+  },
+  /**
+   * A cross-unit loan, waiting on the unit that owns the person.
+   *
+   * SEEDED FOR THE SAME REASON `gov_role_*` IS. The borrow flow was reachable
+   * but invisible: nothing produced a `cross_bu_assignment` until someone raised
+   * one by hand, so the decision card — the half of the feature the approving
+   * admin ever touches — was dead UI on first load.
+   *
+   * ROUTED TO PLATFORM ENGINEERING BECAUSE THAT IS OMAR'S UNIT, and because the
+   * mock Business Unit Admin persona administers it (lib/auth/persona-identity.ts).
+   * Lending is doing the asking and cannot approve its own want; signing in as
+   * the Business Unit Admin therefore lands on a decision that is genuinely
+   * theirs. `workspaceId` is the PARENT unit for exactly that reason — the queue
+   * filters on it (see lib/mock/cross-bu.ts).
+   *
+   * The payload mirrors `requestCrossBuAssignment`'s output field for field, so
+   * approving this seed runs the same `applyCrossBuAssignment` path a live
+   * request would: grant first, then the seat.
+   */
+  {
+    id: "gov_xbu_omar",
+    type: "cross_bu_assignment",
+    status: "pending_review",
+    workspaceId: "ws_platform",
+    workspaceName: "Platform Engineering",
+    projectId: "core-ledger",
+    projectName: "Core ledger — Java 8 to 21",
+    title: "Lending asks for Omar Nasser as Developer",
+    summary:
+      "Ana Silva is asking to add Omar Nasser to Core ledger — Java 8 to 21 (Lending) as Developer. They stay in Platform Engineering.",
+    description:
+      "The strangler-fig cutover needs a second developer who has done a Spring Boot 2 → 3 migration before. Omar would keep Platform Engineering as their business unit and reach this project only — not Lending's other work, its budget or its connections.",
+    requestedBy: "Ana Silva",
+    requestedById: "idn_ana",
+    requestedByRole: "project_admin",
+    requestedAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+    decidedBy: null,
+    decidedAt: null,
+    reason: null,
+    targetRef: "core-ledger",
+    payload: {
+      identityId: "idn_omar",
+      userId: "okta|omar",
+      displayName: "Omar Nasser",
+      email: "omar@abcbank.com",
+      roleName: "developer",
+      roleLabel: "Developer",
+      parentWorkspaceId: "ws_platform",
+      parentWorkspaceName: "Platform Engineering",
+      targetWorkspaceId: "ws_lending",
+      targetWorkspaceName: "Lending",
+    },
+    priority: "normal",
+    attachments: [],
+    currentApproverRole: "bu_admin",
+    escalationCount: 0,
+    timeline: seedTimeline(
+      "Ana Silva",
+      "project_admin",
+      "bu_admin",
+      new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
     ),
   },
   // ── Role assignments, one per seeded Contributor ──────────────────────────

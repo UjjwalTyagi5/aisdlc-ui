@@ -111,6 +111,30 @@ export function GovernanceApprovalRow({
         )}
       </div>
 
+      {/* A cross-unit loan is approve/reject like everything else — the ask is
+          fully specified, so there is nothing left to choose. What the card
+          adds is the four facts the decision turns on, because "approve?" with
+          only a title is a decision made on a sentence. */}
+      {approval.type === "cross_bu_assignment" && (
+        <dl className="border-line-soft bg-surface-1 mb-2 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-lg border p-3 text-[12px] sm:grid-cols-4">
+          {(
+            [
+              ["Contributor", target.displayName],
+              ["Stays in", (approval.payload?.parentWorkspaceName as string) ?? null],
+              ["Lent to", (approval.payload?.targetWorkspaceName as string) ?? null],
+              ["As", (approval.payload?.roleLabel as string) ?? null],
+            ] as const
+          ).map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
+                {label}
+              </dt>
+              <dd className="text-foreground mt-0.5 font-medium">{value ?? "—"}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
       {isRoleAssignment ? (
         <div className="border-line-soft bg-panel-elevated space-y-3 rounded-xl border p-4">
           <div>

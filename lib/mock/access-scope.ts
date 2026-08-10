@@ -212,14 +212,30 @@ export function resolveAccessScope(
     ).map((p) => String(p.id)),
   ]);
 
-  // Units held directly, plus the parent unit of every visible project as
-  // READ context only (never added to managedBusinessUnitIds).
-  const businessUnitIds = unique([
-    ...acting.filter((b) => b.kind === "business_unit").map((b) => b.scopeId),
-    ...acting
-      .filter((b) => b.kind === "project" && b.parentId)
-      .map((b) => b.parentId as string),
-  ]);
+  /**
+   * Units held directly — and the parent unit of a project ONLY when it is a
+   * unit they already belong to.
+   *
+   * A CROSS-UNIT LOAN MUST NOT DRAG ITS UNIT ALONG. A contributor lent to one
+   * project in another Business Unit reaches that project and nothing else: not
+   * the unit's other projects, not its budget, connectors, models or people.
+   * Inheriting the parent unit from any project binding is exactly how the loan
+   * would have widened into unit-wide read the moment it was granted — the
+   * borrowing unit's whole estate, from one project seat.
+   *
+   * The last clause is the fallback for someone seated on a project with no
+   * unit membership at all. It cannot happen through `addProjectMember`, which
+   * enrols them, but a scope that answered "nothing" for such a person would
+   * blank their own project rather than fail safe in any useful sense.
+   */
+  const ownUnitIds = acting.filter((b) => b.kind === "business_unit").map((b) => b.scopeId);
+  const businessUnitIds = unique(
+    ownUnitIds.length > 0
+      ? ownUnitIds
+      : acting
+          .filter((b) => b.kind === "project" && b.parentId)
+          .map((b) => b.parentId as string),
+  );
 
   const level: ScopeKind = managedBusinessUnitIds.length > 0 ? "business_unit" : "project";
 

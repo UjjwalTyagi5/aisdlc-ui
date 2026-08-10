@@ -63,6 +63,13 @@ export const GovernanceApprovalType = z.enum([
    * Users or this queue.
    */
   "role_assignment",
+  /**
+   * One Business Unit asking to borrow another's contributor for a single
+   * project. Routed to the contributor's OWN (parent) unit admin — the only
+   * person who can lend them — rather than to anyone above the asker. Approving
+   * writes a `CrossBuGrant` and seats them; their parent unit never changes.
+   */
+  "cross_bu_assignment",
   "model_provider_access",
   "other",
 ]);
@@ -82,6 +89,7 @@ export const REQUEST_TYPE_LABEL: Record<GovernanceApprovalType, string> = {
   access_request: "Access or permission",
   user_onboarding: "User onboarding",
   role_assignment: "Role assignment",
+  cross_bu_assignment: "Cross-unit contributor",
   model_provider_access: "Model provider access",
   other: "Other",
 };

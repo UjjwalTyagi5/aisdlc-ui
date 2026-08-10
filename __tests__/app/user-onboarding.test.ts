@@ -220,7 +220,9 @@ describe("the request the handover raises", () => {
       actorName: "Noah Bennett",
     });
     expect(outcome.status).toBe(200);
-    expect((outcome.body as { resolvedRequestId: string | null }).resolvedRequestId).toBe(requestId);
+    expect((outcome.body as { resolvedRequestId: string | null }).resolvedRequestId).toBe(
+      requestId,
+    );
 
     expect(findOpenRoleAssignment(PLATFORM_ENG, identityId)).toBeUndefined();
     const closed = listGovernanceApprovals().find((a) => a.id === requestId)!;
@@ -265,9 +267,7 @@ describe("the governance tier is never on a project", () => {
 
   it("refuses to seat one, by email", () => {
     expect(projectMembershipBlock("payments-api", "farah@abcbank.com")).toContain("never members");
-    expect(projectMembershipBlock("payments-api", "srk02804@gmail.com")).toContain(
-      "never members",
-    );
+    expect(projectMembershipBlock("payments-api", "srk02804@gmail.com")).toContain("never members");
   });
 
   it("lets delivery people in their own unit, and unknown emails, through", () => {
@@ -347,16 +347,22 @@ describe("the governance tier is never on a project", () => {
 
   it("keeps every seeded unit membership to a real role", () => {
     for (const m of listAllMemberships()) {
-      expect(m.role in ROLE_META || m.role.startsWith("role_"), `unknown role ${m.role}`).toBe(true);
+      expect(m.role in ROLE_META || m.role.startsWith("role_"), `unknown role ${m.role}`).toBe(
+        true,
+      );
     }
   });
 });
 
 describe("who sees which slice of the directory", () => {
   const org = { isOrgWide: true, businessUnitIds: [] };
+  // Administering a unit is what separates this scope from the Project Admin's
+  // below — the two are otherwise identical, and it is the only difference the
+  // directory reads.
   const buAdmin = {
     isOrgWide: false,
     businessUnitIds: [PLATFORM_ENG],
+    managedBusinessUnitIds: [PLATFORM_ENG],
     actingBindings: [{ kind: "business_unit", scopeId: PLATFORM_ENG }],
   };
   // A Project Admin on a Platform Engineering project: they can READ the
@@ -371,14 +377,19 @@ describe("who sees which slice of the directory", () => {
     expect(scopeUserDirectory(org)).toHaveLength(listUserDirectory().length);
   });
 
-  it("narrows a Business Unit Admin to their own unit", () => {
-    // They assign roles here, and nine tenths of an org-wide list is a unit
-    // they cannot touch — with the people they are accountable for buried in
-    // it. One unit's admin has no standing over another unit's people.
+  it("gives a Business Unit Admin the whole organisation to READ", () => {
+    // They borrow contributors across units, and the borrow dialog identifies
+    // a person by email because it cannot offer a picker. A directory that
+    // stopped at their own boundary left that address unfindable anywhere in
+    // the product. Containment lives on the write, not here.
     const seen = scopeUserDirectory(buAdmin);
-    expect(seen.length).toBeLessThan(listUserDirectory().length);
-    expect(seen.every((e) => e.businessUnitName === "Platform Engineering")).toBe(true);
-    expect(seen.some((e) => e.displayName === "Marcus Reyes")).toBe(false);
+    expect(seen).toHaveLength(listUserDirectory().length);
+    // Other units' admins and people are visible…
+    expect(seen.some((e) => e.displayName === "Marcus Reyes")).toBe(true);
+    expect(seen.some((e) => e.displayName === "Sofia Rossi")).toBe(true);
+    // …and still named under the unit that actually owns them, so an org-wide
+    // read never reads as "these people are mine".
+    expect(seen.find((e) => e.displayName === "Marcus Reyes")!.businessUnitName).toBe("Payments");
   });
 
   it("narrows a Project Admin to the units they are part of", () => {
@@ -411,10 +422,13 @@ describe("who sees which slice of the directory", () => {
     };
     const seen = scopeUserDirectory(priya);
 
-    expect(seen.every((e) => e.businessUnitName === "Payments")).toBe(true);
-    expect(seen.some((e) => e.displayName === "Sofia Rossi"), "a Lending member leaked").toBe(
-      false,
-    );
+    expect(
+      seen.filter((e) => e.orgRole !== "org_admin").every((e) => e.businessUnitName === "Payments"),
+    ).toBe(true);
+    expect(
+      seen.some((e) => e.displayName === "Sofia Rossi"),
+      "a Lending member leaked",
+    ).toBe(false);
     expect(seen.some((e) => e.displayName === "Priya Menon")).toBe(true);
   });
 
@@ -457,19 +471,20 @@ describe("who sees which slice of the directory", () => {
     expect(seen.some((e) => e.displayName === "Lena Fischer")).toBe(true);
   });
 
-  it("names the unit the viewer shares, not the person's home one", () => {
-    // The Organization Admin is the only person in more than one unit — their
-    // rows everywhere are what org-wide authority looks like here, and they
-    // have no home unit of their own. A scoped viewer must see them under the
-    // unit they share, or the row reads as someone from elsewhere.
+  it("keeps the Organization Admin visible but unplaced, for every viewer", () => {
+    // He holds a membership row in every unit, so the shared-unit relabelling
+    // found one and printed the VIEWER'S unit beside his name — a Business Unit
+    // Admin's roster claiming the Organization Admin as one of their people.
+    // Visible, because org-wide authority is a fact about the organisation the
+    // unit sits in. Unplaced, because no unit owns him.
     const seenByPlatform = scopeUserDirectory(projectAdmin).find(
       (e) => e.displayName === "Sarthak Kapoor",
     )!;
-    expect(seenByPlatform.businessUnitName).toBe("Platform Engineering");
-    expect(seenByPlatform.unitRole).toBe("org_admin");
+    expect(seenByPlatform, "the Organization Admin vanished from a scoped list").toBeDefined();
+    expect(seenByPlatform.businessUnitName).toBeNull();
+    expect(seenByPlatform.orgRole).toBe("org_admin");
 
-    // Org-wide keeps him unplaced — there is no shared unit to prefer, and
-    // naming one would claim he belongs to it.
+    // Org-wide agrees, and always did.
     const orgWide = scopeUserDirectory(org).find((e) => e.displayName === "Sarthak Kapoor")!;
     expect(orgWide.businessUnitName).toBeNull();
   });
@@ -493,9 +508,7 @@ describe("what a Contributor sees in the sidebar", () => {
   it("nothing — the role holds no job yet", () => {
     // Four working links to four empty pages reads as a broken platform rather
     // than a pending assignment; the utility rail is what stays reachable.
-    expect(
-      visibleNav([...ROLE_PERMISSIONS.contributor], { role: "contributor" }),
-    ).toEqual([]);
+    expect(visibleNav([...ROLE_PERMISSIONS.contributor], { role: "contributor" })).toEqual([]);
   });
 
   it("but every other delivery role keeps its pages", () => {

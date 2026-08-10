@@ -38,3 +38,19 @@ export const removeProjectMember = (projectId: ProjectId, membershipId: string) 
   api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(membershipId)}`, {
     method: "DELETE",
   });
+
+/**
+ * Ask another Business Unit to lend a contributor to this project.
+ *
+ * By EMAIL, because the asker cannot see the other unit's people — see
+ * `lib/mock/cross-bu.ts`. Returns the raised request; the seat appears only
+ * once the contributor's own admin approves it.
+ */
+export const requestCrossBuMember = (
+  projectId: ProjectId,
+  input: { email: string; roleName: string; reason?: string },
+) =>
+  api(`/projects/${encodeURIComponent(projectId)}/access-requests`, {
+    method: "POST",
+    body: input,
+  });

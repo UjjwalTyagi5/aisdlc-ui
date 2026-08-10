@@ -10,6 +10,7 @@
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { ProjectMember } from "@/lib/schemas/project-membership";
+import { hasCrossBuGrant } from "./cross-bu-fixtures";
 import { getProjectById } from "./project-fixtures";
 import {
   getIdentityByEmail,
@@ -113,6 +114,15 @@ const PROJECT_MEMBERSHIPS: ProjectMembershipRow[] = SEEDED.map((s) => ({
 function toProjectMember(row: ProjectMembershipRow): ProjectMember | null {
   const identity = getIdentity(row.identityId);
   if (!identity) return null;
+
+  // Named only when it differs from the project's own unit — see the field's
+  // docblock. Derived rather than stored: it is the answer to a comparison
+  // between two memberships, and a copy of it would go stale the day either
+  // side moves.
+  const home = parentBusinessUnitOf(String(identity.id));
+  const projectUnit = getProjectById(row.projectId)?.workspaceId;
+  const isGuest = home !== null && projectUnit != null && home !== String(projectUnit);
+
   return {
     membershipId: row.id,
     projectId: row.projectId,
@@ -121,6 +131,7 @@ function toProjectMember(row: ProjectMembershipRow): ProjectMember | null {
     status: row.status,
     addedAt: row.addedAt,
     extraAgents: row.extraAgents,
+    homeBusinessUnitName: isGuest ? (getWorkspace(home)?.displayName ?? home) : null,
   };
 }
 
@@ -136,13 +147,15 @@ function toProjectMember(row: ProjectMembershipRow): ProjectMember | null {
  *    how the person signing off the work ends up on the team doing it, and no
  *    audit trail can untangle that after the fact.
  *
- * 2. A PROJECT IS STAFFED FROM ITS OWN BUSINESS UNIT. The unit owns the
- *    project, funds it from its budget and governs who works in it, so someone
- *    outside the unit joining it is spending a budget they are not counted
- *    against and answering to an admin who cannot see them. Someone genuinely
- *    needed on another unit's project is onboarded into that unit first — which
- *    is a decision with an owner, rather than a side effect of an email typed
- *    into a picker.
+ * 2. A PROJECT IS STAFFED FROM ITS OWN BUSINESS UNIT — UNLESS THE PERSON'S
+ *    PARENT UNIT HAS LENT THEM. The unit owns the project, funds it from its
+ *    budget and governs who works in it, so someone outside the unit joining it
+ *    is spending a budget they are not counted against and answering to an
+ *    admin who cannot see them. That is why the loan is a decision with an
+ *    owner: the borrowing side raises a `cross_bu_assignment` request, the
+ *    contributor's OWN admin approves it, and the approval writes a
+ *    `CrossBuGrant` for exactly one project. This function then lets the seat
+ *    exist because the grant does — not the other way round.
  *
  * Checked here rather than in the picker because the add path takes an EMAIL:
  * a Business Unit Admin's address typed into "add a contributor" would resolve
@@ -179,9 +192,26 @@ export function projectMembershipBlock(
   if (units.length === 0) return null;
   if (units.includes(String(projectUnit))) return null;
 
+  // Lent by their own unit's admin, for this project and no other.
+  if (hasCrossBuGrant(String(identity.id), String(projectId))) return null;
+
   const theirUnit = getWorkspace(units[0]!)?.displayName ?? "another business unit";
   const thisUnit = getWorkspace(String(projectUnit))?.displayName ?? "this project's";
-  return `${identity.displayName} is in ${theirUnit}; this project belongs to ${thisUnit}. A project is staffed from its own ${BUSINESS_UNIT_LABEL.toLowerCase()}.`;
+  return `${identity.displayName} is in ${theirUnit}; this project belongs to ${thisUnit}. Ask ${theirUnit}'s admin for them — a project is staffed from its own ${BUSINESS_UNIT_LABEL.toLowerCase()} unless their admin lends them.`;
+}
+
+/**
+ * The Business Unit that OWNS this person — their parent, which a loan never
+ * changes. Null for someone who belongs to no unit yet.
+ *
+ * The first membership rather than a stored field: a person holds exactly one
+ * business-unit membership (see workspace-fixtures.ts), so "their unit" and
+ * "their only unit" are the same fact, and storing it twice is how the two
+ * disagree later.
+ */
+export function parentBusinessUnitOf(identityId: string): string | null {
+  const held = listMembershipsForIdentity(String(identityId))[0];
+  return held ? String(held.workspaceId) : null;
 }
 
 export function listProjectMembers(projectId: string): ProjectMember[] {
@@ -243,6 +273,51 @@ export function addProjectMember(
     // Undefined rather than [] when none were granted — see the note on the
     // create input; the two must not become distinguishable states.
     extraAgents: input.extraAgents?.length ? [...input.extraAgents] : undefined,
+  };
+  PROJECT_MEMBERSHIPS.push(row);
+  return toProjectMember(row)!;
+}
+
+/**
+ * Seat an EXISTING person on a project by identity id.
+ *
+ * The by-email `addProjectMember` above is the onboarding path — it mints
+ * people and enrols them in the project's unit. This one is for someone who
+ * already belongs somewhere: an approved cross-unit loan, where minting would
+ * be wrong and re-enrolling them would move them out of the parent unit the
+ * loan exists to preserve.
+ *
+ * Still goes through `projectMembershipBlock`, which by this point passes
+ * because the grant was written first — the seat is legal because the approval
+ * happened, not because this path skips the check.
+ */
+export function seatProjectMember(
+  projectId: string,
+  identityId: string,
+  roleName: string,
+): ProjectMember | { error: string } {
+  const identity = getIdentity(identityId);
+  if (!identity) return { error: "Unknown person" };
+
+  const blocked = projectMembershipBlock(projectId, String(identity.id));
+  if (blocked) return { error: blocked };
+
+  const existing = PROJECT_MEMBERSHIPS.find(
+    (r) => r.projectId === projectId && r.identityId === String(identity.id),
+  );
+  if (existing) {
+    existing.role = roleName;
+    existing.status = "active";
+    return toProjectMember(existing)!;
+  }
+
+  const row: ProjectMembershipRow = {
+    id: `pm_${nextId++}`,
+    projectId,
+    identityId: String(identity.id),
+    role: roleName,
+    status: "active",
+    addedAt: new Date().toISOString(),
   };
   PROJECT_MEMBERSHIPS.push(row);
   return toProjectMember(row)!;

@@ -17,6 +17,7 @@ import {
 import { getProjectById } from "./project-fixtures";
 import { listProjectMembershipsForIdentity } from "./project-membership-fixtures";
 import { listCustomRoles } from "./custom-role-fixtures";
+import { listCrossBuGrants } from "./cross-bu-fixtures";
 import { getOrgRole } from "./org-role-fixtures";
 import { awaitsBusinessUnitRole, AGENT_OWNERSHIP, ROLE_META, type PlatformRole } from "@/lib/roles";
 import { ROLE_PERMISSIONS } from "@/lib/auth/role-permissions";
@@ -32,7 +33,9 @@ import type {
 } from "@/lib/schemas/user-directory";
 
 const PERMISSION_LABELS = new Map(
-  PERMISSION_CATALOG.flatMap((g) => g.perms.map((p) => [p.id, { label: p.label, grants: p.grants ?? null }])),
+  PERMISSION_CATALOG.flatMap((g) =>
+    g.perms.map((p) => [p.id, { label: p.label, grants: p.grants ?? null }]),
+  ),
 );
 
 function permissionSummary(id: string) {
@@ -65,7 +68,11 @@ function buildRoleSummary(role: string): RoleSummary {
       tier: null,
       permissions: custom.permissions.map(permissionSummary),
       agentAccess: Phase.options
-        .map((phase) => ({ phase, label: PHASE_LABEL[phase], level: custom.agentAccess?.[phase] ?? "none" }))
+        .map((phase) => ({
+          phase,
+          label: PHASE_LABEL[phase],
+          level: custom.agentAccess?.[phase] ?? "none",
+        }))
         .filter((row) => row.level !== "none"),
     };
   }
@@ -105,19 +112,19 @@ export function listUserDirectory(): DirectoryEntry[] {
         status: m.status,
       }));
 
-      const projectBindings: DirectoryBinding[] = listProjectMembershipsForIdentity(identity.id).map(
-        (m) => {
-          const project = getProjectById(m.projectId);
-          return {
-            scope: "project" as const,
-            id: m.projectId,
-            name: project?.name ?? m.projectId,
-            businessUnitId: project?.workspaceId ? String(project.workspaceId) : null,
-            role: m.role,
-            status: m.status,
-          };
-        },
-      );
+      const projectBindings: DirectoryBinding[] = listProjectMembershipsForIdentity(
+        identity.id,
+      ).map((m) => {
+        const project = getProjectById(m.projectId);
+        return {
+          scope: "project" as const,
+          id: m.projectId,
+          name: project?.name ?? m.projectId,
+          businessUnitId: project?.workspaceId ? String(project.workspaceId) : null,
+          role: m.role,
+          status: m.status,
+        };
+      });
 
       const orgRole = getOrgRole(identity.id);
       // The unit the org-level record names, falling back to the one they are
@@ -161,6 +168,8 @@ export function listUserDirectory(): DirectoryEntry[] {
         // standing in the unit that owns them.
         awaitingRole:
           unitBindings.length > 0 && unitBindings.every((b) => awaitsBusinessUnitRole(b.role)),
+        // Set per viewer in `scopeUserDirectory` — org-wide, nobody is a guest.
+        isGuest: false,
       } satisfies DirectoryEntry;
     })
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -169,17 +178,28 @@ export function listUserDirectory(): DirectoryEntry[] {
 /**
  * The directory as one viewer may see it.
  *
- * ORG-WIDE FOR THE ORGANIZATION ADMIN, AND NOBODY ELSE. Everyone else sees the
- * people in the unit they belong to.
+ * READING AND MANAGING ARE TWO DIFFERENT QUESTIONS, and this function only
+ * answers the first. Anyone who ADMINISTERS a Business Unit — the Organization
+ * Admin, or a Business Unit Admin — reads the whole organisation. Everyone else
+ * sees the people in the unit they belong to.
  *
- * A Business Unit Admin was briefly given the whole organisation on the
- * argument that "who else is here" is a fair question. On screen it wasn't: the
- * page is where they assign roles, nine tenths of it was a unit they cannot
- * touch, and the useful part — the people they are accountable for — was buried
- * among names they have no business reading. One unit's admin has no standing
- * over another unit's people, and the read now says so.
+ * WHY A UNIT ADMIN GETS THE WHOLE ROSTER. "Who else is here" is a question they
+ * genuinely have to answer: they borrow contributors from other units, they
+ * hand people over to other units, and the borrow dialog identifies a person by
+ * EMAIL precisely because it cannot offer a picker. A directory that stopped at
+ * their own boundary made that address unfindable anywhere in the product. The
+ * containment that matters is on the WRITE, not the read: `canAssignRole` in
+ * app/(app)/users/page.tsx offers the role control only for units the viewer
+ * administers, every other row renders "view only", and the membership
+ * endpoints check `canManageBusinessUnit` on their own.
  *
- * MEMBERSHIP OF A UNIT, NOT WORK INSIDE ONE — on BOTH sides of the match.
+ * A Project Admin is NOT included. They hold `member:manage` for their own
+ * projects' rosters, which is a project-scoped power; the organisation's people
+ * list is not theirs, and the project's own Members screen is where their
+ * version of this question is answered.
+ *
+ * MEMBERSHIP OF A UNIT, NOT WORK INSIDE ONE — on BOTH sides of the match, for
+ * the scoped viewers who remain.
  *
  * On the viewer's side: the units they are a member of, not the units their
  * projects happen to live in. On the listed person's side: their business-unit
@@ -198,10 +218,44 @@ export function listUserDirectory(): DirectoryEntry[] {
 export function scopeUserDirectory(scope: {
   isOrgWide: boolean;
   businessUnitIds: string[];
+  managedBusinessUnitIds?: string[];
   actingBindings?: { kind: string; scopeId: string }[];
 }): DirectoryEntry[] {
   const all = listUserDirectory();
   if (scope.isOrgWide) return all;
+
+  /**
+   * People from other units who are working HERE, on loan.
+   *
+   * A Business Unit Admin's list is the people in their unit — and a borrowed
+   * contributor is not one, which is exactly why they were missing from it. But
+   * they are working on this unit's project, against this unit's budget, and
+   * the admin accountable for that had no way to see them at all: not in their
+   * own directory, and not in anyone else's they can read. So they are listed,
+   * marked as guests, and not editable — the unit that lent them still owns
+   * them, and their role here was fixed by the approval.
+   */
+  const managed = new Set((scope.managedBusinessUnitIds ?? []).map(String));
+  const guests = new Map<string, string>();
+  if (managed.size > 0) {
+    for (const g of listCrossBuGrants()) {
+      if (managed.has(String(g.targetWorkspaceId))) guests.set(g.identityId, g.targetWorkspaceId);
+    }
+  }
+
+  /**
+   * A Business Unit Admin reads the organisation.
+   *
+   * Administering a unit is the line, not membership of one: it is what
+   * distinguishes them from a Project Admin, who also holds `member:manage` but
+   * holds it over project rosters rather than over people. The guest marks are
+   * still applied on the way out — org-wide visibility does not make "this
+   * person is on loan INTO your unit" a less useful thing to say, and it is the
+   * only signal that separates a name you may act on from one you may not.
+   */
+  if (managed.size > 0) {
+    return all.map((entry) => (guests.has(entry.identityId) ? { ...entry, isGuest: true } : entry));
+  }
 
   /**
    * The units the viewer is a MEMBER of — not `scope.businessUnitIds`.
@@ -225,11 +279,32 @@ export function scopeUserDirectory(scope: {
   return all.flatMap((entry) => {
     if (entry.businessUnitId !== null && readable.has(entry.businessUnitId)) return [entry];
 
+    // Listed as a guest, under the unit they actually belong to — claiming they
+    // are in yours would be the lie the marker exists to avoid.
+    if (guests.has(entry.identityId)) return [{ ...entry, isGuest: true }];
+
     const shared = entry.bindings.find(
       (b) =>
         b.scope === "business_unit" && b.businessUnitId !== null && readable.has(b.businessUnitId),
     );
     if (!shared) return [];
+
+    /**
+     * The Organization Admin stays UNPLACED, in every list they appear in.
+     *
+     * They hold a membership row in every unit, so the relabelling below found
+     * one and printed the viewer's own unit beside their name — a Business Unit
+     * Admin's roster claimed the Organization Admin as one of their people.
+     * `listUserDirectory` already refuses to pick a unit for them for exactly
+     * this reason (see `businessUnitId` above); undoing that here, per viewer,
+     * put the claim back one scope at a time.
+     *
+     * Visible, because org-wide authority is a fact about the organisation the
+     * unit sits in and a missing row reads as a missing person. Unplaced,
+     * because no unit owns them. Their appointment chip already says
+     * Organization Admin, so the empty unit column reads as scope, not a gap.
+     */
+    if (entry.orgRole === "org_admin") return [entry];
 
     /**
      * Name the unit the VIEWER shares, not the person's home one.
@@ -256,30 +331,34 @@ export function getUserDetail(ssoSubject: string): UserDetail | undefined {
   const identity = getIdentityBySsoSubject(ssoSubject);
   if (!identity) return undefined;
 
-  const workspaceBindings: UserDetailBinding[] = listMembershipsForIdentity(identity.id).map((m) => {
-    const ws = getWorkspace(m.workspaceId);
-    return {
-      scope: "workspace",
-      id: m.workspaceId,
-      name: ws?.displayName ?? m.workspaceId,
-      parentName: null,
-      role: m.role,
-      status: m.status,
-    };
-  });
+  const workspaceBindings: UserDetailBinding[] = listMembershipsForIdentity(identity.id).map(
+    (m) => {
+      const ws = getWorkspace(m.workspaceId);
+      return {
+        scope: "workspace",
+        id: m.workspaceId,
+        name: ws?.displayName ?? m.workspaceId,
+        parentName: null,
+        role: m.role,
+        status: m.status,
+      };
+    },
+  );
 
-  const projectBindings: UserDetailBinding[] = listProjectMembershipsForIdentity(identity.id).map((m) => {
-    const project = getProjectById(m.projectId);
-    const parentWorkspace = project?.workspaceId ? getWorkspace(project.workspaceId) : undefined;
-    return {
-      scope: "project",
-      id: m.projectId,
-      name: project?.name ?? m.projectId,
-      parentName: parentWorkspace?.displayName ?? null,
-      role: m.role,
-      status: m.status,
-    };
-  });
+  const projectBindings: UserDetailBinding[] = listProjectMembershipsForIdentity(identity.id).map(
+    (m) => {
+      const project = getProjectById(m.projectId);
+      const parentWorkspace = project?.workspaceId ? getWorkspace(project.workspaceId) : undefined;
+      return {
+        scope: "project",
+        id: m.projectId,
+        name: project?.name ?? m.projectId,
+        parentName: parentWorkspace?.displayName ?? null,
+        role: m.role,
+        status: m.status,
+      };
+    },
+  );
 
   const distinctRoles = [...new Set([...workspaceBindings, ...projectBindings].map((b) => b.role))];
 

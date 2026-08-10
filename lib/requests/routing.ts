@@ -71,6 +71,10 @@ const TYPE_ROUTED = new Set<GovernanceApprovalType>([
   // this request is raised by the Organization Admin, who has nobody above
   // them — the answer is one tier DOWN, which only the type knows.
   "role_assignment",
+  // SIDEWAYS, not up: to the Business Unit Admin who owns the contributor being
+  // asked for. Climbing from the requester would land it with the borrowing
+  // unit's own admin, who cannot lend somebody else's person.
+  "cross_bu_assignment",
 ]);
 
 /**
@@ -243,7 +247,22 @@ export function initialApproverRole(
     ? GOVERNANCE_APPROVER_ROLE[type]
     : nextApproverRole(requesterRole);
 
-  if (routed !== null && routed === requesterRole) return nextApproverRole(routed);
+  /**
+   * The bump exists so nobody decides their own tier's ask — a Business Unit
+   * Admin's project-creation request must not land back with a Business Unit
+   * Admin, because that would be them.
+   *
+   * `cross_bu_assignment` is the exception, and the only one: its approver is a
+   * DIFFERENT unit's admin — the one who owns the contributor being asked for —
+   * identified by the request's `workspaceId` rather than by tier. Bumping it
+   * sent a Business Unit Admin's ask to the Organization Admin, who has no
+   * standing to lend another unit's people and every reason not to be asked.
+   * Same rung, different unit, and the peer is not the requester.
+   */
+  const samePersonRisk = type !== "cross_bu_assignment";
+  if (samePersonRisk && routed !== null && routed === requesterRole) {
+    return nextApproverRole(routed);
+  }
   return routed;
 }
 

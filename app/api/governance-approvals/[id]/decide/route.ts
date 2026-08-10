@@ -1,7 +1,8 @@
 import { type NextRequest } from "next/server";
 
 import { getSession } from "@/lib/auth/session";
-import { sessionIdentityId } from "@/lib/auth/access-scope";
+import { resolveSessionScope, sessionIdentityId } from "@/lib/auth/access-scope";
+import { canReadGovernanceApproval } from "@/lib/mock/access-scope";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { canDecideRequest } from "@/lib/requests/routing";
 import type { PlatformRole } from "@/lib/roles";
@@ -9,6 +10,7 @@ import {
   decideGovernanceApproval,
   getGovernanceApproval,
 } from "@/lib/mock/governance-approval-fixtures";
+import { applyCrossBuAssignment } from "@/lib/mock/cross-bu";
 import { activateProject, rejectProjectCreation, setProjectArchived } from "@/lib/mock/project-fixtures";
 import { activateModelProvider, rejectModelProvider } from "@/lib/mock/model-fixtures";
 import { patchWorkspace } from "@/lib/mock/workspace-fixtures";
@@ -46,6 +48,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
   }
 
+  /**
+   * The right ROLE is not enough — it has to be the right one OF that role.
+   *
+   * `canDecideRequest` answers "is a Business Unit Admin what this is waiting
+   * on", which every Business Unit Admin satisfies. The queue never showed
+   * someone another unit's request, so the gap was invisible; posting straight
+   * at this endpoint was not. It matters most for `cross_bu_assignment`, where
+   * one unit's admin could otherwise lend out ANOTHER unit's people — the one
+   * decision the whole type exists to keep with the person who owns them.
+   *
+   * Same predicate the list uses, so what you can decide is exactly what you
+   * could see.
+   */
+  if (!canReadGovernanceApproval(resolveSessionScope(session), approval.workspaceId, approval.projectId)) {
+    return Response.json(
+      { code: "forbidden", message: "This request belongs to another business unit." },
+      { status: 403 },
+    );
+  }
+
   const decided = decideGovernanceApproval(id, body.decision, session.user.name, body.reason);
   if (!decided) return Response.json({ code: "not_found" }, { status: 404 });
 
@@ -62,6 +84,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
   } else if (approval.type === "project_archive" && body.decision === "approve") {
     setProjectArchived(approval.targetRef, true);
+  } else if (approval.type === "cross_bu_assignment" && body.decision === "approve") {
+    // Writes the grant, then seats them. A rejection needs no counterpart:
+    // nothing was created to undo, and the contributor's own unit keeps them.
+    applyCrossBuAssignment(approval, session.user.name);
   } else if (
     (approval.type === "agent_default_org" ||
       approval.type === "agent_default_workspace" ||

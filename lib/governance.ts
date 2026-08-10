@@ -48,6 +48,11 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   // rather than one tier above the requester. A Business Unit Admin asking
   // would land there anyway; this makes it true for everyone.
   model_provider_access: "org_admin",
+  // Routed to a Business Unit Admin — but a SPECIFIC one, and not the asker's.
+  // The request carries the contributor's parent unit as its `workspaceId`, so
+  // the queue's own scope filter (`canReadGovernanceApproval`) lands it with
+  // that unit's admin. They are the only person who can lend their own people.
+  cross_bu_assignment: "bu_admin",
   // Type-routed to stage one's approver. The second stage is the agent's own
   // owner, which depends on the PHASE being asked for and so cannot live in a
   // map keyed by type — `lib/requests/routing.ts::agentAccessApprover` derives

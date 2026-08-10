@@ -236,6 +236,27 @@ export function isOrgAssignableRole(role: string): role is PlatformRole {
 }
 
 /**
+ * The roles a contributor BORROWED from another Business Unit may hold.
+ *
+ * Project-scoped roles, plus Project Admin — someone can be lent to run a
+ * project, which is still a project-level job. Both admin tiers are absent and
+ * always will be: a governance role is never a project member at all, so
+ * lending one would be lending authority over a unit rather than work inside a
+ * project.
+ *
+ * Lives here rather than beside the cross-unit transaction because the request
+ * dialog needs it, and reaching into `lib/mock/*` from a client component would
+ * pull the whole fixture graph into the browser bundle.
+ */
+export const CROSS_BU_ASSIGNABLE_ROLES: readonly PlatformRole[] = ROLE_ORDER.filter(
+  (r) => r === "project_admin" || (ROLE_META[r].scope === "project" && r !== "custom"),
+);
+
+export function isCrossBuAssignableRole(role: string): boolean {
+  return (CROSS_BU_ASSIGNABLE_ROLES as readonly string[]).includes(role);
+}
+
+/**
  * Does a Business Unit membership still need its admin to act?
  *
  * `contributor` is a placeholder, not a job: it records that the Org Admin put

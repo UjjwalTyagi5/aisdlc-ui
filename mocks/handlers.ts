@@ -5,6 +5,7 @@ import {
   archiveWorkspace as fxArchiveWorkspace,
   createWorkspace as fxCreateWorkspace,
   findOrCreateIdentityBySsoSubject as fxFindOrCreateIdentityBySsoSubject,
+  getIdentity as fxGetIdentity,
   getWorkspace as fxGetWorkspace,
   listMembers as fxListMembers,
   listWorkspaces as fxListWorkspaces,
@@ -160,8 +161,17 @@ import {
   onboardIntoOrganization as fxOnboardIntoOrganization,
 } from "@/lib/mock/onboarding";
 import {
+  applyCrossBuAssignment as fxApplyCrossBuAssignment,
+  requestCrossBuAssignment as fxRequestCrossBuAssignment,
+} from "@/lib/mock/cross-bu";
+import {
+  listCrossBuGrants as fxListCrossBuGrants,
+  revokeCrossBuGrant as fxRevokeCrossBuGrant,
+} from "@/lib/mock/cross-bu-fixtures";
+import {
   addProjectMember as fxAddProjectMember,
   projectMembershipBlock as fxProjectMembershipBlock,
+  removeProjectMembershipsInWorkspace as fxRemoveProjectMembershipsInWorkspace,
   listProjectMembers as fxListProjectMembers,
   removeProjectMember as fxRemoveProjectMember,
   updateProjectMemberRole as fxUpdateProjectMemberRole,
@@ -636,6 +646,20 @@ export const handlers = [
         { status: 403 },
       );
     }
+    // The right role is not enough — it must be the right one OF that role.
+    // See the route handler for why this matters most to cross_bu_assignment.
+    if (
+      !canReadGovernanceApproval(
+        scopeFromCookies(cookies),
+        approval.workspaceId,
+        approval.projectId,
+      )
+    ) {
+      return HttpResponse.json(
+        { code: "forbidden", message: "This request belongs to another business unit." },
+        { status: 403 },
+      );
+    }
 
     const decided = decideGovernanceApproval(id, body.decision, session.user.name, body.reason);
     if (!decided) return HttpResponse.json({ code: "not_found" }, { status: 404 });
@@ -653,6 +677,8 @@ export const handlers = [
       }
     } else if (approval.type === "project_archive" && body.decision === "approve") {
       setProjectArchived(approval.targetRef, true);
+    } else if (approval.type === "cross_bu_assignment" && body.decision === "approve") {
+      fxApplyCrossBuAssignment(approval, session.user.name);
     } else if (
       (approval.type === "agent_default_org" ||
         approval.type === "agent_default_workspace" ||
@@ -1770,6 +1796,60 @@ export const handlers = [
     return HttpResponse.json(payload as Record<string, unknown>, { status });
   }),
 
+  // ───── Cross-unit loans ─────
+  // Mirrors app/api/admin/cross-bu-grants/route.ts.
+  http.get("/api/admin/cross-bu-grants", async ({ cookies }) => {
+    await lag();
+    const scope = scopeFromCookies(cookies);
+    return HttpResponse.json(
+      fxListCrossBuGrants()
+        .filter(
+          (g) =>
+            canManageBusinessUnit(scope, g.parentWorkspaceId) ||
+            canManageBusinessUnit(scope, g.targetWorkspaceId),
+        )
+        .map((g) => ({
+          ...g,
+          displayName: fxGetIdentity(g.identityId)?.displayName ?? g.identityId,
+          projectName: fxGetProjectById(g.projectId)?.name ?? g.projectId,
+          parentWorkspaceName:
+            fxGetWorkspace(g.parentWorkspaceId)?.displayName ?? g.parentWorkspaceId,
+          targetWorkspaceName:
+            fxGetWorkspace(g.targetWorkspaceId)?.displayName ?? g.targetWorkspaceId,
+          lentByYou: canManageBusinessUnit(scope, g.parentWorkspaceId),
+        })),
+    );
+  }),
+  http.delete("/api/admin/cross-bu-grants", async ({ request, cookies }) => {
+    await lag();
+    const body = (await request.json().catch(() => ({}))) as {
+      identityId?: string;
+      projectId?: string;
+    };
+    if (!body.identityId || !body.projectId) {
+      return HttpResponse.json(
+        { code: "invalid_input", message: "identityId and projectId are required" },
+        { status: 422 },
+      );
+    }
+    const grant = fxListCrossBuGrants().find(
+      (g) => g.identityId === body.identityId && g.projectId === body.projectId,
+    );
+    if (!grant) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+    if (!canManageBusinessUnit(scopeFromCookies(cookies), grant.parentWorkspaceId)) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: "Only the business unit that lent this person can end the loan.",
+        },
+        { status: 403 },
+      );
+    }
+    fxRevokeCrossBuGrant(body.identityId, body.projectId);
+    fxRemoveProjectMembershipsInWorkspace(body.identityId, grant.targetWorkspaceId);
+    return HttpResponse.json({ ok: true });
+  }),
+
   // ───── People directory (Users & Roles) ─────
   // Mirrors app/api/admin/users/route.ts. Org-wide on purpose — see that file
   // for why this one list is not scope-filtered.
@@ -2172,6 +2252,48 @@ export const handlers = [
     }
     const member = fxAddProjectMember(String(params.id), body);
     return HttpResponse.json(member, { status: 201 });
+  }),
+
+  // Ask another Business Unit to lend a contributor to this project. Mirrors
+  // app/api/projects/[id]/access-requests/route.ts.
+  http.post("/api/projects/:id/access-requests", async ({ params, request, cookies }) => {
+    await lag();
+    const session = sessionFromCookies(cookies);
+    if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
+
+    const project = fxGetProjectById(String(params.id));
+    if (!project) return HttpResponse.json({ code: "not_found" }, { status: 404 });
+
+    const scope = scopeFromCookies(cookies);
+    const entitled =
+      scope.isOrgWide ||
+      canManageProject(scope, String(project.id)) ||
+      canManageBusinessUnit(scope, project.workspaceId ? String(project.workspaceId) : null);
+    if (!entitled) {
+      return HttpResponse.json(
+        {
+          code: "forbidden",
+          message: "Only this project's admin, or its business unit's, can ask for people on it.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const body = (await request.json().catch(() => ({}))) as {
+      email?: string;
+      roleName?: string;
+      reason?: string;
+    };
+    const { status, body: payload } = fxRequestCrossBuAssignment({
+      projectId: String(project.id),
+      email: body.email,
+      roleName: body.roleName,
+      reason: body.reason,
+      actorName: session.user.name,
+      actorIdentityId: scope.identityId,
+      actorRole: effectivePlatformRole(session),
+    });
+    return HttpResponse.json(payload as Record<string, unknown>, { status });
   }),
   http.patch("/api/projects/:id/members/:membershipId", async ({ params, request }) => {
     await lag();

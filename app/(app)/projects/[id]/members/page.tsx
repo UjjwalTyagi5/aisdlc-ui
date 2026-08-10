@@ -4,7 +4,7 @@ import * as React from "react";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { MoreVertical, Trash2, UserPlus, Users } from "lucide-react";
+import { Building2, MoreVertical, Trash2, UserPlus, Users } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { OnboardPersonDialog } from "@/components/app/onboard-person-dialog";
+import { RequestCrossBuMemberDialog } from "@/components/app/request-cross-bu-member-dialog";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import {
@@ -72,6 +74,7 @@ export default function ProjectMembersPage() {
   const session = useSession({ required: true });
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = React.useState(false);
+  const [borrowOpen, setBorrowOpen] = React.useState(false);
 
   const canManage = hasPermission(session, "member:manage");
   const contributorRoles = useAssignableRoles("project");
@@ -147,10 +150,22 @@ export default function ProjectMembersPage() {
         </div>
 
         {canManage && (
-          <Button className="gap-2" onClick={() => setAddOpen(true)}>
-            <UserPlus className="size-4" aria-hidden />
-            Add member
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Secondary, because it is the slower path: it ends in someone
+                else's decision rather than a member. */}
+            <Button
+              variant="outline"
+              className="border-line-soft gap-2"
+              onClick={() => setBorrowOpen(true)}
+            >
+              <Building2 className="size-4" aria-hidden />
+              Ask another {BUSINESS_UNIT_LABEL.toLowerCase()}
+            </Button>
+            <Button className="gap-2" onClick={() => setAddOpen(true)}>
+              <UserPlus className="size-4" aria-hidden />
+              Add member
+            </Button>
+          </div>
         )}
       </div>
 
@@ -202,6 +217,24 @@ export default function ProjectMembersPage() {
                       <span className="border-line-soft text-muted-foreground rounded-full border px-1.5 py-px font-mono text-[9.5px] uppercase tracking-wider">
                         invited
                       </span>
+                    )}
+                    {/* On loan from another unit. Worth its own chip: they are
+                        someone else's headcount, their admin is elsewhere, and
+                        this project is the whole of what they reach here. */}
+                    {m.homeBusinessUnitName && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="border-brand-bright/35 bg-brand-bright/10 text-brand-bright inline-flex items-center gap-1 rounded-full border px-1.5 py-px font-mono text-[9.5px] tracking-wider uppercase">
+                            <Building2 className="size-2.5" aria-hidden />
+                            {m.homeBusinessUnitName}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="left" className="max-w-[260px]">
+                          Lent by {m.homeBusinessUnitName}, who still own them. They reach this
+                          project and nothing else in this{" "}
+                          {BUSINESS_UNIT_LABEL.toLowerCase()}.
+                        </TooltipContent>
+                      </Tooltip>
                     )}
                   </span>
                   {m.identity.email && (
@@ -301,6 +334,14 @@ export default function ProjectMembersPage() {
         title="Add a project member"
         description="Assign a contributor role — they get that role's agent access on this project automatically."
         onSubmit={(input) => addMutation.mutateAsync(input)}
+      />
+
+      <RequestCrossBuMemberDialog
+        open={borrowOpen}
+        onOpenChange={setBorrowOpen}
+        projectId={id}
+        projectName={projectQ.data?.name ?? "this project"}
+        onRaised={invalidate}
       />
     </div>
   );

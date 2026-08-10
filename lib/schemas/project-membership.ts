@@ -31,6 +31,16 @@ export const ProjectMember = z.object({
    * unanswerable without inspecting every membership.
    */
   extraAgents: z.array(z.string()).optional(),
+  /**
+   * The Business Unit this person actually belongs to, named ONLY when it is
+   * not the project's own — i.e. they are here on an approved cross-unit loan.
+   *
+   * Null in the ordinary case, so the roster stays quiet about the unit
+   * everyone shares and speaks up about the one person who is a guest. Whose
+   * headcount someone is, and whose admin to go back to, is what a Project
+   * Admin needs and cannot otherwise see.
+   */
+  homeBusinessUnitName: z.string().nullable().optional(),
 });
 export type ProjectMember = z.infer<typeof ProjectMember>;
 

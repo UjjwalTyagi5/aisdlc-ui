@@ -6,13 +6,15 @@ import { scopeUserDirectory } from "@/lib/mock/user-directory-fixtures";
 // DUMMY-DATA SEAM: reads the in-memory identity/membership stores directly.
 // Mirrored in mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
 //
-// SCOPE — the Organization Admin sees the organisation; everyone else sees the
-// Business Unit they belong to ([[access-scope-rbac-layer]]). A unit admin has
-// no standing over another unit's people, and a Project Admin's
-// `member:manage` is about their own projects' rosters.
+// SCOPE — anyone who ADMINISTERS a Business Unit reads the organisation: the
+// Organization Admin, and a Business Unit Admin who has to be able to find a
+// person in another unit to borrow them. A Project Admin does not: their
+// `member:manage` is about their own projects' rosters, so they see the unit
+// they belong to ([[access-scope-rbac-layer]]).
 //
-// Writing stays scoped independently: the membership endpoints check
-// `canManageBusinessUnit`, so the read boundary is not the only thing holding.
+// The containment is on the WRITE, and it holds independently: the membership
+// endpoints check `canManageBusinessUnit`, so an org-wide read never becomes an
+// org-wide edit.
 //
 // A Contributor gets nothing at all — the directory names every colleague's
 // email and role, which is an administrator's view of the organisation.

@@ -110,13 +110,7 @@ export default function ProjectsPage() {
     placeholderData: (prev) => prev,
   });
   const { data: workspaces = [] } = useWorkspaces();
-  const {
-    scope,
-    level,
-    isOrgWide,
-    managedProjectIds,
-    projectIds,
-  } = useAccessScope();
+  const { scope, level, isOrgWide, managedProjectIds, projectIds } = useAccessScope();
 
   // Client-side finishing moves: template filter + sort (server handles search/archive/page).
   const items = React.useMemo(() => {
@@ -155,7 +149,9 @@ export default function ProjectsPage() {
   }, [items, workspaces]);
 
   const pagination = data?.pagination;
-  const totalPages = pagination ? Math.max(1, Math.ceil(pagination.total / pagination.pageSize)) : 1;
+  const totalPages = pagination
+    ? Math.max(1, Math.ceil(pagination.total / pagination.pageSize))
+    : 1;
 
   // The scope these projects were drawn from, named for the chip. A grouped list
   // already shows each Business Unit heading, so the chip carries the tier and
@@ -229,11 +225,7 @@ export default function ProjectsPage() {
 
           <div className="flex flex-wrap items-center gap-2">
             {scope !== null && (
-              <ScopeChip
-                kind={isOrgWide ? "organization" : level}
-                name={scopeName}
-                size="sm"
-              />
+              <ScopeChip kind={isOrgWide ? "organization" : level} name={scopeName} size="sm" />
             )}
             {/* The count stays; the sentence explaining what a project card
                 looks like does not. The count is of AUTHORIZED projects — the
@@ -242,7 +234,11 @@ export default function ProjectsPage() {
                 can only partly open. */}
             {pagination && (
               <span className="text-muted-foreground font-mono text-[11.5px]">
-                {pagination.total} of {groups.length}{" "}
+                {/* "N projects in M units", never "N of M" — the two numbers
+                    count different things, and a bare "of" between them reads
+                    as a fraction. "2 of 1 business unit" was the giveaway. */}
+                {pagination.total} {pagination.total === 1 ? "project" : "projects"} in{" "}
+                {groups.length}{" "}
                 {groups.length === 1
                   ? BUSINESS_UNIT_LABEL.toLowerCase()
                   : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}
@@ -260,7 +256,7 @@ export default function ProjectsPage() {
         {canCreate && (
           <Button
             onClick={() => setDialogOpen(true)}
-            className="shrink-0 bg-gradient-to-br from-brand-gradient-from to-brand-gradient-to font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
           >
             <Plus className="size-4" aria-hidden />
             New project
@@ -270,21 +266,14 @@ export default function ProjectsPage() {
 
       {/* Metric strip — real counts from listProjects data */}
       {data && (
-        <div
-          className="grid grid-cols-2 gap-3 sm:grid-cols-3"
-          aria-label="Project metrics"
-        >
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3" aria-label="Project metrics">
           <MetricTile
             label="Total projects"
             value={pagination?.total ?? items.length}
             foot={archivedCount > 0 ? `${archivedCount} archived` : undefined}
             delay={0.06}
           />
-          <MetricTile
-            label="Active"
-            value={activeCount}
-            delay={0.12}
-          />
+          <MetricTile label="Active" value={activeCount} delay={0.12} />
           <MetricTile
             label="Awaiting approval"
             value={awaitingCount}
@@ -320,7 +309,9 @@ export default function ProjectsPage() {
           }
           description={
             !(error && "code" in error)
-              ? (error instanceof Error ? error.message : "Unknown error.")
+              ? error instanceof Error
+                ? error.message
+                : "Unknown error."
               : undefined
           }
           onRetry={() => refetch()}
@@ -355,7 +346,7 @@ export default function ProjectsPage() {
                   <span className="text-muted-foreground font-mono text-[11px]">
                     {group.items.length} project{group.items.length === 1 ? "" : "s"}
                   </span>
-                  <span className="h-px flex-1 bg-line-soft" aria-hidden />
+                  <span className="bg-line-soft h-px flex-1" aria-hidden />
                 </div>
 
                 {toolbarState.view === "grid" ? (
@@ -366,9 +357,11 @@ export default function ProjectsPage() {
                         project={p}
                         onArchive={onArchive}
                         onRestore={onRestore}
-                        style={{
-                          animationDelay: `${0.1 + i * 0.05}s`,
-                        } as React.CSSProperties}
+                        style={
+                          {
+                            animationDelay: `${0.1 + i * 0.05}s`,
+                          } as React.CSSProperties
+                        }
                       />
                     ))}
                   </div>
@@ -392,7 +385,7 @@ export default function ProjectsPage() {
           {pagination && pagination.total > pagination.pageSize && (
             <nav
               aria-label="Pagination"
-              className="text-muted-foreground flex items-center justify-between border-t border-line-soft pt-4 text-sm"
+              className="text-muted-foreground border-line-soft flex items-center justify-between border-t pt-4 text-sm"
             >
               <span className="font-mono text-xs">
                 Showing {(pagination.page - 1) * pagination.pageSize + 1}–
@@ -443,7 +436,7 @@ function MetricTile({ label, value, foot, accent, delay = 0 }: MetricTileProps) 
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-xl border border-line-soft bg-panel-elevated px-[18px] py-[18px]",
+        "border-line-soft bg-panel-elevated relative overflow-hidden rounded-xl border px-[18px] py-[18px]",
         "shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_8px_20px_-8px_oklch(0_0_0_/_0.4)]",
       )}
       style={{
@@ -454,10 +447,10 @@ function MetricTile({ label, value, foot, accent, delay = 0 }: MetricTileProps) 
         animationDelay: `${delay}s`,
       }}
     >
-      <p className="font-mono text-[11.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+      <p className="text-muted-foreground font-mono text-[11.5px] font-semibold tracking-[0.08em] uppercase">
         {label}
       </p>
-      <p className="font-display mt-2 text-[30px] font-bold leading-none tracking-[-0.02em]">
+      <p className="font-display mt-2 text-[30px] leading-none font-bold tracking-[-0.02em]">
         {value}
       </p>
       {foot && (
@@ -467,7 +460,7 @@ function MetricTile({ label, value, foot, accent, delay = 0 }: MetricTileProps) 
             accent ? "text-success" : "text-muted-foreground",
           )}
         >
-          {accent && value > 0 && <span className="mr-1 text-success">●</span>}
+          {accent && value > 0 && <span className="text-success mr-1">●</span>}
           {foot}
         </p>
       )}
