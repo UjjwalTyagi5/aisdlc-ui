@@ -1,14 +1,16 @@
-# ArgoCD Application — watches Manifest/ in the ADO repo and syncs it to the cluster.
+# ArgoCD Application — watches frontend/Manifest/ in the ADO repo and syncs it
+# to the cluster.
 #
-# Flow: pipeline builds :<BuildId> -> rewrites the tag in Manifest/frontend-deploy.yaml
-# -> git push [skip ci] -> ArgoCD sees the commit -> syncs. No manual kubectl.
+# Flow: pipeline builds :<BuildId> -> rewrites the tag in
+# frontend/Manifest/frontend-deploy.yaml -> git push [skip ci] -> ArgoCD sees
+# the commit -> syncs. No manual kubectl.
 #
 # Prereqs (infra.sh does 1 and 3; you do 2 — it needs a PAT):
 #   1) kubectl create ns argocd && kubectl apply -n argocd \
 #        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 #   2) argocd repo add https://dev.azure.com/IDP-CORE/AISDLC/_git/aisdlc-ui \
 #        --username azdo --password <ADO_PAT>
-#   3) kubectl apply -f argocd/aisdlc-application.yaml
+#   3) kubectl apply -f frontend/argocd/aisdlc-application.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -19,7 +21,7 @@ spec:
   source:
     repoURL: https://dev.azure.com/IDP-CORE/AISDLC/_git/aisdlc-ui
     targetRevision: main
-    path: Manifest
+    path: frontend/Manifest
     directory:
       recurse: false
   destination:

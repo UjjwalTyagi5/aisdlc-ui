@@ -1,12 +1,17 @@
 # ==============================================================================
-# AISDLC frontend CI/CD — build + GitOps handoff (same flow as AgentCore).
+# AISDLC *frontend* CI/CD — build + GitOps handoff (same flow as AgentCore).
 #
 #   push to main -> build amd64 image -> push to ACR as :<BuildId> and :latest
-#   -> rewrite the image tag in Manifest/frontend-deploy.yaml -> git push [skip ci]
-#   -> ArgoCD sees the commit and syncs the cluster. No manual kubectl.
+#   -> rewrite the image tag in frontend/Manifest/frontend-deploy.yaml
+#   -> git push [skip ci] -> ArgoCD sees the commit and syncs. No manual kubectl.
 #
-# Single service, so there's no change-detection stage — the path filters below
-# already scope what triggers a build.
+# This file sits at the repo root because that is where Azure DevOps looks for a
+# pipeline definition by default, but it builds the frontend only — every path
+# below is deliberately scoped to frontend/. The backend has no pipeline yet;
+# when it gets one it belongs beside this file, not inside it.
+#
+# One service per pipeline, so there's no change-detection stage — the path
+# filters below already scope what triggers a build.
 #
 # Required pipeline variables (Pipeline > Edit > Variables):
 #   ACR_USERNAME = aisdlcacr2026
@@ -22,20 +27,22 @@ trigger:
       - main
   paths:
     include:
-      - app/**
-      - components/**
-      - lib/**
-      - hooks/**
-      - stores/**
-      - mocks/**
-      - public/**
-      - middleware.ts
-      - next.config.ts
-      - package.json
-      - pnpm-lock.yaml
-      - Dockerfile
+      - frontend/app/**
+      - frontend/components/**
+      - frontend/lib/**
+      - frontend/hooks/**
+      - frontend/stores/**
+      - frontend/mocks/**
+      - frontend/public/**
+      - frontend/middleware.ts
+      - frontend/next.config.ts
+      - frontend/package.json
+      - frontend/pnpm-lock.yaml
+      - frontend/Dockerfile
+      - azure-pipelines.yml
     exclude:
-      - Manifest/** # the pipeline's own tag-bump commit must never re-trigger it
+      # the pipeline's own tag-bump commit must never re-trigger it
+      - frontend/Manifest/**
 
 pool:
   vmImage: ubuntu-latest
@@ -43,7 +50,10 @@ pool:
 variables:
   acr: 'aisdlcacr2026.azurecr.io'
   image: 'frontend'
-  m_file: 'Manifest/frontend-deploy.yaml'
+  # Paths below are repo-root-relative: steps run in $(Build.SourcesDirectory),
+  # which is the monorepo root, not the frontend subtree.
+  ctx: 'frontend'
+  m_file: 'frontend/Manifest/frontend-deploy.yaml'
   # Baked into the client bundle at build time. Flip these to move off mock mode.
   NEXT_PUBLIC_AUTH_MODE: 'mock'
   NEXT_PUBLIC_API_MOCKS: 'enabled'
@@ -66,11 +76,16 @@ jobs:
           set -euo pipefail
           TAG=$(Build.BuildId)
           # --platform linux/amd64: the AKS node pool is x86 B-series, not arm.
+          # Context is frontend/, not the repo root: the Dockerfile COPYs paths
+          # like package.json unprefixed, and frontend/.dockerignore only takes
+          # effect when frontend/ is the context root. Sending the whole monorepo
+          # would also drag the backend's 768 MB .venv into the build daemon.
           docker build --platform linux/amd64 \
+            -f $(ctx)/Dockerfile \
             --build-arg NEXT_PUBLIC_AUTH_MODE=$(NEXT_PUBLIC_AUTH_MODE) \
             --build-arg NEXT_PUBLIC_API_MOCKS=$(NEXT_PUBLIC_API_MOCKS) \
             --build-arg NEXT_PUBLIC_API_BASE=$(NEXT_PUBLIC_API_BASE) \
-            -t $(acr)/$(image):$TAG -t $(acr)/$(image):latest .
+            -t $(acr)/$(image):$TAG -t $(acr)/$(image):latest $(ctx)
           docker push $(acr)/$(image):$TAG
           docker push $(acr)/$(image):latest
         displayName: 'Build & push image (amd64)'
