@@ -1,0 +1,6 @@
+{
+  "agent_type": "deployment",
+  "input": "Produce a deployment summary for releasing the Acme Widget inventory tracker stock-adjustment endpoint to staging.",
+  "expected": "Deployed the inventory service update to staging via the standard pipeline. The stock-adjustment endpoint passed smoke tests, the database migration adding low_stock_threshold ran successfully, and rollback steps were documented in case of regression.",
+  "reference_actual": "Deployed the inventory service update to staging via the standard pipeline. The stock-adjustment endpoint passed smoke tests, the database migration adding low_stock_threshold ran successfully, and rollback steps were documented in case of regression."
+}

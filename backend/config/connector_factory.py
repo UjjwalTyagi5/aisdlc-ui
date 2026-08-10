@@ -1,0 +1,106 @@
+"""Connector factory — resolves the active connector at runtime (milestone-3).
+
+Replaces provider_factory.py. Agent tools never instantiate connectors
+directly; the worker calls get_connector_for_session() at task start and injects
+the result via config.connectors.context.set_connector(). The factory creates
+the connector with org_url only — credentials are resolved lazily inside the
+connector's auth_adapter() at call time, so the factory never touches a PAT.
+"""
+from __future__ import annotations
+
+import importlib
+
+from config.connectors.base import BaseConnector, ConnectorNotAvailableError
+from config.env import ADO_ORG_URL
+
+
+# ── Registry: kind → connector module + class ────────────────────────────────
+_CONNECTOR_REGISTRY: dict[str, str] = {
+    "azure_devops":  "config.connectors.azure_devops.AzureDevOpsConnector",
+    "jira":          "config.connectors.jira.JiraConnector",
+    "github_issues": "config.connectors.github_issues.GitHubIssuesConnector",
+    "azure_repos":   "config.connectors.azure_repos.AzureReposConnector",
+    "slack":         "config.connectors.slack.SlackConnector",
+}
+
+
+def _load_connector_class(dotted_path: str):
+    """Import and return a connector class by dotted module path."""
+    module_path, class_name = dotted_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+async def get_connector_for_session(kind: str = "azure_devops", tenant_id: str = "") -> BaseConnector:
+    """Return a connector instance for the given kind.
+
+    tenant_id must be a non-empty string for all connector kinds except health-probe
+    calls which pass tenant_id='__health_probe__' by platform convention.
+    Raises ValueError if tenant_id is empty — fail-closed per REQ-M7-03.
+
+    The connector is created with org_url only. Credentials are fetched lazily
+    inside the connector's auth_adapter() — the factory never touches them.
+    """
+    if tenant_id == "__health_probe__":
+        pass  # Platform health probe path — no tenant context required.
+    elif not tenant_id:
+        raise ValueError(
+            f"tenant_id is required to get a connector for kind '{kind}'. "
+            "Background jobs must derive tenant_id from the entity being processed (D-04, REQ-M7-03)."
+        )
+
+    if kind not in _CONNECTOR_REGISTRY:
+        raise ConnectorNotAvailableError(
+            f"Unknown connector kind '{kind}'. "
+            f"Supported: {', '.join(_CONNECTOR_REGISTRY)}"
+        )
+
+    connector_class = _load_connector_class(_CONNECTOR_REGISTRY[kind])
+
+    # tenant_id is run context (not a credential): pass it so the connector's
+    # auth_adapter() can resolve the tenant-scoped secret without each call site
+    # threading it through. The health-probe sentinel is passed through unchanged;
+    # auth_adapter then misses the tenant-scoped KV name and falls back to the
+    # global name / env var, which is the intended probe credential.
+    if kind == "azure_devops":
+        # Prefer the per-tenant org URL set via the Integrations "Add credentials"
+        # form (secret store); fall back to the env default. Skipped for the
+        # health-probe sentinel and never allowed to raise.
+        org_url = ADO_ORG_URL
+        if tenant_id and tenant_id != "__health_probe__":
+            try:
+                from shared.services import secret_store
+                stored = await secret_store.get_secret(tenant_id, "ado-org-url")
+                if stored:
+                    org_url = stored
+            except Exception:
+                pass
+        return connector_class(org_url=org_url, tenant_id=tenant_id)
+    if kind == "azure_repos":
+        # Reuses ADO credentials — same org URL as AzureDevOpsConnector
+        return connector_class(org_url=ADO_ORG_URL)
+    if kind == "jira":
+        from config.env import JIRA_URL
+        # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
+        # token (not the empty global env), mirroring azure_devops above.
+        return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
+    if kind == "slack":
+        return connector_class(org_url="")
+    # github_issues and any future connectors: instantiate with empty org_url;
+    # actual credentials resolved lazily in auth_adapter() via load_secret()
+    return connector_class(org_url="")
+
+
+async def list_available_connectors() -> list[dict]:
+    """Return metadata for all registered connectors (used by status endpoints)."""
+    result = []
+    for kind, dotted_path in _CONNECTOR_REGISTRY.items():
+        cls = _load_connector_class(dotted_path)
+        # display_name is a read-only property; read it off a lightweight instance.
+        try:
+            inst = cls(org_url="")
+            display_name = inst.display_name
+        except Exception:
+            display_name = kind
+        result.append({"kind": kind, "display_name": display_name})
+    return result

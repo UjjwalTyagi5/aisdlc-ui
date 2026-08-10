@@ -1,0 +1,220 @@
+"""Phase 3 — BYOK runtime model resolver. Maps a tenant (+ optional requested
+model) to a ResolvedModel: which provider, which model, the org's BYOK key, and
+a non-secret alias. Fails CLOSED (NoModelConfiguredError) when the org has no
+valid+enabled model — there is NO platform fallback (spec D-4).
+
+Security: the resolved api_key is NEVER logged. Only `alias` is safe to log.
+"""
+from __future__ import annotations
+
+import contextvars
+import logging
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+from sqlalchemy import text
+
+from shared.db import get_db_session_for_tenant
+from shared.services import secret_store
+
+logger = logging.getLogger(__name__)
+
+# Catalog provider name -> LiteLLM custom_llm_provider token.
+_LITELLM_PROVIDER = {"anthropic": "anthropic", "openai": "openai", "google": "gemini"}
+
+# In-process BYOK-key cache keyed by (tenant_id, secret_ref) -> (api_key, expires_at).
+# The secret_store read is the one network hop in resolution; on a slow/flaky link
+# (e.g. Key Vault over a phone hotspot) it can intermittently time out and surface as a
+# spurious "no model configured". Caching the key for a short TTL means only the FIRST
+# resolve per key pays that cost; every later agent turn reuses it with no KV read.
+# The plaintext key lives only in-process and is never logged (same contract as elsewhere).
+_KEY_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+_KEY_CACHE_TTL_SECONDS = 300
+
+
+async def _resolve_secret_cached(tenant_id: str, secret_ref: str) -> Optional[str]:
+    """Return the BYOK key for (tenant, secret_ref), using the short-lived in-process
+    cache. On a cache miss (or expiry) read through secret_store and cache a non-empty
+    result. A miss/None is NOT cached, so a genuinely-absent key keeps failing closed."""
+    key = (tenant_id, secret_ref)
+    hit = _KEY_CACHE.get(key)
+    if hit is not None and hit[1] > time.monotonic():
+        return hit[0]
+    value = await secret_store.get_secret(tenant_id, secret_ref)
+    if value:
+        _KEY_CACHE[key] = (value, time.monotonic() + _KEY_CACHE_TTL_SECONDS)
+    return value
+
+
+@dataclass
+class ResolvedModel:
+    provider: str            # catalog provider: anthropic | openai | google
+    litellm_provider: str    # LiteLLM token: anthropic | openai | gemini
+    model: str               # catalog model id, e.g. claude-sonnet-4-6
+    api_key: str             # BYOK key — never log this
+    base_url: Optional[str]  # None for standard providers (v1)
+    alias: str               # non-secret label for cost logs / metadata
+    offering_id: str = ""    # the exact offering (provider connection + model) chosen
+    display_name: str = ""   # provider connection name — safe to log / show in UI
+    rpm_limit: Optional[int] = None    # per-model requests/min cap (enforced at resolve)
+    tpm_limit: Optional[int] = None    # per-model tokens/min cap (enforced at resolve)
+    cost_limit_usd: Optional[float] = None  # per-model monthly USD budget (enforced at resolve)
+
+
+class NoModelConfiguredError(Exception):
+    """The tenant has no valid+enabled model — the run must fail closed."""
+
+
+class ModelNotEnabledError(Exception):
+    """A requested model is not in the tenant's enabled+valid set."""
+
+
+_RESOLVED_MODEL: "contextvars.ContextVar[ResolvedModel | None]" = contextvars.ContextVar(
+    "resolved_model", default=None)
+
+
+def set_resolved_model(resolved: "ResolvedModel | None") -> None:
+    """Stash the run's resolved model so tool-level generation helpers can reuse it
+    without re-resolving (and without an async DB call from an executor thread)."""
+    _RESOLVED_MODEL.set(resolved)
+
+
+def get_resolved_model() -> "ResolvedModel | None":
+    """Return the resolved model set for the current run context, or None."""
+    return _RESOLVED_MODEL.get()
+
+
+# Run-scoped project id — set once at an activity/agent entry so resolve_model_for_run
+# can enforce project/workspace budgets mid-run without every caller threading it
+# explicitly (mirrors the set_resolved_model contextvar pattern).
+_RUN_PROJECT: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "run_project_id", default=None)
+
+
+def set_run_project(project_id: "str | None") -> None:
+    """Stash the current run's project id for budget enforcement in this async context."""
+    _RUN_PROJECT.set(str(project_id) if project_id else None)
+
+
+def get_run_project() -> "str | None":
+    """Return the run-scoped project id for the current context, or None."""
+    return _RUN_PROJECT.get()
+
+
+# tenant_id -> (ResolvedModel-by-model dict, fetched_at_monotonic). 5-min TTL
+# so per-turn agent calls avoid DB + secret_store round-trips.
+_CACHE: dict[str, tuple[dict, float]] = {}
+_CACHE_TTL_SECONDS = 300
+
+
+def _alias(tenant_id: str, provider_id: str) -> str:
+    return f"tenant:{tenant_id}:{provider_id}"
+
+
+async def _load_enabled(tenant_id: str) -> list[dict]:
+    """Rows of valid+enabled offerings with the data needed to build a key fetch.
+    Explicit p.tenant_id filter is defence-in-depth under superuser dev connections."""
+    async with get_db_session_for_tenant(tenant_id) as s:
+        rows = (await s.execute(text(
+            "SELECT o.id AS offering_id, o.model_id, o.is_default, "
+            "o.rpm_limit, o.tpm_limit, o.cost_limit_usd, "
+            "p.id AS provider_id, p.provider, p.display_name, p.secret_ref "
+            "FROM model_offerings o JOIN model_providers p ON p.id = o.provider_id "
+            "WHERE o.enabled = true AND p.status = 'valid' AND p.tenant_id = :t AND o.tenant_id = :t "
+            "ORDER BY p.display_name, p.provider, o.model_id"
+        ), {"t": tenant_id})).fetchall()
+    return [
+        {"offering_id": str(r.offering_id), "model_id": r.model_id, "is_default": bool(r.is_default),
+         "provider_id": str(r.provider_id), "provider": r.provider,
+         "display_name": r.display_name, "secret_ref": r.secret_ref,
+         "rpm_limit": r.rpm_limit, "tpm_limit": r.tpm_limit,
+         "cost_limit_usd": float(r.cost_limit_usd) if r.cost_limit_usd is not None else None}
+        for r in rows
+    ]
+
+
+async def resolve_model_for_run(
+    tenant_id: str,
+    requested_model_id: Optional[str] = None,
+    *,
+    offering_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> ResolvedModel:
+    """Resolve the model+key a run should use.
+
+    Precedence (most specific first):
+      - offering_id given -> the EXACT provider connection + model (unambiguous even
+        when two connections expose the same model_id); else ModelNotEnabledError.
+      - requested_model_id given -> first enabled offering with that model_id
+        (legacy/back-compat path; ambiguous if duplicated — prefer offering_id).
+      - neither -> the org default offering (is_default), or the single offering.
+    No valid+enabled offering -> NoModelConfiguredError (fail closed, no fallback).
+    """
+    if not tenant_id:
+        raise NoModelConfiguredError("no tenant context for model resolution")
+
+    offerings = await _load_enabled(tenant_id)
+    if not offerings:
+        raise NoModelConfiguredError(
+            f"tenant {tenant_id} has no valid, enabled model provider configured")
+
+    if offering_id:
+        chosen = next((o for o in offerings if o["offering_id"] == offering_id), None)
+        if chosen is None:
+            raise ModelNotEnabledError(
+                f"model offering {offering_id!r} is not enabled for this org")
+    elif requested_model_id:
+        chosen = next((o for o in offerings if o["model_id"] == requested_model_id), None)
+        if chosen is None:
+            raise ModelNotEnabledError(
+                f"model {requested_model_id!r} is not enabled for this org")
+    else:
+        chosen = next((o for o in offerings if o["is_default"]), offerings[0])
+
+    # Live per-model limit enforcement (org/workspace-scoped via the offering).
+    # RPM counts resolutions this minute; TPM/cost read the Redis usage meter fed by
+    # UsageMeterCallbackHandler. Each raises a typed *LimitError over the cap and fails
+    # open if Redis is unavailable. Checked BEFORE fetching the secret so an over-limit
+    # run does no extra work.
+    from shared.services.model_rate_limit import (  # noqa: PLC0415
+        enforce_cost,
+        enforce_rpm,
+        enforce_tpm,
+    )
+
+    _off = chosen["offering_id"]
+    await enforce_rpm(tenant_id, _off, chosen.get("rpm_limit"))
+    await enforce_tpm(tenant_id, _off, chosen.get("tpm_limit"))
+    await enforce_cost(tenant_id, _off, chosen.get("cost_limit_usd"))
+
+    # Hierarchical monthly budget gate (org ⊇ workspace ⊇ project). Fails the run
+    # closed mid-pipeline once any scope's calendar-month spend hits its budget.
+    # project_id falls back to the run-scoped contextvar so pipeline activities that
+    # set it once at entry get project/workspace enforcement without threading it here.
+    from shared.services.budget_guard import check_budgets  # noqa: PLC0415
+
+    await check_budgets(tenant_id, project_id or _RUN_PROJECT.get())
+
+    api_key = await _resolve_secret_cached(tenant_id, chosen["secret_ref"])
+    if not api_key:
+        # A 'valid' provider with a missing secret is a configuration error, not a fallback.
+        raise NoModelConfiguredError(
+            f"BYOK key missing for provider {chosen['provider_id']} (tenant {tenant_id})")
+
+    resolved = ResolvedModel(
+        provider=chosen["provider"],
+        litellm_provider=_LITELLM_PROVIDER.get(chosen["provider"], chosen["provider"]),
+        model=chosen["model_id"],
+        api_key=api_key,
+        base_url=None,
+        alias=_alias(tenant_id, chosen["provider_id"]),
+        offering_id=chosen["offering_id"],
+        display_name=chosen["display_name"],
+        rpm_limit=chosen.get("rpm_limit"),
+        tpm_limit=chosen.get("tpm_limit"),
+        cost_limit_usd=chosen.get("cost_limit_usd"),
+    )
+    logger.debug("model resolved tenant=%s model=%s offering=%s alias=%s",
+                 tenant_id, resolved.model, resolved.offering_id, resolved.alias)
+    return resolved

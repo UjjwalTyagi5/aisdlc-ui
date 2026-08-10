@@ -1,0 +1,136 @@
+# Self-hosted Langfuse v3 (open-source) — OPTIONAL / OFFLINE FALLBACK ONLY.
+#
+# DEFAULT is Langfuse Cloud (US): the app just points at it via .env — no local
+# containers, no CPU cost. Use cloud unless you specifically need to run offline:
+#   ENABLE_LANGFUSE=true
+#   LANGFUSE_HOST=https://cloud.langfuse.com
+#   LANGFUSE_PUBLIC_KEY=pk-lf-...      # from cloud.langfuse.com → project → API Keys
+#   LANGFUSE_SECRET_KEY=sk-lf-...
+#
+# ── Self-hosted fallback (this file) ─────────────────────────────────────────────
+# This stack is v3, so it REQUIRES Clickhouse + MinIO alongside Postgres/Redis (6
+# containers) — heavy on a laptop CPU. Prefer Cloud. If you must self-host:
+#   Start:   docker compose -f docker-compose.langfuse.yml up -d
+#   Stop:    docker compose -f docker-compose.langfuse.yml down
+#   Wipe:    docker compose -f docker-compose.langfuse.yml down -v
+# Then open http://localhost:3100, create an org + project + key pair, and set in .env:
+#   LANGFUSE_HOST=http://localhost:3100  (+ the keys above)
+#
+# Isolated from the app's docker-compose.yml (own Postgres/ClickHouse/Redis/MinIO on a
+# private network + distinct host ports). Host ports exposed: 3100 (web UI) only.
+
+services:
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      lf-postgres:
+        condition: service_healthy
+      lf-clickhouse:
+        condition: service_healthy
+      lf-minio:
+        condition: service_healthy
+      lf-redis:
+        condition: service_healthy
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:langfuse@lf-postgres:5432/langfuse
+      SALT: "changeme-dev-salt"
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000" # 64 hex chars (dev only)
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://lf-clickhouse:9000
+      CLICKHOUSE_URL: http://lf-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: lf-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: langfuse-redis
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://lf-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-worker:
+        condition: service_started
+    ports:
+      - "3100:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:3100
+      NEXTAUTH_SECRET: "changeme-dev-nextauth-secret"
+
+  lf-postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  lf-clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      # The alpine clickhouse image has no wget; use the bundled client instead.
+      test: ["CMD-SHELL", "clickhouse-client --user clickhouse --password clickhouse --query 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  lf-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse_minio:/data
+    entrypoint: sh
+    # Create the bucket on boot, then start the server.
+    command: -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  lf-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass langfuse-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "langfuse-redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  langfuse_postgres:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio:

@@ -1,0 +1,16 @@
+# requirements.txt
+
+# For building the web API that the UI will talk to
+fastapi
+uvicorn[standard]
+
+# For the AI and Language Model parts
+google-generativeai
+langchain-core
+langgraph
+pydantic
+tenacity
+faiss-cpu
+numpy
+python-dotenv
+pygrok
