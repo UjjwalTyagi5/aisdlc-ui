@@ -1,0 +1,6 @@
+{
+  "agent_type": "requirements",
+  "input": "Gather requirements for an Acme Widget inventory tracker that lets warehouse staff scan widget barcodes, update stock counts, and generate low-stock alerts.",
+  "expected": "The Acme Widget inventory tracker shall allow warehouse staff to scan widget barcodes to identify items, update stock counts in real time, and generate low-stock alerts when inventory falls below a configurable threshold. The system shall maintain an audit trail of all stock adjustments.",
+  "reference_actual": "The Acme Widget inventory tracker shall allow warehouse staff to scan widget barcodes to identify items, update stock counts in real time, and generate low-stock alerts when inventory falls below a configurable threshold. The system shall maintain an audit trail of all stock adjustments."
+}

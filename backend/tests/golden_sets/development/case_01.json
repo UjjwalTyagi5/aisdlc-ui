@@ -1,0 +1,6 @@
+{
+  "agent_type": "development",
+  "input": "Implement the stock-adjustment endpoint for the Acme Widget inventory tracker per the design's API contract.",
+  "expected": "Implemented POST /widgets/{id}/adjust in the inventory service. The endpoint validates the barcode id, applies the delta quantity to stock_count in the widgets table, and returns the updated stock level. Added unit tests covering positive and negative adjustments and the low-stock-threshold boundary.",
+  "reference_actual": "Implemented POST /widgets/{id}/adjust in the inventory service. The endpoint validates the barcode id, applies the delta quantity to stock_count in the widgets table, and returns the updated stock level. Added unit tests covering positive and negative adjustments and the low-stock-threshold boundary."
+}

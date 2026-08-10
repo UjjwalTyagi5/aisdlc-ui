@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>QA Report — {{ session_id }}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 20px; color: #222; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: 8px; }
+  h2 { margin-top: 32px; color: #333; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+  th { background: #f5f5f5; }
+  .pyramid { display: flex; gap: 12px; }
+  .pyramid div { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 4px; text-align: center; background: #fafafa; }
+  .pass { color: #1c5c1c; font-weight: bold; }
+  .fail { color: #a00; font-weight: bold; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  pre { background: #f7f7f7; padding: 8px; overflow-x: auto; font-size: 11px; }
+  .severity-critical { color: #fff; background: #a00; padding: 2px 6px; border-radius: 3px; }
+  .severity-high { color: #fff; background: #d56; padding: 2px 6px; border-radius: 3px; }
+  .severity-medium { color: #444; background: #fc6; padding: 2px 6px; border-radius: 3px; }
+  .severity-low { color: #444; background: #cce; padding: 2px 6px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>QA Report</h1>
+<p><strong>Session:</strong> {{ session_id }} &nbsp; <strong>Language:</strong> {{ language }} &nbsp; <strong>Generated:</strong> {{ generated_at }}</p>
+
+<h2>1. Test Strategy</h2>
+<div class="pyramid">
+  <div><div style="font-size:24px">{{ unit_count }}</div>Unit</div>
+  <div><div style="font-size:24px">{{ negative_edge_count }}</div>Negative / Edge</div>
+  <div><div style="font-size:24px">{{ smoke_count }}</div>Smoke</div>
+  <div><div style="font-size:24px">{{ functional_api_count }}</div>Functional API</div>
+  <div><div style="font-size:24px">{{ functional_ui_count }}</div>Functional UI</div>
+</div>
+
+{% if traceability %}
+<h3>Traceability</h3>
+<table>
+  <thead><tr><th>Requirement</th><th>Test cases</th></tr></thead>
+  <tbody>
+    {% for req, cases in traceability.items() %}
+    <tr><td>{{ req }}</td><td>{{ cases | join(", ") }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>2. Test Results</h2>
+{% if test_execution %}
+<p>
+  Total: <strong>{{ test_execution.total }}</strong> &nbsp;
+  <span class="pass">Passed: {{ test_execution.passed }}</span> &nbsp;
+  <span class="fail">Failed: {{ test_execution.failed }}</span> &nbsp;
+  Skipped: {{ test_execution.skipped }} &nbsp;
+  Duration: {{ test_execution.duration_ms }}ms
+</p>
+{% else %}
+<p>No test-execution data available.</p>
+{% endif %}
+
+{% for test_set in generated_test_sets %}
+<details>
+  <summary>{{ test_set.skill_name }} ({{ test_set.test_framework }}, {{ test_set.scenario_count }} scenarios)</summary>
+  <p>File: <code>{{ test_set.test_file_path }}</code></p>
+</details>
+{% endfor %}
+
+<h2>3. Coverage</h2>
+{{ coverage_html | safe }}
+
+{% if functional_results %}
+<h2>4. Functional API Scenarios</h2>
+<table>
+  <thead><tr><th>ID</th><th>Method</th><th>Path</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
+  <tbody>
+    {% for r in functional_results %}
+    <tr>
+      <td>{{ r.scenario_id }}</td><td>{{ r.method }}</td><td>{{ r.path }}</td>
+      <td>{{ r.status_code_expected }}</td><td>{{ r.status_code_actual or "—" }}</td>
+      <td class="{{ 'pass' if r.passed else 'fail' }}">{{ "PASS" if r.passed else "FAIL" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if defect_log %}
+<h2>5. Defect Log</h2>
+<table>
+  <thead><tr><th>ID</th><th>Severity</th><th>Summary</th></tr></thead>
+  <tbody>
+    {% for d in defect_log %}
+    <tr>
+      <td>{{ d.defect_id }}</td>
+      <td><span class="severity-{{ d.severity }}">{{ d.severity }}</span></td>
+      <td>{{ d.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if security_findings %}
+<h2>6. Security Findings</h2>
+<table>
+  <thead><tr><th>Source</th><th>Severity</th><th>Rule</th><th>File</th><th>Message</th></tr></thead>
+  <tbody>
+    {% for s in security_findings %}
+    <tr>
+      <td>{{ s.source }}</td>
+      <td><span class="severity-{{ s.severity | lower }}">{{ s.severity }}</span></td>
+      <td>{{ s.rule_id }}</td><td>{{ s.file }}</td><td>{{ s.message }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if mutation_results %}
+<h2>7. Mutation Testing</h2>
+<p>
+  <strong>Tool:</strong> {{ mutation_results.tool }} &nbsp;
+  <strong>Kill rate:</strong>
+  <span class="{{ 'pass' if mutation_results.kill_rate_pct >= 75 else 'fail' }}">
+    {{ "%.1f"|format(mutation_results.kill_rate_pct) }}%
+  </span>
+  &nbsp;<strong>Mutants:</strong> {{ mutation_results.mutants_total }} total —
+  {{ mutation_results.mutants_killed }} killed,
+  {{ mutation_results.mutants_survived }} survived,
+  {{ mutation_results.mutants_no_coverage }} no-coverage,
+  {{ mutation_results.mutants_timeout }} timeout
+</p>
+{% if mutation_results.top_survivors %}
+<h3>Top survivors (mutants the tests missed)</h3>
+<table>
+  <thead><tr><th>File</th><th>Line</th><th>Mutator</th><th>Original → Mutated</th></tr></thead>
+  <tbody>
+    {% for s in mutation_results.top_survivors %}
+    <tr>
+      <td><code>{{ s.file }}</code></td>
+      <td>{{ s.line or "—" }}</td>
+      <td>{{ s.mutator or "—" }}</td>
+      <td><code>{{ s.original }}</code> → <code>{{ s.mutated }}</code></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{% if dependency_vulns %}
+<h2>8. Dependency Vulnerabilities</h2>
+<p><strong>{{ dependency_vulns | length }}</strong> known CVE{{ "s" if dependency_vulns|length != 1 else "" }} in installed packages.</p>
+<table>
+  <thead><tr><th>Source</th><th>Package</th><th>Installed</th><th>Severity</th><th>CVE</th><th>Fix</th></tr></thead>
+  <tbody>
+    {% for v in dependency_vulns %}
+    <tr>
+      <td>{{ v.source }}</td>
+      <td><code>{{ v.package }}</code></td>
+      <td>{{ v.installed_version or "—" }}</td>
+      <td><span class="severity-{{ v.severity | lower }}">{{ v.severity }}</span></td>
+      <td>{{ v.cve or "—" }}</td>
+      <td>{{ v.fix_versions | join(", ") if v.fix_versions else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>9. Generated Artifacts</h2>
+<ul>
+{% for f in artifact_files %}
+  <li><code>{{ f }}</code></li>
+{% endfor %}
+</ul>
+
+</body>
+</html>

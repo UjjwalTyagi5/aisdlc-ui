@@ -1,0 +1,8 @@
+{
+  "threshold": 0.10,
+  "requirements": 1.0,
+  "design": 1.0,
+  "development": 1.0,
+  "testing": 1.0,
+  "deployment": 1.0
+}

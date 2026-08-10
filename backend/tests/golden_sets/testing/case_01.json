@@ -1,0 +1,6 @@
+{
+  "agent_type": "testing",
+  "input": "Write a test plan for the Acme Widget inventory tracker stock-adjustment endpoint.",
+  "expected": "Test plan for POST /widgets/{id}/adjust: verify a positive delta increases stock_count, a negative delta decreases stock_count and rejects when it would go below zero, an unknown barcode id returns 404, and the low-stock alert fires when stock_count crosses the low_stock_threshold.",
+  "reference_actual": "Test plan for POST /widgets/{id}/adjust: verify a positive delta increases stock_count, a negative delta decreases stock_count and rejects when it would go below zero, an unknown barcode id returns 404, and the low-stock alert fires when stock_count crosses the low_stock_threshold."
+}

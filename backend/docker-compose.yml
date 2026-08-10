@@ -1,0 +1,119 @@
+# Local development infrastructure — application containers are NOT included here.
+#
+# Prerequisites: Docker Desktop must be installed and running.
+#   Download: https://www.docker.com/products/docker-desktop/
+#
+# Usage:
+#   Start:              docker compose up -d
+#   Stop:               docker compose down
+#   Stop + delete data: docker compose down -v
+#   View logs:          docker compose logs -f [service]
+#
+# Databases:
+#   App DB:      sdlc_agentic  — used by FastAPI (POSTGRES_CONN_STRING=postgresql+asyncpg://sdlc:sdlcdev@localhost:5432/sdlc_agentic)
+#   Temporal DB: sdlc_temporal — used by Temporal auto-setup (separate DB on same Postgres instance)
+#                Keeping these databases separate prevents Temporal's internal schema from
+#                colliding with the Alembic-managed application schema.
+#
+# Ports exposed on host:
+#   5432  — Postgres
+#   6379  — Redis
+#   7233  — Temporal gRPC frontend
+#   8088  — Temporal UI (mapped to 8088 to avoid conflicts with other local services)
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: sdlc-postgres
+    environment:
+      POSTGRES_USER: sdlc
+      POSTGRES_PASSWORD: sdlcdev
+      POSTGRES_DB: sdlc_agentic
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdlc -d sdlc_agentic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sdlc-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.29.6.1
+    container_name: sdlc-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=sdlc
+      - POSTGRES_PWD=sdlcdev
+      - POSTGRES_SEEDS=postgres
+      - POSTGRES_DB=sdlc_temporal
+      - TEMPORAL_ADDRESS=temporal:7233
+      - DEFAULT_NAMESPACE=sdlc-dev
+      - DEFAULT_NAMESPACE_RETENTION=72h
+    ports:
+      - "7233:7233"
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: sdlc-temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8088:8080"
+    restart: unless-stopped
+
+  litellm-proxy:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: sdlc-litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

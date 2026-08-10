@@ -1,0 +1,81 @@
+# deps
+node_modules
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+coverage
+
+# next.js
+.next
+out
+build
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env
+# .env IS tracked on purpose: this project runs mock-only, so its contents are
+# just the flags that put it in that mode — committing them is what makes a
+# fresh clone work without setup. It must therefore stay secret-free; anything
+# real (a JWT signing key, Auth0 credentials) belongs in .env.local below.
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# typescript
+*.tsbuildinfo
+
+# vercel
+.vercel
+
+# storybook
+storybook-static
+
+# playwright
+playwright-report
+test-results
+.playwright-cache
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea
+
+# npm lock (canonical PM is pnpm)
+package-lock.json
+
+# local reference docs — the PRD and similar office files are shared out of
+# band, not through the repo
+*.docx
+*.doc
+*.pdf
+*.xlsx
+*.pptx
+
+# ad-hoc screenshots dropped at the repo root during development
+/Screenshot*.png
+
+# Claude Code — settings.json is shared, settings.local.json is per-machine
+# (it accumulates absolute local paths)
+.claude/settings.local.json
+# Real env files never belong in the repo — .env.example carries the shape.
+.env
+
+# Deployment audit trail — local working record, never pushed
+AUDIT_LOG.md

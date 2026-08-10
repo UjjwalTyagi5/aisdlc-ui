@@ -1,0 +1,494 @@
+"""Agent Profile lifecycle API — versioned draft / publish / rollback (Phase 2, design §3.5).
+
+An Agent Profile is the org-editable behavior layer for one of the 8 pipeline agents,
+resolved org -> workspace -> project on top of the in-code base prompt (the floor). This
+router owns the *authoring* lifecycle:
+
+  draft     — lint, then insert a new version row (is_active=false).
+  publish   — flip the active pointer to a version (rollback = publishing an older one).
+  unpublish — clear the active pointer (agent falls back to lower scopes / base).
+  preview   — show how a draft's slots stack on the vendor base + active lower scopes,
+              WITHOUT leaking the vendor base prompt content.
+
+Serialization convention: snake_case in responses, matching the sibling capabilities
+router (shared/routers/capabilities.py) and the resource routers. The frontend BFF reads
+these keys verbatim.
+
+RBAC (design §3.5): reads gate on the "artifact:view" floor (router-level, matching the
+capabilities router). draft/preview require "project:update"; publish/unpublish require
+"workspace:manage". Every route therefore carries a require_permission sentinel so the
+process_api D-05 boot scan stays green.
+"""
+from __future__ import annotations
+
+import re
+import uuid
+from typing import Iterable, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config.agent_registry import AGENT_REGISTRY
+from shared.audit.models import AuditEventPayload
+from shared.audit.service import audit_service
+from shared.authz.dependency import require_permission
+from shared.db import get_db_session
+from shared.models.orm import AgentProfile
+from shared.services.prompt_runtime import invalidate_profile_cache
+
+# ── Fixed presentation order (frozen API contract). Differs from AGENT_REGISTRY
+#    dict order — the contract puts code_review + security BEFORE testing — so it is
+#    declared explicitly here rather than derived from pipeline_position. ────────────
+PIPELINE_ORDER: tuple[str, ...] = (
+    "requirements", "design", "development", "code_review",
+    "security", "testing", "deployment", "documentation",
+)
+
+SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project")
+SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
+
+VENDOR_LAYER_NAME = "Vendor base prompt (identity, tools, safety, HANDOFF contract)"
+
+# ── Lint rules (module-level so tests + preview reuse them; design §3.5 guardrails) ──
+MAX_PROMPT_PREPEND = 4000
+MAX_PROMPT_APPEND = 4000
+MAX_OUTPUT_CONTRACT_EXTRA = 2000
+
+FIELD_CAPS: dict[str, int] = {
+    "prompt_prepend": MAX_PROMPT_PREPEND,
+    "prompt_append": MAX_PROMPT_APPEND,
+    "output_contract_extra": MAX_OUTPUT_CONTRACT_EXTRA,
+}
+
+_FORBIDDEN_SOURCES: tuple[str, ...] = (
+    # Stacked qualifiers ("ignore all previous instructions") must match too — allow
+    # up to three words between the verb and "instructions".
+    r"ignore\s+(?:\w+\s+){0,3}instructions",
+    r"disregard\s+.{0,30}(system|previous)\s+prompt",
+    r"reveal\s+.{0,40}prompt",
+    r"HANDOFF::",
+    r"you\s+are\s+no\s+longer",
+    r"forget\s+(all|everything|your)\s+(instructions|rules)",
+)
+FORBIDDEN_PATTERNS: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in _FORBIDDEN_SOURCES]
+
+
+# ── Pure helpers (unit-testable without a DB) ───────────────────────────────────────
+
+def lint_profile_fields(
+    prompt_prepend: str | None,
+    prompt_append: str | None,
+    output_contract_extra: str | None,
+) -> list[dict]:
+    """Return ALL lint violations (never short-circuit on the first).
+
+    Each violation is {"field", "code", "message"}. Codes: "too_long", "forbidden_pattern".
+    Caps are checked per field first, then every deny-regex against every field.
+    """
+    fields = {
+        "prompt_prepend": prompt_prepend or "",
+        "prompt_append": prompt_append or "",
+        "output_contract_extra": output_contract_extra or "",
+    }
+    violations: list[dict] = []
+    for field, cap in FIELD_CAPS.items():
+        length = len(fields[field])
+        if length > cap:
+            violations.append({
+                "field": field,
+                "code": "too_long",
+                "message": f"{field} is {length} characters; the maximum is {cap}.",
+            })
+    for field, value in fields.items():
+        for pattern in FORBIDDEN_PATTERNS:
+            if pattern.search(value):
+                violations.append({
+                    "field": field,
+                    "code": "forbidden_pattern",
+                    "message": (
+                        f"{field} contains a forbidden instruction-override pattern "
+                        f"(/{pattern.pattern}/)."
+                    ),
+                })
+    return violations
+
+
+def next_version(existing_versions: Iterable[int]) -> int:
+    """Next version number: max(existing) + 1, or 1 when there are no prior rows."""
+    vals = list(existing_versions)
+    return (max(vals) + 1) if vals else 1
+
+
+def apply_publish_flip(rows: Iterable, target_id) -> Optional[int]:
+    """Mutate is_active so ONLY the target row is active. Return the previously-active
+    version among the siblings (excluding the target), or None.
+
+    Pure over any objects exposing .id / .version / .is_active — the route calls it on
+    ORM rows inside one transaction; tests call it on stand-ins.
+    """
+    rows = list(rows)
+    prior = [
+        r.version for r in rows
+        if r.is_active and str(r.id) != str(target_id)
+    ]
+    previous_active_version = max(prior) if prior else None
+    for r in rows:
+        r.is_active = str(r.id) == str(target_id)
+    return previous_active_version
+
+
+def build_agent_summary(agent_id: str, rows: Iterable) -> dict:
+    """Summarize all version rows for one agent+scope into the summary[] shape."""
+    rows = list(rows)
+    if not rows:
+        return {
+            "agent_id": agent_id,
+            "active_version": None,
+            "latest_version": None,
+            "draft_count": 0,
+            "updated_at": None,
+            "active": None,
+        }
+    active_rows = [r for r in rows if r.is_active]
+    active = max(active_rows, key=lambda r: r.version) if active_rows else None
+    updated_candidates = [r.updated_at for r in rows if r.updated_at is not None]
+    return {
+        "agent_id": agent_id,
+        "active_version": active.version if active else None,
+        "latest_version": max(r.version for r in rows),
+        "draft_count": sum(1 for r in rows if not r.is_active),
+        "updated_at": _iso(max(updated_candidates)) if updated_candidates else None,
+        "active": {
+            "prompt_prepend": active.prompt_prepend or "",
+            "prompt_append": active.prompt_append or "",
+            "output_contract_extra": active.output_contract_extra or "",
+        } if active else None,
+    }
+
+
+def _layer(name: str, source: str, locked: bool, content: str | None) -> dict:
+    return {
+        "name": name,
+        "source": source,
+        "locked": locked,
+        "content": content,
+        "chars": len(content) if content else 0,
+    }
+
+
+def build_preview_layers(
+    lower_rows: Iterable,
+    draft_prepend: str,
+    draft_append: str,
+    draft_output_contract_extra: str,
+) -> list[dict]:
+    """Compose the preview layer stack mirroring agent_profile_store.inject_prompt order:
+    all prepends (scope order, then draft) -> vendor base -> contracts -> appends.
+
+    The vendor base layer is locked with content=None (its prompt is never leaked). A
+    lower-scope row that has both a prepend and an append appears twice — once before the
+    vendor base, once after — exactly as inject_prompt concatenates them.
+    """
+    ordered = sorted(lower_rows, key=lambda r: SCOPE_ORDER.get(r.scope, 99))
+    layers: list[dict] = []
+
+    for r in ordered:
+        if r.prompt_prepend:
+            layers.append(_layer(f"{r.scope.title()} prompt prepend", r.scope, False, r.prompt_prepend))
+    if draft_prepend:
+        layers.append(_layer("Draft prompt prepend", "draft", False, draft_prepend))
+
+    layers.append(_layer(VENDOR_LAYER_NAME, "vendor", True, None))
+
+    for r in ordered:
+        if r.output_contract_extra:
+            layers.append(_layer(f"{r.scope.title()} output-contract additions", r.scope, False, r.output_contract_extra))
+    if draft_output_contract_extra:
+        layers.append(_layer("Draft output-contract additions", "draft", False, draft_output_contract_extra))
+
+    for r in ordered:
+        if r.prompt_append:
+            layers.append(_layer(f"{r.scope.title()} prompt append", r.scope, False, r.prompt_append))
+    if draft_append:
+        layers.append(_layer("Draft prompt append", "draft", False, draft_append))
+
+    return layers
+
+
+def _iso(dt) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+def _version_dict(row: AgentProfile) -> dict:
+    return {
+        "id": str(row.id),
+        "version": row.version,
+        "is_active": row.is_active,
+        "prompt_prepend": row.prompt_prepend or "",
+        "prompt_append": row.prompt_append or "",
+        "output_contract_extra": row.output_contract_extra or "",
+        "created_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+# ── Request/response helpers ─────────────────────────────────────────────────────────
+
+def _tenant_id(request: Request) -> str:
+    tid = getattr(request.state, "tenant_id", "") or ""
+    if not tid:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return tid
+
+
+def _user_id(request: Request) -> str:
+    return getattr(request.state, "user_id", "") or ""
+
+
+def _validate_scope(scope: str, scope_id: str | None) -> None:
+    if scope not in SCOPE_VALUES:
+        raise HTTPException(status_code=422, detail=f"scope must be one of {SCOPE_VALUES}")
+    if scope in ("workspace", "project") and not scope_id:
+        raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
+
+
+def _validate_agent(agent_id: str) -> None:
+    if agent_id not in AGENT_REGISTRY:
+        raise HTTPException(status_code=404, detail="Unknown agent")
+
+
+def _scope_filters(scope: str, scope_id: str | None) -> list:
+    filters = [AgentProfile.scope == scope]
+    if scope == "org":
+        filters.append(AgentProfile.scope_id.is_(None))
+    else:
+        filters.append(AgentProfile.scope_id == uuid.UUID(str(scope_id)))
+    return filters
+
+
+class DraftIn(BaseModel):
+    agent_id: str
+    scope: str
+    scope_id: Optional[str] = None
+    prompt_prepend: str = ""
+    prompt_append: str = ""
+    output_contract_extra: str = ""
+
+
+agent_profiles_router = APIRouter(
+    prefix="/agent-profiles",
+    dependencies=[Depends(require_permission("artifact:view"))],
+)
+
+
+@agent_profiles_router.get("/summary")
+async def get_summary(
+    request: Request,
+    scope: str,
+    scope_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    _tenant_id(request)
+    _validate_scope(scope, scope_id)
+    stmt = select(AgentProfile).where(
+        AgentProfile.agent_id.in_(PIPELINE_ORDER),
+        *_scope_filters(scope, scope_id),
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    by_agent: dict[str, list] = {a: [] for a in PIPELINE_ORDER}
+    for r in rows:
+        by_agent.setdefault(r.agent_id, []).append(r)
+    return {"agents": [build_agent_summary(a, by_agent.get(a, [])) for a in PIPELINE_ORDER]}
+
+
+@agent_profiles_router.get("/versions")
+async def get_versions(
+    request: Request,
+    agent_id: str,
+    scope: str,
+    scope_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    _tenant_id(request)
+    _validate_agent(agent_id)
+    _validate_scope(scope, scope_id)
+    stmt = (
+        select(AgentProfile)
+        .where(AgentProfile.agent_id == agent_id, *_scope_filters(scope, scope_id))
+        .order_by(AgentProfile.version.desc())
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    return {"versions": [_version_dict(r) for r in rows]}
+
+
+@agent_profiles_router.post(
+    "/draft",
+    dependencies=[Depends(require_permission("project:update"))],
+)
+async def create_draft(
+    body: DraftIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    tenant_id = _tenant_id(request)
+    _validate_agent(body.agent_id)
+    _validate_scope(body.scope, body.scope_id)
+
+    violations = lint_profile_fields(
+        body.prompt_prepend, body.prompt_append, body.output_contract_extra
+    )
+    if violations:
+        raise HTTPException(status_code=422, detail={"violations": violations})
+
+    existing = list((await db.execute(
+        select(AgentProfile.version).where(
+            AgentProfile.agent_id == body.agent_id, *_scope_filters(body.scope, body.scope_id)
+        )
+    )).scalars().all())
+
+    row = AgentProfile(
+        tenant_id=uuid.UUID(str(tenant_id)),
+        agent_id=body.agent_id,
+        scope=body.scope,
+        scope_id=uuid.UUID(str(body.scope_id)) if body.scope != "org" else None,
+        version=next_version(existing),
+        is_active=False,
+        prompt_prepend=body.prompt_prepend or None,
+        prompt_append=body.prompt_append or None,
+        output_contract_extra=body.output_contract_extra or None,
+        created_by=_user_id(request) or "system",
+    )
+    db.add(row)
+    await db.flush()
+    await db.refresh(row)
+    return _version_dict(row)
+
+
+@agent_profiles_router.post(
+    "/{profile_id}/publish",
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def publish(
+    profile_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    tenant_id = _tenant_id(request)
+    target = await _load_or_404(db, profile_id)
+
+    siblings = list((await db.execute(
+        select(AgentProfile).where(
+            AgentProfile.agent_id == target.agent_id,
+            *_scope_filters(target.scope, str(target.scope_id) if target.scope_id else None),
+        )
+    )).scalars().all())
+
+    previous_active_version = apply_publish_flip(siblings, target.id)
+    await db.flush()
+    await db.refresh(target)
+
+    invalidate_profile_cache(tenant_id, target.agent_id)
+    await audit_service.emit(AuditEventPayload(
+        tenant_id=str(tenant_id),
+        event_type="agent_profile.published",
+        actor_id=_user_id(request) or None,
+        resource_type="agent_profile",
+        resource_id=str(target.id),
+        payload={
+            "agent_id": target.agent_id,
+            "scope": target.scope,
+            "scope_id": str(target.scope_id) if target.scope_id else None,
+            "version": target.version,
+            "previous_active_version": previous_active_version,
+        },
+    ))
+    return _version_dict(target)
+
+
+@agent_profiles_router.post(
+    "/{profile_id}/unpublish",
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def unpublish(
+    profile_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    tenant_id = _tenant_id(request)
+    target = await _load_or_404(db, profile_id)
+
+    target.is_active = False
+    await db.flush()
+    await db.refresh(target)
+
+    invalidate_profile_cache(tenant_id, target.agent_id)
+    await audit_service.emit(AuditEventPayload(
+        tenant_id=str(tenant_id),
+        event_type="agent_profile.unpublished",
+        actor_id=_user_id(request) or None,
+        resource_type="agent_profile",
+        resource_id=str(target.id),
+        payload={
+            "agent_id": target.agent_id,
+            "scope": target.scope,
+            "scope_id": str(target.scope_id) if target.scope_id else None,
+            "version": target.version,
+        },
+    ))
+    return _version_dict(target)
+
+
+@agent_profiles_router.post(
+    "/preview",
+    dependencies=[Depends(require_permission("project:update"))],
+)
+async def preview(
+    body: DraftIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    _tenant_id(request)
+    _validate_agent(body.agent_id)
+    _validate_scope(body.scope, body.scope_id)
+
+    # Active lower-scope layers the draft stacks on. Only the org layer is reliably
+    # resolvable from a draft payload (which carries no workspace id); a project-scoped
+    # draft's workspace layer is therefore omitted (documented deviation).
+    lower_rows: list = []
+    if SCOPE_ORDER.get(body.scope, 0) > 0:
+        lower_rows = list((await db.execute(
+            select(AgentProfile).where(
+                AgentProfile.agent_id == body.agent_id,
+                AgentProfile.scope == "org",
+                AgentProfile.scope_id.is_(None),
+                AgentProfile.is_active.is_(True),
+            )
+        )).scalars().all())
+
+    layers = build_preview_layers(
+        lower_rows,
+        body.prompt_prepend or "",
+        body.prompt_append or "",
+        body.output_contract_extra or "",
+    )
+    warnings = lint_profile_fields(
+        body.prompt_prepend, body.prompt_append, body.output_contract_extra
+    )
+    return {"layers": layers, "warnings": warnings}
+
+
+async def _load_or_404(db: AsyncSession, profile_id: str) -> AgentProfile:
+    """Load a profile by id (RLS scopes to the caller's tenant -> cross-tenant = 404)."""
+    try:
+        pid = uuid.UUID(str(profile_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Not found")
+    row = (await db.execute(
+        select(AgentProfile).where(AgentProfile.id == pid)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return row

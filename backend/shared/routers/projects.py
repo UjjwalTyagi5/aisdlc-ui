@@ -1,0 +1,479 @@
+"""Projects resource router.
+
+Exposes CRUD operations for the Project model. All routes are JWT-protected
+(NOT in _EXEMPT_PATHS) and scope every query by request.state.tenant_id.
+
+Routes:
+  GET    /projects               — paginated list (query: page, page_size, archived, search)
+  GET    /projects/{id}          — detail
+  POST   /projects               — create
+  POST   /projects/{id}/archive  — soft-delete (sets archived=True)
+  POST   /projects/{id}/restore  — un-archive (sets archived=False)
+  PATCH  /projects/{id}          — partial update (name, description)
+
+Threat mitigations (T-M4-01, T-M4-02, T-M4-03):
+  - All queries filtered by tenant_id (no cross-tenant reads)
+  - Routes not in _EXEMPT_PATHS (JWT middleware enforces 401 without token)
+  - Mutations scope by tenant_id + 404 guard (no cross-tenant writes)
+  - Mutating routes (create/archive/restore/patch) carry require_permission("workspace:manage")
+    per the Phase 6 RBAC matrix — only admin/delivery_lead reach mutation endpoints
+    (Phase 6 tightening; process_api.py _VIEW_DEP floor remains for reads)
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import logging
+
+from shared.authz.dependency import require_permission
+from shared.authz.workspace import active_workspace_for_request
+from shared.db import get_db_session
+from shared.models.orm import Project, Run, Workspace
+from shared.routers._schemas import Paginated, Pagination, ProjectOut, _slugify
+
+logger = logging.getLogger(__name__)
+
+projects_router = APIRouter()
+
+
+class ProjectCreateIn(BaseModel):
+    name: str
+    template: str = "blank"
+    description: Optional[str] = None
+    # Stage→MCP-server mapping {agent_id: [mcp_server_id, ...]} chosen at creation.
+    mcp_servers: Optional[dict[str, list[str]]] = None
+    # Stage→connector-kind mapping {agent_id: [connector_kind, ...]} chosen at creation.
+    connectors: Optional[dict[str, list[str]]] = None
+    monthlyBudgetUsd: Optional[float] = None
+
+
+class ProjectPatchIn(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    mcp_servers: Optional[dict[str, list[str]]] = None
+    connectors: Optional[dict[str, list[str]]] = None
+    # 0 clears the cap (inherit workspace / unlimited); positive sets it.
+    monthlyBudgetUsd: Optional[float] = None
+
+
+class IngestBoardIn(BaseModel):
+    # Which board project to import from. When omitted, the project's remembered
+    # board (Project.external_ref) is used, else the first board project.
+    board_project: Optional[str] = None
+    # Which board provider to pull from when the stage has more than one
+    # (e.g. azure_devops + jira). Omitted → the first available board provider.
+    provider: Optional[str] = None
+
+
+@projects_router.get("", response_model=Paginated[ProjectOut])
+async def list_projects(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    archived: bool = False,
+    search: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Return a paginated list of projects scoped to the active workspace."""
+    tenant_id = request.state.tenant_id
+    workspace_id = await active_workspace_for_request(request, str(tenant_id))
+
+    stmt = select(Project).where(
+        Project.tenant_id == tenant_id,
+        Project.workspace_id == workspace_id,
+        Project.archived == archived,
+    )
+    if search:
+        stmt = stmt.where(Project.display_name.ilike(f"%{search}%"))
+
+    count_stmt = select(func.count()).select_from(stmt.subquery())
+    total: int = (await db.execute(count_stmt)).scalar_one()
+
+    stmt = stmt.order_by(Project.updated_at.desc())
+    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    return Paginated(
+        items=[ProjectOut.from_orm_project(p) for p in rows],
+        pagination=Pagination(page=page, pageSize=page_size, total=total),
+    )
+
+
+@projects_router.get("/{project_id}", response_model=ProjectOut)
+async def get_project(
+    project_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Return a single project by ID, scoped to the requesting tenant."""
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    # Spend is financial data — only cost:view holders see the dollar figure.
+    _perms = getattr(request.state, "permissions", []) or []
+    spend = 0.0
+    if "admin:*" in _perms or "cost:view" in _perms:
+        from shared.services.budget_store import read_scope_spend  # noqa: PLC0415
+        spend = await read_scope_spend(str(tenant_id), "project", str(project.id))
+    return ProjectOut.from_orm_project(project, spend)
+
+
+@projects_router.post(
+    "",
+    response_model=ProjectOut,
+    status_code=201,
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def create_project(
+    body: ProjectCreateIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Create a new project for the requesting tenant.
+
+    The project is attached to the tenant's workspace (organization_id ==
+    tenant_id; a "default" workspace is seeded per org). If none exists yet, a
+    default workspace is created — previously this used a hardcoded nil
+    workspace_id that was never seeded, causing a projects_workspace_id_fkey
+    violation on every create. tenant_id comes from the JWT.
+    """
+    tenant_id = request.state.tenant_id
+    tenant_uuid = uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+
+    # Attach to the ACTIVE workspace (X-Workspace-Id selector → org's first as
+    # fallback). Validated to belong to the tenant by active_workspace_for_request.
+    ws_id = await active_workspace_for_request(request, str(tenant_id))
+
+    # Default budget + hierarchical guard (0032): a new project defaults to the project
+    # budget and must fit under its workspace's remaining budget, else 409 "Budget low"
+    # (blocks creation until the workspace cap is raised).
+    from config.env import DEFAULT_PROJECT_BUDGET_USD  # noqa: PLC0415
+    from shared.services.budget_alloc import assert_project_fits  # noqa: PLC0415
+    _proj_budget = body.monthlyBudgetUsd if body.monthlyBudgetUsd is not None else DEFAULT_PROJECT_BUDGET_USD
+    await assert_project_fits(db, tenant_id, str(ws_id), _proj_budget, on_create=True)
+
+    project = Project(
+        workspace_id=ws_id,
+        tenant_id=tenant_uuid,
+        display_name=body.name,
+        archived=False,
+        mcp_servers=body.mcp_servers or None,
+        connectors=body.connectors or None,
+        monthly_budget_usd=_proj_budget,
+    )
+    db.add(project)
+    await db.flush()
+    await db.refresh(project)
+
+    # DP6 warn: compute config-time capability-gap and log any shortfalls.
+    # Best-effort only — never blocks project creation.
+    try:
+        from shared.capabilities.config_check import config_capability_report  # noqa: PLC0415
+        assignment: dict = {"agents": {}}
+        gap_report = config_capability_report(assignment)
+        for agent_id, gap in gap_report.items():
+            if gap:
+                logger.warning(
+                    "Project %s: agent %s missing capabilities %s",
+                    str(project.id), agent_id, gap,
+                )
+    except Exception:  # noqa: BLE001 — reporting must never break project creation
+        pass
+
+    return ProjectOut.from_orm_project(project)
+
+
+# Connector kinds that are work-item BOARDS (vs MCP servers / other connectors that
+# can also be assigned to a stage). Only these are offered as a "pull stories" source.
+_BOARD_KINDS = ("azure_devops", "jira", "github_issues", "linear")
+
+
+def _board_providers(project) -> list[str]:
+    """Board connector kinds assigned to the Requirements stage, in order.
+
+    Filters Project.connectors["requirements"] to real board kinds (drops MCP/others),
+    falling back to the legacy project-wide provider_kind, then azure_devops.
+    """
+    conns = getattr(project, "connectors", None) or {}
+    req = [k for k in (conns.get("requirements") or []) if k in _BOARD_KINDS]
+    if req:
+        return req
+    legacy = getattr(project, "provider_kind", None)
+    return [legacy] if legacy in _BOARD_KINDS else ["azure_devops"]
+
+
+def _board_kind(project, requested: Optional[str] = None) -> str:
+    """The board provider to pull from — the requested one when it's available to this
+    project's Requirements stage, else the first available."""
+    providers = _board_providers(project)
+    if requested and requested in providers:
+        return requested
+    return providers[0]
+
+
+async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None):
+    """Resolve the tenant's board connector for a project, or 409 fail-closed."""
+    from config.connector_factory import get_connector_for_session  # noqa: PLC0415
+
+    kind = kind or _board_kind(project)
+    try:
+        return await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+    except Exception:
+        raise HTTPException(
+            status_code=409,
+            detail="No board connector is configured. Connect Azure DevOps or Jira on the Integrations page.",
+        )
+
+
+@projects_router.get(
+    "/{project_id}/board-projects",
+    dependencies=[Depends(require_permission("run:create"))],
+)
+async def list_board_projects(
+    project_id: str,
+    request: Request,
+    provider: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Discover the board projects available on the chosen provider.
+
+    `provider` (query) selects which board connector to read when the stage has more
+    than one (e.g. azure_devops + jira); defaults to the first available. Returns
+    {projects, selected, provider, available_providers}. 409 no connector; 502 board error.
+    """
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    kind = _board_kind(project, provider)
+    connector = await _connector_or_409(project, tenant_id, kind=kind)
+    try:
+        boards = await connector.read_adapter("list_projects")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("list_board_projects: list_projects failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Couldn't reach the board ({type(exc).__name__}). Check the connector credentials on Integrations.",
+        )
+    projects = [
+        {"name": b.get("name") or b.get("key") or "", "key": b.get("key") or ""}
+        for b in (boards or [])
+        if (b.get("name") or b.get("key"))
+    ]
+    return {
+        "projects": projects,
+        "selected": getattr(project, "external_ref", None),
+        "provider": kind,
+        "available_providers": _board_providers(project),
+    }
+
+
+@projects_router.post(
+    "/{project_id}/ingest-board",
+    dependencies=[Depends(require_permission("run:create"))],
+)
+async def ingest_board(
+    project_id: str,
+    request: Request,
+    body: IngestBoardIn = IngestBoardIn(),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Pull work items from a chosen board project into structured stories.
+
+    Deterministic board ingestion: resolves the tenant's connector, picks the board
+    project (request body → project's remembered external_ref → first project),
+    lists its work items, fetches each item's detail, and stores them as stories in a
+    requirements Run's requirements_payload. The chosen board is remembered on
+    Project.external_ref so the picker pre-selects it next time. The Requirements page
+    renders the stories (see story_artifacts_from_run). 409 no connector / 502 board error.
+    """
+    tenant_id = request.state.tenant_id
+    tenant_uuid = uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    connector = await _connector_or_409(project, tenant_id, kind=_board_kind(project, body.provider))
+
+    try:
+        boards = await connector.read_adapter("list_projects")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ingest_board: list_projects failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Couldn't reach the board ({type(exc).__name__}). Check the connector credentials on Integrations.",
+        )
+    if not boards:
+        raise HTTPException(status_code=409, detail="No projects found on the connected board.")
+
+    names = [b.get("name") or b.get("key") or "" for b in boards if (b.get("name") or b.get("key"))]
+    requested = body.board_project or getattr(project, "external_ref", None)
+    board_name = requested if (requested and requested in names) else names[0]
+    try:
+        items = await connector.read_adapter("list_all_items", project=board_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ingest_board: list_all_items failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"Couldn't list work items ({type(exc).__name__}).")
+
+    stories: list[dict] = []
+    for it in (items or [])[:25]:
+        item_id = it.get("id") or it.get("source_key")
+        detail = it
+        try:
+            detail = await connector.read_adapter(
+                "fetch_item_detail", project=board_name, item_id=item_id
+            )
+        except Exception:  # noqa: BLE001 — fall back to the summary row
+            detail = it
+        stories.append(
+            {
+                "id": str(detail.get("id") or item_id or ""),
+                "source_key": str(detail.get("source_key") or item_id or ""),
+                "title": detail.get("title") or "",
+                "description": detail.get("description") or "",
+                "acceptance_criteria": detail.get("acceptance_criteria") or [],
+                "state": detail.get("state") or "",
+                "work_item_type": detail.get("work_item_type") or "",
+            }
+        )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_uuid,
+        stage="requirements",
+        status="completed",
+        trigger="manual",
+        requirements_payload={"stories": stories, "board_project": board_name},
+    )
+    db.add(run)
+    # Remember the chosen board on the local project so the picker pre-selects it.
+    project.external_ref = board_name
+    await db.flush()
+    await db.commit()
+    logger.info(
+        "ingest_board: tenant=%s project=%s board=%s ingested=%d",
+        tenant_id, str(project.id), board_name, len(stories),
+    )
+    return {"ingested": len(stories), "board_project": board_name, "run_id": str(run.id)}
+
+
+@projects_router.post(
+    "/{project_id}/archive",
+    response_model=ProjectOut,
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def archive_project(
+    project_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Soft-delete a project (sets archived=True).
+
+    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+    """
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    project.archived = True
+    await db.flush()
+    await db.refresh(project)
+    return ProjectOut.from_orm_project(project)
+
+
+@projects_router.post(
+    "/{project_id}/restore",
+    response_model=ProjectOut,
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def restore_project(
+    project_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Un-archive a project (sets archived=False).
+
+    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+    """
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    project.archived = False
+    await db.flush()
+    await db.refresh(project)
+    return ProjectOut.from_orm_project(project)
+
+
+@projects_router.patch(
+    "/{project_id}",
+    response_model=ProjectOut,
+    dependencies=[Depends(require_permission("workspace:manage"))],
+)
+async def patch_project(
+    project_id: str,
+    body: ProjectPatchIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Partially update a project's name or description.
+
+    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+    """
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    if body.name is not None:
+        project.display_name = body.name
+    if body.mcp_servers is not None:
+        project.mcp_servers = body.mcp_servers or None
+    if body.connectors is not None:
+        project.connectors = body.connectors or None
+    if body.monthlyBudgetUsd is not None:
+        project.monthly_budget_usd = body.monthlyBudgetUsd or None  # 0 clears the cap
+    await db.flush()
+    await db.refresh(project)
+    from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415
+    clear_budget_cache()
+    from shared.services.budget_store import read_scope_spend  # noqa: PLC0415
+    spend = await read_scope_spend(str(tenant_id), "project", str(project.id))
+    return ProjectOut.from_orm_project(project, spend)
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+async def _get_or_404(db: AsyncSession, project_id: str, tenant_id: str) -> Project:
+    """Fetch a Project by UUID id OR derived slug, scoped to tenant_id (404 if none).
+
+    `slug` is a derived, non-queryable display field (Plan 02: slug =
+    slugify(display_name); no slug column in the ORM). The frontend detail/phase
+    routes are slug-based, so when `project_id` is not a UUID we treat it as a slug
+    and match it against the in-tenant projects' derived slugs. Passing a non-UUID
+    straight into `Project.id ==` makes Postgres raise `invalid input syntax for
+    type uuid` (500); this resolver yields a clean 404 instead.
+
+    The tenant_id filter prevents cross-tenant reads (T-M4-01) — a valid JWT for
+    tenant B cannot read or mutate tenant A's projects.
+    """
+    if _is_uuid(project_id):
+        result = await db.execute(
+            select(Project).where(
+                Project.id == project_id,
+                Project.tenant_id == tenant_id,
+            )
+        )
+        project = result.scalar_one_or_none()
+    else:
+        # Slug path — derive slug per in-tenant project and match.
+        result = await db.execute(
+            select(Project).where(Project.tenant_id == tenant_id)
+        )
+        project = next(
+            (p for p in result.scalars() if _slugify(p.display_name) == project_id),
+            None,
+        )
+
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
