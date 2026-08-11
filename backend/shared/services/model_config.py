@@ -380,9 +380,10 @@ async def get_options(tenant_id: str, workspace_id: str | None = None, project_i
             " ORDER BY p.display_name, p.provider, o.model_id"
         ), {"t": tenant_id})).fetchall()
 
-    effective_ids = await effective_project_offerings(tenant_id, project_id)
-    if effective_ids is not None:
-        rows = [r for r in rows if str(r.offering_id) in effective_ids]
+    if project_id:
+        effective_ids = await effective_project_offerings(tenant_id, project_id)
+        if effective_ids is not None:
+            rows = [r for r in rows if str(r.offering_id) in effective_ids]
 
     options = [{
         "offering_id": str(r.offering_id),

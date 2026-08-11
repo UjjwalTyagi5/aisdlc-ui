@@ -187,6 +187,41 @@ async def test_get_options_only_returns_valid_enabled(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_get_options_stays_tenant_wide_without_project_id_even_with_grants(monkeypatch):
+    """Regression guard: get_options has no real project-scoped caller today (the
+    router never passes project_id). A tenant that has configured ANY org_model_grants
+    row must NOT see its picker go empty just because no project_id was given —
+    effective_project_offerings(tenant, None) intentionally fails closed to set() for a
+    real RUN, but get_options must not call it at all when project_id is falsy."""
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="O2", api_key="k",
+        enabled_models=["claude-sonnet-4-6"], created_by="a",
+    )
+
+    async def _ok(p, m, k):
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+    await mc.verify_provider(tenant, created["id"])
+
+    # Configure a grant row — this is what flips effective_project_offerings(t, None)
+    # from None to set() once a project_id IS passed. Here none is passed at all.
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
+          "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    opts = await mc.get_options(tenant)
+    assert opts["options"], "options must stay tenant-wide when no project_id is given"
+    assert any(o["model_id"] == "claude-sonnet-4-6" for o in opts["options"])
+
+
 # ---------------------------------------------------------------------------
 # Task 5: router + RBAC + registration
 # ---------------------------------------------------------------------------
