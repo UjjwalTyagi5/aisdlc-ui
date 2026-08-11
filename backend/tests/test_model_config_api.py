@@ -343,3 +343,63 @@ async def test_list_providers_scope_all_returns_every_connection():
     providers = await mc.list_providers(tenant, scope="all")
     ids = {p["id"] for p in providers}
     assert org_wide["id"] in ids and bu_scoped["id"] in ids
+
+
+# ---------------------------------------------------------------------------
+# Task 5: cascade router endpoints (real JWTs via process_api, matching the
+# mint_token + ASGITransport pattern used elsewhere in the test suite)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_org_grants_roundtrip_via_router(mint_token):
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Acme", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    token = mint_token(tenant_id=tenant, permissions=["model:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        put_resp = await client.put(
+            "/model/allowed/org",
+            json={"entries": [{
+                "provider": "anthropic", "model_id": "claude-sonnet-4-6",
+                "credential_id": created["id"], "visibility": "global", "business_unit_ids": [],
+            }]},
+            headers=headers,
+        )
+        assert put_resp.status_code == 200
+
+        get_resp = await client.get("/model/allowed/org", headers=headers)
+        assert get_resp.status_code == 200
+        assert len(get_resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_allowed_project_requires_run_create_not_model_manage(mint_token):
+    """A caller with run:create but WITHOUT model:manage can still read/write their
+    project's model selection (spec §4 permission split)."""
+    import httpx
+    from process_api import app
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    token = mint_token(tenant_id=tenant, permissions=["run:create"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/model/allowed/project", params={"projectId": str(uuid.uuid4())}, headers=headers
+        )
+        # 404/422 (unknown project) is fine — the point is it's NOT 403.
+        assert resp.status_code != 403

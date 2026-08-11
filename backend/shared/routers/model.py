@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from shared.authz.dependency import require_permission
 from shared.authz.workspace import active_workspace_for_request
 from shared.services import model_config as mc
+from shared.services import model_grants as mg
 from shared.services.model_catalog import list_providers as catalog_providers
 
 model_router = APIRouter(
@@ -89,12 +90,15 @@ class CreateProviderIn(BaseModel):
     # Any LiteLLM provider slug — onboarding is dynamic, gated by model:manage RBAC.
     provider: str = Field(min_length=1, max_length=64, pattern="^[a-z0-9][a-z0-9_-]*$")
     display_name: str = Field(min_length=1, max_length=255)
-    api_key: str = Field(min_length=1, max_length=512)
+    api_key: str | None = Field(default=None, max_length=512)
     # Optional custom endpoint (OpenAI-compatible / self-hosted / gateway).
     api_base: str | None = Field(default=None, max_length=512)
     # Preferred: full model specs with pricing. Back-compat: bare model ids.
     models: list[ModelIn] = Field(default_factory=list)
     enabled_models: list[str] = Field(default_factory=list)
+    workspace_id: str | None = None
+    visibility: str | None = None
+    business_unit_ids: list[str] = Field(default_factory=list)
 
 
 class UpdateProviderIn(BaseModel):
@@ -106,16 +110,44 @@ class SetDefaultIn(BaseModel):
     offering_id: str
 
 
+class GrantEntryIn(BaseModel):
+    provider: str
+    model_id: str
+    credential_id: str | None = None
+    visibility: str = "global"
+    business_unit_ids: list[str] = Field(default_factory=list)
+
+
+class AllowEntryIn(BaseModel):
+    provider: str
+    model_id: str
+    credential_id: str | None = None
+
+
+class SetOrgGrantsIn(BaseModel):
+    entries: list[GrantEntryIn] = Field(default_factory=list)
+
+
+class SetBuGrantsIn(BaseModel):
+    entries: list[AllowEntryIn] = Field(default_factory=list)
+
+
+class SetProjectSelectionIn(BaseModel):
+    selected: list[AllowEntryIn] = Field(default_factory=list)
+    default_key: str | None = None
+
+
 @model_router.get("/catalog")
 async def get_catalog() -> list[dict]:
     return catalog_providers()
 
 
 @model_router.get("/providers", response_model=list[ProviderOut])
-async def list_providers_route(request: Request) -> list[ProviderOut]:
+async def list_providers_route(request: Request, scope: str | None = None, workspaceId: str | None = None) -> list[ProviderOut]:
+    ws = workspaceId or await _active_ws(request)
     return [
         _to_provider_out(d)
-        for d in await mc.list_providers(_tenant_id(request), workspace_id=await _active_ws(request))
+        for d in await mc.list_providers(_tenant_id(request), workspace_id=ws, scope=scope)
     ]
 
 
@@ -129,7 +161,7 @@ async def create_provider_route(request: Request, body: CreateProviderIn) -> Pro
         d = await mc.create_provider(
             _tenant_id(request), provider=body.provider, display_name=body.display_name,
             api_key=body.api_key, models=models, api_base=body.api_base,
-            created_by=_user_id(request),  # tenant-wide: connections are org-scoped, not per-workspace
+            created_by=_user_id(request), workspace_id=body.workspace_id,
         )
     except mc.DuplicateProviderNameError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -137,6 +169,17 @@ async def create_provider_route(request: Request, body: CreateProviderIn) -> Pro
         raise HTTPException(status_code=422, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+    if body.workspace_id is None and (body.visibility or body.business_unit_ids):
+        # Org-wide onboarding writes the matching grant in the same act (spec §2.3) — a
+        # key can't land without anyone being able to use what it unlocks.
+        entries = [
+            {"provider": body.provider, "model_id": m["model_id"], "credential_id": d["id"],
+             "visibility": body.visibility or "global", "business_unit_ids": body.business_unit_ids or []}
+            for m in models
+        ]
+        existing = await mg.get_org_grants(_tenant_id(request))
+        await mg.set_org_grants(_tenant_id(request), existing + entries, created_by=_user_id(request))
     return _to_provider_out(d)
 
 
@@ -187,3 +230,61 @@ async def set_default_route(request: Request, body: SetDefaultIn) -> None:
 @model_options_router.get("/options")
 async def get_options_route(request: Request) -> dict:
     return await mc.get_options(_tenant_id(request), workspace_id=await _active_ws(request))
+
+
+@model_router.get("/allowed/org")
+async def get_org_grants_route(request: Request) -> list[dict]:
+    return await mg.get_org_grants(_tenant_id(request))
+
+
+@model_router.put("/allowed/org")
+async def set_org_grants_route(request: Request, body: SetOrgGrantsIn) -> list[dict]:
+    try:
+        return await mg.set_org_grants(
+            _tenant_id(request), [e.model_dump() for e in body.entries], created_by=_user_id(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@model_router.get("/allowed/bu")
+async def get_bu_allowed_route(request: Request, workspaceId: str) -> list[dict]:
+    return await mg.get_bu_allowed(_tenant_id(request), workspaceId)
+
+
+@model_router.put("/allowed/bu")
+async def set_bu_grants_route(request: Request, workspaceId: str, body: SetBuGrantsIn) -> list[dict]:
+    return await mg.set_bu_grants(
+        _tenant_id(request), workspaceId, [e.model_dump() for e in body.entries],
+    )
+
+
+@model_router.get("/availability")
+async def get_availability_route(request: Request, workspaceId: str) -> list[dict]:
+    return await mg.get_availability(_tenant_id(request), workspaceId)
+
+
+@model_router.get("/grant-matrix")
+async def get_grant_matrix_route(request: Request) -> dict:
+    return await mg.get_grant_matrix(_tenant_id(request))
+
+
+@model_options_router.get("/allowed/project")
+async def get_project_selection_route(request: Request, projectId: str) -> dict:
+    try:
+        return await mg.get_project_selection(_tenant_id(request), projectId)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@model_options_router.put("/allowed/project")
+async def set_project_selection_route(request: Request, projectId: str, body: SetProjectSelectionIn) -> dict:
+    try:
+        return await mg.set_project_selection(
+            _tenant_id(request), projectId,
+            [e.model_dump() for e in body.selected], body.default_key,
+        )
+    except mg.NotAllowedForUnitError as exc:
+        raise HTTPException(status_code=400, detail={"code": "not_allowed_for_unit", "message": str(exc)})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
