@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from shared.authz.dependency import require_permission
+from shared.authz.dependency import require_any_permission, require_permission
 from shared.authz.workspace import active_workspace_for_request
 from shared.services import model_config as mc
 from shared.services import model_grants as mg
@@ -16,6 +16,13 @@ model_router = APIRouter(
 )
 model_options_router = APIRouter(
     prefix="/model", dependencies=[Depends(require_permission("run:create"))]
+)
+# GET /availability has two legitimate consumer groups gated by different permissions:
+# a Business Unit Admin's own governance view (model:manage) and the run-time model
+# picker / create-project dialog (run:create). Neither single-permission router fits —
+# see require_any_permission's docstring.
+model_availability_router = APIRouter(
+    prefix="/model", dependencies=[Depends(require_any_permission("model:manage", "run:create"))]
 )
 
 
@@ -321,7 +328,7 @@ async def set_bu_grants_route(request: Request, workspaceId: str, body: SetBuGra
     return [_to_camel(e, *_CRED_KEYS) for e in entries]
 
 
-@model_options_router.get("/availability")
+@model_availability_router.get("/availability")
 async def get_availability_route(request: Request, workspaceId: str) -> list[dict]:
     entries = await mg.get_availability(_tenant_id(request), workspaceId)
     return [_to_camel(e, *_CRED_KEYS) for e in entries]

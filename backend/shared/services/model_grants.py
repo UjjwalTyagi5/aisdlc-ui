@@ -187,6 +187,14 @@ async def set_bu_grants(tenant_id: str, workspace_id: str, entries: list[dict]) 
     return await get_bu_allowed(tenant_id, workspace_id)
 
 
+def _is_valid_uuid(value: str) -> bool:
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 async def get_availability(tenant_id: str, workspace_id: str) -> list[dict]:
     allowed = await get_bu_allowed(tenant_id, workspace_id)
     async with get_db_session_for_tenant(tenant_id) as s:
@@ -198,14 +206,20 @@ async def get_availability(tenant_id: str, workspace_id: str) -> list[dict]:
                 "AND mp.status = 'valid' AND o.enabled = true"
             ), {"t": tenant_id},
         )).fetchall()
-        local_rows = (await s.execute(
-            text(
-                "SELECT o.provider_id, mp.provider, o.model_id FROM model_offerings o "
-                "JOIN model_providers mp ON mp.id = o.provider_id "
-                "WHERE o.tenant_id = :t AND mp.tenant_id = :t AND mp.workspace_id = :w "
-                "AND mp.status = 'valid' AND o.enabled = true"
-            ), {"t": tenant_id, "w": workspace_id},
-        )).fetchall()
+        # workspace_id is compared against a UUID column below; a malformed value (e.g. a
+        # BU identity not yet migrated to a real backend id) must not crash the request —
+        # treat it as "nothing locally credentialed" rather than raising.
+        if _is_valid_uuid(workspace_id):
+            local_rows = (await s.execute(
+                text(
+                    "SELECT o.provider_id, mp.provider, o.model_id FROM model_offerings o "
+                    "JOIN model_providers mp ON mp.id = o.provider_id "
+                    "WHERE o.tenant_id = :t AND mp.tenant_id = :t AND mp.workspace_id = :w "
+                    "AND mp.status = 'valid' AND o.enabled = true"
+                ), {"t": tenant_id, "w": workspace_id},
+            )).fetchall()
+        else:
+            local_rows = []
     central = {(r.provider, r.model_id) for r in central_rows}
     local = {(r.provider, r.model_id) for r in local_rows}
     out = []

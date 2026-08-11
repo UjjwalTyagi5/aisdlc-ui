@@ -17,6 +17,18 @@ from shared.services.model_catalog import is_known_provider, is_valid_model, pri
 logger = logging.getLogger(__name__)
 
 
+def _is_valid_uuid(value: str) -> bool:
+    """True when `value` is a syntactically valid UUID — guards every place a caller-
+    supplied id is bound against a UUID-typed column, so a malformed id (e.g. a
+    not-yet-migrated fixture identity) fails predictably in Python instead of as an
+    unhandled asyncpg.DataError partway through a query."""
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 class InvalidModelError(Exception):
     """A requested model is not valid for the given provider (catalog check)."""
 
@@ -127,6 +139,12 @@ async def create_provider(
     provider = (provider or "").strip()
     api_base = (api_base or "").strip() or None
     api_key = (api_key or "").strip() or None
+    if workspace_id and not _is_valid_uuid(workspace_id):
+        # Silently dropping to None here would widen a BU-scoped onboarding to org-wide
+        # (every business unit could suddenly see it) — the opposite of fail-safe. Reject
+        # instead, unlike the read path in list_providers where the same malformed id can
+        # safely fall back to "show nothing BU-specific".
+        raise ValueError(f"workspace_id is not a valid identifier: {workspace_id!r}")
     if models is None:
         models = [{"model_id": m} for m in (enabled_models or [])]
     if not provider or not display_name:
@@ -201,7 +219,18 @@ async def list_providers(
 ) -> list[dict]:
     """scope="all" -> every connection (org-wide + every BU's) — the Org Admin's view.
     A bare workspace_id -> org-wide connections + that one BU's own — a BU/Project Admin's
-    view. Neither -> org-wide only (legacy default, unchanged for existing callers)."""
+    view. Neither -> org-wide only (legacy default, unchanged for existing callers).
+
+    workspace_id is compared against a UUID column: a caller passing a malformed value
+    (e.g. a BU identity that hasn't been migrated to a real backend id yet) must not crash
+    the request. Falling back to the org-wide-only view is safe here — it never surfaces a
+    BU-specific connection, only withholds one — unlike defaulting the WRITE path in
+    create_provider, where the same fallback would incorrectly widen a scoped onboarding to
+    org-wide. Validated in Python (not via a failed-then-retried query) so a malformed id
+    never leaves the session's transaction in an aborted state."""
+    if workspace_id and scope != "all" and not _is_valid_uuid(workspace_id):
+        workspace_id = None
+
     async with get_db_session_for_tenant(tenant_id) as s:
         if scope == "all":
             where = "tenant_id = :t"
