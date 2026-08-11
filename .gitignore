@@ -13,6 +13,9 @@ backend/.ruff_cache/
 # Agent run workspaces — generated per pipeline run, not source
 backend/files/
 
+# Superpowers subagent-driven-development scratch workspace (ledgers, briefs, reports)
+.superpowers/
+
 # Local Temporal dev-server state
 backend/.temporal-dev.db
 backend/.temporal-dev.db-journal
