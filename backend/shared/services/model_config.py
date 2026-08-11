@@ -94,12 +94,17 @@ def _provider_dict(row, offerings: list[dict]) -> dict:
 
 
 async def create_provider(
-    tenant_id: str, *, provider: str, display_name: str, api_key: str,
+    tenant_id: str, *, provider: str, display_name: str, api_key: str | None,
     created_by: str, models: list[dict] | None = None,
     enabled_models: list[str] | None = None, api_base: str | None = None,
     workspace_id: str | None = None,
 ) -> dict:
     """Create a provider connection + its enabled model offerings.
+
+    `api_key` may be None/empty — the connection is registered with no secret (hasKey via
+    a null secret_ref) so its models can be granted centrally while a Business Unit or
+    project supplies its own key later (spec §2.3). `workspace_id` scopes the connection to
+    that BU (NULL = org-wide).
 
     Pass either `models` (rich specs: {model_id, input_price_per_million?,
     output_price_per_million?}) or `enabled_models` (bare ids, back-compat).
@@ -111,18 +116,15 @@ async def create_provider(
     display_name = (display_name or "").strip()
     provider = (provider or "").strip()
     api_base = (api_base or "").strip() or None
+    api_key = (api_key or "").strip() or None
     if models is None:
         models = [{"model_id": m} for m in (enabled_models or [])]
-    if not provider or not display_name or not api_key:
-        raise ValueError("provider, display_name, and api_key are required")
+    if not provider or not display_name:
+        raise ValueError("provider and display_name are required")
     if not models:
         raise ValueError("at least one model is required")
 
     is_custom = not is_known_provider(provider)
-    # Resolve pricing per model: caller-supplied wins, else the LiteLLM catalog.
-    # Governance: a model NOT in the catalog (custom / unlisted / self-hosted)
-    # MUST carry pricing so Cost/Langfuse can attribute spend. Catalog models may
-    # leave price NULL (resolved from LiteLLM's cost map at read time).
     for m in models:
         model_id = (m.get("model_id") or "").strip()
         if not model_id:
@@ -141,16 +143,15 @@ async def create_provider(
         m["input_price_per_million"] = in_p
         m["output_price_per_million"] = out_p
 
-    # Connection names must be unique per tenant (identity for model selection).
     async with get_db_session_for_tenant(tenant_id) as s:
         if await _name_exists(s, tenant_id, display_name):
             raise DuplicateProviderNameError(
                 f"A provider connection named {display_name!r} already exists")
 
     provider_id = str(_uuid.uuid4())
-    secret_ref = _secret_ref(provider_id)
-    # Store the key FIRST so a row never references a missing secret.
-    await secret_store.put_secret(tenant_id, secret_ref, api_key)
+    secret_ref = _secret_ref(provider_id) if api_key else None
+    if api_key:
+        await secret_store.put_secret(tenant_id, secret_ref, api_key)
     try:
         async with get_db_session_for_tenant(tenant_id) as s:
             await s.execute(
@@ -177,27 +178,34 @@ async def create_provider(
             row = await _provider_row(s, provider_id)
             offerings = await _offerings_for(s, provider_id)
     except Exception:
-        # roll back the orphaned secret on row-insert failure
-        await secret_store.delete_secret(tenant_id, secret_ref)
+        if secret_ref:
+            await secret_store.delete_secret(tenant_id, secret_ref)
         raise
-    logger.info("model provider created tenant=%s provider=%s id=%s custom=%s",
-                tenant_id, provider, provider_id, is_custom)
+    logger.info("model provider created tenant=%s provider=%s id=%s custom=%s workspace=%s",
+                tenant_id, provider, provider_id, is_custom, workspace_id)
     return _provider_dict(row, offerings)
 
 
-async def list_providers(tenant_id: str, workspace_id: str | None = None) -> list[dict]:
-    # Providers are TENANT-WIDE: every connection the org adds is visible and usable
-    # org-wide, exactly matching how the model resolver selects them (resolver filters
-    # by tenant only). This keeps one source of truth — what the UI shows is precisely
-    # what agents can run on. `workspace_id` is accepted for call-site compatibility but
-    # no longer narrows results (an earlier workspace filter let "removed" connections
-    # survive unseen because the resolver ignored workspace).
+async def list_providers(
+    tenant_id: str, workspace_id: str | None = None, scope: str | None = None,
+) -> list[dict]:
+    """scope="all" -> every connection (org-wide + every BU's) — the Org Admin's view.
+    A bare workspace_id -> org-wide connections + that one BU's own — a BU/Project Admin's
+    view. Neither -> org-wide only (legacy default, unchanged for existing callers)."""
     async with get_db_session_for_tenant(tenant_id) as s:
+        if scope == "all":
+            where = "tenant_id = :t"
+            params: dict = {"t": tenant_id}
+        elif workspace_id:
+            where = "tenant_id = :t AND (workspace_id IS NULL OR workspace_id = :w)"
+            params = {"t": tenant_id, "w": workspace_id}
+        else:
+            where = "tenant_id = :t AND workspace_id IS NULL"
+            params = {"t": tenant_id}
         prows = (await s.execute(
-            text("SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-                 "api_base, is_custom "
-                 "FROM model_providers WHERE tenant_id = :t ORDER BY created_at"),
-            {"t": tenant_id},
+            text(f"SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
+                 f"api_base, is_custom FROM model_providers WHERE {where} ORDER BY created_at"),
+            params,
         )).fetchall()
         out = []
         for r in prows:

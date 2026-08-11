@@ -252,3 +252,59 @@ async def test_options_requires_run_create_not_model_manage():
             "provider": "anthropic", "display_name": "x", "api_key": "k", "enabled_models": [],
         })
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Task 3: keyless onboarding + workspace-scoped listing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_create_provider_without_api_key_has_no_key():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Keyless",
+        api_key=None, enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    assert created["secret_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_provider_scoped_to_workspace():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="BU Key",
+        api_key="sk-x", enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+        workspace_id=ws_id,
+    )
+    providers = await mc.list_providers(tenant, workspace_id=ws_id)
+    assert any(p["id"] == created["id"] for p in providers)
+
+    other_ws_providers = await mc.list_providers(tenant, workspace_id=str(uuid.uuid4()))
+    # A different BU sees org-wide connections only — this BU-scoped one is absent.
+    assert not any(p["id"] == created["id"] for p in other_ws_providers)
+
+
+@pytest.mark.asyncio
+async def test_list_providers_scope_all_returns_every_connection():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+    org_wide = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Org Wide",
+        api_key="sk-x", enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    bu_scoped = await mc.create_provider(
+        tenant, provider="openai", display_name="BU Scoped",
+        api_key="sk-y", enabled_models=["gpt-4o"], created_by="admin1",
+        workspace_id=str(uuid.uuid4()),
+    )
+    providers = await mc.list_providers(tenant, scope="all")
+    ids = {p["id"] for p in providers}
+    assert org_wide["id"] in ids and bu_scoped["id"] in ids
