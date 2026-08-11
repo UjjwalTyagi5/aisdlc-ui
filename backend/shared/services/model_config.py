@@ -363,19 +363,13 @@ async def delete_provider(tenant_id: str, provider_id: str, workspace_id: str | 
     logger.info("model provider deleted tenant=%s id=%s", tenant_id, provider_id)
 
 
-async def get_options(tenant_id: str, workspace_id: str | None = None) -> dict:
+async def get_options(tenant_id: str, workspace_id: str | None = None, project_id: str | None = None) -> dict:
     """Selectable offerings whose provider is verified `valid` — for the model
-    picker. Each option carries full identity (offering_id + provider connection +
-    model) so the UI can disambiguate two keys that expose the same model, and so
-    runs can be dispatched against an exact offering rather than a bare model_id.
+    picker. When `project_id` is given and the tenant has grants configured, narrows to
+    that project's effective offering set (spec §5) — otherwise (no grants yet, or no
+    project context) stays tenant-wide, unchanged from before this feature."""
+    from shared.services.model_grants import effective_project_offerings  # noqa: PLC0415
 
-    Returns {options:[{offering_id, provider_id, display_name, provider, model_id,
-    is_default}], default_offering_id, default_model_id}. Explicit p.tenant_id
-    filter is defence-in-depth under superuser dev connections (RLS enforces
-    isolation in production)."""
-    # TENANT-WIDE: the picker offers every valid+enabled offering the org owns — the same
-    # set the resolver can run on. `workspace_id` is accepted for call-site compatibility
-    # but no longer narrows the options (one source of truth across UI + resolver).
     async with get_db_session_for_tenant(tenant_id) as s:
         rows = (await s.execute(text(
             "SELECT o.id AS offering_id, o.model_id, o.is_default, "
@@ -385,6 +379,11 @@ async def get_options(tenant_id: str, workspace_id: str | None = None) -> dict:
             "WHERE o.enabled = true AND p.status = 'valid' AND p.tenant_id = :t AND o.tenant_id = :t"
             " ORDER BY p.display_name, p.provider, o.model_id"
         ), {"t": tenant_id})).fetchall()
+
+    effective_ids = await effective_project_offerings(tenant_id, project_id)
+    if effective_ids is not None:
+        rows = [r for r in rows if str(r.offering_id) in effective_ids]
+
     options = [{
         "offering_id": str(r.offering_id),
         "provider_id": str(r.provider_id),
