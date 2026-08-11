@@ -52,7 +52,8 @@ def _secret_ref(provider_id: str) -> str:
 async def _provider_row(s, provider_id: str):
     return (await s.execute(
         text("SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-             "workspace_id, api_base, is_custom "
+             "workspace_id, api_base, is_custom, "
+             "approval_status, approval_decided_by, approval_decided_at, approval_reason "
              "FROM model_providers WHERE id = :id"),
         {"id": provider_id},
     )).first()
@@ -82,6 +83,7 @@ async def _offerings_for(s, provider_id: str) -> list[dict]:
 
 
 def _provider_dict(row, offerings: list[dict]) -> dict:
+    approval_decided_at = getattr(row, "approval_decided_at", None)
     return {
         "id": str(row.id), "provider": row.provider, "display_name": row.display_name,
         "secret_ref": row.secret_ref, "status": row.status,
@@ -90,6 +92,14 @@ def _provider_dict(row, offerings: list[dict]) -> dict:
         "last_verified_at": row.last_verified_at.isoformat() if row.last_verified_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "offerings": offerings,
+        "workspace_id": str(row.workspace_id) if getattr(row, "workspace_id", None) else None,
+        # Synthetic — there is no has_key column; a connection has a usable key iff
+        # secret_ref is non-null (it's registered with no key, or the key was removed).
+        "has_key": row.secret_ref is not None,
+        "approval_status": getattr(row, "approval_status", None) or "active",
+        "approval_decided_by": getattr(row, "approval_decided_by", None),
+        "approval_decided_at": approval_decided_at.isoformat() if approval_decided_at else None,
+        "approval_reason": getattr(row, "approval_reason", None),
     }
 
 
@@ -204,7 +214,9 @@ async def list_providers(
             params = {"t": tenant_id}
         prows = (await s.execute(
             text(f"SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-                 f"api_base, is_custom FROM model_providers WHERE {where} ORDER BY created_at"),
+                 f"api_base, is_custom, workspace_id, "
+                 f"approval_status, approval_decided_by, approval_decided_at, approval_reason "
+                 f"FROM model_providers WHERE {where} ORDER BY created_at"),
             params,
         )).fetchall()
         out = []
@@ -359,7 +371,8 @@ async def delete_provider(tenant_id: str, provider_id: str, workspace_id: str | 
         secret_ref = row.secret_ref
         # offerings cascade via FK ON DELETE CASCADE
         await s.execute(text("DELETE FROM model_providers WHERE id = :id"), {"id": provider_id})
-    await secret_store.delete_secret(tenant_id, secret_ref)
+    if secret_ref:
+        await secret_store.delete_secret(tenant_id, secret_ref)
     logger.info("model provider deleted tenant=%s id=%s", tenant_id, provider_id)
 
 

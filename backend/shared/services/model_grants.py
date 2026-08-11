@@ -110,6 +110,7 @@ async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
         {
             "provider": g["provider"], "model_id": g["model_id"],
             "credential_id": g["credential_id"], "credential_name": g["credential_name"],
+            "visibility": g["visibility"],
         }
         for g in grants
         if _grant_reaches(g["visibility"], g["business_unit_ids"], workspace_id)
@@ -126,13 +127,29 @@ async def set_bu_grants(tenant_id: str, workspace_id: str, entries: list[dict]) 
     """
     wanted = {_entry_key(e) for e in entries}
     async with get_db_session_for_tenant(tenant_id) as s:
-        rows = (await s.execute(
+        # Validate every non-null credential_id belongs to a real provider for this tenant —
+        # the same check set_org_grants performs. Without it, an unknown id falls through
+        # to the INSERT below and raises an unmapped FK IntegrityError (bare 500).
+        cred_ids = {e.get("credential_id") for e in entries if e.get("credential_id")}
+        if cred_ids:
+            found = {
+                str(r[0]) for r in (await s.execute(
+                    text("SELECT id FROM model_providers WHERE tenant_id = :t AND id = ANY(:ids)"),
+                    {"t": tenant_id, "ids": list(cred_ids)},
+                )).fetchall()
+            }
+            missing = cred_ids - found
+            if missing:
+                raise ValueError(f"unknown credential_id(s): {sorted(missing)}")
+
+        all_rows = (await s.execute(
             text(
                 "SELECT id, provider, model_id, credential_id, visibility, business_unit_ids "
-                "FROM org_model_grants WHERE tenant_id = :t AND visibility = 'specific'"
+                "FROM org_model_grants WHERE tenant_id = :t"
             ), {"t": tenant_id},
         )).fetchall()
-        for r in rows:
+        specific_rows = [r for r in all_rows if r.visibility == "specific"]
+        for r in specific_rows:
             key = (r.provider, r.model_id, str(r.credential_id) if r.credential_id else None)
             bu_ids = set(str(x) for x in (r.business_unit_ids or []))
             if key in wanted:
@@ -143,9 +160,16 @@ async def set_bu_grants(tenant_id: str, workspace_id: str, entries: list[dict]) 
                 text("UPDATE org_model_grants SET business_unit_ids = :bus WHERE id = :id"),
                 {"bus": _json_dumps(sorted(bu_ids)), "id": r.id},
             )
-        # An entry with no existing specific grant row at all needs one created —
-        # e.g. the unit is being granted a model that has no grant yet.
-        existing_keys = {(r.provider, r.model_id, str(r.credential_id) if r.credential_id else None) for r in rows}
+        # An entry needs a brand-new specific grant row only if that (provider, model_id,
+        # credential_id) key has NO existing grant of any kind. If a `global` grant already
+        # covers it, it already reaches every unit (including this one) — inserting a second,
+        # `specific` row for the same key would violate uq_org_grant_cred /
+        # uq_org_grant_null_cred, and would be a no-op anyway since it's already allowed. If a
+        # `specific` grant already exists for the key, the loop above just added this
+        # workspace to it.
+        existing_keys = {
+            (r.provider, r.model_id, str(r.credential_id) if r.credential_id else None) for r in all_rows
+        }
         for e in entries:
             key = _entry_key(e)
             if key not in existing_keys:
@@ -188,6 +212,8 @@ async def get_availability(tenant_id: str, workspace_id: str) -> list[dict]:
     for e in allowed:
         key = (e["provider"], e["model_id"])
         out.append({
+            # e already carries "visibility" from get_bu_allowed — ModelAvailability
+            # (frontend/lib/schemas/model.ts) requires it.
             **e,
             "centrallyCredentialed": key in central,
             "locallyCredentialed": key in local,
@@ -196,10 +222,18 @@ async def get_availability(tenant_id: str, workspace_id: str) -> list[dict]:
 
 
 async def _project_workspace_id(tenant_id: str, project_id: str) -> str:
-    async with get_db_session_for_tenant(tenant_id) as s:
-        row = (await s.execute(
-            text("SELECT workspace_id, tenant_id FROM projects WHERE id = :id"), {"id": project_id},
-        )).first()
+    from sqlalchemy.exc import DBAPIError  # noqa: PLC0415
+
+    try:
+        async with get_db_session_for_tenant(tenant_id) as s:
+            row = (await s.execute(
+                text("SELECT workspace_id, tenant_id FROM projects WHERE id = :id"), {"id": project_id},
+            )).first()
+    except DBAPIError:
+        # A malformed (non-UUID) project_id fails the SQL layer's UUID cast with a raw
+        # DBAPIError — turn it into the same ValueError the "no such project" case raises,
+        # so the router's existing `except ValueError -> 404` handles it uniformly.
+        raise ValueError(f"invalid project_id: {project_id!r}")
     if row is None:
         raise ValueError(f"unknown project {project_id!r}")
     return str(row.workspace_id)
@@ -266,7 +300,7 @@ async def get_grant_matrix(tenant_id: str) -> dict:
         onboarded = (await s.execute(
             text(
                 "SELECT DISTINCT o.provider_id, mp.provider, o.model_id, mp.display_name AS credential_name, "
-                "mp.workspace_id "
+                "mp.workspace_id, (mp.secret_ref IS NOT NULL) AS credential_has_key "
                 "FROM model_offerings o JOIN model_providers mp ON mp.id = o.provider_id "
                 "WHERE o.tenant_id = :t AND mp.tenant_id = :t"
             ), {"t": tenant_id},
@@ -296,7 +330,7 @@ async def get_grant_matrix(tenant_id: str) -> dict:
         rows.append({
             "provider": r.provider, "model_id": r.model_id,
             "credential_id": str(r.provider_id), "credential_name": r.credential_name,
-            "credentialHasKey": True,
+            "credentialHasKey": bool(r.credential_has_key),
             "granted": grant is not None,
             "visibility": grant["visibility"] if grant else None,
             "centrallyCredentialed": r.provider in central_providers,
