@@ -1,17 +1,9 @@
-import { DEFAULT_MODEL_ID, DEFAULT_OFFERING_ID, MODEL_OPTIONS } from "@/lib/mock/model-fixtures";
+import { type NextRequest } from "next/server";
 
-// DUMMY-DATA SEAM: returns fixtures directly. When the LiteLLM-backed catalog
-// lands, replace the body with: return bffProxy("/model/options", { schema: ModelOptions }).
-//
-// force-dynamic: no request param/dynamic API used, so Next's Full Route
-// Cache would otherwise statically cache the first response to disk — see
-// the identical note on app/api/agent-profiles/summary/route.ts.
-export const dynamic = "force-dynamic";
+import { bffProxy } from "@/lib/bff/proxy";
+import { ModelOptions } from "@/lib/schemas/model";
 
-export function GET() {
-  return Response.json({
-    options: MODEL_OPTIONS,
-    default_offering_id: DEFAULT_OFFERING_ID,
-    default_model_id: DEFAULT_MODEL_ID,
-  });
+export function GET(req: NextRequest) {
+  const qs = req.nextUrl.searchParams.toString();
+  return bffProxy(`/model/options${qs ? `?${qs}` : ""}`, { schema: ModelOptions });
 }

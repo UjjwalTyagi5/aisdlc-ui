@@ -88,7 +88,7 @@ from shared.routers.admin import admin_router
 from shared.routers.custom_roles import custom_roles_router
 from shared.routers.auth_local import auth_local_router
 from shared.routers.platform import platform_router
-from shared.routers.model import model_router, model_options_router
+from shared.routers.model import model_router, model_options_router, model_availability_router
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
 from shared.services.artifact_service import _ARTIFACT_CHANNEL
@@ -943,13 +943,15 @@ app.include_router(auth_local_router, tags=["auth"])
 # Platform-tier cross-tenant surface (Phase 3): GET /platform/organizations.
 # platform:*-gated via require_platform_admin (tenant-less callers, D-05 sentinel-marked).
 app.include_router(platform_router, tags=["platform"])
-# Model Provider (BYOK) config + options surface (P2). Both routers carry their
-# OWN router-level require_permission gates baked into the APIRouter definition —
-# model_router on "model:manage", model_options_router on "run:create" — so NO
-# _VIEW_DEP floor here (the per-router dep is the effective gate and carries
-# __rbac_require_permission__ for the D-05 boot scan).
+# Model Provider (BYOK) config + options surface (P2). All three routers carry their
+# OWN router-level require_permission/require_any_permission gates baked into the
+# APIRouter definition — model_router on "model:manage", model_options_router on
+# "run:create", model_availability_router on either — so NO _VIEW_DEP floor here (the
+# per-router dep is the effective gate and carries __rbac_require_permission__ for the
+# D-05 boot scan).
 app.include_router(model_router, tags=["model"])
 app.include_router(model_options_router, tags=["model"])
+app.include_router(model_availability_router, tags=["model"])
 # Capabilities API (D7): read-only per-agent capability view for the UI panel.
 # Native tools are informational only; curated shown with default-on flag.
 # Router carries its own require_permission("artifact:view") gate — no _VIEW_DEP floor.

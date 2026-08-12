@@ -17,6 +17,18 @@ from shared.services.model_catalog import is_known_provider, is_valid_model, pri
 logger = logging.getLogger(__name__)
 
 
+def _is_valid_uuid(value: str) -> bool:
+    """True when `value` is a syntactically valid UUID — guards every place a caller-
+    supplied id is bound against a UUID-typed column, so a malformed id (e.g. a
+    not-yet-migrated fixture identity) fails predictably in Python instead of as an
+    unhandled asyncpg.DataError partway through a query."""
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 class InvalidModelError(Exception):
     """A requested model is not valid for the given provider (catalog check)."""
 
@@ -52,7 +64,8 @@ def _secret_ref(provider_id: str) -> str:
 async def _provider_row(s, provider_id: str):
     return (await s.execute(
         text("SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-             "workspace_id, api_base, is_custom "
+             "workspace_id, api_base, is_custom, "
+             "approval_status, approval_decided_by, approval_decided_at, approval_reason "
              "FROM model_providers WHERE id = :id"),
         {"id": provider_id},
     )).first()
@@ -82,6 +95,7 @@ async def _offerings_for(s, provider_id: str) -> list[dict]:
 
 
 def _provider_dict(row, offerings: list[dict]) -> dict:
+    approval_decided_at = getattr(row, "approval_decided_at", None)
     return {
         "id": str(row.id), "provider": row.provider, "display_name": row.display_name,
         "secret_ref": row.secret_ref, "status": row.status,
@@ -90,16 +104,29 @@ def _provider_dict(row, offerings: list[dict]) -> dict:
         "last_verified_at": row.last_verified_at.isoformat() if row.last_verified_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "offerings": offerings,
+        "workspace_id": str(row.workspace_id) if getattr(row, "workspace_id", None) else None,
+        # Synthetic — there is no has_key column; a connection has a usable key iff
+        # secret_ref is non-null (it's registered with no key, or the key was removed).
+        "has_key": row.secret_ref is not None,
+        "approval_status": getattr(row, "approval_status", None) or "active",
+        "approval_decided_by": getattr(row, "approval_decided_by", None),
+        "approval_decided_at": approval_decided_at.isoformat() if approval_decided_at else None,
+        "approval_reason": getattr(row, "approval_reason", None),
     }
 
 
 async def create_provider(
-    tenant_id: str, *, provider: str, display_name: str, api_key: str,
+    tenant_id: str, *, provider: str, display_name: str, api_key: str | None,
     created_by: str, models: list[dict] | None = None,
     enabled_models: list[str] | None = None, api_base: str | None = None,
     workspace_id: str | None = None,
 ) -> dict:
     """Create a provider connection + its enabled model offerings.
+
+    `api_key` may be None/empty — the connection is registered with no secret (hasKey via
+    a null secret_ref) so its models can be granted centrally while a Business Unit or
+    project supplies its own key later (spec §2.3). `workspace_id` scopes the connection to
+    that BU (NULL = org-wide).
 
     Pass either `models` (rich specs: {model_id, input_price_per_million?,
     output_price_per_million?}) or `enabled_models` (bare ids, back-compat).
@@ -111,18 +138,21 @@ async def create_provider(
     display_name = (display_name or "").strip()
     provider = (provider or "").strip()
     api_base = (api_base or "").strip() or None
+    api_key = (api_key or "").strip() or None
+    if workspace_id and not _is_valid_uuid(workspace_id):
+        # Silently dropping to None here would widen a BU-scoped onboarding to org-wide
+        # (every business unit could suddenly see it) — the opposite of fail-safe. Reject
+        # instead, unlike the read path in list_providers where the same malformed id can
+        # safely fall back to "show nothing BU-specific".
+        raise ValueError(f"workspace_id is not a valid identifier: {workspace_id!r}")
     if models is None:
         models = [{"model_id": m} for m in (enabled_models or [])]
-    if not provider or not display_name or not api_key:
-        raise ValueError("provider, display_name, and api_key are required")
+    if not provider or not display_name:
+        raise ValueError("provider and display_name are required")
     if not models:
         raise ValueError("at least one model is required")
 
     is_custom = not is_known_provider(provider)
-    # Resolve pricing per model: caller-supplied wins, else the LiteLLM catalog.
-    # Governance: a model NOT in the catalog (custom / unlisted / self-hosted)
-    # MUST carry pricing so Cost/Langfuse can attribute spend. Catalog models may
-    # leave price NULL (resolved from LiteLLM's cost map at read time).
     for m in models:
         model_id = (m.get("model_id") or "").strip()
         if not model_id:
@@ -141,16 +171,15 @@ async def create_provider(
         m["input_price_per_million"] = in_p
         m["output_price_per_million"] = out_p
 
-    # Connection names must be unique per tenant (identity for model selection).
     async with get_db_session_for_tenant(tenant_id) as s:
         if await _name_exists(s, tenant_id, display_name):
             raise DuplicateProviderNameError(
                 f"A provider connection named {display_name!r} already exists")
 
     provider_id = str(_uuid.uuid4())
-    secret_ref = _secret_ref(provider_id)
-    # Store the key FIRST so a row never references a missing secret.
-    await secret_store.put_secret(tenant_id, secret_ref, api_key)
+    secret_ref = _secret_ref(provider_id) if api_key else None
+    if api_key:
+        await secret_store.put_secret(tenant_id, secret_ref, api_key)
     try:
         async with get_db_session_for_tenant(tenant_id) as s:
             await s.execute(
@@ -177,27 +206,47 @@ async def create_provider(
             row = await _provider_row(s, provider_id)
             offerings = await _offerings_for(s, provider_id)
     except Exception:
-        # roll back the orphaned secret on row-insert failure
-        await secret_store.delete_secret(tenant_id, secret_ref)
+        if secret_ref:
+            await secret_store.delete_secret(tenant_id, secret_ref)
         raise
-    logger.info("model provider created tenant=%s provider=%s id=%s custom=%s",
-                tenant_id, provider, provider_id, is_custom)
+    logger.info("model provider created tenant=%s provider=%s id=%s custom=%s workspace=%s",
+                tenant_id, provider, provider_id, is_custom, workspace_id)
     return _provider_dict(row, offerings)
 
 
-async def list_providers(tenant_id: str, workspace_id: str | None = None) -> list[dict]:
-    # Providers are TENANT-WIDE: every connection the org adds is visible and usable
-    # org-wide, exactly matching how the model resolver selects them (resolver filters
-    # by tenant only). This keeps one source of truth — what the UI shows is precisely
-    # what agents can run on. `workspace_id` is accepted for call-site compatibility but
-    # no longer narrows results (an earlier workspace filter let "removed" connections
-    # survive unseen because the resolver ignored workspace).
+async def list_providers(
+    tenant_id: str, workspace_id: str | None = None, scope: str | None = None,
+) -> list[dict]:
+    """scope="all" -> every connection (org-wide + every BU's) — the Org Admin's view.
+    A bare workspace_id -> org-wide connections + that one BU's own — a BU/Project Admin's
+    view. Neither -> org-wide only (legacy default, unchanged for existing callers).
+
+    workspace_id is compared against a UUID column: a caller passing a malformed value
+    (e.g. a BU identity that hasn't been migrated to a real backend id yet) must not crash
+    the request. Falling back to the org-wide-only view is safe here — it never surfaces a
+    BU-specific connection, only withholds one — unlike defaulting the WRITE path in
+    create_provider, where the same fallback would incorrectly widen a scoped onboarding to
+    org-wide. Validated in Python (not via a failed-then-retried query) so a malformed id
+    never leaves the session's transaction in an aborted state."""
+    if workspace_id and scope != "all" and not _is_valid_uuid(workspace_id):
+        workspace_id = None
+
     async with get_db_session_for_tenant(tenant_id) as s:
+        if scope == "all":
+            where = "tenant_id = :t"
+            params: dict = {"t": tenant_id}
+        elif workspace_id:
+            where = "tenant_id = :t AND (workspace_id IS NULL OR workspace_id = :w)"
+            params = {"t": tenant_id, "w": workspace_id}
+        else:
+            where = "tenant_id = :t AND workspace_id IS NULL"
+            params = {"t": tenant_id}
         prows = (await s.execute(
-            text("SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-                 "api_base, is_custom "
-                 "FROM model_providers WHERE tenant_id = :t ORDER BY created_at"),
-            {"t": tenant_id},
+            text(f"SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
+                 f"api_base, is_custom, workspace_id, "
+                 f"approval_status, approval_decided_by, approval_decided_at, approval_reason "
+                 f"FROM model_providers WHERE {where} ORDER BY created_at"),
+            params,
         )).fetchall()
         out = []
         for r in prows:
@@ -351,23 +400,18 @@ async def delete_provider(tenant_id: str, provider_id: str, workspace_id: str | 
         secret_ref = row.secret_ref
         # offerings cascade via FK ON DELETE CASCADE
         await s.execute(text("DELETE FROM model_providers WHERE id = :id"), {"id": provider_id})
-    await secret_store.delete_secret(tenant_id, secret_ref)
+    if secret_ref:
+        await secret_store.delete_secret(tenant_id, secret_ref)
     logger.info("model provider deleted tenant=%s id=%s", tenant_id, provider_id)
 
 
-async def get_options(tenant_id: str, workspace_id: str | None = None) -> dict:
+async def get_options(tenant_id: str, workspace_id: str | None = None, project_id: str | None = None) -> dict:
     """Selectable offerings whose provider is verified `valid` — for the model
-    picker. Each option carries full identity (offering_id + provider connection +
-    model) so the UI can disambiguate two keys that expose the same model, and so
-    runs can be dispatched against an exact offering rather than a bare model_id.
+    picker. When `project_id` is given and the tenant has grants configured, narrows to
+    that project's effective offering set (spec §5) — otherwise (no grants yet, or no
+    project context) stays tenant-wide, unchanged from before this feature."""
+    from shared.services.model_grants import effective_project_offerings  # noqa: PLC0415
 
-    Returns {options:[{offering_id, provider_id, display_name, provider, model_id,
-    is_default}], default_offering_id, default_model_id}. Explicit p.tenant_id
-    filter is defence-in-depth under superuser dev connections (RLS enforces
-    isolation in production)."""
-    # TENANT-WIDE: the picker offers every valid+enabled offering the org owns — the same
-    # set the resolver can run on. `workspace_id` is accepted for call-site compatibility
-    # but no longer narrows the options (one source of truth across UI + resolver).
     async with get_db_session_for_tenant(tenant_id) as s:
         rows = (await s.execute(text(
             "SELECT o.id AS offering_id, o.model_id, o.is_default, "
@@ -377,6 +421,12 @@ async def get_options(tenant_id: str, workspace_id: str | None = None) -> dict:
             "WHERE o.enabled = true AND p.status = 'valid' AND p.tenant_id = :t AND o.tenant_id = :t"
             " ORDER BY p.display_name, p.provider, o.model_id"
         ), {"t": tenant_id})).fetchall()
+
+    if project_id:
+        effective_ids = await effective_project_offerings(tenant_id, project_id)
+        if effective_ids is not None:
+            rows = [r for r in rows if str(r.offering_id) in effective_ids]
+
     options = [{
         "offering_id": str(r.offering_id),
         "provider_id": str(r.provider_id),
