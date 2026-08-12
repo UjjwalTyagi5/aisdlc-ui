@@ -66,9 +66,12 @@ class AzureReposConnector(BaseConnector):
     # Per-tenant semaphores for concurrent call limiting (mirrors AzureDevOpsConnector).
     _tenant_semaphores: Dict[str, asyncio.Semaphore] = {}
 
-    def __init__(self, org_url: str) -> None:
+    def __init__(self, org_url: str = "", tenant_id: str = "") -> None:
         # org_url only — no PAT/credential attribute (REQ-M3-10, REQ-M6-14).
-        self._org_url = org_url.rstrip("/")
+        # org_url is defaulted and tenant_id accepted so the connector factory can
+        # construct every kind uniformly; tenant_id is run context, not a credential.
+        self._org_url = (org_url or "").rstrip("/")
+        self._tenant_id = tenant_id
 
     # ── Identity ──────────────────────────────────────────────────────────
 
@@ -86,10 +89,13 @@ class AzureReposConnector(BaseConnector):
         """Resolve PAT ephemerally: Key Vault first, env var fallback.
 
         tenant_id is required — raises ValueError when absent (REQ-M7-01, SC-02).
+        An explicit argument wins; otherwise the instance tenant_id set by the factory
+        is used (mirrors AzureDevOpsConnector).
         Reuses the same ADO credentials as AzureDevOpsConnector — both
         Azure DevOps (boards) and Azure Repos share a single PAT/org.
         Return value is never stored on self and must not be logged/persisted.
         """
+        tenant_id = tenant_id or self._tenant_id
         if not tenant_id:
             raise ValueError(
                 "tenant_id is required for AzureReposConnector.auth_adapter() — "

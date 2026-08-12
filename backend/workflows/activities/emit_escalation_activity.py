@@ -64,6 +64,29 @@ async def emit_escalation_activity(payload: Dict[str, Any]) -> None:
     #   "run.escalation_triggered"  — an escalation notification was raised
     # Plan 06 (SDLCWorkflow) invokes this once per phase timeout; the workflow
     # then proceeds to the escalation path (e.g. notify delegate).
+    # Actually notify a human BEFORE writing the audit row, so the row records what
+    # really happened instead of the hardcoded `delegate_notified: False` that used to
+    # sit here. This is legal inside D-06: an outbound notification is activity I/O,
+    # which is precisely what activities are for (no Temporal workflow APIs are used).
+    #
+    # notify_all never raises and returns per-channel results, so activity retry
+    # semantics are untouched. A Temporal retry WILL re-notify — accepted: a duplicate
+    # escalation is better than a missed one.
+    from shared.services.notify_dispatch import notify_all
+
+    try:
+        from config.env import AGENTIC_BASE_URL
+
+        delivery = await notify_all(
+            str(tenant_uuid),
+            f"SLA breached: run {run_id} has been waiting at the {phase} gate "
+            f"for {int(elapsed_seconds)}s.",
+            title="SLA escalation",
+            link_url=f"{(AGENTIC_BASE_URL or '').rstrip('/')}/runs/{run_id}",
+        )
+    except Exception:  # noqa: BLE001 — defence in depth; notify_all already swallows
+        delivery = {}
+
     now = datetime.now(timezone.utc)
     # tenant_uuid derived from payload above (D-04 — tenant from the entity being processed).
     async with get_db_session_for_tenant(str(tenant_uuid)) as session:
@@ -79,7 +102,10 @@ async def emit_escalation_activity(payload: Dict[str, Any]) -> None:
                 "escalation_triggered": True,
                 "grace_applied": grace_applied,
                 "elapsed_seconds": elapsed_seconds,
-                "delegate_notified": False,
+                # Real delivery outcome, not a literal. False here now means "no
+                # channel is configured, or every configured channel failed".
+                "delegate_notified": any(delivery.values()),
+                "notified_channels": [k for k, v in delivery.items() if v],
                 "event_subtype": "run.escalation_triggered",
             },
             created_at=now,

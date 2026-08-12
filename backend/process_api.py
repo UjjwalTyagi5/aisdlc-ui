@@ -59,6 +59,8 @@ from config.env import (
     JIRA_WEBHOOK_SECRET,
     ADO_WEBHOOK_USER,
     ADO_WEBHOOK_PASSWORD,
+    GHA_WEBHOOK_SECRET,
+    MSGRAPH_WEBHOOK_CLIENT_STATE,
     ENABLE_OIDC,
     ENABLE_SCIM,
     AUTH0_AUDIENCE,
@@ -302,11 +304,16 @@ async def _refresh_health(app: FastAPI) -> None:
 
 
 def _build_connectors_for_health_probe():
-    """Instantiate all five connectors for the health probe loop.
+    """Instantiate every registered connector for the health probe loop.
 
     Each connector is constructed without credentials — credentials are resolved
     ephemerally inside health_check() via auth_adapter(). Instantiation is
     synchronous and cheap (no I/O at construction time).
+
+    Keep this list in sync with config.connectors.router._EXPECTED_CONNECTOR_NAMES:
+    a name expected there but missing here (or whose probe raises, since
+    _probe_all_connectors drops exceptions) makes GET /connectors/health fail its
+    subset test and re-probe inline on every request.
 
     Returns a list of connector instances.
     """
@@ -315,6 +322,9 @@ def _build_connectors_for_health_probe():
     from config.connectors.github_issues import GitHubIssuesConnector
     from config.connectors.azure_repos import AzureReposConnector
     from config.connectors.slack import SlackConnector
+    from config.connectors.github_actions import GitHubActionsConnector
+    from config.connectors.msteams import MSTeamsConnector
+    from config.connectors.sharepoint import SharePointConnector
     from config.env import ADO_ORG_URL, JIRA_URL
 
     return [
@@ -323,11 +333,14 @@ def _build_connectors_for_health_probe():
         GitHubIssuesConnector(),
         AzureReposConnector(ADO_ORG_URL),
         SlackConnector(),
+        GitHubActionsConnector(),
+        MSTeamsConnector(),
+        SharePointConnector(),
     ]
 
 
 async def _probe_all_connectors() -> dict:
-    """Probe all five connectors concurrently and return a health cache dict.
+    """Probe every registered connector concurrently and return a health cache dict.
 
     Uses asyncio.gather(return_exceptions=True) so one slow or failing connector
     cannot block the others (REQ-M6-11, T-m6-08-D).  Probe errors are surfaced
@@ -351,7 +364,7 @@ async def _probe_all_connectors() -> dict:
 
 
 async def _refresh_connector_health(app) -> None:
-    """Background coroutine — re-probes all five connector health probes every 30 seconds.
+    """Background coroutine — re-probes every registered connector every 30 seconds.
 
     Probes ADO, Jira, GitHub Issues, Azure Repos, and Slack concurrently via
     asyncio.gather(return_exceptions=True).  One slow connector cannot block the
@@ -438,6 +451,14 @@ async def lifespan(app: FastAPI):
     app.state.jira_webhook_secret = await load_secret("jira-webhook-secret") or JIRA_WEBHOOK_SECRET
     app.state.ado_webhook_user = await load_secret("ado-webhook-user") or ADO_WEBHOOK_USER
     app.state.ado_webhook_password = await load_secret("ado-webhook-password") or ADO_WEBHOOK_PASSWORD
+    # GitHub Actions uses the same HMAC scheme as GitHub Issues but its own secret, so
+    # the CI webhook can be rotated independently.
+    app.state.gha_webhook_secret = await load_secret("gha-webhook-secret") or GHA_WEBHOOK_SECRET
+    # Microsoft Graph sends NO signature — clientState is the only authentication, so
+    # the /webhooks/msgraph route fails closed when this is unset.
+    app.state.msgraph_client_state = (
+        await load_secret("msgraph-webhook-client-state") or MSGRAPH_WEBHOOK_CLIENT_STATE
+    )
 
     # Redis connection pool for the worker pool (REQ-M3-01). Only created when
     # the feature flag is on — ENABLE_WORKER_POOL=false keeps local dev Redis-free.
@@ -586,12 +607,20 @@ async def lifespan(app: FastAPI):
     webhook_consumer_tasks = []
     if ENABLE_WEBHOOK_TRIGGERS and app.state.temporal_client is not None:
         from webhooks.consumer import WebhookConsumer
+        # github_actions is DELIBERATELY ABSENT from this list. WebhookConsumer starts
+        # an SDLCWorkflow per event, which for a CI stream would launch a full pipeline
+        # several times per push. It gets PipelineRunConsumer below instead.
         for _ck in ["github", "jira", "azure_repos"]:
             _consumer = WebhookConsumer(_ck, app.state.temporal_client)
             webhook_consumer_tasks.append(asyncio.create_task(_consumer.run()))
         logger.info(
             "Webhook consumers started for connectors: github, jira, azure_repos"
         )
+
+        # CI pipeline runs: records state, never starts a workflow.
+        from webhooks.pipeline_consumer import PipelineRunConsumer
+        webhook_consumer_tasks.append(asyncio.create_task(PipelineRunConsumer().run()))
+        logger.info("Pipeline-run consumer started for connector: github_actions")
 
     # Durable async LangGraph checkpointer pool (enterprise) — opened once here so the
     # agent graphs' astream/ainvoke can persist execution state. No-op in local mode

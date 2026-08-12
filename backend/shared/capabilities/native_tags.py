@@ -177,6 +177,10 @@ NATIVE_TAGS: dict[str, dict[str, "str | list[str]"]] = {
         "open_deploy_pr": "vcs.pr.create",
         # artifact.write also emits risk.score / rollback.plan / compliance.evidence / release.decision
         "submit_release": "artifact.write",
+        # Provider-aware CI trigger plus the two concrete providers behind it.
+        "trigger_deployment_pipeline": "deploy.pipeline.trigger",
+        "trigger_azure_pipeline": "deploy.pipeline.trigger",
+        "trigger_github_actions_workflow": "deploy.pipeline.trigger",
     },
     "documentation": {
         "inspect_repo": "repo.read",
@@ -187,6 +191,11 @@ NATIVE_TAGS: dict[str, dict[str, "str | list[str]"]] = {
         # save_document also emits doc.set.compile / doc.rtm.generate / doc.compliance.evidence
         "save_document": "doc.generate",
         "open_docs_pr": "vcs.pr.create",
+        # SharePoint destination — docs.publish and doc.ingest were already in the
+        # taxonomy with zero call sites; these are the first.
+        "publish_to_sharepoint": "docs.publish",
+        "list_sharepoint_documents": "doc.ingest",
+        "ingest_sharepoint_document": "doc.ingest",
     },
     # Other agents tagged in subsequent cohorts — empty until their fan-out tasks land.
 }

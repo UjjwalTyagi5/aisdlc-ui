@@ -45,16 +45,40 @@ def _detect_deploy_via(work_dir: str) -> str:
     return "azure_pipelines"
 
 
+async def _github_actions_available(tenant_id: str) -> bool:
+    """True when this tenant has a working GitHub Actions credential.
+
+    This used to be hardcoded False, which meant the GitHub Actions option in the
+    deploy-target dialog could never be selected no matter what the tenant had
+    connected. Resolves the same `gha-pat` / `gha-owner` refs the Integrations form
+    writes, then verifies with the shared probe. Best-effort by contract — any failure
+    reads as "unavailable" rather than raising into the endpoint.
+    """
+    try:
+        from shared.services import secret_store
+        from shared.services.deployment_probe import probe_github_actions
+
+        pat = await secret_store.get_secret(tenant_id, "gha-pat")
+        if not pat or pat == secret_store.DISCONNECTED_MARKER:
+            return False
+        owner = await secret_store.get_secret(tenant_id, "gha-owner")
+        ok, _account, _err = await probe_github_actions(pat, owner or None)
+        return bool(ok)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @deployment_workspace_router.get("/{project_id}/connectors")
 async def list_deploy_connectors(project_id: str, request: Request) -> dict:
     """Which deployment connectors are available for this tenant (best-effort)."""
     tenant_id: str = request.state.tenant_id
-    azure = github = False
+    azure = False
     try:
         org_url, pat = await ado_repos.resolve_auth(tenant_id)
         azure = bool(org_url and pat)
     except Exception:
         azure = False
+    github = await _github_actions_available(tenant_id)
     return {
         "connectors": [
             {"kind": "azure_pipelines", "label": "Azure Pipelines", "available": azure},
