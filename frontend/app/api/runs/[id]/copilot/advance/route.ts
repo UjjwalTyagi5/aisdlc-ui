@@ -7,7 +7,7 @@ import { getSession } from "@/lib/auth/session";
  * POST /api/runs/[id]/copilot/advance — advance (or re-run) a CONVERSATIONAL run
  * at a gate. Signed BFF proxy to FastAPI `POST /runs/{id}/copilot/advance`; the
  * server re-checks the stage approve permission (no self-approval bypass). Used by
- * the Copilot gate instead of the Temporal `hitl.decision` signal (there is no
+ * the Copilot gate. It replaced the `hitl.decision` signal (there is no
  * workflow for a conversational run).
  */
 export async function POST(

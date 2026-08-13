@@ -17,7 +17,7 @@ import { ARTIFACTS, RUNS } from "./fixtures";
  *   - an `artifact.updated` ping once per minute against a random artifact
  *     so cache-invalidation wiring is visibly exercised.
  *
- * Real implementation will fan-out Temporal signal events here.
+ * Real implementation will fan-out run events here.
  */
 export const workspaceStreamHandler: HttpResponseResolver = () => {
   const encoder = new TextEncoder();

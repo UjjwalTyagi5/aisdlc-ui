@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ArrowLeft, Loader2, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, Loader2, Trash2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -19,7 +19,7 @@ import {
 import { LoadingState } from "@/components/ui/loading-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { RunDetailDrawer } from "@/components/app/run-detail-drawer";
-import { cancelRun, deleteRun, getRun, getWorkerStatus } from "@/lib/api/runs";
+import { cancelRun, deleteRun, getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import type { RunId } from "@/lib/schemas";
 
@@ -73,16 +73,6 @@ export default function RunDetailPage() {
   const status = runQ.data?.status;
   const isActive = !!status && ACTIVE_STATUSES.includes(status);
 
-  // Only probe worker availability while the run is active; poll so the banner
-  // clears once a worker comes online.
-  const workerQ = useQuery({
-    queryKey: ["runs", "worker-status"],
-    queryFn: () => getWorkerStatus(),
-    enabled: isActive,
-    refetchInterval: isActive ? 10_000 : false,
-  });
-  const noWorker = isActive && workerQ.data?.worker_available === false;
-
   return (
     <div className="w-full space-y-5 p-4 md:px-10 md:py-8">
       <div className="flex items-center justify-between gap-3">
@@ -124,25 +114,6 @@ export default function RunDetailPage() {
           </div>
         )}
       </div>
-
-      {noWorker && (
-        <div
-          role="alert"
-          className="border-warning/40 bg-warning/10 flex items-start gap-3 rounded-xl border px-4 py-3"
-        >
-          <AlertTriangle className="text-warning mt-0.5 size-4 shrink-0" aria-hidden />
-          <div className="text-[13px]">
-            <p className="font-semibold">No agent worker is running</p>
-            <p className="text-muted-foreground mt-0.5">
-              This run can&apos;t progress until a Temporal worker is started. Run{" "}
-              <code className="bg-surface-2 rounded px-1 py-0.5 font-mono text-[12px]">
-                python -m workers.temporal_worker
-              </code>{" "}
-              from <code className="font-mono text-[12px]">platform/backend</code>.
-            </p>
-          </div>
-        </div>
-      )}
 
       {runQ.isLoading ? (
         <LoadingState variant="list" rows={4} />

@@ -8,7 +8,7 @@
  *
  * IMPORTANT — defense-in-depth only: this is UX gating, NOT a security
  * boundary. The authoritative check is the backend `require_permission`
- * dependency (and the Temporal `_check_permission_for_phase` signal guard).
+ * dependency (and the `_check_permission_for_phase` gate guard).
  * A user who tampers with client state to reveal a hidden action still gets
  * a 403 from FastAPI on the actual call (T-7.2-25, accepted).
  */

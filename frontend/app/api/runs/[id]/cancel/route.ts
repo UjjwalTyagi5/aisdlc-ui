@@ -3,7 +3,7 @@ import { type NextRequest } from "next/server";
 import { bffFetch } from "@/lib/bff/client";
 import { getSession } from "@/lib/auth/session";
 
-/** POST /api/runs/[id]/cancel — terminate the run's Temporal workflow + mark cancelled. */
+/** POST /api/runs/[id]/cancel — mark the run cancelled. */
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },

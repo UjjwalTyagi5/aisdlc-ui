@@ -2315,7 +2315,7 @@ export const handlers = [
   // ───── Chat ─────
   http.post("/api/chat", chatHandler),
 
-  // ───── HITL signals (Temporal-shaped) ─────
+  // ───── HITL gate decisions ─────
   // Real backend translates this into a workflow signal; the mock just flips
   // the artifact's status to mirror what the agent worker would do downstream.
   http.post("/api/runs/:id/signals/:name", async ({ params, request }) => {

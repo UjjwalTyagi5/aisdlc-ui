@@ -11,7 +11,6 @@ export type RunTrigger = z.infer<typeof RunTrigger>;
 
 export const RunCreateResponse = z.object({
   runId: z.string(),
-  temporalWorkflowId: z.string(),
 });
 export type RunCreateResponse = z.infer<typeof RunCreateResponse>;
 

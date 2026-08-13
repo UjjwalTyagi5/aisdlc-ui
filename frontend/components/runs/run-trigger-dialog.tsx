@@ -49,7 +49,7 @@ export function RunTriggerDialog({
         project_id: projectId,
         offering_id: offeringId ?? null,
         // Run Agent opens the Copilot, which drives the pipeline chat-first — create
-        // a conversational run (no Temporal auto-run) so the Copilot can DRIVE it.
+        // a conversational run so the Copilot can DRIVE it.
         conversational: true,
       }),
     onSuccess: ({ runId }) => {
