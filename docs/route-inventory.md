@@ -1,0 +1,169 @@
+# Frontend → backend route inventory
+
+Generated from a static scan: 229 backend routes, 151 frontend handlers.
+
+- **106** frontend handlers have an exact backend counterpart — wire these first.
+- **38** need a backend endpoint written before they can be wired.
+- **9** are frontend-only by design (cookie/session, SSE, WS ticket) and stay as they are.
+
+## Needs a backend endpoint first
+
+- /admin/cross-bu-grants
+- /admin/role-permissions
+- /admin/users
+- /admin/users/[id]
+- /agent-profiles/[id]/propose
+- /approvals
+- /approvals/[id]/decision
+- /approvals/metrics
+- /auth/access-scope
+- /connectors/grants
+- /cost/spend-series
+- /deployment/[id]/release/[session]
+- /documentation/[id]/docset/[session]
+- /governance-approvals
+- /governance-approvals/[id]/cancel
+- /governance-approvals/[id]/decide
+- /governance-approvals/[id]/escalate
+- /integrations/access
+- /model/allowed/bu
+- /model/allowed/org
+- /model/allowed/project
+- /model/availability
+- /model/grant-matrix
+- /notifications
+- /onboarding
+- /org/overview
+- /projects/[id]/access-requests
+- /projects/[id]/agent-access-overrides
+- /projects/[id]/integrations
+- /projects/[id]/members
+- /projects/[id]/members/[membershipId]
+- /testing/[id]/download/[session]/[filename]
+- /testing/[id]/files/[session]
+- /testing/[id]/qa/[session]
+- /testing/[id]/tests-pr/[session]
+- /testing/[id]/unit-result/[session]
+- /workspaces/[id]/admin
+- /workspaces/[id]/budget-increase-request
+
+## Frontend-only by design (do not wire)
+
+- /auth/login
+- /auth/logout
+- /auth/mock/logout
+- /auth/mock/signin
+- /auth/register
+- /chat
+- /copilot/ws-ticket
+- /runs/[id]/stream
+- /stream
+
+## Has a backend counterpart (wire to FastAPI)
+
+- /admin/assignments
+- /admin/audit
+- /admin/custom-roles
+- /admin/custom-roles/[id]
+- /admin/members
+- /admin/org-members
+- /admin/roles
+- /admin/workspaces
+- /agent-profiles/[id]/publish
+- /agent-profiles/[id]/unpublish
+- /agent-profiles/draft
+- /agent-profiles/preview
+- /agent-profiles/summary
+- /agent-profiles/versions
+- /agent-skills
+- /agent-skills/[skill_key]
+- /agent-skills/[skill_key]/[detail_key]
+- /agent-skills/[skill_key]/versions
+- /agent-skills/toggle
+- /artifacts/[id]
+- /artifacts/export-docx
+- /audit
+- /auth/login
+- /auth/register
+- /capabilities/projects/[id]/agents
+- /capabilities/projects/[id]/agents/[agentId]/curated
+- /code-review/[id]/ado/repos/[project]/[repo]/prs
+- /code-review/[id]/review/prepare
+- /code-review/[id]/reviews
+- /code-review/[id]/reviews/[runId]
+- /connectors
+- /connectors/[kind]
+- /connectors/[kind]/credentials
+- /connectors/[kind]/disconnect
+- /connectors/[kind]/install
+- /connectors/[kind]/oauth/callback
+- /conversations
+- /conversations/[id]
+- /conversations/[id]/attachments
+- /conversations/[id]/messages
+- /cost
+- /cost/budgets
+- /deployment/[id]/ado/repos/[project]/[repo]/prs
+- /deployment/[id]/connectors
+- /deployment/[id]/deploy/prepare
+- /dev/[id]/ado/projects
+- /dev/[id]/ado/projects/[project]/repos
+- /dev/[id]/ado/repos/[project]/[repo]/branches
+- /dev/[id]/prs
+- /dev/[id]/workspace
+- /dev/[id]/workspace/changes
+- /dev/[id]/workspace/file
+- /dev/[id]/workspace/file/changed-lines
+- /dev/[id]/workspace/pull
+- /dev/[id]/workspace/tree
+- /documentation/[id]/ado/repos/[project]/[repo]/prs
+- /documentation/[id]/connectors
+- /documentation/[id]/prepare
+- /mcp/registry
+- /mcp/registry/[id]
+- /mcp/registry/[id]/probe
+- /mcp/registry/test-connection
+- /model/catalog
+- /model/default
+- /model/options
+- /model/providers
+- /model/providers/[id]
+- /model/providers/[id]/verify
+- /projects
+- /projects/[id]
+- /projects/[id]/archive
+- /projects/[id]/artifacts
+- /projects/[id]/board-projects
+- /projects/[id]/ingest-board
+- /projects/[id]/restore
+- /runs
+- /runs/[id]
+- /runs/[id]/approvals
+- /runs/[id]/artifacts
+- /runs/[id]/cancel
+- /runs/[id]/copilot/advance
+- /runs/[id]/copilot/cancel-turn
+- /runs/[id]/copilot/set-stage
+- /runs/[id]/signals/[name]
+- /runs/[id]/stage-files/[stage]/file
+- /runs/[id]/stage-files/[stage]/tree
+- /runs/[id]/steps
+- /runs/[id]/transcript
+- /runs/[id]/workspace/changes
+- /runs/[id]/workspace/file
+- /runs/[id]/workspace/file/changed-lines
+- /runs/[id]/workspace/tree
+- /runs/worker-status
+- /security/[id]/ado/repos/[project]/[repo]/prs
+- /security/[id]/scan/prepare
+- /security/[id]/scans
+- /security/[id]/scans/[runId]
+- /traces
+- /traces/[id]
+- /traces/metrics
+- /traces/project-summary
+- /workspaces
+- /workspaces/[id]
+- /workspaces/[id]/archive
+- /workspaces/[id]/members
+- /workspaces/[id]/members/[userId]
