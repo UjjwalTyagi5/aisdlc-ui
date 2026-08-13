@@ -1,29 +1,27 @@
-import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * The notification bell.
+ * The notification bell — proxied to FastAPI `GET /notifications` and
+ * `POST /notifications/read`.
  *
- * NOT IMPLEMENTED BY THE BACKEND — there is no notifications table and no
- * endpoint. `lib/mock/notification-fixtures` was written BY the governance-
- * approval transitions, so with those gone (see
- * app/api/governance-approvals/route.ts) nothing would write to it even if it
- * stayed: every notification the bell showed was seeded, not earned.
+ * Previously returned an empty list with a comment saying the backend owed it one.
+ * It does now: a `notifications` table written by the governance-request lifecycle,
+ * so "your request was approved" has somewhere to be delivered to.
  *
- * That is also why the unread badge read "1" on a fresh, empty organisation.
- *
- * The scoping note is worth preserving for whoever builds this: a notification is
- * addressed to an identity OR to a role, and the listing must intersect both
- * against the caller. There is no "all notifications" view — an unaddressed list
- * hands a contributor the Org Admin's queue.
- *
- * BACKLOG: FastAPI `GET /notifications` + `POST /notifications/read`.
+ * ADDRESSED, NEVER BROADCAST — the scoping note that used to live here is now a
+ * CHECK constraint. Every row names a PERSON or a ROLE, and the listing intersects
+ * both against the caller. The two exist because they answer different questions:
+ * "your request was approved" belongs to one identity and follows them, while "a
+ * request is waiting on the Business Unit Admin" belongs to whoever holds that role
+ * right now — including someone appointed after it was raised, who would never see a
+ * notification addressed to their predecessor.
  */
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return emptyList();
+  return bffProxy("/notifications");
 }
 
 export async function POST() {
-  return notImplemented("POST /notifications/read");
+  return bffProxy("/notifications/read", { method: "POST" });
 }

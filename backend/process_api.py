@@ -88,6 +88,7 @@ from shared.routers.role_permissions import role_permissions_router
 from shared.routers.org import org_router
 from shared.routers.approvals import approvals_router
 from shared.routers.governance_requests import governance_router
+from shared.routers.notifications import notifications_router
 from shared.routers.spend import spend_router
 from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
@@ -900,6 +901,10 @@ app.include_router(approvals_router, tags=["approvals"])
 # their own; WHO DECIDES is a question about role, not permission, and is answered
 # per request against current_approver_role inside the service.
 app.include_router(governance_router, tags=["governance"])
+# The bell. Floor is artifact:view because everyone signed in has one; WHICH
+# notifications exist for a caller is decided by the address on each row, not
+# by a permission — there is deliberately no "all notifications" view.
+app.include_router(notifications_router, tags=["notifications"])
 app.include_router(spend_router, tags=["cost"])
 # The org -> BU -> project model grant cascade. Registered BEFORE model_router so
 # /model/allowed/* and /model/grant-matrix are matched here rather than falling into

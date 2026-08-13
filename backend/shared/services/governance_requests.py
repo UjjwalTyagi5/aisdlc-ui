@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.governance import routing
 from shared.governance.effects import EffectNotAvailable, apply_on_approve
+from shared.services import notifications
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +404,19 @@ async def create_request(
         to_role=approver,
         note=f"Routed to the {approver.replace('_', ' ')}.",
     )
+    # Tell the queue it landed in. Addressed to the ROLE, not a person: whoever
+    # holds it now is who should act, including someone appointed after this was
+    # raised — a notification addressed to their predecessor would be invisible to
+    # them.
+    await notifications.emit(
+        db,
+        tenant_id=tenant_id,
+        kind="request_approval_required",
+        title=title,
+        body=summary,
+        href="/approvals",
+        recipient_role=approver,
+    )
     await db.flush()
 
     logger.info(
@@ -560,6 +574,15 @@ async def decide(
                 to_role=next_approver,
                 note=reason or "Stage one approved; the agent's owner decides next.",
             )
+            await notifications.emit(
+                db,
+                tenant_id=request["tenantId"],
+                kind="request_approval_required",
+                title=request["title"],
+                body=f"Approved by the {(decider_role or '').replace('_', ' ')} — now yours to decide.",
+                href="/approvals",
+                recipient_role=next_approver,
+            )
             await db.flush()
             return await get_request(db, request["id"])
 
@@ -602,6 +625,17 @@ async def decide(
         actor_id=decider_id,
         actor_role=decider_role,
         note=" ".join(filter(None, [reason, effect_note])) or None,
+    )
+    # The outcome goes to the PERSON who raised it, not to a role. Their request
+    # followed them wherever it climbed; the answer should too.
+    await notifications.emit(
+        db,
+        tenant_id=request["tenantId"],
+        kind=f"request_{status}",
+        title=request["title"],
+        body=" ".join(filter(None, [f"{status.capitalize()} by {decider_name}.", reason, effect_note])),
+        href="/approvals",
+        recipient_user_id=request["requestedById"],
     )
     await db.flush()
 
@@ -673,6 +707,18 @@ async def escalate(
         actor_role=actor_role,
         to_role=nxt,
         note=note,
+    )
+    await notifications.emit(
+        db, tenant_id=request["tenantId"], kind="request_escalated",
+        title=request["title"], body="Escalated to your queue.", href="/approvals",
+        recipient_role=nxt,
+    )
+    # And the initiator, who is the person actually waiting.
+    await notifications.emit(
+        db, tenant_id=request["tenantId"], kind="request_escalated",
+        title=request["title"],
+        body=f"Escalated to the {(nxt or '').replace('_', ' ')}.",
+        href="/approvals", recipient_user_id=request["requestedById"],
     )
     await db.flush()
     logger.info(
