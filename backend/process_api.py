@@ -61,6 +61,7 @@ from config.env import (
     ADO_WEBHOOK_PASSWORD,
     ENABLE_OIDC,
     ENABLE_SCIM,
+    RBAC_CATALOG_AUTOREPAIR,
     AUTH0_AUDIENCE,
     OIDC_ISSUER_URL,
     OIDC_PROVIDER,
@@ -68,7 +69,8 @@ from config.env import (
 from shared.auth.denylist import is_jti_denied
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
-from shared.auth.platform_identity import seed_platform_admins
+from shared.authz.catalog import assert_rbac_catalog
+from shared.auth.bootstrap import seed_org_admins
 from shared.authz.resolver import resolve_permissions_for_user, PermissionResolutionError
 from shared.db import engine, get_db_session_for_tenant, get_db_session_superuser, RESOLVED_POSTGRES_CONN_STRING
 from shared.models.orm import Organization, Run
@@ -86,8 +88,12 @@ from shared.routers.evidence import evidence_router
 from shared.routers.signals import signals_router
 from shared.routers.admin import admin_router
 from shared.routers.custom_roles import custom_roles_router
+from shared.routers.org import org_router
+from shared.routers.approvals import approvals_router
+from shared.routers.governance_requests import governance_router
+from shared.routers.spend import spend_router
+from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
-from shared.routers.platform import platform_router
 from shared.routers.model import model_router, model_options_router
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
@@ -549,9 +555,21 @@ async def lifespan(app: FastAPI):
             "enabled" if getattr(app.state, "redis_denylist", None) is not None else "disabled (local)",
         )
 
-    # Phase 3: idempotently seed env-listed platform admins (users + platform_users).
-    # No-op unless PLATFORM_ADMIN_EMAILS and PLATFORM_ADMIN_PASSWORD are both set.
-    await seed_platform_admins()
+    # RBAC catalogue boot guard. Runs BEFORE any org/admin seeding: grant_role
+    # validates against ALL_ROLES and writes role_bindings with an FK onto roles, so
+    # the catalogue has to be correct before the first binding is written.
+    #
+    # roles/permissions/role_permissions carry no tenant_id and no RLS, so a direct
+    # INSERT escalates every holder of that role in every tenant. This refuses to
+    # start on any difference from shared/authz/catalog.py.
+    async with get_db_session_superuser() as _catalog_session:
+        await assert_rbac_catalog(
+            _catalog_session, autorepair=RBAC_CATALOG_AUTOREPAIR
+        )
+
+    # Seed the single organization + its env-listed org admin(s). Idempotent.
+    # No-op unless ORG_ADMIN_EMAILS and ORG_ADMIN_PASSWORD are both set.
+    await seed_org_admins()
 
     # D-05 / SC-04 / T-7.2-15 boot scan: every APIRoute must be either
     # require_permission-protected, public()/allowlist-marked, or the signals
@@ -688,7 +706,12 @@ app.add_middleware(
 # /auth/ws-ticket is NOT exempt — only authenticated users may mint tickets.
 # /metrics is exempt because the Prometheus scraper sends no JWT; labels carry
 # only agent_type/connector enums, no credentials or user data (T-M3-05).
-_EXEMPT_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics", "/auth/login"}
+# /auth/register joins /auth/login here: both are how a caller obtains a token in the
+# first place, so requiring one would make them unreachable.
+_EXEMPT_PATHS = {
+    "/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics",
+    "/auth/login", "/auth/register",
+}
 
 
 @app.middleware("http")
@@ -893,6 +916,28 @@ app.include_router(webhooks_router, tags=["webhooks"])
 # treats the router as protected even though mutation routes carry their own tighter dep.
 app.include_router(workspaces_router, prefix="/workspaces", tags=["workspaces"], dependencies=[_VIEW_DEP])
 app.include_router(projects_router, prefix="/projects", tags=["projects"], dependencies=[_VIEW_DEP])
+# GET /org/overview — the dashboard rollup. Carries its own require_permission
+# ("artifact:view") so it is D-05-protected without a router-level floor; every
+# figure it returns is scoped to the caller's units inside the handler.
+app.include_router(org_router, tags=["org"])
+# GET /approvals + /approvals/metrics — the cross-run pending-gate queue, derived
+# from runs.gate_pending. GET /cost/spend-series — the dashboard spend chart.
+# Both carry their own require_permission("artifact:view") and scope every figure
+# to the caller's units inside the handler.
+app.include_router(approvals_router, tags=["approvals"])
+# /governance-approvals — the OTHER lane of PRD §33.2, and a separate router on
+# purpose. approvals_router derives gates from runs.gate_pending (an agent paused
+# for a human, no initiator); this one is raised BY a person and climbs tiers.
+# Its floor is artifact:view because every signed-in person may raise one and see
+# their own; WHO DECIDES is a question about role, not permission, and is answered
+# per request against current_approver_role inside the service.
+app.include_router(governance_router, tags=["governance"])
+app.include_router(spend_router, tags=["cost"])
+# The org -> BU -> project model grant cascade. Registered BEFORE model_router so
+# /model/allowed/* and /model/grant-matrix are matched here rather than falling into
+# model_router's model:manage floor — a BU Admin must be able to READ what their
+# unit was granted without holding the permission that changes the catalogue.
+app.include_router(model_grants_router, tags=["model-grants"])
 # runs_router: POST /runs is THE fixed-permission route named by the plan
 # (run:create) — given its OWN per-route dependency below, NOT a router-level
 # floor, because the other /runs/* routes (list/detail/steps/approvals) are
@@ -936,7 +981,7 @@ app.include_router(connectors_resource_router, tags=["connectors"], dependencies
 app.include_router(signals_router, tags=["signals"])
 # admin_router: self-protected via its own router-level _require_admin dependency
 # (admin:* gate, tenant-wide). Mounted under /admin — self-serve RBAC role assignment
-# (the D-09 deferred feature). Cross-tenant blocked by FORCE RLS on user_workspace_roles.
+# (the D-09 deferred feature). Cross-tenant blocked by FORCE RLS on role_bindings.
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
 # custom_roles_router: self-gated via router-level require_permission("role:manage").
 # Carries its own /admin/custom-roles prefix; tenant isolation by FORCE RLS.
@@ -944,9 +989,6 @@ app.include_router(custom_roles_router, tags=["admin"])
 # Local email+password auth (Phase 3): POST /auth/login (JWT-exempt, in _EXEMPT_PATHS)
 # + GET /auth/me (JWT-validated). Both public()-marked for the D-05 boot scan.
 app.include_router(auth_local_router, tags=["auth"])
-# Platform-tier cross-tenant surface (Phase 3): GET /platform/organizations.
-# platform:*-gated via require_platform_admin (tenant-less callers, D-05 sentinel-marked).
-app.include_router(platform_router, tags=["platform"])
 # Model Provider (BYOK) config + options surface (P2). Both routers carry their
 # OWN router-level require_permission gates baked into the APIRouter definition —
 # model_router on "model:manage", model_options_router on "run:create" — so NO
