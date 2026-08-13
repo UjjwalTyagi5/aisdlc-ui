@@ -28,10 +28,11 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, false as sa_false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.env import ENABLE_TEMPORAL, TEMPORAL_TASK_QUEUE
+from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Project, Run
@@ -52,6 +53,13 @@ from shared.routers._schemas import (
 from workflows.sdlc_workflow import SDLCWorkflow
 
 runs_router = APIRouter()
+
+# Aliases so the scope helpers read the same way here as in the other routers.
+_uuid = uuid
+
+
+def _user_id(request: Request) -> str:
+    return getattr(request.state, "user_id", "") or ""
 
 
 class ApprovalIn(BaseModel):
@@ -217,10 +225,29 @@ async def list_runs(
     page_size: int = 20,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Return a paginated list of runs scoped to the requesting tenant."""
+    """Paginated runs, narrowed to the projects this caller may see."""
     tenant_id = request.state.tenant_id
 
     stmt = select(Run).where(Run.tenant_id == tenant_id)
+
+    # Runs were scoped by tenant ALONE — this module did not reference role_bindings
+    # at all, so any authenticated person could list every run in the organization,
+    # including their stages, statuses and the projects they belong to. The Next.js
+    # tier filtered them by project afterwards; nothing did on this side.
+    #
+    # Applied before paging, for the same reason as the projects list: filtering after
+    # would return short pages and a total describing runs the caller cannot open.
+    visible = await visible_project_ids(
+        db, user_id=_user_id(request), tenant_id=str(tenant_id)
+    )
+    if visible is not None:
+        if not visible:
+            # No bindings: no runs. Expressed as a false predicate rather than an
+            # empty IN (), which some planners treat as unconstrained.
+            stmt = stmt.where(sa_false())
+        else:
+            stmt = stmt.where(Run.project_id.in_([_uuid.UUID(p) for p in visible]))
+
     if project_id:
         stmt = stmt.where(Run.project_id == project_id)
     if status:
@@ -281,7 +308,7 @@ async def get_run(
 ):
     """Return a single run by ID, scoped to the requesting tenant."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     return RunOut.from_orm_run(run)
 
 
@@ -293,7 +320,7 @@ async def get_run_artifacts(
 ):
     """Panel-ready artifact list for a run (reload/replay). Tenant-scoped."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     from shared.services.orchestrator.artifacts_view import sections_from_run
     return {"artifacts": sections_from_run(run)}
 
@@ -307,7 +334,7 @@ async def get_run_transcript(
     """Persisted Copilot conversation for a run (session_id == run_id), so reopening a
     run replays its chat. Tenant-scoped; returns [] on any miss."""
     tenant_id = request.state.tenant_id
-    await _get_run_or_404(db, run_id, tenant_id)  # 404 + tenant guard
+    await _get_run_or_404(db, run_id, tenant_id, request=request)  # 404 + tenant guard
     from shared.services.conversation_service import get_transcript
     rows = await get_transcript(run_id, tenant_id=tenant_id)
     messages = []
@@ -495,7 +522,7 @@ async def get_run_workspace_changes(
 ):
     """Files the dev agent changed vs the branch base — for tree change decorations."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_dev_work_dir(run_id, run.development_artifacts, tenant_id)
@@ -514,7 +541,7 @@ async def get_run_workspace_file_changed_lines(
 ):
     """New-file line numbers changed for *path* vs the branch base (for code highlighting)."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_dev_work_dir(run_id, run.development_artifacts, tenant_id)
@@ -536,7 +563,7 @@ async def get_run_workspace_tree(
     """Flat file list of the run's Development workspace (the cloned repo), so the
     Copilot panel can show the code + structure. {ready:false} when nothing cloned."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_dev_work_dir(run_id, run.development_artifacts, tenant_id)
@@ -555,7 +582,7 @@ async def get_run_workspace_file(
 ):
     """Read one repo-relative file from the run's Development workspace (traversal-guarded)."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_dev_work_dir(run_id, run.development_artifacts, tenant_id)
@@ -580,7 +607,7 @@ async def get_run_stage_tree(
     panel can browse any downstream agent's files the same way it browses Development's
     workspace. {ready:false} when nothing has been generated for this stage yet."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_stage_output_dir(
@@ -606,7 +633,7 @@ async def get_run_stage_file(
 ):
     """Read one file from *stage*'s generated output dir (traversal-guarded)."""
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     import asyncio
     from shared.services import workspace_fs
     wd = await _run_stage_output_dir(
@@ -642,7 +669,7 @@ async def cancel_run(
     already gone/complete we still mark the row cancelled. Terminal runs are left as-is.
     """
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
 
     if run.status in ("approved", "rejected", "failed", "merged", "cancelled"):
         return RunOut.from_orm_run(run)  # already terminal — no-op
@@ -680,7 +707,7 @@ async def delete_run(
     gated on workspace:manage (admin/delivery_lead).
     """
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
 
     if ENABLE_TEMPORAL and run.temporal_workflow_id and run.status in ("queued", "running", "awaiting_approval", "awaiting_clarification"):
         client = request.app.state.temporal_client
@@ -715,7 +742,7 @@ async def get_run_steps(
     StepId: f"{run_id}:{stage}". Real steps table deferred to M5 Temporal work.
     """
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
     steps = derive_steps_from_run(run)
     return steps
 
@@ -733,7 +760,7 @@ async def record_approval(
     The AuditEvent payload carries the decision + reason for the audit trail.
     """
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
 
     actor_id = getattr(request.state, "user_id", "system")
     now = datetime.now(timezone.utc)
@@ -803,7 +830,7 @@ async def copilot_advance(
     from shared.services.orchestrator import progression
 
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
 
     stage = body.stage or run.current_stage or run.stage or "requirements"
     decision = (body.decision or "").lower()
@@ -900,7 +927,7 @@ async def copilot_set_stage(
     from shared.services.orchestrator.gate_routing import can_user_approve
 
     tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id)
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
 
     stage = body.stage
     if stage not in progression.STAGE_ORDER:
@@ -971,7 +998,7 @@ async def copilot_cancel_turn(
     """
     tenant_id = request.state.tenant_id
     # Tenant-scoped existence check (also gives a clean 404 for a bogus id).
-    await _get_run_or_404(db, run_id, tenant_id)
+    await _get_run_or_404(db, run_id, tenant_id, request=request)
     try:
         from agents_orchestrator.orchestrator.copilot_api import request_turn_cancel
         request_turn_cancel(run_id)
@@ -980,10 +1007,22 @@ async def copilot_cancel_turn(
     return CopilotCancelTurnOut(ok=True)
 
 
-async def _get_run_or_404(db: AsyncSession, run_id: str, tenant_id: str) -> Run:
-    """Fetch a Run by id scoped to tenant_id, raising 404 if not found.
+async def _get_run_or_404(
+    db: AsyncSession, run_id: str, tenant_id: str, *, request: Request
+) -> Run:
+    """Fetch a Run by id, scoped to the tenant AND to what this caller may see.
 
-    The tenant_id filter prevents cross-tenant reads (T-M4-01).
+    The tenant_id filter prevents cross-tenant reads (T-M4-01). The scope check is
+    the second half: every route in this module reached a run through here with the
+    tenant filter alone, so any authenticated person could read any run in the
+    organization — its stages, artifacts, transcript and workspace files — by id.
+
+    `request` is REQUIRED and keyword-only on purpose. This is the chokepoint for
+    sixteen routes; an optional parameter here is a check that will eventually be
+    forgotten at one call site, and that one site is the hole.
+
+    404 for a run outside the caller's scope, matching the cross-tenant answer — two
+    different codes for "you cannot have this" tells the caller which runs exist.
     """
     result = await db.execute(
         select(Run).where(
@@ -993,5 +1032,26 @@ async def _get_run_or_404(db: AsyncSession, run_id: str, tenant_id: str) -> Run:
     )
     run = result.scalar_one_or_none()
     if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    # A run with no project (webhook-triggered against a provider key, project_id is
+    # nullable) has no scope chain to walk. Org-wide callers still see it; nobody else
+    # does, because there is no unit or project that could make it theirs.
+    if run.project_id is None:
+        visible = await visible_project_ids(
+            db, user_id=_user_id(request), tenant_id=str(tenant_id)
+        )
+        if visible is not None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return run
+
+    if not await can_perform(
+        db,
+        user_id=_user_id(request),
+        permission="artifact:view",
+        tenant_id=str(tenant_id),
+        resource_kind="project",
+        resource_id=str(run.project_id),
+    ):
         raise HTTPException(status_code=404, detail="Run not found")
     return run

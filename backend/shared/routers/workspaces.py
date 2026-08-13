@@ -18,12 +18,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import false as False_
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
 from shared.authz.permissions import ROLE_TIER
-from shared.authz.read_scope import is_org_wide
+from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Project, Role, RoleBinding, UsageMonthly, User, Workspace
 
@@ -245,34 +246,25 @@ async def list_workspaces(request: Request, db: AsyncSession = Depends(get_db_se
     tenant_id = _tenant_id(request)
     tenant_uuid = _uuid.UUID(tenant_id)
 
-    # Org-wide callers see every unit; everyone else — including a Business Unit
-    # Admin, who holds workspace:manage only for their own unit — sees just the
-    # units they hold a business-unit RoleBinding for.
-    if _sees_every_workspace(request):
-        rows = (
-            await db.execute(
-                select(Workspace)
-                .where(Workspace.organization_id == tenant_uuid)
-                .order_by(Workspace.display_name)
-            )
-        ).scalars().all()
-    else:
-        user_id = getattr(request.state, "user_id", None) or ""
-        member_ws_ids = select(RoleBinding.scope_id).where(
-            RoleBinding.user_id == user_id,
-            RoleBinding.tenant_id == tenant_uuid,
-            RoleBinding.scope_kind == "business_unit",
+    # Org-wide callers see every unit; everyone else sees the units they may READ.
+    #
+    # THAT INCLUDES THE PARENT UNIT OF A PROJECT THEY ARE ON, which is what
+    # `allowed_workspace_ids` adds over the binding query this used to run inline.
+    # A Developer bound to one project held no business-unit binding, so this
+    # returned an empty list to them — and with it their project's unit name, cap
+    # and connectors, none of which they can work without. Worse, it made the unit
+    # unpickable: the request form asks which unit an ask belongs to, and theirs
+    # was not on the list, so a contributor could not raise a request at all.
+    #
+    # Reading the parent unit is not administering it: `administered_workspace_ids`
+    # is the narrower question and every write still asks that one.
+    allowed = await allowed_workspace_ids(db, request)
+    query = select(Workspace).where(Workspace.organization_id == tenant_uuid)
+    if allowed is not None:
+        query = query.where(
+            Workspace.id.in_([_uuid.UUID(w) for w in allowed]) if allowed else False_()
         )
-        rows = (
-            await db.execute(
-                select(Workspace)
-                .where(
-                    Workspace.organization_id == tenant_uuid,
-                    Workspace.id.in_(member_ws_ids),
-                )
-                .order_by(Workspace.display_name)
-            )
-        ).scalars().all()
+    rows = (await db.execute(query.order_by(Workspace.display_name))).scalars().all()
 
     projects, members = await _counts(db, tenant_uuid)
     spend = await _workspace_spend_map(db, tenant_uuid) if _can_view_cost(request) else {}

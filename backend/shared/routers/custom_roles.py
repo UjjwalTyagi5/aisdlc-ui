@@ -1,9 +1,25 @@
-"""Custom-role CRUD — org admins define tenant-scoped roles (role:manage, D-1 hybrid).
+"""Custom-role CRUD — tenant-defined roles composed from the permission catalogue.
 
 Tenant isolation is enforced by FORCE RLS on custom_roles / custom_role_permissions:
 all reads/writes go through get_db_session (request-scoped, sets app.current_tenant_id).
 Custom roles are composed only from the global permission catalog; wildcards
 (admin:* / platform:*) are NOT grantable to a custom role.
+
+NO ESCALATION: a creator cannot put a permission into a custom role that they do not
+themselves hold. Without that rule this endpoint was a straightforward privilege
+escalation — `role:manage` is held by a Business Unit Admin, and any catalogue
+permission could be packaged into a role and then assigned, including to themselves.
+The catalogue check alone only ever asked whether a permission EXISTS.
+
+The creator's permissions are re-resolved from the database rather than read from the
+JWT. Everywhere else the token is the authority, and rightly so; here it is not, because
+a custom role OUTLIVES the session that created it. A token issued before a demotion
+stays valid for its lifetime, and using it would let a just-demoted admin mint a role
+carrying the permissions they no longer have — a durable grant from a stale claim.
+
+OWNER SCOPE: an organization-scoped role is assignable anywhere in the tenant; a
+business-unit-scoped role only within the unit that owns it. That is what lets a BU
+Admin define a role for their own unit without defining it for every unit.
 """
 from __future__ import annotations
 
@@ -17,7 +33,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
-from shared.authz.permissions import ALL_PERMISSIONS
+from shared.authz.permissions import ALL_PERMISSIONS, has_permission
+from shared.authz.read_scope import assert_can_write_workspace, is_org_wide
+from shared.authz.resolver import resolve_permissions_for_user
 from shared.db import get_db_session
 from shared.models.orm import CustomRole
 
@@ -37,6 +55,48 @@ def _validate_permissions(perms: list[str]) -> None:
             raise ValueError(f"permission not grantable to a custom role: {p!r}")
 
 
+async def _assert_creator_holds(request: Request, requested: list[str]) -> None:
+    """Refuse to package a permission the caller does not hold. 403 on any excess.
+
+    `admin:*` passes everything by design — the wildcard IS the full catalogue, so an
+    Organization Admin composing any role is not an escalation.
+
+    The excess permissions ARE named in the error, unlike the deliberately opaque 403
+    elsewhere. They are the caller's own permissions being described back to them, so
+    there is nothing to disclose, and "forbidden" with no indication of which of
+    fifteen ticked boxes was the problem is unusable.
+    """
+    if not requested:
+        # Nothing requested, nothing to escalate. Returning early also spares a DB
+        # round trip on the empty-role case, which the UI issues while a form is
+        # still being filled in.
+        return
+
+    user_id = getattr(request.state, "user_id", "") or ""
+    tenant_id = getattr(request.state, "tenant_id", "") or ""
+    if not user_id or not tenant_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    held = await resolve_permissions_for_user(user_id, tenant_id)
+    if has_permission(held, "admin:*"):
+        return
+
+    held_set = set(held)
+    excess = sorted(p for p in requested if p not in held_set)
+    if excess:
+        logger.warning(
+            "custom role creation refused: user=%s tried to grant permissions they lack: %s",
+            user_id, excess,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "You cannot grant permissions you do not hold: "
+                + ", ".join(excess)
+            ),
+        )
+
+
 class CustomRoleIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=255)
@@ -48,6 +108,9 @@ class CustomRoleOut(BaseModel):
     name: str
     description: str | None
     permissions: list[str]
+    scopeKind: str = "organization"
+    scopeId: str | None = None
+    createdBy: str | None = None
 
 
 class OkOut(BaseModel):
@@ -61,24 +124,41 @@ def _tenant_id(request: Request) -> str:
     return tid
 
 
-@custom_roles_router.post("", response_model=CustomRoleOut, status_code=201)
-async def create_custom_role(
-    request: Request, body: CustomRoleIn, db: AsyncSession = Depends(get_db_session)
+async def _create(
+    request: Request,
+    body: CustomRoleIn,
+    db: AsyncSession,
+    *,
+    scope_kind: str,
+    scope_id: str,
 ) -> CustomRoleOut:
+    """Shared creation path for both the org-scoped and unit-scoped endpoints.
+
+    One function so the two can never diverge on the checks that matter — the
+    catalogue validation and, above all, the no-escalation rule.
+    """
     tenant_id = _tenant_id(request)
     try:
         _validate_permissions(body.permissions)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
+    await _assert_creator_holds(request, body.permissions)
+
+    created_by = getattr(request.state, "user_id", "") or None
     role_id = _uuid.uuid4()
     try:
         await db.execute(
             text(
-                "INSERT INTO custom_roles (id, tenant_id, name, description) "
-                "VALUES (:id, :t, :name, :descr)"
+                "INSERT INTO custom_roles "
+                "  (id, tenant_id, name, description, scope_kind, scope_id, created_by) "
+                "VALUES (:id, :t, :name, :descr, :sk, :sid, :by)"
             ),
-            {"id": str(role_id), "t": tenant_id, "name": body.name, "descr": body.description},
+            {
+                "id": str(role_id), "t": tenant_id, "name": body.name,
+                "descr": body.description, "sk": scope_kind, "sid": scope_id,
+                "by": created_by,
+            },
         )
     except IntegrityError:
         raise HTTPException(status_code=409, detail=f"role '{body.name}' already exists")
@@ -90,9 +170,63 @@ async def create_custom_role(
             ),
             {"id": str(_uuid.uuid4()), "rid": str(role_id), "p": p, "t": tenant_id},
         )
-    return CustomRoleOut(
-        id=str(role_id), name=body.name, description=body.description, permissions=body.permissions
+    logger.info(
+        "custom role created: name=%s scope=%s:%s by=%s perms=%d",
+        body.name, scope_kind, scope_id, created_by, len(body.permissions),
     )
+    return CustomRoleOut(
+        id=str(role_id), name=body.name, description=body.description,
+        permissions=body.permissions, scopeKind=scope_kind, scopeId=scope_id,
+        createdBy=created_by,
+    )
+
+
+@custom_roles_router.post("", response_model=CustomRoleOut, status_code=201)
+async def create_custom_role(
+    request: Request, body: CustomRoleIn, db: AsyncSession = Depends(get_db_session)
+) -> CustomRoleOut:
+    """Create an ORGANIZATION-scoped custom role — assignable anywhere in the tenant.
+
+    Org-wide authority required. `role:manage` alone is not enough: a Business Unit
+    Admin holds it for their own unit, and a role assignable across every unit is not
+    theirs to define. They use the unit-scoped endpoint below instead.
+    """
+    tenant_id = _tenant_id(request)
+    if not is_org_wide(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only an Organization Admin can create an organization-wide role. "
+                "Create it for your business unit instead."
+            ),
+        )
+    return await _create(
+        request, body, db, scope_kind="organization", scope_id=tenant_id
+    )
+
+
+@custom_roles_router.post(
+    "/business-unit/{workspace_id}", response_model=CustomRoleOut, status_code=201
+)
+async def create_bu_custom_role(
+    workspace_id: str,
+    request: Request,
+    body: CustomRoleIn,
+    db: AsyncSession = Depends(get_db_session),
+) -> CustomRoleOut:
+    """Create a role owned by one business unit, assignable only inside it.
+
+    Guarded by the same write check as every other unit-scoped write, so a BU Admin
+    cannot define a role inside a unit they do not administer.
+    """
+    _tenant_id(request)
+    try:
+        unit = str(_uuid.UUID(workspace_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="workspace_id must be a UUID")
+
+    await assert_can_write_workspace(db, request, unit)
+    return await _create(request, body, db, scope_kind="business_unit", scope_id=unit)
 
 
 @custom_roles_router.get("", response_model=list[CustomRoleOut])
@@ -110,7 +244,13 @@ async def list_custom_roles(
             )
         ).scalars().all()
         out.append(
-            CustomRoleOut(id=str(r.id), name=r.name, description=r.description, permissions=list(perms))
+            CustomRoleOut(
+                id=str(r.id), name=r.name, description=r.description,
+                permissions=list(perms),
+                scopeKind=getattr(r, "scope_kind", "organization") or "organization",
+                scopeId=str(r.scope_id) if getattr(r, "scope_id", None) else None,
+                createdBy=getattr(r, "created_by", None),
+            )
         )
     return out
 

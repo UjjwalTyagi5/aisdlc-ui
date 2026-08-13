@@ -14,7 +14,7 @@ import logging
 from sqlalchemy import select
 
 from shared.db import get_db_session_for_tenant
-from shared.models.orm import CustomRolePermission, RolePermission, UserWorkspaceRole
+from shared.models.orm import CustomRolePermission, RolePermission, RoleBinding
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,13 @@ class PermissionResolutionError(Exception):
 async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str]:
     """Return the sorted, deduplicated effective permission set for a user.
 
-    Queries user_workspace_roles JOIN role_permissions under the tenant GUC so RLS
+    Queries role_bindings JOIN role_permissions under the tenant GUC so RLS
     restricts the result to the caller's tenant automatically (D-03).
+
+    Unions across every binding the user holds regardless of scope_kind — a person
+    with org-level, business-unit-level and project-level bindings gets the union of
+    all three. WHICH scope each permission applies to is answered separately by
+    shared/authz/scope.py; this function only answers WHAT the user may do.
 
     Returns [] immediately when tenant_id is falsy — fail-closed (D-02).  Returns []
     for a user with no role assignment (genuine empty set).  Raises
@@ -49,18 +54,18 @@ async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str
             default_stmt = (
                 select(RolePermission.permission_name)
                 .join(
-                    UserWorkspaceRole,
-                    UserWorkspaceRole.role_name == RolePermission.role_name,
+                    RoleBinding,
+                    RoleBinding.role_name == RolePermission.role_name,
                 )
-                .where(UserWorkspaceRole.user_id == user_id)
+                .where(RoleBinding.user_id == user_id)
             )
             custom_stmt = (
                 select(CustomRolePermission.permission_name)
                 .join(
-                    UserWorkspaceRole,
-                    UserWorkspaceRole.custom_role_id == CustomRolePermission.custom_role_id,
+                    RoleBinding,
+                    RoleBinding.custom_role_id == CustomRolePermission.custom_role_id,
                 )
-                .where(UserWorkspaceRole.user_id == user_id)
+                .where(RoleBinding.user_id == user_id)
             )
             default_rows = (await session.execute(default_stmt)).scalars().all()
             custom_rows = (await session.execute(custom_stmt)).scalars().all()
@@ -87,8 +92,8 @@ async def resolve_primary_role_for_user(user_id: str, tenant_id: str) -> str:
     try:
         async with get_db_session_for_tenant(tenant_id) as session:
             stmt = (
-                select(UserWorkspaceRole.role_name)
-                .where(UserWorkspaceRole.user_id == user_id)
+                select(RoleBinding.role_name)
+                .where(RoleBinding.user_id == user_id)
                 .limit(1)
             )
             result = await session.execute(stmt)
