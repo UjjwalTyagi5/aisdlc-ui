@@ -1,40 +1,40 @@
-import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Governance requests — the Requests & Approvals queue.
+ * Governance requests — proxied to FastAPI `GET/POST /governance-approvals`.
  *
- * NOT IMPLEMENTED BY THE BACKEND, despite appearances. FastAPI does have
- * `GET/POST /approvals/requests` over an `approval_requests` table, and it is
- * NOT this: the two disagree on nearly every field the queue renders.
+ * The backend now models these as their own thing rather than as a variant of
+ * `approval_requests`: sixteen types, seven statuses, a priority, attachments and
+ * an append-only timeline. See `backend/migrations/versions/0010_*` for why the
+ * two lanes are not one table.
  *
- *   this queue needs        approval_requests has
- *   ─────────────────────   ──────────────────────────────────────────────
- *   16 request types        request_type ∈ {standard, specialist_required}
- *   7 lifecycle statuses    status without submitted/escalated/cancelled
- *   workspace + project     scope_kind/scope_id, unresolved to a name
- *   priority                —
- *   attachments             —
- *   a timeline of events    decided_by/decided_at, one terminal decision
- *   requestedByRole         —
+ * EVERY GUARD THAT USED TO RUN HERE IS NOW THE BACKEND'S, and that is the point of
+ * the move rather than a side effect. The old handler checked `canRaiseRequest`,
+ * `canRaiseType` and the requester's scope against fixture stores — real rules
+ * enforced against imaginary data. They are the same rules, applied to bindings:
  *
- * Adapting one to the other means inventing a type, a priority and a timeline
- * per row, which is the fabrication this sweep exists to remove — a queue that
- * showed every real request as "Other · normal priority · no history" would be
- * lying more quietly, not less. So: empty until the backend models governance
- * requests as its own thing.
+ *   - an Organization Admin cannot raise one (nothing sits above them to decide it)
+ *   - a tier can only raise what it cannot grant itself
+ *   - the requester's role and the approver are taken from the session, never the
+ *     body — a client that could name its own role would pick the one whose chain
+ *     is shortest
  *
- * This is where the dashboard's "Approvals pending: 7" came from. The table
- * holds zero rows; all seven were `lib/mock/governance-approval-fixtures`.
- *
- * BACKLOG: FastAPI `GET/POST /governance-approvals` carrying the fields above,
- * plus the decide / cancel / escalate transitions in the sibling routes.
+ * `workspaceId` is forwarded as the caller's own narrowing choice (the queue's
+ * "this unit" filter). It is not the boundary: the backend intersects it with what
+ * the viewer may read, and adds back anything they raised themselves wherever it
+ * has climbed to.
  */
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return emptyList();
+export async function GET(req: NextRequest) {
+  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
+  const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  return bffProxy(`/governance-approvals${qs}`);
 }
 
-export async function POST() {
-  return notImplemented("POST /governance-approvals");
+export async function POST(req: NextRequest) {
+  const body: unknown = await req.json();
+  return bffProxy("/governance-approvals", { method: "POST", body });
 }

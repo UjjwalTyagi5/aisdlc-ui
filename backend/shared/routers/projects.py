@@ -31,15 +31,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import logging
 
+from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.effective_role import actor_display_name, effective_platform_role
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.models.orm import Project, Run, Workspace
+from shared.services import governance_requests as governance_service
 from shared.routers._schemas import Paginated, Pagination, ProjectOut, _slugify
 
 logger = logging.getLogger(__name__)
 
 projects_router = APIRouter()
+
+# Alias so the scope helpers read the same way here as in the other routers.
+_uuid = uuid
+
+
+def _user_id(request: Request) -> str:
+    return getattr(request.state, "user_id", "") or ""
 
 
 class ProjectCreateIn(BaseModel):
@@ -80,7 +90,7 @@ async def list_projects(
     search: Optional[str] = None,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Return a paginated list of projects scoped to the active workspace."""
+    """Paginated projects: the active workspace, narrowed to what the caller may see."""
     tenant_id = request.state.tenant_id
     workspace_id = await active_workspace_for_request(request, str(tenant_id))
 
@@ -89,6 +99,21 @@ async def list_projects(
         Project.workspace_id == workspace_id,
         Project.archived == archived,
     )
+
+    # Scope filter, applied BEFORE paging. RLS confines this to the tenant and the
+    # selector confines it to one unit, but neither answers "which projects in that
+    # unit are this person's". Until now nothing did on this side: the Next.js tier
+    # filtered the rows after the fact, so removing that filter widened the endpoint
+    # from "my projects" to "every project in the unit".
+    #
+    # Filtering after paging would leak the real total and hand back short pages, so
+    # the count in "12 projects" would describe a set the viewer cannot open.
+    visible = await visible_project_ids(db, user_id=_user_id(request), tenant_id=str(tenant_id))
+    if visible is not None:
+        # [] is a real answer — a user with no bindings sees nothing — so it must not
+        # be folded into "no filter".
+        stmt = stmt.where(Project.id.in_([_uuid.UUID(p) for p in visible]))
+
     if search:
         stmt = stmt.where(Project.display_name.ilike(f"%{search}%"))
 
@@ -111,9 +136,26 @@ async def get_project(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Return a single project by ID, scoped to the requesting tenant."""
+    """Return a single project by ID, if this caller may see that project."""
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
+
+    # Resource-aware check. The router-level view floor only asks whether the caller
+    # holds artifact:view SOMEWHERE in the tenant, which every role does — so it let
+    # anyone open any project by guessing or pasting an id.
+    #
+    # 404, not 403: a project the caller may not see must not be confirmed to exist,
+    # and _get_or_404 already answers with 404 for a project in another tenant. Two
+    # different codes for "you can't have this" is itself a disclosure.
+    if not await can_perform(
+        db,
+        user_id=_user_id(request),
+        permission="artifact:view",
+        tenant_id=str(tenant_id),
+        resource_kind="project",
+        resource_id=str(project.id),
+    ):
+        raise HTTPException(status_code=404, detail="Project not found")
     # Spend is financial data — only cost:view holders see the dollar figure.
     _perms = getattr(request.state, "permissions", []) or []
     spend = 0.0
@@ -367,12 +409,48 @@ async def archive_project(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Soft-delete a project (sets archived=True).
+    """Soft-delete a project, or ASK to — which depends on who is asking.
 
     Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+
+    A Project Admin archives their own project and an Org Admin archives anything;
+    a Business Unit Admin archiving a project they do not run is a different act,
+    and it files a `project_archive` governance request routed to the Org Admin
+    rather than doing it. Ending someone else's delivery work is exactly the kind
+    of decision the request lane exists for — `workspace:manage` says a BU Admin
+    may administer their unit, not that this particular call is theirs to make.
+
+    THE RESPONSE SHAPE IS THE SAME EITHER WAY, and deliberately: the project comes
+    back with `archived` still false when a request was filed, and the client reads
+    "sent for approval" from that. A second response shape would mean every caller
+    branching on which one it got.
     """
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
+
+    role = await effective_platform_role(db, request)
+    if role == "bu_admin":
+        await governance_service.create_request(
+            db,
+            tenant_id=str(tenant_id),
+            initiator_id=getattr(request.state, "user_id", "") or "",
+            initiator_name=await actor_display_name(db, request),
+            initiator_role=role,
+            request_type="project_archive",
+            title=f"Archive {project.display_name}",
+            description=(
+                f"{project.display_name} was proposed for archiving by its "
+                "business unit's admin."
+            ),
+            workspace_id=str(project.workspace_id),
+            project_id=str(project.id),
+            target_ref=str(project.id),
+            system_raised=True,
+        )
+        await db.flush()
+        await db.refresh(project)
+        return ProjectOut.from_orm_project(project)
+
     project.archived = True
     await db.flush()
     await db.refresh(project)

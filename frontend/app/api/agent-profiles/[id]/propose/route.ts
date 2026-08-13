@@ -1,18 +1,21 @@
-import { notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Propose a change to an Agent Studio default you don't own — instead of
- * publishing it, raise it with the tier's owner.
+ * Propose a change to an Agent Studio default you don't own — proxied to FastAPI
+ * `POST /agent-profiles/{id}/propose`.
  *
- * NOT IMPLEMENTED BY THE BACKEND. It has two halves and neither exists: the
- * governance request it files (see app/api/governance-approvals/route.ts) and
- * the approve-time side effect that publishes the draft version once the owner
- * says yes. FastAPI has `/agent-profiles/{id}/publish`, which is the direct
- * action this route exists to AVOID for someone who lacks the authority.
+ * The counterpart to `/publish` for someone who is not the tier's owner. It files
+ * an `agent_default_org|workspace|project` request; approving it publishes exactly
+ * the draft version this id names.
  *
- * BACKLOG: FastAPI `POST /agent-profiles/{id}/propose`, once governance requests
- * are modelled.
+ * The body the client used to send (agent label, workspace name, project name) is
+ * gone: the backend reads all of it off the profile row and the session. Those
+ * fields decided WHO the request routed to and WHAT approving would publish, which
+ * is precisely the set a client should not be supplying.
  */
-export async function POST() {
-  return notImplemented("POST /agent-profiles/{id}/propose");
+export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return bffProxy(`/agent-profiles/${encodeURIComponent(id)}/propose`, { method: "POST" });
 }

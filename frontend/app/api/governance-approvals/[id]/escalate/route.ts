@@ -1,14 +1,25 @@
-import { notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Send a request up a tier when its approver hasn't answered.
+ * Send a request up a tier — proxied to FastAPI
+ * `POST /governance-approvals/{id}/escalate`.
  *
- * NOT IMPLEMENTED BY THE BACKEND — `approval_requests` records one target role
- * and one terminal decision, with no `escalated` state and no trail of the roles
- * a request has passed through. See app/api/governance-approvals/route.ts.
+ * Open to the current approver AND to the initiator: the person waiting is the one
+ * who knows it has stalled, and a request that can only be escalated by the
+ * approver who is ignoring it will never move.
  *
- * BACKLOG: FastAPI `POST /governance-approvals/{id}/escalate`.
+ * Refused with `CANNOT_ESCALATE` at the ceiling — which is the Organization Admin
+ * for an admin tier, and the requester's own Project Admin for a contributor. A
+ * contributor's ask about one project climbing to an Org Admin would route around
+ * the person accountable for it rather than through them.
  */
-export async function POST() {
-  return notImplemented("POST /governance-approvals/{id}/escalate");
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const body: unknown = await req.json().catch(() => ({}));
+  return bffProxy(`/governance-approvals/${encodeURIComponent(id)}/escalate`, {
+    method: "POST",
+    body,
+  });
 }

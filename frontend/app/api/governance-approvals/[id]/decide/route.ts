@@ -1,21 +1,30 @@
-import { notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Approve or reject a governance request.
+ * Approve or reject — proxied to FastAPI
+ * `POST /governance-approvals/{id}/decide`.
  *
- * NOT IMPLEMENTED BY THE BACKEND — see app/api/governance-approvals/route.ts
- * for why FastAPI's `/approvals/{id}/approve|reject` is not this endpoint.
+ * The decision and its CONSEQUENCE happen in one transaction there: approving a
+ * budget request moves the cap, approving an archive archives the project,
+ * approving an agent-default proposal publishes that draft version. If the
+ * consequence cannot be applied the decision is refused rather than recorded —
+ * a request marked approved over a budget that never moved is the failure mode
+ * most likely to go unnoticed, because everyone believes it was handled.
  *
- * This one carried more than a status change: on approval it also activated the
- * project, model provider, cross-BU grant or agent-profile version the request
- * was ABOUT, by mutating the fixture stores in place. None of those side effects
- * has a backend equivalent either, so faking the decision would leave a request
- * marked approved and the thing it approved untouched — the worst of the three
- * possible outcomes.
+ * Two refusals are worth recognising in the UI by their `code`:
+ *   SELF_APPROVAL_BLOCKED   400 — you raised this; it escalates instead
+ *   NOT_CURRENT_APPROVER    403 — it is waiting on a different role
  *
- * BACKLOG: FastAPI `POST /governance-approvals/{id}/decide`, including the
- * apply-on-approve side effects.
+ * The first is checked BEFORE "already closed" on purpose, so a second attempt by
+ * the initiator still gets the more actionable of the two answers.
  */
-export async function POST() {
-  return notImplemented("POST /governance-approvals/{id}/decide");
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const body: unknown = await req.json().catch(() => ({}));
+  return bffProxy(`/governance-approvals/${encodeURIComponent(id)}/decide`, {
+    method: "POST",
+    body,
+  });
 }

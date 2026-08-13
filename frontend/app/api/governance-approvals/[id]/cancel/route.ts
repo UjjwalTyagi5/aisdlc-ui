@@ -1,14 +1,20 @@
-import { notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Withdraw a request you raised.
+ * Withdraw a request you raised — proxied to FastAPI
+ * `POST /governance-approvals/{id}/cancel`.
  *
- * NOT IMPLEMENTED BY THE BACKEND — `approval_requests.status` has no
- * `cancelled` state, so there is nowhere for this transition to land. See
- * app/api/governance-approvals/route.ts.
- *
- * BACKLOG: FastAPI `POST /governance-approvals/{id}/cancel`.
+ * The INITIATOR only, enforced in the backend service. An approver who wants it
+ * gone rejects it, which records a decision; letting them cancel would let an
+ * approver make a request disappear without ever answering it.
  */
-export async function POST() {
-  return notImplemented("POST /governance-approvals/{id}/cancel");
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const body: unknown = await req.json().catch(() => ({}));
+  return bffProxy(`/governance-approvals/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    body,
+  });
 }
