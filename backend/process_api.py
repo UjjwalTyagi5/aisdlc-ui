@@ -89,6 +89,7 @@ from shared.routers.org import org_router
 from shared.routers.approvals import approvals_router
 from shared.routers.governance_requests import governance_router
 from shared.routers.notifications import notifications_router
+from shared.routers.project_members import project_members_router
 from shared.routers.spend import spend_router
 from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
@@ -905,6 +906,10 @@ app.include_router(governance_router, tags=["governance"])
 # notifications exist for a caller is decided by the address on each row, not
 # by a permission — there is deliberately no "all notifications" view.
 app.include_router(notifications_router, tags=["notifications"])
+# A project's roster. Registered BEFORE projects_router so /projects/{id}/members
+# is matched here rather than falling into that router's own floor — reading a
+# roster is not the same permission as changing the project it belongs to.
+app.include_router(project_members_router, tags=["projects"])
 app.include_router(spend_router, tags=["cost"])
 # The org -> BU -> project model grant cascade. Registered BEFORE model_router so
 # /model/allowed/* and /model/grant-matrix are matched here rather than falling into
