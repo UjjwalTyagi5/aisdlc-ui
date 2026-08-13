@@ -130,7 +130,7 @@ class SuperAgentState(TypedDict, total=False):
     # {role, content} dicts), passed through by the API layer's chat handlers
     # when called from the orchestrator. Used by pull_upstream_context to mine
     # dev-agent chat output for branch/repo/project hints when the
-    # development_artifacts row is NULL (broken upstream Django persistence).
+    # development_artifacts row is NULL (broken upstream persistence).
     orchestrator_chat_history: Optional[List[Dict]]
     # Phase 10 — fan-out test-type generation (Skill-packaged generators).
     # Each entry produced by dispatch_test_types; consumed by aggregate_test_results.

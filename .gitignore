@@ -13,6 +13,14 @@ backend/.ruff_cache/
 # Agent run workspaces — generated per pipeline run, not source
 backend/files/
 
+# Agent scratch that kept getting committed. The agents write these with bare
+# cwd-relative paths ("outputs/pdd.docx", "logs.db"), so whichever directory the
+# process happens to start in accumulates them. Nothing reads them back.
+backend/**/outputs/
+backend/**/INPUT/
+backend/**/temp/
+backend/**/logs.db
+
 # Local Temporal dev-server state
 backend/.temporal-dev.db
 backend/.temporal-dev.db-journal

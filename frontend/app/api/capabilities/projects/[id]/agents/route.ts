@@ -1,20 +1,16 @@
 import { type NextRequest } from "next/server";
 
-import { getSession } from "@/lib/auth/session";
-import { getProjectCapabilitiesData } from "@/lib/mock/capabilities-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: derives capability data from the project's actual track
-// roster + MCP registry. Mirrored in mocks/handlers.ts — see
-// [[msw-dual-runtime-mutation-rule]].
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
+/**
+ * What a project's agents can reach — proxied to FastAPI
+ * `GET /capabilities/projects/{id}/agents`.
+ *
+ * The fixture version derived this from the project's track roster and the
+ * fixture MCP registry, so it listed tool servers against an `mcp_servers` table
+ * holding none.
+ */
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const data = getProjectCapabilitiesData(id);
-  if (!data) return Response.json({ code: "not_found", message: "Project not found" }, { status: 404 });
-  return Response.json(data);
+  return bffProxy(`/capabilities/projects/${encodeURIComponent(id)}/agents`);
 }

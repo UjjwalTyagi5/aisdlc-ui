@@ -1,62 +1,55 @@
-import { type NextRequest } from "next/server";
-
 import { getSession } from "@/lib/auth/session";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import {
-  listRolePermissions,
-  resetRolePermissions,
-  setRolePermissions,
-} from "@/lib/mock/role-permission-overrides";
-import type { PlatformRole } from "@/lib/roles";
-
-// DUMMY-DATA SEAM: mutates the in-memory override store. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export const dynamic = "force-dynamic";
+import { notImplemented } from "@/lib/bff/not-implemented";
+import { ROLE_ORDER, ROLE_META } from "@/lib/roles";
+import { ROLE_PERMISSIONS } from "@/lib/auth/role-permissions";
 
 /**
- * Every built-in role with the permissions it holds, the defaults it shipped
- * with, and whether an admin has changed it.
+ * Every built-in role with the permissions it holds.
  *
- * Readable by anyone signed in. "What can this role do" is the question a
- * person asks about their OWN role, and answering it only for administrators
- * makes the permission model something you have to be told rather than look
- * up.
+ * READ IS REAL AND STAYS. A built-in role's permission set is shipped reference
+ * data — the same for every tenant, defined in `lib/auth/role-permissions.ts`,
+ * mirroring the backend's own `ROLE_PERMISSIONS`. Nothing about it was ever
+ * fetched, so nothing about it was ever fake, and answering "what can a Security
+ * Engineer do" from the catalogue is correct rather than a stand-in.
+ *
+ * Readable by anyone signed in, deliberately: "what can this role do" is the
+ * question a person asks about their OWN role, and answering it only for
+ * administrators makes the permission model something you have to be told rather
+ * than look up.
+ *
+ * THE OVERRIDES ARE GONE. `lib/mock/role-permission-overrides` let an admin
+ * retune a built-in role and stored the result in memory, so `isOverridden`
+ * reported edits that existed for one server process. FastAPI has no
+ * role-permission override table, so every role now reports its shipped default
+ * and `isOverridden` is false — which is the true state of every tenant.
+ *
+ * BACKLOG: FastAPI `GET/PUT/DELETE /admin/role-permissions`.
  */
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  return Response.json(listRolePermissions());
+
+  return Response.json(
+    ROLE_ORDER.map((role) => {
+      const permissions = [...(ROLE_PERMISSIONS[role] ?? [])];
+      return {
+        role,
+        label: ROLE_META[role].label,
+        tier: ROLE_META[role].tier,
+        permissions,
+        defaults: permissions,
+        isOverridden: false,
+      };
+    }),
+  );
 }
 
-/** Change a built-in role's permissions, or reset it. Organization Admin only. */
-export async function PUT(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  if (effectivePlatformRole(session) !== "org_admin") {
-    return Response.json(
-      { code: "forbidden", message: "Only an Organization Admin can change a role." },
-      { status: 403 },
-    );
-  }
+export async function PUT() {
+  return notImplemented("PUT /admin/role-permissions");
+}
 
-  const body = (await req.json()) as {
-    role?: string;
-    permissions?: string[];
-    reset?: boolean;
-  };
-  if (!body.role) {
-    return Response.json({ code: "bad_request", message: "Name the role." }, { status: 400 });
-  }
-
-  try {
-    const row = body.reset
-      ? resetRolePermissions(body.role as PlatformRole)
-      : setRolePermissions(body.role as PlatformRole, body.permissions ?? []);
-    return Response.json(row);
-  } catch (e) {
-    return Response.json(
-      { code: "forbidden", message: e instanceof Error ? e.message : "Cannot change that role." },
-      { status: 403 },
-    );
-  }
+export async function DELETE() {
+  return notImplemented("DELETE /admin/role-permissions");
 }

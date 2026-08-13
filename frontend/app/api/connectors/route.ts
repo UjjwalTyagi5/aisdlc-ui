@@ -1,36 +1,24 @@
-import { type NextRequest } from "next/server";
+import { bffProxy } from "@/lib/bff/proxy";
 
-import { CONNECTORS } from "@/mocks/fixtures";
-import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
-import { getSession } from "@/lib/auth/session";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
-
-// DUMMY-DATA SEAM: returns the fixture list directly — a critical-path route
-// (integrations hub, connector pickers) that must work even if MSW never
-// intercepts it. Mirrored in mocks/handlers.ts — see
-// [[msw-dual-runtime-mutation-rule]].
-//
-// force-dynamic: the response varies by `workspaceId`, and even without one
-// Next's Full Route Cache would otherwise statically cache the first response
-// to disk — see the identical note on app/api/agent-profiles/summary/route.ts.
+/**
+ * Connector integrations — proxied to FastAPI `GET /connectors`.
+ *
+ * Workspace scoping travels as the `X-Workspace-Id` header, which `bffFetch` adds
+ * from the `sdlc_active_workspace` cookie on every BFF call. The old `?workspaceId=`
+ * query param is therefore no longer read: the backend scopes on the header alone,
+ * and honouring a second, caller-supplied source of truth for "which unit am I in"
+ * is how the two disagree.
+ *
+ * The backend returns connectors with credentials but no workspace_connectors row as
+ * `disconnected` rather than hiding them — "installed for the org, not enabled here"
+ * is a state the integrations hub needs to show, not an absence.
+ *
+ * force-dynamic: the response varies by the active-workspace cookie, and Next's Full
+ * Route Cache would otherwise persist the first response to disk and serve one unit's
+ * connector list to another.
+ */
 export const dynamic = "force-dynamic";
 
-export async function GET(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  // Org-wide connectors plus the requesting unit's own — intersected with the
-  // units the viewer may read. The old "no workspaceId means the whole tenant"
-  // default is retained ONLY for an unbounded (org-wide) viewer; for anyone else
-  // it is exactly the leak, because the dashboard health tile and the onboarding
-  // wizard both call without an id. See visibleConnectorsForScope.
-  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
-  const scope = resolveSessionScope(session);
-  return Response.json(
-    visibleConnectorsForScope(
-      CONNECTORS,
-      workspaceId,
-      scope.isOrgWide ? null : scope.businessUnitIds,
-    ),
-  );
+export async function GET() {
+  return bffProxy("/connectors");
 }

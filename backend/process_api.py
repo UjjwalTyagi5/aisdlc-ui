@@ -667,6 +667,10 @@ Instrumentator().instrument(app).expose(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FILES_DIR = os.path.join(BASE_DIR, "files")
+# files/ holds per-run agent workspaces and is gitignored, so it is absent on a
+# fresh clone (and after a scratch cleanup). StaticFiles raises at mount time on a
+# missing directory, which made importing this module fail outright — create it first.
+os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=FILES_DIR), name="generated")
 
 # Add CORS middleware

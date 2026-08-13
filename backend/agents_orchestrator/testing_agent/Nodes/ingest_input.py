@@ -284,7 +284,7 @@ async def pull_upstream_context(state: SuperAgentState):
 
     # 2. Raw artifacts dict — used to short-circuit analyze_requirements.
     # Post-MVP Phase 2 — race-retry: when invoked from the orchestrator right
-    # after dev finishes, dev's async POST to Django may not have committed
+    # after dev finishes, dev's async artifact write may not have committed
     # before testing starts. Retry up to 3 times with 500ms backoff IF this
     # looks like an orchestrator-driven session (no explicit clone_target /
     # input_file_path) and development_artifacts is missing on the first try.
@@ -310,7 +310,7 @@ async def pull_upstream_context(state: SuperAgentState):
     upstream_development = raw_artifacts.get("development_artifacts") or None
 
     # Phase 8.9d — chat-history fallback. When orchestrator-driven AND the
-    # dev's development_artifacts row never landed in Django (broken POST
+    # dev's development_artifacts row never landed in Postgres (broken write
     # somewhere upstream, see Â§32.9), mine the orchestrator's prior message
     # list (passed through previous_state by the API layer) for hints from
     # dev's user-facing chat output. extract_dev_chat_hints handles partial
@@ -382,7 +382,7 @@ async def pull_upstream_context(state: SuperAgentState):
             blog(
                 "No development handoff found in this session — testing will require "
                 "either an uploaded file or an explicit clone target. "
-                "If the development agent ran already, its handoff to Django may have failed.",
+                "If the development agent ran already, its artifact handoff may have failed.",
                 level="WARNING",
             )
         elif not isinstance(upstream_development, dict):

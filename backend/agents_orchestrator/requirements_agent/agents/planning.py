@@ -1,4 +1,4 @@
-from config.env import AGENTIC_BASE_URL, SQLSERVER_CONN_STRING
+from config.env import AGENTIC_BASE_URL
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import os
 import time
@@ -35,14 +35,14 @@ from shared.services.skill_runtime import get_skill_tools
 from config.ws_helper import set_session_id, broadcast_log, get_user_id, get_session_id
 from config.connection_manager import manager
 import os, sys, inspect
-from agents.requirements_agent.prompts.brd_prompt import BRDPROMPT
-from agents.requirements_agent.prompts.Pdd_prompt import PDDPROMPT
-from agents.requirements_agent.prompts.MOM_prompt import MoMPROMPT
-from agents.requirements_agent.prompts.risk_register_prompt import RISKPROMPT
-from agents.requirements_agent.prompts.User_stories_prompt import USER_STORY_PROMPT as USERSTORYPROMPT
+from agents_orchestrator.requirements_agent.prompts.brd_prompt import BRDPROMPT
+from agents_orchestrator.requirements_agent.prompts.Pdd_prompt import PDDPROMPT
+from agents_orchestrator.requirements_agent.prompts.MOM_prompt import MoMPROMPT
+from agents_orchestrator.requirements_agent.prompts.risk_register_prompt import RISKPROMPT
+from agents_orchestrator.requirements_agent.prompts.User_stories_prompt import USERSTORYPROMPT
 from docxtpl import DocxTemplate, InlineImage, RichText
 import pickle
-from agents.requirements_agent.config import shared
+from agents_orchestrator.requirements_agent.config import shared
 from agents_orchestrator.requirements_agent.tools.nlp_quality_tool import run_nlp_quality_check
 from agents_orchestrator.requirements_agent.tools.smell_tool import run_requirement_smell_check
 from agents_orchestrator.requirements_agent.tools.spectral_tool import run_spectral_lint

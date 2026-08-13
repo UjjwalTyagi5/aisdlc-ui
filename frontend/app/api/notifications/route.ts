@@ -1,36 +1,29 @@
-import { getSession } from "@/lib/auth/session";
-import { sessionIdentityId } from "@/lib/auth/access-scope";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import {
-  listNotifications,
-  markNotificationsRead,
-} from "@/lib/mock/notification-fixtures";
+import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
 
-// DUMMY-DATA SEAM: reads the in-memory notification store. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]]: the store is
-// written by the governance-approval transitions, which run in whichever
-// runtime served the mutation, so the read must run there too.
-//
-// SCOPE: a notification is addressed to an identity or to a role, and the
-// listing intersects both against the caller. There is no "all notifications"
-// view — an unaddressed list would hand a contributor the Org Admin's queue.
+/**
+ * The notification bell.
+ *
+ * NOT IMPLEMENTED BY THE BACKEND — there is no notifications table and no
+ * endpoint. `lib/mock/notification-fixtures` was written BY the governance-
+ * approval transitions, so with those gone (see
+ * app/api/governance-approvals/route.ts) nothing would write to it even if it
+ * stayed: every notification the bell showed was seeded, not earned.
+ *
+ * That is also why the unread badge read "1" on a fresh, empty organisation.
+ *
+ * The scoping note is worth preserving for whoever builds this: a notification is
+ * addressed to an identity OR to a role, and the listing must intersect both
+ * against the caller. There is no "all notifications" view — an unaddressed list
+ * hands a contributor the Org Admin's queue.
+ *
+ * BACKLOG: FastAPI `GET /notifications` + `POST /notifications/read`.
+ */
+export const dynamic = "force-dynamic";
+
 export async function GET() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  return Response.json(
-    listNotifications(sessionIdentityId(session), effectivePlatformRole(session)),
-  );
+  return emptyList();
 }
 
-/** Mark everything currently addressed to this viewer as read. */
 export async function POST() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  const marked = markNotificationsRead(
-    sessionIdentityId(session),
-    effectivePlatformRole(session),
-  );
-  return Response.json({ marked });
+  return notImplemented("POST /notifications/read");
 }

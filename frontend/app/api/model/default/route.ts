@@ -1,11 +1,14 @@
 import { type NextRequest } from "next/server";
 
-import { setModelDefaultOffering } from "@/lib/mock/model-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: mutates the shared PROVIDERS array directly. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
+/**
+ * Set the default offering — proxied to FastAPI `PUT /model/default`.
+ *
+ * Previously mutated the shared fixture PROVIDERS array, so choosing a default
+ * held until the next reload and never reached the tenant's settings.
+ */
 export async function PUT(req: NextRequest) {
-  const body = (await req.json()) as { offering_id: string };
-  setModelDefaultOffering(body.offering_id);
-  return Response.json({ ok: true });
+  const body: unknown = await req.json();
+  return bffProxy("/model/default", { method: "PUT", body });
 }

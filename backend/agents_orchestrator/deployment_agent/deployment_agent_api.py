@@ -2,7 +2,7 @@
 
 Receives codebase.zip + testing.zip, runs a deterministic pipeline using Claude
 to produce: risk analysis, deployment validation, Dockerfile, README, and Docker
-instructions. Persists DeploymentArtifacts to Django and emits a HANDOFF sentinel
+instructions. Persists DeploymentArtifacts to Postgres and emits a HANDOFF sentinel
 so the Monitoring agent can pick up context.
 """
 
@@ -333,7 +333,7 @@ async def _fetch_session_artifacts_safe(session_id: str) -> Dict[str, Any]:
 
 
 async def _build_session_context(session_id: str) -> str:
-    """Fetch prior agent artifacts from Django and format them for the deployment prompts."""
+    """Fetch prior agent artifacts from Postgres and format them for the deployment prompts."""
     artifacts = await _fetch_session_artifacts_safe(session_id)
     if not artifacts:
         return ""

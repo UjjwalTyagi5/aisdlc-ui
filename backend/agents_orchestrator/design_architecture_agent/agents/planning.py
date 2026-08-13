@@ -25,13 +25,13 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
-from agents.design_architecture_agent.prompts.brd_prompt import BRDPROMPT
-from agents.design_architecture_agent.prompts.Pdd_prompt import PDDPROMPT
-from agents.design_architecture_agent.prompts.MOM_prompt import MoMPROMPT
-from agents.design_architecture_agent.prompts.risk_register_prompt import RISKPROMPT
+from agents_orchestrator.design_architecture_agent.prompts.brd_prompt import BRDPROMPT
+from agents_orchestrator.design_architecture_agent.prompts.Pdd_prompt import PDDPROMPT
+from agents_orchestrator.design_architecture_agent.prompts.MOM_prompt import MoMPROMPT
+from agents_orchestrator.design_architecture_agent.prompts.risk_register_prompt import RISKPROMPT
 from docxtpl import DocxTemplate, InlineImage, RichText
 import pickle
-from agents.design_architecture_agent.config import shared
+from agents_orchestrator.design_architecture_agent.config import shared
  
 # from main import output_doc
 

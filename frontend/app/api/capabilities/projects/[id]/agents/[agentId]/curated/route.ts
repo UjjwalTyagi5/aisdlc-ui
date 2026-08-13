@@ -1,18 +1,19 @@
 import { type NextRequest } from "next/server";
 
-import { getSession } from "@/lib/auth/session";
-import { setCuratedDisabled } from "@/lib/mock/capabilities-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: mirrors mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
+/**
+ * Turn a curated capability off for one agent — proxied to FastAPI
+ * `PUT /capabilities/projects/{id}/agents/{agentId}/curated`.
+ */
 export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; agentId: string }> },
 ) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
   const { id, agentId } = await params;
-  const body = (await req.json()) as { disabled: string[] };
-  const result = setCuratedDisabled(id, agentId, body.disabled ?? []);
-  return Response.json(result);
+  const body: unknown = await req.json();
+  return bffProxy(
+    `/capabilities/projects/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/curated`,
+    { method: "PUT", body },
+  );
 }

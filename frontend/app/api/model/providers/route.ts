@@ -1,55 +1,37 @@
 import { type NextRequest } from "next/server";
 
-import { getSession } from "@/lib/auth/session";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import {
-  createModelProvider,
-  listAllModelProviders,
-  listModelProviders,
-  type CreateModelProviderInput,
-} from "@/lib/mock/model-fixtures";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: reads/writes the shared PROVIDERS array directly —
-// approval-aware, mirroring app/api/projects/route.ts. See
-// [[msw-dual-runtime-mutation-rule]]: mocks/handlers.ts's /api/model/providers
-// mirrors this exactly.
 /**
- * `?scope=all` returns EVERY connection the caller may see — org-wide and
- * unit-scoped together — rather than exactly one scope.
+ * Model provider connections (BYOK) — proxied to FastAPI `GET/POST /model/providers`.
  *
- * Model Management asked for `workspaceId=null`, which means "org-wide only",
- * so a subscription onboarded by a Business Unit was structurally invisible to
- * the Organization Admin. "Which providers is this organization actually
- * using?" is not a question one scope can answer, and the page asking it was
- * getting a confident wrong answer.
+ * `?scope=all` and `?workspaceId=` are accepted but no longer narrow anything, and
+ * that is the backend's deliberate model rather than an oversight here: provider
+ * connections are TENANT-WIDE. The resolver that picks a model for a run filters by
+ * tenant alone, so a list narrowed by workspace would show something different from
+ * what agents can actually run on — which is exactly the bug the backend comment in
+ * services/model_config.py::list_providers records, where "removed" connections
+ * survived unseen because the resolver ignored workspace.
+ *
+ * Which models a unit or project may USE is a separate question, answered by the
+ * grant cascade (/model/allowed/*), not by hiding rows from this list.
+ *
+ * The response carries no secret fields — ProviderOut omits the API key, and the
+ * key itself lives in Key Vault or the encrypted secret store, never in the DB row.
  */
-export async function GET(req: NextRequest) {
-  if (req.nextUrl.searchParams.get("scope") === "all") {
-    const session = await getSession();
-    if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-    const scope = resolveSessionScope(session);
-    return Response.json(
-      listAllModelProviders(scope.isOrgWide ? null : scope.businessUnitIds),
-    );
-  }
-  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
-  return Response.json(listModelProviders(workspaceId || null));
+export const dynamic = "force-dynamic";
+
+export async function GET(_req: NextRequest) {
+  return bffProxy("/model/providers");
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  const body = (await req.json()) as CreateModelProviderInput;
+  const body = (await req.json()) as { provider?: string; display_name?: string };
   if (!body?.provider || !body?.display_name) {
     return Response.json(
       { code: "invalid_input", message: "provider and display_name are required" },
       { status: 422 },
     );
   }
-
-  const role = effectivePlatformRole(session);
-  const created = createModelProvider(body, { role, displayName: session.user.name });
-  return Response.json(created, { status: 201 });
+  return bffProxy("/model/providers", { method: "POST", body });
 }

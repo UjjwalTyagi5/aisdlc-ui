@@ -1,6 +1,12 @@
-import { buildQueueMetrics } from "@/lib/mock/approval-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: swap to bffProxy("/approvals/metrics") when backend exists.
-export function GET() {
-  return Response.json(buildQueueMetrics());
+/**
+ * Approval-queue metrics — proxied to FastAPI `GET /approvals/metrics`.
+ *
+ * The seam comment here said "swap to bffProxy when backend exists". It does.
+ */
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  return bffProxy("/approvals/metrics");
 }

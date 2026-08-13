@@ -1,12 +1,16 @@
 import { type NextRequest } from "next/server";
 
-import { verifyModelProvider } from "@/lib/mock/model-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: mutates the shared PROVIDERS array directly. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
+/**
+ * Verify a provider's credential — proxied to FastAPI
+ * `POST /model/providers/{id}/verify`.
+ *
+ * The fixture version flipped a status field and reported success without ever
+ * calling the provider, which is the one thing a verify button must not do: an
+ * unreachable endpoint or a revoked key came back green.
+ */
 export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const result = verifyModelProvider(id);
-  if (!result) return Response.json({ code: "not_found" }, { status: 404 });
-  return Response.json(result);
+  return bffProxy(`/model/providers/${encodeURIComponent(id)}/verify`, { method: "POST" });
 }

@@ -119,11 +119,6 @@ DEFAULT_ORG_BUDGET_USD: float = float(os.environ.get("DEFAULT_ORG_BUDGET_USD", "
 DEFAULT_WORKSPACE_BUDGET_USD: float = float(os.environ.get("DEFAULT_WORKSPACE_BUDGET_USD", "50"))
 DEFAULT_PROJECT_BUDGET_USD: float = float(os.environ.get("DEFAULT_PROJECT_BUDGET_USD", "25"))
 
-# SQL Server — LangGraph checkpoint store
-# Format (Windows auth):  mssql+pyodbc://SERVER/DB?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes&TrustServerCertificate=yes
-# Format (SQL auth):       mssql+pyodbc://USER:PASS@SERVER/DB?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes
-SQLSERVER_CONN_STRING = os.environ.get("SQLSERVER_CONN_STRING", "")
-
 # PostgreSQL — asyncpg URL for SQLAlchemy async engine (postgresql+asyncpg://user:pass@host:5432/dbname)
 # Use POSTGRES_MIGRATIONS_CONN_STRING for Alembic — it must use a superuser/BYPASSRLS role.
 # POSTGRES_MIGRATIONS_CONN_STRING defaults to "" (not POSTGRES_CONN_STRING) — the migration runner
