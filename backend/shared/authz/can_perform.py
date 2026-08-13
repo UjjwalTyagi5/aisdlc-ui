@@ -48,6 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.permissions import has_permission
+from shared.authz.role_permissions import effective_by_role
 
 logger = logging.getLogger(__name__)
 
@@ -184,10 +185,10 @@ async def _permissions_at(
             """
             SELECT rb.scope_kind,
                    rb.scope_id,
+                   rb.role_name,
                    COALESCE(rb.role_name, cr.name)      AS role_label,
-                   COALESCE(rp.permission_name, crp.permission_name) AS permission
+                   crp.permission_name                  AS custom_permission
             FROM role_bindings rb
-            LEFT JOIN role_permissions rp        ON rp.role_name = rb.role_name
             LEFT JOIN custom_roles cr            ON cr.id = rb.custom_role_id
             LEFT JOIN custom_role_permissions crp ON crp.custom_role_id = rb.custom_role_id
             WHERE rb.user_id = :u
@@ -199,14 +200,28 @@ async def _permissions_at(
         {"u": user_id, "ids": scope_ids, "now": now},
     )).fetchall()
 
+    # Built-in roles are resolved through `effective_by_role`, NOT by joining
+    # role_permissions above. That table holds the SHIPPED DEFAULT; what a role grants
+    # in this organization may have been retuned from the Roles page. Resolving it here
+    # the same way `resolve_permissions_for_user` does is what keeps a scoped check
+    # from disagreeing with the token the caller is holding — a split that presents as
+    # "works on the dashboard, denied on the project page".
+    by_role = await effective_by_role(session)
+
     grouped: dict[tuple[str, str, str], list[str]] = {}
     for r in rows:
-        if r.permission is None:
+        if r.role_name:
+            permissions = sorted(by_role.get(r.role_name, set()))
+        elif r.custom_permission is not None:
+            permissions = [r.custom_permission]
+        else:
             # A binding whose role grants nothing. Kept out of the result rather than
             # recorded as an empty match, so "matched but unauthorized" and "no match"
             # cannot be confused downstream.
             continue
-        grouped.setdefault((r.scope_kind, str(r.scope_id), r.role_label), []).append(r.permission)
+        if not permissions:
+            continue
+        grouped.setdefault((r.scope_kind, str(r.scope_id), r.role_label), []).extend(permissions)
 
     # Narrowest scope first, so an explanation names the most specific assignment that
     # granted access rather than an ancestor that happens to also grant it.

@@ -88,6 +88,7 @@ from shared.routers.evidence import evidence_router
 from shared.routers.signals import signals_router
 from shared.routers.admin import admin_router
 from shared.routers.custom_roles import custom_roles_router
+from shared.routers.role_permissions import role_permissions_router
 from shared.routers.org import org_router
 from shared.routers.approvals import approvals_router
 from shared.routers.governance_requests import governance_router
@@ -986,6 +987,12 @@ app.include_router(admin_router, prefix="/admin", tags=["admin"])
 # custom_roles_router: self-gated via router-level require_permission("role:manage").
 # Carries its own /admin/custom-roles prefix; tenant isolation by FORCE RLS.
 app.include_router(custom_roles_router, tags=["admin"])
+# GET/PUT /admin/role-permissions + GET /admin/permissions. Read is open to any
+# signed-in caller ("what can my role do" is a fair question); the WRITE checks
+# org-wideness inside the handler rather than a permission string, because
+# redefining a role is how you would grant yourself anything and role:manage is
+# held by a Business Unit Admin.
+app.include_router(role_permissions_router, tags=["admin"])
 # Local email+password auth (Phase 3): POST /auth/login (JWT-exempt, in _EXEMPT_PATHS)
 # + GET /auth/me (JWT-validated). Both public()-marked for the D-05 boot scan.
 app.include_router(auth_local_router, tags=["auth"])

@@ -82,6 +82,8 @@ async def seed_run(
     Step-2 "has a Temporal workflow" 409 guard and reaches the Step-3 permission
     check (REQ-M7-11 negative-authz tests need to exercise the 403 branch, not 409).
     """
+    from sqlalchemy import text as _sa_text
+
     from shared.db import AsyncSessionFactory
     from shared.models.orm import Organization, Workspace, Project, Run
 
@@ -91,6 +93,15 @@ async def seed_run(
     suffix = str(rid)[:8]
 
     async with AsyncSessionFactory() as session:
+        # projects and runs are FORCE-RLS, so the insert must run under the tenant GUC
+        # or the WITH CHECK policy rejects it. This used to pass without the GUC only
+        # because the app connected as a superuser, which bypasses RLS entirely — the
+        # seed was never actually exercising the policy it now has to satisfy.
+        # organizations and workspaces are global tables and need no GUC.
+        await session.execute(
+            _sa_text("SELECT set_config('app.current_tenant_id', :tid, true)"),
+            {"tid": str(tid)},
+        )
         org = Organization(slug=f"canary-org-{suffix}", display_name="Canary Org")
         session.add(org)
         await session.flush()

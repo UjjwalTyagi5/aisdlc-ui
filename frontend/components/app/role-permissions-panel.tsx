@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
 import { listRolePermissions, saveRolePermissions } from "@/lib/api/role-permissions";
-import { PERMISSION_CATALOG } from "@/lib/auth/permission-catalog";
+import { usePermissionCatalog } from "@/hooks/use-permission-catalog";
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
 
 /**
@@ -53,6 +53,12 @@ export function RolePermissionsPanel({ canEdit }: { canEdit: boolean }) {
     queryKey: ["role-permissions", "list"],
     queryFn: () => listRolePermissions(),
   });
+
+  // The grantable permissions as the DATABASE has them, grouped and labelled by the
+  // static catalogue. A permission added to `permissions` appears here without a
+  // deploy; one the catalogue names but the database lacks is not offered, because
+  // nothing could grant it. See hooks/use-permission-catalog.ts.
+  const catalog = usePermissionCatalog();
 
   const save = useMutation({
     mutationFn: saveRolePermissions,
@@ -142,7 +148,7 @@ export function RolePermissionsPanel({ canEdit }: { canEdit: boolean }) {
                   </p>
                 ) : (
                   <>
-                    {PERMISSION_CATALOG.map((group) => (
+                    {catalog.map((group) => (
                       <div key={group.group} className="space-y-1.5">
                         <p className="text-muted-foreground font-mono text-[10px] tracking-[0.12em] uppercase">
                           {group.group}

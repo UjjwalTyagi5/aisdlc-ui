@@ -13,8 +13,9 @@ import logging
 
 from sqlalchemy import select
 
+from shared.authz.role_permissions import effective_for_roles
 from shared.db import get_db_session_for_tenant
-from shared.models.orm import CustomRolePermission, RolePermission, RoleBinding
+from shared.models.orm import CustomRolePermission, RolePermission, RoleBinding  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +52,29 @@ async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str
 
     try:
         async with get_db_session_for_tenant(tenant_id) as session:
-            default_stmt = (
-                select(RolePermission.permission_name)
-                .join(
-                    RoleBinding,
-                    RoleBinding.role_name == RolePermission.role_name,
+            # Built-in roles no longer join role_permissions directly. That table is
+            # the SHIPPED DEFAULT; what a role grants in THIS organization may have
+            # been retuned from the Roles page, and `effective_for_roles` is the one
+            # place the two are merged. Joining the default here would let a token
+            # minted at login disagree with the scoped checks in can_perform, which
+            # reads through the same helper.
+            role_names = list(
+                (
+                    await session.execute(
+                        select(RoleBinding.role_name).where(
+                            RoleBinding.user_id == user_id,
+                            RoleBinding.role_name.isnot(None),
+                        )
+                    )
                 )
-                .where(RoleBinding.user_id == user_id)
+                .scalars()
+                .all()
             )
+            builtin = await effective_for_roles(session, role_names, tenant_id)
+
+            # Custom roles carry their own permission rows and are not overridable —
+            # editing one IS editing its permissions, so there is no default to
+            # diverge from.
             custom_stmt = (
                 select(CustomRolePermission.permission_name)
                 .join(
@@ -67,9 +83,8 @@ async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str
                 )
                 .where(RoleBinding.user_id == user_id)
             )
-            default_rows = (await session.execute(default_stmt)).scalars().all()
             custom_rows = (await session.execute(custom_stmt)).scalars().all()
-            return sorted(set(default_rows) | set(custom_rows))
+            return sorted(builtin | set(custom_rows))
     except Exception as exc:
         logger.exception(
             "resolve_permissions_for_user failed for user=%s tenant=%s — raising "
