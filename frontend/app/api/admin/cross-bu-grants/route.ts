@@ -1,26 +1,30 @@
-import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Live cross-unit loans — contributors lent from one Business Unit to another
- * unit's project ([[cross-bu-contributor-loan]]).
+ * Live cross-unit loans — proxied to FastAPI `GET/DELETE /admin/cross-bu-grants`.
  *
- * NOT IMPLEMENTED BY THE BACKEND. There is no cross-BU grant table: a loan is a
- * seat authorised in a project without the person's parent unit changing, and
- * `role_bindings` has no way to express "bound here, owned there".
+ * A loan records a SEAT, not a membership: the whole point is that the person's home
+ * unit does not change. A row in `role_bindings` would make them a member of the
+ * borrowing unit and lose the fact that somebody else still owns them — which is why
+ * this needed its own table and could not exist until it had one.
  *
- * The read this served answered both directions at once — who of mine is working
- * elsewhere, and whose people are working here — because an admin needs both and
- * they are one fact seen from two sides. Worth keeping in view for whoever builds
- * it; today there are no loans, because there is nowhere to record one.
+ * The read answers both directions at once — who of mine is working elsewhere, and
+ * whose people are working here — because an admin needs both and they are one fact
+ * seen from two sides. `lentByYou` says which side the viewer is on.
  *
- * BACKLOG: FastAPI `GET/DELETE /admin/cross-bu-grants`.
+ * Ending a loan is the LENDING unit's admin alone. The borrowing unit can take the
+ * person off the project like any other member; ending the loan is the lender's,
+ * because it is their person and their headcount.
  */
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return emptyList();
+  return bffProxy("/admin/cross-bu-grants");
 }
 
-export async function DELETE() {
-  return notImplemented("DELETE /admin/cross-bu-grants");
+export async function DELETE(req: NextRequest) {
+  const body: unknown = await req.json();
+  return bffProxy("/admin/cross-bu-grants", { method: "DELETE", body });
 }

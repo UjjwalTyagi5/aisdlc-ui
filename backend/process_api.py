@@ -92,6 +92,7 @@ from shared.routers.notifications import notifications_router
 from shared.routers.project_members import project_members_router
 from shared.routers.integration_access import integration_access_router
 from shared.routers.onboarding import onboarding_router
+from shared.routers.project_scoped import project_scoped_router
 from shared.routers.spend import spend_router
 from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
@@ -922,6 +923,10 @@ app.include_router(integration_access_router, tags=["integrations"])
 # owe them a job. The third act is the point — without it somebody lands in a
 # unit and nobody is told to give them a role.
 app.include_router(onboarding_router, tags=["admin"])
+# Agent-access overrides, per-project integration credentials, and cross-BU
+# loans. Registered BEFORE projects_router so /projects/{id}/... is matched
+# here rather than falling into that router's own permission floor.
+app.include_router(project_scoped_router, tags=["projects"])
 app.include_router(spend_router, tags=["cost"])
 # The org -> BU -> project model grant cascade. Registered BEFORE model_router so
 # /model/allowed/* and /model/grant-matrix are matched here rather than falling into

@@ -255,6 +255,69 @@ async def list_custom_roles(
     return out
 
 
+@custom_roles_router.patch("/{role_id}", response_model=CustomRoleOut)
+async def update_custom_role(
+    role_id: str, request: Request, body: CustomRoleIn, db: AsyncSession = Depends(get_db_session)
+) -> CustomRoleOut:
+    """Rename a custom role or change what it grants.
+
+    A ROLE BELONGS TO THE UNIT THAT DEFINED IT. A Business Unit Admin editing another
+    unit's role — or the org-wide one every unit assigns — would change what people
+    outside their authority are allowed to do, which is the escalation `scope_id`
+    exists to prevent. So an org-scoped role needs org-wide authority, and a
+    unit-scoped one needs write access to that unit.
+
+    PERMISSIONS ARE REPLACED WHOLESALE, not merged. The request states the complete
+    set, so computing a delta would only add a way for the stored set to end up as
+    neither the old one nor the new one.
+    """
+    tenant_id = _tenant_id(request)
+    try:
+        rid = _uuid.UUID(role_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="role_id must be a UUID")
+
+    row = (await db.execute(select(CustomRole).where(CustomRole.id == rid))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not found")
+
+    scope_kind = getattr(row, "scope_kind", "organization") or "organization"
+    if scope_kind == "business_unit":
+        await assert_can_write_workspace(db, request, str(row.scope_id))
+    elif not is_org_wide(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only an Organization Admin can change an organization-wide role. It is "
+                "assignable in every business unit."
+            ),
+        )
+
+    row.name = body.name
+    row.description = body.description
+    await db.execute(
+        text("DELETE FROM custom_role_permissions WHERE custom_role_id = :rid"),
+        {"rid": str(rid)},
+    )
+    for permission in body.permissions:
+        await db.execute(
+            text(
+                "INSERT INTO custom_role_permissions "
+                "  (id, custom_role_id, permission_name, tenant_id) "
+                "VALUES (CAST(:i AS uuid), CAST(:rid AS uuid), :p, CAST(:t AS uuid))"
+            ),
+            {"i": str(_uuid.uuid4()), "rid": str(rid), "p": permission, "t": tenant_id},
+        )
+    await db.flush()
+
+    return CustomRoleOut(
+        id=str(row.id), name=row.name, description=row.description,
+        permissions=list(body.permissions), scopeKind=scope_kind,
+        scopeId=str(row.scope_id) if row.scope_id else None,
+        createdBy=getattr(row, "created_by", None),
+    )
+
+
 @custom_roles_router.delete("/{role_id}", response_model=OkOut)
 async def delete_custom_role(
     role_id: str, request: Request, db: AsyncSession = Depends(get_db_session)
