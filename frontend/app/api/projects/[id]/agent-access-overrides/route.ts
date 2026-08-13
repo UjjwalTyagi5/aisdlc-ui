@@ -1,57 +1,27 @@
-import { type NextRequest } from "next/server";
+import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
 
-import { getSession } from "@/lib/auth/session";
-import {
-  listOverridesForProject,
-  removeOverride,
-  setOverride,
-} from "@/lib/mock/agent-access-override-fixtures";
-import type { AgentAccessOverrideInput } from "@/lib/schemas/agent-access";
-import type { Phase } from "@/lib/schemas/enums";
+/**
+ * Per-project adjustments to what a role may do with an agent — the layer that
+ * narrows or widens `AGENT_OWNERSHIP` for one project.
+ *
+ * NOT IMPLEMENTED BY THE BACKEND. There is no override table; a role's agent
+ * access is the shipped matrix and nothing modifies it per project.
+ *
+ * Empty is the correct read either way: no overrides means every project uses the
+ * built-in matrix, which is exactly the state of this database.
+ *
+ * BACKLOG: FastAPI `GET/PUT/DELETE /projects/{id}/agent-access-overrides`.
+ */
+export const dynamic = "force-dynamic";
 
-// DUMMY-DATA SEAM: reads/writes the shared OVERRIDES array directly. Mirrored
-// in mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  const { id } = await params;
-  return Response.json(listOverridesForProject(id));
+export async function GET() {
+  return emptyList();
 }
 
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  const { id } = await params;
-  const body = (await req.json()) as AgentAccessOverrideInput;
-  if (!body?.role || !body?.phase || !body?.involvement) {
-    return Response.json(
-      { code: "invalid_input", message: "role, phase and involvement are required" },
-      { status: 422 },
-    );
-  }
-  const created = setOverride(id, body.role, body.phase, body.involvement, session.user.name);
-  return Response.json(created, { status: 201 });
+export async function PUT() {
+  return notImplemented("PUT /projects/{id}/agent-access-overrides");
 }
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  const { id } = await params;
-  const role = req.nextUrl.searchParams.get("role");
-  const phase = req.nextUrl.searchParams.get("phase");
-  if (!role || !phase) {
-    return Response.json({ code: "invalid_input", message: "role and phase are required" }, { status: 422 });
-  }
-  const ok = removeOverride(id, role, phase as Phase);
-  if (!ok) return Response.json({ code: "not_found" }, { status: 404 });
-  return new Response(null, { status: 204 });
+export async function DELETE() {
+  return notImplemented("DELETE /projects/{id}/agent-access-overrides");
 }

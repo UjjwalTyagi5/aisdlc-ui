@@ -11,6 +11,9 @@ export const metadata: Metadata = {
 
 export default async function RootPage() {
   const session = await getSession();
-  const consoleHref = session?.permissions.includes("platform:*") ? "/platform" : "/dashboard";
+  // A signed-up user with no bindings yet would bounce off every gate on the
+  // dashboard, so send them where their pending state is actually explained.
+  const consoleHref =
+    session && session.permissions.length === 0 ? "/my-access" : "/dashboard";
   return <Landing authed={Boolean(session)} consoleHref={consoleHref} />;
 }

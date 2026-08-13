@@ -74,16 +74,15 @@ export function visibleConnectorsForScope(
   );
 }
 
-/** The level an admin's newly onboarded connector lands at. */
-export function onboardingScopeFor(
-  role: string | null,
-): { scope: Connector["scope"]; requiresWorkspace: boolean } {
-  // Only an Org Admin onboards org-wide; everyone else who may onboard at all
-  // does so into their own unit, which is why the BU case needs a workspace.
-  return role === "org_admin"
-    ? { scope: "organization", requiresWorkspace: false }
-    : { scope: "business_unit", requiresWorkspace: true };
-}
+/**
+ * The level an admin's newly onboarded connector lands at.
+ *
+ * Re-exported, not restated. The rule lives in `lib/integrations/manage-scope.ts`
+ * beside the manage check it has to agree with; this module keeps the name so the
+ * MSW handlers that import it here are unaffected, and so the mock runtime and
+ * the app can never answer this differently.
+ */
+export { onboardingScopeFor } from "@/lib/integrations/manage-scope";
 
 /**
  * Record a pasted credential against a connector kind, creating the connection

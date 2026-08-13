@@ -58,15 +58,29 @@ export function canManageIntegration(
 }
 
 /**
- * The level this viewer's newly onboarded integration lands at.
+ * The level this viewer's newly onboarded integration lands at, and whether
+ * they have to name a Business Unit to put it in.
  *
- * Unchanged in substance from `onboardingScopeFor` in connector-scope.ts,
- * restated here because the manage rule above has to agree with it: an admin
- * must always be able to manage what they just onboarded, and the two rules
- * drifting apart is how you get a connection its own creator cannot re-key.
+ * Only an Org Admin onboards org-wide; everyone else who may onboard at all does
+ * so into their own unit, which is why the unit case needs one named.
+ *
+ * THE MANAGE RULE ABOVE HAS TO AGREE WITH THIS: an admin must always be able to
+ * manage what they just onboarded, and the two drifting apart is how you get a
+ * connection its own creator cannot re-key. It used to be stated twice for that
+ * reason — here as `onboardsAt`, and again as `onboardingScopeFor` in
+ * `lib/mock/connector-scope.ts`, which is a fixture module the app no longer
+ * reads. One copy now, in the file that owns the rule it must match.
  */
+export function onboardingScopeFor(
+  role: string | null,
+): { scope: IntegrationScope; requiresWorkspace: boolean } {
+  return role === "org_admin"
+    ? { scope: "organization", requiresWorkspace: false }
+    : { scope: "business_unit", requiresWorkspace: true };
+}
+
 export function onboardsAt(role: string | null): IntegrationScope {
-  return role === "org_admin" ? "organization" : "business_unit";
+  return onboardingScopeFor(role).scope;
 }
 
 /**

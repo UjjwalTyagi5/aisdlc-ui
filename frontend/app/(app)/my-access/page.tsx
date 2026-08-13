@@ -6,6 +6,7 @@ import {
   Building2,
   FolderKanban,
   Globe2,
+  Hourglass,
   Lock,
   ShieldCheck,
   Wrench,
@@ -167,6 +168,27 @@ export default function MyAccessPage() {
         </p>
       </header>
 
+      {/* A just-registered account lands here with nothing at all. Without this it
+          would read the two "you have none" empty states below as a fault rather
+          than as the normal state of an account waiting on an admin. */}
+      {!isLoading && permissions.length === 0 && allBindings.length === 0 && (
+        <div
+          className="border-brand-bright/30 bg-brand-bright/5 flex items-start gap-3 rounded-2xl border p-4"
+          style={{ ...RISE, animationDelay: "0.02s" }}
+        >
+          <Hourglass className="text-brand-bright mt-0.5 size-4 shrink-0" aria-hidden />
+          <div>
+            <p className="text-[13.5px] font-medium">Your account is waiting for a role</p>
+            <p className="text-muted-foreground mt-1 text-[12.5px]">
+              You&rsquo;re signed in, but nothing has been assigned to you yet — so every
+              other screen will be empty or closed. Ask an administrator to grant you a
+              role on a {BUSINESS_UNIT_LABEL.toLowerCase()} or project. This page will
+              fill in as soon as they do.
+            </p>
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <LoadingState variant="card" />
       ) : (
@@ -252,7 +274,7 @@ export default function MyAccessPage() {
               <EmptyState
                 icon={Lock}
                 title="No permissions resolved"
-                description="Your session carries no permissions, so every action is unavailable. This usually means your role assignment hasn't finished — ask your admin to check it."
+                description="Your session carries no permissions, so every action is unavailable. That is the normal state of a new account: signing up creates your identity, an admin assigns what it can do."
               />
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

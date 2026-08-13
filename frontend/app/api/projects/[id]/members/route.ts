@@ -1,31 +1,25 @@
-import { type NextRequest } from "next/server";
+import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
 
-import {
-  addProjectMember,
-  listProjectMembers,
-  projectMembershipBlock,
-} from "@/lib/mock/project-membership-fixtures";
+/**
+ * A project's roster — who works on it, and in which role.
+ *
+ * NOT IMPLEMENTED BY THE BACKEND, and the seam comment here said so from the
+ * start: "a net-new project-scoped role model with no backend equivalent yet".
+ * `role_bindings` does have a `scope_kind` that admits `project`, so the storage
+ * exists; no endpoint reads or writes those rows.
+ *
+ * This is what put "Payments API — SCA exemption defect · Developer" beside
+ * people on the Users page over a `projects` table holding nothing.
+ *
+ * BACKLOG: FastAPI `GET/POST /projects/{id}/members` over project-scope
+ * `role_bindings`, plus the PATCH/DELETE in the sibling route.
+ */
+export const dynamic = "force-dynamic";
 
-// DUMMY-DATA SEAM: reads/writes the in-memory fixture store directly — this
-// is a net-new project-scoped role model with no backend equivalent yet.
-
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  return Response.json(listProjectMembers(id));
+export async function GET() {
+  return emptyList();
 }
 
-export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const body = (await req.json()) as { email: string; displayName?: string; roleName: string };
-  if (!body?.email || !body?.roleName) {
-    return Response.json({ code: "invalid_input", message: "email and roleName are required" }, {
-      status: 422,
-    });
-  }
-  const blocked = projectMembershipBlock(id, body.email);
-  if (blocked) {
-    return Response.json({ code: "forbidden", message: blocked }, { status: 422 });
-  }
-  const member = addProjectMember(id, body);
-  return Response.json(member, { status: 201 });
+export async function POST() {
+  return notImplemented("POST /projects/{id}/members");
 }
