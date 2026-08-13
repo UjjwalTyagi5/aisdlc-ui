@@ -1,28 +1,29 @@
-import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * Connector grants — which Business Units may use which connector kind.
+ * Connector grants — proxied to FastAPI `GET/PUT /connectors/grants`, over the
+ * `integration_grants` table that did not exist when this route returned an empty
+ * list.
  *
- * NOT IMPLEMENTED BY THE BACKEND. FastAPI has `/connectors` (the kinds, and
- * whether each is installed for the tenant) but no per-unit grant table: there
- * is no `workspace_connector_grants` relation and no endpoint that reads or
- * writes one. `workspace_connectors` is a different thing — it records that a
- * unit ENABLED a connector, not that the organisation PERMITTED it to.
- *
- * This used to serve `lib/mock/connector-grants`, which is why the Integrations
- * hub reported "Jira — 3 business units · 4 projects" over an empty database.
- *
- * Until the backend owns grants, the honest answer is that nothing is granted.
- * The page reads that as "no unit has been given this yet", which is true.
- *
- * BACKLOG: FastAPI `GET/PUT /connectors/grants`.
+ * Kept as grants rather than bare kinds so the UI can tell "every unit has this" from
+ * "you were given this". A bounded viewer gets the union across their own units with
+ * the unit lists intact only for those — they should not learn which OTHER units a
+ * grant reaches, which is why the narrowing happens in the backend rather than by
+ * trimming a full policy here.
  */
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return emptyList();
+export async function GET(req: NextRequest) {
+  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
+  const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  return bffProxy(`/connectors/grants${qs}`);
 }
 
-export async function PUT() {
-  return notImplemented("PUT /connectors/grants");
+export async function PUT(req: NextRequest) {
+  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
+  const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  const body: unknown = await req.json();
+  return bffProxy(`/connectors/grants${qs}`, { method: "PUT", body });
 }

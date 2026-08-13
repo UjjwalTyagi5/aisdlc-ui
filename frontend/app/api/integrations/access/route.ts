@@ -1,33 +1,33 @@
-import { emptyList, notImplemented } from "@/lib/bff/not-implemented";
+import { type NextRequest } from "next/server";
+
+import { bffProxy } from "@/lib/bff/proxy";
 
 /**
- * The integration access map — every connector and MCP server, with the units
- * that may use it and the projects that do.
+ * The integration access map — proxied to FastAPI `/integrations/access`.
  *
- * NOT IMPLEMENTED BY THE BACKEND. It is a join across three things FastAPI does
- * not expose: connector grants (no grant table at all — see
- * app/api/connectors/grants/route.ts), MCP grants (`mcp_servers` records who
- * CREATED a server, not who may use it), and per-project integration wiring
- * (there is no project→integration relation).
+ * THREE LEVELS, and this route is about the middle one: the organisation ONBOARDS a
+ * connection, a Business Unit is GRANTED permission to use it, and a project WIRES it
+ * to its stages. Only the middle level is a decision made about somebody else, which
+ * is why it is the only one with an authorisation story — and it is the one that did
+ * not exist, which is why this route used to return fabricated unit and project counts.
  *
- * This used to serve `lib/mock/integration-access` joined against the fixture
- * PROJECTS array. With the database holding zero `mcp_servers` and zero
- * `workspace_connectors`, every unit and project count that page printed was
- * invented here.
- *
- * BACKLOG: FastAPI `GET /integrations/access`, plus `POST`/`DELETE` for the
- * unit-level grant and project-level revoke this route used to fake.
+ * Granting is the Organization Admin's alone (a unit that could grant itself an
+ * integration has no grant). Revoking at PROJECT level is either admin tier's, because
+ * an admin taking something away has to be able to stop one team without punishing the
+ * rest of the unit.
  */
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return emptyList();
+  return bffProxy("/integrations/access");
 }
 
-export async function POST() {
-  return notImplemented("POST /integrations/access");
+export async function POST(req: NextRequest) {
+  const qs = req.nextUrl.searchParams.toString();
+  return bffProxy(`/integrations/access${qs ? `?${qs}` : ""}`, { method: "POST" });
 }
 
-export async function DELETE() {
-  return notImplemented("DELETE /integrations/access");
+export async function DELETE(req: NextRequest) {
+  const qs = req.nextUrl.searchParams.toString();
+  return bffProxy(`/integrations/access${qs ? `?${qs}` : ""}`, { method: "DELETE" });
 }

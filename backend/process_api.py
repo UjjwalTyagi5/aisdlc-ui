@@ -90,6 +90,7 @@ from shared.routers.approvals import approvals_router
 from shared.routers.governance_requests import governance_router
 from shared.routers.notifications import notifications_router
 from shared.routers.project_members import project_members_router
+from shared.routers.integration_access import integration_access_router
 from shared.routers.spend import spend_router
 from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
@@ -910,6 +911,11 @@ app.include_router(notifications_router, tags=["notifications"])
 # is matched here rather than falling into that router's own floor — reading a
 # roster is not the same permission as changing the project it belongs to.
 app.include_router(project_members_router, tags=["projects"])
+# The middle level of the integration cascade: which units MAY use what.
+# `connectors` records what the org onboarded and projects.connectors what a
+# project wired; this is the permission between them, and the only one of the
+# three that is a decision made about somebody else.
+app.include_router(integration_access_router, tags=["integrations"])
 app.include_router(spend_router, tags=["cost"])
 # The org -> BU -> project model grant cascade. Registered BEFORE model_router so
 # /model/allowed/* and /model/grant-matrix are matched here rather than falling into
