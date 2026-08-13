@@ -7,7 +7,7 @@ GET  /docset/{session_id}/doc/{doc_id} — one document's contents
 
 Mirrors the Deployment / Code Review / Security standalone agents. The prepared
 target (cloned repo + detected stack + upstream-artifact summary) is bound by
-project_id; BYO MCP tools are injected here (the WS path bypasses the Temporal spine).
+project_id; BYO MCP tools are injected here (the WS path bypasses the pipeline spine).
 """
 from __future__ import annotations
 

@@ -105,7 +105,7 @@ def build_checkpointer(agent_name: str):
 
 async def aopen_checkpointer() -> None:
     """Open the async checkpointer pool + ensure tables. Call once at process startup
-    (FastAPI lifespan + Temporal worker main). No-op in local mode (no pool)."""
+    (FastAPI lifespan + worker main). No-op in local mode (no pool)."""
     if _async_pool is None:
         return
     await _async_pool.open()

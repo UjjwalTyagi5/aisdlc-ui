@@ -87,7 +87,7 @@ MCP_STDIO_ENABLED = os.environ.get("MCP_STDIO_ENABLED", "false").lower() in ("1"
 MCP_STDIO_COMMAND_ALLOWLIST = [
     c.strip() for c in os.environ.get("MCP_STDIO_COMMAND_ALLOWLIST", "").split(",") if c.strip()
 ]
-# Bounded timeouts so a slow/unreachable MCP server never hangs a Temporal activity.
+# Bounded timeouts so a slow/unreachable MCP server never hangs a stage.
 MCP_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("MCP_CONNECT_TIMEOUT_SECONDS", "20"))
 MCP_TOOL_TIMEOUT_SECONDS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECONDS", "60"))
 
@@ -172,9 +172,30 @@ OIDC_ISSUER_URL: str = os.environ.get("OIDC_ISSUER_URL", "")
 # Must be set when AGENT_RUNTIME_MODE=enterprise and OIDC_ISSUER_URL is set.
 AUTH0_AUDIENCE: str = os.environ.get("AUTH0_AUDIENCE", "")
 
-# Phase 3 local auth — platform-admin bootstrap (comma-separated emails + initial password).
-PLATFORM_ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("PLATFORM_ADMIN_EMAILS", "").split(",") if e.strip()]
-PLATFORM_ADMIN_PASSWORD = os.getenv("PLATFORM_ADMIN_PASSWORD", "")
+# ── RBAC catalogue boot guard ──
+# roles/permissions/role_permissions are GLOBAL tables with no RLS, so a direct
+# INSERT escalates every holder of a role in every tenant. The boot check compares
+# them to shared/authz/catalog.py and refuses to start on any difference.
+# Set true ONLY to reconcile automatically — that silently undoes tampering, which
+# is exactly the alarm the check exists to raise.
+RBAC_CATALOG_AUTOREPAIR: bool = os.environ.get("RBAC_CATALOG_AUTOREPAIR", "false").lower() == "true"
+
+# ── Single-organization bootstrap (local auth) ──
+# The platform hosts exactly ONE organization; nothing creates a second one. It is
+# seeded at startup if absent, and the env-listed admins are bound to it as org_admin.
+# Self-serve signup joins this same org with no role bindings at all.
+DEFAULT_ORG_SLUG: str = os.getenv("DEFAULT_ORG_SLUG", "pwc").strip().lower()
+DEFAULT_ORG_NAME: str = os.getenv("DEFAULT_ORG_NAME", "PwC").strip()
+
+# Comma-separated emails + initial password for the org admin(s). PLATFORM_ADMIN_* are
+# the historical names for the same two values, honoured so an existing .env keeps
+# working; ORG_ADMIN_* wins when both are set.
+ORG_ADMIN_EMAILS = [
+    e.strip().lower()
+    for e in (os.getenv("ORG_ADMIN_EMAILS") or os.getenv("PLATFORM_ADMIN_EMAILS", "")).split(",")
+    if e.strip()
+]
+ORG_ADMIN_PASSWORD = os.getenv("ORG_ADMIN_PASSWORD") or os.getenv("PLATFORM_ADMIN_PASSWORD", "")
 
 # ── M2: LiteLLM Gateway (D-06, D-07, D-10) ──
 LITELLM_BASE_URL: str = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
@@ -186,11 +207,6 @@ ENABLE_WORKER_POOL: bool = os.environ.get("ENABLE_WORKER_POOL", "false").lower()
 WORKER_POOL_CONCURRENCY: int = int(os.environ.get("WORKER_POOL_CONCURRENCY", "2"))
 WORKER_RECLAIM_TIMEOUT_MS: int = int(os.environ.get("WORKER_RECLAIM_TIMEOUT_MS", "60000"))
 
-# ── M5: Temporal Workflow Engine (D-01, D-03, D-09) ──
-ENABLE_TEMPORAL: bool = os.environ.get("ENABLE_TEMPORAL", "false").lower() == "true"
-TEMPORAL_ADDRESS: str = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-TEMPORAL_NAMESPACE: str = os.environ.get("TEMPORAL_NAMESPACE", "sdlc-dev")
-TEMPORAL_TASK_QUEUE: str = os.environ.get("TEMPORAL_TASK_QUEUE", "sdlc-agents")
 SLA_REQUIREMENTS_HOURS: int = int(os.environ.get("SLA_REQUIREMENTS_HOURS", "24"))
 SLA_DESIGN_HOURS: int = int(os.environ.get("SLA_DESIGN_HOURS", "48"))
 SLA_DEVELOPMENT_HOURS: int = int(os.environ.get("SLA_DEVELOPMENT_HOURS", "72"))

@@ -120,9 +120,6 @@ class Run(Base):
     # Orchestrator state â€” tracks which SDLC stage is active and whether a human gate is pending
     current_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gate_pending: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
-    # Temporal integration â€” added in migration 0004 (M5)
-    temporal_workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    temporal_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

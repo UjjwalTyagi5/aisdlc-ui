@@ -412,7 +412,11 @@ async def test_sc08_slack_clean_message_accepted():
 
 
 # ---------------------------------------------------------------------------
-# Consumer flag-gate behavior (supplement to SC-09 consumer tests)
+# The consumer flag-gate tests lived here. WebhookConsumer is gone with Temporal:
+# it existed to turn a stream event into a workflow, and there is no engine to
+# start. Webhook DELIVERY is still covered above; what is no longer covered is
+# what happens to a delivered event, because nothing happens to it yet.
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit

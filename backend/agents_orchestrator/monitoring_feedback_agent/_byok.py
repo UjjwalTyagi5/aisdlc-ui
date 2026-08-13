@@ -1,7 +1,7 @@
 """BYOK helper for the monitoring/feedback agent (P3.6 Task B4).
 
 This agent is a PROTOTYPE: its router is not mounted in process_api.py and it has
-no live tenant-aware caller (the Temporal SDLCWorkflow sequences only
+no live tenant-aware caller (the pipeline sequences only
 requirements -> design -> development -> testing; there is no monitoring phase or
 activity). The previous LLM sites built calls with the shared *platform*
 LITELLM_API_KEY, which BYOK D-4 forbids.

@@ -6,7 +6,7 @@ POST /chat/    — REST (orchestrator / non-streaming)
 The scan TARGET (cloned branch) is prepared out-of-band by
 POST /security/{project_id}/scan/prepare using the same project; this handler binds
 that prepared state, streams the scan, then persists the produced artifact to a Run.
-The WS path bypasses the Temporal capability spine, so BYO MCP tools are injected here.
+The WS path bypasses the pipeline capability spine, so BYO MCP tools are injected here.
 """
 from __future__ import annotations
 

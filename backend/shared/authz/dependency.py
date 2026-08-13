@@ -182,7 +182,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = ("/webhooks/", "/generated", "/static", "/sc
 # is derived at runtime from the run's current pipeline stage (requirements/design/
 # development/testing), so it cannot be expressed as a single require_permission(perm)
 # factory call ahead of time. signals.py's send_signal performs the equivalent
-# deny-by-default check in-body via _check_permission_for_phase, BEFORE any Temporal
+# deny-by-default check in-body via _check_permission_for_phase, BEFORE any
 # handle is obtained (REQ-M7-11) — functionally equivalent to the factory dependency,
 # just parameterized at request time instead of route-registration time (Pattern 4).
 _SIGNALS_IN_BODY_PROTECTED_PATHS: set[str] = {"/runs/{run_id}/signals/{name}"}

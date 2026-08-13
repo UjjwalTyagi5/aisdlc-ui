@@ -19,7 +19,7 @@ Prereqs:
 Run from agentic_app/:
   PYTHONPATH=. PYTHONIOENCODING=utf-8 ../.venv/Scripts/python.exe scripts/m6_webhook_local_smoke.py
 
-Does NOT cover SC-06 (webhook -> Temporal SDLCWorkflow -> GET /runs): that path
+Does NOT cover SC-06 (webhook -> run -> GET /runs): that path
 has open code gaps (webhook-triggered runs are not persisted as Run rows and
 `trigger` is not surfaced). Tracked separately.
 """
@@ -188,7 +188,7 @@ async def sc06_roundtrip_visible_in_runs() -> bool:
             found = next(
                 (r for r in items
                  if r.get("trigger") == "webhook"
-                 and expected_prefix in (r.get("temporalWorkflowId") or "")),
+                 and expected_prefix in (r.get("id") or "")),
                 None,
             )
             if found:
@@ -197,7 +197,7 @@ async def sc06_roundtrip_visible_in_runs() -> bool:
 
     if found:
         print(f"  ✓ run id={found['id'][:8]} trigger={found['trigger']!r} "
-              f"workflow={found['temporalWorkflowId']}")
+              f"run={found['id']}")
         return True
     print("  ✗ no webhook-triggered run appeared in GET /runs")
     return False

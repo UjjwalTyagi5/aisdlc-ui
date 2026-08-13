@@ -157,7 +157,6 @@ langgraph-checkpoint-postgres>=2,<3  # 3.x needs langgraph-checkpoint>=4 (langgr
 psycopg[binary]==3.3.4
 psycopg-pool==3.3.1
 psycopg2-binary==2.9.12
-temporalio==1.27.2
 slack-sdk==3.42.0
 
 # MCP (Model Context Protocol) — user-registered servers consumed as agent tools.

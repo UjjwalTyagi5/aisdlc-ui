@@ -50,9 +50,6 @@ from config.env import (
     ENABLE_LITELLM,
     LITELLM_BASE_URL,
     ENABLE_WORKER_POOL,
-    ENABLE_TEMPORAL,
-    TEMPORAL_ADDRESS,
-    TEMPORAL_NAMESPACE,
     ENABLE_WEBHOOK_TRIGGERS,
     GITHUB_WEBHOOK_SECRET,
     SLACK_SIGNING_SECRET,
@@ -85,7 +82,6 @@ from shared.routers.traces import traces_router
 from shared.routers.artifacts import artifacts_router
 from shared.routers.connectors import connectors_resource_router
 from shared.routers.evidence import evidence_router
-from shared.routers.signals import signals_router
 from shared.routers.admin import admin_router
 from shared.routers.custom_roles import custom_roles_router
 from shared.routers.role_permissions import role_permissions_router
@@ -426,8 +422,8 @@ async def lifespan(app: FastAPI):
             )
         logger.info("LiteLLM proxy reachable at %s", LITELLM_BASE_URL)
 
-    # Initial synchronous connector health probe — runs BEFORE the Temporal connect
-    # so that GET /connectors/health returns real probe results even when Temporal
+    # Initial synchronous connector health probe — runs early in the lifespan
+    # so that GET /connectors/health returns real probe results even when the rest
     # is unavailable.  Failures are tolerated (return_exceptions=True inside
     # _probe_all_connectors); the cache contains whatever connectors succeed.
     # This mirrors the infra _probe_postgres pattern used for the /health endpoint.
@@ -437,7 +433,7 @@ async def lifespan(app: FastAPI):
     # time to verify inbound signatures BEFORE any processing. Loaded Key-Vault-first
     # with env-var fallback, mirroring the connector auth_adapter() pattern. Set
     # unconditionally (independent of ENABLE_WEBHOOK_TRIGGERS, which only gates
-    # downstream Temporal run-creation — signature verification must run on every
+    # downstream run-creation — signature verification must run on every
     # inbound webhook regardless). ADO uses HTTP Basic Auth (no HMAC), so its pair
     # is a username/password rather than a signing key.
     app.state.github_webhook_secret = await load_secret("github-webhook-secret") or GITHUB_WEBHOOK_SECRET
@@ -474,23 +470,6 @@ async def lifespan(app: FastAPI):
         app.state.redis_denylist = None
         logger.info("REDIS_URL not set — JTI denylist disabled (local dev only)")
 
-    # Temporal client — ONE cached connection shared across all request handlers
-    # (Pitfall 3: never call Client.connect() per request — one gRPC channel per process).
-    # When ENABLE_TEMPORAL=false, set to None so handlers know Temporal is unavailable.
-    if ENABLE_TEMPORAL:
-        from temporalio.client import Client as TemporalClient
-        app.state.temporal_client = await TemporalClient.connect(
-            TEMPORAL_ADDRESS,
-            namespace=TEMPORAL_NAMESPACE,
-        )
-        logger.info(
-            "Temporal client connected: address=%s namespace=%s",
-            TEMPORAL_ADDRESS,
-            TEMPORAL_NAMESPACE,
-        )
-    else:
-        app.state.temporal_client = None
-        logger.info("Temporal disabled (ENABLE_TEMPORAL=false) — app.state.temporal_client=None")
 
     app.state.health_cache = {
         "postgres": str(postgres_result),
@@ -590,7 +569,7 @@ async def lifespan(app: FastAPI):
     # Start background health probe (re-probes every 30s)
     bg_task = asyncio.create_task(_refresh_health(app))
     # RunSweeper — expires runs stuck in "running" with no activity (conversational
-    # runs have no Temporal owner, so nothing else ever terminates an abandoned one).
+    # nothing else ever terminates an abandoned run).
     from workers.run_sweeper import RunSweeper
     run_sweeper_task = asyncio.create_task(RunSweeper().run())
     logger.info("RunSweeper started")
@@ -599,18 +578,12 @@ async def lifespan(app: FastAPI):
     # Start connector health probe (re-probes connector health every 30s)
     connector_health_task = asyncio.create_task(_refresh_connector_health(app))
 
-    # Webhook consumer tasks — one per connector kind, spawned only when
-    # ENABLE_WEBHOOK_TRIGGERS=true AND the Temporal client is available.
-    # The M3 worker-pool gate (ENABLE_WORKER_POOL) is independent of this.
-    webhook_consumer_tasks = []
-    if ENABLE_WEBHOOK_TRIGGERS and app.state.temporal_client is not None:
-        from webhooks.consumer import WebhookConsumer
-        for _ck in ["github", "jira", "azure_repos"]:
-            _consumer = WebhookConsumer(_ck, app.state.temporal_client)
-            webhook_consumer_tasks.append(asyncio.create_task(_consumer.run()))
-        logger.info(
-            "Webhook consumers started for connectors: github, jira, azure_repos"
-        )
+    # NO WEBHOOK CONSUMERS. Webhook DELIVERY still works — POST
+    # /webhooks/{connector}/{tenant_id} verifies the signature and puts the event on
+    # its Redis stream — but the consumer that turned those events into runs started a
+    # workflow engine, and there is no longer an engine to start. Events accumulate on
+    # the stream, which is recoverable; silently dropping deliveries would not be.
+    # BACKLOG: a consumer that starts a conversational run from a webhook event.
 
     # Durable async LangGraph checkpointer pool (enterprise) — opened once here so the
     # agent graphs' astream/ainvoke can persist execution state. No-op in local mode
@@ -632,12 +605,6 @@ async def lifespan(app: FastAPI):
     # Flush any buffered Langfuse spans before the process exits.
     from shared.observability import flush_langfuse  # noqa: PLC0415
     flush_langfuse()
-    for _wt in webhook_consumer_tasks:
-        _wt.cancel()
-        try:
-            await _wt
-        except asyncio.CancelledError:
-            pass
     connector_health_task.cancel()
     try:
         await connector_health_task
@@ -975,11 +942,9 @@ app.include_router(artifacts_router, tags=["artifacts"], dependencies=[_VIEW_DEP
 # — seeded now so the boot scan passes and the matrix is enforced; live
 # connect/disconnect provider plumbing is 7.6 (plan note, D-07 scope).
 app.include_router(connectors_resource_router, tags=["connectors"], dependencies=[_VIEW_DEP])
-# signals_router: send_signal performs its OWN in-body phase-derived permission
 # check (_check_permission_for_phase, REQ-M7-11/Pattern 4) — NOT a router-level
 # dependency (the required permission cannot be a static factory parameter).
 # Covered by _SIGNALS_IN_BODY_PROTECTED_PATHS in the boot-scan allowlist.
-app.include_router(signals_router, tags=["signals"])
 # admin_router: self-protected via its own router-level _require_admin dependency
 # (admin:* gate, tenant-wide). Mounted under /admin — self-serve RBAC role assignment
 # (the D-09 deferred feature). Cross-tenant blocked by FORCE RLS on role_bindings.

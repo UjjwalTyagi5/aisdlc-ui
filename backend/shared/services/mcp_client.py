@@ -10,7 +10,7 @@ Transports supported: streamable_http (primary, remote), sse (legacy remote), st
 (local subprocess — gated by MCP_STDIO_ENABLED + command allowlist).
 
 Bounded by MCP_CONNECT_TIMEOUT_SECONDS / MCP_TOOL_TIMEOUT_SECONDS so a slow or
-unreachable server can never hang a Temporal activity.
+unreachable server can never hang a stage.
 """
 from __future__ import annotations
 

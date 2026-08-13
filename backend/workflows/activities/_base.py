@@ -1,11 +1,11 @@
-"""Shared idempotency helper for Temporal activity wrappers (M5-04, D-05).
+"""Shared idempotency helper for stage runners (D-05).
 
 Public API:
   check_existing_artifact(run_id, agent_type, version)
       -> returns the stored artifact dict when the runs.<column> JSONB field exists
          AND its embedded "version" key matches the requested version; else None.
       -> uses a fresh get_db_session_for_tenant/superuser context per call (Assumption A3 —
-         avoids stale ORM object across Temporal activity retries).
+         avoids stale ORM object across stage retries).
 
   write_and_notify   — re-exported from artifact_service for a single import
                        surface in all activity wrappers.
@@ -57,13 +57,13 @@ async def check_existing_artifact(
 ) -> Optional[dict]:
     """Return the stored artifact dict when it already exists for this version.
 
-    Uses a fresh session per call — never a cached session — so Temporal retries
+    Uses a fresh session per call — never a cached session — so retries
     always see the committed Postgres state rather than a stale in-memory snapshot
     (Assumption A3 from M5-RESEARCH.md).
 
     tenant_id: when provided, uses get_db_session_for_tenant (D-04). When absent,
     uses get_db_session_superuser() because this is a system-internal idempotency
-    read across the Temporal retry boundary — no user tenant is in scope at the
+    read across the retry boundary — no user tenant is in scope at the
     read site (D-05 — cross-retry idempotency read is a justified system op).
     Callers that have SDLCWorkflowInput.tenant_id should pass it here to keep the
     read tenant-scoped once FORCE RLS is active (Plan 04).

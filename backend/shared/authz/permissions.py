@@ -1,10 +1,10 @@
 """Canonical RBAC permission matrix and phase-to-permission map.
 
 Single source of truth imported by both the FastAPI require_permission dependency
-and the Temporal signal handler — no dual maintenance (D-01).
+and every non-HTTP caller — no dual maintenance (D-01).
 
 No FastAPI, no SQLAlchemy, no DB session imports here — intentionally import-cheap
-so the Temporal activity path can import this without pulling web framework deps.
+so a worker or agent process can import this without pulling web framework deps.
 
 MIRROR CONTRACT — this file is the server half of a pair. Its counterparts are:
     frontend/lib/roles.ts                  — PlatformRole, tier, scope
@@ -220,7 +220,7 @@ def has_permission(perms: list[str], required: str) -> bool:
     """Return True if perms grants the required permission.
 
     admin:* is a wildcard that passes every permission check — keeps enforcement
-    sites identical at both the FastAPI dependency and the Temporal signal handler.
+    sites identical at the FastAPI dependency and at every non-HTTP caller.
 
     Exact membership, no implication: holding "connector:manage" does NOT satisfy
     "connector:view". Roles must list both halves. hasPermission in

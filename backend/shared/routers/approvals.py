@@ -4,7 +4,7 @@ A *gate* is a run paused for a human. There is no approvals table: the run row
 itself carries the state (`gate_pending` + `current_stage`), so a gate is derived,
 not stored, and cannot drift from the run it belongs to.
 
-Only approval gates exist here. Clarifications are Temporal signal state rather
+Only approval gates exist here. Clarifications are run state rather
 than a column, so `?type=clarification` correctly returns nothing today instead of
 inventing rows — the queue shows what the database can actually prove is waiting.
 

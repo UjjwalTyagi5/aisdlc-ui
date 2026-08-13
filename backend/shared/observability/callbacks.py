@@ -1,14 +1,14 @@
 """build_agent_callbacks — the single place agent LLM invocations attach observers.
 
 Replaces the ~10 duplicated `config = {..., "callbacks": [AuditCallbackHandler(...)]}`
-blocks across the Temporal activities and standalone agent APIs. Always returns the
+blocks across the stage runners and standalone agent APIs. Always returns the
 existing AuditCallbackHandler (audit_events + agent_call_logs cost + Prometheus — the
 behavior is unchanged). When Langfuse is enabled it ALSO appends the Langfuse LangChain
 CallbackHandler and returns a context manager that opens the per-agent span under a
 deterministic trace.
 
 Deterministic trace grouping (the crux — see plan "Architecture"):
-  Temporal activities run in the WORKER process, the agent APIs in the FastAPI process.
+  Stage runners may run in a worker process, the agent APIs in the FastAPI process.
   We cannot share a live trace object across processes, so the trace id is derived from
   the run_id (pipeline) or session_id (standalone) via Langfuse.create_trace_id(seed=...).
   Every activity of one run therefore lands in ONE trace; every turn of one chat session
@@ -145,7 +145,7 @@ def build_agent_callbacks(
             yield
         finally:
             # Flush after the per-agent span closes so the pipeline trace is durable
-            # even in short-lived / idle Temporal worker processes (the SDK's timer
+            # even in short-lived / idle worker processes (the SDK's timer
             # flush may not fire before the worker parks).
             try:
                 client.flush()

@@ -2,7 +2,7 @@
 
 Root cause of the live bug: the Copilot pipeline's `_seed_downstream_prepared`
 (`agents_orchestrator/orchestrator/copilot_api.py`) seeds `s.changed_files` as the
-raw `list[str]` from `RunWorkspace.changed_files`, while the Temporal activity path
+raw `list[str]` from `RunWorkspace.changed_files`, while the pipeline path
 (`workflows/activities/code_review_activity.py`) converts it to `list[dict]` first.
 `submit_code_review`'s metrics block called `f.get(...)` on every entry unconditionally,
 so under the Copilot-seeded shape it raised `AttributeError: 'str' object has no
@@ -75,7 +75,7 @@ def review_payload() -> dict:
 @pytest.fixture
 def review_session():
     """A session whose `changed_files` mirrors the Copilot pipeline's (buggy) shape:
-    a plain `list[str]`, not the `list[dict]` the Temporal activity path produces."""
+    a plain `list[str]`, not the `list[dict]` the pipeline path produces."""
     token = set_session_id("test-submit-code-review-session")
     s = get_session("test-submit-code-review-session")
     s.changed_files = ["src/File1.cs", "src/File2.cs", "src/File3.cs"]

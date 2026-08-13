@@ -48,7 +48,7 @@ class TestPlan(BaseModel):
 
 
 class SuperAgentState(TypedDict, total=False):
-    # BYOK (P3.6) — tenant + requested model threaded from the Temporal activity
+    # BYOK (P3.6) — tenant + requested model threaded from the stage runner
     # so the run resolves the org's BYOK model (no platform-key fallback).
     tenant_id: Optional[str]
     model_id: Optional[str]

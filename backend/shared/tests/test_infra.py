@@ -27,7 +27,7 @@ from config.env import (
 
 @pytest.mark.unit
 def test_docker_compose_valid():
-    """TM1-002: docker-compose.yml exists and declares postgres, redis, temporal."""
+    """TM1-002: docker-compose.yml exists and declares postgres and redis."""
     import yaml
 
     compose_path = pathlib.Path(__file__).parents[3] / "docker-compose.yml"
@@ -37,7 +37,6 @@ def test_docker_compose_valid():
     services = compose.get("services", {})
     assert "postgres" in services, "postgres service missing from docker-compose.yml"
     assert "redis" in services, "redis service missing from docker-compose.yml"
-    assert "temporal" in services, "temporal service missing from docker-compose.yml"
 
 
 @pytest.mark.unit

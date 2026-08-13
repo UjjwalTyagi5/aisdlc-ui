@@ -1153,7 +1153,7 @@ async def write_requirements_artifact(
 # ── Board connector tools (ADO/Jira ingestion) ──────────────────────────────
 # These let the agent pull epics/stories from the tenant's connected board. The
 # connector is injected per-run via config.connectors.context.set_connector()
-# (Temporal activity / Redis worker); these tools read it back with get_connector().
+# (stage runner / Redis worker); these tools read it back with get_connector().
 # Credentials never appear here — the connector resolves the tenant PAT ephemerally
 # inside auth_adapter(). When no board is connected the tools fail closed with a
 # clear, user-facing message instead of raising (so a run without a board still

@@ -145,7 +145,6 @@ dependencies = [
     # Async database / cache drivers — required by M1-07 health probes and M1-08 integration tests
     "redis>=5.0.0",
     "asyncpg>=0.29.0",
-    "temporalio>=1.28.0",
     "langchain-litellm>=0.5.1,<0.6",  # 0.6.x requires langchain-core>=1.2 — incompatible with pinned langchain-core 0.3.76
     "prometheus-client>=0.25.0",
     "passlib>=1.7.4",
