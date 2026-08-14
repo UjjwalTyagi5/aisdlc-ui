@@ -72,6 +72,8 @@ const KIND_LOGO: Partial<Record<ConnectorKind, { src: string; fit: "contain" | "
   github_actions: { src: "/brand/github.svg", fit: "contain" },
   slack: { src: "/brand/slack.png", fit: "contain" },
   jira: { src: "/brand/jira.png", fit: "cover-left" },
+  ms_teams: { src: "/brand/msteams.svg", fit: "contain" },
+  sharepoint: { src: "/brand/sharepoint.svg", fit: "contain" },
 };
 
 /** Shared gradient for primary CTAs — the app's brand-gradient button. */
