@@ -131,3 +131,76 @@ async def test_duplicate_display_name_rejected():
     with pytest.raises(mc.DuplicateProviderNameError):
         await mc.create_provider(tenant, provider="anthropic", display_name="anthropic",
                                  api_key="k2", enabled_models=["claude-opus-4-8"], created_by="a")
+
+
+@pytest.mark.asyncio
+async def test_resolver_respects_project_grant_scope():
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+    from shared.services.model_resolver import resolve_model_for_run, ModelNotEnabledError
+    from shared.db import get_db_session_for_tenant
+    from sqlalchemy import text
+    import uuid as _uuid
+
+    tenant = str(_uuid.uuid4())
+    ws_id = str(_uuid.uuid4())
+    proj_id = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(
+            text("INSERT INTO organizations (id, slug, display_name, created_at, updated_at) "
+                 "VALUES (:id, :slug, :dn, now(), now()) ON CONFLICT (id) DO NOTHING"),
+            {"id": tenant, "slug": f"org-{tenant[:8]}", "dn": "Org"},
+        )
+        await s.execute(
+            text("INSERT INTO workspaces (id, organization_id, slug, display_name, created_at, updated_at) "
+                 "VALUES (:id, :org_id, :slug, :dn, now(), now())"),
+            {"id": ws_id, "org_id": tenant, "slug": f"ws-{ws_id[:8]}", "dn": "Unit A"},
+        )
+        await s.execute(
+            text("INSERT INTO projects (id, workspace_id, tenant_id, display_name, created_at, updated_at) "
+                 "VALUES (:id, :ws_id, :t, :dn, now(), now())"),
+            {"id": proj_id, "ws_id": ws_id, "t": tenant, "dn": "Proj"},
+        )
+
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Acme", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6", "claude-opus-4-8"], created_by="admin1",
+    )
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text("UPDATE model_providers SET status='valid' WHERE id=:i"), {"i": created["id"]})
+
+    # Grant only claude-sonnet-4-6 to this project's BU — claude-opus-4-8 is onboarded
+    # but never granted, so it must become unresolvable for this project.
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6", "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    resolved = await resolve_model_for_run(tenant, "claude-sonnet-4-6", project_id=proj_id)
+    assert resolved.model == "claude-sonnet-4-6"
+
+    with pytest.raises(ModelNotEnabledError):
+        await resolve_model_for_run(tenant, "claude-opus-4-8", project_id=proj_id)
+
+
+@pytest.mark.asyncio
+async def test_resolver_stays_open_with_zero_grants_configured():
+    """Backward-compat: a tenant with no org_model_grants rows resolves exactly as today."""
+    from shared.services import model_config as mc
+    from shared.services.model_resolver import resolve_model_for_run
+    from shared.db import get_db_session_for_tenant
+    from sqlalchemy import text
+    import uuid as _uuid
+
+    tenant = str(_uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Acme", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text("UPDATE model_providers SET status='valid' WHERE id=:i"), {"i": created["id"]})
+
+    # No grants at all, no project_id passed — must resolve exactly as before this feature.
+    resolved = await resolve_model_for_run(tenant, "claude-sonnet-4-6")
+    assert resolved.model == "claude-sonnet-4-6"
