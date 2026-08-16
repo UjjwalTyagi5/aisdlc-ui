@@ -201,6 +201,7 @@ export default function DevelopmentPage() {
           <div className="flex flex-wrap items-center gap-2">
             <ModelSelector
               aria-label="Development agent model"
+              projectId={projectId}
               value={agentModel}
               onValueChange={setAgentModel}
             />

@@ -39,6 +39,12 @@ export interface ModelSelectorProps {
   id?: string;
   className?: string;
   disabled?: boolean;
+  /**
+   * The project whose effective grant set decides the list. Required on every project
+   * surface — see `getModelOptions`. Without it the backend has no unit to resolve
+   * against and, once any org grant exists, fails closed to an empty list.
+   */
+  projectId?: string;
 }
 
 /**
@@ -54,11 +60,12 @@ export function ModelSelector({
   id,
   className,
   disabled,
+  projectId,
   "aria-label": ariaLabel = "Agent model",
 }: ModelSelectorProps) {
   const optionsQ = useQuery({
-    queryKey: qk.model.options(),
-    queryFn: () => getModelOptions(),
+    queryKey: qk.model.options(projectId),
+    queryFn: () => getModelOptions(projectId),
     staleTime: 60_000,
   });
 

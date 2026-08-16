@@ -289,9 +289,20 @@ async def set_default_route(request: Request, body: SetDefaultIn) -> None:
 
 @model_options_router.get("/options")
 async def get_options_route(request: Request, projectId: str | None = None) -> dict:
-    return await mc.get_options(
-        _tenant_id(request), workspace_id=await _active_ws(request), project_id=projectId,
-    )
+    """The model picker's list, scoped to the PROJECT and nothing else.
+
+    `projectId` is what decides the answer. Once an organization holds any
+    org_model_grants row, `effective_project_offerings` fails CLOSED without a project
+    context — an empty list, on purpose, rather than silently offering everything — so
+    a caller that omits it renders "Connect a model provider" on a project whose unit
+    has models granted.
+
+    No active-workspace selector is consulted. It was, and the value went unused by
+    `get_options`; worse, the selector names the org's oldest unit whenever the
+    X-Workspace-Id cookie is absent (it usually is), which is not the unit the project
+    belongs to.
+    """
+    return await mc.get_options(_tenant_id(request), project_id=projectId)
 
 
 @model_router.get("/allowed/org")

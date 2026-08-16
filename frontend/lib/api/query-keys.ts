@@ -65,7 +65,8 @@ export const qk = {
   model: {
     catalog: () => ["model", "catalog"] as const,
     providers: (workspaceId?: string | null) => ["model", "providers", workspaceId ?? ""] as const,
-    options: () => ["model", "options"] as const,
+    /** Scoped by project: two projects in different units have different option sets. */
+    options: (projectId?: string | null) => ["model", "options", projectId ?? ""] as const,
     orgGrants: () => ["model", "allowed", "org"] as const,
     buAllowed: (workspaceId: string) => ["model", "allowed", "bu", workspaceId] as const,
     availability: (workspaceId: string) => ["model", "availability", workspaceId] as const,

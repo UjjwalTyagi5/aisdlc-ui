@@ -126,7 +126,20 @@ export const deleteModelProvider = (id: string) =>
 export const setModelDefault = (offeringId: string) =>
   api("/model/default", { method: "PUT", body: { offering_id: offeringId } });
 
-export const getModelOptions = () => api("/model/options", { schema: ModelOptions });
+/**
+ * Selectable offerings for the model picker.
+ *
+ * `projectId` is not optional in practice on any project surface. The backend gates
+ * the list by the PROJECT's effective grant set, and once an organization has any
+ * `org_model_grants` row at all, a call with no project context deliberately fails
+ * closed to an empty set rather than silently opening up — so omitting it renders
+ * "Connect a model provider" on a project whose unit has models granted.
+ */
+export const getModelOptions = (projectId?: string) =>
+  api(
+    `/model/options${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+    { schema: ModelOptions },
+  );
 
 /**
  * The Organization Admin's grant matrix — every catalogue model, whether it is

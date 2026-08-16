@@ -85,6 +85,7 @@ export function RunTriggerDialog({
             id="run-model-select"
             variant="field"
             aria-label="Provider and model"
+            projectId={projectId}
             value={offeringId}
             onValueChange={setOfferingId}
           />
