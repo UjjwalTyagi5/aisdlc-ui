@@ -73,6 +73,12 @@ class ProjectOut(BaseModel):
 
     id: str
     tenantId: str
+    # The Business Unit this project belongs to. The Projects screen GROUPS by this,
+    # so omitting it does not degrade to "no badge" — every project falls into the
+    # trailing "Unassigned" bucket instead, which reads as a data problem rather than
+    # a serialization one. The Zod counterpart is `.nullable().optional()`, so a
+    # missing field parses cleanly to undefined and nothing errors on the way.
+    workspaceId: Optional[str] = None
     name: str
     slug: str
     description: Optional[str] = None
@@ -95,9 +101,11 @@ class ProjectOut(BaseModel):
     def from_orm_project(cls, project: Any, spend_usd: float = 0.0) -> "ProjectOut":
         """Build a ProjectOut from a shared.models.orm.Project instance."""
         _budget = getattr(project, "monthly_budget_usd", None)
+        _ws = getattr(project, "workspace_id", None)
         return cls(
             id=str(project.id),
             tenantId=str(project.tenant_id),
+            workspaceId=str(_ws) if _ws is not None else None,
             name=project.display_name,
             slug=_slugify(project.display_name),
             description=getattr(project, "description", None),
