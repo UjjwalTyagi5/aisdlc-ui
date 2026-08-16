@@ -1,21 +1,20 @@
-import { ACCESS_WORKSPACES } from "@/lib/mock/access-fixtures";
-import { getSession } from "@/lib/auth/session";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
-import { canManageBusinessUnit } from "@/lib/mock/access-scope";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: was an unconditional `bffFetch("/admin/workspaces")`, which
-// 500s with no FastAPI running — see [[dummy-data-seam-pattern]]. Reads the
-// shared ACCESS_WORKSPACES store, matching the MSW handler for the same path so
-// both runtimes agree.
-//
-// SCOPE FILTER: this list is the Business Unit picker on Roles & Access, so it
-// decides whose role assignments an admin can even open. MANAGE, not read — a
-// Project Admin who may read their parent unit for context must not be offered
-// it as a unit whose memberships they can edit.
+/**
+ * The Business Unit picker on Roles & Access — proxied to FastAPI
+ * `GET /admin/workspaces`.
+ *
+ * This route was ORIGINALLY a proxy and was converted to a fixture read when the
+ * frontend ran standalone; the seam comment recorded that history. With FastAPI
+ * up, it goes back to what it was.
+ *
+ * The `canManageBusinessUnit` filter is not reinstated on top. The endpoint is
+ * gated on `member:manage` and its query is tenant-scoped, so the backend already
+ * answers "which units may this caller act in"; a second filter in this tier over
+ * a fixture store was how the two came to disagree in the first place.
+ */
+export const dynamic = "force-dynamic";
+
 export async function GET() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  const scope = resolveSessionScope(session);
-  return Response.json(ACCESS_WORKSPACES.filter((w) => canManageBusinessUnit(scope, w.id)));
+  return bffProxy("/admin/workspaces");
 }

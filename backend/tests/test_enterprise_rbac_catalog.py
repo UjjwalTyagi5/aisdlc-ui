@@ -1,4 +1,6 @@
-"""Phase 1 — RBAC catalog expansion: roles, permissions, connector split."""
+"""RBAC catalog: roles, permissions, tiers, and the seeded-vs-code drift guard."""
+import pytest
+
 from shared.authz.dependency import _low_cardinality_role
 from shared.authz.permissions import (
     ALL_PERMISSIONS,
@@ -7,9 +9,13 @@ from shared.authz.permissions import (
     has_permission,
 )
 
+# The 13 roles of the redesigned model. Mirrors PlatformRole in frontend/lib/roles.ts —
+# if these drift apart the UI gates off strings the backend never grants.
 EXPECTED_ROLES = {
-    "org_admin", "admin", "delivery_lead", "product_manager", "tech_lead",
-    "developer", "qa_lead", "sre_lead", "security_auditor", "stakeholder",
+    "org_admin", "bu_admin", "contributor", "project_admin",
+    "ba", "architect", "developer", "qa",
+    "security_engineer", "devops_engineer", "data_engineer", "scrum_master",
+    "custom",
 }
 
 NEW_PERMISSIONS = {
@@ -23,24 +29,28 @@ def test_all_expected_roles_present():
     assert EXPECTED_ROLES.issubset(set(ALL_ROLES))
 
 
-def test_all_new_roles_present():
-    for role in ("delivery_lead", "security_auditor", "stakeholder"):
-        assert role in ALL_ROLES, f"{role} missing from ALL_ROLES"
+def test_role_catalog_is_exactly_the_expected_set():
+    """No extras either — a leftover legacy role would still be grantable."""
+    assert set(ALL_ROLES) == EXPECTED_ROLES
 
 
 def test_all_new_permissions_present():
     assert NEW_PERMISSIONS.issubset(set(ALL_PERMISSIONS))
 
 
-def test_security_auditor_is_read_only():
-    perms = _ROLE_PERMISSIONS["security_auditor"]
-    assert "audit:view" in perms and "cost:view" in perms and "eval:view" in perms
+def test_security_engineer_is_oversight_not_author():
+    perms = _ROLE_PERMISSIONS["security_engineer"]
+    assert "audit:view" in perms and "cost:view" in perms and "trace:view" in perms
+    # Reviews and signs off via the generic "approve", but owns no phase gate
+    # and cannot start work of its own.
     assert not any(p.startswith("artifact:approve_") for p in perms)
     assert "run:create" not in perms
 
 
-def test_stakeholder_view_only():
-    assert _ROLE_PERMISSIONS["stakeholder"] == ["artifact:view"]
+def test_contributor_is_the_read_only_floor():
+    """Onboarded into a unit, holding nothing until that unit's admin assigns a role."""
+    assert _ROLE_PERMISSIONS["contributor"] == ["artifact:view"]
+    assert _ROLE_PERMISSIONS["custom"] == ["artifact:view"]
 
 
 def test_developer_cannot_approve():
@@ -49,13 +59,32 @@ def test_developer_cannot_approve():
     assert not any(p.startswith("artifact:approve_") for p in perms)
 
 
-def test_connector_view_granted_broadly_manage_admin_only():
-    for role in ("developer", "qa_lead", "delivery_lead"):
+def test_connector_view_granted_broadly_manage_restricted():
+    for role in ("developer", "qa", "architect", "ba", "devops_engineer"):
         assert "connector:view" in _ROLE_PERMISSIONS[role]
+    # connector:manage means onboarding a provider, which only the roles that own a
+    # scope may do. bu_admin runs its unit's connections; project_admin its project's.
+    allowed_to_manage = {"org_admin", "bu_admin", "project_admin"}
     for role, perms in _ROLE_PERMISSIONS.items():
-        if role in ("admin", "org_admin"):
+        if role in allowed_to_manage:
             continue
         assert "connector:manage" not in perms, f"{role} must not have connector:manage"
+
+
+def test_every_role_has_a_tier_and_scope():
+    from shared.authz.permissions import ROLE_SCOPE, ROLE_TIER
+    for role in ALL_ROLES:
+        assert ROLE_TIER.get(role) in ("governance", "delivery"), f"{role} has no tier"
+        assert ROLE_SCOPE.get(role), f"{role} has no default scope"
+    # Only the two administrative roles govern; everyone else delivers.
+    assert {r for r in ALL_ROLES if ROLE_TIER[r] == "governance"} == {"org_admin", "bu_admin"}
+
+
+def test_phase_permissions_all_exist_in_the_catalog():
+    """signals.py resolves a phase to a permission at request time — every one must exist."""
+    from shared.authz.permissions import _PHASE_PERMISSION
+    for phase, perm in _PHASE_PERMISSION.items():
+        assert perm in ALL_PERMISSIONS, f"phase {phase} maps to uncatalogued {perm}"
 
 
 def test_admin_wildcard_still_passes_new_perms():
@@ -63,11 +92,12 @@ def test_admin_wildcard_still_passes_new_perms():
     assert has_permission(["admin:*"], "audit:view") is True
 
 
-def test_role_hint_for_auditor_and_stakeholder():
-    assert _low_cardinality_role(["audit:view", "cost:view"]) == "security_auditor"
-    assert _low_cardinality_role(["artifact:view"]) == "stakeholder"
+def test_role_hint_labels_are_bounded_and_current():
+    """Advisory metric labels only — never authz. Must name roles that still exist."""
     assert _low_cardinality_role(["admin:*"]) == "admin"
-    assert _low_cardinality_role(["workspace:manage"]) == "delivery_lead"
+    assert _low_cardinality_role(["role:manage"]) == "bu_admin"
+    assert _low_cardinality_role(["artifact:approve_testing"]) == "qa"
+    assert _low_cardinality_role(["artifact:view"]) == "contributor"
 
 
 def test_every_role_has_display_metadata():
@@ -75,9 +105,10 @@ def test_every_role_has_display_metadata():
     from shared.authz.permissions import ALL_ROLES as _ALL_ROLES
     for role in _ALL_ROLES:
         assert role in _ROLE_META, f"{role} missing a label/description in _ROLE_META"
-    # Enterprise-friendly labels over the kept internal keys.
-    assert _ROLE_META["tech_lead"][0] == "Architect"
-    assert _ROLE_META["sre_lead"][0] == "Release Manager"
+    # Labels mirror ROLE_META in frontend/lib/roles.ts.
+    assert _ROLE_META["architect"][0] == "Architect"
+    assert _ROLE_META["bu_admin"][0] == "Business Unit Admin"
+    assert _ROLE_META["org_admin"][0] == "Organization Admin"
 
 
 def test_get_connectors_requires_view_permission():
@@ -96,38 +127,85 @@ def test_get_connectors_requires_view_permission():
     assert _has_require_perm("/connectors/{kind}", "GET")
 
 
-def test_migration_0011_is_catalog_only_and_chained():
-    # Module name has a leading digit (`0011_...`) which is not a valid Python
-    # identifier, so importlib.util.find_spec on the dotted path is unreliable
-    # (may raise instead of returning None). Locate the file directly instead.
-    import os
-    here = os.path.dirname(__file__)
-    path = os.path.normpath(
-        os.path.join(here, "..", "migrations", "versions", "0011_rbac_catalog_expansion.py")
-    )
-    assert os.path.exists(path), "migration 0011 module not found"
-    text = open(path, encoding="utf-8").read()
-    assert 'revision = "0011"' in text
-    assert 'down_revision = "0010"' in text
-    # Must NEVER write user_workspace_roles (FORCE RLS would block the migration role).
-    assert "user_workspace_roles" not in text
-    # Must be idempotent.
-    assert "ON CONFLICT DO NOTHING" in text
+def test_baseline_seeds_catalog_from_the_code_matrix():
+    """The baseline must import the matrix, not restate it.
 
-
-def test_migration_matrix_matches_code_matrix():
-    """0011's literal matrix must equal _ROLE_PERMISSIONS (D-01 no-drift)."""
-    import importlib.util
+    The old 0011 carried a literal copy of _ROLE_PERMISSIONS, so this test compared the
+    two dicts to catch drift. The baseline imports the real module instead, which makes
+    drift impossible by construction — so what is worth asserting now is that it still
+    does that, and still refuses to write into an RLS table.
+    """
     from pathlib import Path
 
-    mig_path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0011_rbac_catalog_expansion.py"
-    spec = importlib.util.spec_from_file_location("_mig_0011", mig_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    for role, perms in _ROLE_PERMISSIONS.items():
-        assert set(mod._ROLE_PERMS.get(role, [])) == set(perms), (
-            f"matrix drift for {role}: migration vs permissions.py"
+    path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0001_baseline.py"
+    assert path.exists(), "baseline migration not found"
+    text = path.read_text(encoding="utf-8")
+
+    assert "from shared.authz.permissions import" in text, (
+        "baseline must seed from shared.authz.permissions, not a hardcoded copy"
+    )
+    assert "_ROLE_PERMISSIONS" in text and "ALL_PERMISSIONS" in text
+
+    # FORCE RLS applies to the migration role too, so seeding a tenant-scoped table
+    # here would fail the WITH CHECK policy. role_bindings must start empty.
+    assert "INSERT INTO role_bindings" not in text
+    assert "bulk_insert(role_bindings" not in text
+
+    # Exactly ONE baseline: the 39 migrations that preceded it were squashed into it,
+    # and reintroducing a second baseline would give the chain two roots.
+    #
+    # Was `len(versions) == 1`, which also forbade any migration ever being added
+    # after it — an assertion the squash never intended and which fires the first time
+    # the schema legitimately changes. What matters is the single root, plus every
+    # other revision chaining onto something.
+    versions = sorted(p.name for p in path.parent.glob("[0-9]*.py"))
+    baselines = [v for v in versions if "baseline" in v]
+    assert baselines == ["0001_baseline.py"], f"expected one baseline, found {baselines}"
+
+    for name in versions:
+        if name in baselines:
+            continue
+        body = (path.parent / name).read_text(encoding="utf-8")
+        assert "down_revision = " in body and "down_revision = None" not in body, (
+            f"{name} must chain onto a previous revision, not start a second root"
         )
-    # And the reverse: migration has no roles absent from the code matrix.
-    for role in mod._ROLE_PERMS:
-        assert role in _ROLE_PERMISSIONS, f"migration has unknown role {role}"
+
+
+def test_seeded_catalog_matches_the_code_matrix():
+    """The rows actually in the database must equal _ROLE_PERMISSIONS.
+
+    This is the guarantee the old migration-vs-code comparison was reaching for, checked
+    against the real seeded state rather than against source text. Skips without a DB.
+    """
+    import asyncio, os
+
+    dsn = os.environ.get("POSTGRES_MIGRATIONS_CONN_STRING", "")
+    if not dsn:
+        pytest.skip("POSTGRES_MIGRATIONS_CONN_STRING not set")
+
+    async def _check():
+        import asyncpg
+        conn = await asyncpg.connect(dsn.replace("postgresql+asyncpg://", "postgresql://"))
+        try:
+            rows = await conn.fetch("SELECT role_name, permission_name FROM role_permissions")
+            seeded: dict[str, set[str]] = {}
+            for r in rows:
+                seeded.setdefault(r["role_name"], set()).add(r["permission_name"])
+            names = {r["name"] for r in await conn.fetch("SELECT name FROM roles")}
+        finally:
+            await conn.close()
+        return seeded, names
+
+    try:
+        seeded, names = asyncio.run(_check())
+    except Exception as exc:  # no live DB in this environment
+        pytest.skip(f"database unavailable: {exc}")
+
+    assert names == set(ALL_ROLES), "roles table does not match ALL_ROLES"
+    for role, perms in _ROLE_PERMISSIONS.items():
+        # Every granted string is seeded verbatim, wildcards included. ALL_PERMISSIONS is
+        # the grantable-leaf catalog offered by the custom-role builder and excludes
+        # admin:*, but role_permissions must still carry it — the resolver reads a user's
+        # effective permissions straight out of that table, so filtering the wildcard out
+        # would leave org_admin with nothing.
+        assert seeded.get(role, set()) == set(perms), f"seeded grants drifted for {role}"

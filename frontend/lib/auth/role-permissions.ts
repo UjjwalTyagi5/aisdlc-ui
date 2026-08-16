@@ -13,6 +13,13 @@ import type { PlatformRole } from "@/lib/roles";
 export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
   org_admin: ["admin:*"],
   bu_admin: [
+    // The read-only floor. It was missing here while `contributor` — a strictly
+    // weaker role — had it, so every backend route behind the `artifact:view`
+    // dependency (workspaces, projects, runs, audit, cost, traces) refused a
+    // Business Unit Admin: they could administer a unit they could not open.
+    // Governance roles do not run agents (PRD §14.8) — that is why `agent:invoke`
+    // and `approve` stay absent — but being unable to READ was never the intent.
+    "artifact:view",
     "member:manage",
     "role:manage",
     // Both halves, explicitly. `hasPermission` mirrors the backend's exact

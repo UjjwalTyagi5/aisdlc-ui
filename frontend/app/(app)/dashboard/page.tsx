@@ -276,6 +276,17 @@ export default function DashboardPage() {
     // list is already scoped to the viewer's units, so a sibling unit's broken
     // Slack no longer shows up as this viewer's problem.
     for (const c of connectors) {
+      // NEVER INSTALLED IS NOT BROKEN. `/connectors` returns the whole
+      // catalogue of known kinds — installed or not — because the Integrations
+      // hub needs to offer the ones you don't have yet. Every uninstalled kind
+      // carries `health: "disconnected"`, so without this an organisation that
+      // has connected nothing opens its dashboard to eight red rows telling it
+      // that eight integrations it never set up are down.
+      //
+      // Health is only a claim about a connection that exists. A missing
+      // connection is a setup step, and the Integrations page is where it is
+      // offered — this list is for things that have gone wrong.
+      if (!c.installed) continue;
       if (c.health === "healthy") continue;
       items.push({
         id: `connector-${c.kind}`,

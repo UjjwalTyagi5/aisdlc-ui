@@ -42,7 +42,13 @@ export async function bffProxy<TSchema extends z.ZodTypeAny>(
     return Response.json(data ?? null);
   } catch (err) {
     if (err instanceof ApiRequestError) {
-      if (err.status === 403) {
+      // A 403 the backend EXPLAINED keeps its own words. The generic message below
+      // is for a bare permission refusal — "you don't hold the right role" — and
+      // saying that about a request which is merely waiting on somebody else sends
+      // the reader looking for a permission they already have. `err.code` is
+      // `unknown_error` only when the backend offered nothing more specific, so it
+      // is the right test for "did it bother to say why".
+      if (err.status === 403 && err.code === "unknown_error") {
         return Response.json(
           { code: "forbidden", message: FORBIDDEN_MESSAGE },
           { status: 403 },

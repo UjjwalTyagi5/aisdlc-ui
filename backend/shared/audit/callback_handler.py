@@ -57,7 +57,7 @@ class AuditCallbackHandler(BaseCallbackHandler):
     def _fire(self, coro) -> None:
         """Schedule an async coroutine from a sync context without blocking.
 
-        If a running event loop exists (e.g., inside an async test or Temporal
+        If a running event loop exists (e.g., inside an async test or worker
         worker), create_task schedules the coroutine on that loop.  In a
         pure-sync context (no running loop) the coroutine is closed immediately
         to suppress "coroutine never awaited" RuntimeWarning -- the emit is
@@ -218,7 +218,7 @@ class AuditCallbackHandler(BaseCallbackHandler):
 
         # REQ-M9-05/M9-06: CostLogService.emit is async; schedule safely from a
         # sync context.  If a running loop exists (e.g., called from sync code inside
-        # an async test or Temporal worker), create_task fires the coroutine on that
+        # an async test or worker process), create_task fires the coroutine on that
         # loop.  In a pure-sync context (no running loop) we close the coroutine
         # immediately to suppress the "coroutine never awaited" RuntimeWarning -- the
         # cost row is silently skipped, which is acceptable (degraded, not broken).

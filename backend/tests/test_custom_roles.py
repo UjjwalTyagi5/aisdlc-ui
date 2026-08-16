@@ -2,7 +2,7 @@
 from shared.models.orm import (
     CustomRole,
     CustomRolePermission,
-    UserWorkspaceRole,
+    RoleBinding,
     _RLS_TABLES,
 )
 
@@ -15,12 +15,16 @@ def test_custom_role_tables_registered_for_rls():
 def test_custom_role_columns():
     cols = {c.name for c in CustomRole.__table__.columns}
     assert {"id", "tenant_id", "name", "description", "created_at"} <= cols
+    # Owner scope + creator, added in migration 0004.
+    assert {"scope_kind", "scope_id", "created_by"} <= cols
     uniques = [
         tuple(sorted(c.name for c in con.columns))
         for con in CustomRole.__table__.constraints
         if con.__class__.__name__ == "UniqueConstraint"
     ]
-    assert ("name", "tenant_id") in uniques
+    # Uniqueness is per OWNER scope, not per tenant: two business units may each
+    # define a "Reviewer" without colliding, which the old tenant-wide unique forbade.
+    assert ("name", "scope_id", "tenant_id") in uniques
 
 
 def test_custom_role_permission_columns():
@@ -29,23 +33,29 @@ def test_custom_role_permission_columns():
 
 
 def test_user_workspace_role_has_nullable_custom_ref():
-    cols = {c.name: c for c in UserWorkspaceRole.__table__.columns}
+    cols = {c.name: c for c in RoleBinding.__table__.columns}
     assert "custom_role_id" in cols
     assert cols["custom_role_id"].nullable is True
     assert cols["role_name"].nullable is True
 
 
-def test_migration_0012_shape():
-    from pathlib import Path
-    mig = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0012_custom_roles.py"
-    text = mig.read_text(encoding="utf-8")
-    assert 'revision = "0012"' in text
-    assert 'down_revision = "0011"' in text
+def test_custom_role_tables_are_rls_protected():
+    """custom_roles and custom_role_permissions are tenant-scoped and must be forced.
+
+    Was a shape check on migration 0012. The baseline drives RLS from
+    shared.models.orm._RLS_TABLES, so the check now targets that registry — which is
+    also what the DDL loop iterates, so the two cannot disagree.
+    """
+    from shared.models.orm import _RLS_TABLES
     for tbl in ("custom_roles", "custom_role_permissions"):
-        assert f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY" in text
-        assert f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY" in text
-    assert "ADD COLUMN" in text or "add_column" in text
-    assert "UPDATE user_workspace_roles" not in text
+        assert tbl in _RLS_TABLES, f"{tbl} is tenant-scoped but absent from _RLS_TABLES"
+
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0001_baseline.py").read_text(encoding="utf-8")
+    # All four statements per table — FORCE alone leaves a table wide open.
+    for stmt in ("ENABLE ROW LEVEL SECURITY", "FORCE ROW LEVEL SECURITY",
+                 "CREATE POLICY tenant_isolation ", "CREATE POLICY tenant_isolation_insert "):
+        assert stmt in text, f"baseline is missing: {stmt}"
 
 
 import os
@@ -57,6 +67,11 @@ pg_required = pytest.mark.skipif(
     not os.getenv("POSTGRES_CONN_STRING") and not os.getenv("AZURE_KEY_VAULT_URL"),
     reason="needs a live Postgres",
 )
+
+# The DB-backed cases here insert throwaway organizations directly and left them
+# behind. The conftest fixture diffs the organizations table around each test; the
+# tests that touch no database simply see a no-op.
+pytestmark = pytest.mark.usefixtures("purge_created_orgs")
 
 # Cross-tenant RLS *isolation* assertions must run only against the restricted app
 # DSN (POSTGRES_CONN_STRING → sdlc_app, non-BYPASSRLS), never the KV-resolved superuser
@@ -103,15 +118,19 @@ async def test_resolver_includes_custom_role_permissions():
             "VALUES (:w,:t,'default','D')"
         ), {"w": ws_id, "t": tenant})
         await s.execute(text(
-            "INSERT INTO custom_roles (id, tenant_id, name) VALUES (:id,:t,'junior_dev')"
+            # scope_kind/scope_id are NOT NULL since migration 0004: a custom role now
+            # records who owns it. Organization scope with the tenant as scope_id is
+            # what a tenant-wide role was before the column existed.
+            "INSERT INTO custom_roles (id, tenant_id, name, scope_kind, scope_id) "
+            "VALUES (:id,:t,'junior_dev','organization',:t)"
         ), {"id": role_id, "t": tenant})
         await s.execute(text(
             "INSERT INTO custom_role_permissions (id, custom_role_id, permission_name, tenant_id) "
             "VALUES (:id,:rid,'run:create',:t)"
         ), {"id": str(_uuid.uuid4()), "rid": role_id, "t": tenant})
         await s.execute(text(
-            "INSERT INTO user_workspace_roles (id, user_id, workspace_id, custom_role_id, tenant_id) "
-            "VALUES (:id,:u,:w,:rid,:t)"
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, custom_role_id, tenant_id) "
+            "VALUES (:id,:u,'business_unit',:w,:rid,:t)"
         ), {"id": str(_uuid.uuid4()), "u": user, "w": ws_id, "rid": role_id, "t": tenant})
 
     perms = await resolve_permissions_for_user(user, tenant)
@@ -148,7 +167,14 @@ async def test_create_custom_role_duplicate_returns_409(monkeypatch):
     class _FakeReq:
         def __init__(self):
             from types import SimpleNamespace
-            self.state = SimpleNamespace(tenant_id="00000000-0000-0000-0000-000000000001")
+            # admin:* since migration 0004: creating an ORGANIZATION-scoped role now
+            # requires org-wide authority, so a caller without it is refused at 403
+            # before the path this test is about is ever reached.
+            self.state = SimpleNamespace(
+                tenant_id="00000000-0000-0000-0000-000000000001",
+                user_id="fake-admin",
+                permissions=["admin:*"],
+            )
 
     class _FakeDB:
         async def execute(self, *a, **k):
@@ -168,7 +194,14 @@ async def test_create_custom_role_reraises_non_integrity(monkeypatch):
     class _FakeReq:
         def __init__(self):
             from types import SimpleNamespace
-            self.state = SimpleNamespace(tenant_id="00000000-0000-0000-0000-000000000001")
+            # admin:* since migration 0004: creating an ORGANIZATION-scoped role now
+            # requires org-wide authority, so a caller without it is refused at 403
+            # before the path this test is about is ever reached.
+            self.state = SimpleNamespace(
+                tenant_id="00000000-0000-0000-0000-000000000001",
+                user_id="fake-admin",
+                permissions=["admin:*"],
+            )
 
     class _FakeDB:
         async def execute(self, *a, **k):
@@ -203,7 +236,8 @@ async def test_grant_custom_role_assigns_and_resolves():
             "VALUES (:w,:t,'default','D')"
         ), {"w": ws_id, "t": tenant})
         await s.execute(text(
-            "INSERT INTO custom_roles (id, tenant_id, name) VALUES (:id,:t,'qa_plus')"
+            "INSERT INTO custom_roles (id, tenant_id, name, scope_kind, scope_id) "
+            "VALUES (:id,:t,'qa_plus','organization',:t)"
         ), {"id": role_id, "t": tenant})
         await s.execute(text(
             "INSERT INTO custom_role_permissions (id, custom_role_id, permission_name, tenant_id) "
@@ -235,7 +269,10 @@ async def test_custom_roles_are_tenant_isolated():
                 text("SELECT set_config('app.current_tenant_id', :tid, true)"),
                 {"tid": tid},
             )
-            return (await conn.execute(stmt, params or {})).fetchall()
+            result = await conn.execute(stmt, params or {})
+            # An INSERT returns no rows; calling fetchall() on it raises
+            # ResourceClosedError. Only drain a result that actually has rows.
+            return result.fetchall() if result.returns_rows else []
 
     tenant_a = str(_uuid.uuid4())
     tenant_b = str(_uuid.uuid4())
@@ -245,7 +282,10 @@ async def test_custom_roles_are_tenant_isolated():
     try:
         await _run_with_guc(
             eng, tenant_a,
-            text("INSERT INTO custom_roles (id, tenant_id, name) VALUES (:id,:t,'secret_role')"),
+            text(
+                "INSERT INTO custom_roles (id, tenant_id, name, scope_kind, scope_id) "
+                "VALUES (:id,:t,'secret_role','organization',:t)"
+            ),
             {"id": role_id, "t": tenant_a},
         )
 

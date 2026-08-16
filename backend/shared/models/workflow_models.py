@@ -1,13 +1,16 @@
-"""Pydantic workflow input and HITL signal models for the Temporal pipeline (M5).
+"""Pydantic models describing a pipeline run and its human-in-the-loop decisions.
 
-These models flow across the Temporal activity boundary and must remain
-serialisation-safe (JSON-round-trippable). Use model_dump() when passing
-to Temporal workflow input — the SDK serialises via its DataConverter.
+These were the payloads that crossed the Temporal activity boundary. Temporal is gone;
+the models are not, because what they describe outlived the engine that carried them —
+`ChangeRequest` is what a run is asked to do, `SDLCWorkflowInput` is the full
+description of one, and the HITL types are the shape of a human decision on a gate.
+
+They stay JSON-round-trippable. Nothing requires that of them today, and it costs
+nothing to keep: the moment one is handed to a queue, a worker or an audit payload,
+the alternative is discovering it is not.
 
 Canonical import surface:
     from shared.models.workflow_models import SDLCWorkflowInput, HITLSignal, HITLApprovalRecord
-
-Do NOT import from workflows.models — that module does not exist.
 """
 from __future__ import annotations
 
@@ -74,7 +77,7 @@ class SDLCWorkflowInput(BaseModel):
 class ClarificationRequest(BaseModel):
     """Returned by an agent activity when the agent ended its turn with questions.
 
-    D-M10-04: mirrors the HITLSignal shape so the existing Temporal
+    D-M10-04: mirrors the HITLSignal shape so the existing
     DataConverter + signals.py authz machinery reuse cleanly downstream
     (10.2/10.3). All fields are JSON-round-trippable (REQ-M10-02).
     """
@@ -94,7 +97,7 @@ class ClarificationAnswer(BaseModel):
     # Must match the pending ClarificationRequest.clarification_id —
     # the correlation guard (RESEARCH Pitfall 4).
     clarification_id: str
-    # Bounded to cap Temporal history bloat from an oversized answer
+    # Bounded to cap payload bloat from an oversized answer
     # (threat T-10.1-DOS).
     answer: str = Field(max_length=4096)
     actor_id: str

@@ -1,17 +1,12 @@
 import { type NextRequest } from "next/server";
 
-import { archiveWorkspace } from "@/lib/mock/workspace-fixtures";
-import { getSession } from "@/lib/auth/session";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: mirrors mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function POST(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+/**
+ * Archive a Business Unit — proxied to FastAPI
+ * `POST /workspaces/{id}/archive`, gated there on `workspace:manage`.
+ */
+export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const ws = archiveWorkspace(id);
-  if (!ws) return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
-  return Response.json(ws);
+  return bffProxy(`/workspaces/${encodeURIComponent(id)}/archive`, { method: "POST" });
 }

@@ -274,7 +274,7 @@ class TestSCIMProvision:
         assert r1.json()["id"] == r2.json()["id"]
 
     async def test_provision_user_starts_with_zero_roles(self):
-        """D-05: SCIM-provisioned user has no UserWorkspaceRole row created."""
+        """D-05: SCIM-provisioned user has no RoleBinding row created."""
         from scim.router import scim_router
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -305,12 +305,12 @@ class TestSCIMProvision:
             )
 
         assert response.status_code == 201
-        # Confirm we never called INSERT ... user_workspace_roles (D-05)
+        # Confirm we never called INSERT ... role_bindings (D-05)
         execute_calls = mock_conn.execute.call_args_list
         for call in execute_calls:
             sql_text = str(call.args[0] if call.args else "")
-            assert "user_workspace_roles" not in sql_text.lower(), (
-                "D-05 violated: provision handler must not insert into user_workspace_roles"
+            assert "role_bindings" not in sql_text.lower(), (
+                "D-05 violated: provision handler must not insert into role_bindings"
             )
 
     async def test_provision_metric_emitted(self):

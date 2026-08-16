@@ -18,7 +18,7 @@ REQ-M3-10 credential hygiene: clear_connector() runs in finally so the connector
 reference never survives the run, even on error. Only clears when this scope set
 it (so a caller's outer scope, if any, is not disturbed).
 
-This is the single helper the worker, the Temporal activity, and the WS/REST chat
+This is the single helper the worker, the stage runner, and the WS/REST chat
 handlers converge on. This slot wires the Requirements chat handlers; the other
 paths already inject the connector and adopt this helper in their own slots.
 """

@@ -34,7 +34,7 @@ class DevSessionState:
     mcp_loaded: bool = False
     # HITL push gate — STANDALONE dev agent only. push_gate_enabled is set True by
     # development_agent_api (the standalone WS/REST path) and left False everywhere
-    # else, so the copilot orchestrator and the Temporal pipeline (which share these
+    # else, so the copilot orchestrator and the pipeline (which share these
     # git tools) are unaffected. When enabled, push_branch/create_pr refuse (and show
     # the diff + ask) unless push_approved is set for the current turn — which the API
     # sets only when the user's message is an explicit approval ("push" / "yes").

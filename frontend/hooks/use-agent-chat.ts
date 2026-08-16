@@ -31,7 +31,7 @@ export interface AgentChatContext {
    * workspace and persist PRs to a project-linked run, and (b) every stage page so
    * the backend can resolve this project's per-stage MCP selection
    * (Project.mcp_servers[agent_id]) and bind those tools for the agent in chat — the
-   * same path the Temporal pipeline uses.
+   * same path the pipeline uses.
    */
   project_id?: string;
   /**
@@ -61,7 +61,7 @@ export interface AgentChatToolCall {
   id: string;
   name: string;
   args: Record<string, unknown>;
-  /** Always present in MVP — replaced by real status when wired to Temporal. */
+  /** Always present in MVP — replaced by real status when the backend reports it. */
   status: "completed";
 }
 

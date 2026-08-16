@@ -1,88 +1,41 @@
-import type { ArtifactId, ProjectId, RunId, StreamEvent } from "@/lib/schemas";
-import { ARTIFACTS, RUNS } from "@/mocks/fixtures";
+/**
+ * The org-wide live-update stream (SSE).
+ *
+ * OPEN AND QUIET. It holds the connection and heartbeats, and sends no events.
+ *
+ * It used to synthesise them: a `cost.update` every few seconds naming a random
+ * fixture run, and artifact-status changes picked out of the fixture array. On a
+ * database with no runs and no artifacts, that made the most convincing lie on
+ * the platform — numbers that MOVED, which is what a live feed is trusted for.
+ *
+ * The endpoint stays rather than being deleted, because a page opening an
+ * EventSource against a 404 retries in a loop. An open stream with nothing on it
+ * is the accurate report: nothing is happening.
+ *
+ * BACKLOG: a FastAPI event source (run progress, cost ticks, artifact
+ * transitions) for this route to relay. `app/api/runs/[id]/stream` already
+ * relays a real per-run stream — this is its org-wide counterpart.
+ */
+export const dynamic = "force-dynamic";
 
-// DUMMY-DATA SEAM: a synthetic workspace-wide SSE stream (cost ticks, artifact
-// updates) — a nice-to-have live-update feed, but must exist as a plain Next
-// route too so a page never 404s on it if MSW isn't intercepting (e.g. a
-// stale/unregistered Service Worker). Mirrors mocks/workspace-stream.ts's
-// synthesis exactly (duplicated rather than shared, since MSW's HttpResponse
-// and a plain Response aren't interchangeable at the type level) — see
-// [[msw-dual-runtime-mutation-rule]].
 export function GET() {
   const encoder = new TextEncoder();
-
-  const pickRun = (): RunId =>
-    (RUNS[Math.floor(Math.random() * RUNS.length)]?.id ?? RUNS[0]!.id) as RunId;
-  const pickArtifact = () => {
-    const a = ARTIFACTS[Math.floor(Math.random() * ARTIFACTS.length)];
-    return {
-      id: (a?.id ?? ARTIFACTS[0]!.id) as ArtifactId,
-      projectId: (a?.projectId ?? ARTIFACTS[0]!.projectId) as ProjectId,
-      status: a?.status ?? "approved",
-    };
-  };
-
-  let closed = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
 
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(encoder.encode(": stream opened\n\n"));
-
-      const send = (ev: StreamEvent) => {
-        if (closed) return;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-      };
-
-      const heartbeat = setInterval(() => {
-        if (closed) return;
-        controller.enqueue(encoder.encode(": heartbeat\n\n"));
-      }, 15_000);
-
-      const cost = setInterval(() => {
-        const runId = pickRun();
-        const inputTokens = 1200 + Math.floor(Math.random() * 3000);
-        const outputTokens = 200 + Math.floor(Math.random() * 800);
-        send({
-          type: "cost.update",
-          runId,
-          cost: {
-            usd: Number((inputTokens * 3e-6 + outputTokens * 1.5e-5).toFixed(4)),
-            inputTokens,
-            outputTokens,
-          },
-          at: new Date().toISOString(),
-        });
-      }, 8_000);
-
-      const artifact = setInterval(() => {
-        const { id, status } = pickArtifact();
-        send({
-          type: "artifact.updated",
-          runId: pickRun(),
-          artifactId: id,
-          status,
-          at: new Date().toISOString(),
-        });
-        if (Math.random() < 0.25) {
-          send({
-            type: "hitl.pending",
-            runId: pickRun(),
-            artifactId: id,
-            title: "Gate waiting on your approval",
-            at: new Date().toISOString(),
-          });
+      heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": heartbeat\n\n"));
+        } catch {
+          // Client went away between the cancel callback and this tick.
+          if (heartbeat) clearInterval(heartbeat);
         }
-      }, 60_000);
-
-      (controller as ReadableStreamDefaultController & { _cleanup?: () => void })._cleanup = () => {
-        closed = true;
-        clearInterval(heartbeat);
-        clearInterval(cost);
-        clearInterval(artifact);
-      };
+      }, 15_000);
     },
     cancel() {
-      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
     },
   });
 
@@ -91,7 +44,6 @@ export function GET() {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
     },
   });
 }

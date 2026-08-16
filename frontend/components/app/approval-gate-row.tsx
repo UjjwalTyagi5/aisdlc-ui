@@ -10,10 +10,10 @@ import { formatDistanceToNow } from "date-fns";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ClarificationCard } from "@/components/app/clarification-card";
-import { sendApprovalSignal, sendClarificationAnswer } from "@/lib/api/signals";
+import { advanceCopilotRun } from "@/lib/api/runs";
 import { PHASE_LABEL } from "@/lib/agents";
 import { CAPABILITY_CLASS_META } from "@/lib/capability-class";
-import type { ApprovalDecision, ApprovalGate, ArtifactId } from "@/lib/schemas";
+import type { ApprovalDecision, ApprovalGate } from "@/lib/schemas";
 
 /** One pending gate: a meta line + the matching action card. No nested cards —
  *  the meta sits on the page surface above the (single) card. */
@@ -24,14 +24,21 @@ export function ApprovalGateRow({
   gate: ApprovalGate;
   onResolved: (id: string) => void;
 }) {
+  // Both actions below resolve the gate through the SAME endpoint, because there is
+  // only one way a run advances now. It replaced a `hitl.decision` signal that
+  // needed a workflow engine to receive it; the server still re-checks the stage's
+  // approve permission before touching any state.
+  //
+  // `artifactId` and `idempotencyKey` are gone with the signal. The gate is
+  // identified by the run and its stage — the server resolves the artifact itself —
+  // and replay safety comes from the gate being closed after the first decision
+  // rather than from a key the client invents.
   const decide = useMutation({
     mutationFn: (input: { decision: ApprovalDecision; reason?: string }) =>
-      sendApprovalSignal({
-        runId: gate.runId,
-        artifactId: (gate.artifact?.id ?? gate.runId) as ArtifactId,
-        decision: input.decision,
+      advanceCopilotRun(gate.runId, {
+        decision: input.decision === "approve" ? "approved" : "rejected",
+        stage: gate.phase,
         reason: input.reason,
-        idempotencyKey: crypto.randomUUID(),
       }),
     onSuccess: (_data, vars) => {
       toast.success(
@@ -49,13 +56,14 @@ export function ApprovalGateRow({
       }),
   });
 
+  // A clarification is answered by advancing the gate with the answer as the
+  // reason — the endpoint records it on the audit event and lets the stage carry on.
   const answer = useMutation({
     mutationFn: (text: string) =>
-      sendClarificationAnswer({
-        runId: gate.runId,
-        clarificationId: gate.id,
-        answer: text,
-        idempotencyKey: crypto.randomUUID(),
+      advanceCopilotRun(gate.runId, {
+        decision: "approved",
+        stage: gate.phase,
+        reason: text,
       }),
     onSuccess: () => {
       toast.success("Answer sent to the agent");

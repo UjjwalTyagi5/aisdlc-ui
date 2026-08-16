@@ -1,67 +1,41 @@
 import { type NextRequest } from "next/server";
 
-import { createWorkspace, listWorkspaces } from "@/lib/mock/workspace-fixtures";
-import { getSession } from "@/lib/auth/session";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
-import { canReadBusinessUnit } from "@/lib/mock/access-scope";
+import { bffProxy } from "@/lib/bff/proxy";
+import { WorkspaceList } from "@/lib/schemas/workspace";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
-// DUMMY-DATA SEAM: reads/writes the shared workspace-fixtures store directly —
-// this is a critical-path route (sidebar, active-workspace resolution) hit on
-// nearly every page, so it must work even if MSW never intercepts it (e.g. a
-// stale/unregistered Service Worker) rather than depend solely on the mock
-// browser layer. Mirrored in mocks/handlers.ts — see
-// [[msw-dual-runtime-mutation-rule]].
-// SCOPE FILTER: a Business Unit Admin must see only its own unit(s), and a
-// contributor only the unit(s) its projects sit in. This list feeds the sidebar
-// switcher, every Business Unit dropdown and the org dashboard, so filtering it
-// here closes the widest leak in one place — a sibling unit that never reaches
-// the browser cannot be picked, searched, filtered or linked to.
+/**
+ * Business Units list + create — proxied to FastAPI `GET/POST /workspaces`.
+ *
+ * The scope filter that used to run here is now the backend's: its list query
+ * returns every unit to an org admin and only bound units to everyone else, from
+ * real role_bindings instead of a fixture array.
+ *
+ * The org-admin check on create moved to the backend too, and that was the point
+ * of moving it. `workspace:manage` is held by a unit's own Admin for the unit they
+ * run, so the router-level permission alone would have let them create siblings;
+ * FastAPI now rejects that itself rather than trusting this tier to have done it.
+ */
 export async function GET() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  const scope = resolveSessionScope(session);
-  return Response.json(listWorkspaces().filter((w) => canReadBusinessUnit(scope, String(w.id))));
+  return bffProxy("/workspaces", { schema: WorkspaceList });
 }
 
-/**
- * Creating a Business Unit is an Organization Admin action (PRD §15.2).
- *
- * The check is `isOrgWide`, not a permission: `workspace:manage` is held by a
- * unit's own Admin for the unit they run, so gating on it would let a Business
- * Unit Admin create siblings. Until this existed the route accepted a create
- * from anyone signed in — the UI hid the button but the endpoint did not, and
- * the `?new=1` deep link reached the dialog without passing the button at all.
- */
 export async function POST(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-  if (!resolveSessionScope(session).isOrgWide) {
-    return Response.json(
-      {
-        code: "forbidden",
-        message: `Only an Organization Admin can create a ${BUSINESS_UNIT_LABEL.toLowerCase()}`,
-      },
-      { status: 403 },
-    );
-  }
-  const body = (await req.json()) as {
-    displayName: string;
-    businessUnit?: string;
-    costCenter?: string;
-    /** Optional at creation; null = no cap, for the unit's Admin to set later. */
-    monthlyBudgetUsd?: number | null;
-    budgetStartDate?: string | null;
-    budgetEndDate?: string | null;
-    /** Org-Admin-only marker; defaults to active. */
-    isActive?: boolean;
-  };
+  const body = (await req.json()) as { displayName?: string };
+  // Kept as a fast local reject for the empty-form case only. It is not the
+  // authorization check — that is the backend's, and duplicating one here is how
+  // the two drift apart.
   if (!body?.displayName || body.displayName.trim().length < 2) {
     return Response.json(
-      { code: "invalid_input", message: `${BUSINESS_UNIT_LABEL} name must be at least 2 characters` },
+      {
+        code: "invalid_input",
+        message: `${BUSINESS_UNIT_LABEL} name must be at least 2 characters`,
+      },
       { status: 422 },
     );
   }
-  const created = createWorkspace({ ...body, displayName: body.displayName.trim() });
-  return Response.json(created, { status: 201 });
+  return bffProxy("/workspaces", {
+    method: "POST",
+    body: { ...body, displayName: body.displayName.trim() },
+  });
 }

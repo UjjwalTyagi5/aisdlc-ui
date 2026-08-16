@@ -6,7 +6,7 @@ GET  /release/{session_id} — the session's current assessment artifact (for th
 
 Mirrors the Code Review / Security standalone agents. The prepared target (cloned
 repo + detected connector) is bound by project_id; BYO MCP tools are injected here
-(the WS path bypasses the Temporal spine).
+(the WS path bypasses the pipeline spine).
 """
 from __future__ import annotations
 

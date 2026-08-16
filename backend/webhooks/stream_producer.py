@@ -21,7 +21,7 @@ async def publish_webhook_event(
     """XADD the normalized canonical event to the webhooks:{connector_kind} stream.
 
     The canonical_event dict must carry tenant_id and event_id so that the
-    consumer (Plan 07) can build the deterministic Temporal workflow_id.
+    consumer (Plan 07) can build a deterministic run id.
 
     Returns the Redis stream entry ID assigned by the XADD command.
     """

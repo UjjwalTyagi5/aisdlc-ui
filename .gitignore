@@ -13,6 +13,14 @@ backend/.ruff_cache/
 # Agent run workspaces — generated per pipeline run, not source
 backend/files/
 
+# Agent scratch that kept getting committed. The agents write these with bare
+# cwd-relative paths ("outputs/pdd.docx", "logs.db"), so whichever directory the
+# process happens to start in accumulates them. Nothing reads them back.
+backend/**/outputs/
+backend/**/INPUT/
+backend/**/temp/
+backend/**/logs.db
+
 # Superpowers subagent-driven-development scratch workspace (ledgers, briefs, reports)
 .superpowers/
 
@@ -27,6 +35,13 @@ backend/.temporal-dev.db-journal
 # The real backend .env holds live API keys, a JWT signing key and Postgres
 # credentials. backend/.env.example carries the shape instead.
 backend/.env
+
+# Local persona logins, written by backend/scripts/seed_dev_personas.py. The
+# password in it is weak and shared by design — it exists so a developer can
+# switch roles quickly. Committing the file would put a working credential list
+# in the repo, and the fact that it only works locally today is not a property
+# anyone should have to keep true.
+DEV_LOGINS.txt
 
 # ── Tooling ──────────────────────────────────────────────────────────────
 # settings.json is shared, settings.local.json accumulates local paths

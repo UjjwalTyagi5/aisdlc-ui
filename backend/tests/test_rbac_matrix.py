@@ -15,6 +15,11 @@ from httpx import AsyncClient, ASGITransport
 # Allow .test TLD (RFC 6761 special-use) so pydantic EmailStr accepts test addresses.
 _ev.SPECIAL_USE_DOMAIN_NAMES = [d for d in _ev.SPECIAL_USE_DOMAIN_NAMES if d != "test"]
 
+# Every test here provisions a throwaway organization and none of them removed it, so
+# each full run left another dozen tenants in the development database. See the
+# fixture in conftest.py — it diffs the organizations table around each test.
+pytestmark = pytest.mark.usefixtures("purge_created_orgs")
+
 
 @pytest.fixture(autouse=True)
 async def _dispose_shared_engine():

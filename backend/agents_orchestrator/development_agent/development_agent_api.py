@@ -120,7 +120,7 @@ async def _build_dev_session_context(session_id: str) -> str:
 async def _load_dev_mcp_tools(tenant_id: str, project_id: str | None) -> list:
     """Resolve the project's BYO MCP servers for the development stage into tools.
 
-    The Temporal pipeline does this via mcp_tools_for_stage; the interactive WS
+    The pipeline does this via mcp_tools_for_stage; the interactive WS
     chat bypasses that, so we replicate it here. Prefers the project's per-stage
     assignment (project.mcp_servers['development']); if none is configured, falls
     back to the tenant's active MCP servers that allow the development stage — so a
@@ -439,7 +439,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
         # MCP: bind this project's development-stage servers as tools for the graph
         # run (interactive-chat surface). project_id comes from pipeline_context;
-        # absent project / disabled MCP -> no tools (no-op). Mirrors the Temporal path.
+        # absent project / disabled MCP -> no tools (no-op). Mirrors the pipeline path.
         from shared.services.mcp_injection import mcp_tools_scope, project_stage_server_ids
         _project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
         _mcp_ids = await project_stage_server_ids(tenant_id or None, _project_id, "development")

@@ -226,7 +226,7 @@ async def submit_code_review(review_json: str) -> str:
     metrics_in = payload.get("metrics")
     if not isinstance(metrics_in, dict):
         metrics_in = {}
-    # `s.changed_files` is `list[dict]` when the Temporal activity seeds it (it
+    # `s.changed_files` is `list[dict]` when the pipeline seeds it (it
     # converts `RunWorkspace.changed_files` from `list[str]`), but the Copilot
     # pipeline's `_seed_downstream_prepared` seeds the raw `list[str]` unconverted —
     # tolerate both shapes so that upstream gap alone can never crash this tool

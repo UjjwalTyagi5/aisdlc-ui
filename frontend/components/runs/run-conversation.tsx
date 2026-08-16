@@ -15,11 +15,10 @@ import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ClarificationCard } from "@/components/app/clarification-card";
 import { AGENT_LABEL } from "@/lib/agents";
-import { StreamEvent, type ArtifactId, type ApprovalDecision, type RunId } from "@/lib/schemas";
+import { StreamEvent, type ApprovalDecision, type RunId } from "@/lib/schemas";
 import { useSse } from "@/lib/stream/use-sse";
 import { bubbleFromRunEvent, type RunBubble } from "@/lib/stream/run-event-bubble";
-import { cancelRun, getRun } from "@/lib/api/runs";
-import { sendApprovalSignal, sendClarificationAnswer } from "@/lib/api/signals";
+import { advanceCopilotRun, cancelRun, getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { approvePermissionForPhase, hasPermission } from "@/lib/auth/permissions";
 import { useSession } from "@/hooks/use-session";
@@ -32,12 +31,12 @@ const ACTIVE_STATUSES = [
 ];
 
 /**
- * Run Conversation surface — a chat-shaped column bound to a Temporal `runId`.
+ * Run Conversation surface — a chat-shaped column bound to a `runId`.
  *
  * Renders the run's per-run SSE events as message bubbles, drops the inline
  * gate/clarification cards when the run is awaiting a human, and exposes a
  * composer that is enabled *only* when a clarification is pending (its text
- * becomes the answer). It talks to the TEMPORAL RUN via the existing run SSE
+ * becomes the answer). It talks to the RUN via the existing run SSE
  * (`/api/runs/[id]/stream`) + signals — NOT the legacy agent WebSocket.
  *
  * The card + signal wiring mirrors `RunDetailDrawer` (the reference impl):
@@ -104,12 +103,7 @@ export function RunConversation({ runId }: { runId: string }) {
     setApprovalPending(true);
     setPendingDecision("approve");
     try {
-      await sendApprovalSignal({
-        runId: run.id,
-        artifactId: run.id as unknown as ArtifactId,
-        decision: "approve",
-        idempotencyKey: crypto.randomUUID(),
-      });
+      await advanceCopilotRun(run.id, { decision: "approved", stage: run.phase });
       await queryClient.invalidateQueries({ queryKey: qk.runs.detail(run.id) });
     } finally {
       setApprovalPending(false);
@@ -123,12 +117,10 @@ export function RunConversation({ runId }: { runId: string }) {
       setApprovalPending(true);
       setPendingDecision("reject");
       try {
-        await sendApprovalSignal({
-          runId: run.id,
-          artifactId: run.id as unknown as ArtifactId,
-          decision: "reject",
+        await advanceCopilotRun(run.id, {
+          decision: "rejected",
+          stage: run.phase,
           reason,
-          idempotencyKey: crypto.randomUUID(),
         });
         await queryClient.invalidateQueries({ queryKey: qk.runs.detail(run.id) });
       } finally {
@@ -144,11 +136,12 @@ export function RunConversation({ runId }: { runId: string }) {
       if (!run) return;
       setClarificationPending(true);
       try {
-        await sendClarificationAnswer({
-          runId: run.id,
-          clarificationId: run.id,
-          answer,
-          idempotencyKey: crypto.randomUUID(),
+        // The answer rides as the gate's reason — one endpoint moves a run,
+        // whatever its gate was asking.
+        await advanceCopilotRun(run.id, {
+          decision: "approved",
+          stage: run.phase,
+          reason: answer,
         });
         await queryClient.invalidateQueries({ queryKey: qk.runs.detail(run.id) });
       } finally {

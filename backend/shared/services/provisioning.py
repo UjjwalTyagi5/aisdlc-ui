@@ -1,8 +1,16 @@
-"""Organization provisioning (Phase 4). Creates Org + default Workspace + first
-org-admin user (creator-set password) + org_admin assignment.
+"""Organization provisioning — TEST FIXTURES ONLY. Not reachable at runtime.
+
+Nothing in the running product creates an organization: there is no route, no console
+and no signup path that calls this. The platform hosts exactly ONE organization, seeded
+at startup by shared/auth/bootstrap.py, which does its own idempotent insert rather than
+going through here (it must converge on an existing org, not fail on a taken slug).
+
+This module survives only because the RBAC test suites build throwaway tenants with it
+(tests/test_rbac_matrix.py, tests/test_provisioning.py). Do NOT wire it to an endpoint —
+re-exposing it re-introduces multi-org creation, which was removed deliberately.
 
 organizations/workspaces/users are GLOBAL (non-RLS) -> superuser session.
-user_workspace_roles is FORCE-RLS -> grant_role sets the tenant GUC.
+role_bindings is FORCE-RLS -> grant_role sets the tenant GUC.
 """
 from __future__ import annotations
 
@@ -70,7 +78,14 @@ async def provision_organization(
             {"id": admin_user_id, "email": admin_email, "ph": pw_hash, "tid": str(org_id)},
         )
 
-    await grant_role(admin_user_id, ws_id, "org_admin", tenant_id=str(org_id))
+    # org_admin binds at ORGANIZATION scope, not at the default workspace. Binding it to
+    # ws_id would scope the org's own administrator to a single business unit, so a second
+    # unit created later would be invisible to them. ROLE_SCOPE["org_admin"] is
+    # "organization" for exactly this reason.
+    await grant_role(
+        admin_user_id, org_id, "org_admin",
+        tenant_id=str(org_id), scope_kind="organization",
+    )
 
     logger.info("provisioned org slug=%s id=%s admin=%s", slug, org_id, admin_email)
     return {

@@ -21,11 +21,11 @@ RBAC_TABLES = [
     "organizations", "workspaces",
     "roles", "permissions", "role_permissions",
     "custom_roles", "custom_role_permissions",
-    "user_workspace_roles", "users",
+    "role_bindings", "users",
 ]
 RLS_TABLES = [
     "projects", "runs", "artifacts", "audit_events", "agent_call_logs",
-    "eval_records", "custom_roles", "custom_role_permissions", "user_workspace_roles",
+    "eval_records", "custom_roles", "custom_role_permissions", "role_bindings",
 ]
 
 
@@ -73,18 +73,18 @@ async def main() -> None:
         for tbl, pname, cmd, expr in pol:
             print(f"  {tbl}.{pname} [{cmd}]  {expr}")
 
-        print("\n=== user_workspace_roles COLUMNS ===")
+        print("\n=== role_bindings COLUMNS ===")
         cols = (await s.execute(text(
             "select column_name, data_type, is_nullable from information_schema.columns "
-            "where table_name='user_workspace_roles' order by ordinal_position"
+            "where table_name='role_bindings' order by ordinal_position"
         ))).fetchall()
         for c, dt, nul in cols:
             print(f"  {c:<16} {dt:<28} nullable={nul}")
 
-        print("\n=== user_workspace_roles CONSTRAINTS ===")
+        print("\n=== role_bindings CONSTRAINTS ===")
         cons = (await s.execute(text(
             "select conname, pg_get_constraintdef(oid) from pg_constraint "
-            "where conrelid = 'user_workspace_roles'::regclass order by conname"
+            "where conrelid = 'role_bindings'::regclass order by conname"
         ))).fetchall()
         for cn, cd in cons:
             print(f"  {cn}: {cd}")

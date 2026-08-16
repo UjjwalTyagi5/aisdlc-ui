@@ -4,8 +4,8 @@ Single source of truth for "resolve the MCP servers selected for this stage,
 turn them into LangChain tools, and make them visible to the graph for the
 duration of one invocation". Used by:
 
-  - the Temporal activities (pipeline runs) — server ids come from
-    SDLCWorkflowInput.mcp_servers (see workflows/activities/_base.py)
+  - the stage runners (pipeline runs) — server ids come from
+    the run input's mcp_servers (see workflows/activities/_base.py)
   - the interactive chat handlers (WS/REST) — server ids come from the
     project's per-stage map (see shared/services/agent_run.py)
 

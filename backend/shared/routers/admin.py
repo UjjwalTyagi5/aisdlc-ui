@@ -4,7 +4,7 @@ Endpoints let a tenant admin list workspaces/roles/people and assign or revoke r
 per workspace. Every route is gated by member:manage via require_permission (Phase 6),
 so delivery_lead (who holds member:manage per the RBAC matrix) can reach the members
 surface alongside org_admin. admin:* still passes because has_permission honours the
-wildcard. Cross-tenant access is structurally blocked by FORCE RLS on user_workspace_roles.
+wildcard. Cross-tenant access is structurally blocked by FORCE RLS on role_bindings.
 
 Why member:manage and not admin:* (Phase 6 change):
   The RBAC matrix assigns this surface to both org_admin (admin:*) and delivery_lead
@@ -35,6 +35,7 @@ from typing import Optional
 from shared.authz.dependency import require_permission
 from shared.authz.grant import grant_role, revoke_role
 from shared.authz.permissions import ALL_ROLES, _ROLE_PERMISSIONS, has_permission
+from shared.authz.read_scope import assert_can_write_workspace
 from shared.db import get_db_session
 from shared.models.orm import AuditEvent, User, Workspace
 from shared.routers._schemas import AuditEventOut, Paginated, Pagination
@@ -43,17 +44,22 @@ from shared.services.metrics import RBAC_DENIALS
 logger = logging.getLogger(__name__)
 
 # Human-facing labels/descriptions for the global role catalog (mirrors the frontend).
+# Display metadata for GET /admin/roles. Labels mirror ROLE_META in
+# frontend/lib/roles.ts so the same wording appears wherever a role is named.
 _ROLE_META: dict[str, tuple[str, str]] = {
-    "admin": ("Admin", "Full control across the tenant — every permission."),
-    "org_admin": ("Org Admin", "Full control across the tenant — every permission."),
-    "delivery_lead": ("Delivery Lead", "Runs the workspace: projects, members, cost & quality oversight."),
-    "product_manager": ("Product Manager", "Triggers runs and approves requirements."),
-    "tech_lead": ("Architect", "Approves design & development; uses connectors."),
-    "developer": ("Developer", "Triggers runs and views/exports artifacts."),
-    "qa_lead": ("QA Lead", "Approves testing."),
-    "sre_lead": ("Release Manager", "Approves deployment; watches monitoring feedback."),
-    "security_auditor": ("Security Auditor", "Read-only oversight: audit, cost & quality. Approves nothing."),
-    "stakeholder": ("Stakeholder", "Read-only artifact viewing."),
+    "org_admin": ("Organization Admin", "Org-wide governance. Onboards business units and grants model and connector access."),
+    "bu_admin": ("Business Unit Admin", "Runs one business unit: its projects, members, connections and budget."),
+    "contributor": ("Contributor", "Onboarded into a unit, awaiting a real role from that unit's admin. Read-only."),
+    "project_admin": ("Project Admin", "Owns a project, its members and its integrations. Approves where no specialist role exists."),
+    "ba": ("Business Analyst", "Owns requirements and approves them."),
+    "architect": ("Architect", "Owns design; approves design and development."),
+    "developer": ("Developer", "Builds. Triggers runs, invokes agents and edits project skills."),
+    "qa": ("QA Engineer", "Owns testing and approves it."),
+    "security_engineer": ("Security Engineer", "Security review with audit, cost and trace visibility."),
+    "devops_engineer": ("DevOps Engineer", "Owns deployment and approves it."),
+    "data_engineer": ("Data Engineer", "Data pipelines and related delivery work."),
+    "scrum_master": ("Scrum Master", "Process and visibility. Holds no approval authority."),
+    "custom": ("Custom", "Tenant-defined role — permissions are attached separately."),
 }
 
 
@@ -184,9 +190,9 @@ async def list_members(
         await db.execute(
             text(
                 "SELECT uwr.user_id, uwr.role_name, u.email "
-                "FROM user_workspace_roles uwr "
+                "FROM role_bindings uwr "
                 "LEFT JOIN users u ON u.id = uwr.user_id "
-                "WHERE uwr.workspace_id = :wid "
+                "WHERE uwr.scope_kind = 'business_unit' AND uwr.scope_id = :wid "
                 "ORDER BY uwr.user_id, uwr.role_name"
             ),
             {"wid": wid},
@@ -219,9 +225,18 @@ class OkOut(BaseModel):
 
 
 @admin_router.post("/assignments", response_model=OkOut)
-async def create_assignment(request: Request, body: AssignmentIn) -> OkOut:
+async def create_assignment(
+    request: Request,
+    body: AssignmentIn,
+    db: AsyncSession = Depends(get_db_session),
+) -> OkOut:
     """Assign a role to a user in a workspace (idempotent)."""
     tenant_id = _tenant_id(request)
+    # The router gate (member:manage) says this caller manages members SOMEWHERE.
+    # workspace_id arrives in the body and was never checked against that, so a
+    # Business Unit Admin could grant any role in any sibling unit — the sharpest
+    # escalation on this surface, since granting org_admin there escalates further.
+    await assert_can_write_workspace(db, request, body.workspace_id)
     if body.role_name not in ALL_ROLES:
         raise HTTPException(
             status_code=422, detail=f"Unknown role '{body.role_name}'"
@@ -232,6 +247,9 @@ async def create_assignment(request: Request, body: AssignmentIn) -> OkOut:
             body.workspace_id,
             body.role_name,
             tenant_id=tenant_id,
+            # The audit actor. Without it the trail records that someone gained a role
+            # but not who gave it, which is the question actually asked afterwards.
+            granted_by=getattr(request.state, "user_id", None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -239,9 +257,16 @@ async def create_assignment(request: Request, body: AssignmentIn) -> OkOut:
 
 
 @admin_router.delete("/assignments", response_model=OkOut)
-async def delete_assignment(request: Request, body: AssignmentIn) -> OkOut:
+async def delete_assignment(
+    request: Request,
+    body: AssignmentIn,
+    db: AsyncSession = Depends(get_db_session),
+) -> OkOut:
     """Revoke a role from a user in a workspace (idempotent)."""
     tenant_id = _tenant_id(request)
+    # Revocation needs the same guard as the grant: stripping a sibling unit's
+    # admin of their role is a denial-of-service on that unit, not a lesser act.
+    await assert_can_write_workspace(db, request, body.workspace_id)
     if body.role_name not in ALL_ROLES:
         raise HTTPException(
             status_code=422, detail=f"Unknown role '{body.role_name}'"
@@ -252,6 +277,7 @@ async def delete_assignment(request: Request, body: AssignmentIn) -> OkOut:
             body.workspace_id,
             body.role_name,
             tenant_id=tenant_id,
+            revoked_by=getattr(request.state, "user_id", None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -308,8 +334,12 @@ class MemberCreateOut(BaseModel):
 
 
 @admin_router.post("/members", response_model=MemberCreateOut, status_code=201)
-async def create_member(request: Request, body: MemberCreateIn) -> MemberCreateOut:
-    """Create a user (email+password) and assign a role in a workspace (org admin)."""
+async def create_member(
+    request: Request,
+    body: MemberCreateIn,
+    db: AsyncSession = Depends(get_db_session),
+) -> MemberCreateOut:
+    """Create a user (email+password) and assign a role in a workspace."""
     import uuid as _uuid
 
     from shared.auth.passwords import hash_password
@@ -317,6 +347,9 @@ async def create_member(request: Request, body: MemberCreateIn) -> MemberCreateO
     from shared.db import get_db_session_superuser
 
     tenant_id = _tenant_id(request)
+    # Reading a sibling unit's roster is a disclosure; creating a member inside one
+    # is an escalation, so this guard matters more than any on the read paths.
+    await assert_can_write_workspace(db, request, body.workspace_id)
     if body.role_name not in ALL_ROLES:
         raise HTTPException(status_code=422, detail=f"Unknown role '{body.role_name}'")
     email = body.email.strip().lower()

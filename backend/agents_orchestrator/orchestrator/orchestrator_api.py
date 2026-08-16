@@ -1430,7 +1430,7 @@ async def orchestrate_agents(state: OrchestratorState) -> OrchestratorState:
             # chat-history fallback can mine the branch/repo from the dev's
             # user-visible chat output when development_artifacts is NULL
             # (e.g. user said "push but don't create PR" â†’ dev never called
-            # submit_development_artifacts â†’ Django row stays empty).
+            # submit_development_artifacts â†’ development_artifacts row stays empty).
             conversation_context = (
                 f"Requirements Context:\n{req_context}"
                 f"\n\nDesign Context (LLD, API Contracts, DB Schema, Tech Stack, ADRs):\n{design_context}"

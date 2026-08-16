@@ -1,7 +1,7 @@
 """Per-invocation MCP tool injection for LangGraph agents.
 
 Mirrors the connector contextvar pattern in config/connectors/context.py: the
-Temporal activity (or any caller) resolves the run's selected MCP servers into
+A stage runner (or any caller) resolves the run's selected MCP servers into
 LangChain tools and calls set_mcp_tools(...) before graph.ainvoke; the agent node
 binds base_tools + get_mcp_tools() and the tools node dispatches over the same
 combined set. clear_mcp_tools() runs in the caller's finally block so tools never

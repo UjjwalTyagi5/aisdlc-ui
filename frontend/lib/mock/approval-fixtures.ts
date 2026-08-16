@@ -9,7 +9,7 @@
  * Approvals screen exercises the real governance model rather than one happy
  * path.
  *
- * DUMMY-DATA source. The backend (Temporal gate state) replaces the route
+ * DUMMY-DATA source. The backend's gate state replaces the route
  * handlers, not these shapes.
  */
 import type { ApprovalGate, ApprovalQueueMetrics, Phase } from "@/lib/schemas";

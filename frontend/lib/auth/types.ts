@@ -41,7 +41,15 @@ export interface Session {
   role: Role;
   /** Which auth backend produced this session. */
   mode: "mock" | "auth0" | "local";
-  /** Coarse tier — "platform" (Application Team) vs "org" (tenant). Local auth only. */
+  /**
+   * Coarse tier. Always "org" — the platform (Application Team) tier was removed
+   * along with multi-org support, and nothing branches on this any more.
+   *
+   * "platform" stays in the union only because sessions minted before the removal
+   * are still sitting in browser cookies and `decodeSession` does not validate the
+   * field; typing it away would not delete those cookies, it would just make the
+   * type lie about what can be read back.
+   */
   tier?: "platform" | "org";
   /**
    * DB-resolved effective permission strings (REQ-M7-12 frontend half,

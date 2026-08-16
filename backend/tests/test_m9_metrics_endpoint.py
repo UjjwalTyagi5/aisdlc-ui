@@ -34,9 +34,6 @@ def _touch_all_singletons() -> None:
     m.CONNECTOR_CALL_DURATION.labels(connector="azure_devops", method="list_projects").observe(0)
     m.DEAD_LETTER_DEPTH.labels(stream="agent-tasks").set(0)
 
-    m.TEMPORAL_ACTIVITY_DURATION.labels(activity="requirements", status="success").observe(0)
-    m.TEMPORAL_HITL_WAIT_DURATION.labels(phase="requirements", outcome="approved").observe(0)
-
     m.WEBHOOK_DELIVERIES.labels(connector="github", status="success").inc(0)
     m.WEBHOOK_PROCESSING_DURATION.labels(connector="github").observe(0)
     m.WEBHOOK_DUPLICATES_REJECTED.labels(connector="github").inc(0)
@@ -70,9 +67,6 @@ EXPECTED_METRIC_NAMES = [
     "worker_task_duration_seconds_count",
     "connector_call_duration_seconds_count",
     "dead_letter_queue_depth",
-    # M5 Temporal
-    "temporal_activity_duration_seconds_count",
-    "temporal_hitl_wait_duration_seconds_count",
     # M6 webhooks
     "webhook_deliveries_total",
     "webhook_processing_duration_ms_count",

@@ -90,6 +90,24 @@ def require_permission(perm: str, *, run_param: str | None = None):
             perm,
             role_label,
         )
+
+        # The 403 trail. The response body stays deliberately opaque — the caller
+        # learns nothing about what they lacked — while the audit row carries the
+        # permission, the route and the actor, so an admin can answer "why was I
+        # refused" without the API having told an attacker what to aim for.
+        #
+        # Imported here rather than at module scope: audit.py reaches into shared.db,
+        # which imports this module's siblings, and a top-level import closes the cycle.
+        from shared.authz.audit import record_access_denied  # noqa: PLC0415
+
+        await record_access_denied(
+            tenant_id=tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            permission=perm,
+            scope_kind="business_unit" if getattr(request.state, "workspace_id", None) else None,
+            scope_id=str(getattr(request.state, "workspace_id", "") or "") or None,
+            route=request.scope.get("path") or None,
+        )
         raise HTTPException(status_code=403, detail="Forbidden")
 
     _dep.__rbac_require_permission__ = True  # boot-scan sentinel (D-05)
@@ -168,15 +186,17 @@ def _low_cardinality_role(perms: list[str]) -> str:
     # Ordered most-privileged-first; first match wins. Bounded set keeps
     # RBAC_DENIALS label cardinality safe (Pitfall 7 / A2). Advisory only.
     _PERM_ROLE_HINTS = {
-        "workspace:manage": "delivery_lead",
-        "audit:view": "security_auditor",
-        "artifact:approve_requirements": "product_manager",
-        "artifact:approve_design": "tech_lead",
-        "artifact:approve_development": "tech_lead",
-        "artifact:approve_testing": "qa_lead",
-        "artifact:approve_deployment": "sre_lead",
+        "role:manage": "bu_admin",
+        "artifact:approve_requirements": "ba",
+        "artifact:approve_design": "architect",
+        "artifact:approve_development": "architect",
+        "artifact:approve_testing": "qa",
+        "artifact:approve_deployment": "devops_engineer",
+        "member:manage": "project_admin",
+        "skill:edit": "developer",
+        "audit:view": "security_engineer",
         "run:create": "developer",
-        "artifact:view": "stakeholder",
+        "artifact:view": "contributor",
     }
     for perm, role in _PERM_ROLE_HINTS.items():
         if perm in perms:
@@ -208,7 +228,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = ("/webhooks/", "/generated", "/static", "/sc
 # is derived at runtime from the run's current pipeline stage (requirements/design/
 # development/testing), so it cannot be expressed as a single require_permission(perm)
 # factory call ahead of time. signals.py's send_signal performs the equivalent
-# deny-by-default check in-body via _check_permission_for_phase, BEFORE any Temporal
+# deny-by-default check in-body via _check_permission_for_phase, BEFORE any
 # handle is obtained (REQ-M7-11) — functionally equivalent to the factory dependency,
 # just parameterized at request time instead of route-registration time (Pattern 4).
 _SIGNALS_IN_BODY_PROTECTED_PATHS: set[str] = {"/runs/{run_id}/signals/{name}"}

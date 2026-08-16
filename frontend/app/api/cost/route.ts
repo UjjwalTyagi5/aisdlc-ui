@@ -1,26 +1,24 @@
 import { type NextRequest } from "next/server";
 
-import { buildCostBreakdown } from "@/lib/mock/cost-fixtures";
-import { getSession } from "@/lib/auth/session";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: derives fixtures directly from the workspace/project
-// fixtures. When the Langfuse-backed cost pipeline lands, replace the body
-// with: return bffProxy(`/cost?${search}`).
-//
-// SCOPE FILTER: spend is commercially sensitive between units, and an
-// unfiltered TOTAL leaks even without a per-unit breakdown — "the organisation
-// spent $21,889 this month" tells a Business Unit Admin what the other two units
-// cost. The viewer's readable units are intersected with whichever unit they
-// asked for.
+/**
+ * Spend breakdown — proxied to FastAPI `GET /cost`.
+ *
+ * Previously a DUMMY-DATA SEAM that derived a breakdown from the workspace and
+ * project fixtures, so the Cost page reported spend for units and projects the
+ * database has never held.
+ *
+ * The scope filter that ran here is the backend's now, and belongs there: it was
+ * intersecting the viewer's readable units against the fixture stores, while the
+ * backend narrows against real bindings. The note it carried is still true and
+ * still the reason the endpoint is scoped at all — an unfiltered TOTAL leaks even
+ * without a per-unit breakdown, because "the organisation spent $21,889" tells a
+ * Business Unit Admin what the other units cost.
+ */
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  const windowDays = Number(req.nextUrl.searchParams.get("window_days") ?? "30");
-  const workspace = req.nextUrl.searchParams.get("workspace");
-  const scope = resolveSessionScope(session);
-  return Response.json(
-    buildCostBreakdown(windowDays, workspace, scope.isOrgWide ? null : scope.businessUnitIds),
-  );
+  const search = req.nextUrl.searchParams.toString();
+  return bffProxy(`/cost${search ? `?${search}` : ""}`);
 }

@@ -9,7 +9,7 @@ Public API:
          "tenant_id":...} to Redis so _handle_artifact_ready can scope its session
 
   write_and_notify(run_id, artifact_type, artifact_data, *, tenant_id)
-      -> convenience: persist then publish; call from Temporal activity wrappers
+      -> convenience: persist then publish; call from stage runners
          and agent tool functions that have a tenant_id in scope
 """
 import json
@@ -54,8 +54,8 @@ async def persist_artifact(
     model (RequirementsArtifact, DesignArtifact, etc.) — unvalidated dicts must not
     be passed directly (T-M2-02-02 mitigation).
 
-    tenant_id should always be provided by callers that have tenant context (Temporal
-    activity wrappers, agent tool functions via SDLCWorkflowInput). When absent, falls
+    tenant_id should always be provided by callers that have tenant context (stage
+    runners, agent tool functions via SDLCWorkflowInput). When absent, falls
     back to get_db_session_superuser() — a system-scoped read-then-write that is only
     safe before RLS FORCE is active; once Plan 04 enables FORCE RLS this fallback will
     return zero rows unless the role is BYPASSRLS (D-05 backward-compat path).
@@ -116,8 +116,8 @@ async def write_and_notify(
 ) -> None:
     """Persist artifact to Postgres then publish Redis notification.
 
-    This is the primary entry point for Temporal activity wrappers and agent
-    tool functions. Pass tenant_id from SDLCWorkflowInput so both the DB write
+    This is the primary entry point for stage runners and agent
+    tool functions. Pass tenant_id from the run input so both the DB write
     and the pub/sub payload are tenant-scoped (REQ-M7-07 / T-M7.1-08).
     """
     await persist_artifact(run_id, artifact_type, artifact_data, tenant_id=tenant_id)

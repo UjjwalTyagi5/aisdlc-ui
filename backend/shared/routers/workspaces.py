@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import re
 import uuid as _uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import false as False_
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
+from shared.authz.permissions import ROLE_TIER
+from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
-from shared.models.orm import Project, Role, UsageMonthly, User, UserWorkspaceRole, Workspace
+from shared.models.orm import Project, Role, RoleBinding, UsageMonthly, User, Workspace
 
 workspaces_router = APIRouter()
 
@@ -50,9 +54,20 @@ def _initials(display_name: str | None, email: str | None, user_id: str) -> str:
     return (user_id[:2]).upper() or "?"
 
 
-def _is_admin_or_manager(request: Request) -> bool:
-    perms: list[str] = getattr(request.state, "permissions", []) or []
-    return "admin:*" in perms or "workspace:manage" in perms
+def _sees_every_workspace(request: Request) -> bool:
+    """True only for a caller whose reach is the whole organization.
+
+    Was `admin:* or workspace:manage`, which conflated two different things. A
+    Business Unit Admin holds workspace:manage FOR THE UNIT THEY RUN, so that test
+    handed them the full list of sibling units — units they cannot open, whose
+    names, budgets and headcounts are not theirs to see. The frontend used to hide
+    those rows after the fact; with that filter gone, this is the only thing
+    standing between a unit admin and their siblings.
+
+    is_org_wide() is the same predicate the dashboard aggregates use, so both
+    surfaces answer "the whole org, or just mine?" identically.
+    """
+    return is_org_wide(request)
 
 
 def _can_view_cost(request: Request) -> bool:
@@ -168,8 +183,9 @@ async def _counts(db: AsyncSession, tenant_uuid: _uuid.UUID) -> tuple[dict, dict
     ).all()
     mem_rows = (
         await db.execute(
-            select(UserWorkspaceRole.workspace_id, func.count(func.distinct(UserWorkspaceRole.user_id)))
-            .group_by(UserWorkspaceRole.workspace_id)
+            select(RoleBinding.scope_id, func.count(func.distinct(RoleBinding.user_id)))
+            .where(RoleBinding.scope_kind == "business_unit")
+            .group_by(RoleBinding.scope_id)
         )
     ).all()
     projects = {str(r[0]): r[1] for r in proj_rows}
@@ -230,32 +246,25 @@ async def list_workspaces(request: Request, db: AsyncSession = Depends(get_db_se
     tenant_id = _tenant_id(request)
     tenant_uuid = _uuid.UUID(tenant_id)
 
-    # Org admins + workspace managers see all workspaces; everyone else sees only
-    # workspaces they have a UserWorkspaceRole entry for.
-    if _is_admin_or_manager(request):
-        rows = (
-            await db.execute(
-                select(Workspace)
-                .where(Workspace.organization_id == tenant_uuid)
-                .order_by(Workspace.display_name)
-            )
-        ).scalars().all()
-    else:
-        user_id = getattr(request.state, "user_id", None) or ""
-        member_ws_ids = select(UserWorkspaceRole.workspace_id).where(
-            UserWorkspaceRole.user_id == user_id,
-            UserWorkspaceRole.tenant_id == tenant_uuid,
+    # Org-wide callers see every unit; everyone else sees the units they may READ.
+    #
+    # THAT INCLUDES THE PARENT UNIT OF A PROJECT THEY ARE ON, which is what
+    # `allowed_workspace_ids` adds over the binding query this used to run inline.
+    # A Developer bound to one project held no business-unit binding, so this
+    # returned an empty list to them — and with it their project's unit name, cap
+    # and connectors, none of which they can work without. Worse, it made the unit
+    # unpickable: the request form asks which unit an ask belongs to, and theirs
+    # was not on the list, so a contributor could not raise a request at all.
+    #
+    # Reading the parent unit is not administering it: `administered_workspace_ids`
+    # is the narrower question and every write still asks that one.
+    allowed = await allowed_workspace_ids(db, request)
+    query = select(Workspace).where(Workspace.organization_id == tenant_uuid)
+    if allowed is not None:
+        query = query.where(
+            Workspace.id.in_([_uuid.UUID(w) for w in allowed]) if allowed else False_()
         )
-        rows = (
-            await db.execute(
-                select(Workspace)
-                .where(
-                    Workspace.organization_id == tenant_uuid,
-                    Workspace.id.in_(member_ws_ids),
-                )
-                .order_by(Workspace.display_name)
-            )
-        ).scalars().all()
+    rows = (await db.execute(query.order_by(Workspace.display_name))).scalars().all()
 
     projects, members = await _counts(db, tenant_uuid)
     spend = await _workspace_spend_map(db, tenant_uuid) if _can_view_cost(request) else {}
@@ -274,6 +283,20 @@ async def list_workspaces(request: Request, db: AsyncSession = Depends(get_db_se
 async def create_workspace(
     body: WorkspaceCreateIn, request: Request, db: AsyncSession = Depends(get_db_session)
 ):
+    # Creating a business unit is an ORGANIZATION-wide act (PRD §15.2), so the
+    # router-level workspace:manage gate is necessary but not sufficient: a unit's
+    # own Admin holds workspace:manage for the unit they run, and passing only that
+    # check would let them create siblings they have no authority over.
+    #
+    # This lived in the Next.js route handler until the fixtures were removed. It
+    # belongs here — the BFF is the only caller today, but "the only caller today"
+    # is not an authorization boundary.
+    if not is_org_wide(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an Organization Admin can create a business unit",
+        )
+
     tenant_id = _tenant_id(request)
     tenant_uuid = _uuid.UUID(tenant_id)
     name = body.displayName.strip()
@@ -316,10 +339,12 @@ async def create_workspace(
     creator_id = getattr(request.state, "user_id", None) or ""
     if creator_id:
         db.add(
-            UserWorkspaceRole(
+            RoleBinding(
                 user_id=creator_id,
-                workspace_id=ws.id,
-                role_name="admin",
+                scope_kind="business_unit",
+                scope_id=ws.id,
+                role_name="bu_admin",
+                tier="governance",
                 tenant_id=tenant_uuid,
             )
         )
@@ -387,6 +412,83 @@ async def archive_workspace(
     return _to_out(ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0))
 
 
+class BudgetIncreaseIn(BaseModel):
+    requestedAmountUsd: float = Field(gt=0)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+@workspaces_router.post("/{workspace_id}/budget-increase-request", status_code=201)
+async def request_budget_increase(
+    workspace_id: str,
+    request: Request,
+    body: BudgetIncreaseIn,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Ask for more budget than you may set yourself.
+
+    THE OTHER HALF OF THE BUDGET CASCADE (PRD §34.5). A unit's own Admin may set
+    the FIRST cap directly — the Org Admin is allowed to create a unit without one
+    and somebody has to fill in the blank — but changing a cap that already exists
+    is a different act, with a prior figure someone agreed to, and it comes here.
+
+    A DEDICATED ENDPOINT RATHER THAN `POST /governance-approvals`, and the reason is
+    the amount. The generic create endpoint deliberately accepts no `payload` and no
+    `target_ref`, because those are what the approval's SIDE EFFECT reads: a client
+    that could set them could file an `agent_default_*` request pointing at any
+    profile version and have approving it publish that version. So every request
+    type carrying a consequence gets a typed filing point that fills those in from
+    something the server checked. Here that is a positive number and a unit the
+    caller can reach.
+
+    The floor is `cost:view`, not `workspace:manage`: asking is not changing, and
+    the person who can see a cap about to bind is the person who should be able to
+    raise it.
+    """
+    tenant_id = _tenant_id(request)
+    tenant_uuid = _uuid.UUID(tenant_id)
+    # 404s a unit in another tenant, and one this caller cannot reach.
+    ws = await _get_owned(db, tenant_uuid, workspace_id)
+
+    from shared.authz.effective_role import (  # noqa: PLC0415 - avoids an import cycle
+        actor_display_name,
+        effective_platform_role,
+    )
+    from shared.services import governance_requests as governance_service  # noqa: PLC0415
+    from shared.services.governance_requests import GovernanceError  # noqa: PLC0415
+
+    amount = body.requestedAmountUsd
+    current = float(ws.monthly_budget_usd) if ws.monthly_budget_usd is not None else None
+    detail = (
+        f"{ws.display_name} is asking to move its monthly cap "
+        + (f"from {current:.0f} " if current is not None else "")
+        + f"to {amount:.0f} USD."
+        + (f" {body.reason}" if body.reason else "")
+    )
+
+    try:
+        return await governance_service.create_request(
+            db,
+            tenant_id=tenant_id,
+            initiator_id=getattr(request.state, "user_id", "") or "",
+            initiator_name=await actor_display_name(db, request),
+            initiator_role=await effective_platform_role(db, request),
+            request_type="budget_increase",
+            title=f"Budget increase: {ws.display_name} — {amount:.0f} USD/month",
+            description=detail,
+            workspace_id=str(ws.id),
+            target_ref=str(ws.id),
+            # The figure the approver will read and agree to. Read back at decision
+            # time from HERE, never from the decision call — otherwise someone
+            # approves one number and a different one is applied.
+            payload={"requestedAmountUsd": amount, "previousAmountUsd": current},
+            priority="high",
+        )
+    except GovernanceError as exc:
+        raise HTTPException(
+            status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)}
+        )
+
+
 # ─── Member management ────────────────────────────────────────────────────────
 
 @workspaces_router.get("/{workspace_id}/members", response_model=list[WorkspaceMemberOut])
@@ -399,10 +501,10 @@ async def list_workspace_members(
 
     rows = (
         await db.execute(
-            select(UserWorkspaceRole, User)
-            .outerjoin(User, User.id == UserWorkspaceRole.user_id)
-            .where(UserWorkspaceRole.workspace_id == wid)
-            .order_by(UserWorkspaceRole.created_at)
+            select(RoleBinding, User)
+            .outerjoin(User, User.id == RoleBinding.user_id)
+            .where(RoleBinding.scope_kind == "business_unit", RoleBinding.scope_id == wid)
+            .order_by(RoleBinding.created_at)
         )
     ).all()
 
@@ -443,10 +545,11 @@ async def add_workspace_member(
     # Idempotency guard — prevent duplicate membership rows.
     existing = (
         await db.execute(
-            select(UserWorkspaceRole).where(
-                UserWorkspaceRole.user_id == user.id,
-                UserWorkspaceRole.workspace_id == wid,
-                UserWorkspaceRole.role_name == body.roleName,
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.scope_kind == "business_unit",
+                RoleBinding.scope_id == wid,
+                RoleBinding.role_name == body.roleName,
             )
         )
     ).scalar_one_or_none()
@@ -456,10 +559,12 @@ async def add_workspace_member(
             detail=f"User is already a member of this workspace with role '{body.roleName}'.",
         )
 
-    member = UserWorkspaceRole(
+    member = RoleBinding(
         user_id=user.id,
-        workspace_id=wid,
+        scope_kind="business_unit",
+        scope_id=wid,
         role_name=body.roleName,
+        tier=ROLE_TIER.get(body.roleName),
         tenant_id=tenant_uuid,
     )
     db.add(member)
@@ -494,9 +599,10 @@ async def update_workspace_member_role(
     # Find ANY existing role entry for this user in this workspace, then update it.
     uwr = (
         await db.execute(
-            select(UserWorkspaceRole).where(
-                UserWorkspaceRole.user_id == user_id,
-                UserWorkspaceRole.workspace_id == wid,
+            select(RoleBinding).where(
+                RoleBinding.user_id == user_id,
+                RoleBinding.scope_kind == "business_unit",
+                RoleBinding.scope_id == wid,
             )
         )
     ).scalar_one_or_none()
@@ -531,9 +637,10 @@ async def remove_workspace_member(
     wid = _uuid.UUID(workspace_id)
 
     result = await db.execute(
-        delete(UserWorkspaceRole).where(
-            UserWorkspaceRole.user_id == user_id,
-            UserWorkspaceRole.workspace_id == wid,
+        delete(RoleBinding).where(
+            RoleBinding.user_id == user_id,
+            RoleBinding.scope_kind == "business_unit",
+            RoleBinding.scope_id == wid,
         )
     )
     if result.rowcount == 0:

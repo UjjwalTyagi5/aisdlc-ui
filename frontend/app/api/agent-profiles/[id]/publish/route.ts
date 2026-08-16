@@ -1,34 +1,17 @@
 import { type NextRequest } from "next/server";
 
-import { getSession } from "@/lib/auth/session";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import { canPublishAtTier } from "@/lib/governance";
-import { publishVersion, versionScope } from "@/lib/mock/agent-profile-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: mirrors mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function POST(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
+/**
+ * Activate a version — proxied to FastAPI `POST /agent-profiles/{id}/publish`.
+ *
+ * The tier-ownership check that ran here is gone, and the rule it enforced is
+ * still enforced: FastAPI gates publish on `workspace:manage`. It had to go
+ * regardless — it read the version's scope from `lib/mock/agent-profile-fixtures`,
+ * so with the fixtures out of the data path it would have 404'd every real
+ * version before the backend ever saw the call.
+ */
+export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-
-  // Publishing was authenticated-only: any signed-in person could activate a
-  // version at ANY tier, so the cascade's ownership was a UI convention rather
-  // than a rule. Checked here now, against the draft's own recorded scope —
-  // the tier is the version's, not something the caller gets to assert.
-  const scope = versionScope(id);
-  if (!scope) return Response.json({ code: "not_found" }, { status: 404 });
-  if (!canPublishAtTier(effectivePlatformRole(session), scope)) {
-    return Response.json(
-      { code: "forbidden", message: "You don't own this tier's defaults." },
-      { status: 403 },
-    );
-  }
-
-  const published = publishVersion(id, session.user.name);
-  if (!published) return Response.json({ code: "not_found" }, { status: 404 });
-  return Response.json(published);
+  return bffProxy(`/agent-profiles/${encodeURIComponent(id)}/publish`, { method: "POST" });
 }

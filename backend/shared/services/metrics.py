@@ -33,22 +33,6 @@ DEAD_LETTER_DEPTH = Gauge(
     labelnames=["stream"],
 )
 
-# ── M5: Temporal Workflow Metrics (D-07) ──
-
-TEMPORAL_ACTIVITY_DURATION = Histogram(
-    "temporal_activity_duration_seconds",
-    "Time taken for a single Temporal activity",
-    labelnames=["activity", "status"],
-    buckets=(1, 5, 15, 30, 60, 120, 300, 600, 1800),
-)
-
-TEMPORAL_HITL_WAIT_DURATION = Histogram(
-    "temporal_hitl_wait_duration_seconds",
-    "Time from HITL gate entry to signal receipt",
-    labelnames=["phase", "outcome"],
-    buckets=(60, 300, 900, 3600, 14400, 86400),
-)
-
 # ── M6: Webhook Pipeline Metrics (REQ-M6-15) ──
 
 WEBHOOK_DELIVERIES = Counter(

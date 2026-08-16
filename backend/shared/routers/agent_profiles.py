@@ -34,6 +34,7 @@ from config.agent_registry import AGENT_REGISTRY
 from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
+from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.models.orm import AgentProfile
 from shared.services.prompt_runtime import invalidate_profile_cache
@@ -439,6 +440,104 @@ async def unpublish(
         },
     ))
     return _version_dict(target)
+
+
+@agent_profiles_router.post(
+    "/{profile_id}/propose",
+    status_code=201,
+    dependencies=[Depends(require_permission("project:update"))],
+)
+async def propose(
+    profile_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Ask the tier's owner to publish this draft, instead of publishing it yourself.
+
+    The counterpart to `/publish` for someone who does not own the tier. Agent
+    Studio's cascade is Org → Business Unit → Project → Personal, and each shared
+    tier has exactly one role that may change its default; anyone else proposes.
+
+    A DEDICATED FILING POINT rather than `POST /governance-approvals`, for the same
+    reason as the budget one next door: the request's `target_ref` is what approving
+    PUBLISHES, so it must be set from a version the server loaded, not from a body.
+    A client that could name it could point a proposal at any profile row in the
+    tenant and have the approval publish that instead.
+
+    The tier's own owner does not come here — they hold `/publish`. Sending a
+    proposal to yourself would be a request you are then blocked from deciding by
+    the self-approval rule, which is a dead end rather than a safeguard.
+    """
+    from shared.authz.effective_role import (  # noqa: PLC0415 - avoids an import cycle
+        actor_display_name,
+        effective_platform_role,
+    )
+    from shared.services import governance_requests as governance_service  # noqa: PLC0415
+    from shared.services.governance_requests import GovernanceError  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    target = await _load_or_404(db, profile_id)
+
+    if target.scope == "user":
+        # A personal override is nobody else's to approve — it is one person's own
+        # setting, outside the cascade everyone else inherits from.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NOT_A_SHARED_TIER",
+                "message": "A personal default is yours alone; there is nobody to propose it to.",
+            },
+        )
+
+    request_type = f"agent_default_{target.scope}"
+    scope_label = {"org": "organization", "workspace": "business unit", "project": "project"}[
+        target.scope
+    ]
+    role = await effective_platform_role(db, request)
+    name = await actor_display_name(db, request)
+
+    # The unit the proposal is filed against. An org-scoped profile has no
+    # workspace of its own, so it is filed against the caller's active unit — the
+    # request still has to belong somewhere for the queue's scope filter to work.
+    workspace_id = str(target.scope_id) if target.scope_id else await active_workspace_for_request(
+        db, request
+    )
+    if not workspace_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NO_WORKSPACE",
+                "message": "Choose a business unit before proposing an organization default.",
+            },
+        )
+
+    try:
+        return await governance_service.create_request(
+            db,
+            tenant_id=tenant_id,
+            initiator_id=_user_id(request),
+            initiator_name=name,
+            initiator_role=role,
+            request_type=request_type,
+            title=f"{target.agent_id} default change ({scope_label})",
+            description=(
+                f"{name} proposed a {target.agent_id} behavior change for the "
+                f"{scope_label} default, version {target.version}."
+            ),
+            workspace_id=workspace_id,
+            project_id=str(target.scope_id) if target.scope == "project" else None,
+            # The DRAFT version's id. Approving publishes exactly this — which is
+            # why the proposal carries an id rather than the prompt text: the
+            # approver agrees to a specific draft, and re-reading the text at
+            # decision time would publish whatever it had since become.
+            target_ref=str(target.id),
+            payload={"agentId": target.agent_id, "scope": target.scope, "version": target.version},
+            system_raised=True,
+        )
+    except GovernanceError as exc:
+        raise HTTPException(
+            status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)}
+        )
 
 
 @agent_profiles_router.post(

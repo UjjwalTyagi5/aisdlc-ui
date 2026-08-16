@@ -888,7 +888,7 @@ def push_branch() -> str:
 def _existing_pr_or_none(s) -> Optional[str]:
     """Return the already-recorded PR URL for this session, or None.
 
-    Checked at the start of create_pr so that a Temporal retry within the same
+    Checked at the start of create_pr so that a retry within the same
     session does not open a second pull request for the same branch.
     """
     url = getattr(s.dev_artifacts, "pr_url", None) or getattr(s, "pr_url", None)

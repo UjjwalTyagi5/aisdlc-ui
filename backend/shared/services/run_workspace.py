@@ -1,6 +1,6 @@
 """Run-scoped repo workspace for pipeline activities (durable across retries).
 
-A Temporal activity may retry on a different worker, so the workspace is rebuilt
+A stage may retry on a different worker, so the workspace is rebuilt
 from scratch every call: delete-then-clone into `<DEV_WORKSPACE_ROOT>/run/<run_id>/repo`.
 Authenticated cloning REUSES the proven dev-pull-repo helpers in
 `shared/services/ado_repos.py` (`clone_into` injects the PAT and scrubs it on error);

@@ -1,9 +1,9 @@
 # pipeline_controller.py
 
-from agents.monitoring_feedback_agent.log_processor import parse_logs_from_text
-from agents.monitoring_feedback_agent.log_chunker import chunk_logs
-from agents.monitoring_feedback_agent.llm_analysis import analyze_logs
-from agents.monitoring_feedback_agent.action_decision import generate_issue_description_and_suggestions
+from agents_orchestrator.monitoring_feedback_agent.log_processor import parse_logs_from_text
+from agents_orchestrator.monitoring_feedback_agent.log_chunker import chunk_logs
+from agents_orchestrator.monitoring_feedback_agent.llm_analysis import analyze_logs
+from agents_orchestrator.monitoring_feedback_agent.action_decision import generate_issue_description_and_suggestions
 # pipeline_controller.py
 
 import json

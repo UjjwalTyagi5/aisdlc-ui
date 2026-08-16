@@ -6,7 +6,6 @@ does NOT appear as a direct call outside the explicitly-allowed system-op files.
 ALLOWLIST (legitimately bare AsyncSessionFactory() — not migrated):
   shared/db.py              — the factory definition itself; get_db_session* wrap it
   scripts/seed_e2e_fixtures.py — local seed script run as superuser DSN
-  tests/temporal/conftest.py   — test fixture (integration test setup only)
 
 Every other file under agentic_app that imports AsyncSessionFactory must use it
 only inside get_db_session_* wrapper functions, never as a direct call in
@@ -25,7 +24,7 @@ Audit covers the 10 call sites enumerated in the plan callsite_checklist:
   10 config/connectors/azure_devops.py (audit_emitter)
 
 And the deviation call site resolved at execute-time:
-  D1 shared/services/artifact_service.py (persist_artifact — background Temporal path)
+  D1 shared/services/artifact_service.py (persist_artifact — background pipeline path)
 """
 from __future__ import annotations
 
@@ -103,7 +102,6 @@ def test_no_bare_session_factory_in_migrated_files():
 _ALLOWLISTED_FILES = [
     "shared/db.py",                  # factory definition + get_db_session* wrappers
     "scripts/seed_e2e_fixtures.py",  # superuser seed script
-    "tests/temporal/conftest.py",    # integration test fixture
 ]
 
 
@@ -175,7 +173,7 @@ def test_webhook_consumer_preserves_best_effort():
     """_ensure_webhook_run_row must preserve the D-07 best-effort wrapper.
 
     The outer try/except must still fall back to a throwaway UUID so a
-    tenant-resolution or DB failure never blocks the Temporal trigger.
+    tenant-resolution or DB failure never blocks the trigger.
     """
     source = _read("webhooks/consumer.py")
     assert "get_db_session_for_tenant" in source, (
@@ -194,7 +192,7 @@ def test_webhook_consumer_preserves_best_effort():
 def test_sdlcworkflow_threads_tenant_id():
     """SDLCWorkflow.run must thread tenant_id into _sync_status calls (REQ-M7-07).
 
-    Contextvars do not cross Temporal activity boundaries — the tenant must be
+    Contextvars do not cross worker/process boundaries — the tenant must be
     passed as an explicit argument.
     """
     source = _read("workflows/sdlc_workflow.py")

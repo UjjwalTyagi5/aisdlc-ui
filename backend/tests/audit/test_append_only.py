@@ -52,18 +52,35 @@ async def test_insert_succeeds_as_sdlc_app():
                 ),
                 {"id": event_id, "tenant_id": tenant_id},
             )
-            # Clean up the test row (superuser session can DELETE; app session cannot after 0008)
-            await session.execute(
-                text("DELETE FROM audit_events WHERE id = :id"),
-                {"id": event_id},
-            )
     except Exception as exc:
         if "permission denied" in str(exc).lower():
             pytest.fail(
-                f"INSERT failed with permission denied — migration 0008 REVOKE may have "
+                f"INSERT failed with permission denied — the append-only REVOKE may have "
                 f"incorrectly revoked INSERT: {exc}"
             )
         pytest.skip(f"DB not reachable or setup incomplete: {exc}")
+
+    # Cleanup runs on the PRIVILEGED connection. It used to run on the app session,
+    # whose own comment said "app session cannot DELETE after 0008" — so this test
+    # could only pass while the property it exists to protect was absent. It did,
+    # because the squash dropped the REVOKE.
+    await _delete_as_superuser(event_id)
+
+
+async def _delete_as_superuser(event_id: str) -> None:
+    """Remove one audit row using the migrations role, which retains DELETE."""
+    import os
+
+    dsn = os.environ.get("POSTGRES_MIGRATIONS_CONN_STRING", "")
+    if not dsn:
+        return  # nothing to clean with; the row is harmless test data
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn.replace("postgresql+asyncpg://", "postgresql://"))
+    try:
+        await conn.execute("DELETE FROM audit_events WHERE id = $1::uuid", event_id)
+    finally:
+        await conn.close()
 
 
 @pytest.mark.integration
