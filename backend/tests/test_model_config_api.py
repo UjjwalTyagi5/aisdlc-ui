@@ -187,6 +187,41 @@ async def test_get_options_only_returns_valid_enabled(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_get_options_stays_tenant_wide_without_project_id_even_with_grants(monkeypatch):
+    """Regression guard: get_options has no real project-scoped caller today (the
+    router never passes project_id). A tenant that has configured ANY org_model_grants
+    row must NOT see its picker go empty just because no project_id was given —
+    effective_project_offerings(tenant, None) intentionally fails closed to set() for a
+    real RUN, but get_options must not call it at all when project_id is falsy."""
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="O2", api_key="k",
+        enabled_models=["claude-sonnet-4-6"], created_by="a",
+    )
+
+    async def _ok(p, m, k):
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+    await mc.verify_provider(tenant, created["id"])
+
+    # Configure a grant row — this is what flips effective_project_offerings(t, None)
+    # from None to set() once a project_id IS passed. Here none is passed at all.
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
+          "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    opts = await mc.get_options(tenant)
+    assert opts["options"], "options must stay tenant-wide when no project_id is given"
+    assert any(o["model_id"] == "claude-sonnet-4-6" for o in opts["options"])
+
+
 # ---------------------------------------------------------------------------
 # Task 5: router + RBAC + registration
 # ---------------------------------------------------------------------------
@@ -252,3 +287,441 @@ async def test_options_requires_run_create_not_model_manage():
             "provider": "anthropic", "display_name": "x", "api_key": "k", "enabled_models": [],
         })
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Task 3: keyless onboarding + workspace-scoped listing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_create_provider_without_api_key_has_no_key():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Keyless",
+        api_key=None, enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    assert created["secret_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_provider_scoped_to_workspace():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="BU Key",
+        api_key="sk-x", enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+        workspace_id=ws_id,
+    )
+    providers = await mc.list_providers(tenant, workspace_id=ws_id)
+    assert any(p["id"] == created["id"] for p in providers)
+
+    other_ws_providers = await mc.list_providers(tenant, workspace_id=str(uuid.uuid4()))
+    # A different BU sees org-wide connections only — this BU-scoped one is absent.
+    assert not any(p["id"] == created["id"] for p in other_ws_providers)
+
+
+@pytest.mark.asyncio
+async def test_list_providers_scope_all_returns_every_connection():
+    from shared.services import model_config as mc
+    import uuid
+    tenant = str(uuid.uuid4())
+    org_wide = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Org Wide",
+        api_key="sk-x", enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    bu_scoped = await mc.create_provider(
+        tenant, provider="openai", display_name="BU Scoped",
+        api_key="sk-y", enabled_models=["gpt-4o"], created_by="admin1",
+        workspace_id=str(uuid.uuid4()),
+    )
+    providers = await mc.list_providers(tenant, scope="all")
+    ids = {p["id"] for p in providers}
+    assert org_wide["id"] in ids and bu_scoped["id"] in ids
+
+
+# ---------------------------------------------------------------------------
+# Task 5: cascade router endpoints (real JWTs via process_api, matching the
+# mint_token + ASGITransport pattern used elsewhere in the test suite)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_org_grants_roundtrip_via_router(mint_token):
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Acme", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    token = mint_token(tenant_id=tenant, permissions=["model:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        put_resp = await client.put(
+            "/model/allowed/org",
+            json={"entries": [{
+                "provider": "anthropic", "model_id": "claude-sonnet-4-6",
+                "credential_id": created["id"], "visibility": "global", "business_unit_ids": [],
+            }]},
+            headers=headers,
+        )
+        assert put_resp.status_code == 200
+
+        get_resp = await client.get("/model/allowed/org", headers=headers)
+        assert get_resp.status_code == 200
+        assert len(get_resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_allowed_project_requires_run_create_not_model_manage(mint_token):
+    """A caller with run:create but WITHOUT model:manage can still read/write their
+    project's model selection (spec §4 permission split)."""
+    import httpx
+    from process_api import app
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    token = mint_token(tenant_id=tenant, permissions=["run:create"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/model/allowed/project", params={"projectId": str(uuid.uuid4())}, headers=headers
+        )
+        # 404/422 (unknown project) is fine — the point is it's NOT 403.
+        assert resp.status_code != 403
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix round: C1 — field-name mismatch across the grants cascade.
+# frontend/lib/schemas/model.ts's Zod schemas require camelCase
+# (credentialId/credentialName/businessUnitIds); model_grants.py's dicts are
+# snake_case with no response_model, so the router must rename explicitly.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_org_grants_response_uses_camel_case_keys(mint_token):
+    """THE test that would have caught C1: raw JSON from PUT and GET
+    /model/allowed/org must contain the literal keys "credentialId" and
+    "businessUnitIds" — never "credential_id" / "business_unit_ids"."""
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="C1", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    token = mint_token(tenant_id=tenant, permissions=["model:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # Input side: the frontend sends camelCase (credentialId/businessUnitIds) — the
+        # Pydantic alias must accept it.
+        put_resp = await client.put(
+            "/model/allowed/org",
+            json={"entries": [{
+                "provider": "anthropic", "model_id": "claude-sonnet-4-6",
+                "credentialId": created["id"], "visibility": "specific",
+                "businessUnitIds": [str(uuid.uuid4())],
+            }]},
+            headers=headers,
+        )
+        assert put_resp.status_code == 200, put_resp.text
+        assert '"credentialId"' in put_resp.text
+        assert '"businessUnitIds"' in put_resp.text
+        assert '"credential_id"' not in put_resp.text
+        assert '"business_unit_ids"' not in put_resp.text
+
+        get_resp = await client.get("/model/allowed/org", headers=headers)
+        assert get_resp.status_code == 200
+        assert '"credentialId"' in get_resp.text
+        assert '"credential_id"' not in get_resp.text
+        entry = get_resp.json()[0]
+        assert entry["credentialId"] == created["id"]
+        assert entry["businessUnitIds"]
+
+
+@pytest.mark.asyncio
+async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
+    """C1, continued: GET /allowed/bu, /availability (I1, corrected: accepts EITHER
+    model:manage — a Business Unit Admin's own governance view — OR run:create — the
+    run-time picker/create-project dialog; neither alone is the right single gate),
+    /grant-matrix, and /allowed/project must all rename credential_id/credential_name to
+    camelCase; /availability's entries must also carry "visibility" (get_availability
+    never included it at all before this fix)."""
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_id, proj_id = await _seed_org_workspace_project(tenant, "Unit A")
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="C1b", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
+          "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    mgmt_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['model:manage'])}"}
+    run_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['run:create'])}"}
+    no_perm_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=[])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        bu_resp = await client.get("/model/allowed/bu", params={"workspaceId": ws_id}, headers=mgmt_headers)
+        assert bu_resp.status_code == 200
+        assert '"credentialId"' in bu_resp.text and '"credential_id"' not in bu_resp.text
+
+        # I1, corrected: /model/availability accepts EITHER model:manage (a Business Unit
+        # Admin's own governance view) OR run:create (the run-time picker) — a caller
+        # holding neither must still be denied.
+        no_access = await client.get("/model/availability", params={"workspaceId": ws_id}, headers=no_perm_headers)
+        assert no_access.status_code == 403
+
+        mgmt_avail_resp = await client.get("/model/availability", params={"workspaceId": ws_id}, headers=mgmt_headers)
+        assert mgmt_avail_resp.status_code == 200, mgmt_avail_resp.text
+
+        avail_resp = await client.get("/model/availability", params={"workspaceId": ws_id}, headers=run_headers)
+        assert avail_resp.status_code == 200, avail_resp.text
+        assert '"credentialId"' in avail_resp.text and '"credential_id"' not in avail_resp.text
+        avail_body = avail_resp.json()
+        assert avail_body and all("visibility" in e for e in avail_body)
+
+        matrix_resp = await client.get("/model/grant-matrix", headers=mgmt_headers)
+        assert matrix_resp.status_code == 200
+        assert '"credentialId"' in matrix_resp.text and '"credential_id"' not in matrix_resp.text
+        assert any(r["credentialHasKey"] is True for r in matrix_resp.json()["rows"])
+
+        proj_resp = await client.get("/model/allowed/project", params={"projectId": proj_id}, headers=run_headers)
+        assert proj_resp.status_code == 200, proj_resp.text
+        assert '"credentialId"' in proj_resp.text and '"credential_id"' not in proj_resp.text
+        assert '"defaultKey"' in proj_resp.text
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix round: C2 — ProviderOut was missing workspace_id/hasKey/
+# approval_* even though model_providers has had the approval columns since
+# Task 1's migration, and model_config.py already had workspace_id in hand.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_provider_out_roundtrips_workspace_and_haskey(mint_token):
+    """A BU-scoped, keyless connection must round-trip workspaceId as the REAL workspace
+    id and hasKey as false. Before the fix, ProviderOut had no such fields at all, so the
+    frontend's Zod defaults silently fabricated workspaceId=null / hasKey=true instead of
+    the response ever saying so — the dangerous, silent kind of bug."""
+    import httpx
+    from process_api import app
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    token = mint_token(tenant_id=tenant, permissions=["model:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        create_resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "anthropic", "display_name": "C2 keyless BU",
+                "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_id,
+            },
+            headers=headers,
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        body = create_resp.json()
+        assert body["workspaceId"] == ws_id
+        assert body["hasKey"] is False
+        assert body["approvalStatus"] == "active"
+        assert body["approvalDecidedBy"] is None
+        assert body["approvalDecidedAt"] is None
+        assert body["approvalReason"] is None
+
+        list_resp = await client.get("/model/providers", params={"scope": "all"}, headers=headers)
+        assert list_resp.status_code == 200
+        row = next(p for p in list_resp.json() if p["id"] == body["id"])
+        assert row["workspaceId"] == ws_id
+        assert row["hasKey"] is False
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix round: I4 — get_options_route never threaded projectId
+# through to mc.get_options, so the project-scoped narrowing was unreachable
+# from the real HTTP surface even though the service function supported it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_options_route_threads_project_id(mint_token, monkeypatch):
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    _, proj_id = await _seed_org_workspace_project(tenant, "Unit A")
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="I4", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6", "claude-opus-4-8"], created_by="admin1",
+    )
+
+    async def _ok(p, m, k):
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+    await mc.verify_provider(tenant, created["id"])
+
+    # Only claude-sonnet-4-6 is granted at all — claude-opus-4-8 has no org grant.
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
+          "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['run:create'])}"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r_wide = await client.get("/model/options", headers=headers)
+        assert r_wide.status_code == 200
+        assert {o["model_id"] for o in r_wide.json()["options"]} == {"claude-sonnet-4-6", "claude-opus-4-8"}
+
+        r_scoped = await client.get("/model/options", params={"projectId": proj_id}, headers=headers)
+        assert r_scoped.status_code == 200
+        assert {o["model_id"] for o in r_scoped.json()["options"]} == {"claude-sonnet-4-6"}
+
+
+@pytest.mark.asyncio
+async def test_list_providers_malformed_workspace_id_does_not_crash():
+    """Discovered via persona testing: a Business Unit Admin's active workspace can
+    resolve to a not-yet-migrated identity (e.g. a Business Units fixture id) rather
+    than a real backend UUID. Passing that straight into a UUID-typed SQL comparison
+    used to raise an unhandled asyncpg.DataError -> bare 500. Falling back to the
+    org-wide-only view is safe: it never surfaces a BU-specific connection."""
+    from shared.services import model_config as mc
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    org_wide = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Org Wide",
+        api_key="sk-x", enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+
+    providers = await mc.list_providers(tenant, workspace_id="ws_platform")
+    assert any(p["id"] == org_wide["id"] for p in providers)
+
+
+@pytest.mark.asyncio
+async def test_create_provider_malformed_workspace_id_rejected_not_widened():
+    """The write-path counterpart: silently dropping a malformed workspace_id to None
+    would widen a BU-scoped onboarding to org-wide (every unit could suddenly see it),
+    the opposite of fail-safe — this must be rejected with a clear error instead."""
+    from shared.services import model_config as mc
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    with pytest.raises(ValueError):
+        await mc.create_provider(
+            tenant, provider="anthropic", display_name="Bad WS", api_key="sk-x",
+            enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+            workspace_id="ws_platform",
+        )
+
+
+@pytest.mark.asyncio
+async def test_availability_malformed_workspace_id_does_not_crash(mint_token):
+    """Same discovery, through the HTTP surface: GET /model/availability with a
+    not-yet-migrated workspace id must not 500 — it should read as centrally-credentialed
+    only, with nothing locally credentialed (since there's no real backend BU to check)."""
+    import httpx
+    from process_api import app
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    created = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Central", api_key="sk-x",
+        enabled_models=["claude-sonnet-4-6"], created_by="admin1",
+    )
+    # get_availability's centrallyCredentialed check requires status='valid' — mark it so
+    # directly, same pattern as test_model_resolver.py's _seed_valid_provider.
+    from shared.db import get_db_session_for_tenant
+    from sqlalchemy import text
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(
+            text("UPDATE model_providers SET status='valid' WHERE id=:i AND tenant_id=:t"),
+            {"i": created["id"], "t": tenant},
+        )
+    await mg.set_org_grants(
+        tenant,
+        [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
+          "credential_id": created["id"], "visibility": "global", "business_unit_ids": []}],
+        created_by="admin1",
+    )
+
+    headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['model:manage'])}"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/model/availability", params={"workspaceId": "ws_platform"}, headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert any(e["model_id"] == "claude-sonnet-4-6" and e["centrallyCredentialed"] for e in body)
+
+
+@pytest.mark.asyncio
+async def test_availability_accepts_model_manage_for_bu_admin_governance_view(mint_token):
+    """/model/availability has two legitimate consumers gated by different permissions:
+    a Business Unit Admin's own governance view (model:manage) and the run-time picker /
+    create-project dialog (run:create). A caller holding only model:manage must succeed;
+    a caller holding neither must still be denied."""
+    import httpx
+    from process_api import app
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    mgmt_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['model:manage'])}"}
+    no_perm_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=[])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        ok = await client.get("/model/availability", params={"workspaceId": str(uuid.uuid4())}, headers=mgmt_headers)
+        assert ok.status_code == 200, ok.text
+
+        denied = await client.get(
+            "/model/availability", params={"workspaceId": str(uuid.uuid4())}, headers=no_perm_headers,
+        )
+        assert denied.status_code == 403

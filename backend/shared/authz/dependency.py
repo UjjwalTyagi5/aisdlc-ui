@@ -114,6 +114,52 @@ def require_permission(perm: str, *, run_param: str | None = None):
     return _dep
 
 
+def require_any_permission(*perms: str, run_param: str | None = None):
+    """Like require_permission, but grants access if the caller holds ANY of `perms`.
+
+    For endpoints with two legitimate consumer groups gated by different permissions —
+    e.g. GET /model/availability, read by a Business Unit Admin's own governance view
+    (model:manage) and by the run-time model picker / create-project dialog (run:create).
+    Gating on a single permission here locks out whichever group doesn't hold it.
+    """
+    if not perms:
+        raise ValueError("require_any_permission needs at least one permission")
+
+    async def _dep(conn: HTTPConnection) -> None:
+        if conn.scope.get("type") == "websocket":
+            return
+        request = conn
+        caller_perms: list[str] = getattr(request.state, "permissions", []) or []
+        tenant_id: str = getattr(request.state, "tenant_id", "") or ""
+
+        try:
+            if run_param and run_param in request.path_params:
+                run_id = request.path_params[run_param]
+                request.state.workspace_id = await resolve_workspace_for_run(run_id, tenant_id)
+            else:
+                await active_workspace_for_request(request, tenant_id)
+        except HTTPException:
+            pass
+
+        if any(has_permission(caller_perms, p) for p in perms):
+            return
+
+        role_label = _low_cardinality_role(caller_perms)
+        required_label = "|".join(perms)
+        RBAC_DENIALS.labels(permission=required_label, role=role_label).inc()
+        logger.warning(
+            "RBAC denial: user=%s tenant=%s required_any=%s role_label=%s",
+            getattr(request.state, "user_id", "unknown"),
+            tenant_id,
+            required_label,
+            role_label,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    _dep.__rbac_require_permission__ = True  # boot-scan sentinel (D-05)
+    return _dep
+
+
 def public():
     """Return a no-op FastAPI dependency for routes that consciously opt out (D-05).
 

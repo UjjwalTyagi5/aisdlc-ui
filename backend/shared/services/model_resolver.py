@@ -159,6 +159,18 @@ async def resolve_model_for_run(
         raise NoModelConfiguredError(
             f"tenant {tenant_id} has no valid, enabled model provider configured")
 
+    from shared.services.model_grants import effective_project_offerings  # noqa: PLC0415
+
+    effective_ids = await effective_project_offerings(
+        tenant_id, project_id or _RUN_PROJECT.get()
+    )
+    if effective_ids is not None:
+        offerings = [o for o in offerings if o["offering_id"] in effective_ids]
+        if not offerings:
+            raise NoModelConfiguredError(
+                f"tenant {tenant_id} has grants configured but none apply to this project"
+            )
+
     if offering_id:
         chosen = next((o for o in offerings if o["offering_id"] == offering_id), None)
         if chosen is None:

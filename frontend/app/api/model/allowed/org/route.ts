@@ -1,26 +1,14 @@
 import { type NextRequest } from "next/server";
+import { z } from "zod";
 
 import { bffProxy } from "@/lib/bff/proxy";
+import { OrgModelGrant } from "@/lib/schemas/model";
 
-/**
- * The organization's model catalogue policy — proxied to FastAPI
- * `GET/PUT /model/allowed/org`.
- *
- * The org-admin gate moved to the backend. It is a ROLE check there too, not a
- * permission one: a Business Unit Admin holds `model:manage` for their own unit,
- * so gating on the permission would let them widen what the whole organization
- * permits. That distinction was previously enforced only in this handler.
- */
-export const dynamic = "force-dynamic";
-
-export async function GET() {
-  return bffProxy("/model/allowed/org");
+export function GET() {
+  return bffProxy("/model/allowed/org", { schema: z.array(OrgModelGrant) });
 }
 
 export async function PUT(req: NextRequest) {
-  const body = (await req.json()) as { entries?: unknown[] };
-  return bffProxy("/model/allowed/org", {
-    method: "PUT",
-    body: { entries: body.entries ?? [] },
-  });
+  const body: unknown = await req.json();
+  return bffProxy("/model/allowed/org", { method: "PUT", body, schema: z.array(OrgModelGrant) });
 }

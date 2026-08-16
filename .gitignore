@@ -21,6 +21,9 @@ backend/**/INPUT/
 backend/**/temp/
 backend/**/logs.db
 
+# Superpowers subagent-driven-development scratch workspace (ledgers, briefs, reports)
+.superpowers/
+
 # Local Temporal dev-server state
 backend/.temporal-dev.db
 backend/.temporal-dev.db-journal

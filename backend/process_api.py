@@ -94,9 +94,12 @@ from shared.routers.integration_access import integration_access_router
 from shared.routers.onboarding import onboarding_router
 from shared.routers.project_scoped import project_scoped_router
 from shared.routers.spend import spend_router
-from shared.routers.model_grants import model_grants_router
 from shared.routers.auth_local import auth_local_router
-from shared.routers.model import model_router, model_options_router
+from shared.routers.model import (
+    model_router,
+    model_options_router,
+    model_availability_router,
+)
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
 from shared.services.artifact_service import _ARTIFACT_CHANNEL
@@ -928,11 +931,6 @@ app.include_router(onboarding_router, tags=["admin"])
 # here rather than falling into that router's own permission floor.
 app.include_router(project_scoped_router, tags=["projects"])
 app.include_router(spend_router, tags=["cost"])
-# The org -> BU -> project model grant cascade. Registered BEFORE model_router so
-# /model/allowed/* and /model/grant-matrix are matched here rather than falling into
-# model_router's model:manage floor — a BU Admin must be able to READ what their
-# unit was granted without holding the permission that changes the catalogue.
-app.include_router(model_grants_router, tags=["model-grants"])
 # runs_router: POST /runs is THE fixed-permission route named by the plan
 # (run:create) — given its OWN per-route dependency below, NOT a router-level
 # floor, because the other /runs/* routes (list/detail/steps/approvals) are
@@ -988,13 +986,15 @@ app.include_router(role_permissions_router, tags=["admin"])
 # Local email+password auth (Phase 3): POST /auth/login (JWT-exempt, in _EXEMPT_PATHS)
 # + GET /auth/me (JWT-validated). Both public()-marked for the D-05 boot scan.
 app.include_router(auth_local_router, tags=["auth"])
-# Model Provider (BYOK) config + options surface (P2). Both routers carry their
-# OWN router-level require_permission gates baked into the APIRouter definition —
-# model_router on "model:manage", model_options_router on "run:create" — so NO
-# _VIEW_DEP floor here (the per-router dep is the effective gate and carries
-# __rbac_require_permission__ for the D-05 boot scan).
+# Model Provider (BYOK) config + options surface (P2). All three routers carry their
+# OWN router-level require_permission/require_any_permission gates baked into the
+# APIRouter definition — model_router on "model:manage", model_options_router on
+# "run:create", model_availability_router on either — so NO _VIEW_DEP floor here (the
+# per-router dep is the effective gate and carries __rbac_require_permission__ for the
+# D-05 boot scan).
 app.include_router(model_router, tags=["model"])
 app.include_router(model_options_router, tags=["model"])
+app.include_router(model_availability_router, tags=["model"])
 # Capabilities API (D7): read-only per-agent capability view for the UI panel.
 # Native tools are informational only; curated shown with default-on flag.
 # Router carries its own require_permission("artifact:view") gate — no _VIEW_DEP floor.

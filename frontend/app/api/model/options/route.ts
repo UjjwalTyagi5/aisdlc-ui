@@ -1,17 +1,9 @@
+import { type NextRequest } from "next/server";
+
 import { bffProxy } from "@/lib/bff/proxy";
+import { ModelOptions } from "@/lib/schemas/model";
 
-/**
- * Selectable models and the active default — proxied to FastAPI
- * `GET /model/options`, the LiteLLM-backed catalogue the seam comment here was
- * waiting for.
- *
- * The backend resolves the default against the active workspace, which travels
- * as the `X-Workspace-Id` header `bffFetch` adds from the
- * `sdlc_active_workspace` cookie — so the per-unit default arrives without this
- * handler passing anything.
- */
-export const dynamic = "force-dynamic";
-
-export async function GET() {
-  return bffProxy("/model/options");
+export function GET(req: NextRequest) {
+  const qs = req.nextUrl.searchParams.toString();
+  return bffProxy(`/model/options${qs ? `?${qs}` : ""}`, { schema: ModelOptions });
 }
