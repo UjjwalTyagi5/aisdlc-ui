@@ -18,16 +18,35 @@ export class ApiRequestError extends Error {
 
   constructor(status: number, body: unknown, fallback?: string) {
     const parsed = ApiError.safeParse(body);
-    // FastAPI raises HTTPException as `{detail: "..."}` — not the `{code, message}`
-    // ApiError shape. Surface that detail string (e.g. a budget-exceeded 409) instead
-    // of flattening it to the HTTP statusText.
+    // FastAPI raises HTTPException as `{detail: …}` — not the `{code, message}`
+    // ApiError shape — and `detail` comes in two forms, both of which are real:
+    //
+    //   {detail: "Budget exceeded"}                    a bare message
+    //   {detail: {code: "SELF_APPROVAL_BLOCKED", …}}   a machine-readable refusal
+    //
+    // The second is what the approvals and governance routers raise, and it was
+    // being dropped: only the string form was unwrapped, so a caller got
+    // `unknown_error` / "Bad Request" in place of "You raised this request — it
+    // escalates rather than self-approving". The code is what a client branches on
+    // and the message is what a person reads; flattening both to the statusText
+    // loses the two things the backend went to the trouble of distinguishing.
+    const rawDetail = (body as { detail?: unknown } | null | undefined)?.detail;
     const detail =
-      body && typeof body === "object" && typeof (body as { detail?: unknown }).detail === "string"
-        ? (body as { detail: string }).detail
-        : undefined;
+      typeof rawDetail === "string"
+        ? { message: rawDetail }
+        : rawDetail && typeof rawDetail === "object"
+          ? (rawDetail as { code?: unknown; message?: unknown })
+          : undefined;
+    const detailMessage =
+      typeof detail?.message === "string" ? detail.message : undefined;
+    const detailCode = typeof detail?.code === "string" ? detail.code : undefined;
+
     const payload = parsed.success
       ? parsed.data
-      : { code: "unknown_error", message: detail ?? fallback ?? "Request failed" };
+      : {
+          code: detailCode ?? "unknown_error",
+          message: detailMessage ?? fallback ?? "Request failed",
+        };
     super(payload.message);
     this.status = status;
     this.code = payload.code;

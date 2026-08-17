@@ -1,24 +1,22 @@
 import { type NextRequest } from "next/server";
 
-import { requestOrArchiveProject } from "@/lib/mock/project-fixtures";
-import { getSession } from "@/lib/auth/session";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: a Project Admin (owner) or Org Admin archives directly; a
-// BU Admin's request instead opens a governance approval and the project's
-// `archived` stays false in the response — the client infers "sent for
-// approval" from that, no separate field needed. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function POST(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
+/**
+ * Archive a project — proxied to FastAPI `POST /projects/{id}/archive`.
+ *
+ * THE ROLE FORK IS BACK, and it is the backend's now. A Project Admin archives
+ * their own project and an Org Admin archives anything; a Business Unit Admin
+ * archiving a project they do not run files a `project_archive` request routed to
+ * the Org Admin instead. Ending someone else's delivery work is the kind of
+ * decision the request lane exists for.
+ *
+ * The response shape is the same either way — the project comes back with
+ * `archived` still false when a request was filed, and the client reads "sent for
+ * approval" from that. That was the original contract here and it is worth keeping:
+ * a second response shape would make every caller branch on which one it got.
+ */
+export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const role = effectivePlatformRole(session);
-  const result = requestOrArchiveProject(id, { role, displayName: session.user.name });
-  if (!result) return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
-  return Response.json(result.project);
+  return bffProxy(`/projects/${encodeURIComponent(id)}/archive`, { method: "POST" });
 }

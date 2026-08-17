@@ -1,40 +1,32 @@
 import { type NextRequest } from "next/server";
 
-import { getWorkspace } from "@/lib/mock/workspace-fixtures";
-import { createGovernanceApproval } from "@/lib/mock/governance-approval-fixtures";
-import { getSession } from "@/lib/auth/session";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: a BU Admin's request for more budget than they can set
-// themselves — routed to Org Admin (lib/governance.ts::GOVERNANCE_APPROVER_ROLE).
-// Mirrored in mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
+/**
+ * A Business Unit Admin asking for more budget than they may set themselves —
+ * proxied to FastAPI `POST /workspaces/{id}/budget-increase-request`.
+ *
+ * The other half of the budget cascade: a unit's own Admin sets the FIRST cap
+ * directly (someone has to fill in a blank the Org Admin left), and changing one
+ * that already exists comes here, as a `budget_increase` request routed to the Org
+ * Admin.
+ *
+ * A dedicated endpoint rather than a plain `POST /governance-approvals` because the
+ * AMOUNT has to be recorded server-side: the generic create accepts no payload, so
+ * a client cannot set the figure that approving will apply. Approving reads it back
+ * from the stored request, so the number agreed to is the number applied.
+ */
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const workspace = getWorkspace(id);
-  if (!workspace) return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
-
-  const body = (await req.json()) as { requestedAmountUsd?: number; reason?: string };
+  const body = (await req.json().catch(() => ({}))) as { requestedAmountUsd?: number };
   if (!body?.requestedAmountUsd || body.requestedAmountUsd <= 0) {
     return Response.json(
       { code: "invalid_input", message: "requestedAmountUsd must be a positive number" },
       { status: 422 },
     );
   }
-
-  const created = createGovernanceApproval({
-    type: "budget_increase",
-    workspaceId: workspace.id,
-    workspaceName: workspace.displayName,
-    title: `Budget increase: ${workspace.displayName}`,
-    summary: `${session.user.name} requested a monthly budget increase to $${body.requestedAmountUsd.toLocaleString()} for ${workspace.displayName}${body.reason ? ` — "${body.reason}"` : ""}.`,
-    requestedBy: session.user.name,
-    targetRef: workspace.id,
-    payload: { requestedAmountUsd: body.requestedAmountUsd },
+  return bffProxy(`/workspaces/${encodeURIComponent(id)}/budget-increase-request`, {
+    method: "POST",
+    body,
   });
-  return Response.json(created, { status: 201 });
 }

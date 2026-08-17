@@ -33,6 +33,32 @@ import pytest
 
 from config.env import POSTGRES_CONN_STRING
 
+async def _delete_audit_row_privileged(event_id: str) -> None:
+    """Remove one audit row using the migrations role.
+
+    The app role holds INSERT and SELECT on audit_events but not UPDATE or DELETE —
+    that is the append-only guarantee, enforced as a privilege rather than a rule the
+    application could be talked out of. Test cleanup therefore cannot use it.
+    """
+    import os
+
+    dsn = os.environ.get("POSTGRES_MIGRATIONS_CONN_STRING", "")
+    if not dsn:
+        return
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn.replace("postgresql+asyncpg://", "postgresql://"))
+    try:
+        await conn.execute("DELETE FROM audit_events WHERE id = $1::uuid", event_id)
+    finally:
+        await conn.close()
+
+
+# Removes the two fixed tenants below once the module's cases have run. They are
+# deterministic rather than random, so they were reused rather than accumulating —
+# but they still outlived the suite and showed up in the org list.
+pytestmark = pytest.mark.usefixtures("purge_created_orgs")
+
 # Well-known deterministic tenant UUIDs for this test only.
 # Chosen outside the E2E range (00000000-e2e0-*) and the legacy range (…0001).
 _TENANT_A = uuid.UUID("00000000-0000-0000-0001-000000000001")
@@ -252,11 +278,12 @@ async def test_cross_tenant_isolation():
         # ── CLEANUP: remove test fixtures under a tenant-A session — the DELETE USING
         # policy (tenant_id = app.current_tenant_id) makes the tenant-A rows visible
         # and deletable; org/workspace have no RLS so they delete unconditionally. ──
+        # audit_events is append-only for the app role (UPDATE/DELETE revoked), so its
+        # row is removed on the privileged connection instead. The rest delete fine
+        # under the tenant session, whose USING policy makes the tenant-A rows visible.
+        await _delete_audit_row_privileged(str(audit_id_a))
+
         async with get_db_session_for_tenant(str(_TENANT_A)) as su_cleanup:
-            await su_cleanup.execute(
-                text("DELETE FROM audit_events WHERE id = :id"),
-                {"id": str(audit_id_a)},
-            )
             await su_cleanup.execute(
                 text("DELETE FROM artifacts WHERE id = :id"),
                 {"id": str(artifact_id_a)},

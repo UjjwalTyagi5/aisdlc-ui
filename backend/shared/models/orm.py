@@ -70,7 +70,7 @@ class Project(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     external_ref: Mapped[str | None] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    provider_kind: Mapped[str] = mapped_column(String(50), nullable=False, default="azure_devops")
+    provider_kind: Mapped[str] = mapped_column(String(50), nullable=False, default="azure_devops", server_default="azure_devops")
     # added in migration 0003 â€” server_default false keeps existing rows at false
     archived: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
     # Per-project stageâ†’MCP-server mapping {agent_id: [mcp_server_id, ...]} (migration 0024).
@@ -95,8 +95,8 @@ class Run(Base):
     # Nullable since 0005: webhook-triggered runs carry a provider project key, not a local project UUID.
     project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
-    stage: Mapped[str] = mapped_column(String(50), nullable=False, default="requirements")
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    stage: Mapped[str] = mapped_column(String(50), nullable=False, default="requirements", server_default="requirements")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending", server_default="pending")
     # Phase 1 (model provider): the model chosen for this run; NULL â†’ org default at dispatch.
     model_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # The exact provider connection + model used (unambiguous when two keys expose the
@@ -120,9 +120,6 @@ class Run(Base):
     # Orchestrator state â€” tracks which SDLC stage is active and whether a human gate is pending
     current_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gate_pending: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
-    # Temporal integration â€” added in migration 0004 (M5)
-    temporal_workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    temporal_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -226,26 +223,39 @@ class UsageMonthly(Base):
 # ---------------------------------------------------------------------------
 # Tenant-scoped FORCE-RLS table registry â€” single source of truth (REQ-M9-10).
 #
-# These are the tenant-scoped tables that ship with ENABLE + CREATE POLICY +
-# FORCE ROW LEVEL SECURITY (0001 for the original 5, 0010 for eval_records).
-# Migrations and RLS coverage tooling should read from this constant rather
-# than re-declaring the table list locally.
+# Every table here ships with all four statements: ENABLE ROW LEVEL SECURITY,
+# CREATE POLICY tenant_isolation (USING), CREATE POLICY tenant_isolation_insert
+# (WITH CHECK), and FORCE ROW LEVEL SECURITY. FORCE on its own leaves a table
+# wide open, so none of the four may be skipped.
+#
+# This list was previously 14 entries while the live database had 21 protected
+# tables. Anything generating DDL from this constant would have silently shipped
+# seven tenant-scoped tables — including app_secrets, model_providers and the
+# role-assignment table — with no isolation at all. Keep it in step with the
+# tables that actually carry a tenant_id column; test_rls_coverage guards it.
 # ---------------------------------------------------------------------------
 _RLS_TABLES: tuple[str, ...] = (
-    "projects",
-    "runs",
+    "agent_call_logs",
+    "agent_profiles",
+    "agent_skill_toggles",
+    "agent_skills",
+    "app_secrets",
     "artifacts",
     "audit_events",
-    "agent_call_logs",
-    "eval_records",
-    "custom_roles",
-    "custom_role_permissions",
-    "mcp_servers",
-    "agent_profiles",
-    "conversation_sessions",
     "conversation_messages",
+    "conversation_sessions",
+    "custom_role_permissions",
+    "custom_roles",
     "dev_workspaces",
+    "eval_records",
+    "mcp_servers",
+    "model_offerings",
+    "model_providers",
+    "projects",
+    "role_bindings",
+    "runs",
     "usage_monthly",
+    "workspace_connectors",
 )
 
 
@@ -280,33 +290,71 @@ class RolePermission(Base):
 # RBAC assignment table (TENANT-SCOPED â€” forced RLS added in migration 0007)
 # ---------------------------------------------------------------------------
 
-class UserWorkspaceRole(Base):
-    """Maps a user to a role within a workspace, scoped to a tenant.
+class RoleBinding(Base):
+    """Grants a user one role at one scope: an organization, a business unit, or a project.
 
-    No relationship/back_populates into this table from Role or Workspace â€”
-    a lazy-load from the non-RLS catalog side would cross the tenant RLS boundary (Pitfall 1).
+    Replaces the old user_workspace_roles, which could only ever bind at the business-unit
+    level (its `workspace_id` column). The frontend's model is a three-level cascade —
+    organization -> business unit -> project — so the scope is now expressed as a
+    (scope_kind, scope_id) pair rather than a single FK. A person holds a *set* of
+    bindings; the role is a property of the binding, never of the person.
+
+    `scope_id` deliberately carries no foreign key: it points at organizations.id,
+    workspaces.id or projects.id depending on scope_kind, and no single FK can express
+    that. Referential integrity for it is enforced in shared/authz/grant.py on write.
+
+    `tier` separates governance (approves work) from delivery (does the work). The
+    invariant the UI relies on is that nobody holds both tiers *within one scope* —
+    that would let a person approve their own work — while the same person may well be
+    governance in one scope and delivery in another. Cross-scope combinations are legal,
+    so this cannot be a table constraint; grant.py enforces it per scope.
+
+    No relationship/back_populates into this table from Role or Workspace — a lazy-load
+    from the non-RLS catalog side would cross the tenant RLS boundary (Pitfall 1).
     """
-    __tablename__ = "user_workspace_roles"
+    __tablename__ = "role_bindings"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+
+    # WHICH scope this binding applies to. See the class docstring for why scope_id has no FK.
+    scope_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    scope_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+
     role_name: Mapped[str | None] = mapped_column(ForeignKey("roles.name"), nullable=True)
     custom_role_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("custom_roles.id", ondelete="CASCADE"), nullable=True, index=True
     )
+
+    tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+
     # RLS anchor: no FK intentional â€” tenant_id is a policy column, not a relational FK (mirrors Project.tenant_id)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("user_id", "workspace_id", "role_name"),
-        # Mirrors ck_uwr_exactly_one_role in migration 0012 (DB is authoritative; this
-        # keeps the model in parity so autogenerate/create_all reproduce the constraint).
+        UniqueConstraint(
+            "user_id", "scope_kind", "scope_id", "role_name", name="uq_role_binding_scope_role"
+        ),
         CheckConstraint(
             "(role_name IS NOT NULL AND custom_role_id IS NULL) "
             "OR (role_name IS NULL AND custom_role_id IS NOT NULL)",
-            name="ck_uwr_exactly_one_role",
+            name="ck_role_binding_exactly_one_role",
+        ),
+        CheckConstraint(
+            "scope_kind IN ('organization', 'business_unit', 'project')",
+            name="ck_role_binding_scope_kind",
+        ),
+        CheckConstraint(
+            "tier IS NULL OR tier IN ('governance', 'delivery')",
+            name="ck_role_binding_tier",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'invited', 'deactivated')",
+            name="ck_role_binding_status",
         ),
     )
 
@@ -319,7 +367,10 @@ class WorkspaceConnector(Base):
     """
     __tablename__ = "workspace_connectors"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
     workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -338,9 +389,20 @@ class CustomRole(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str | None] = mapped_column(String(255))
+    # Who OWNS this role, and therefore where it may be assigned (migration 0004).
+    # "organization" = anywhere in the tenant; "business_unit" = only inside that unit.
+    scope_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="organization", server_default="organization"
+    )
+    scope_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_custom_role_tenant_name"),)
+    # Uniqueness is per OWNER scope, not per tenant: two business units may each define
+    # a role called "Reviewer" without colliding.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "scope_id", "name", name="uq_custom_role_scope_name"),
+    )
 
 
 class CustomRolePermission(Base):
@@ -381,8 +443,8 @@ class ModelProvider(Base):
     # Optional custom endpoint (OpenAI-compatible / self-hosted / gateway base URL).
     api_base: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # True when not a curated preset â€” drives the "Custom" UI treatment.
-    is_custom: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="unverified")
+    is_custom: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="unverified", server_default="unverified")
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -402,8 +464,8 @@ class ModelOffering(Base):
         ForeignKey("model_providers.id", ondelete="CASCADE"), nullable=False, index=True
     )
     model_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
-    is_default: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default="true")
+    is_default: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
     # USD per 1M tokens. Mandatory for custom models (cost attribution rides on
     # the model); NULL for catalog models (priced from LiteLLM's cost map).
     input_price_per_million: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
@@ -444,7 +506,10 @@ class McpServer(Base):
     here, mirroring ModelProvider.secret_ref."""
     __tablename__ = "mcp_servers"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
     # RLS anchor: no FK intentional â€” policy column (mirrors Project.tenant_id)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     server_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -598,7 +663,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # M7.4 Wave A: SCIM soft-deactivate flag (D-01). False = deprovisioned; future logins blocked.
     # DB constraint uq_users_external_id_tenant is migration-authoritative (migration 0008).
-    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
 
 
 class PlatformUser(Base):
@@ -607,8 +672,8 @@ class PlatformUser(Base):
 
     user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
-    platform_role: Mapped[str] = mapped_column(String(32), nullable=False, default="platform_admin")
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    platform_role: Mapped[str] = mapped_column(String(32), nullable=False, default="platform_admin", server_default="platform_admin")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

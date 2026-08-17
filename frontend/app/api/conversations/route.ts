@@ -1,24 +1,26 @@
 import { type NextRequest } from "next/server";
 
-import { createConversation, listConversations } from "@/lib/mock/conversation-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: reads/writes the in-memory fixture store directly. When the
-// backend conversations service lands, replace both bodies with bffProxy(...).
+/**
+ * Agent chat sessions — proxied to FastAPI `GET/POST /conversations`, the
+ * backend conversations service the seam comment here was waiting for.
+ *
+ * Ownership is the backend's: it lists the CALLER's sessions (`created_by`) and
+ * 403s a transcript belonging to someone else. The fixture store had no notion of
+ * an owner at all, so every session in it was everyone's.
+ */
+export const dynamic = "force-dynamic";
 
-/** List the caller's sessions for an agent+project (query: agent_id, project_id). */
-export function GET(req: NextRequest) {
+export async function GET(req: NextRequest) {
   const agentId = req.nextUrl.searchParams.get("agent_id") ?? "";
-  const projectId = req.nextUrl.searchParams.get("project_id") ?? "";
-  return Response.json(listConversations(agentId, projectId));
+  const projectId = req.nextUrl.searchParams.get("project_id");
+  const qs = new URLSearchParams({ agent_id: agentId });
+  if (projectId) qs.set("project_id", projectId);
+  return bffProxy(`/conversations?${qs.toString()}`);
 }
 
-/** Create a new chat session. */
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as { agent_id: string; project_id: string; title?: string };
-  const session = createConversation({
-    agentId: body.agent_id,
-    projectId: body.project_id,
-    title: body.title,
-  });
-  return Response.json(session, { status: 201 });
+  const body: unknown = await req.json();
+  return bffProxy("/conversations", { method: "POST", body });
 }

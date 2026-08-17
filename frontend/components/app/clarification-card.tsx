@@ -34,7 +34,7 @@ export interface ClarificationCardProps {
  * same brand-orange eyebrow + gradient-card shell, the existing `Textarea`
  * + `Button` primitives, and the M5 `SlaCountdown`. Submitting calls
  * `onSubmit(answer)` — the caller (run-detail-drawer) wires this to
- * `sendClarificationAnswer`, which sends a Temporal SIGNAL through the
+ * the Copilot advance endpoint, which carries the answer as the gate reason through the
  * existing BFF route, NOT an ephemeral WebSocket chat message (D-M10-03).
  */
 

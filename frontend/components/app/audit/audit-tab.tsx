@@ -331,7 +331,6 @@ export function AuditTab({ runId }: AuditTabProps) {
             <SelectItem value="design">design</SelectItem>
             <SelectItem value="development">development</SelectItem>
             <SelectItem value="testing">testing</SelectItem>
-            <SelectItem value="temporal">temporal</SelectItem>
           </SelectContent>
         </Select>
 

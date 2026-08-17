@@ -1,9 +1,9 @@
 /**
- * Unit tests for buildLocalSession (Phase 3 local email+password auth).
+ * Unit tests for buildLocalSession (local email+password auth).
  *
- * Asserts the login response → Session mapping: tier-aware tenant, role derived
- * from the resolved permission set, and the permissions carried verbatim so the
- * BFF minter and hasPermission gate see the real backend vocabulary.
+ * Asserts the login response → Session mapping: the tenant, the role derived from
+ * the resolved permission set, and the permissions carried verbatim so the BFF
+ * minter and hasPermission gate see the real backend vocabulary.
  */
 import { describe, it, expect } from "vitest";
 
@@ -21,23 +21,33 @@ function resp(over: Partial<LoginResponse>): LoginResponse {
 }
 
 describe("buildLocalSession", () => {
-  it("maps a platform admin to admin role + tenant-less + platform tier", () => {
-    const s = buildLocalSession(
-      resp({ tier: "platform", tenant_id: null, permissions: ["platform:*"] }),
-      "boss@co.com",
-    );
-    expect(s.role).toBe("admin");
-    expect(s.tier).toBe("platform");
-    expect(s.tenant.id).toBe(""); // tenant-less
-    expect(s.permissions).toEqual(["platform:*"]);
-    expect(s.mode).toBe("local");
-  });
-
   it("maps an org admin (admin:*) to admin role with its tenant", () => {
     const s = buildLocalSession(resp({ permissions: ["admin:*"] }), "ada@acme.test");
     expect(s.role).toBe("admin");
     expect(s.tier).toBe("org");
     expect(s.tenant.id).toBe("00000000-0000-0000-0000-000000000001");
+    expect(s.mode).toBe("local");
+  });
+
+  it("no longer treats platform:* as admin — the platform tier was removed", () => {
+    const s = buildLocalSession(resp({ permissions: ["platform:*"] }), "boss@co.com");
+    expect(s.role).toBe("viewer");
+    expect(s.permissions).toEqual(["platform:*"]);
+  });
+
+  it("gives a freshly registered account no role and no permissions", () => {
+    const s = buildLocalSession(resp({ permissions: [] }), "newcomer@acme.test");
+    expect(s.role).toBe("viewer");
+    expect(s.permissions).toEqual([]);
+    // Still attached to the one organization — signup joins it, it just grants nothing.
+    expect(s.tenant.id).toBe("00000000-0000-0000-0000-000000000001");
+  });
+
+  it("names the tenant from the backend when it sends one", () => {
+    expect(buildLocalSession(resp({ tenant_name: "PWC" }), "a@acme.test").tenant.name).toBe(
+      "PWC",
+    );
+    expect(buildLocalSession(resp({}), "a@acme.test").tenant.name).toBe("Organization");
   });
 
   it("derives member from run:create / approve permissions", () => {

@@ -1,9 +1,9 @@
 """Pipeline Session Bridge — makes the standalone, session-coupled agents work inside
-Temporal activities, rebuilt idempotently every attempt (retry-safe).
+stage runs, rebuilt idempotently every attempt (retry-safe).
 
 The standalone agents assume a WebSocket session: a `session_id` contextvar, an
 agent-session row their tools read, and (for repo agents) a cloned `work_dir`. A
-Temporal activity sets up none of that. `pipeline_session` is the ONE context manager
+A bare stage call sets up none of that. `pipeline_session` is the ONE context manager
 every session-coupled activity (Tasks 5-12) wraps around its `graph.ainvoke(...)`:
 
   1. binds `session_id = run_id` (contextvar; ALWAYS reset in finally),

@@ -1,63 +1,35 @@
 import { type NextRequest } from "next/server";
 
-import { buildSpendSeries, type SpendGroupBy } from "@/lib/mock/cost-fixtures";
-import { getSession } from "@/lib/auth/session";
-import { resolveSessionScope } from "@/lib/auth/access-scope";
-import { canReadBusinessUnit, canReadProject } from "@/lib/mock/access-scope";
-
-// DUMMY-DATA SEAM: derives from the workspace/project fixtures — see
-// lib/mock/cost-fixtures.ts. Mirrored in mocks/handlers.ts, per
-// [[msw-dual-runtime-mutation-rule]].
-
-const GROUP_BY = new Set<SpendGroupBy>(["business_unit", "project", "model", "provider"]);
-
-export const dynamic = "force-dynamic";
+import { bffProxy } from "@/lib/bff/proxy";
+import { SpendSeries } from "@/lib/schemas/spend-series";
 
 /**
- * Monthly spend split by business unit, project or model.
+ * Monthly spend split by business unit, project, model or provider — proxied to
+ * FastAPI `GET /cost/spend-series`.
  *
- * SCOPE FILTER: the caller's allowed units bound the result before their own
- * `workspaceId` choice narrows it, so "all" can only ever mean "all of mine" —
- * this is what lets a Business Unit Admin use the same chart and filters as an
- * Org Admin without seeing a sibling unit's spend. A `workspaceId` they cannot
- * read is refused rather than silently ignored, which would otherwise answer a
- * question about someone else's unit with org-wide totals.
+ * Every figure now comes from agent_call_logs joined through runs → projects →
+ * workspaces, so an empty chart means no agent calls have been billed, not that a
+ * fixture ran out of months.
+ *
+ * The scope rules moved to the backend but did not change: the caller's allowed
+ * units bound the result before their own `workspaceId` choice narrows it, so
+ * "all" can only ever mean "all of mine", and a unit they cannot read is refused
+ * with a 404 rather than silently widened to org-wide totals.
  */
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+  const from = req.nextUrl.searchParams;
+  const to = new URLSearchParams();
+  to.set("groupBy", from.get("groupBy") ?? "business_unit");
+  to.set("months", from.get("months") ?? "6");
 
-  const scope = resolveSessionScope(session);
-  const params = req.nextUrl.searchParams;
+  // "all" is the frontend's sentinel for unfiltered; the backend treats an absent
+  // param the same way, so it is dropped rather than forwarded as a literal id.
+  const workspaceId = from.get("workspaceId");
+  if (workspaceId && workspaceId !== "all") to.set("workspaceId", workspaceId);
+  const projectId = from.get("projectId");
+  if (projectId) to.set("projectId", projectId);
 
-  const raw = params.get("groupBy") ?? "business_unit";
-  const groupBy = (GROUP_BY.has(raw as SpendGroupBy) ? raw : "business_unit") as SpendGroupBy;
-
-  const monthsRaw = Number(params.get("months") ?? 6);
-  const months = Number.isFinite(monthsRaw) ? Math.min(24, Math.max(1, Math.trunc(monthsRaw))) : 6;
-
-  const requested = params.get("workspaceId");
-  const workspaceId = requested && requested !== "all" ? requested : null;
-  if (workspaceId && !canReadBusinessUnit(scope, workspaceId)) {
-    return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
-  }
-
-  // A project's own Overview asks for exactly its own series. Refused rather
-  // than ignored when unreadable, for the same reason as `workspaceId`: quietly
-  // widening to every project would answer a question about someone else's
-  // project with the viewer's own totals.
-  const projectId = params.get("projectId");
-  if (projectId && !canReadProject(scope, projectId)) {
-    return Response.json({ code: "not_found", message: "not found" }, { status: 404 });
-  }
-
-  return Response.json(
-    buildSpendSeries(
-      months,
-      scope.isOrgWide ? null : scope.businessUnitIds,
-      groupBy,
-      workspaceId,
-      projectId,
-    ),
-  );
+  return bffProxy(`/cost/spend-series?${to.toString()}`, { schema: SpendSeries });
 }

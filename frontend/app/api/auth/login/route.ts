@@ -85,8 +85,9 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     tier: data.tier,
-    // Org-tier users land on the Dashboard (PRD §36); the platform (Application
-    // Team) tier keeps its own console.
-    redirectTo: data.tier === "platform" ? "/platform" : "/dashboard",
+    // Everyone lands on the Dashboard (PRD §36) — there is no second console to
+    // route to. A user with no bindings yet sees an empty one; that is what
+    // /my-access explains, and the sign-up flow sends them straight there.
+    redirectTo: data.permissions.length === 0 ? "/my-access" : "/dashboard",
   });
 }

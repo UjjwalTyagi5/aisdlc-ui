@@ -21,9 +21,10 @@ export const createRun = (body: {
   model_id?: string | null;
   trigger?: string;
   /**
-   * Chat-driven run (Orchestrator Copilot): created WITHOUT Temporal — the Copilot
-   * drives each stage conversationally and gate approvals advance it via
-   * POST /api/runs/[id]/copilot/advance.
+   * Accepted and ignored. EVERY run is chat-driven now — the Copilot drives each
+   * stage and gate approvals advance it via POST /api/runs/[id]/copilot/advance.
+   * The field survives only so an older client does not fail schema validation
+   * mid-deploy; the backend no longer branches on it.
    */
   conversational?: boolean;
 }) => api("/runs", { method: "POST", body, schema: RunCreateResponse });
@@ -42,24 +43,13 @@ export const listRuns = (query?: {
 export const getRun = (id: RunId) =>
   api(`/runs/${encodeURIComponent(id)}`, { schema: Run });
 
-/** Cancel a running run — terminates its Temporal workflow and marks it cancelled. */
+/** Cancel a running run. */
 export const cancelRun = (id: RunId) =>
   api(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", schema: Run });
 
 /** Hard-delete a run (and its artifacts). */
 export const deleteRun = (id: RunId) =>
   api(`/runs/${encodeURIComponent(id)}`, { method: "DELETE" });
-
-/** Whether a Temporal worker is polling the queue (UI warns when none is). */
-export const WorkerStatus = z.object({
-  worker_available: z.boolean().nullable(),
-  pollers: z.number().default(0),
-  reason: z.string().optional(),
-});
-export type WorkerStatus = z.infer<typeof WorkerStatus>;
-
-export const getWorkerStatus = () =>
-  api(`/runs/worker-status`, { schema: WorkerStatus });
 
 export const getRunSteps = (id: RunId) =>
   api(`/runs/${encodeURIComponent(id)}/steps`, { schema: z.array(Step) });
@@ -79,10 +69,16 @@ export const CopilotAdvanceResult = z.object({
 export type CopilotAdvanceResult = z.infer<typeof CopilotAdvanceResult>;
 
 /**
- * Advance (or re-run) a CONVERSATIONAL run at a gate — the Copilot's Approve/Reject.
- * Hits the signed BFF proxy `/api/runs/[id]/copilot/advance` (NOT the Temporal
- * `hitl.decision` signal — a conversational run has no workflow). The server
- * re-checks the stage approve permission.
+ * Resolve a run's gate — the Copilot's Approve/Reject, and the ONLY way a run
+ * advances.
+ *
+ * It replaced the `hitl.decision` signal, which needed a workflow engine to
+ * receive it. The server re-checks the stage's approve permission before any state
+ * change, so this is not a thinner path than the one it replaced — it is the same
+ * check without the engine.
+ *
+ * `reason` is free text and carries a clarification's ANSWER as well as a
+ * rejection's explanation; both are recorded on the audit event.
  */
 export const advanceCopilotRun = (
   id: RunId,

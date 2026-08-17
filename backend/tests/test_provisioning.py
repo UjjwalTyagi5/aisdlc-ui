@@ -9,6 +9,11 @@ import pytest
 # the test process only — production validation is untouched.
 _ev.SPECIAL_USE_DOMAIN_NAMES = [d for d in _ev.SPECIAL_USE_DOMAIN_NAMES if d != "test"]
 
+# These tests provision real organizations and left every one of them behind. The
+# conftest fixture diffs the organizations table around each test and removes what
+# appeared.
+pytestmark = pytest.mark.usefixtures("purge_created_orgs")
+
 
 @pytest.fixture(autouse=True)
 async def _dispose_shared_engine():

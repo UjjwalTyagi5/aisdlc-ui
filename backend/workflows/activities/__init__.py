@@ -1,13 +1,11 @@
-"""Temporal activity wrappers for the SDLC pipeline (M5-04).
+"""Stage setup and execution helpers, called directly by the Copilot.
 
-Each module exposes one @activity.defn async function:
-  requirements_activity  -> run_requirements_activity
-  design_activity        -> run_design_activity
-  development_activity   -> run_development_activity
-  testing_activity       -> run_testing_activity  (plan 05)
-  emit_escalation_activity -> emit_escalation_activity  (plan 05, SLA breach)
+  _base.py            per-stage connector kind, MCP tool selection, artifact
+                      idempotency, and a re-export of write_and_notify
+  pipeline_session.py the bridge that runs one stage inside a run's session
 
-_base.py provides the shared idempotency helper check_existing_artifact
-and re-exports write_and_notify from artifact_service for a single import
-surface in activity wrappers.
+The per-agent `@activity.defn` wrappers that used to sit beside these were Temporal
+bindings and are gone with it. Neither module here ever imported temporalio; they
+are ordinary async functions, which is why the conversational path could always
+call them without a workflow engine running.
 """

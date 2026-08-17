@@ -12,7 +12,15 @@ import { NextResponse, type NextRequest } from "next/server";
  */
 const AUTH0_MODE = process.env.NEXT_PUBLIC_AUTH_MODE === "auth0";
 
-const PUBLIC_PREFIXES = ["/login", "/api/auth", "/_next", "/favicon.ico"];
+// Sign-up lives on /login as a second tab, so /login is the only public page a
+// person without a session needs. /api/auth stays public because both the sign-in
+// and the sign-up proxies are reached from there before any session exists.
+const PUBLIC_PREFIXES = [
+  "/login",
+  "/api/auth",
+  "/_next",
+  "/favicon.ico",
+];
 const AUTH0_ROUTE_PREFIX = "/auth/";
 
 export async function middleware(req: NextRequest) {

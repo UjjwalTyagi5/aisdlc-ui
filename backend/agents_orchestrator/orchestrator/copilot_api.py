@@ -1614,18 +1614,19 @@ async def _maybe_switch_stage(
 async def _maybe_detect_conversational_gate(
     stage: str, run_id: str, tenant_id: str, perms: list[str], websocket: WebSocket
 ) -> None:
-    """For a CONVERSATIONAL run, advance or open the stage gate once its artifact exists.
+    """Advance or open the stage gate once the stage's artifact exists.
 
-    A conversational run has no Temporal workflow (temporal_workflow_id is empty), so
-    nothing else advances current_stage or flips gate_pending. Here we detect that the
+    NOTHING ELSE advances current_stage or flips gate_pending — there used to be a
+    Temporal workflow that could, and this guarded against double-advancing a run it
+    owned. That engine is gone and every run is conversational, so the guard went with
+    it and this path is now unconditional. Here we detect that the
     active stage's output artifact column (AGENT_REGISTRY[stage].output_artifact) is now
     populated on the run and — via the SAME `_advance_decision` rule used by the HANDOFF
     path (`_advance_or_gate`) — either advance in-chat or open the approval gate. This is
     what makes Design->Development behave identically to Requirements->Design, regardless
     of whether the agent happened to emit a HANDOFF:: sentinel that turn.
 
-    Fully fail-soft: any miss (non-conversational run, unmapped stage, DB error, no
-    artifact yet) is a no-op — _maybe_open_gate still runs afterward for the already-
+    Fully fail-soft: any miss (unmapped stage, DB error, no artifact yet) is a no-op — _maybe_open_gate still runs afterward for the already-
     gated case."""
     try:
         from shared.services.orchestrator import progression
@@ -1636,9 +1637,6 @@ async def _maybe_detect_conversational_gate(
                 await s.execute(select(Run).where(Run.id == _as_run_uuid(run_id)))
             ).scalar_one_or_none()
             if run is None:
-                return
-            # Only conversational runs (no Temporal workflow) self-advance/gate here.
-            if getattr(run, "temporal_workflow_id", None):
                 return
             if bool(run.gate_pending):
                 return  # already gated — _maybe_open_gate handles emission

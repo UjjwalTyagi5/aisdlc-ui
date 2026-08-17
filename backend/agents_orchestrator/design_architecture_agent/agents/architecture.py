@@ -41,7 +41,6 @@ import logging
 from config.env import (
     AGENTIC_BASE_URL,
     ANTHROPIC_MODEL,
-    SQLSERVER_CONN_STRING,
 )
 
 logger = logging.getLogger(__name__)

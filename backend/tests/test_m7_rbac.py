@@ -1,7 +1,7 @@
 """Wave-0 RBAC test scaffold — milestone-7.2.
 
 Covers all 8 requirements from the Test Map (RESEARCH §Validation Architecture):
-  REQ-M7-09  test_rbac_tables_and_rls           — FORCE RLS on user_workspace_roles (plan 02)
+  REQ-M7-09  test_rbac_tables_and_rls           — FORCE RLS on role_bindings (plan 02)
   REQ-M7-10  test_rbac_permission_denied         — developer→approve_requirements = 403 (plan 03)
   REQ-M7-10  test_deny_by_default                — no permissions claim → 403 (plan 03)
   REQ-M7-12  test_permissions_claim_baked        — create_access_token bakes permissions (plan 03)
@@ -29,14 +29,14 @@ _skip_no_db = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# REQ-M7-09 — RLS flags on user_workspace_roles (plan 02 target)
+# REQ-M7-09 — RLS flags on role_bindings (plan 02 target)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
 @_skip_no_db
 @pytest.mark.asyncio
 async def test_rbac_tables_and_rls():
-    """user_workspace_roles must have relrowsecurity AND relforcerowsecurity true in pg_class.
+    """role_bindings must have relrowsecurity AND relforcerowsecurity true in pg_class.
     Global catalog tables (roles, permissions, role_permissions, users) must have relrowsecurity false.
 
     Verifies that migration 0007 applied the full RLS lifecycle on the new assignment
@@ -49,10 +49,10 @@ async def test_rbac_tables_and_rls():
 
     try:
         async with AsyncSessionFactory() as session:
-            # Check user_workspace_roles has both RLS flags set (Pitfall 3 — ENABLE + FORCE)
+            # Check role_bindings has both RLS flags set (Pitfall 3 — ENABLE + FORCE)
             uwr_result = await session.execute(text(
                 "SELECT relrowsecurity, relforcerowsecurity "
-                "FROM pg_class WHERE relname = 'user_workspace_roles'"
+                "FROM pg_class WHERE relname = 'role_bindings'"
             ))
             uwr_row = uwr_result.one_or_none()
 
@@ -68,13 +68,13 @@ async def test_rbac_tables_and_rls():
         pytest.skip(f"DB not reachable or tables absent (migration 0007 not applied?): {exc}")
 
     assert uwr_row is not None, (
-        "user_workspace_roles table not found in pg_class — run migration 0007"
+        "role_bindings table not found in pg_class — run migration 0007"
     )
     assert uwr_row[0] is True, (
-        "relrowsecurity must be true on user_workspace_roles (ENABLE ROW LEVEL SECURITY not applied)"
+        "relrowsecurity must be true on role_bindings (ENABLE ROW LEVEL SECURITY not applied)"
     )
     assert uwr_row[1] is True, (
-        "relforcerowsecurity must be true on user_workspace_roles (FORCE ROW LEVEL SECURITY not applied)"
+        "relforcerowsecurity must be true on role_bindings (FORCE ROW LEVEL SECURITY not applied)"
     )
 
     # All four catalog tables must exist and must NOT have RLS (D-03)
@@ -107,11 +107,12 @@ async def test_rbac_permission_denied(monkeypatch):
     from shared.authz import dependency as dep_module
     from shared.authz.dependency import require_permission
 
-    # Monkeypatch workspace resolution to avoid DB hit.
-    async def _fake_workspace(tenant_id: str):
+    # Monkeypatch workspace resolution to avoid a DB hit. active_workspace_for_request
+    # takes (request, tenant_id) — it stashes the resolved workspace on request.state.
+    async def _fake_workspace(request, tenant_id: str):
         return uuid.uuid4()
 
-    monkeypatch.setattr(dep_module, "resolve_default_workspace", _fake_workspace)
+    monkeypatch.setattr(dep_module, "active_workspace_for_request", _fake_workspace)
 
     dep = require_permission("artifact:approve_requirements")
 
@@ -121,7 +122,7 @@ async def test_rbac_permission_denied(monkeypatch):
         tenant_id="00000000-0000-0000-0000-000000000001",
         user_id="dev-user",
     )
-    request = SimpleNamespace(state=state, path_params={})
+    request = SimpleNamespace(state=state, path_params={}, scope={"type": "http"})
 
     with pytest.raises(HTTPException) as exc_info:
         await dep(request)
@@ -139,7 +140,7 @@ async def test_rbac_permission_denied(monkeypatch):
         tenant_id="00000000-0000-0000-0000-000000000001",
         user_id="admin-user",
     )
-    admin_request = SimpleNamespace(state=admin_state, path_params={})
+    admin_request = SimpleNamespace(state=admin_state, path_params={}, scope={"type": "http"})
     # Should not raise.
     await dep(admin_request)
 
@@ -161,11 +162,12 @@ async def test_deny_by_default(monkeypatch):
     from shared.authz import dependency as dep_module
     from shared.authz.dependency import require_permission
 
-    # Monkeypatch workspace resolution to avoid DB hit.
-    async def _fake_workspace(tenant_id: str):
+    # Monkeypatch workspace resolution to avoid a DB hit. active_workspace_for_request
+    # takes (request, tenant_id) — it stashes the resolved workspace on request.state.
+    async def _fake_workspace(request, tenant_id: str):
         return uuid.uuid4()
 
-    monkeypatch.setattr(dep_module, "resolve_default_workspace", _fake_workspace)
+    monkeypatch.setattr(dep_module, "active_workspace_for_request", _fake_workspace)
 
     dep = require_permission("artifact:approve_requirements")
 
@@ -174,7 +176,7 @@ async def test_deny_by_default(monkeypatch):
         tenant_id="00000000-0000-0000-0000-000000000001",
         user_id="no-perms-user",
     )
-    request_absent = SimpleNamespace(state=state_absent, path_params={})
+    request_absent = SimpleNamespace(state=state_absent, path_params={}, scope={"type": "http"})
     with pytest.raises(HTTPException) as exc_info:
         await dep(request_absent)
     assert exc_info.value.status_code == 403
@@ -185,7 +187,7 @@ async def test_deny_by_default(monkeypatch):
         tenant_id="00000000-0000-0000-0000-000000000001",
         user_id="no-perms-user",
     )
-    request_empty = SimpleNamespace(state=state_empty, path_params={})
+    request_empty = SimpleNamespace(state=state_empty, path_params={}, scope={"type": "http"})
     with pytest.raises(HTTPException) as exc_info2:
         await dep(request_empty)
     assert exc_info2.value.status_code == 403
@@ -291,16 +293,16 @@ async def test_default_workspace_multi_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# D-03 — cross-tenant UserWorkspaceRole isolation (plan 02/03 target)
+# D-03 — cross-tenant RoleBinding isolation (plan 02/03 target)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
 @_skip_no_db
 @pytest.mark.asyncio
 async def test_uwr_cross_tenant_empty():
-    """A UserWorkspaceRole query under tenant B's GUC must return zero rows for tenant A's data.
+    """A RoleBinding query under tenant B's GUC must return zero rows for tenant A's data.
 
-    Verifies that FORCE RLS on user_workspace_roles prevents cross-tenant role-assignment
+    Verifies that FORCE RLS on role_bindings prevents cross-tenant role-assignment
     leaks (D-03 / Pitfall 3).  Becomes GREEN when migration 0007 and the RLS policy land
     in plan 02.  The seeded row is cleaned up via tenant-A's session in a finally block.
     """
@@ -374,9 +376,9 @@ async def test_uwr_cross_tenant_empty():
             _engine_a,
             str(tenant_a),
             text(
-                "INSERT INTO user_workspace_roles "
-                "(id, user_id, workspace_id, role_name, tenant_id) "
-                "VALUES (:id, :uid, :wid, :rn, :tid)"
+                "INSERT INTO role_bindings "
+                "(id, user_id, scope_kind, scope_id, role_name, tenant_id) "
+                "VALUES (:id, :uid, 'business_unit', :wid, :rn, :tid)"
             ),
             {
                 "id": str(seeded_uwr_id),
@@ -388,7 +390,7 @@ async def test_uwr_cross_tenant_empty():
         )
         await _engine_a.dispose()
     except Exception as exc:
-        pytest.skip(f"Could not seed UserWorkspaceRole (migration 0007 not applied?): {exc}")
+        pytest.skip(f"Could not seed RoleBinding (migration 0007 not applied?): {exc}")
 
     try:
         # Query from tenant B's GUC — RLS must return zero rows (cross-tenant isolation proof).
@@ -396,7 +398,7 @@ async def test_uwr_cross_tenant_empty():
         rows_result = await _run_with_guc(
             _engine_b,
             str(tenant_b),
-            text("SELECT id FROM user_workspace_roles WHERE user_id = :uid"),
+            text("SELECT id FROM role_bindings WHERE user_id = :uid"),
             {"uid": user_id},
         )
         rows = rows_result.fetchall()
@@ -414,7 +416,7 @@ async def test_uwr_cross_tenant_empty():
                 await _run_with_guc(
                     _engine_c,
                     str(tenant_a),
-                    text("DELETE FROM user_workspace_roles WHERE id = :id"),
+                    text("DELETE FROM role_bindings WHERE id = :id"),
                     {"id": str(seeded_uwr_id)},
                 )
                 await _engine_c.dispose()
@@ -519,7 +521,7 @@ def test_grant_role_uses_tenant_session_not_superuser():
 @_skip_no_db
 @pytest.mark.asyncio
 async def test_grant_role_idempotent():
-    """grant_role called twice produces exactly one user_workspace_roles row (ON CONFLICT DO NOTHING).
+    """grant_role called twice produces exactly one role_bindings row (ON CONFLICT DO NOTHING).
 
     Integration test — requires POSTGRES_CONN_STRING and migration 0007.
     """
@@ -571,7 +573,7 @@ async def test_grant_role_idempotent():
             )
             result = await conn.execute(
                 _text(
-                    "SELECT COUNT(*) FROM user_workspace_roles "
+                    "SELECT COUNT(*) FROM role_bindings "
                     "WHERE user_id = :uid AND role_name = 'developer'"
                 ),
                 {"uid": user_id},
@@ -590,7 +592,7 @@ async def test_grant_role_idempotent():
                     {"tid": tenant_id},
                 )
                 await conn.execute(
-                    _text("DELETE FROM user_workspace_roles WHERE user_id = :uid"),
+                    _text("DELETE FROM role_bindings WHERE user_id = :uid"),
                     {"uid": user_id},
                 )
             await _ec.dispose()
@@ -682,7 +684,7 @@ async def test_grant_role_upserts_user():
                     {"tid": tenant_id},
                 )
                 await conn.execute(
-                    _text("DELETE FROM user_workspace_roles WHERE user_id = :uid"),
+                    _text("DELETE FROM role_bindings WHERE user_id = :uid"),
                     {"uid": user_id},
                 )
             await _ec.dispose()
@@ -754,7 +756,7 @@ async def test_grant_cross_tenant_isolated():
                 {"tid": tenant_b},
             )
             result = await conn.execute(
-                _text("SELECT COUNT(*) FROM user_workspace_roles WHERE user_id = :uid"),
+                _text("SELECT COUNT(*) FROM role_bindings WHERE user_id = :uid"),
                 {"uid": user_id},
             )
             count_tenant_b = result.scalar()
@@ -773,7 +775,7 @@ async def test_grant_cross_tenant_isolated():
                     {"tid": tenant_a},
                 )
                 await conn.execute(
-                    _text("DELETE FROM user_workspace_roles WHERE user_id = :uid"),
+                    _text("DELETE FROM role_bindings WHERE user_id = :uid"),
                     {"uid": user_id},
                 )
             await _ec.dispose()
@@ -835,12 +837,12 @@ async def test_grant_then_resolve():
         pytest.skip(f"Could not seed org/workspace: {exc}")
 
     try:
-        # Grant product_manager — it has approve_requirements + run:create + artifact:view.
-        await grant_role(user_id, workspace_id, "product_manager", tenant_id=tenant_id)
+        # Grant ba — it has approve_requirements + run:create + artifact:view.
+        await grant_role(user_id, workspace_id, "ba", tenant_id=tenant_id)
 
         resolved = await resolve_permissions_for_user(user_id, tenant_id)
 
-        expected = sorted(set(_ROLE_PERMISSIONS["product_manager"]))
+        expected = sorted(set(_ROLE_PERMISSIONS["ba"]))
         assert resolved == expected, (
             f"Grant->resolve loop failure: expected {expected!r}, got {resolved!r}"
         )
@@ -853,7 +855,7 @@ async def test_grant_then_resolve():
                     {"tid": tenant_id},
                 )
                 await conn.execute(
-                    _text("DELETE FROM user_workspace_roles WHERE user_id = :uid"),
+                    _text("DELETE FROM role_bindings WHERE user_id = :uid"),
                     {"uid": user_id},
                 )
             await _ec.dispose()

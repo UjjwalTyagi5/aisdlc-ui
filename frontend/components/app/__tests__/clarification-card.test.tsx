@@ -15,7 +15,7 @@
  *    when canAnswer is false or the answer is empty/whitespace; true only
  *    when canAnswer is true, not pending, and the answer is non-empty.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
 import { canSubmitAnswer } from "../clarification-card";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -40,51 +40,12 @@ function buildSession(permissions: string[]): Session {
   };
 }
 
-// ── sendClarificationAnswer → sendRunSignal contract ───────────────────────
-
-const mockApi = vi.fn().mockResolvedValue({
-  accepted: true,
-  signalName: "within_agent_clarification",
-  runId: "run_123",
-  idempotencyKey: "idem-1",
-});
-
-vi.mock("@/lib/api/client", () => ({
-  api: (...args: unknown[]) => mockApi(...args),
-}));
-
-describe("sendClarificationAnswer", () => {
-  beforeEach(() => {
-    mockApi.mockClear();
-  });
-
-  it("sends a within_agent_clarification signal via the BFF signals route", async () => {
-    const { sendClarificationAnswer } = await import("@/lib/api/signals");
-
-    await sendClarificationAnswer({
-      runId: "run_123" as never,
-      clarificationId: "run_123",
-      answer: "Use Postgres for the new table.",
-      idempotencyKey: "idem-1",
-    });
-
-    expect(mockApi).toHaveBeenCalledTimes(1);
-    const [path, opts] = mockApi.mock.calls[0] as [string, Record<string, unknown>];
-
-    // Routes through /runs/<id>/signals/<name> — not a WebSocket path.
-    expect(path).toBe("/runs/run_123/signals/within_agent_clarification");
-    expect(opts.method).toBe("POST");
-
-    const body = opts.body as Record<string, unknown>;
-    expect(body.idempotencyKey).toBe("idem-1");
-    expect(body.payload).toEqual({
-      clarification_id: "run_123",
-      answer: "Use Postgres for the new table.",
-    });
-  });
-});
-
-// ── permission gate (canAnswer) ─────────────────────────────────────────────
+// The `sendClarificationAnswer` contract test lived here. Clarifications no longer
+// travel as a durable signal — that needed a workflow engine to receive it and went
+// with Temporal. An answer now resolves the gate through the Copilot advance
+// endpoint with its text carried as the reason, so there is no request shape left
+// here to assert; the two describes below still cover the permission gate and the
+// submit-button logic, which is what this file is really protecting.
 
 describe("clarification permission gate (canAnswer)", () => {
   it("grants canAnswer for a session holding the phase approval permission", () => {

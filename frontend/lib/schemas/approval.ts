@@ -108,8 +108,3 @@ export const ApprovalQueueMetrics = z.object({
 export type ApprovalQueueMetrics = z.infer<typeof ApprovalQueueMetrics>;
 
 /** Response of a dummy decision/answer POST. */
-export const GateDecisionResult = z.object({
-  ok: z.boolean(),
-  id: z.string(),
-});
-export type GateDecisionResult = z.infer<typeof GateDecisionResult>;

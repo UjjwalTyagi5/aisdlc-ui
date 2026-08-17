@@ -10,15 +10,21 @@ export interface LoginResponse {
   user_id: string;
   tenant_id: string | null;
   permissions: string[];
+  /** Organization display name. Optional — older backends do not send it. */
+  tenant_name?: string | null;
 }
 
 /**
  * Derive the coarse MVP-0 role from the resolved permission set so the existing
  * `role`/capability UI keeps working alongside the M7.2 `permissions` model.
- * `admin:*` (org) and `platform:*` (vendor) both map to admin.
+ *
+ * A freshly self-registered user has NO bindings and therefore no permissions at
+ * all, which lands here as "viewer" — the least-privileged rung. That is correct:
+ * the coarse role is presentation only, and every real gate reads `permissions`,
+ * which is empty until an admin grants a role.
  */
 function deriveRole(permissions: string[]): Role {
-  if (permissions.includes("admin:*") || permissions.includes("platform:*")) {
+  if (permissions.includes("admin:*")) {
     return "admin";
   }
   const isMember = permissions.some(
@@ -43,7 +49,6 @@ function initialsFrom(email: string): string {
  * unchanged — `mintBffToken` reads `user.id` / `tenant.id` / `permissions`.
  */
 export function buildLocalSession(resp: LoginResponse, email: string): Session {
-  const isPlatform = resp.tier === "platform";
   return {
     user: {
       id: resp.user_id,
@@ -52,11 +57,12 @@ export function buildLocalSession(resp: LoginResponse, email: string): Session {
       initials: initialsFrom(email),
     },
     tenant: {
-      // Platform admins are tenant-LESS; "" yields an empty tenant_id claim,
-      // which the backend's tenant-less platform path expects.
+      // Every account belongs to the one organization, so tenant_id is always set.
+      // "" is kept as the fallback rather than throwing: an empty tenant claim
+      // resolves to zero permissions server-side, which fails closed.
       id: resp.tenant_id ?? "",
-      name: isPlatform ? "Platform" : "Workspace",
-      plan: isPlatform ? "Platform" : "Enterprise",
+      name: resp.tenant_name ?? "Organization",
+      plan: "Enterprise",
     },
     role: deriveRole(resp.permissions),
     mode: "local",

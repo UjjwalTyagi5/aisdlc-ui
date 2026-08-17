@@ -8,7 +8,7 @@ POST /code-review/{project_id}/review/prepare using the SAME session_id; this
 handler reads that prepared ReviewSessionState, injects the diff into the agent's
 context, streams the review, then persists the produced artifact to a Run.
 
-Like the dev chat, this WS path bypasses the Temporal capability spine, so BYO
+Like the dev chat, this WS path bypasses the pipeline capability spine, so BYO
 MCP tools are injected manually.
 """
 from __future__ import annotations

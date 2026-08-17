@@ -104,13 +104,27 @@ async def test_run_scoped_query_uses_composite_index():
                 {"tenant_id": tenant_id, "run_id": run_id},
             )
             plan = "\n".join(row[0] for row in result.fetchall())
+            row_count = (
+                await session.execute(text("SELECT count(*) FROM audit_events"))
+            ).scalar() or 0
     except Exception as exc:
-        pytest.skip(f"DB not reachable or migration 0008 not applied: {exc}")
+        pytest.skip(f"DB not reachable or the audit migrations are not applied: {exc}")
+
+    # On a small table a sequential scan is the CORRECT plan, and asserting otherwise
+    # tests the planner's cost model rather than this schema. The threshold is
+    # deliberately generous: the point below it is that the answer is meaningless,
+    # not that the index is absent — its existence is asserted by the test above,
+    # which is the structural guarantee this file actually owns.
+    if row_count < 1000:
+        pytest.skip(
+            f"audit_events has {row_count} rows — too small for the planner to prefer "
+            "an index scan; index existence is covered by "
+            "test_ix_audit_tenant_run_created_exists, and real behaviour by the "
+            "10M-row test (set M8_10M_SEED=true)."
+        )
 
     assert "ix_audit_tenant_run_created" in plan or "Index Scan" in plan, (
-        f"Expected composite index usage in query plan. Plan:\n{plan}\n"
-        "If the index exists but is not selected, the table may be too small for "
-        "the planner to prefer it — the 10M-row test exercises the actual performance."
+        f"Expected composite index usage in query plan. Plan:\n{plan}"
     )
 
 

@@ -297,7 +297,7 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
 
     # MCP: bind this project's design-stage servers as tools for the duration of the
     # graph run (interactive-chat surface). project_id comes from pipeline_context;
-    # absent project / disabled MCP -> no tools (no-op). Mirrors the Temporal path.
+    # absent project / disabled MCP -> no tools (no-op). Mirrors the pipeline path.
     from shared.services.mcp_injection import mcp_tools_scope, project_stage_server_ids
     _project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
     # Expose tenant/project/run to tool context so chat-generated design files (docx/ppt/

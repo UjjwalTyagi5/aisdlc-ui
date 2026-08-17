@@ -1,15 +1,16 @@
 import { type NextRequest } from "next/server";
 
-import { listMessages } from "@/lib/mock/conversation-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: returns the in-memory fixture store directly. When the
-// backend conversations service lands, replace the body with bffProxy(...).
-
-/** Transcript for an owned session. */
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+/**
+ * Transcript for one session — proxied to FastAPI
+ * `GET /conversations/{id}/messages`.
+ *
+ * The backend checks the session's owner before returning a word of it, which is
+ * the check that matters here: a transcript is the most quotable thing on the
+ * platform, and the fixture store returned any id to any caller.
+ */
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  return Response.json(listMessages(id));
+  return bffProxy(`/conversations/${encodeURIComponent(id)}/messages`);
 }

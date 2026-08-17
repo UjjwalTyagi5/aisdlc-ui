@@ -1,36 +1,27 @@
-import { getSession } from "@/lib/auth/session";
-import { sessionIdentityId } from "@/lib/auth/access-scope";
-import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import {
-  listNotifications,
-  markNotificationsRead,
-} from "@/lib/mock/notification-fixtures";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: reads the in-memory notification store. Mirrored in
-// mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]]: the store is
-// written by the governance-approval transitions, which run in whichever
-// runtime served the mutation, so the read must run there too.
-//
-// SCOPE: a notification is addressed to an identity or to a role, and the
-// listing intersects both against the caller. There is no "all notifications"
-// view — an unaddressed list would hand a contributor the Org Admin's queue.
+/**
+ * The notification bell — proxied to FastAPI `GET /notifications` and
+ * `POST /notifications/read`.
+ *
+ * Previously returned an empty list with a comment saying the backend owed it one.
+ * It does now: a `notifications` table written by the governance-request lifecycle,
+ * so "your request was approved" has somewhere to be delivered to.
+ *
+ * ADDRESSED, NEVER BROADCAST — the scoping note that used to live here is now a
+ * CHECK constraint. Every row names a PERSON or a ROLE, and the listing intersects
+ * both against the caller. The two exist because they answer different questions:
+ * "your request was approved" belongs to one identity and follows them, while "a
+ * request is waiting on the Business Unit Admin" belongs to whoever holds that role
+ * right now — including someone appointed after it was raised, who would never see a
+ * notification addressed to their predecessor.
+ */
+export const dynamic = "force-dynamic";
+
 export async function GET() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  return Response.json(
-    listNotifications(sessionIdentityId(session), effectivePlatformRole(session)),
-  );
+  return bffProxy("/notifications");
 }
 
-/** Mark everything currently addressed to this viewer as read. */
 export async function POST() {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
-
-  const marked = markNotificationsRead(
-    sessionIdentityId(session),
-    effectivePlatformRole(session),
-  );
-  return Response.json({ marked });
+  return bffProxy("/notifications/read", { method: "POST" });
 }

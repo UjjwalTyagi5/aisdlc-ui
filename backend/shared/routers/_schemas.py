@@ -65,7 +65,7 @@ class ProjectOut(BaseModel):
     Derived fields (ORM-gap decision 2):
       slug           = slugify(display_name) — no slug column in ORM
       template       = "blank"               — no template column in ORM
-      owners         = []                    — no owners relation in ORM (M5 Temporal work)
+      owners         = []                    — no owners relation in ORM
       pipeline       = []                    — no pipeline data in ORM (renders idle state)
     """
 
@@ -180,13 +180,12 @@ class RunOut(BaseModel):
       created_at           -> startedAt
       updated_at           -> completedAt (null if not terminal; approximation)
       gate_pending         -> pendingApprovers (["admin","member"] when True, else [])
-      temporal_workflow_id -> temporalWorkflowId (M5 — null before Temporal workflow starts)
 
     Constant-filled fields (no real ORM data yet):
       title          = f"Run {id[:8]}"   — no title column in ORM
       startedBy      = null               — no startedBy relation in ORM
       cost           = {usd:0, inputTokens:0, outputTokens:0} — real cost via AgentCallLog
-                       aggregation (M5 Temporal work); zero is the correct ED-5 display
+                       aggregation; zero is the correct ED-5 display
                        ("show only real data") until real cost binding lands
       durationMs     = null               — no duration column in ORM
     """
@@ -206,7 +205,6 @@ class RunOut(BaseModel):
     durationMs: Optional[int]
     cost: CostOut
     pendingApprovers: List[str]
-    temporalWorkflowId: Optional[str] = None
 
     @classmethod
     def from_orm_run(cls, run: Any) -> "RunOut":
@@ -227,7 +225,6 @@ class RunOut(BaseModel):
             durationMs=None,
             cost=CostOut(usd=0.0, inputTokens=0, outputTokens=0),
             pendingApprovers=["admin", "member"] if run.gate_pending else [],
-            temporalWorkflowId=getattr(run, "temporal_workflow_id", None),
         )
 
 
@@ -245,7 +242,7 @@ class StepOut(BaseModel):
     No 'steps' table exists in the ORM. Steps are DERIVED from the populated
     JSONB columns on the Run row: requirements_payload, design_artifacts,
     development_artifacts, testing_artifacts. One synthetic Step per populated
-    stage column. A real steps table is deferred to M5 Temporal work.
+    stage column. There is no steps table; a step is derived from the run.
 
     Deterministic synthetic StepId: f"{run_id}:{stage}"
     """
@@ -288,7 +285,7 @@ def derive_steps_from_run(run: Any) -> List[StepOut]:
     """Derive a Step[] from Run JSONB stage columns.
 
     One synthetic Step per populated stage column. StepId is deterministic:
-    f"{run_id}:{stage}". Real steps table deferred to M5 Temporal work.
+    f"{run_id}:{stage}". There is no steps table; a step is derived from the run.
     """
     steps: List[StepOut] = []
     run_id = str(run.id)
@@ -615,7 +612,7 @@ class ConnectorOut(BaseModel):
         )
 
 
-# ── Run create request / response (M5 Temporal) ──────────────────────────────
+# ── Run create request / response ────────────────────────────────────────────
 
 class RunCreateIn(BaseModel):
     """Request body for POST /runs — creates a Run and starts SDLCWorkflow (SC-01)."""
@@ -633,15 +630,14 @@ class RunCreateIn(BaseModel):
     # Absent in pipeline-mode runs; additive + optional (backward-compatible).
     change_request: Optional[ChangeRequest] = None
     # Chat-driven progression (Orchestrator Copilot): when true the run is created
-    # WITHOUT starting Temporal — the Copilot drives each stage conversationally and
+    # The Copilot drives each stage conversationally and
     # gate approvals advance it via POST /runs/{id}/copilot/advance.
     conversational: bool = False
 
 
 class RunCreateOut(BaseModel):
-    """Response for POST /runs — returns IDs needed to track the Temporal workflow."""
+    """Response for POST /runs."""
     runId: str
-    temporalWorkflowId: str
 
 
 # ── SignalAckOut ──────────────────────────────────────────────────────────────
@@ -649,9 +645,9 @@ class RunCreateOut(BaseModel):
 class SignalAckOut(BaseModel):
     """Zod SignalAck shape — acknowledgement of a signal dispatch.
 
-    This is a stub response: durable Temporal signal handling is deferred to M5.
+    This is a stub response.
     The ack records an AuditEvent so there is an audit trail even without
-    Temporal. The accepted=True response indicates the request was received and
+    The accepted=True response indicates the request was received and
     logged; it does NOT guarantee the signal was delivered to a running workflow.
     """
     accepted: bool

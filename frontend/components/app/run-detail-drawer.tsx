@@ -27,14 +27,13 @@ import { AGENT_LABEL } from "@/lib/agents";
 import { RunStreamFeed } from "@/components/app/stream-subscriber";
 import { AuditTab } from "@/components/app/audit/audit-tab";
 import { EvalIndicator } from "@/components/app/eval/eval-indicator";
-import { sendApprovalSignal, sendClarificationAnswer } from "@/lib/api/signals";
-import { getRun, getRunSteps } from "@/lib/api/runs";
+import { advanceCopilotRun, getRun, getRunSteps } from "@/lib/api/runs";
 import { getTrace } from "@/lib/api/traces";
 import { TraceSpanTree } from "@/components/app/trace-span-tree";
 import { qk } from "@/lib/api/query-keys";
 import { approvePermissionForPhase, hasPermission } from "@/lib/auth/permissions";
 import { useSession } from "@/hooks/use-session";
-import type { ApprovalDecision, ArtifactId, Run } from "@/lib/schemas";
+import type { ApprovalDecision, Run } from "@/lib/schemas";
 
 export interface RunDetailDrawerProps {
   run: Run | null;
@@ -100,13 +99,12 @@ export function RunDetailDrawer({
     setApprovalPending(true);
     setPendingDecision("approve");
     try {
-      // Use runId as artifactId fallback — the server maps hitl.decision to the
-      // correct artifact via run_id + current_stage (D-08).
-      await sendApprovalSignal({
-        runId: liveRun.id,
-        artifactId: liveRun.id as unknown as ArtifactId,
-        decision: "approve",
-        idempotencyKey: crypto.randomUUID(),
+      // The stage comes from the run itself rather than the caller: the gate that
+      // is open is the one on the current stage, and letting the drawer name a
+      // different one would let it approve a stage nobody is looking at.
+      await advanceCopilotRun(liveRun.id, {
+        decision: "approved",
+        stage: liveRun.phase,
       });
       // Invalidate the run detail so the drawer refreshes with the new status.
       await queryClient.invalidateQueries({ queryKey: qk.runs.detail(liveRun.id) });
@@ -122,12 +120,10 @@ export function RunDetailDrawer({
       setApprovalPending(true);
       setPendingDecision("reject");
       try {
-        await sendApprovalSignal({
-          runId: liveRun.id,
-          artifactId: liveRun.id as unknown as ArtifactId,
-          decision: "reject",
+        await advanceCopilotRun(liveRun.id, {
+          decision: "rejected",
+          stage: liveRun.phase,
           reason,
-          idempotencyKey: crypto.randomUUID(),
         });
         await queryClient.invalidateQueries({ queryKey: qk.runs.detail(liveRun.id) });
       } finally {
@@ -138,22 +134,19 @@ export function RunDetailDrawer({
     [liveRun, queryClient],
   );
 
-  // Answer a durable within-agent clarification (REQ-M10-06). Sends a
-  // Temporal SIGNAL via the existing BFF signals route — D-M10-03, NOT a
-  // WebSocket chat message. The clarification id is not yet a discrete
-  // field on the Run schema, so — mirroring handleApprove's
-  // `liveRun.id as artifactId` fallback — the run id is used as the
-  // server-side correlation key (D-08).
+  // Answer a clarification the agent raised. It resolves the gate through the same
+  // advance endpoint as an approval, with the answer carried as the reason — one
+  // way for a run to move, whatever the gate was asking. The durable-signal version
+  // of this needed a workflow engine to receive it and went with Temporal.
   const handleAnswer = React.useCallback(
     async (answer: string) => {
       if (!liveRun) return;
       setClarificationPending(true);
       try {
-        await sendClarificationAnswer({
-          runId: liveRun.id,
-          clarificationId: liveRun.id,
-          answer,
-          idempotencyKey: crypto.randomUUID(),
+        await advanceCopilotRun(liveRun.id, {
+          decision: "approved",
+          stage: liveRun.phase,
+          reason: answer,
         });
         await queryClient.invalidateQueries({ queryKey: qk.runs.detail(liveRun.id) });
       } finally {

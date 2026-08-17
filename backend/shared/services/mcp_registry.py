@@ -1,6 +1,6 @@
 """MCP server registry service — DB CRUD + secret handling + config resolution.
 
-Sits between the REST router / Temporal activities and the mcp_servers table.
+Sits between the REST router / stage runners and the mcp_servers table.
 Credentials (env vars / HTTP headers) are stored in the tenant-scoped secret store
 under stable refs; only the refs live on the row. resolve_server_configs() decrypts
 them back into plain ServerConfig dicts for shared.services.mcp_client.

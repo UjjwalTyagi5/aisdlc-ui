@@ -2,7 +2,7 @@
 
 Maps GitHub issue webhook payloads to CanonicalWorkItem via make_board_item().
 Carries tenant_id and event_id into the canonical event so the consumer
-(Plan 07) can build the deterministic Temporal workflow_id.
+(Plan 07) can build a deterministic run id.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def normalize_github_event(payload: dict, tenant_id: str = "", event_id: str = "
         project=repo.get("full_name", ""),
         raw=payload,
     )
-    # Carry dedup / Temporal routing context into the canonical event
+    # Carry dedup / routing context into the canonical event
     # Add status alias for test and consumer compatibility (make_board_item uses 'state')
     canonical.setdefault("status", canonical.get("state", ""))
     if tenant_id:

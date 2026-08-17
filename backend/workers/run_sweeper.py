@@ -1,6 +1,6 @@
 """RunSweeper — expires runs stuck in "running" with no activity.
 
-Conversational (Copilot) runs skip Temporal, so nothing owns their terminal
+Nothing owns a conversational run's terminal
 transition: a run abandoned mid-conversation stays status="running" forever and
 the Runs page fills with phantom in-flight runs. This sweeper marks any
 non-gate-pending run that has been idle (updated_at) longer than
@@ -10,7 +10,7 @@ vocabulary has for "abandoned".
 Scope guards:
   - Only raw status "running"/"in_progress" rows are swept. Runs parked at a
     human gate (awaiting_*) are excluded — an approval can legitimately wait
-    days, and Temporal owns its own workflow timeouts.
+    days.
   - Idle means the row itself hasn't been touched: every Copilot turn persists
     artifacts/stage onto the run row (updated_at onupdate), so an active
     conversation keeps its run out of scope.

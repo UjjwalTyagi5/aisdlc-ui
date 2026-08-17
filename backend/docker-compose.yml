@@ -11,15 +11,10 @@
 #
 # Databases:
 #   App DB:      sdlc_agentic  — used by FastAPI (POSTGRES_CONN_STRING=postgresql+asyncpg://sdlc:sdlcdev@localhost:5432/sdlc_agentic)
-#   Temporal DB: sdlc_temporal — used by Temporal auto-setup (separate DB on same Postgres instance)
-#                Keeping these databases separate prevents Temporal's internal schema from
-#                colliding with the Alembic-managed application schema.
-#
 # Ports exposed on host:
-#   5432  — Postgres
+#   5433  — Postgres (5432 is taken by this machine's native PostgreSQL 16 service,
+#           which holds the real application schema — see the postgres service below)
 #   6379  — Redis
-#   7233  — Temporal gRPC frontend
-#   8088  — Temporal UI (mapped to 8088 to avoid conflicts with other local services)
 
 version: "3.9"
 
@@ -32,7 +27,13 @@ services:
       POSTGRES_PASSWORD: sdlcdev
       POSTGRES_DB: sdlc_agentic
     ports:
-      - "5432:5432"
+      # Host port 5433, NOT 5432. This machine runs a native PostgreSQL 16 service
+      # that already owns 5432 and holds the migrated application schema. Binding
+      # both to 5432 "succeeds" (native on IPv6, Docker on IPv4) and then which one
+      # a client reaches depends on how localhost resolves — the app would silently
+      # talk to an empty database. Other services are unaffected: they reach this container
+      # as POSTGRES_SEEDS=postgres over the compose network, not via the host port.
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -55,38 +56,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    restart: unless-stopped
-
-  temporal:
-    image: temporalio/auto-setup:1.29.6.1
-    container_name: sdlc-temporal
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - POSTGRES_USER=sdlc
-      - POSTGRES_PWD=sdlcdev
-      - POSTGRES_SEEDS=postgres
-      - POSTGRES_DB=sdlc_temporal
-      - TEMPORAL_ADDRESS=temporal:7233
-      - DEFAULT_NAMESPACE=sdlc-dev
-      - DEFAULT_NAMESPACE_RETENTION=72h
-    ports:
-      - "7233:7233"
-    restart: unless-stopped
-
-  temporal-ui:
-    image: temporalio/ui:latest
-    container_name: sdlc-temporal-ui
-    depends_on:
-      - temporal
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
-    ports:
-      - "8088:8080"
     restart: unless-stopped
 
   litellm-proxy:

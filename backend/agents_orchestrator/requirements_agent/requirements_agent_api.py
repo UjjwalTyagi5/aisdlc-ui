@@ -30,7 +30,7 @@ from uuid import uuid4
 import contextvars
 
 from agents_orchestrator.requirements_agent.agents.planning import app as planning_app, INGESTION_SYS_MESSAGE
-from agents.requirements_agent.config import shared
+from agents_orchestrator.requirements_agent.config import shared
 from config import sdlcSettings
 from config.agent_context import build_agent_input_text
 from shared.tools.ingestion_summary import build_ingestion_summary

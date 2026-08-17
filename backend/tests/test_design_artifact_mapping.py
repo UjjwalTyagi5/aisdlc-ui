@@ -53,7 +53,7 @@ from config.context_broker import _fmt_design
 
 
 def _build_design_artifact_from_doc(doc: str) -> DesignArtifact:
-    """Mirror the Temporal cold-path mapping under test (Task 5)."""
+    """Mirror the pipeline cold-path mapping under test (Task 5)."""
     parsed = parse_artifact_sections(doc)
     return DesignArtifact(
         hld=parsed.hld,

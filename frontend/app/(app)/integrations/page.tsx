@@ -42,7 +42,7 @@ import {
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
-import { onboardingScopeFor } from "@/lib/mock/connector-scope";
+import { onboardingScopeFor } from "@/lib/integrations/manage-scope";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { qk } from "@/lib/api/query-keys";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";

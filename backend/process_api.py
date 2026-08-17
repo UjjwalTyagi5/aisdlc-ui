@@ -50,9 +50,6 @@ from config.env import (
     ENABLE_LITELLM,
     LITELLM_BASE_URL,
     ENABLE_WORKER_POOL,
-    ENABLE_TEMPORAL,
-    TEMPORAL_ADDRESS,
-    TEMPORAL_NAMESPACE,
     ENABLE_WEBHOOK_TRIGGERS,
     GITHUB_WEBHOOK_SECRET,
     SLACK_SIGNING_SECRET,
@@ -63,6 +60,7 @@ from config.env import (
     MSGRAPH_WEBHOOK_CLIENT_STATE,
     ENABLE_OIDC,
     ENABLE_SCIM,
+    RBAC_CATALOG_AUTOREPAIR,
     AUTH0_AUDIENCE,
     OIDC_ISSUER_URL,
     OIDC_PROVIDER,
@@ -70,7 +68,8 @@ from config.env import (
 from shared.auth.denylist import is_jti_denied
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
-from shared.auth.platform_identity import seed_platform_admins
+from shared.authz.catalog import assert_rbac_catalog
+from shared.auth.bootstrap import seed_org_admins
 from shared.authz.resolver import resolve_permissions_for_user, PermissionResolutionError
 from shared.db import engine, get_db_session_for_tenant, get_db_session_superuser, RESOLVED_POSTGRES_CONN_STRING
 from shared.models.orm import Organization, Run
@@ -85,12 +84,24 @@ from shared.routers.traces import traces_router
 from shared.routers.artifacts import artifacts_router
 from shared.routers.connectors import connectors_resource_router
 from shared.routers.evidence import evidence_router
-from shared.routers.signals import signals_router
 from shared.routers.admin import admin_router
 from shared.routers.custom_roles import custom_roles_router
+from shared.routers.role_permissions import role_permissions_router
+from shared.routers.org import org_router
+from shared.routers.approvals import approvals_router
+from shared.routers.governance_requests import governance_router
+from shared.routers.notifications import notifications_router
+from shared.routers.project_members import project_members_router
+from shared.routers.integration_access import integration_access_router
+from shared.routers.onboarding import onboarding_router
+from shared.routers.project_scoped import project_scoped_router
+from shared.routers.spend import spend_router
 from shared.routers.auth_local import auth_local_router
-from shared.routers.platform import platform_router
-from shared.routers.model import model_router, model_options_router, model_availability_router
+from shared.routers.model import (
+    model_router,
+    model_options_router,
+    model_availability_router,
+)
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
 from shared.services.artifact_service import _ARTIFACT_CHANNEL
@@ -432,8 +443,8 @@ async def lifespan(app: FastAPI):
             )
         logger.info("LiteLLM proxy reachable at %s", LITELLM_BASE_URL)
 
-    # Initial synchronous connector health probe — runs BEFORE the Temporal connect
-    # so that GET /connectors/health returns real probe results even when Temporal
+    # Initial synchronous connector health probe — runs early in the lifespan
+    # so that GET /connectors/health returns real probe results even when the rest
     # is unavailable.  Failures are tolerated (return_exceptions=True inside
     # _probe_all_connectors); the cache contains whatever connectors succeed.
     # This mirrors the infra _probe_postgres pattern used for the /health endpoint.
@@ -443,7 +454,7 @@ async def lifespan(app: FastAPI):
     # time to verify inbound signatures BEFORE any processing. Loaded Key-Vault-first
     # with env-var fallback, mirroring the connector auth_adapter() pattern. Set
     # unconditionally (independent of ENABLE_WEBHOOK_TRIGGERS, which only gates
-    # downstream Temporal run-creation — signature verification must run on every
+    # downstream run-creation — signature verification must run on every
     # inbound webhook regardless). ADO uses HTTP Basic Auth (no HMAC), so its pair
     # is a username/password rather than a signing key.
     app.state.github_webhook_secret = await load_secret("github-webhook-secret") or GITHUB_WEBHOOK_SECRET
@@ -488,23 +499,6 @@ async def lifespan(app: FastAPI):
         app.state.redis_denylist = None
         logger.info("REDIS_URL not set — JTI denylist disabled (local dev only)")
 
-    # Temporal client — ONE cached connection shared across all request handlers
-    # (Pitfall 3: never call Client.connect() per request — one gRPC channel per process).
-    # When ENABLE_TEMPORAL=false, set to None so handlers know Temporal is unavailable.
-    if ENABLE_TEMPORAL:
-        from temporalio.client import Client as TemporalClient
-        app.state.temporal_client = await TemporalClient.connect(
-            TEMPORAL_ADDRESS,
-            namespace=TEMPORAL_NAMESPACE,
-        )
-        logger.info(
-            "Temporal client connected: address=%s namespace=%s",
-            TEMPORAL_ADDRESS,
-            TEMPORAL_NAMESPACE,
-        )
-    else:
-        app.state.temporal_client = None
-        logger.info("Temporal disabled (ENABLE_TEMPORAL=false) — app.state.temporal_client=None")
 
     app.state.health_cache = {
         "postgres": str(postgres_result),
@@ -570,9 +564,21 @@ async def lifespan(app: FastAPI):
             "enabled" if getattr(app.state, "redis_denylist", None) is not None else "disabled (local)",
         )
 
-    # Phase 3: idempotently seed env-listed platform admins (users + platform_users).
-    # No-op unless PLATFORM_ADMIN_EMAILS and PLATFORM_ADMIN_PASSWORD are both set.
-    await seed_platform_admins()
+    # RBAC catalogue boot guard. Runs BEFORE any org/admin seeding: grant_role
+    # validates against ALL_ROLES and writes role_bindings with an FK onto roles, so
+    # the catalogue has to be correct before the first binding is written.
+    #
+    # roles/permissions/role_permissions carry no tenant_id and no RLS, so a direct
+    # INSERT escalates every holder of that role in every tenant. This refuses to
+    # start on any difference from shared/authz/catalog.py.
+    async with get_db_session_superuser() as _catalog_session:
+        await assert_rbac_catalog(
+            _catalog_session, autorepair=RBAC_CATALOG_AUTOREPAIR
+        )
+
+    # Seed the single organization + its env-listed org admin(s). Idempotent.
+    # No-op unless ORG_ADMIN_EMAILS and ORG_ADMIN_PASSWORD are both set.
+    await seed_org_admins()
 
     # D-05 / SC-04 / T-7.2-15 boot scan: every APIRoute must be either
     # require_permission-protected, public()/allowlist-marked, or the signals
@@ -592,7 +598,7 @@ async def lifespan(app: FastAPI):
     # Start background health probe (re-probes every 30s)
     bg_task = asyncio.create_task(_refresh_health(app))
     # RunSweeper — expires runs stuck in "running" with no activity (conversational
-    # runs have no Temporal owner, so nothing else ever terminates an abandoned one).
+    # nothing else ever terminates an abandoned run).
     from workers.run_sweeper import RunSweeper
     run_sweeper_task = asyncio.create_task(RunSweeper().run())
     logger.info("RunSweeper started")
@@ -601,26 +607,20 @@ async def lifespan(app: FastAPI):
     # Start connector health probe (re-probes connector health every 30s)
     connector_health_task = asyncio.create_task(_refresh_connector_health(app))
 
-    # Webhook consumer tasks — one per connector kind, spawned only when
-    # ENABLE_WEBHOOK_TRIGGERS=true AND the Temporal client is available.
-    # The M3 worker-pool gate (ENABLE_WORKER_POOL) is independent of this.
+    # NO WEBHOOK CONSUMERS for github/jira/azure_repos. Webhook DELIVERY still works —
+    # POST /webhooks/{connector}/{tenant_id} verifies the signature and puts the event
+    # on its Redis stream — but the consumer that turned those events into runs started
+    # a workflow engine, and there is no longer an engine to start (Temporal was
+    # removed). Events accumulate on the stream, which is recoverable; silently
+    # dropping deliveries would not be.
+    # BACKLOG: a consumer that starts a conversational run from a webhook event.
     webhook_consumer_tasks = []
-    if ENABLE_WEBHOOK_TRIGGERS and app.state.temporal_client is not None:
-        from webhooks.consumer import WebhookConsumer
-        # github_actions is DELIBERATELY ABSENT from this list. WebhookConsumer starts
-        # an SDLCWorkflow per event, which for a CI stream would launch a full pipeline
-        # several times per push. It gets PipelineRunConsumer below instead.
-        for _ck in ["github", "jira", "azure_repos"]:
-            _consumer = WebhookConsumer(_ck, app.state.temporal_client)
-            webhook_consumer_tasks.append(asyncio.create_task(_consumer.run()))
-        logger.info(
-            "Webhook consumers started for connectors: github, jira, azure_repos"
-        )
 
-        # CI pipeline runs: records state, never starts a workflow.
-        from webhooks.pipeline_consumer import PipelineRunConsumer
-        webhook_consumer_tasks.append(asyncio.create_task(PipelineRunConsumer().run()))
-        logger.info("Pipeline-run consumer started for connector: github_actions")
+    # CI pipeline runs: records state, never starts a workflow — unaffected by the
+    # Temporal removal above (see PipelineRunConsumer docstring).
+    from webhooks.pipeline_consumer import PipelineRunConsumer
+    webhook_consumer_tasks.append(asyncio.create_task(PipelineRunConsumer().run()))
+    logger.info("Pipeline-run consumer started for connector: github_actions")
 
     # Durable async LangGraph checkpointer pool (enterprise) — opened once here so the
     # agent graphs' astream/ainvoke can persist execution state. No-op in local mode
@@ -642,12 +642,6 @@ async def lifespan(app: FastAPI):
     # Flush any buffered Langfuse spans before the process exits.
     from shared.observability import flush_langfuse  # noqa: PLC0415
     flush_langfuse()
-    for _wt in webhook_consumer_tasks:
-        _wt.cancel()
-        try:
-            await _wt
-        except asyncio.CancelledError:
-            pass
     connector_health_task.cancel()
     try:
         await connector_health_task
@@ -696,6 +690,10 @@ Instrumentator().instrument(app).expose(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FILES_DIR = os.path.join(BASE_DIR, "files")
+# files/ holds per-run agent workspaces and is gitignored, so it is absent on a
+# fresh clone (and after a scratch cleanup). StaticFiles raises at mount time on a
+# missing directory, which made importing this module fail outright — create it first.
+os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=FILES_DIR), name="generated")
 
 # Add CORS middleware
@@ -713,7 +711,12 @@ app.add_middleware(
 # /auth/ws-ticket is NOT exempt — only authenticated users may mint tickets.
 # /metrics is exempt because the Prometheus scraper sends no JWT; labels carry
 # only agent_type/connector enums, no credentials or user data (T-M3-05).
-_EXEMPT_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics", "/auth/login"}
+# /auth/register joins /auth/login here: both are how a caller obtains a token in the
+# first place, so requiring one would make them unreachable.
+_EXEMPT_PATHS = {
+    "/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics",
+    "/auth/login", "/auth/register",
+}
 
 
 @app.middleware("http")
@@ -918,6 +921,45 @@ app.include_router(webhooks_router, tags=["webhooks"])
 # treats the router as protected even though mutation routes carry their own tighter dep.
 app.include_router(workspaces_router, prefix="/workspaces", tags=["workspaces"], dependencies=[_VIEW_DEP])
 app.include_router(projects_router, prefix="/projects", tags=["projects"], dependencies=[_VIEW_DEP])
+# GET /org/overview — the dashboard rollup. Carries its own require_permission
+# ("artifact:view") so it is D-05-protected without a router-level floor; every
+# figure it returns is scoped to the caller's units inside the handler.
+app.include_router(org_router, tags=["org"])
+# GET /approvals + /approvals/metrics — the cross-run pending-gate queue, derived
+# from runs.gate_pending. GET /cost/spend-series — the dashboard spend chart.
+# Both carry their own require_permission("artifact:view") and scope every figure
+# to the caller's units inside the handler.
+app.include_router(approvals_router, tags=["approvals"])
+# /governance-approvals — the OTHER lane of PRD §33.2, and a separate router on
+# purpose. approvals_router derives gates from runs.gate_pending (an agent paused
+# for a human, no initiator); this one is raised BY a person and climbs tiers.
+# Its floor is artifact:view because every signed-in person may raise one and see
+# their own; WHO DECIDES is a question about role, not permission, and is answered
+# per request against current_approver_role inside the service.
+app.include_router(governance_router, tags=["governance"])
+# The bell. Floor is artifact:view because everyone signed in has one; WHICH
+# notifications exist for a caller is decided by the address on each row, not
+# by a permission — there is deliberately no "all notifications" view.
+app.include_router(notifications_router, tags=["notifications"])
+# A project's roster. Registered BEFORE projects_router so /projects/{id}/members
+# is matched here rather than falling into that router's own floor — reading a
+# roster is not the same permission as changing the project it belongs to.
+app.include_router(project_members_router, tags=["projects"])
+# The middle level of the integration cascade: which units MAY use what.
+# `connectors` records what the org onboarded and projects.connectors what a
+# project wired; this is the permission between them, and the only one of the
+# three that is a decision made about somebody else.
+app.include_router(integration_access_router, tags=["integrations"])
+# The Organization Admin's half of the two-step handover: admit a person, place
+# them, and raise the role_assignment request that tells the unit's admin they
+# owe them a job. The third act is the point — without it somebody lands in a
+# unit and nobody is told to give them a role.
+app.include_router(onboarding_router, tags=["admin"])
+# Agent-access overrides, per-project integration credentials, and cross-BU
+# loans. Registered BEFORE projects_router so /projects/{id}/... is matched
+# here rather than falling into that router's own permission floor.
+app.include_router(project_scoped_router, tags=["projects"])
+app.include_router(spend_router, tags=["cost"])
 # runs_router: POST /runs is THE fixed-permission route named by the plan
 # (run:create) — given its OWN per-route dependency below, NOT a router-level
 # floor, because the other /runs/* routes (list/detail/steps/approvals) are
@@ -954,24 +996,25 @@ app.include_router(artifacts_router, tags=["artifacts"], dependencies=[_VIEW_DEP
 # — seeded now so the boot scan passes and the matrix is enforced; live
 # connect/disconnect provider plumbing is 7.6 (plan note, D-07 scope).
 app.include_router(connectors_resource_router, tags=["connectors"], dependencies=[_VIEW_DEP])
-# signals_router: send_signal performs its OWN in-body phase-derived permission
 # check (_check_permission_for_phase, REQ-M7-11/Pattern 4) — NOT a router-level
 # dependency (the required permission cannot be a static factory parameter).
 # Covered by _SIGNALS_IN_BODY_PROTECTED_PATHS in the boot-scan allowlist.
-app.include_router(signals_router, tags=["signals"])
 # admin_router: self-protected via its own router-level _require_admin dependency
 # (admin:* gate, tenant-wide). Mounted under /admin — self-serve RBAC role assignment
-# (the D-09 deferred feature). Cross-tenant blocked by FORCE RLS on user_workspace_roles.
+# (the D-09 deferred feature). Cross-tenant blocked by FORCE RLS on role_bindings.
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
 # custom_roles_router: self-gated via router-level require_permission("role:manage").
 # Carries its own /admin/custom-roles prefix; tenant isolation by FORCE RLS.
 app.include_router(custom_roles_router, tags=["admin"])
+# GET/PUT /admin/role-permissions + GET /admin/permissions. Read is open to any
+# signed-in caller ("what can my role do" is a fair question); the WRITE checks
+# org-wideness inside the handler rather than a permission string, because
+# redefining a role is how you would grant yourself anything and role:manage is
+# held by a Business Unit Admin.
+app.include_router(role_permissions_router, tags=["admin"])
 # Local email+password auth (Phase 3): POST /auth/login (JWT-exempt, in _EXEMPT_PATHS)
 # + GET /auth/me (JWT-validated). Both public()-marked for the D-05 boot scan.
 app.include_router(auth_local_router, tags=["auth"])
-# Platform-tier cross-tenant surface (Phase 3): GET /platform/organizations.
-# platform:*-gated via require_platform_admin (tenant-less callers, D-05 sentinel-marked).
-app.include_router(platform_router, tags=["platform"])
 # Model Provider (BYOK) config + options surface (P2). All three routers carry their
 # OWN router-level require_permission/require_any_permission gates baked into the
 # APIRouter definition — model_router on "model:manage", model_options_router on

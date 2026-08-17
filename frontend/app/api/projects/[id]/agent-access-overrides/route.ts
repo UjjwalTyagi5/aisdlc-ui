@@ -1,57 +1,39 @@
 import { type NextRequest } from "next/server";
 
-import { getSession } from "@/lib/auth/session";
-import {
-  listOverridesForProject,
-  removeOverride,
-  setOverride,
-} from "@/lib/mock/agent-access-override-fixtures";
-import type { AgentAccessOverrideInput } from "@/lib/schemas/agent-access";
-import type { Phase } from "@/lib/schemas/enums";
+import { bffProxy } from "@/lib/bff/proxy";
 
-// DUMMY-DATA SEAM: reads/writes the shared OVERRIDES array directly. Mirrored
-// in mocks/handlers.ts — see [[msw-dual-runtime-mutation-rule]].
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+/**
+ * Per-project adjustments to what a role may do with an agent — proxied to FastAPI
+ * `GET/PUT/DELETE /projects/{id}/agent-access-overrides`.
+ *
+ * EMPTY IS STILL THE NORMAL ANSWER, and now it means something: this project uses the
+ * built-in matrix. Before, it meant the table did not exist.
+ *
+ * The stored value is the FULL involvement level rather than a delta, so "what does a
+ * QA reach on this project" is one lookup instead of a base plus a patch. Deleting the
+ * row IS the reset — there is no separate "clear" state to get out of step with it.
+ */
+export const dynamic = "force-dynamic";
+
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  return Response.json(listOverridesForProject(id));
+  return bffProxy(`/projects/${encodeURIComponent(id)}/agent-access-overrides`);
 }
 
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const body = (await req.json()) as AgentAccessOverrideInput;
-  if (!body?.role || !body?.phase || !body?.involvement) {
-    return Response.json(
-      { code: "invalid_input", message: "role, phase and involvement are required" },
-      { status: 422 },
-    );
-  }
-  const created = setOverride(id, body.role, body.phase, body.involvement, session.user.name);
-  return Response.json(created, { status: 201 });
+  const body: unknown = await req.json();
+  return bffProxy(`/projects/${encodeURIComponent(id)}/agent-access-overrides`, {
+    method: "PUT",
+    body,
+  });
 }
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await getSession();
-  if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const role = req.nextUrl.searchParams.get("role");
-  const phase = req.nextUrl.searchParams.get("phase");
-  if (!role || !phase) {
-    return Response.json({ code: "invalid_input", message: "role and phase are required" }, { status: 422 });
-  }
-  const ok = removeOverride(id, role, phase as Phase);
-  if (!ok) return Response.json({ code: "not_found" }, { status: 404 });
-  return new Response(null, { status: 204 });
+  const qs = req.nextUrl.searchParams.toString();
+  return bffProxy(
+    `/projects/${encodeURIComponent(id)}/agent-access-overrides${qs ? `?${qs}` : ""}`,
+    { method: "DELETE" },
+  );
 }

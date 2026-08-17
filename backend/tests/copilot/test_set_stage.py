@@ -1,7 +1,7 @@
 """POST /runs/{run_id}/copilot/set-stage — repoint a run's active stage (E1).
 
 Lets the Copilot left rail jump the run back to ANY prior stage (e.g. re-activate
-Development after the pipeline has already completed) without a Temporal signal —
+Development after the pipeline has already completed) —
 mirrors copilot_advance's conversational-mutation pattern (shared/routers/runs.py).
 
 Calls the router coroutine directly (not via ASGITransport/httpx): a pre-existing

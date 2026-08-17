@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-import { ApprovalGate, ApprovalQueueMetrics, GateDecisionResult } from "@/lib/schemas";
-import type { ApprovalDecision } from "@/lib/schemas";
+import { ApprovalGate, ApprovalQueueMetrics } from "@/lib/schemas";
 
 import { api } from "./client";
 
@@ -19,18 +18,8 @@ export const listApprovals = (filters: ApprovalFilters = {}) =>
 export const getApprovalMetrics = () =>
   api("/approvals/metrics", { schema: ApprovalQueueMetrics });
 
-/** Submit an approval decision for a gate (dummy ack today). */
-export const decideGate = (input: { id: string; decision: ApprovalDecision; reason?: string }) =>
-  api(`/approvals/${encodeURIComponent(input.id)}/decision`, {
-    method: "POST",
-    body: { decision: input.decision, reason: input.reason },
-    schema: GateDecisionResult,
-  });
-
-/** Answer an agent clarification gate (dummy ack today). */
-export const answerGate = (input: { id: string; answer: string }) =>
-  api(`/approvals/${encodeURIComponent(input.id)}/decision`, {
-    method: "POST",
-    body: { answer: input.answer },
-    schema: GateDecisionResult,
-  });
+// `decideGate` / `answerGate` lived here, posting to /api/approvals/{id}/decision —
+// a route that acknowledged a decision and persisted nothing. Both were unused: the
+// gate UI resolves through `advanceCopilotRun`, which actually moves the run and is
+// permission-checked server-side. Removed rather than left as a working-looking
+// alternative to the real one.
