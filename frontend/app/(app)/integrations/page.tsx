@@ -60,6 +60,7 @@ const KIND_BRAND: Record<ConnectorKind, { mark: string; bg: string }> = {
   slack: { mark: "S", bg: "#4A154B" }, // Slack aubergine
   ms_teams: { mark: "T", bg: "#4B53BC" }, // Teams indigo
   sharepoint: { mark: "SP", bg: "#038387" }, // SharePoint teal
+  figma: { mark: "F", bg: "#1E1E1E" }, // Figma near-black (its 5-colour mark has no single brand colour)
   sso_okta: { mark: "OK", bg: "#007DC1" }, // Okta blue
   sso_entra: { mark: "ME", bg: "#0A66C2" }, // Microsoft Entra blue
 };
@@ -74,6 +75,7 @@ const KIND_LOGO: Partial<Record<ConnectorKind, { src: string; fit: "contain" | "
   jira: { src: "/brand/jira.png", fit: "cover-left" },
   ms_teams: { src: "/brand/msteams.svg", fit: "contain" },
   sharepoint: { src: "/brand/sharepoint.svg", fit: "contain" },
+  figma: { src: "/brand/figma.svg", fit: "contain" },
 };
 
 /** Shared gradient for primary CTAs — the app's brand-gradient button. */
@@ -170,6 +172,12 @@ const CATEGORIES: { id: string; title: string; blurb: string; kinds: ConnectorKi
     title: "Documents & knowledge",
     blurb: "Read specifications and file generated documentation where the business looks for it.",
     kinds: ["sharepoint"],
+  },
+  {
+    id: "design",
+    title: "Design & prototyping",
+    blurb: "Ground the Design agent in the screens that were actually drawn.",
+    kinds: ["figma"],
   },
 ];
 
@@ -762,6 +770,7 @@ function CredentialsDialog({
   const open = !!kind;
   const isJira = kind === "jira";
   const isGithubActions = kind === "github_actions";
+  const isFigma = kind === "figma";
   const mustChooseUnit = targetUnits.length > 1;
   const [unitId, setUnitId] = React.useState("");
   const targetUnitId = unitId || targetUnits[0]?.id || "";
@@ -773,6 +782,8 @@ function CredentialsDialog({
   const [apiToken, setApiToken] = React.useState("");
   const [ghToken, setGhToken] = React.useState("");
   const [ghOwner, setGhOwner] = React.useState("");
+  const [figmaToken, setFigmaToken] = React.useState("");
+  const [figmaFileUrl, setFigmaFileUrl] = React.useState("");
   const [pending, setPending] = React.useState(false);
 
   // Reset all fields whenever the dialog closes or switches connector.
@@ -785,6 +796,8 @@ function CredentialsDialog({
       setApiToken("");
       setGhToken("");
       setGhOwner("");
+      setFigmaToken("");
+      setFigmaFileUrl("");
       setUnitId("");
       setPending(false);
     }
@@ -794,7 +807,9 @@ function CredentialsDialog({
     ? Boolean(baseUrl.trim() && email.trim() && apiToken.trim())
     : isGithubActions
       ? Boolean(ghToken.trim())
-      : Boolean(orgUrl.trim() && pat.trim());
+      : isFigma
+        ? Boolean(figmaToken.trim())
+        : Boolean(orgUrl.trim() && pat.trim());
   const canSubmit = fieldsValid && (!mustChooseUnit || Boolean(targetUnitId));
 
   const handleSubmit = async () => {
@@ -805,7 +820,9 @@ function CredentialsDialog({
         ? { base_url: baseUrl.trim(), email: email.trim(), api_token: apiToken }
         : isGithubActions
           ? { pat: ghToken, owner: ghOwner.trim() || undefined }
-          : { org_url: orgUrl.trim(), pat };
+          : isFigma
+            ? { pat: figmaToken, file_url: figmaFileUrl.trim() || undefined }
+            : { org_url: orgUrl.trim(), pat };
       const result = await setConnectorCredentials(kind, {
         ...fields,
         workspaceId: targetUnitId || undefined,
@@ -842,7 +859,9 @@ function CredentialsDialog({
               ? "Paste your Jira site URL, account email, and an API token. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
               : isGithubActions
                 ? "Paste a GitHub Personal Access Token (scopes: repo, workflow) and, optionally, the owner/org. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
-                : "Paste your Azure DevOps organization URL and a Personal Access Token — this one connection powers boards, repos, and CI/CD. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."}
+                : isFigma
+                  ? "Paste a Figma personal access token (Figma → Settings → Security → Personal access tokens). Read-only: the Design agent reads your screens and never writes to them. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
+                  : "Paste your Azure DevOps organization URL and a Personal Access Token — this one connection powers boards, repos, and CI/CD. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."}
           </DialogDescription>
         </DialogHeader>
 
@@ -898,6 +917,37 @@ function CredentialsDialog({
                   placeholder="acme"
                   autoComplete="off"
                 />
+              </div>
+            </>
+          ) : isFigma ? (
+            <>
+              <div className="space-y-1.5">
+                <Label htmlFor="figma-token">Personal access token</Label>
+                <Input
+                  id="figma-token"
+                  type="password"
+                  value={figmaToken}
+                  onChange={(e) => setFigmaToken(e.target.value)}
+                  placeholder="figd_••••••••••••"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="figma-file-url">
+                  Default file{" "}
+                  <span className="text-muted-foreground/60 normal-case">(optional)</span>
+                </Label>
+                <Input
+                  id="figma-file-url"
+                  value={figmaFileUrl}
+                  onChange={(e) => setFigmaFileUrl(e.target.value)}
+                  placeholder="https://www.figma.com/design/abc123/Product"
+                  autoComplete="off"
+                />
+                <p className="text-muted-foreground text-[11px]">
+                  The file the Design agent reads when nobody names one. It can always be
+                  given a different file at the time of asking.
+                </p>
               </div>
             </>
           ) : isJira ? (

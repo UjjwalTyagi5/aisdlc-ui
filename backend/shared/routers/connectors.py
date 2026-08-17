@@ -75,6 +75,7 @@ _KNOWN_KINDS = {
     "slack",
     "ms_teams",
     "sharepoint",
+    "figma",
     "sso_okta",
     "sso_entra",
 }
@@ -85,6 +86,7 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
     "github": ["github-access-token"],
     "slack": ["slack-bot-token"],
     "azure_repos": ["ado-pat"],
+    "figma": ["figma-access-token"],
 }
 
 # secret_store refs written by the "Add credentials" form (POST /credentials).
@@ -108,6 +110,15 @@ _KIND_SECRET_STORE_REFS: Dict[str, List[str]] = {
         "sharepoint-site-id",
         "sharepoint-drive-id",
         "sharepoint-folder-path",
+    ],
+    # Figma accepts EITHER a PAT or an OAuth token, so both refs are listed: whichever
+    # shape the tenant used, disconnect must clear it. figma-access-token also appears
+    # in _KIND_KV_SECRETS above because the OAuth callback writes it to Key Vault.
+    "figma": [
+        "figma-connected",
+        "figma-pat",
+        "figma-access-token",
+        "figma-file-key",
     ],
 }
 
@@ -134,6 +145,11 @@ _KIND_PRIMARY_CREDENTIAL: Dict[str, str] = {
     # SharePoint. The marker's value is the account label.
     "ms_teams": "msteams-connected",
     "sharepoint": "sharepoint-connected",
+    # A per-kind MARKER for the same reason as the Graph pair, but a different one:
+    # Figma has TWO credential refs (PAT and OAuth token) and naming either as primary
+    # would tombstone one while leaving the other live — a "disconnected" connector
+    # that still authenticates. FigmaConnector.auth_adapter checks this marker first.
+    "figma": "figma-connected",
 }
 
 # Atlassian token exchange endpoint
@@ -145,6 +161,9 @@ _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 # Slack token exchange endpoint
 _SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+
+# Figma token exchange endpoint
+_FIGMA_TOKEN_URL = "https://api.figma.com/v1/oauth/token"
 
 
 def _build_connector_list(
@@ -172,6 +191,7 @@ _CREDENTIAL_CONNECTORS = [
     ("github_actions", "gha-pat", "gha-owner"),
     ("ms_teams", "msteams-connected", "msteams-channel-id"),
     ("sharepoint", "sharepoint-connected", "sharepoint-site-id"),
+    ("figma", "figma-connected", "figma-connected"),
 ]
 
 
@@ -399,7 +419,7 @@ async def install_connector(kind: str, request: Request):
 # tenant secret store (Key Vault in prod, Fernet-encrypted DB in dev) and a live
 # probe verifies them. The secret is never echoed back.
 
-_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions", "ms_teams", "sharepoint"}
+_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions", "ms_teams", "sharepoint", "figma"}
 
 
 class SetCredentialsIn(BaseModel):
@@ -431,6 +451,11 @@ class SetCredentialsIn(BaseModel):
     site_url: Optional[str] = None
     drive_id: Optional[str] = None
     folder_path: Optional[str] = None
+    # Figma. `pat` is reused for the Personal Access Token shape; figma_access_token
+    # is the OAuth shape, normally written by the callback rather than pasted here.
+    # file_url is an optional default file (URL or bare key), not a credential.
+    figma_access_token: Optional[str] = None
+    file_url: Optional[str] = None
 
 
 async def _store_msgraph_app(tenant_id: str, body: SetCredentialsIn, secret_store) -> bool:
@@ -539,6 +564,85 @@ async def _store_sharepoint_credentials(
     return account
 
 
+def _clear_figma_auth_cache(tenant_id: str) -> None:
+    """Invalidate FigmaConnector's per-tenant credential cache. Never raises.
+
+    The connector caches resolved credentials for a short TTL to avoid re-walking the
+    secret-store/Key-Vault ladder on every REST call. Any write to a Figma credential
+    must drop that entry, or the old credential stays live until it expires.
+    """
+    try:
+        from config.connectors.figma import clear_auth_cache
+
+        clear_auth_cache(tenant_id)
+    except Exception as exc:  # noqa: BLE001 — cache invalidation must not fail a write
+        logger.warning("figma auth-cache invalidation failed: %s", type(exc).__name__)
+
+
+async def _store_figma_credentials(
+    tenant_id: str, body: SetCredentialsIn, secret_store
+) -> Optional[str]:
+    """Store Figma credentials + an optional default file. Returns the account label.
+
+    TWO ACCEPTED SHAPES, matching the connector's two auth headers:
+      1. `pat` — a Personal Access Token. Simple, no app registration.
+      2. `figma_access_token` — an OAuth2 access token. Normally written by the OAuth
+         callback rather than pasted, but accepted here so an operator holding a token
+         can configure a tenant without running the redirect flow.
+
+    Only ONE is stored. Writing both would leave auth_adapter's precedence rule
+    (OAuth wins) deciding which credential a tenant actually uses, which is not a
+    decision that should depend on the order someone filled in a form.
+    """
+    from config.connectors.figma import extract_file_key
+
+    pat = (body.pat or "").strip()
+    oauth_token = (body.figma_access_token or "").strip()
+
+    if not pat and not oauth_token:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Figma needs a credential: either 'pat' (a Personal Access Token from "
+                "figma.com → Settings → Security) or 'figma_access_token' (an OAuth2 "
+                "access token)."
+            ),
+        )
+
+    # An explicit OAuth token wins — it is user-scoped and revocable from Figma's side.
+    if oauth_token:
+        await secret_store.put_secret(tenant_id, "figma-access-token", oauth_token)
+        await secret_store.delete_secret(tenant_id, "figma-pat")
+        account = "OAuth token"
+    else:
+        await secret_store.put_secret(tenant_id, "figma-pat", pat)
+        await secret_store.delete_secret(tenant_id, "figma-access-token")
+        account = "Personal Access Token"
+
+    # Optional default file. Rejected loudly when unparseable rather than silently
+    # stored — a bad key here surfaces later as a confusing 404 from Figma.
+    file_url = (body.file_url or "").strip()
+    if file_url:
+        file_key = extract_file_key(file_url)
+        if not file_key:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Could not read a Figma file key from {file_url!r}. Paste the file "
+                    "URL (https://www.figma.com/design/<key>/<name>) or the key itself."
+                ),
+            )
+        await secret_store.put_secret(tenant_id, "figma-file-key", file_key)
+
+    # The marker is what makes the catalogue read this tenant as connected, and what
+    # disconnect tombstones. Its value doubles as the account label.
+    await secret_store.put_secret(tenant_id, "figma-connected", account)
+    # The connector caches resolved credentials per tenant; without this the verify
+    # probe immediately below would run against whatever was cached beforehand.
+    _clear_figma_auth_cache(tenant_id)
+    return account
+
+
 async def _resolve_and_cache_sharepoint_ids(tenant_id: str, site_url: str) -> Optional[str]:
     """Resolve site → drive after a successful probe and cache both ids.
 
@@ -617,6 +721,8 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             account = await _store_ms_teams_credentials(tenant_id, body, secret_store)
         elif kind == "sharepoint":
             account = await _store_sharepoint_credentials(tenant_id, body, secret_store)
+        elif kind == "figma":
+            account = await _store_figma_credentials(tenant_id, body, secret_store)
         else:  # jira
             base_url = (body.base_url or "").strip()
             email = (body.email or "").strip()
@@ -717,6 +823,8 @@ async def oauth_callback(
             await _slack_oauth_exchange(code, state, tenant_id)
         elif kind == "azure_repos":
             await _azure_repos_oauth_exchange(code, state, tenant_id)
+        elif kind == "figma":
+            await _figma_oauth_exchange(code, state, tenant_id)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported connector kind: {kind!r}")
     except HTTPException:
@@ -796,6 +904,12 @@ async def disconnect_connector(kind: str, request: Request, db: AsyncSession = D
     # The Entra app registration is shared by ms_teams and sharepoint, so it may only
     # be deleted once BOTH are disconnected.
     await _maybe_purge_shared_graph_secrets(tenant_id, kind)
+
+    # Figma caches resolved credentials per tenant — without this the connector keeps
+    # authenticating with the just-revoked token until the TTL expires, which is
+    # exactly the fail-open a disconnect must not have.
+    if kind == "figma":
+        _clear_figma_auth_cache(tenant_id)
 
     # Remove workspace-level enablement for the active workspace
     workspace_id = request.headers.get("x-workspace-id", "")
@@ -974,6 +1088,69 @@ async def _slack_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
                 "client_secret": SLACK_CLIENT_SECRET,
                 "code": code,
                 "redirect_uri": callback,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _figma_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
+    """Exchange a Figma authorization code for an access token; store it per tenant.
+
+    Writes THREE things, and all three matter:
+      - `figma-access-token` to Key Vault, so the connector's OAuth tier resolves it.
+      - the same value to the tenant secret store, because that is the tier
+        FigmaConnector.auth_adapter reads FIRST and the one _overlay_tenant_credentials
+        checks; a KV-only write would leave the catalogue showing "not connected"
+        immediately after a successful consent.
+      - the `figma-connected` marker, which is what the catalogue and disconnect key
+        off for this kind.
+
+    Any previously pasted PAT is cleared: a tenant that has just completed consent
+    should be using the token they consented with, not one left over from before.
+    T-7.4-22: token values never logged.
+    """
+    verify_oauth_state(state, tenant_id)
+
+    tokens = await _figma_token_exchange(code, tenant_id)
+    access_token = tokens.get("access_token", "")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="Figma returned no access token")
+
+    await store_secret("figma-access-token", access_token, tenant_id=tenant_id)
+
+    from shared.services import secret_store
+
+    await secret_store.put_secret(tenant_id, "figma-access-token", access_token)
+    try:
+        await secret_store.delete_secret(tenant_id, "figma-pat")
+    except Exception as exc:  # noqa: BLE001 — a stale PAT must not fail the connect
+        logger.warning("figma oauth: could not clear stale PAT: %s", type(exc).__name__)
+    await secret_store.put_secret(tenant_id, "figma-connected", "OAuth")
+    _clear_figma_auth_cache(tenant_id)
+
+
+async def _figma_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
+    """POST to Figma's token endpoint; return {access_token, refresh_token, expires_in}.
+
+    NOTE: Figma access tokens EXPIRE (90 days) and this platform does NOT refresh them —
+    the refresh_token is stored but nothing consumes it yet, so a long-lived tenant
+    eventually falls back to "connect again". Refresh is a named follow-on, deliberately
+    not half-built; the PAT shape has no such expiry and remains the lower-maintenance
+    option.
+    """
+    from config.env import FIGMA_OAUTH_CLIENT_ID, FIGMA_OAUTH_CLIENT_SECRET
+
+    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/figma/oauth/callback"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            _FIGMA_TOKEN_URL,
+            data={
+                "client_id": FIGMA_OAUTH_CLIENT_ID,
+                "client_secret": FIGMA_OAUTH_CLIENT_SECRET,
+                "redirect_uri": callback,
+                "code": code,
+                "grant_type": "authorization_code",
             },
         )
         resp.raise_for_status()

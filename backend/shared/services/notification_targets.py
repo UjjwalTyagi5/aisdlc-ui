@@ -96,3 +96,16 @@ async def sharepoint_target(tenant_id: str) -> Optional[Dict[str, str]]:
         "drive_id": drive_id,
         "folder": await _get(tenant_id, "sharepoint-folder-path") or DEFAULT_SHAREPOINT_FOLDER,
     }
+
+
+async def figma_target(tenant_id: str) -> Optional[Dict[str, str]]:
+    """Which Figma file this tenant's design work defaults to.
+
+    Unlike the resolvers above, this one is a CONVENIENCE, not a gate: the Design
+    agent's tools accept an explicit file URL, and a tenant with no default file can
+    still use them by pasting one. So None here means "no default configured", NOT
+    "Figma is unavailable" — connectedness is the `figma-connected` marker's job, and
+    conflating the two would hide a working integration behind an unset preference.
+    """
+    file_key = await _get(tenant_id, "figma-file-key")
+    return {"file_key": file_key} if file_key else None

@@ -249,6 +249,8 @@ ENABLE_WEBHOOK_TRIGGERS: bool = os.environ.get("ENABLE_WEBHOOK_TRIGGERS", "false
 #         plus non-secret routing refs msteams-team-id, msteams-channel-id,
 #         msteams-webhook-url, sharepoint-site-id, sharepoint-drive-id,
 #         sharepoint-folder-path.
+# Figma:  secret_store refs figma-pat OR figma-access-token (the two auth shapes),
+#         plus the figma-connected marker and the non-secret figma-file-key default.
 # Env-var fallbacks for local dev (never use in production)
 JIRA_URL:        str = os.environ.get("JIRA_URL", "")
 JIRA_EMAIL:      str = os.environ.get("JIRA_EMAIL", "")
@@ -271,6 +273,13 @@ GHA_OWNER: str = os.environ.get("GHA_OWNER", "")
 MSGRAPH_TENANT_ID:     str = os.environ.get("MSGRAPH_TENANT_ID", "")
 MSGRAPH_CLIENT_ID:     str = os.environ.get("MSGRAPH_CLIENT_ID", "")
 MSGRAPH_CLIENT_SECRET: str = os.environ.get("MSGRAPH_CLIENT_SECRET", "")
+# Figma — accepts EITHER a Personal Access Token or an OAuth2 app. The per-tenant
+# secret store (figma-pat / figma-access-token) is authoritative; FIGMA_PAT is a
+# local-dev fallback only. The OAuth client pair is platform-level, not per-tenant:
+# one registered Figma app serves every tenant, exactly like SLACK_CLIENT_ID.
+FIGMA_PAT:                 str = os.environ.get("FIGMA_PAT", "")
+FIGMA_OAUTH_CLIENT_ID:     str = os.environ.get("FIGMA_OAUTH_CLIENT_ID", "")
+FIGMA_OAUTH_CLIENT_SECRET: str = os.environ.get("FIGMA_OAUTH_CLIENT_SECRET", "")
 
 # Webhook signature secrets (REQ-M6-06) — verify inbound webhook signatures.
 # Loaded KV-first in the FastAPI lifespan, then these env vars as local-dev fallback.

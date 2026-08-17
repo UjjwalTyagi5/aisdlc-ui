@@ -749,6 +749,7 @@ const KIND_LABEL: Record<ConnectorKind, string> = {
   slack: "Slack",
   ms_teams: "Microsoft Teams",
   sharepoint: "SharePoint",
+  figma: "Figma",
   sso_okta: "Okta SSO",
   sso_entra: "Microsoft Entra SSO",
 };

@@ -67,6 +67,12 @@ NATIVE_TAGS: dict[str, dict[str, "str | list[str]"]] = {
         ],
         # brownfield / existing-system analysis
         "generate_architecture_from_context": "design.system.analyze",
+        # Figma reads — analysing a system that already exists, same as above. The
+        # design being in a design tool rather than a repo does not make it a
+        # different capability, so these need no new taxonomy entry.
+        "list_figma_frames": "design.system.analyze",
+        "read_figma_design": "design.system.analyze",
+        "export_figma_frames": "design.system.analyze",
         # diagrams (C4 / sequence / ERD via Kroki; Mermaid is client-side)
         "render_diagram_via_kroki": "design.diagram.render",
         # OpenAPI lint + DB schema validation

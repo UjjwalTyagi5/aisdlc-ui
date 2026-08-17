@@ -336,6 +336,7 @@ def _build_connectors_for_health_probe():
     from config.connectors.github_actions import GitHubActionsConnector
     from config.connectors.msteams import MSTeamsConnector
     from config.connectors.sharepoint import SharePointConnector
+    from config.connectors.figma import FigmaConnector
     from config.env import ADO_ORG_URL, JIRA_URL
 
     return [
@@ -347,6 +348,7 @@ def _build_connectors_for_health_probe():
         GitHubActionsConnector(),
         MSTeamsConnector(),
         SharePointConnector(),
+        FigmaConnector(),
     ]
 
 

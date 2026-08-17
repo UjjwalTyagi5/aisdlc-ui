@@ -24,6 +24,7 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     "github_actions": "config.connectors.github_actions.GitHubActionsConnector",
     "ms_teams":       "config.connectors.msteams.MSTeamsConnector",
     "sharepoint":     "config.connectors.sharepoint.SharePointConnector",
+    "figma":          "config.connectors.figma.FigmaConnector",
 }
 
 
@@ -87,7 +88,7 @@ async def get_connector_for_session(kind: str = "azure_devops", tenant_id: str =
         # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
         # token (not the empty global env), mirroring azure_devops above.
         return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
-    # slack, github_issues, github_actions, ms_teams, sharepoint and any future
+    # slack, github_issues, github_actions, ms_teams, sharepoint, figma and any future
     # connectors: instantiate with an empty org_url; credentials are resolved lazily
     # in auth_adapter() from the tenant secret store / Key Vault.
     #

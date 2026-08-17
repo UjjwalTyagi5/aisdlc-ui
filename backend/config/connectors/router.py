@@ -37,6 +37,7 @@ _EXPECTED_CONNECTOR_NAMES = frozenset(
         "github_actions",
         "ms_teams",
         "sharepoint",
+        "figma",
     }
 )
 
