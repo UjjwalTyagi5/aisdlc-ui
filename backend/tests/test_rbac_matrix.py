@@ -189,8 +189,14 @@ async def test_project_create_denied_without_workspace_manage():
 
 
 @pytest.mark.asyncio
-async def test_project_create_allowed_with_workspace_manage():
-    """POST /projects must NOT 403 callers with workspace:manage (admin/delivery_lead).
+async def test_project_create_allowed_with_project_create():
+    """POST /projects must NOT 403 a caller holding `project:create`.
+
+    The gate was `workspace:manage`, which only bu_admin holds — so a Project Admin,
+    who holds `project:create` and whom the frontend shows the "New project" button to,
+    got a 403 on submit. Creating a project inside a unit is the unit's own act;
+    administering the unit is a different authority. bu_admin holds both, so moving the
+    gate widened access without taking any away.
 
     We provision a real org so require_permission can resolve the default workspace.
     The DB session is mocked so the route body does not hit the real DB (avoids
@@ -237,7 +243,7 @@ async def test_project_create_allowed_with_workspace_manage():
     from shared.db import get_db_session
     from shared.routers._schemas import ProjectOut
 
-    app = _app_with_perms(projects_router, ["workspace:manage", "artifact:view"], tenant_id=org_id, prefix="/projects")
+    app = _app_with_perms(projects_router, ["project:create", "artifact:view"], tenant_id=org_id, prefix="/projects")
     app.dependency_overrides[get_db_session] = _mock_db
 
     original_from_orm = ProjectOut.from_orm_project
@@ -263,7 +269,7 @@ async def test_project_create_allowed_with_workspace_manage():
         app.dependency_overrides.clear()
 
     assert r.status_code != 403, (
-        f"Expected non-403 for workspace:manage caller on POST /projects, got {r.status_code}: {r.text}"
+        f"Expected non-403 for project:create caller on POST /projects, got {r.status_code}: {r.text}"
     )
 
 

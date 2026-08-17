@@ -86,8 +86,17 @@ export const PERMISSION_CATALOG: PermGroup[] = [
       },
       { id: "artifact:approve_design", label: "Approve Design", legacy: true },
       { id: "artifact:approve_development", label: "Approve Development", legacy: true },
+      // Listed in PIPELINE order, and all eight stages are present. Code Review,
+      // Security and Documentation were missing here while the backend's
+      // `_PHASE_PERMISSION` gated their gates on exactly these strings — so those
+      // three sign-offs were reachable only by an Organization Admin's `admin:*`
+      // wildcard, and no admin could delegate them because the checkbox did not
+      // exist. A permission the enforcement path demands must be grantable.
+      { id: "artifact:approve_code_review", label: "Approve Code Review", legacy: true },
+      { id: "artifact:approve_security", label: "Approve Security", legacy: true },
       { id: "artifact:approve_testing", label: "Approve Testing", legacy: true },
       { id: "artifact:approve_deployment", label: "Approve Deployment", legacy: true },
+      { id: "artifact:approve_documentation", label: "Approve Documentation", legacy: true },
     ],
   },
   {
@@ -107,6 +116,18 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         id: "connector:manage",
         label: "Register / edit a connection",
         grants: "Register or edit a connection.",
+      },
+    ],
+  },
+  {
+    group: "Governance",
+    perms: [
+      {
+        id: "governance:decide",
+        label: "Decide governance requests",
+        grants:
+          "Approve or reject a governance request. Not the same as being the person it is waiting on — the escalation chain still decides whose turn it is. Withdrawing your own request and escalating a stalled one need no permission: both are open to the person who raised it.",
+        legacy: true,
       },
     ],
   },

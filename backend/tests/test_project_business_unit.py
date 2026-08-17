@@ -167,6 +167,48 @@ async def test_create_rejects_a_unit_from_another_org(two_units):
 
 
 @pytest.mark.asyncio
+async def test_a_project_admin_can_create_a_project(two_units):
+    """The permission that NAMES the act is the one the route asks for.
+
+    `POST /projects` required `workspace:manage`, which only bu_admin holds, while
+    `project:create` — held by both bu_admin and project_admin, and the permission the
+    frontend's `canCreateProject` gates the "New project" button on — was enforced
+    nowhere. A Project Admin was shown the button and got a 403 on submit.
+
+    The permission list here is project_admin's real one, minus the parts irrelevant to
+    creating: notably it does NOT include `workspace:manage`, which is the whole point.
+    """
+    t = two_units
+    admin = f"projadmin-{_uuid.uuid4()}"
+    await grant_role(admin, t["org"], "org_admin", tenant_id=t["org"], scope_kind="organization")
+
+    c = _client()
+    r = c.post(
+        "/projects",
+        headers=_headers(admin, t["org"], t["bu_a"], ["artifact:view", "project:create"]),
+        json={"name": "Made By A Project Admin", "workspaceId": t["bu_b"]},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["workspaceId"] == t["bu_b"]
+
+
+@pytest.mark.asyncio
+async def test_creating_a_project_still_needs_a_permission(two_units):
+    """The read floor is not enough — deny-by-default still holds."""
+    t = two_units
+    nobody = f"nobody-{_uuid.uuid4()}"
+    await grant_role(nobody, t["org"], "org_admin", tenant_id=t["org"], scope_kind="organization")
+
+    c = _client()
+    r = c.post(
+        "/projects",
+        headers=_headers(nobody, t["org"], t["bu_a"], ["artifact:view"]),
+        json={"name": "No Permission", "workspaceId": t["bu_b"]},
+    )
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
 async def test_create_without_a_unit_is_refused(two_units):
     """There is no default workspace, so a create that names no unit is an error.
 

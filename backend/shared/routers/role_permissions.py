@@ -128,7 +128,17 @@ async def list_role_permissions(
     return await _rows(db, _tenant_id(request))
 
 
-@role_permissions_router.put("/role-permissions", response_model=RolePermissionRow)
+@role_permissions_router.put(
+    "/role-permissions",
+    response_model=RolePermissionRow,
+    # Rewriting what a built-in role grants is the definition of `role:manage`, and
+    # this route asked only for the view floor. `_require_org_admin()` below is still
+    # the operative check and still narrows further than this permission does
+    # (bu_admin holds role:manage but is refused here), so this widens nothing — it
+    # stops the most powerful write in the RBAC surface from advertising itself as a
+    # read.
+    dependencies=[Depends(require_permission("role:manage"))],
+)
 async def save_role_permissions(
     request: Request,
     body: RolePermissionSaveIn,

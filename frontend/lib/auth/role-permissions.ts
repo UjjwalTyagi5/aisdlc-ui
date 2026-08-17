@@ -36,6 +36,8 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "audit:view",
     "cost:view",
     "workspace:manage",
+    // Tier 2 of the governance escalation chain (project_admin → bu_admin → org_admin).
+    "governance:decide",
   ],
   // Onboarded, placed in a unit, and holding nothing until that unit's admin
   // assigns a real role. `artifact:view` is the read-only floor — enough to
@@ -53,10 +55,16 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "artifact:export",
     "agent:invoke",
     "approve",
+    // Documentation's acceptance is automatic and AGENT_OWNER_ROLE.documentation is
+    // project_admin — the fallback approver on every agent. It is the override for a
+    // stage no delivery role owns.
+    "artifact:approve_documentation",
     "connector:view",
     "connector:manage",
     "cost:view",
     "trace:view",
+    // Tier 1 of the governance escalation chain — the first approver a request reaches.
+    "governance:decide",
   ],
   ba: [
     "run:create",
@@ -77,6 +85,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "approve",
     "artifact:approve_design",
     "artifact:approve_development",
+    // AGENT_OWNER_ROLE.review is `architect`, so the Code Review gate routes here.
+    // Without this the gate routed to a role that could not pass it, and only an
+    // `admin:*` holder could — a sign-off with nobody behind it.
+    "artifact:approve_code_review",
     "connector:view",
   ],
   developer: [
@@ -103,6 +115,11 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "artifact:export",
     "agent:invoke",
     "approve",
+    // The Security gate is this role's own (AGENT_OWNER_ROLE.security). It held the
+    // generic `approve` but not this, and `has_permission` is an exact membership
+    // test with no implication from the generic to the specific — so the Security
+    // Engineer could not sign off Security.
+    "artifact:approve_security",
     "connector:view",
     "audit:view",
     "cost:view",

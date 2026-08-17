@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createCustomRole, updateCustomRole, type CustomRole, type CustomRoleScope } from "@/lib/api/roles";
-import { PERMISSION_CATALOG } from "@/lib/auth/permission-catalog";
+import { usePermissionCatalog } from "@/hooks/use-permission-catalog";
 import { PHASE_LABEL } from "@/lib/agents";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { Phase, type InvolvementLevel } from "@/lib/schemas";
@@ -83,6 +83,7 @@ export function RoleDialog({
   onSaved,
 }: RoleDialogProps) {
   const editing = Boolean(initialRole);
+  const catalog = usePermissionCatalog();
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [scope, setScope] = React.useState<CustomRoleScope>(lockedScope ?? "project");
@@ -200,8 +201,14 @@ export function RoleDialog({
                 <p className="text-muted-foreground text-[11px]">{SCOPE_HINT[scope]}</p>
               </div>
             )}
+            {/* The DATABASE decides what exists, not this bundle. Rendering the static
+                catalogue meant a permission added to `permissions` was grantable on the
+                Roles page (which already reads the hook) but invisible here, so the two
+                permission editors offered different vocabularies. The hook merges the
+                two, labels what it recognises, buckets the rest under "Other", and
+                falls back to the static list on error. */}
             <div className="space-y-3">
-              {PERMISSION_CATALOG.map((g) => (
+              {catalog.map((g) => (
                 <div key={g.group} className="space-y-1.5">
                   <p className="text-muted-foreground text-[11px] font-semibold tracking-wider uppercase">
                     {g.group}

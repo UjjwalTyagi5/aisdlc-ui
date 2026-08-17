@@ -39,7 +39,20 @@ audit_router = APIRouter()
 audit_runs_router = APIRouter()
 
 
-@audit_router.get("", response_model=Paginated[AuditEventOut])
+@audit_router.get(
+    "",
+    response_model=Paginated[AuditEventOut],
+    # The ORGANISATION-WIDE trail, gated on the permission that names it. It sat on
+    # the `artifact:view` floor that every role holds — including `contributor`, whose
+    # entire point is holding nothing yet — so any signed-in account could read the
+    # whole tenant's audit log over the API. The frontend already refused them the
+    # page; this is the backend catching up to that decision.
+    #
+    # `audit:view` is held by bu_admin and security_engineer (plus admin:*). The
+    # RUN-scoped trail below deliberately stays on the view floor: that is one run's
+    # own timeline, and reading it is part of reading the run.
+    dependencies=[Depends(require_permission("audit:view"))],
+)
 async def list_audit_events(
     request: Request,
     project_id: Optional[str] = None,

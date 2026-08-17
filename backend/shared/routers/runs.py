@@ -546,7 +546,12 @@ async def get_run_stage_file(
 @runs_router.post(
     "/{run_id}/cancel",
     response_model=RunOut,
-    dependencies=[Depends(require_permission("run:create"))],
+    # Stopping a run is not the same authority as starting one, and the role matrix
+    # already says so — `run:cancel` is granted to project_admin alone while
+    # `run:create` reaches every delivery role that raises work. Gating the stop on
+    # the start permission made the distinct permission decorative and let anyone who
+    # could begin a run end somebody else's.
+    dependencies=[Depends(require_permission("run:cancel"))],
 )
 async def cancel_run(
     run_id: str,
@@ -630,9 +635,36 @@ async def record_approval(
 
     The approval is scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
     The AuditEvent payload carries the decision + reason for the audit trail.
+
+    GATED ON THE STAGE'S APPROVE PERMISSION, mirroring copilot_advance. This route had
+    NO permission check at all beyond the router's `artifact:view` floor — which every
+    role holds, including `contributor`, whose entire purpose is holding nothing yet. So
+    anyone signed in could write `run.approved`, under their own name, against any run
+    in the tenant.
+
+    That it does not advance the run is exactly why it went unnoticed and exactly why it
+    matters: nothing visibly changed, and `audit_events` is append-only by privilege, so
+    the forged row could not be cleaned up afterwards. Recording that a human approved
+    something is the same authority as approving it.
     """
+    from shared.authz.permissions import _PHASE_PERMISSION, has_permission  # noqa: PLC0415
+
     tenant_id = request.state.tenant_id
     run = await _get_run_or_404(db, run_id, tenant_id, request=request)
+
+    # The run's OWN stage decides the permission — not a caller-supplied one. Taking it
+    # from the body would let the caller name a stage they can approve and record the
+    # decision against a run sitting at a different one.
+    stage = run.current_stage or run.stage or "requirements"
+    actor_permissions: list[str] = getattr(request.state, "permissions", []) or []
+    required_permission = _PHASE_PERMISSION.get(stage)
+    if not required_permission or not has_permission(actor_permissions, required_permission):
+        # Unknown/uncovered stage OR missing permission ⇒ 403 before anything is
+        # written (no permission-name leak, consistent with copilot_advance).
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: actor lacks the required approval permission for this phase",
+        )
 
     actor_id = getattr(request.state, "user_id", "system")
     now = datetime.now(timezone.utc)
