@@ -120,6 +120,18 @@ export const PERMISSION_CATALOG: PermGroup[] = [
     ],
   },
   {
+    group: "Governance",
+    perms: [
+      {
+        id: "governance:decide",
+        label: "Decide governance requests",
+        grants:
+          "Approve or reject a governance request. Not the same as being the person it is waiting on — the escalation chain still decides whose turn it is. Withdrawing your own request and escalating a stalled one need no permission: both are open to the person who raised it.",
+        legacy: true,
+      },
+    ],
+  },
+  {
     group: "Configuration",
     perms: [
       { id: "project:create", label: "Create projects", grants: "Create a new project." },

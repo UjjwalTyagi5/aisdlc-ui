@@ -80,6 +80,8 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "project:create", "model:manage",
         "audit:view", "cost:view",
         "workspace:manage",
+        # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
+        "governance:decide",
     ],
     # Onboarded into a unit and holding nothing until that unit's admin assigns a real
     # role. artifact:view is the read-only floor — enough to sign in and see the shell
@@ -95,6 +97,9 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "artifact:approve_documentation",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
+        # Tier 1 of routing.REQUEST_ESCALATION_CHAIN — the first approver a request
+        # reaches, and the reason this is not a governance-tier-only permission.
+        "governance:decide",
     ],
     "ba": [
         "run:create", "run:view",
@@ -214,6 +219,14 @@ _PERMISSION_CATALOG: list[str] = [
     "agent:invoke",
     # Connectors
     "connector:view", "connector:request", "connector:manage",
+    # Governance
+    # Deciding a governance request. NOT the same as being the person it is currently
+    # waiting on: this says the role takes governance decisions at all, and
+    # `routing.REQUEST_ESCALATION_CHAIN` still says whose turn it is. Without it the
+    # lane was authorised purely by role-string matching, so a custom role could be
+    # neither granted nor denied governance decisioning — the one thing custom roles
+    # exist to express.
+    "governance:decide",
     # Configuration
     "project:create", "model:manage", "settings:manage", "workspace:manage",
     # Observability

@@ -162,7 +162,25 @@ async def create_request(
         raise _http(exc)
 
 
-@governance_router.post("/{request_id}/decide")
+@governance_router.post(
+    "/{request_id}/decide",
+    # THE ONLY ROUTE IN THIS FILE THAT GETS THIS GATE, and the omissions are the point:
+    #
+    #   /cancel   is the INITIATOR's act — withdrawing your own request. An approver who
+    #             wants it gone rejects it, which records a decision.
+    #   /escalate is open to the initiator too, deliberately: a request that can only be
+    #             escalated by the approver ignoring it would never move.
+    #
+    # Gating either on a decider permission would take those away from the person who
+    # raised the request, who is usually a delivery role and holds nothing here.
+    #
+    # This does NOT replace the routing check in the service — `decider_role` must still
+    # equal `currentApproverRole`. Permission answers WHETHER this role decides
+    # governance requests at all; the escalation chain answers WHOSE TURN it is. Only
+    # the second existed, so authorisation was pure role-string matching and a custom
+    # role could be neither granted nor denied a governance decision.
+    dependencies=[Depends(require_permission("governance:decide"))],
+)
 async def decide_request(
     request_id: str,
     request: Request,

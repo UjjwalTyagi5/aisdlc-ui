@@ -36,6 +36,8 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "audit:view",
     "cost:view",
     "workspace:manage",
+    // Tier 2 of the governance escalation chain (project_admin → bu_admin → org_admin).
+    "governance:decide",
   ],
   // Onboarded, placed in a unit, and holding nothing until that unit's admin
   // assigns a real role. `artifact:view` is the read-only floor — enough to
@@ -61,6 +63,8 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "connector:manage",
     "cost:view",
     "trace:view",
+    // Tier 1 of the governance escalation chain — the first approver a request reaches.
+    "governance:decide",
   ],
   ba: [
     "run:create",
