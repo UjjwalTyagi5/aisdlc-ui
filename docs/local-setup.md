@@ -174,6 +174,38 @@ gitignored and overrides the tracked `.env`, which stays in mock mode — **dele
 
 ---
 
+## 7. Email (optional)
+
+Onboarding sends a single-use set-password link, and "Forgot password" sends the same
+kind. **You do not need a mail server to work on this.** With `SMTP_HOST` unset the
+backend logs the whole message — link included — at WARNING and carries on, so the flow
+is fully exercisable: onboard somebody, then copy the link out of the backend log.
+
+To send for real, set these on the **backend** (see `backend/config/env.py` for the full
+commentary):
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=<account@gmail.com>
+SMTP_PASSWORD=<16-char app password>
+SMTP_USE_TLS=true
+EMAIL_FROM=<account@gmail.com>
+PUBLIC_APP_URL=http://localhost:3000
+```
+
+`PUBLIC_APP_URL` is the **browser-facing** origin the emailed links point at — not
+`AGENTIC_BASE_URL`, which is this API. A link built against the API host goes nowhere.
+
+Gmail needs 2FA on the account plus an **App Password**; Google removed plain-password
+SMTP auth. It is fine for development and a poor production choice for this traffic
+specifically: the From address cannot be your own domain, there is no SPF/DKIM alignment
+so a real spam-folder risk, and a set-password link in spam means the user cannot get in
+at all. Any SMTP provider works — Azure Communication Services, SES, SendGrid, Mailgun —
+so moving is configuration, not code.
+
+---
+
 ## Troubleshooting
 
 ### `psql : The term 'psql' is not recognized`
@@ -228,9 +260,9 @@ Start the backend, then re-run the seeder.
 
 ### Login works, but every scoped page is empty
 
-You have no role bindings. Sign in as one of the seeded personas from `DEV_LOGINS.txt`
-rather than an account created through sign-up — self-serve registration deliberately
-grants nothing.
+You have no role bindings. Sign in as one of the seeded personas from `DEV_LOGINS.txt`.
+There is no sign-up: accounts are created by an Organization Admin onboarding somebody,
+and that person receives an emailed link to set their own password.
 
 ### Model picker says "Connect a model provider"
 

@@ -204,7 +204,11 @@ def _headers(mint_token, perms):
 
 
 VIEW = ["artifact:view"]
-UPDATE = ["artifact:view", "project:update"]
+# skill:edit, not project:update. These routes were gated on `project:update` — a
+# string that was in no catalogue and granted to no role, so they answered only to
+# admin:*. They moved to skill:edit (which Developer holds for exactly this) and this
+# constant did not follow, leaving fourteen tests red against a correct router.
+UPDATE = ["artifact:view", "skill:edit"]
 MANAGE = ["artifact:view", "workspace:manage"]
 
 
@@ -284,7 +288,7 @@ async def test_get_detail_bad_origin_422(monkeypatch, mint_token):
     assert r.status_code == 422
 
 
-# — create (project:update) —
+# — create (skill:edit) —
 
 def _create_body(**over):
     body = {
@@ -356,7 +360,7 @@ async def test_create_duplicate_custom_422(monkeypatch, mint_token):
     assert {"duplicate_key"} <= {v["code"] for v in r.json()["detail"]["violations"]}
 
 
-# — update (project:update) —
+# — update (skill:edit) —
 
 def _update_body(**over):
     body = {
@@ -399,7 +403,7 @@ async def test_update_lint_422(monkeypatch, mint_token):
     store.update_custom_skill.assert_not_awaited()
 
 
-# — toggle (project:update) —
+# — toggle (skill:edit) —
 
 async def test_toggle_vendor_ok(monkeypatch, mint_token):
     store, runtime = _install(monkeypatch, vendor_skill=object())
@@ -442,7 +446,7 @@ async def test_toggle_bad_origin_422(monkeypatch, mint_token):
     assert r.status_code == 422
 
 
-# — delete (project:update) —
+# — delete (skill:edit) —
 
 async def test_delete_custom_ok(monkeypatch, mint_token):
     store, runtime = _install(monkeypatch, store_attrs={"soft_delete_custom_skill": _async(True)})

@@ -2,24 +2,62 @@ import { cookies } from "next/headers";
 
 import { fetchPermissions } from "@/lib/api/auth";
 
+import { deriveRole } from "./local";
 import { isLocalAuth, isMockAuth } from "./mode";
 import { MOCK_COOKIE_NAME, decodeSession } from "./mock";
+import { TOKEN_COOKIE_NAME, verifyBackendToken } from "./token";
 import type { Role, Session } from "./types";
 
 /**
- * Server-only — reads the current session from either the mock cookie
- * or Auth0's session store. Returns `null` when not authenticated.
+ * Server-only — reads the current session from the backend token (local mode),
+ * the mock cookie (mock mode), or Auth0's session store. Returns `null` when
+ * not authenticated.
  *
  * Use this in server components + route handlers, then pass the result
  * to `<SessionProvider value={session}>` so client hooks can read it.
  */
 export async function getSession(): Promise<Session | null> {
-  if (isMockAuth || isLocalAuth) {
-    // Local (email+password) and mock both persist the resolved Session in the
-    // `sdlc_session` cookie — already permission-enriched at login time, so no
-    // /auth/permissions round-trip is needed here.
+  if (isMockAuth) {
+    // Mock mode has no backend to issue anything, so the cookie IS the session.
+    // Safe only because mock mode cannot reach a real backend: `bearerForRequest`
+    // refuses to mint outside it (lib/bff/client.ts).
     const store = await cookies();
     return decodeSession(store.get(MOCK_COOKIE_NAME)?.value);
+  }
+
+  if (isLocalAuth) {
+    // THE TOKEN IS THE AUTHORITY, NOT THE COOKIE. `sdlc_session` carries display
+    // fields — a name, an email, an organization label — whose worst case is a
+    // wrong avatar. Identity, tenant and permissions are read from the
+    // signature-verified token and overwrite whatever the display cookie says,
+    // because that cookie is unsigned and was, until this change, the whole
+    // basis of the app's authorization. See docs/rbac-audit-2026-08-17.md.
+    const store = await cookies();
+    const claims = await verifyBackendToken(store.get(TOKEN_COOKIE_NAME)?.value);
+    if (!claims) return null;
+
+    const display = decodeSession(store.get(MOCK_COOKIE_NAME)?.value);
+    return {
+      user: {
+        id: claims.sub,
+        name: display?.user.name ?? claims.sub,
+        email: display?.user.email ?? "",
+        initials: display?.user.initials ?? "?",
+      },
+      tenant: {
+        id: claims.tenant_id,
+        name: display?.tenant.name ?? "Organization",
+        plan: display?.tenant.plan ?? "Enterprise",
+      },
+      // Derived from the token's permissions, NOT read from the display cookie.
+      // The coarse role still drives the legacy `useCan`/capability gates and
+      // `canCreateProject`, so letting an unsigned cookie set it would leave a
+      // smaller version of the hole this change closes.
+      role: deriveRole(claims.permissions),
+      mode: "local",
+      tier: display?.tier ?? "org",
+      permissions: claims.permissions,
+    };
   }
 
   const { getAuth0 } = await import("./auth0");

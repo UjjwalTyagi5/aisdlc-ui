@@ -132,7 +132,12 @@ async def test_get_cost_returns_aggregates_and_totals(mint_token, monkeypatch):
         token = mint_token(
             user_id="u2",
             tenant_id=TENANT_A,
-            permissions=["artifact:view", "cost:view"],
+            # settings:manage makes this caller ORG-WIDE, which is what a tenant-wide
+            # total now requires. `cost:view` alone says the caller may see spend, not
+            # whose: with no bindings they are scoped to an empty set of units and get
+            # zeroes — correctly, since this test asserts the aggregation math rather
+            # than the scope filter. See docs/rbac-audit-2026-08-17.md finding 4.
+            permissions=["artifact:view", "cost:view", "settings:manage"],
         )
         headers = {"Authorization": f"Bearer {token}"}
 

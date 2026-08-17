@@ -1,11 +1,22 @@
 """Per-user Redis Set JTI denylist — Wave A (SCIM provisioning, REQ-M7-17).
 
 Three async helpers for managing the JTI denylist:
-  add_jti_to_user_denylist  — called at token mint time to register a live JTI
+  add_jti_to_user_denylist  — called at LOGOUT to revoke that session's token
   is_jti_denied             — called per-request in jwt_auth_middleware (O(1) SISMEMBER)
   revoke_all_user_jtis      — called at SCIM deprovision to keep all JTIs denied
 
-Redis key shape:  denylist:user:{tenant_id}:{sub}  (Redis Set, one UUID per live token)
+Redis key shape:  denylist:user:{tenant_id}:{sub}  (Redis Set, one UUID per REVOKED token)
+
+MEMBERSHIP MEANS REVOKED. This module's docstring used to describe
+`add_jti_to_user_denylist` as running "at token mint time to register a live JTI",
+which is the opposite of what `is_jti_denied` does with the result — it 401s any
+jti it finds in the set. Wired up that way, every freshly minted token would have
+been dead on arrival. Nothing ever called it, so the contradiction stayed
+invisible and the whole denylist was inert: `revoke_all_user_jtis` ran PERSIST
+and SCARD against a set that was always empty, so the SCIM deprovision path
+revoked nothing while reporting a count. Logout now populates it, which is the
+first thing that ever did. See docs/rbac-audit-2026-08-17.md.
+
 Set TTL policy:   EXPIREAT = max(current expiry, new_token_expiry + buffer)
                   Implemented via Lua script for atomicity (Pitfall 5 — TTL regression
                   on multi-token users when a shorter-lived token is added after a
@@ -48,7 +59,12 @@ async def add_jti_to_user_denylist(
     jti: str,
     token_ttl_seconds: int,
 ) -> None:
-    """Register a live JTI in the per-user denylist set.
+    """Revoke one token by adding its JTI to the per-user denylist set.
+
+    `token_ttl_seconds` is the revoked token's REMAINING lifetime: the entry only
+    has to outlive the token it denies, because once the token expires on its own
+    the signature check refuses it anyway. Keeping it longer would grow the set
+    without buying anything.
 
     Uses a Lua script for atomic SADD + EXPIREAT so the set's TTL never regresses
     below its longest-lived member when multiple tokens are active simultaneously.

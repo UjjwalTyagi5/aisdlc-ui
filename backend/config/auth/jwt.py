@@ -70,6 +70,12 @@ def create_access_token(
         "sub": user_id,
         "tenant_id": tenant_id,
         "jti": jti,
+        # WHEN this permission set was resolved. `shared/authz/token_epoch.py` compares
+        # it against the last time the caller's access changed: a token minted before a
+        # revocation is refused rather than honoured until it lapses. Without `iat` there
+        # is nothing to compare, which is why a permission edit used to take up to an
+        # hour to bite — see finding 6 in docs/rbac-audit-2026-08-17.md.
+        "iat": datetime.utcnow(),
         "exp": datetime.utcnow() + timedelta(minutes=expires_minutes),
         # Default to empty list (deny-by-default) if no permissions supplied (D-02).
         "permissions": permissions or [],

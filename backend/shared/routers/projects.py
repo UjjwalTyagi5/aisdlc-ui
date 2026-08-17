@@ -15,9 +15,13 @@ Threat mitigations (T-M4-01, T-M4-02, T-M4-03):
   - All queries filtered by tenant_id (no cross-tenant reads)
   - Routes not in _EXEMPT_PATHS (JWT middleware enforces 401 without token)
   - Mutations scope by tenant_id + 404 guard (no cross-tenant writes)
-  - Mutating routes (create/archive/restore/patch) carry require_permission("workspace:manage")
-    per the Phase 6 RBAC matrix — only admin/delivery_lead reach mutation endpoints
-    (Phase 6 tightening; process_api.py _VIEW_DEP floor remains for reads)
+  - Mutating routes carry a require_permission gate (process_api.py _VIEW_DEP floor
+    remains for reads). They are NOT all the same gate, on purpose:
+      create           project:create      bu_admin + project_admin
+      patch            project:update      bu_admin + project_admin, and additionally
+                                           scoped to a project the caller administers
+      archive/restore  workspace:manage    bu_admin only — removing a project from the
+                                           unit is the unit's call, not the project's
 """
 from __future__ import annotations
 
@@ -26,13 +30,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import logging
 
 from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.effective_role import actor_display_name, effective_platform_role
 from shared.authz.workspace import assert_workspace_in_tenant
 from shared.db import get_db_session
@@ -69,6 +74,16 @@ class ProjectCreateIn(BaseModel):
     # Stage→connector-kind mapping {agent_id: [connector_kind, ...]} chosen at creation.
     connectors: Optional[dict[str, list[str]]] = None
     monthlyBudgetUsd: Optional[float] = None
+    # Who OWNS the project — bound as `project_admin` at project scope on creation.
+    #
+    # A project with no owner is the state this field exists to prevent: the Project
+    # Admin is the fallback approver on every stage no specialist role owns, so an
+    # unowned project has gates nobody can pass. Optional only because an Org Admin may
+    # legitimately create one before deciding who runs it; the UI always asks.
+    #
+    # A user id, not an email: the dialog picks from people already in the unit, and
+    # accepting an email here would make this a second, quieter account-creating path.
+    ownerId: Optional[str] = None
 
 
 class ProjectPatchIn(BaseModel):
@@ -245,6 +260,35 @@ async def create_project(
     db.add(project)
     await db.flush()
     await db.refresh(project)
+
+    # ── the owner ────────────────────────────────────────────────────────────
+    # Granted AFTER the project row exists, because the binding's scope_id is the
+    # project's id. A Business Unit Admin naming themselves is the ordinary case and is
+    # NOT a tier conflict: their bu_admin binding sits at business_unit scope and this
+    # one at project scope, and `_assert_no_tier_conflict` is per-scope precisely so
+    # that somebody can govern a unit and deliver inside one of its projects.
+    if body.ownerId:
+        owner_ok = (
+            await db.execute(
+                text("SELECT 1 FROM users WHERE id = :u AND tenant_id = CAST(:t AS uuid)"),
+                {"u": body.ownerId, "t": str(tenant_id)},
+            )
+        ).first()
+        if owner_ok is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "unknown_owner",
+                    "message": "That person is not in this organization.",
+                },
+            )
+        from shared.authz.grant import grant_role  # noqa: PLC0415 - import cycle
+
+        await grant_role(
+            body.ownerId, str(project.id), "project_admin",
+            tenant_id=str(tenant_id), scope_kind="project",
+            granted_by=getattr(request.state, "user_id", None),
+        )
 
     # DP6 warn: compute config-time capability-gap and log any shortfalls.
     # Best-effort only — never blocks project creation.
@@ -516,7 +560,7 @@ async def restore_project(
 @projects_router.patch(
     "/{project_id}",
     response_model=ProjectOut,
-    dependencies=[Depends(require_permission("workspace:manage"))],
+    dependencies=[Depends(require_permission("project:update"))],
 )
 async def patch_project(
     project_id: str,
@@ -524,12 +568,19 @@ async def patch_project(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Partially update a project's name or description.
+    """Partially update a project's name, wiring or budget.
 
-    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+    Gated on `project:update`, not `workspace:manage`. The Project Admin is made to
+    choose a budget when they create the project, and `workspace:manage` is held only
+    by the Business Unit Admin — so the person who set the figure could not change it.
+
+    Widening WHO may edit makes WHICH project mandatory: `_get_or_404` scopes by tenant
+    alone, so on its own this would have let any Project Admin patch every project in
+    the organisation. `assert_can_administer_project` is the other half.
     """
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
+    await assert_can_administer_project(db, request, project)
     if body.name is not None:
         project.display_name = body.name
     if body.mcp_servers is not None:

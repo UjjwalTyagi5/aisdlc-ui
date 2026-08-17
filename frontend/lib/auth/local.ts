@@ -23,7 +23,7 @@ export interface LoginResponse {
  * the coarse role is presentation only, and every real gate reads `permissions`,
  * which is empty until an admin grants a role.
  */
-function deriveRole(permissions: string[]): Role {
+export function deriveRole(permissions: string[]): Role {
   if (permissions.includes("admin:*")) {
     return "admin";
   }

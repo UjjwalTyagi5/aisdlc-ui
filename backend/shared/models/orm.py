@@ -331,6 +331,21 @@ class RoleBinding(Base):
         String(16), nullable=False, default="active", server_default="active"
     )
 
+    # Added to the DATABASE by migration 0003 and never mirrored here, which is how a
+    # temporary elevation came to be unenforceable on the login path: `resolve_
+    # permissions_for_user` builds its query from this model, so a column the model does
+    # not declare is a column that query cannot filter on. `can_perform` used raw SQL and
+    # therefore honoured the expiry, giving the two permission readers different answers
+    # about the same binding.
+    #
+    # `expires_at IS NULL` means permanent. A non-null value in the past makes the
+    # assignment inert immediately — enforced by the clock, with no sweep job, because
+    # `status` is a flag somebody has to remember to flip.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    granted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # RLS anchor: no FK intentional â€” tenant_id is a policy column, not a relational FK (mirrors Project.tenant_id)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -345,7 +360,10 @@ class RoleBinding(Base):
             name="ck_role_binding_exactly_one_role",
         ),
         CheckConstraint(
-            "scope_kind IN ('organization', 'business_unit', 'project')",
+            # Four levels, matching migration 0003 and `can_perform.SCOPE_ORDER`. The
+            # model still said three, so a workstream-scoped binding was representable
+            # in the database and rejected by the model.
+            "scope_kind IN ('organization', 'business_unit', 'project', 'workstream')",
             name="ck_role_binding_scope_kind",
         ),
         CheckConstraint(

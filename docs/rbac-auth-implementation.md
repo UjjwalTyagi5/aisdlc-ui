@@ -130,7 +130,14 @@ unit above it, because the project is not an ancestor of the unit.
 `workstream` is the fourth level, added by migration `0003` along with the extended
 `scope_kind` CHECK. That migration also adds `role_bindings.expires_at` and
 `granted_by`, which is what makes a temporary elevation expressible at all — `status` is
-a flag someone must remember to flip; **an expiry is enforced by the clock**.
+a flag someone must remember to flip; an expiry is enforced by the clock.
+
+> **Corrected 2026-08-17.** The clock enforces it *here* and nowhere else. The login-time
+> resolver that produces the JWT claim every `require_permission` reads
+> (`shared/authz/resolver.py:61-72`) filters neither `status` nor `expires_at`, and the ORM
+> model does not even declare those columns. A temporary elevation therefore does not end,
+> and a deactivated binding keeps granting, until the token expires. See finding 5 in
+> `docs/rbac-audit-2026-08-17.md`.
 
 **Deny is the default and every failure returns it.** No tenant, unknown resource,
 resource in another tenant, no assignment, expired, deactivated, or a role that lacks
@@ -182,9 +189,14 @@ is self-approval. Holding governance in one scope and delivery in another is leg
 and common. Enforced by `_assert_no_tier_conflict` in `shared/authz/grant.py`; it cannot
 be a table constraint because the rule is scoped, not global.
 
-`grant.py` is the **only** write path into `role_bindings`. It is operator-only — no
-HTTP route, no UI — and is structurally incapable of crossing tenants, because the write
-goes through `get_db_session_for_tenant` and FORCE RLS enforces the policy.
+`grant.py` is structurally incapable of crossing tenants, because the write goes through
+`get_db_session_for_tenant` and FORCE RLS enforces the policy.
+
+> **Corrected 2026-08-17.** This section used to claim grant.py was the *only* write path
+> into `role_bindings` and was operator-only. Neither is true: `POST /projects/{id}/members`
+> calls it from a request handler (correctly), and `PATCH`/`DELETE` on the same router plus
+> `project_scoped.py` write the table directly, bypassing `_assert_no_tier_conflict` and
+> `record_rbac_change`. See finding 7 in `docs/rbac-audit-2026-08-17.md`.
 
 ---
 
@@ -268,6 +280,13 @@ including the `admin:*` wildcard. **This is UX gating, not a security boundary**
 who tampers with client state to reveal a hidden action still gets a 403 from FastAPI on
 the actual call.
 
+> **Corrected 2026-08-17, now fixed.** That last sentence was false as written. The session
+> cookie was unsigned base64 and `httpOnly: false`, and `lib/bff/jwt.ts` re-signed its
+> `permissions` array into the JWT FastAPI trusts — so tampering with client state did not
+> get a 403, it got `admin:*`. The BFF no longer mints tokens on the local path: the
+> backend-issued token is stored `httpOnly` and forwarded unchanged, which is what makes
+> the sentence true. See finding 1 in `docs/rbac-audit-2026-08-17.md`.
+
 `shared/authz/permissions.py` carries an explicit **mirror contract**: the frontend is
 the spec (it was designed first and the UI gates off these exact strings), and
 `test_enterprise_rbac_catalog.py` asserts the seeded DB matches the backend module.
@@ -346,6 +365,8 @@ makes. The frontend suite is green at 313 tests.
 
 ---
 
-See also: `docs/rbac-auth-design.md` (the original seven-task assessment),
+See also: `docs/rbac-audit-2026-08-17.md` (an audit of this work against the code, which
+found two critical holes and twelve smaller ones — read it before trusting any "Done" in
+the table above), `docs/rbac-auth-design.md` (the original seven-task assessment),
 `docs/rbac-auth-plan.md` (scope-enforcement gaps found during the fixture migration),
 `docs/rbac-tables.md`, and `docs/route-inventory.md`.

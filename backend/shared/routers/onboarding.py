@@ -25,7 +25,6 @@ offer it.
 from __future__ import annotations
 
 import logging
-import secrets
 import uuid as _uuid
 from typing import Any, Optional
 
@@ -34,13 +33,16 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.auth.passwords import hash_password
+from config.env import INVITE_TOKEN_TTL_HOURS
 from shared.authz.dependency import require_permission
-from shared.authz.grant import grant_role
+from shared.authz.grant import UnitAlreadyAdministeredError, grant_role
+from shared.authz.grant_guard import assert_can_grant_role
 from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session, get_db_session_superuser
+from shared.services import email_templates, password_setup
 from shared.services import governance_requests as governance
 from shared.services import notifications
+from shared.services.email import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,12 @@ async def onboard(
             "is granted by a business unit's admin.",
         )
 
+    # Belt and braces over the org-wide gate above, and not redundant: `is_org_wide`
+    # also passes on `settings:manage`, which no shipped role grants but a custom
+    # role or an override could. Someone who reached here that way must still not
+    # confer a Business Unit Admin's permissions without holding them.
+    await assert_can_grant_role(db, request, body.role)
+
     # A contributor with no unit belongs to nobody: no admin is prompted for their
     # role, so they would sit with no access and nothing to explain why.
     if body.role == "contributor" and not body.workspaceId:
@@ -132,22 +140,31 @@ async def onboard(
             created = False
         else:
             user_id = str(_uuid.uuid4())
-            # A password nobody knows, including us. There is no invite-email path
-            # yet, so the account exists and cannot be signed into until an admin
-            # sets one — which is the honest state. Generating a WEAK placeholder
-            # would be an account anybody could guess their way into.
+            # password_hash stays NULL, which is the honest representation of "no
+            # password has been chosen yet". This used to be a hash of 32 random bytes
+            # nobody kept — the effect was identical (`verify_password` refuses either)
+            # but it claimed a credential existed. NULL says what is true, and it is what
+            # lets the invite link be the one way in.
             await s.execute(
                 text(
                     "INSERT INTO users (id, email, password_hash, tenant_id, active) "
-                    "VALUES (:i, :e, :p, CAST(:t AS uuid), true)"
+                    "VALUES (:i, :e, NULL, CAST(:t AS uuid), true)"
                 ),
-                {
-                    "i": user_id, "e": email,
-                    "p": hash_password(secrets.token_urlsafe(32)),
-                    "t": tenant_id,
-                },
+                {"i": user_id, "e": email, "t": tenant_id},
             )
             created = True
+
+        # ── the invitation ───────────────────────────────────────────────────
+        # Issued only for a NEW account. Re-onboarding somebody who already exists
+        # places them somewhere new; it must not mint a fresh set-password link for an
+        # account that already has a working password, because that link would be a way
+        # to take the account over.
+        invite_token = None
+        if created:
+            invite_token = await password_setup.issue(
+                s, user_id=user_id, purpose="invite",
+                ttl_hours=INVITE_TOKEN_TTL_HOURS,
+            )
 
     # ── 2. the placement ─────────────────────────────────────────────────────
     if workspace is not None:
@@ -156,6 +173,14 @@ async def onboard(
                 user_id, str(workspace.id), body.role,
                 tenant_id=tenant_id, scope_kind="business_unit",
                 granted_by=getattr(request.state, "user_id", None),
+            )
+        except UnitAlreadyAdministeredError as exc:
+            # 409, not 422: the request is well-formed and would be valid against a unit
+            # that had no admin. The conflict is with the state of the world, and the
+            # message names the incumbent so the caller knows who to remove.
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "unit_already_administered", "message": str(exc)},
             )
         except ValueError as exc:
             raise _invalid("invalid_role", str(exc))
@@ -201,15 +226,40 @@ async def onboard(
         )
 
     await db.flush()
+
+    # ── 4. the invitation email ──────────────────────────────────────────────
+    # Sent AFTER the placement, so the link lands on an account that already has its
+    # role: somebody who clicks immediately gets a working session rather than an empty
+    # shell. Not transactional with it, deliberately — a mail server being down must not
+    # undo an onboarding that is otherwise correct, and the admin can resend.
+    #
+    # `invited` is reported honestly. When SMTP is unconfigured this is False and the UI
+    # says the account was created but no email went, which is the difference between an
+    # admin who knows to follow up and one who assumes the person was told.
+    invited = False
+    if invite_token:
+        subject, text_body, html_body = email_templates.invite_email(
+            invite_token, INVITE_TOKEN_TTL_HOURS
+        )
+        invited = await send_email(email, subject, text_body, html_body)
+        if not invited:
+            logger.warning(
+                "onboarding: invite email NOT delivered to %s — account has no password "
+                "and no link. Resend once SMTP is configured.", email,
+            )
+
     logger.info(
-        "onboarded %s as %s into %s (created=%s)",
-        email, body.role, body.workspaceId, created,
+        "onboarded %s as %s into %s (created=%s, invited=%s)",
+        email, body.role, body.workspaceId, created, invited,
     )
     return {
         "userId": user_id,
         "email": email,
         "role": body.role,
         "workspaceId": str(workspace.id) if workspace is not None else None,
+        # Whether the set-password email actually left the building. False for an account
+        # that already existed (no link is issued) and False when SMTP is unconfigured.
+        "invited": invited,
         # False when the person already existed and was simply placed — the caller
         # shows "added to Payments" rather than "invited".
         "created": created,

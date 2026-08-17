@@ -50,6 +50,7 @@ from shared.services.budget_alloc import (
     effective_cap,
 )
 from shared.authz.dependency import require_permission
+from shared.authz.read_scope import allowed_workspace_ids
 from shared.db import get_db_session
 from shared.routers._schemas import CostBreakdownOut, CostBreakdownRow
 from shared.services.budget_store import month_key
@@ -139,10 +140,21 @@ async def get_cost_breakdown(
     """
     tenant_id = request.state.tenant_id
 
+    # WHICH units this caller may total over. `cost:view` is held by bu_admin,
+    # project_admin and security_engineer; it says they may see spend, not whose. This
+    # endpoint aggregated the entire tenant's, and `spend.py` — the same money, a
+    # different route — has narrowed correctly all along. See finding 4 in
+    # docs/rbac-audit-2026-08-17.md.
+    allowed_ws = await allowed_workspace_ids(db, request)
+
     # Validate the workspace belongs to the tenant (defense in depth — the Langfuse tenant
     # tag already blocks cross-tenant reads, but reject an unknown/foreign id cleanly).
     _ws_budget = None
     if workspace:
+        if allowed_ws is not None and workspace not in allowed_ws:
+            # Same 404 as an unknown id: a unit the caller cannot read must not be
+            # distinguishable from one that does not exist.
+            raise HTTPException(status_code=404, detail="workspace not found in this tenant")
         _row = (await db.execute(
             text("SELECT monthly_budget_usd FROM workspaces WHERE id = :w AND organization_id = :t"),
             {"w": workspace, "t": tenant_id},
@@ -160,24 +172,40 @@ async def get_cost_breakdown(
     if ENABLE_LANGFUSE:
         from shared.routers.traces import _lf_get  # noqa: PLC0415
         _cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
-        _tags = [f"tenant:{tenant_id}"]
+
+        # ONE QUERY PER UNIT THE CALLER MAY SEE, summed — rather than one tenant-wide
+        # query. Langfuse ANDs its tag filter, so there is no single tag set meaning
+        # "these three workspaces"; and post-filtering is not available either, because
+        # the daily-metrics endpoint returns figures already aggregated across whatever
+        # it matched. Totalling per unit is the only shape that computes the answer FROM
+        # the allowed set rather than trimming it afterwards.
+        #
+        # An org-wide caller keeps the single untagged query — one call, as before.
         if workspace:
-            _tags.append(f"workspace:{workspace}")
-        _data = await _lf_get(
-            "/api/public/metrics/daily",
-            {"tags": _tags, "fromTimestamp": _cutoff},
-        )
+            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{workspace}"]]
+        elif allowed_ws is None:
+            _tag_sets = [[f"tenant:{tenant_id}"]]
+        else:
+            # Empty allowed set → no queries at all → zeroes, which is the honest
+            # answer for someone with no units rather than the organisation's total.
+            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{w}"] for w in allowed_ws]
+
         per_model: dict[str, list] = {}  # model -> [in_tok, out_tok, cost, observations]
-        for _day in (_data or {}).get("data") or []:
-            for _u in _day.get("usage") or []:
-                _m = _u.get("model")
-                if not _m:  # skip the null-model bucket (non-LLM spans)
-                    continue
-                _agg = per_model.setdefault(_m, [0, 0, 0.0, 0])
-                _agg[0] += int(_u.get("inputUsage") or 0)
-                _agg[1] += int(_u.get("outputUsage") or 0)
-                _agg[2] += float(_u.get("totalCost") or 0.0)
-                _agg[3] += int(_u.get("countObservations") or 0)
+        for _tags in _tag_sets:
+            _data = await _lf_get(
+                "/api/public/metrics/daily",
+                {"tags": _tags, "fromTimestamp": _cutoff},
+            )
+            for _day in (_data or {}).get("data") or []:
+                for _u in _day.get("usage") or []:
+                    _m = _u.get("model")
+                    if not _m:  # skip the null-model bucket (non-LLM spans)
+                        continue
+                    _agg = per_model.setdefault(_m, [0, 0, 0.0, 0])
+                    _agg[0] += int(_u.get("inputUsage") or 0)
+                    _agg[1] += int(_u.get("outputUsage") or 0)
+                    _agg[2] += float(_u.get("totalCost") or 0.0)
+                    _agg[3] += int(_u.get("countObservations") or 0)
         for _m, (_i, _o, _c, _n) in per_model.items():
             rows.append(CostBreakdownRow(
                 model=_m, inputTokens=_i, outputTokens=_o,
@@ -272,19 +300,35 @@ async def get_budgets(request: Request, db: AsyncSession = Depends(get_db_sessio
         text("SELECT display_name, monthly_budget_usd FROM organizations WHERE id = :t"),
         {"t": str(tenant_id)},
     )).first()
+    # Every unit and project in the tenant, until the caller's scope narrows it. A
+    # Business Unit Admin was reading every sibling unit's budget AND its spend from
+    # this one — the sharpest disclosure in the finding, because the figures are
+    # financial and the page presents them as a hub.
+    allowed_ws = await allowed_workspace_ids(db, request)
+    scoped = allowed_ws is not None
+
     ws_rows = (await db.execute(
         text("SELECT id, display_name, monthly_budget_usd FROM workspaces "
-             "WHERE organization_id = :t ORDER BY display_name"),
-        {"t": str(tenant_id)},
+             "WHERE organization_id = :t "
+             "  AND (:all OR id = ANY(CAST(:ws AS uuid[]))) "
+             "ORDER BY display_name"),
+        {"t": str(tenant_id), "all": not scoped, "ws": allowed_ws or []},
     )).all()
     proj_rows = (await db.execute(
         text("SELECT id, display_name, workspace_id, monthly_budget_usd FROM projects "
-             "WHERE tenant_id = :t AND archived = false ORDER BY display_name"),
-        {"t": str(tenant_id)},
+             "WHERE tenant_id = :t AND archived = false "
+             "  AND (:all OR workspace_id = ANY(CAST(:ws AS uuid[]))) "
+             "ORDER BY display_name"),
+        {"t": str(tenant_id), "all": not scoped, "ws": allowed_ws or []},
     )).all()
 
     # Effective budgets: explicit value or the per-scope default. Allocation rollups sum
     # the children's EFFECTIVE budgets so the hub's "allocated / free" matches enforcement.
+    #
+    # For a scoped caller this sums the VISIBLE units only, which is the rule
+    # read_scope.py states: a total is computed from the allowed set, not filtered after
+    # the fact. An organization-wide "allocated" figure derived from every unit would
+    # disclose the size of units the caller cannot open.
     org_allocated = round(sum(effective_cap("workspace", r[2]) for r in ws_rows), 4)
     ws_allocated: dict[str, float] = {}
     for r in proj_rows:
@@ -296,7 +340,16 @@ async def get_budgets(request: Request, db: AsyncSession = Depends(get_db_sessio
             scope="org", id=str(tenant_id),
             name=(org_row[0] if org_row else "Organization"),
             monthlyBudgetUsd=effective_cap("org", org_row[1] if org_row else None),
-            monthlySpendUsd=round(org_spend.get(str(tenant_id), 0.0), 4),
+            # The organisation's own spend for an org-wide caller; the sum of the units
+            # they can see otherwise. The org's CAP stays visible either way — it is the
+            # ceiling a unit admin allocates under and they cannot read their own
+            # headroom without it — but its total SPEND is a fact about every unit,
+            # including the ones they cannot open.
+            monthlySpendUsd=(
+                round(org_spend.get(str(tenant_id), 0.0), 4)
+                if not scoped
+                else round(sum(ws_spend.get(str(r[0]), 0.0) for r in ws_rows), 4)
+            ),
             allocatedUsd=org_allocated,
         ),
         workspaces=[

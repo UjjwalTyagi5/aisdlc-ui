@@ -77,7 +77,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # test with no manage->view implication, so "connector:manage" alone left this
         # role failing the Integrations page's "connector:view" gate.
         "connector:manage", "connector:view",
-        "project:create", "model:manage",
+        "project:create", "project:update", "model:manage",
         "audit:view", "cost:view",
         "workspace:manage",
         # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
@@ -88,7 +88,11 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     # rather than an error page, deliberately not enough to open an agent or raise a run.
     "contributor": ["artifact:view"],
     "project_admin": [
-        "member:manage", "project:create", "model:manage",
+        # project:update, and it is the whole point of the role: the Project Admin is
+        # made to choose a budget at creation, so being unable to change the figure
+        # afterwards was never intended. Editing a project used to demand
+        # workspace:manage, which only bu_admin holds.
+        "member:manage", "project:create", "project:update", "model:manage",
         "run:create", "run:view", "run:cancel",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
@@ -228,7 +232,12 @@ _PERMISSION_CATALOG: list[str] = [
     # exist to express.
     "governance:decide",
     # Configuration
-    "project:create", "model:manage", "settings:manage", "workspace:manage",
+    # project:update was used as a require_permission string by seven Agent Studio
+    # routes while being in NO catalogue and granted to NO role — so those routes were
+    # reachable only by admin:*, silently. Those routes moved to skill:* permissions;
+    # the string is now real, means "edit this project's settings and budget", and is
+    # enforced by PATCH /projects/{id}.
+    "project:create", "project:update", "model:manage", "settings:manage", "workspace:manage",
     # Observability
     "audit:view", "cost:view", "trace:view", "eval:view",
     # Agent Studio

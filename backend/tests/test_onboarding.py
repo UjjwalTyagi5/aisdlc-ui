@@ -30,6 +30,7 @@ async def _dispose_shared_engine():
 @pytest.fixture
 async def org():
     org_id, bu = str(_uuid.uuid4()), str(_uuid.uuid4())
+    admin_id = f"admin-{_uuid.uuid4()}"
     async with get_db_session_superuser() as s:
         await s.execute(text(
             "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Onboard Test')"
@@ -38,7 +39,15 @@ async def org():
             "INSERT INTO workspaces (id, organization_id, slug, display_name) "
             "VALUES (:i, :o, 'payments', 'Payments')"
         ), {"i": bu, "o": org_id})
-    yield {"org": org_id, "bu": bu}
+    # The admin gets a REAL org_admin binding, not just a token claiming admin:*.
+    # `assert_can_grant_role` re-resolves the caller's permissions from the database
+    # rather than reading them off the token — deliberately, so a token issued before
+    # a demotion cannot mint a durable grant — and a fixture that only forged the
+    # claim was testing a caller who does not exist in production.
+    from shared.authz.grant import grant_role
+    await grant_role(admin_id, org_id, "org_admin",
+                     tenant_id=org_id, scope_kind="organization")
+    yield {"org": org_id, "bu": bu, "admin": admin_id}
 
 
 def _headers(uid: str, org_id: str, perms: list[str]) -> dict:
@@ -47,7 +56,7 @@ def _headers(uid: str, org_id: str, perms: list[str]) -> dict:
 
 
 def _admin(org: dict) -> dict:
-    return _headers(f"admin-{_uuid.uuid4()}", org["org"], ["admin:*"])
+    return _headers(org["admin"], org["org"], ["admin:*"])
 
 
 @pytest.mark.asyncio

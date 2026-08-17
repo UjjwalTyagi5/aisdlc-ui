@@ -30,6 +30,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
+from shared.authz.grant_guard import assert_can_grant_role
+from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.permissions import ALL_ROLES
 from shared.authz.read_scope import administered_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -105,33 +107,13 @@ async def _project_or_404(db: AsyncSession, tenant_id: str, project_id: str) -> 
 async def _assert_can_write_project(db: AsyncSession, request: Request, project: Any) -> None:
     """Refuse a write aimed at a project the caller does not run.
 
-    Org-wide callers pass. Everyone else must administer the project's PARENT UNIT or
-    hold a project_admin binding on the project itself — the two ways someone
-    legitimately staffs a roster.
-
-    404 rather than 403, matching the sibling routes: a project the caller cannot
-    reach should not be confirmed to exist by the error code.
+    Delegates to `shared.authz.project_scope`, where this rule now lives. It used to be
+    written out here AND identically in project_scoped.py, and both copies checked
+    `status <> 'deactivated'` with no expiry — so an elevation that had lapsed still let
+    someone staff a roster. Three copies of an authorization rule is three chances for
+    one of them to be the stale one.
     """
-    if is_org_wide(request):
-        return
-
-    administered = await administered_workspace_ids(db, request)
-    if administered is not None and str(project.workspace_id) in administered:
-        return
-
-    user_id = getattr(request.state, "user_id", "") or ""
-    own = (
-        await db.execute(
-            text(
-                "SELECT 1 FROM role_bindings WHERE user_id = :u AND scope_kind = 'project' "
-                "  AND scope_id = :p AND role_name = 'project_admin' "
-                "  AND status <> 'deactivated'"
-            ),
-            {"u": user_id, "p": project.id},
-        )
-    ).first()
-    if own is None:
-        raise HTTPException(status_code=404, detail="not found")
+    await assert_can_administer_project(db, request, project)
 
 
 async def _rows(db: AsyncSession, project: Any) -> list[dict[str, Any]]:
@@ -223,6 +205,11 @@ async def add_project_member(
 
     if body.roleName not in ALL_ROLES:
         raise HTTPException(status_code=422, detail=f"Unknown role '{body.roleName}'")
+    # `_assert_can_write_project` says WHICH project; this says WHAT may be granted
+    # there. Without it a Project Admin could staff their own project with an
+    # org_admin binding — including their own — and hold admin:* organization-wide
+    # at the next login, because permissions resolve across scopes.
+    await assert_can_grant_role(db, request, body.roleName)
 
     user = (
         await db.execute(
@@ -295,32 +282,91 @@ async def update_project_member(
 
     if body.roleName is not None and body.roleName not in ALL_ROLES:
         raise HTTPException(status_code=422, detail=f"Unknown role '{body.roleName}'")
-
-    sets, params = [], {"m": membership_id, "p": project.id}
-    if body.roleName is not None:
-        sets.append("role_name = :r")
-        params["r"] = body.roleName
-    if body.extraAgents is not None:
-        sets.append("extra_agents = CAST(:a AS jsonb)")
-        params["a"] = json.dumps(body.extraAgents)
-    if not sets:
+    if body.roleName is None and body.extraAgents is None:
         raise HTTPException(status_code=422, detail="Nothing to change")
 
     # Guarded on scope_id as well as id: a membership id from another project must
     # not be editable by passing this project's id in the path.
-    result = await db.execute(
-        text(
-            f"UPDATE role_bindings SET {', '.join(sets)} "
-            "WHERE id = CAST(:m AS uuid) AND scope_kind = 'project' AND scope_id = :p"
-        ),
-        params,
-    )
-    if not result.rowcount:
+    existing = (
+        await db.execute(
+            text(
+                "SELECT user_id, role_name FROM role_bindings "
+                "WHERE id = CAST(:m AS uuid) AND scope_kind = 'project' AND scope_id = :p"
+            ),
+            {"m": membership_id, "p": project.id},
+        )
+    ).first()
+    if existing is None:
         raise HTTPException(status_code=404, detail="not found")
+
+    # A ROLE CHANGE GOES THROUGH grant.py, NOT A DIRECT UPDATE. This route used to
+    # rewrite `role_name` in place, which skipped both invariants that make a role
+    # change safe: `_assert_no_tier_conflict` (so someone added as a delivery role
+    # could be edited into a governance one in the same scope — the self-approval
+    # the tier split exists to prevent) and `record_rbac_change` (so the single
+    # highest-leverage write on the platform left no audit row). Revoke-then-grant
+    # is the only path that carries both. See docs/rbac-audit-2026-08-17.md.
+    if body.roleName is not None and body.roleName != existing.role_name:
+        # Both directions are rank-checked: conferring the new role, and taking
+        # away the old one, are each an exercise of authority over it.
+        await assert_can_grant_role(db, request, existing.role_name)
+        await assert_can_grant_role(db, request, body.roleName)
+
+        actor = getattr(request.state, "user_id", None)
+        from shared.authz.grant import (  # noqa: PLC0415 - avoids an import cycle
+            TierConflictError,
+            grant_role,
+            revoke_role,
+        )
+
+        # Revoke FIRST, so the tier check sees the state the change is heading for.
+        # Granting first would refuse a legitimate delivery -> governance move —
+        # the person would hold both only for the instant between the two writes,
+        # and the invariant is about the state they end in.
+        #
+        # Each helper runs in its own transaction, so a failed grant cannot be
+        # rolled back by this one. Restore the old role explicitly instead: the
+        # failure mode this avoids is a refused edit that silently leaves someone
+        # with no role on a project they were working on.
+        await revoke_role(
+            existing.user_id, str(project.id), existing.role_name,
+            tenant_id=tenant_id, scope_kind="project", revoked_by=actor,
+        )
+        try:
+            await grant_role(
+                existing.user_id, str(project.id), body.roleName,
+                tenant_id=tenant_id, scope_kind="project", granted_by=actor,
+            )
+        except (TierConflictError, ValueError) as exc:
+            await grant_role(
+                existing.user_id, str(project.id), existing.role_name,
+                tenant_id=tenant_id, scope_kind="project", granted_by=actor,
+            )
+            status = 409 if isinstance(exc, TierConflictError) else 422
+            raise HTTPException(status_code=status, detail=str(exc))
+
+    if body.extraAgents is not None:
+        # Applied after any role change, and addressed by (user, project, role)
+        # rather than by membership id: revoke-then-grant writes a new row, so the
+        # id in the path no longer exists by this point.
+        target_role = body.roleName or existing.role_name
+        await db.execute(
+            text(
+                "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+                "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = :p "
+                "  AND role_name = :r"
+            ),
+            {
+                "a": json.dumps(body.extraAgents),
+                "u": existing.user_id, "p": project.id, "r": target_role,
+            },
+        )
     await db.flush()
 
+    # Matched on the PERSON, not the membership id, for the same reason: a role
+    # change replaces the row, so the caller's id is stale by design.
     rows = await _rows(db, project)
-    match = next((m for m in rows if m["membershipId"] == str(membership_id)), None)
+    match = next((m for m in rows if m["identity"]["id"] == existing.user_id), None)
     if match is None:
         raise HTTPException(status_code=404, detail="not found")
     return match
@@ -342,13 +388,28 @@ async def remove_project_member(
     project = await _project_or_404(db, tenant_id, project_id)
     await _assert_can_write_project(db, request, project)
 
-    await db.execute(
-        text(
-            "DELETE FROM role_bindings WHERE id = CAST(:m AS uuid) "
-            "  AND scope_kind = 'project' AND scope_id = :p"
-        ),
-        {"m": membership_id, "p": project.id},
-    )
+    # Routed through revoke_role rather than a direct DELETE so the removal lands
+    # in the audit trail. Taking a role away is as consequential as conferring one
+    # — losing access is what gets asked about afterwards — and this path recorded
+    # nothing. See docs/rbac-audit-2026-08-17.md.
+    existing = (
+        await db.execute(
+            text(
+                "SELECT user_id, role_name FROM role_bindings "
+                "WHERE id = CAST(:m AS uuid) AND scope_kind = 'project' AND scope_id = :p"
+            ),
+            {"m": membership_id, "p": project.id},
+        )
+    ).first()
+    if existing is not None:
+        await assert_can_grant_role(db, request, existing.role_name)
+        from shared.authz.grant import revoke_role  # noqa: PLC0415 - import cycle
+
+        await revoke_role(
+            existing.user_id, str(project.id), existing.role_name,
+            tenant_id=tenant_id, scope_kind="project",
+            revoked_by=getattr(request.state, "user_id", None),
+        )
     await db.flush()
     # 204 whether or not a row went: removing someone already gone satisfies the
     # caller's intent, and a 404 here reads as "wrong project".

@@ -20,13 +20,14 @@ built-in roles exactly.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.authz.read_scope import is_org_wide
+from shared.authz.read_scope import is_org_wide, live_binding
 
 # Most authority first. Anything not listed is a delivery contributor, which the
 # escalation ladder treats identically — see REQUEST_ESCALATION_CHAIN.
@@ -37,13 +38,16 @@ async def roles_held(db: AsyncSession, user_id: str) -> list[str]:
     """Every non-deactivated role name this user holds, any scope."""
     if not user_id:
         return []
+    # Liveness matters here as much as anywhere: standing decides who a governance
+    # request routes to, so an elevation that has lapsed must stop making someone a
+    # Business Unit Admin for routing purposes, not just for permission checks.
     rows = (
         await db.execute(
             text(
-                "SELECT DISTINCT role_name FROM role_bindings "
-                "WHERE user_id = :u AND status <> 'deactivated'"
+                f"SELECT DISTINCT role_name FROM role_bindings rb "
+                f"WHERE {live_binding()}"
             ),
-            {"u": user_id},
+            {"u": user_id, "now": datetime.now(tz=timezone.utc)},
         )
     ).fetchall()
     return [r[0] for r in rows]
