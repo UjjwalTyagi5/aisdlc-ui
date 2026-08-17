@@ -15,7 +15,7 @@ router (shared/routers/capabilities.py) and the resource routers. The frontend B
 these keys verbatim.
 
 RBAC (design §3.5): reads gate on the "artifact:view" floor (router-level, matching the
-capabilities router). draft/preview require "project:update"; publish/unpublish require
+capabilities router). draft/preview require "skill:edit"; publish/unpublish require
 "workspace:manage". Every route therefore carries a require_permission sentinel so the
 process_api D-05 boot scan stays green.
 """
@@ -327,7 +327,7 @@ async def get_versions(
 
 @agent_profiles_router.post(
     "/draft",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def create_draft(
     body: DraftIn,
@@ -445,7 +445,7 @@ async def unpublish(
 @agent_profiles_router.post(
     "/{profile_id}/propose",
     status_code=201,
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def propose(
     profile_id: str,
@@ -542,7 +542,7 @@ async def propose(
 
 @agent_profiles_router.post(
     "/preview",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def preview(
     body: DraftIn,

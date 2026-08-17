@@ -97,6 +97,44 @@ async def resolve_active_workspace(
     return rows[0]
 
 
+async def assert_workspace_in_tenant(tenant_id: str, workspace_id: str) -> uuid.UUID:
+    """Strict counterpart to resolve_active_workspace, for an EXPLICIT choice.
+
+    `resolve_active_workspace` is deliberately lenient because a selector is ambient:
+    a stale cookie should not break a page, and defaulting to the org's first workspace
+    is harmless when the caller never asked for a particular one.
+
+    A workspace named in a request BODY is the opposite kind of value — somebody picked
+    it from a form. Falling back there would file the resource under a unit nobody
+    chose, and the write would report success, so the mistake surfaces later as "why is
+    this project in the wrong Business Unit" rather than as an error. Hence 422 on
+    anything this tenant does not own.
+    """
+    if not tenant_id:
+        raise HTTPException(status_code=404, detail="No tenant context — workspace unknown")
+
+    try:
+        wid = uuid.UUID(str(workspace_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="workspaceId is not a valid id")
+
+    async with get_db_session_for_tenant(tenant_id) as session:
+        found = (
+            await session.execute(
+                select(Workspace.id).where(
+                    Workspace.id == wid,
+                    Workspace.organization_id == uuid.UUID(str(tenant_id)),
+                )
+            )
+        ).scalar_one_or_none()
+
+    if found is None:
+        raise HTTPException(
+            status_code=422, detail="workspaceId does not belong to this organization"
+        )
+    return wid
+
+
 def workspace_selector(request) -> str | None:
     """The active-workspace selector for an HTTP request (X-Workspace-Id header)."""
     return request.headers.get("x-workspace-id") or None

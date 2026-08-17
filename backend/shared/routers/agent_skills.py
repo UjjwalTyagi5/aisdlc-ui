@@ -17,7 +17,7 @@ router (whose lint style + violation shape + RBAC layering this mirrors). The fr
 reads these keys verbatim.
 
 RBAC (mirrors agent_profiles): reads gate on the "artifact:view" floor (router-level).
-create/update/toggle/delete require "project:update"; activate (version rollback) requires
+create/update/toggle/delete require "skill:edit"; activate (version rollback) requires
 "workspace:manage". Every route therefore carries a require_permission sentinel so the
 process_api D-05 boot scan stays green.
 
@@ -241,7 +241,7 @@ async def list_skills(
 
 @agent_skills_router.post(
     "",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def create_skill(body: CreateSkillIn, request: Request):
     tenant_id = _tenant_id(request)
@@ -288,7 +288,7 @@ async def create_skill(body: CreateSkillIn, request: Request):
 
 @agent_skills_router.post(
     "/toggle",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def toggle_skill(body: ToggleIn, request: Request):
     tenant_id = _tenant_id(request)
@@ -366,7 +366,7 @@ async def activate_version(
 
 @agent_skills_router.put(
     "/{skill_key}",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def update_skill(skill_key: str, body: UpdateSkillIn, request: Request):
     tenant_id = _tenant_id(request)
@@ -396,7 +396,7 @@ async def update_skill(skill_key: str, body: UpdateSkillIn, request: Request):
 
 @agent_skills_router.delete(
     "/{skill_key}",
-    dependencies=[Depends(require_permission("project:update"))],
+    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def delete_skill(
     request: Request,

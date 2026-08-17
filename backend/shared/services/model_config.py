@@ -405,11 +405,18 @@ async def delete_provider(tenant_id: str, provider_id: str, workspace_id: str | 
     logger.info("model provider deleted tenant=%s id=%s", tenant_id, provider_id)
 
 
-async def get_options(tenant_id: str, workspace_id: str | None = None, project_id: str | None = None) -> dict:
+async def get_options(tenant_id: str, project_id: str | None = None) -> dict:
     """Selectable offerings whose provider is verified `valid` — for the model
     picker. When `project_id` is given and the tenant has grants configured, narrows to
     that project's effective offering set (spec §5) — otherwise (no grants yet, or no
-    project context) stays tenant-wide, unchanged from before this feature."""
+    project context) stays tenant-wide, unchanged from before this feature.
+
+    TAKES NO workspace_id. It used to accept one and never read it: the scope that
+    decides this list is the PROJECT's, and `effective_project_offerings` walks from the
+    project to its own selection or its unit's inherited set. The caller was resolving
+    an active-workspace selector to pass in — a DB round trip whose result was discarded,
+    and which named whichever unit the ambient X-Workspace-Id cookie pointed at rather
+    than the one the project actually belongs to."""
     from shared.services.model_grants import effective_project_offerings  # noqa: PLC0415
 
     async with get_db_session_for_tenant(tenant_id) as s:

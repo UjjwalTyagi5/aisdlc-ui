@@ -254,6 +254,7 @@ export function StageWorkbench({
           <div className="flex flex-wrap items-center gap-2">
             <ModelSelector
               aria-label={`${title} agent model`}
+              projectId={projectId}
               value={agentModel}
               onValueChange={setAgentModel}
             />

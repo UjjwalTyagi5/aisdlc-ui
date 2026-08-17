@@ -123,6 +123,7 @@ export default function DeploymentPage() {
           <div className="flex flex-wrap items-center gap-2">
             <ModelSelector
               aria-label="Deployment agent model"
+              projectId={id}
               value={agentModel}
               onValueChange={setAgentModel}
             />

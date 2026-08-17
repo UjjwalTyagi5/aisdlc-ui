@@ -232,6 +232,7 @@ export default function TestingPage() {
           <div className="flex flex-wrap items-center gap-2">
             <ModelSelector
               aria-label="Testing agent model"
+              projectId={id}
               value={agentModel}
               onValueChange={setAgentModel}
             />
