@@ -128,7 +128,7 @@ async def test_a_bu_admin_is_onboarded_signs_in_and_sees_their_access(org, _capt
     r = _onboard(c, t, email, "bu_admin", unit)
     assert r.status_code == 201, r.text
     assert r.json()["invited"] is True
-    user_id = r.json()["userId"]
+    user_id = r.json()["identityId"]
 
     # They set their own password from the emailed link, then sign in for real.
     _set_password(c, _capture_email[0]["text"], "Payments-Admin-1")
@@ -162,7 +162,7 @@ async def test_a_bu_admin_sees_their_own_unit_and_not_a_sibling(org, _capture_em
     theirs = _create_unit(c, t, "Lending")
 
     email = f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    user_id = _onboard(c, t, email, "bu_admin", mine).json()["userId"]
+    user_id = _onboard(c, t, email, "bu_admin", mine).json()["identityId"]
     hdr = await _as_themselves(user_id, t["org"])
 
     ids = [w["id"] for w in c.get("/workspaces", headers=hdr).json()]
@@ -201,7 +201,7 @@ async def test_the_same_admin_can_be_re_granted(org, _capture_email):
     c = _client()
     unit = _create_unit(c, t, "Payments")
     email = f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    user_id = _onboard(c, t, email, "bu_admin", unit).json()["userId"]
+    user_id = _onboard(c, t, email, "bu_admin", unit).json()["identityId"]
 
     await grant_role(user_id, unit, "bu_admin", tenant_id=t["org"],
                      scope_kind="business_unit")  # must not raise
@@ -228,7 +228,7 @@ async def test_removing_the_admin_frees_the_unit(org, _capture_email):
     c = _client()
     unit = _create_unit(c, t, "Payments")
     outgoing = f"out-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    outgoing_id = _onboard(c, t, outgoing, "bu_admin", unit).json()["userId"]
+    outgoing_id = _onboard(c, t, outgoing, "bu_admin", unit).json()["identityId"]
 
     revoked = c.request(
         "DELETE", "/admin/assignments", headers=_org_hdr(t),
@@ -252,12 +252,12 @@ async def test_onboarding_a_contributor_asks_their_bu_admin_for_a_role(org, _cap
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_email = f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    admin_id = _onboard(c, t, admin_email, "bu_admin", unit).json()["userId"]
+    admin_id = _onboard(c, t, admin_email, "bu_admin", unit).json()["identityId"]
 
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
     r = _onboard(c, t, contrib_email, "contributor", unit)
     assert r.status_code == 201, r.text
-    contrib_id = r.json()["userId"]
+    contrib_id = r.json()["identityId"]
     assert r.json()["roleRequestId"], "the handover request is the point of the flow"
 
     # The Contributor holds the floor and nothing else.
@@ -292,11 +292,11 @@ async def test_assigning_the_role_is_the_approval(org, _capture_email):
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
 
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
     onboarded = _onboard(c, t, contrib_email, "contributor", unit).json()
-    contrib_id, request_id = onboarded["userId"], onboarded["roleRequestId"]
+    contrib_id, request_id = onboarded["identityId"], onboarded["roleRequestId"]
     _capture_email.clear()
 
     admin_hdr = await _as_themselves(admin_id, t["org"])
@@ -327,11 +327,11 @@ async def test_the_contributor_signs_in_and_sees_their_access(org, _capture_emai
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
     _capture_email.clear()
 
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["userId"]
+    contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["identityId"]
     _set_password(c, _capture_email[0]["text"], "Contributor-Pw-1")
 
     admin_hdr = await _as_themselves(admin_id, t["org"])
@@ -362,9 +362,9 @@ async def test_a_bu_admin_creates_a_project_and_names_its_owner(org, _capture_em
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
     owner_id = _onboard(c, t, f"po-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "contributor", unit).json()["userId"]
+                        "contributor", unit).json()["identityId"]
 
     admin_hdr = await _as_themselves(admin_id, t["org"])
     created = c.post("/projects", headers=admin_hdr, json={
@@ -392,7 +392,7 @@ async def test_a_bu_admin_can_own_the_project_they_create(org, _capture_email):
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
 
     admin_hdr = await _as_themselves(admin_id, t["org"])
     created = c.post("/projects", headers=admin_hdr, json={
@@ -416,7 +416,7 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
     admin_hdr = await _as_themselves(admin_id, t["org"])
 
     joined = c.post("/projects", headers=admin_hdr,
@@ -425,7 +425,7 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
                    json={"name": "Fraud Engine", "workspaceId": unit}).json()["id"]
 
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["userId"]
+    contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["identityId"]
 
     # Staffed onto one project by its roster.
     added = c.post(f"/projects/{joined}/members", headers=admin_hdr,
@@ -479,13 +479,13 @@ async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_
     c = _client()
     unit = _create_unit(c, t, "Payments")
     admin_id = _onboard(c, t, f"bu-{_uuid.uuid4().hex[:6]}@e2ebank.com",
-                        "bu_admin", unit).json()["userId"]
+                        "bu_admin", unit).json()["identityId"]
     admin_hdr = await _as_themselves(admin_id, t["org"])
 
     seed = c.post("/projects", headers=admin_hdr,
                   json={"name": "Seed", "workspaceId": unit}).json()["id"]
     pa_email = f"pa-{_uuid.uuid4().hex[:6]}@e2ebank.com"
-    pa_id = _onboard(c, t, pa_email, "contributor", unit).json()["userId"]
+    pa_id = _onboard(c, t, pa_email, "contributor", unit).json()["identityId"]
     c.post(f"/projects/{seed}/members", headers=admin_hdr,
            json={"email": pa_email, "roleName": "project_admin"})
 

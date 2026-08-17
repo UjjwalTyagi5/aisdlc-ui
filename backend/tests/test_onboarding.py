@@ -64,11 +64,20 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
     c = TestClient(process_api.app)
     email = f"amara-{_uuid.uuid4().hex[:6]}@abcbank.com"
 
+    # The unit needs an admin for there to be anybody to hand the decision TO. The
+    # notification addresses a ROLE, so emitting it into a unit with nobody in that role
+    # puts an obligation on no one — which the endpoint now reports as
+    # `notifiedBusinessUnitAdmin: false` rather than pretending somebody was told.
+    from shared.authz.grant import grant_role
+    await grant_role(f"buadmin-{_uuid.uuid4()}", org["bu"], "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+
     r = c.post("/onboarding", headers=_admin(org),
                json={"email": email, "role": "contributor", "workspaceId": org["bu"]})
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["created"] is True
+    assert body["notifiedBusinessUnitAdmin"] is True
     assert body["roleRequestId"], "the handover request is the point of the flow"
 
     # The account exists and is bound to the unit.
@@ -79,7 +88,7 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
     async with get_db_session_for_tenant(org["org"]) as s:
         binding = (await s.execute(
             text("SELECT role_name, scope_kind FROM role_bindings WHERE user_id = :u"),
-            {"u": body["userId"]},
+            {"u": body["identityId"]},
         )).first()
         assert (binding.role_name, binding.scope_kind) == ("contributor", "business_unit")
 
@@ -87,7 +96,7 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
         req = await governance.get_request(s, body["roleRequestId"])
         assert req["type"] == "role_assignment"
         assert req["currentApproverRole"] == "bu_admin"
-        assert req["targetRef"] == body["userId"]
+        assert req["targetRef"] == body["identityId"]
 
         # Who is also told about it.
         bell = await notifications.list_for(s, user_id="whoever", role="bu_admin")
@@ -156,7 +165,7 @@ async def test_re_onboarding_an_existing_person_places_them_rather_than_failing(
     assert second.status_code == 201, second.text
     # Same person, and the caller can say "added to Payments" rather than "invited".
     assert second.json()["created"] is False
-    assert second.json()["userId"] == first.json()["userId"]
+    assert second.json()["identityId"] == first.json()["identityId"]
 
 
 @pytest.mark.asyncio

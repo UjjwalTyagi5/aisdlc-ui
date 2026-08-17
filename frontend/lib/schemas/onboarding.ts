@@ -41,5 +41,21 @@ export const OnboardingResult = z.object({
    *  them — false when the unit has no admin appointed yet, which the caller
    *  surfaces rather than silently dropping. */
   notifiedBusinessUnitAdmin: z.boolean(),
+  /**
+   * Whether the set-password email actually left the building.
+   *
+   * False in two very different situations, and the caller must say so either way:
+   * the person already had an account (no link is issued, and they already have a
+   * password), or SMTP is not configured — in which case a NEW account exists that
+   * nobody can sign into, because the link is the only way to a first password.
+   *
+   * Optional so an older backend that predates it still validates.
+   */
+  invited: z.boolean().optional(),
+  /** False when the person already existed and was simply placed somewhere new. */
+  created: z.boolean().optional(),
+  /** The `role_assignment` request now sitting with the unit's admin. Null for a
+   *  Business Unit Admin, who was given their job by this act. */
+  roleRequestId: z.string().nullable().optional(),
 });
 export type OnboardingResult = z.infer<typeof OnboardingResult>;
