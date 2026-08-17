@@ -10,8 +10,10 @@ import type { ProjectCreateInput } from "@/lib/schemas/project";
  * backend's job badly: `canReadProject` re-implemented access-scope in the
  * browser tier against an in-memory array, while the real filter is row-level
  * security keyed on the tenant GUC, and `canCreateProject` guarded a POST the
- * backend already gates on `workspace:manage`. A check that runs in front of
- * the real check can only drift from it.
+ * backend already gates on `project:create`. A check that runs in front of
+ * the real check can only drift from it — and it had: the backend asked for
+ * `workspace:manage`, which a Project Admin does not hold, so the button
+ * `canCreateProject` showed them led to a 403.
  *
  * Query params are renamed rather than passed through: the frontend speaks
  * `pageSize`, FastAPI speaks `page_size`. Forwarding verbatim silently gave the

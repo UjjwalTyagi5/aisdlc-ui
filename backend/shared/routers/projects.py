@@ -187,7 +187,18 @@ async def get_project(
     "",
     response_model=ProjectOut,
     status_code=201,
-    dependencies=[Depends(require_permission("workspace:manage"))],
+    # `project:create`, not `workspace:manage`. The two are not the same authority:
+    # administering a business unit is the Org Admin's grant to a unit's admin, while
+    # creating a project inside a unit is the unit's own act. `workspace:manage` is held
+    # by bu_admin alone, so a Project Admin — who holds `project:create` and whom
+    # `canCreateProject` shows the "New project" button to — got a 403 on submit.
+    #
+    # Pure widening: every holder of `workspace:manage` (bu_admin) also holds
+    # `project:create`, so nobody loses the ability to create.
+    #
+    # Archive/restore/patch below deliberately KEEP `workspace:manage`. Creating a
+    # project is a delivery act; removing one is unit administration.
+    dependencies=[Depends(require_permission("project:create"))],
 )
 async def create_project(
     body: ProjectCreateIn,
