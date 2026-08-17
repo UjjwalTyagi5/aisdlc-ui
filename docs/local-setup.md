@@ -40,8 +40,10 @@ docker compose up -d redis
 
 ```powershell
 # Only when rebuilding from scratch — this destroys everything.
-psql -h localhost -p 5432 -U postgres -c "DROP DATABASE IF EXISTS sdlc_product;"
-psql -h localhost -p 5432 -U postgres -c "CREATE DATABASE sdlc_product;"
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -p 5432 -U postgres `
+    -c "DROP DATABASE IF EXISTS sdlc_product;"
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -p 5432 -U postgres `
+    -c "CREATE DATABASE sdlc_product;"
 
 cd backend
 uv run alembic upgrade head
@@ -49,58 +51,76 @@ uv run alembic upgrade head
 
 Skip the two `psql` lines to migrate an existing database in place.
 
-## 3. Grants — the step that is not in the repo
+> `psql` is not on PATH after a default Windows install — hence the full path. Adjust
+> `16` to your major version. Creating the database is the one step with no Python
+> equivalent here; everything after it runs through `uv`.
 
-Alembic runs as `postgres`, so every table is owned by `postgres` and `sdlc_app` holds
-nothing. Without this the API dies at startup with
-`InsufficientPrivilegeError: permission denied for table users`.
-
-```sql
-GRANT USAGE ON SCHEMA public TO sdlc_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sdlc_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sdlc_app;
-
--- Without these, the NEXT migration creates ungranted tables and the failure returns.
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sdlc_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO sdlc_app;
-
--- NOT OPTIONAL, and it must come AFTER the blanket grant above.
-REVOKE UPDATE, DELETE ON audit_events FROM sdlc_app;
-REVOKE UPDATE, DELETE ON governance_request_events FROM sdlc_app;
-```
-
-Run it with:
+Check it landed — a migration whose transaction rolls back still logs
+`Running upgrade …` on the way in, so the log alone does not prove anything:
 
 ```powershell
-psql -h localhost -p 5432 -U postgres -d sdlc_product -f path\to\the\sql
+uv run alembic current    # must print the same revision as `uv run alembic heads`
 ```
 
-### Why the two REVOKEs matter
+## 3. Grants for the app role
+
+```powershell
+cd backend
+uv run python -m scripts.grant_app_role
+```
+
+**No psql needed** — it uses the virtualenv you already have for alembic. Idempotent, so
+re-run it any time; you *must* re-run it after any `alembic upgrade` that creates tables.
+
+Expected output:
+
+```
+applying grants to sdlc_product on localhost:5432 as postgres
+  7 statement(s) applied
+  every table is readable by sdlc_app
+  audit_events is append-only (no UPDATE, no DELETE)
+  governance_request_events is append-only (no UPDATE, no DELETE)
+
+grants applied and verified
+```
+
+Skip this and the API dies at startup with
+`InsufficientPrivilegeError: permission denied for table users`.
+
+### Why it is a script and not a migration
+
+Alembic connects as `postgres`, so everything it creates is owned by `postgres` and
+`sdlc_app` gets nothing. A migration could grant, but grants must be re-asserted whenever
+the schema changes and a migration only ever runs once. `scripts/grant_app_role.sql` is
+the statements; `scripts/grant_app_role.py` applies them and then checks its own work.
+
+`sdlc_app` deliberately stays non-superuser and `NOBYPASSRLS`: `FORCE ROW LEVEL SECURITY`
+is only a real tenant boundary against a role that cannot step around it.
+
+### Why the script verifies, and why the two REVOKEs matter
 
 `audit_events` is append-only **by privilege**, not by trigger — migration
-`0005_audit_append_only` revokes UPDATE and DELETE from the app role precisely so that
-even a SQL-injection foothold running as `sdlc_app` cannot rewrite history it is not
-granted to rewrite. `GRANT … ON ALL TABLES` hands those rights straight back.
+`0005_audit_append_only` revokes UPDATE and DELETE from the app role so that even a
+SQL-injection foothold running as `sdlc_app` cannot rewrite history it is not granted to
+rewrite. The `GRANT … ON ALL TABLES` above hands those rights straight back, which is why
+the REVOKEs come last in the SQL.
 
-Nothing fails when you forget. The audit trail simply stops being evidence. Verify
-rather than assume:
+**Nothing fails when they are missing.** The audit trail simply stops being evidence.
+That is the whole reason the script asserts the result instead of trusting it, and it
+exits non-zero if either table is writable.
 
-```sql
-SELECT tablename,
-       has_table_privilege('sdlc_app','public.'||tablename,'UPDATE') AS upd,
-       has_table_privilege('sdlc_app','public.'||tablename,'DELETE') AS del
-FROM pg_tables
-WHERE schemaname='public'
-  AND tablename IN ('audit_events','governance_request_events');
--- both columns must be false
+### If you prefer psql
 
-SELECT tablename FROM pg_tables
-WHERE schemaname='public'
-  AND NOT has_table_privilege('sdlc_app','public.'||tablename,'SELECT');
--- must return zero rows
+`psql` ships with PostgreSQL but is **not added to PATH** by the Windows installer, which
+is why `psql : The term 'psql' is not recognized` is the usual first result. Call it by
+full path, or add `C:\Program Files\PostgreSQL\16\bin` to PATH:
+
+```powershell
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -p 5432 -U postgres `
+    -d sdlc_product -f scripts\grant_app_role.sql
 ```
+
+That applies the same statements but does **not** verify them — prefer the Python script.
 
 ## 4. Backend
 
@@ -156,10 +176,20 @@ gitignored and overrides the tracked `.env`, which stays in mock mode — **dele
 
 ## Troubleshooting
 
+### `psql : The term 'psql' is not recognized`
+
+The Windows PostgreSQL installer does not add `psql` to PATH. Nothing is broken.
+
+Only two commands in this document need it — creating and dropping the database — and
+both are in step 2 with the full path. Everything else runs through `uv`, including the
+grants: `uv run python -m scripts.grant_app_role`. To have `psql` generally, add
+`C:\Program Files\PostgreSQL\16\bin` to PATH (adjust the major version).
+
 ### `InsufficientPrivilegeError: permission denied for table users`
 
 Step 3 was skipped, or a migration created tables after it ran without
-`ALTER DEFAULT PRIVILEGES` being in place. Re-run step 3.
+`ALTER DEFAULT PRIVILEGES` being in place. Re-run `uv run python -m scripts.grant_app_role`
+— it is idempotent and reports what it verified.
 
 ### `RbacCatalogDriftError: … Refusing to start`
 
@@ -212,16 +242,23 @@ Legitimate when no provider is onboarded. If one *is* onboarded, check
 ## Full rebuild, in order
 
 ```powershell
+$psql = "C:\Program Files\PostgreSQL\16\bin\psql.exe"   # not on PATH by default
+
 cd backend
 docker compose up -d redis
-psql -h localhost -p 5432 -U postgres -c "DROP DATABASE IF EXISTS sdlc_product;"
-psql -h localhost -p 5432 -U postgres -c "CREATE DATABASE sdlc_product;"
+& $psql -h localhost -p 5432 -U postgres -c "DROP DATABASE IF EXISTS sdlc_product;"
+& $psql -h localhost -p 5432 -U postgres -c "CREATE DATABASE sdlc_product;"
 uv run alembic upgrade head
-# apply the grants from step 3
+uv run alembic current                      # must match `uv run alembic heads`
+uv run python -m scripts.grant_app_role
 uv run uvicorn process_api:app --reload --port 8001   # leave running; creates the org
+
 # in a second terminal:
-cd backend; uv run python -m scripts.seed_dev_personas
-cd ..\frontend; npm run dev
+cd backend
+uv run python -m scripts.seed_dev_personas
+cd ..\frontend
+npm install
+npm run dev
 ```
 
 ---
