@@ -19,12 +19,22 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const apiMock = vi.fn(() => Promise.resolve({ options: [], default_offering_id: null }));
+const apiMock = vi.fn((_path: string, _opts?: unknown) =>
+  Promise.resolve({ options: [], default_offering_id: null }),
+);
 
 vi.mock("@/lib/api/client", () => ({
-  api: (path: string, opts?: unknown) => apiMock(path as never, opts as never),
+  api: (path: string, opts?: unknown) => apiMock(path, opts),
   ApiRequestError: class extends Error {},
 }));
+
+/** The path of the Nth call, asserted to exist so the tests fail loudly rather than
+ *  passing vacuously if `api` was never reached. */
+function calledPath(n = 0): string {
+  const call = apiMock.mock.calls[n];
+  expect(call, `expected api() call #${n}`).toBeDefined();
+  return call![0];
+}
 
 const { getModelOptions } = await import("@/lib/api/models");
 const { qk } = await import("@/lib/api/query-keys");
@@ -35,19 +45,19 @@ describe("getModelOptions", () => {
   it("sends the project so the backend can resolve its unit", async () => {
     await getModelOptions("proj-abc");
     expect(apiMock).toHaveBeenCalledTimes(1);
-    expect(apiMock.mock.calls[0][0]).toBe("/model/options?projectId=proj-abc");
+    expect(calledPath()).toBe("/model/options?projectId=proj-abc");
   });
 
   it("encodes a project id that needs it, rather than splicing it in raw", async () => {
     await getModelOptions("a/b c&d");
-    expect(apiMock.mock.calls[0][0]).toBe("/model/options?projectId=a%2Fb%20c%26d");
+    expect(calledPath()).toBe("/model/options?projectId=a%2Fb%20c%26d");
   });
 
   it("omits the parameter entirely when there is no project context", async () => {
     // Not the same as sending an empty one: `?projectId=` is a present-but-blank value
     // the backend would have to special-case.
     await getModelOptions();
-    expect(apiMock.mock.calls[0][0]).toBe("/model/options");
+    expect(calledPath()).toBe("/model/options");
   });
 });
 

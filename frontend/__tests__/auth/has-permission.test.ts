@@ -76,22 +76,40 @@ describe("approvePermissionForPhase", () => {
     );
   });
 
-  it("returns a never-granted safe-deny sentinel for 'review' (no backend approval permission)", () => {
-    const sentinel = approvePermissionForPhase("review");
-    expect(sentinel).toBe("artifact:approve_review");
-    // Fail-closed proof: no non-admin session can ever hold the sentinel.
-    const memberSession = buildSession([
-      "artifact:view",
-      "artifact:approve_requirements",
-      "artifact:approve_design",
-      "artifact:approve_development",
-      "artifact:approve_testing",
-      "artifact:approve_deployment",
-      "run:create",
-      "connector:manage",
-    ]);
-    expect(hasPermission(memberSession, sentinel)).toBe(false);
-    // ...but admin:* still passes it (wildcard semantics preserved).
-    expect(hasPermission(buildSession(["admin:*"]), sentinel)).toBe(true);
+  it("maps the three gates that used to fall through to the sentinel", () => {
+    // These asserted the sentinel, which encoded the belief that `_PHASE_PERMISSION`
+    // omitted them. It does not — it maps all eight stages, and the gate handler
+    // enforces them. The frontend hiding the approve control for exactly the three
+    // gates the backend also refused is what made the hole look like working software.
+    //
+    // Note the key asymmetry: the frontend Phase is `review`, the backend stage is
+    // `code_review`, and the permission string is the backend's.
+    expect(approvePermissionForPhase("review")).toBe("artifact:approve_code_review");
+    expect(approvePermissionForPhase("security")).toBe("artifact:approve_security");
+    expect(approvePermissionForPhase("documentation")).toBe(
+      "artifact:approve_documentation",
+    );
+  });
+
+  it("still returns a never-granted sentinel for phases with no backend gate", () => {
+    // `discovery`, `strategy`, `migration_mapping`, `validation` and `data_engineering`
+    // genuinely have no entry in `_PHASE_PERMISSION`. Fail-closed is the right answer
+    // for them, and pinning it here stops a future edit to the `default` case from
+    // silently granting something.
+    for (const phase of ["discovery", "strategy", "migration_mapping"]) {
+      const sentinel = approvePermissionForPhase(phase);
+      expect(sentinel).toBe("artifact:approve_review");
+      const memberSession = buildSession([
+        "artifact:view",
+        "artifact:approve_requirements",
+        "artifact:approve_code_review",
+        "artifact:approve_security",
+        "artifact:approve_documentation",
+        "run:create",
+      ]);
+      expect(hasPermission(memberSession, sentinel)).toBe(false);
+      // ...but admin:* still passes it (wildcard semantics preserved).
+      expect(hasPermission(buildSession(["admin:*"]), sentinel)).toBe(true);
+    }
   });
 });

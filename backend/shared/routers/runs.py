@@ -546,7 +546,12 @@ async def get_run_stage_file(
 @runs_router.post(
     "/{run_id}/cancel",
     response_model=RunOut,
-    dependencies=[Depends(require_permission("run:create"))],
+    # Stopping a run is not the same authority as starting one, and the role matrix
+    # already says so — `run:cancel` is granted to project_admin alone while
+    # `run:create` reaches every delivery role that raises work. Gating the stop on
+    # the start permission made the distinct permission decorative and let anyone who
+    # could begin a run end somebody else's.
+    dependencies=[Depends(require_permission("run:cancel"))],
 )
 async def cancel_run(
     run_id: str,

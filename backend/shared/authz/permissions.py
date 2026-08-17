@@ -90,6 +90,9 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "run:create", "run:view", "run:cancel",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
+        # Documentation's owner (AGENT_OWNER_ROLE.documentation) is project_admin, the
+        # fallback approver — its acceptance is automatic and no delivery role owns it.
+        "artifact:approve_documentation",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
     ],
@@ -106,6 +109,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_design",
         "artifact:approve_development",
+        # AGENT_OWNER_ROLE.review is architect, so the Code Review gate routes here —
+        # and _PHASE_PERMISSION demands this exact string. Missing, the gate was
+        # passable only via the admin:* wildcard.
+        "artifact:approve_code_review",
         "connector:view",
     ],
     "developer": [
@@ -126,6 +133,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "run:view",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
+        # Its own gate. has_permission is an exact membership test — the generic
+        # "approve" above does NOT imply this, which is why the Security Engineer
+        # could not sign off the Security stage.
+        "artifact:approve_security",
         "connector:view",
         "audit:view", "cost:view", "trace:view",
     ],

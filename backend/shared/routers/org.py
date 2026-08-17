@@ -106,6 +106,14 @@ async def get_org_settings(
 @org_router.patch(
     "/settings/sso",
     response_model=OrgSettingsOut,
+    # DELIBERATELY the view floor, with `is_org_wide()` in the body as the real gate.
+    #
+    # `settings:manage` looks like the obvious dependency here and is the wrong choice:
+    # `is_org_wide` already tests exactly `("admin:*", "settings:manage")`, so the
+    # permission IS enforced — just in-body — and adding the dependency changes nobody's
+    # access. What it does change is the refusal: `require_permission` raises a
+    # deliberately opaque "Forbidden", replacing the message below that names what the
+    # caller needs. Trading an explanatory 403 for an identical outcome is a net loss.
     dependencies=[Depends(require_permission("artifact:view"))],
 )
 async def patch_org_sso(

@@ -37,11 +37,22 @@ export function hasPermission(session: Session | null, perm: string): boolean {
  * plus the `deployment` entry that exists in `ALL_PERMISSIONS` (owned by `sre_lead`,
  * forward-compat for the future deployment phase per D-07).
  *
- * `review` has NO backend approval permission — `_PHASE_PERMISSION` omits it
- * and no role is ever granted an `artifact:approve_review`. Returning a
- * never-granted sentinel string keeps `hasPermission` fail-closed for this
- * phase (false for everyone except `admin:*`) without throwing or returning
- * a permission a non-admin could plausibly hold.
+ * ALL EIGHT GATED STAGES ARE MAPPED. This used to claim that `review` had no
+ * backend approval permission and send it — along with `security` and
+ * `documentation` — to the safe-deny sentinel. That was false:
+ * `_PHASE_PERMISSION` maps all eight, and the gate handler enforces them. The
+ * effect was that the approve control stayed hidden for exactly the three gates
+ * the backend also refused, so the two halves were wrong in the same direction
+ * and the hole read as working software. The approval queue filters on the
+ * `requiredPermission` the backend returns, so a Security Engineer's queue never
+ * showed a Security gate.
+ *
+ * NOTE THE KEY ASYMMETRY: the frontend `Phase` is `review`, the backend stage is
+ * `code_review`. The permission string is the backend's.
+ *
+ * The sentinel STAYS for the phases that genuinely have no backend gate —
+ * `discovery`, `strategy`, `migration_mapping`, `validation`, `data_engineering`.
+ * For those, a never-granted string is the correct fail-closed answer.
  */
 export function approvePermissionForPhase(phase: Phase | string): string {
   switch (phase) {
@@ -51,11 +62,16 @@ export function approvePermissionForPhase(phase: Phase | string): string {
       return "artifact:approve_design" satisfies Permission;
     case "development":
       return "artifact:approve_development" satisfies Permission;
+    case "review":
+      return "artifact:approve_code_review";
+    case "security":
+      return "artifact:approve_security";
     case "testing":
       return "artifact:approve_testing" satisfies Permission;
     case "deployment":
       return "artifact:approve_deployment" satisfies Permission;
-    case "review":
+    case "documentation":
+      return "artifact:approve_documentation";
     default:
       // SAFE-DENY sentinel: not in backend ALL_PERMISSIONS / _PHASE_PERMISSION,
       // so no non-admin role can ever hold it — hasPermission stays fail-closed.
