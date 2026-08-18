@@ -9,9 +9,11 @@ what it was allowed. It reads model_providers/model_offerings (owned by model_co
 but never writes them.
 
 RBAC note: every endpoint that calls into this module is gated by model:manage or
-run:create at the router (see shared/routers/model.py) — there is no per-workspace
-"is this caller really this BU's admin" check here. That's a known, accepted gap; see
-the design spec §1 and §8. Marked inline with # TODO(scoped-rbac).
+run:create at the router (see shared/routers/model.py), AND — since scoped RBAC
+(shared/authz/can_perform.py) landed — by a resource-scoped can_perform check at the
+router for the BU/project routes (_require_scoped in model.py), closing the gap the
+design spec §1/§8 originally flagged. This module itself still performs no scope
+check; that responsibility stays at the router, one layer up.
 """
 from __future__ import annotations
 
@@ -26,6 +28,12 @@ from shared.db import get_db_session_for_tenant
 class NotAllowedForUnitError(Exception):
     """A project selection names an (provider, model_id, credential_id) the project's
     Business Unit was not granted."""
+
+
+class ProjectKeyNotAllowedError(Exception):
+    """A project tried to onboard its own key for a (provider, model_id) its Business
+    Unit hasn't opted into project-level keys for (PRD §371/§1640 — 'only if the
+    Business Unit allows it'), or for a model the BU never made reachable at all."""
 
 
 def _grant_reaches(visibility: str, business_unit_ids: list[str], workspace_id: str) -> bool:
@@ -104,26 +112,78 @@ def _json_dumps(value) -> str:
     return json.dumps(value)
 
 
+async def get_bu_key_policy(tenant_id: str, workspace_id: str) -> dict[tuple[str, str], bool]:
+    """(provider, model_id) -> whether this BU's projects may bring their own key for
+    it. Missing entries default to False (PRD §371: off unless the BU explicitly
+    allows it) — this table only ever stores the models someone has actually toggled.
+
+    workspace_id is compared against a UUID column: a malformed value (mirrors
+    get_availability's own local_rows guard) must not crash callers like
+    get_bu_allowed that tolerate a bad id by returning "nothing BU-specific" rather
+    than raising."""
+    if not _is_valid_uuid(workspace_id):
+        return {}
+    async with get_db_session_for_tenant(tenant_id) as s:
+        rows = (await s.execute(
+            text("SELECT provider, model_id, allow_project_key FROM bu_model_key_policy "
+                 "WHERE tenant_id = :t AND workspace_id = :w"),
+            {"t": tenant_id, "w": workspace_id},
+        )).fetchall()
+    return {(r.provider, r.model_id): bool(r.allow_project_key) for r in rows}
+
+
+async def set_bu_key_policy(
+    tenant_id: str, workspace_id: str, entries: list[dict], updated_by: str,
+) -> dict[tuple[str, str], bool]:
+    """Replace this BU's (provider, model_id) -> allow_project_key policy.
+    `entries`: [{provider, model_id, allow_project_key}, ...] — only entries with
+    allow_project_key=True need to be sent; anything omitted defaults back to False
+    (full-replace, matching set_bu_grants' contract)."""
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(
+            text("DELETE FROM bu_model_key_policy WHERE tenant_id = :t AND workspace_id = :w"),
+            {"t": tenant_id, "w": workspace_id},
+        )
+        for e in entries:
+            if not e.get("allow_project_key"):
+                continue
+            await s.execute(
+                text(
+                    "INSERT INTO bu_model_key_policy "
+                    "(id, tenant_id, workspace_id, provider, model_id, allow_project_key, updated_by) "
+                    "VALUES (:id, :t, :w, :p, :m, true, :by)"
+                ),
+                {"id": str(_uuid.uuid4()), "t": tenant_id, "w": workspace_id,
+                 "p": e["provider"], "m": e["model_id"], "by": updated_by},
+            )
+    return await get_bu_key_policy(tenant_id, workspace_id)
+
+
 async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
     grants = await get_org_grants(tenant_id)
+    policy = await get_bu_key_policy(tenant_id, workspace_id)
     return [
         {
             "provider": g["provider"], "model_id": g["model_id"],
             "credential_id": g["credential_id"], "credential_name": g["credential_name"],
             "visibility": g["visibility"],
+            "allow_project_key": policy.get((g["provider"], g["model_id"]), False),
         }
         for g in grants
         if _grant_reaches(g["visibility"], g["business_unit_ids"], workspace_id)
     ]
 
 
-async def set_bu_grants(tenant_id: str, workspace_id: str, entries: list[dict]) -> list[dict]:
+async def set_bu_grants(
+    tenant_id: str, workspace_id: str, entries: list[dict], updated_by: str = "system",
+) -> list[dict]:
     """Org Admin's per-unit control (spec §4): only moves `specific`-visibility grants for
     this unit. Implemented as: for each entry, ensure a `specific` grant naming this
     workspace exists; any EXISTING specific grant naming this workspace that is not in
     `entries` has this workspace removed from its business_unit_ids. Global grants are
     untouched — they already reach every unit and cannot be edited per-unit.
-    # TODO(scoped-rbac): should also verify the caller actually administers `workspace_id`.
+    The caller actually administering `workspace_id` is verified one layer up, at the
+    router (shared/routers/model.py's _require_scoped, via can_perform).
     """
     wanted = {_entry_key(e) for e in entries}
     async with get_db_session_for_tenant(tenant_id) as s:
@@ -184,6 +244,7 @@ async def set_bu_grants(tenant_id: str, workspace_id: str, entries: list[dict]) 
                         "cred": e.get("credential_id"), "bus": _json_dumps([str(workspace_id)]),
                     },
                 )
+    await set_bu_key_policy(tenant_id, workspace_id, entries, updated_by)
     return await get_bu_allowed(tenant_id, workspace_id)
 
 
@@ -283,16 +344,62 @@ async def get_project_selection(tenant_id: str, project_id: str) -> dict:
     }
 
 
+async def assert_project_key_allowed(tenant_id: str, project_id: str, provider: str, model_id: str) -> str:
+    """Raise ProjectKeyNotAllowedError unless this project's BU (a) has the model
+    reachable at all, AND (b) has explicitly opted into project-level keys for it.
+    Returns the project's workspace_id (the caller needs it too — resolved once).
+    """
+    workspace_id = await _project_workspace_id(tenant_id, project_id)
+    bu_allowed = await get_bu_allowed(tenant_id, workspace_id)
+    entry = next((e for e in bu_allowed if e["provider"] == provider and e["model_id"] == model_id), None)
+    if entry is None:
+        raise ProjectKeyNotAllowedError(
+            f"{provider}/{model_id} is not reachable by this project's business unit at all"
+        )
+    if not entry.get("allow_project_key"):
+        raise ProjectKeyNotAllowedError(
+            f"this project's business unit has not allowed project-level keys for {provider}/{model_id}"
+        )
+    return workspace_id
+
+
+async def _project_owned_offering_keys(tenant_id: str, project_id: str, selected: list[dict]) -> set[tuple]:
+    """(provider, model_id, credential_id) keys within `selected` whose credential_id
+    is a model_providers row this exact project owns — the second acceptance path
+    set_project_selection allows alongside the BU-shared allowed set."""
+    cred_ids = {e.get("credential_id") for e in selected if e.get("credential_id")}
+    if not cred_ids:
+        return set()
+    async with get_db_session_for_tenant(tenant_id) as s:
+        rows = (await s.execute(
+            text("SELECT mp.id AS provider_id, mp.provider, mo.model_id FROM model_providers mp "
+                 "JOIN model_offerings mo ON mo.provider_id = mp.id "
+                 "WHERE mp.tenant_id = :t AND mp.project_id = :p AND mp.id = ANY(:ids)"),
+            {"t": tenant_id, "p": project_id, "ids": list(cred_ids)},
+        )).fetchall()
+    return {(r.provider, r.model_id, str(r.provider_id)) for r in rows}
+
+
 async def set_project_selection(
     tenant_id: str, project_id: str, selected: list[dict], default_key: Optional[str],
 ) -> dict:
     workspace_id = await _project_workspace_id(tenant_id, project_id)
-    allowed_keys = {_entry_key(e) for e in await get_bu_allowed(tenant_id, workspace_id)}
+    bu_allowed = await get_bu_allowed(tenant_id, workspace_id)
+    allowed_keys = {_entry_key(e) for e in bu_allowed}
+    # A project may also select its OWN key (assert_project_key_allowed already gated
+    # creating it), for a model its BU made reachable under any credential — checked by
+    # model_id alone here since the BU's shared credential_id differs from the project's own.
+    reachable_models = {(e["provider"], e["model_id"]) for e in bu_allowed}
+    own_keys = await _project_owned_offering_keys(tenant_id, project_id, selected)
     for e in selected:
-        if _entry_key(e) not in allowed_keys:
-            raise NotAllowedForUnitError(
-                f"{e['provider']}/{e['model_id']} is not in this project's business unit's allowed set"
-            )
+        key = _entry_key(e)
+        if key in allowed_keys:
+            continue
+        if key in own_keys and (e["provider"], e["model_id"]) in reachable_models:
+            continue
+        raise NotAllowedForUnitError(
+            f"{e['provider']}/{e['model_id']} is not in this project's business unit's allowed set"
+        )
 
     async with get_db_session_for_tenant(tenant_id) as s:
         await s.execute(

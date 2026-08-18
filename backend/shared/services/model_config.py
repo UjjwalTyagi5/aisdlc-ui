@@ -64,7 +64,7 @@ def _secret_ref(provider_id: str) -> str:
 async def _provider_row(s, provider_id: str):
     return (await s.execute(
         text("SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-             "workspace_id, api_base, is_custom, "
+             "workspace_id, project_id, api_base, is_custom, max_cost_per_call_usd, "
              "approval_status, approval_decided_by, approval_decided_at, approval_reason "
              "FROM model_providers WHERE id = :id"),
         {"id": provider_id},
@@ -105,6 +105,8 @@ def _provider_dict(row, offerings: list[dict]) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "offerings": offerings,
         "workspace_id": str(row.workspace_id) if getattr(row, "workspace_id", None) else None,
+        "project_id": str(row.project_id) if getattr(row, "project_id", None) else None,
+        "max_cost_per_call_usd": _price(getattr(row, "max_cost_per_call_usd", None)),
         # Synthetic — there is no has_key column; a connection has a usable key iff
         # secret_ref is non-null (it's registered with no key, or the key was removed).
         "has_key": row.secret_ref is not None,
@@ -119,14 +121,20 @@ async def create_provider(
     tenant_id: str, *, provider: str, display_name: str, api_key: str | None,
     created_by: str, models: list[dict] | None = None,
     enabled_models: list[str] | None = None, api_base: str | None = None,
-    workspace_id: str | None = None,
+    workspace_id: str | None = None, max_cost_per_call_usd: float | None = None,
+    project_id: str | None = None,
 ) -> dict:
     """Create a provider connection + its enabled model offerings.
 
     `api_key` may be None/empty — the connection is registered with no secret (hasKey via
     a null secret_ref) so its models can be granted centrally while a Business Unit or
     project supplies its own key later (spec §2.3). `workspace_id` scopes the connection to
-    that BU (NULL = org-wide).
+    that BU (NULL = org-wide). `project_id` scopes it one level deeper still — a single
+    project's own key (PRD §371/§1640: only reachable via the /model/project-providers
+    router, which validates the project's BU actually allows it before calling this).
+    When `project_id` is set the caller (the router) MUST also pass the project's own
+    `workspace_id` — this function does not look it up, so a project-scoped connection is
+    never silently misfiled under the wrong BU.
 
     Pass either `models` (rich specs: {model_id, input_price_per_million?,
     output_price_per_million?}) or `enabled_models` (bare ids, back-compat).
@@ -145,6 +153,10 @@ async def create_provider(
         # instead, unlike the read path in list_providers where the same malformed id can
         # safely fall back to "show nothing BU-specific".
         raise ValueError(f"workspace_id is not a valid identifier: {workspace_id!r}")
+    if project_id and not _is_valid_uuid(project_id):
+        raise ValueError(f"project_id is not a valid identifier: {project_id!r}")
+    if project_id and not workspace_id:
+        raise ValueError("project_id requires workspace_id (the project's own BU)")
     if models is None:
         models = [{"model_id": m} for m in (enabled_models or [])]
     if not provider or not display_name:
@@ -184,10 +196,13 @@ async def create_provider(
         async with get_db_session_for_tenant(tenant_id) as s:
             await s.execute(
                 text("INSERT INTO model_providers "
-                     "(id, tenant_id, workspace_id, provider, display_name, secret_ref, api_base, is_custom, status, created_by) "
-                     "VALUES (:id, :t, :w, :p, :n, :ref, :ab, :cust, 'unverified', :by)"),
-                {"id": provider_id, "t": tenant_id, "w": workspace_id, "p": provider, "n": display_name,
-                 "ref": secret_ref, "ab": api_base, "cust": is_custom, "by": created_by},
+                     "(id, tenant_id, workspace_id, project_id, provider, display_name, secret_ref, api_base, is_custom, "
+                     "status, created_by, max_cost_per_call_usd) "
+                     "VALUES (:id, :t, :w, :proj, :p, :n, :ref, :ab, :cust, 'unverified', :by, :mcpc)"),
+                {"id": provider_id, "t": tenant_id, "w": workspace_id, "proj": project_id,
+                 "p": provider, "n": display_name,
+                 "ref": secret_ref, "ab": api_base, "cust": is_custom, "by": created_by,
+                 "mcpc": max_cost_per_call_usd},
             )
             for m in models:
                 await s.execute(
@@ -216,10 +231,14 @@ async def create_provider(
 
 async def list_providers(
     tenant_id: str, workspace_id: str | None = None, scope: str | None = None,
+    project_id: str | None = None,
 ) -> list[dict]:
     """scope="all" -> every connection (org-wide + every BU's) — the Org Admin's view.
     A bare workspace_id -> org-wide connections + that one BU's own — a BU/Project Admin's
     view. Neither -> org-wide only (legacy default, unchanged for existing callers).
+    `project_id` -> ONLY that project's own connections (a Project Admin's "your own
+    keys" list) — takes precedence over workspace_id/scope when given, since it's a
+    strictly narrower, self-contained view.
 
     workspace_id is compared against a UUID column: a caller passing a malformed value
     (e.g. a BU identity that hasn't been migrated to a real backend id yet) must not crash
@@ -228,13 +247,18 @@ async def list_providers(
     create_provider, where the same fallback would incorrectly widen a scoped onboarding to
     org-wide. Validated in Python (not via a failed-then-retried query) so a malformed id
     never leaves the session's transaction in an aborted state."""
+    if project_id and not _is_valid_uuid(project_id):
+        project_id = None
     if workspace_id and scope != "all" and not _is_valid_uuid(workspace_id):
         workspace_id = None
 
     async with get_db_session_for_tenant(tenant_id) as s:
-        if scope == "all":
+        if project_id:
+            where = "tenant_id = :t AND project_id = :proj"
+            params: dict = {"t": tenant_id, "proj": project_id}
+        elif scope == "all":
             where = "tenant_id = :t"
-            params: dict = {"t": tenant_id}
+            params = {"t": tenant_id}
         elif workspace_id:
             where = "tenant_id = :t AND (workspace_id IS NULL OR workspace_id = :w)"
             params = {"t": tenant_id, "w": workspace_id}
@@ -243,7 +267,7 @@ async def list_providers(
             params = {"t": tenant_id}
         prows = (await s.execute(
             text(f"SELECT id, provider, display_name, secret_ref, status, last_verified_at, created_at, "
-                 f"api_base, is_custom, workspace_id, "
+                 f"api_base, is_custom, workspace_id, project_id, max_cost_per_call_usd, "
                  f"approval_status, approval_decided_by, approval_decided_at, approval_reason "
                  f"FROM model_providers WHERE {where} ORDER BY created_at"),
             params,
@@ -322,11 +346,20 @@ async def verify_provider(tenant_id: str, provider_id: str) -> dict:
 async def update_provider(
     tenant_id: str, provider_id: str, *,
     display_name: str | None = None, enabled_models: list[str] | None = None,
+    max_cost_per_call_usd: float | None = "__unset__",  # type: ignore[assignment]
 ) -> dict:
+    """max_cost_per_call_usd defaults to a sentinel (not None) so "not provided" and
+    "explicitly clearing the cap" are distinguishable — None is a valid, meaningful
+    value (no per-call cap) that a caller must be able to set."""
     async with get_db_session_for_tenant(tenant_id) as s:
         row = await _provider_row(s, provider_id)
         if row is None:
             raise ProviderNotFoundError(provider_id)
+        if max_cost_per_call_usd != "__unset__":
+            await s.execute(
+                text("UPDATE model_providers SET max_cost_per_call_usd = :v, updated_at = now() WHERE id = :id"),
+                {"v": max_cost_per_call_usd, "id": provider_id},
+            )
         if display_name is not None:
             new_name = display_name.strip()
             if new_name and await _name_exists(s, tenant_id, new_name, exclude_id=provider_id):

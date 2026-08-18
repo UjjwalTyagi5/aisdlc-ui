@@ -143,6 +143,26 @@ async def enforce_cost(tenant_id: str, offering_id: str, cost_limit_usd: float |
         )
 
 
+def enforce_per_call_cost(estimated_cost_usd: float, max_cost_per_call_usd: float | None) -> None:
+    """Raise ModelCostLimitError when a single call's ESTIMATED cost would exceed the
+    provider's per-call cap (task #20/#22 remainder — PRD §376/§545: "max cost per
+    call" / "per-call limits", distinct from enforce_cost's monthly accumulation).
+
+    Synchronous and DB/Redis-free by design: the caller (model_call_wrapper.guarded_completion)
+    already has the estimate and the cap in hand from the resolved model — this is a pure
+    pre-flight check, not a metered read, so there is nothing to fail open/closed on.
+    No-op when the provider has no cap configured.
+    """
+    if not max_cost_per_call_usd or max_cost_per_call_usd <= 0:
+        return
+    if estimated_cost_usd > float(max_cost_per_call_usd):
+        raise ModelCostLimitError(
+            f"Estimated cost for this call (${estimated_cost_usd:.4f}) exceeds the "
+            f"provider's per-call limit (${max_cost_per_call_usd:.4f}). Raise the limit "
+            "in Model Providers, or shorten the prompt, to continue."
+        )
+
+
 _redis = None
 _redis_failed = False
 
