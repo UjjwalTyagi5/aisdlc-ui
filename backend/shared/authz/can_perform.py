@@ -48,6 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.permissions import has_permission
+from shared.authz.read_scope import grants_scope
 from shared.authz.role_permissions import effective_by_role
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,13 @@ async def _permissions_at(
               AND rb.scope_id = ANY(CAST(:ids AS uuid[]))
               AND rb.status = 'active'
               AND (rb.expires_at IS NULL OR rb.expires_at > :now)
+              -- A `contributor` binding is a placeholder, not a grant: it says this
+              -- person was put in a unit and is waiting to be told what they do
+              -- there. Excluded here as well as from the scope queries, because a
+              -- unit is an ANCESTOR of every project in it — so without this, the
+              -- placeholder satisfied a resource-level artifact:view on each of
+              -- them and the project list hid what a pasted URL still opened.
+              AND rb.role_name IS DISTINCT FROM 'contributor'
             """
         ),
         {"u": user_id, "ids": scope_ids, "now": now},
@@ -264,6 +272,12 @@ async def visible_project_ids(
         "rb.user_id = :u AND rb.status = 'active' "
         "AND (rb.expires_at IS NULL OR rb.expires_at > :now)"
     )
+    # `contributor` is a placeholder, not a job — the same rule `read_scope.grants_scope`
+    # states, and it has to be repeated here because this module deliberately keeps its
+    # own copy of the binding predicate. Without it, somebody onboarded into a unit and
+    # still waiting for a role saw every project in that unit on the Projects screen,
+    # which is the opposite of what the placeholder means.
+    scoped = f"{active} AND {grants_scope()}"
     params = {"u": user_id, "now": now, "t": tenant}
 
     org_scoped = (await session.execute(
@@ -281,15 +295,15 @@ async def visible_project_ids(
             f"""
             SELECT p.id FROM projects p
               JOIN role_bindings rb ON rb.scope_id = p.workspace_id
-             WHERE {active} AND rb.scope_kind = 'business_unit'
+             WHERE {scoped} AND rb.scope_kind = 'business_unit'
             UNION
             SELECT p.id FROM projects p
               JOIN role_bindings rb ON rb.scope_id = p.id
-             WHERE {active} AND rb.scope_kind = 'project'
+             WHERE {scoped} AND rb.scope_kind = 'project'
             UNION
             SELECT w.project_id FROM workstreams w
               JOIN role_bindings rb ON rb.scope_id = w.id
-             WHERE {active} AND rb.scope_kind = 'workstream'
+             WHERE {scoped} AND rb.scope_kind = 'workstream'
             """
         ),
         params,

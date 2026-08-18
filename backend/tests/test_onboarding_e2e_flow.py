@@ -427,6 +427,16 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
     contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["identityId"]
 
+    # BEFORE THE ADMIN ACTS, THEY SEE NOTHING. `contributor` is a placeholder — it
+    # records that the Org Admin put this person in the unit and that nobody has yet
+    # said what they do there — so it grants membership without reach. It used to map,
+    # like any other business-unit binding, to every project in the unit: somebody
+    # onboarded ten seconds ago and still waiting for a role could read the unit's
+    # whole project list.
+    waiting_hdr = await _as_themselves(contrib_id, t["org"])
+    assert c.get("/projects", headers=waiting_hdr).json()["items"] == []
+    assert c.get(f"/projects/{joined}", headers=waiting_hdr).status_code == 404
+
     # Staffed onto one project by its roster.
     added = c.post(f"/projects/{joined}/members", headers=admin_hdr,
                    json={"email": contrib_email, "roleName": "developer"})
@@ -439,12 +449,11 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
     assert joined in ids
     assert c.get(f"/projects/{joined}", headers=contrib_hdr).status_code == 200
 
-    # THE UNIT BINDING IS THE WIDER REACH, and that is the designed contract rather than
-    # a leak: `visible_project_ids` maps a business-unit binding to every project in that
-    # unit, so somebody placed in Payments can see Payments' project list. Being STAFFED
-    # onto a project is what gives them a role on it — the thing that changes is what
-    # they may do there, not whether they can see it exists.
-    assert other in ids
+    # AND ONLY IT. The role the admin assigned is bound at the PROJECT they assigned it
+    # on, so it reaches that project and stops. A sibling project in the same unit is
+    # not theirs to see.
+    assert other not in ids
+    assert c.get(f"/projects/{other}", headers=contrib_hdr).status_code == 404
 
     # Someone with no binding in this unit at all sees neither.
     outsider = f"out-{_uuid.uuid4()}"

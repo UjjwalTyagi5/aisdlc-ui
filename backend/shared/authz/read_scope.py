@@ -56,6 +56,27 @@ def live_binding(alias: str = "rb", *, user_param: str = "u") -> str:
 
 _LIVE = live_binding()
 
+# `contributor` is a PLACEHOLDER, NOT A JOB. It records that the Org Admin put this
+# person in a unit and that nobody has yet said what they do there — the frontend's
+# `awaitsBusinessUnitRole` reads it as exactly that, and ROLE_PERMISSIONS gives it the
+# read-only floor and nothing else.
+#
+# It must therefore grant no READ SCOPE either, and it did: the binding is written at
+# business_unit level, and every scope query below matched on scope_kind alone, so a
+# person onboarded ten seconds ago and waiting on a role could open every project in
+# the unit. The permission floor made that look harmless — they could only view — but
+# viewing every project in a unit IS the disclosure this module exists to prevent.
+#
+# `IS DISTINCT FROM` rather than `<>`: `role_name` is NULL for a custom-role binding,
+# and `NULL <> 'contributor'` is NULL, which would silently drop every custom role
+# from its own scope.
+def grants_scope(alias: str = "rb") -> str:
+    """The half that says this binding confers reach, not merely membership."""
+    return f"{alias}.role_name IS DISTINCT FROM 'contributor'"
+
+
+_SCOPED = f"{_LIVE} AND {grants_scope()}"
+
 # Holding either means the caller reads the whole organization. Mirrors the
 # frontend's resolveSessionScope(): org_admin holds admin:*, and settings:manage
 # is org-admin-only, so no other role reaches this branch.
@@ -89,11 +110,11 @@ async def allowed_workspace_ids(db: AsyncSession, request: Request) -> list[str]
         text(
             f"SELECT DISTINCT w.id FROM workspaces w "
             f"JOIN role_bindings rb ON rb.scope_id = w.id "
-            f"WHERE {_LIVE} AND rb.scope_kind = 'business_unit' "
+            f"WHERE {_SCOPED} AND rb.scope_kind = 'business_unit' "
             f"UNION "
             f"SELECT DISTINCT p.workspace_id FROM projects p "
             f"JOIN role_bindings rb ON rb.scope_id = p.id "
-            f"WHERE {_LIVE} AND rb.scope_kind = 'project'"
+            f"WHERE {_SCOPED} AND rb.scope_kind = 'project'"
         ),
         {"u": user_id, "now": datetime.now(tz=timezone.utc)},
     )).fetchall()
@@ -118,7 +139,7 @@ async def administered_workspace_ids(db: AsyncSession, request: Request) -> list
     rows = (await db.execute(
         text(
             f"SELECT DISTINCT rb.scope_id FROM role_bindings rb "
-            f"WHERE {_LIVE} AND rb.scope_kind = 'business_unit'"
+            f"WHERE {_SCOPED} AND rb.scope_kind = 'business_unit'"
         ),
         {"u": user_id, "now": datetime.now(tz=timezone.utc)},
     )).fetchall()

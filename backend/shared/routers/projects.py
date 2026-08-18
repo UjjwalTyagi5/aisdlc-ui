@@ -289,6 +289,34 @@ async def create_project(
             tenant_id=str(tenant_id), scope_kind="project",
             granted_by=getattr(request.state, "user_id", None),
         )
+    else:
+        # NOBODY WAS NAMED, SO THE CREATOR OWNS IT — but only when they cannot already
+        # reach it, which keeps this from quietly handing a delivery-tier binding to
+        # every Business Unit Admin who makes a project (their unit binding covers it,
+        # and an extra one would be noise on their /my-access page).
+        #
+        # A Project Admin is the case that needs this: their reach is the projects they
+        # are bound to, so without a binding they created a project and immediately
+        # could not open it. That was survivable only because a leftover `contributor`
+        # placeholder used to grant unit-wide reach — once that placeholder correctly
+        # grants nothing, the missing binding is the whole difference between a project
+        # and a 404.
+        creator = getattr(request.state, "user_id", None)
+        if creator and not await can_perform(
+            db,
+            user_id=creator,
+            permission="artifact:view",
+            tenant_id=str(tenant_id),
+            resource_kind="project",
+            resource_id=str(project.id),
+        ):
+            from shared.authz.grant import grant_role  # noqa: PLC0415 - import cycle
+
+            await grant_role(
+                creator, str(project.id), "project_admin",
+                tenant_id=str(tenant_id), scope_kind="project",
+                granted_by=creator,
+            )
 
     # DP6 warn: compute config-time capability-gap and log any shortfalls.
     # Best-effort only — never blocks project creation.
