@@ -206,7 +206,14 @@ async def list_integration_access(
     return out
 
 
-@integration_access_router.post("/integrations/access")
+# The three routes below GRANT and REVOKE integration access across business units.
+# The router-level dependency is `connector:view` — a READ permission — which stays for
+# the reads. A write announcing itself as a read is how the next reader concludes these
+# are safe. `_require_org_admin()` in each body remains the operative check.
+@integration_access_router.post(
+    "/integrations/access",
+    dependencies=[Depends(require_permission("connector:manage"))],
+)
 async def grant_integration_access(
     request: Request,
     kind: str,
@@ -261,7 +268,10 @@ async def grant_integration_access(
     return {"ok": True, "changed": True}
 
 
-@integration_access_router.delete("/integrations/access")
+@integration_access_router.delete(
+    "/integrations/access",
+    dependencies=[Depends(require_permission("connector:manage"))],
+)
 async def revoke_integration_access(
     request: Request,
     kind: str,
@@ -390,7 +400,10 @@ async def list_connector_grants(
     return [{"kind": k, "businessUnitIds": sorted(v)} for k, v in sorted(by_kind.items())]
 
 
-@integration_access_router.put("/connectors/grants")
+@integration_access_router.put(
+    "/connectors/grants",
+    dependencies=[Depends(require_permission("connector:manage"))],
+)
 async def set_connector_grants(
     request: Request,
     body: dict,

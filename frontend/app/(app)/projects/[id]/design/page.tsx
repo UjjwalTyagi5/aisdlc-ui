@@ -334,6 +334,7 @@ export default function DesignPage() {
             </div>
             <ModelSelector
               aria-label="Design agent model"
+              projectId={projectId}
               value={agentModel}
               onValueChange={setAgentModel}
             />

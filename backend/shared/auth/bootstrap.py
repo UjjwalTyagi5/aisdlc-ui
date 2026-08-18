@@ -44,27 +44,20 @@ async def get_default_org_id() -> str | None:
     return str(row.id) if row else None
 
 
-async def _ensure_default_business_unit(org_id: str) -> None:
-    """Give the org one business unit so project/BU-scoped screens have somewhere to land."""
-    async with get_db_session_superuser() as s:
-        existing = (await s.execute(
-            text("SELECT 1 FROM workspaces WHERE organization_id = :org LIMIT 1"),
-            {"org": org_id},
-        )).first()
-        if existing:
-            return
-        await s.execute(
-            text(
-                "INSERT INTO workspaces (id, organization_id, slug, display_name) "
-                "VALUES (:id, :org, 'default', 'Default Business Unit')"
-            ),
-            {"id": str(_uuid.uuid4()), "org": org_id},
-        )
-    logger.info("bootstrap: created default business unit for org %s", org_id)
-
-
 async def ensure_default_organization() -> str:
-    """Create the one organization + its default business unit if absent; return its id."""
+    """Create the one organization if absent; return its id.
+
+    NO DEFAULT BUSINESS UNIT IS SEEDED. Boot used to insert one named "Default
+    Business Unit" so BU-scoped screens "had somewhere to land", and that unit was
+    precisely the somewhere projects landed when nobody chose: it is the org's oldest
+    workspace, which is what the create path fell back to. The result was projects
+    filed under a unit no one created and no one owns.
+
+    A business unit is now only ever created deliberately, by an Org Admin. A fresh
+    organization therefore has zero units, and creating a project fails until one
+    exists — which is the honest state, and the one the Business Units screen exists
+    to resolve.
+    """
     org_id = await get_default_org_id()
     if org_id is None:
         async with get_db_session_superuser() as s:
@@ -85,7 +78,6 @@ async def ensure_default_organization() -> str:
             )
         logger.info("bootstrap: created organization %s (%s)", env.DEFAULT_ORG_SLUG, org_id)
 
-    await _ensure_default_business_unit(org_id)
     return org_id
 
 

@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.models.orm import Artifact, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
@@ -154,7 +155,13 @@ class ExportDocxIn(BaseModel):
     markdown: str = ""
 
 
-@artifacts_router.post("/artifacts/export-docx")
+@artifacts_router.post(
+    "/artifacts/export-docx",
+    # Data leaving the platform is what `artifact:export` names, and it was enforced
+    # nowhere while being granted to all nine delivery roles. Reading an artifact and
+    # exporting a copy of it are different acts; only the first is the view floor.
+    dependencies=[Depends(require_permission("artifact:export"))],
+)
 async def export_artifact_docx(body: ExportDocxIn, request: Request):
     """Render an artifact's markdown to a Word (.docx) file and stream it back.
 

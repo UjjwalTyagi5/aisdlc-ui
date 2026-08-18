@@ -233,6 +233,7 @@ export default function ProjectOverviewPage() {
             </span>
             <ModelSelector
               aria-label="Project agent model"
+              projectId={id}
               value={projectOffering}
               onValueChange={setProjectOffering}
             />

@@ -72,7 +72,11 @@ def _month_labels(months: int) -> list[str]:
 @spend_router.get(
     "/spend-series",
     response_model=SpendSeriesOut,
-    dependencies=[Depends(require_permission("artifact:view"))],
+    # Same spend data as GET /cost, which requires cost:view — this route asked only
+    # for the view floor, so the money figures had two different gates depending on
+    # which endpoint you reached them through. Its one consumer (SpendPanel) already
+    # renders behind a governance check, so nothing user-visible changes.
+    dependencies=[Depends(require_permission("cost:view"))],
 )
 async def spend_series(
     request: Request,

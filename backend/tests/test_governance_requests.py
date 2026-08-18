@@ -596,6 +596,65 @@ async def test_the_timeline_records_creation_and_routing(org):
 # ── over real HTTP, with no UI ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
+async def test_deciding_needs_the_governance_permission(org):
+    """The lane was authorised by ROLE-STRING MATCHING alone.
+
+    `decider_role == currentApproverRole` answers whose turn it is; nothing answered
+    whether the role takes governance decisions at all. A tenant-defined custom role
+    could therefore be neither granted nor denied one — the exact thing custom roles
+    exist to express.
+
+    Here the caller IS the right approver (bound project_admin, and the request is
+    waiting on project_admin) and is still refused, because the permission is what
+    they lack.
+    """
+    alice = f"alice-{_uuid.uuid4()}"
+    bob = f"bob-{_uuid.uuid4()}"
+    await _bind(org, bob, "project_admin", scope_kind="project", scope_id=org["project"])
+    req = await _raise(org, initiator=alice, role="developer")
+    assert req["currentApproverRole"] == "project_admin"
+
+    c = TestClient(process_api.app)
+    headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bob, tenant_id=org["org"], permissions=["artifact:view"],
+    )}
+    r = c.post(f"/governance-approvals/{req['id']}/decide", headers=headers,
+               json={"decision": "approve"})
+    assert r.status_code == 403, r.text
+
+    # With it, the same caller on the same request goes through — proving the refusal
+    # above was the permission and not the routing.
+    ok = {"Authorization": "Bearer " + create_access_token(
+        user_id=bob, tenant_id=org["org"],
+        permissions=["artifact:view", "governance:decide"],
+    )}
+    r2 = c.post(f"/governance-approvals/{req['id']}/decide", headers=ok,
+                json={"decision": "approve"})
+    assert r2.status_code == 200, r2.text
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_your_own_request_needs_no_permission(org):
+    """Cancel is the INITIATOR's act, and initiators are usually delivery roles.
+
+    Gating it on `governance:decide` would take away the ability to withdraw your own
+    request — which is why only /decide carries the permission, and /cancel and
+    /escalate deliberately do not.
+    """
+    alice = f"alice-{_uuid.uuid4()}"
+    req = await _raise(org, initiator=alice, role="developer")
+
+    c = TestClient(process_api.app)
+    headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=alice, tenant_id=org["org"], permissions=["artifact:view"],
+    )}
+    r = c.post(f"/governance-approvals/{req['id']}/cancel", headers=headers,
+               json={"reason": "sorted it myself"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_self_approval_blocked_over_http(org):
     alice = f"alice-{_uuid.uuid4()}"
     # A project_admin binding, so effective_platform_role puts the caller on a real
@@ -605,7 +664,13 @@ async def test_self_approval_blocked_over_http(org):
 
     c = TestClient(process_api.app)
     headers = {"Authorization": "Bearer " + create_access_token(
-        user_id=alice, tenant_id=org["org"], permissions=["artifact:view"]
+        user_id=alice, tenant_id=org["org"],
+        # A real project_admin's set for this lane: `governance:decide` says the role
+        # takes governance decisions at all. Without it the route refuses at the
+        # permission gate and the self-approval rule below is never reached — which
+        # would make this test pass for the wrong reason, exactly as the binding above
+        # guards against.
+        permissions=["artifact:view", "governance:decide"],
     )}
 
     created = c.post("/governance-approvals", headers=headers, json={

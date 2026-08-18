@@ -503,7 +503,11 @@ export function CreateProjectDialog({
                   <FormLabel className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
                     {BUSINESS_UNIT_LABEL}
                   </FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+                  <Select
+                    value={field.value}
+                    onValueChange={field.onChange}
+                    disabled={workspaces.length === 0}
+                  >
                     <FormControl>
                       <SelectTrigger className="border-line-soft bg-surface-1">
                         <SelectValue placeholder={`Select a ${BUSINESS_UNIT_LABEL.toLowerCase()}…`} />
@@ -517,6 +521,17 @@ export function CreateProjectDialog({
                       ))}
                     </SelectContent>
                   </Select>
+                  {/* Every project belongs to a unit somebody chose — there is no
+                      default to fall back to — so an organization with no units yet
+                      cannot create a project at all. Without this the picker is simply
+                      empty and the form dead-ends on "Choose a Business Unit", which
+                      reads as a broken dropdown rather than as work to do first. */}
+                  {workspaces.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No {BUSINESS_UNIT_LABEL.toLowerCase()} exists yet. Create one on the{" "}
+                      {BUSINESS_UNIT_LABEL} screen before adding a project.
+                    </p>
+                  ) : null}
                   <FormMessage />
                 </FormItem>
               )}

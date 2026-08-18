@@ -80,6 +80,8 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "project:create", "model:manage",
         "audit:view", "cost:view",
         "workspace:manage",
+        # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
+        "governance:decide",
     ],
     # Onboarded into a unit and holding nothing until that unit's admin assigns a real
     # role. artifact:view is the read-only floor — enough to sign in and see the shell
@@ -90,8 +92,14 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "run:create", "run:view", "run:cancel",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
+        # Documentation's owner (AGENT_OWNER_ROLE.documentation) is project_admin, the
+        # fallback approver — its acceptance is automatic and no delivery role owns it.
+        "artifact:approve_documentation",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
+        # Tier 1 of routing.REQUEST_ESCALATION_CHAIN — the first approver a request
+        # reaches, and the reason this is not a governance-tier-only permission.
+        "governance:decide",
     ],
     "ba": [
         "run:create", "run:view",
@@ -106,6 +114,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_design",
         "artifact:approve_development",
+        # AGENT_OWNER_ROLE.review is architect, so the Code Review gate routes here —
+        # and _PHASE_PERMISSION demands this exact string. Missing, the gate was
+        # passable only via the admin:* wildcard.
+        "artifact:approve_code_review",
         "connector:view",
     ],
     "developer": [
@@ -126,6 +138,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "run:view",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
+        # Its own gate. has_permission is an exact membership test — the generic
+        # "approve" above does NOT imply this, which is why the Security Engineer
+        # could not sign off the Security stage.
+        "artifact:approve_security",
         "connector:view",
         "audit:view", "cost:view", "trace:view",
     ],
@@ -203,6 +219,14 @@ _PERMISSION_CATALOG: list[str] = [
     "agent:invoke",
     # Connectors
     "connector:view", "connector:request", "connector:manage",
+    # Governance
+    # Deciding a governance request. NOT the same as being the person it is currently
+    # waiting on: this says the role takes governance decisions at all, and
+    # `routing.REQUEST_ESCALATION_CHAIN` still says whose turn it is. Without it the
+    # lane was authorised purely by role-string matching, so a custom role could be
+    # neither granted nor denied governance decisioning — the one thing custom roles
+    # exist to express.
+    "governance:decide",
     # Configuration
     "project:create", "model:manage", "settings:manage", "workspace:manage",
     # Observability

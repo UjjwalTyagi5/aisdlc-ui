@@ -41,9 +41,17 @@ def test_all_new_permissions_present():
 def test_security_engineer_is_oversight_not_author():
     perms = _ROLE_PERMISSIONS["security_engineer"]
     assert "audit:view" in perms and "cost:view" in perms and "trace:view" in perms
-    # Reviews and signs off via the generic "approve", but owns no phase gate
-    # and cannot start work of its own.
-    assert not any(p.startswith("artifact:approve_") for p in perms)
+    # Owns EXACTLY one phase gate — its own. This was `not any(startswith(...))`,
+    # which read as "oversight, not author" but actually asserted the bug: the role
+    # that AGENT_OWNER_ROLE says owns the Security stage could not sign it off,
+    # because has_permission is an exact test and the generic "approve" it holds
+    # does not imply the specific one. An exact set is the right shape here — it
+    # catches the missing grant AND an accidental extra one, which the negation
+    # could not.
+    assert {p for p in perms if p.startswith("artifact:approve_")} == {
+        "artifact:approve_security"
+    }
+    # Still not an author: it reviews and signs off, it does not start work.
     assert "run:create" not in perms
 
 

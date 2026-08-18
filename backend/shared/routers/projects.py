@@ -34,7 +34,7 @@ import logging
 from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.authz.effective_role import actor_display_name, effective_platform_role
-from shared.authz.workspace import active_workspace_for_request
+from shared.authz.workspace import assert_workspace_in_tenant
 from shared.db import get_db_session
 from shared.models.orm import Project, Run, Workspace
 from shared.services import governance_requests as governance_service
@@ -54,6 +54,14 @@ def _user_id(request: Request) -> str:
 
 class ProjectCreateIn(BaseModel):
     name: str
+    # Which Business Unit the project belongs to. REQUIRED — there is no default
+    # workspace and no fallback. Every project belongs to a unit somebody chose, so a
+    # create that does not name one is an error (422), not an invitation to guess.
+    #
+    # It was previously absent from this model entirely, which meant Pydantic dropped
+    # the field the create dialog was already sending and the project was attached to
+    # the ambient X-Workspace-Id selector instead.
+    workspaceId: str
     template: str = "blank"
     description: Optional[str] = None
     # Stage→MCP-server mapping {agent_id: [mcp_server_id, ...]} chosen at creation.
@@ -90,13 +98,23 @@ async def list_projects(
     search: Optional[str] = None,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Paginated projects: the active workspace, narrowed to what the caller may see."""
+    """Paginated projects across every unit the caller may see.
+
+    NOT narrowed to the active workspace any more. That filter predates
+    `visible_project_ids` and now actively contradicts it: an Organization Admin's
+    reach is every project in the tenant, but pinning the query to one workspace meant
+    the Projects screen — which GROUPS BY Business Unit — could never show more than
+    one group, and a project created in any other unit simply vanished from the list.
+
+    `visible_project_ids` already encodes the right reach per binding scope
+    (organization -> everything, business_unit -> that unit's projects, project -> the
+    one), including the union across several units for someone who administers more
+    than one. Two filters answering the same question is how they come to disagree.
+    """
     tenant_id = request.state.tenant_id
-    workspace_id = await active_workspace_for_request(request, str(tenant_id))
 
     stmt = select(Project).where(
         Project.tenant_id == tenant_id,
-        Project.workspace_id == workspace_id,
         Project.archived == archived,
     )
 
@@ -169,27 +187,43 @@ async def get_project(
     "",
     response_model=ProjectOut,
     status_code=201,
-    dependencies=[Depends(require_permission("workspace:manage"))],
+    # `project:create`, not `workspace:manage`. The two are not the same authority:
+    # administering a business unit is the Org Admin's grant to a unit's admin, while
+    # creating a project inside a unit is the unit's own act. `workspace:manage` is held
+    # by bu_admin alone, so a Project Admin — who holds `project:create` and whom
+    # `canCreateProject` shows the "New project" button to — got a 403 on submit.
+    #
+    # Pure widening: every holder of `workspace:manage` (bu_admin) also holds
+    # `project:create`, so nobody loses the ability to create.
+    #
+    # Archive/restore/patch below deliberately KEEP `workspace:manage`. Creating a
+    # project is a delivery act; removing one is unit administration.
+    dependencies=[Depends(require_permission("project:create"))],
 )
 async def create_project(
     body: ProjectCreateIn,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Create a new project for the requesting tenant.
+    """Create a new project in the Business Unit the caller named.
 
-    The project is attached to the tenant's workspace (organization_id ==
-    tenant_id; a "default" workspace is seeded per org). If none exists yet, a
-    default workspace is created — previously this used a hardcoded nil
-    workspace_id that was never seeded, causing a projects_workspace_id_fkey
-    violation on every create. tenant_id comes from the JWT.
+    EVERY PROJECT BELONGS TO A UNIT SOMEBODY CHOSE. There is no default workspace to
+    fall back to and no ambient selector consulted here: `workspaceId` is required, and
+    a unit this organization does not own is a 422.
+
+    Both halves of that used to be untrue. The field was not declared on
+    ProjectCreateIn, so Pydantic dropped the value the create dialog was already
+    sending, and the project was attached to whatever the X-Workspace-Id selector named
+    — or, when that header was absent (it usually is: nothing sets its cookie except
+    the create-BU dialog, since the BU switcher was removed from the chrome), to the
+    org's oldest workspace. That is how projects ended up filed under a "Default
+    Workspace" nobody picked.
     """
     tenant_id = request.state.tenant_id
     tenant_uuid = uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
 
-    # Attach to the ACTIVE workspace (X-Workspace-Id selector → org's first as
-    # fallback). Validated to belong to the tenant by active_workspace_for_request.
-    ws_id = await active_workspace_for_request(request, str(tenant_id))
+    ws_id = await assert_workspace_in_tenant(str(tenant_id), body.workspaceId)
+    request.state.workspace_id = ws_id
 
     # Default budget + hierarchical guard (0032): a new project defaults to the project
     # budget and must fit under its workspace's remaining budget, else 409 "Budget low"
