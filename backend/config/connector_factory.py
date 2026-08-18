@@ -31,8 +31,9 @@ def _load_connector_class(dotted_path: str):
     return getattr(module, class_name)
 
 
-async def get_connector_for_session(kind: str = "azure_devops", tenant_id: str = "") -> BaseConnector:
-    """Return a connector instance for the given kind.
+async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> BaseConnector:
+    """Construct the raw connector for `kind`. NOT access-gated — see the public
+    `get_connector_for_session` below, which is what callers must use.
 
     tenant_id must be a non-empty string for all connector kinds except health-probe
     calls which pass tenant_id='__health_probe__' by platform convention.
@@ -104,3 +105,53 @@ async def list_available_connectors() -> list[dict]:
             display_name = kind
         result.append({"kind": kind, "display_name": display_name})
     return result
+
+
+async def get_connector_for_session(
+    kind: str = "azure_devops",
+    tenant_id: str = "",
+    *,
+    project_id: str = "",
+    access: str | None = None,
+    unrestricted: bool = False,
+) -> BaseConnector:
+    """Return a connector for `kind`, bound to the access level it may use.
+
+    THE ONE PLACE ACCESS IS ENFORCED. Agents call `read_adapter` / `write_adapter`
+    from roughly twenty sites across eight modules, and every new agent adds more. A
+    permission check written at those sites is one somebody will forget, and the one
+    they forget is the one that matters. Every connector is obtained here, so the
+    level is bound here and every existing call site became governed without being
+    edited — see `config/connectors/scoped.ScopedConnector`.
+
+    Pass exactly one of:
+
+      project_id    resolve the effective level from the grant cascade. The agent
+                    runtime path: it has `SDLCWorkflowInput.project_id` and no session.
+      access        a level the caller already resolved. The request path, which has a
+                    session open and should not open a second one.
+      unrestricted  no gating. Health probes and org-level admin operations that act
+                    for no project. Explicit and named, because it is the fail-open
+                    door and it should read as one at the call site.
+
+    Passing none of them yields a connector that permits NOTHING — a caller who has
+    not established what they may do has not established that they may do anything.
+    The failure is then a clear `ConnectorAccessDenied` at first use rather than a
+    silent full grant.
+    """
+    raw = await _build_connector(kind=kind, tenant_id=tenant_id)
+
+    if unrestricted:
+        return raw
+
+    level = access
+    if level is None and project_id:
+        from shared.authz.connector_grants import resolve_effective_access
+
+        level = await resolve_effective_access(
+            tenant_id=tenant_id, project_id=project_id, target_ref=kind, kind="connector"
+        )
+
+    from config.connectors.scoped import ScopedConnector
+
+    return ScopedConnector(raw, level)

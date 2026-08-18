@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.connector_access import ACCESS_LEVELS, DEFAULT_ACCESS, is_access_level, narrow
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import administered_workspace_ids, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -210,6 +211,72 @@ async def list_integration_access(
 # The router-level dependency is `connector:view` — a READ permission — which stays for
 # the reads. A write announcing itself as a read is how the next reader concludes these
 # are safe. `_require_org_admin()` in each body remains the operative check.
+async def _reconcile_project_overrides(
+    db: AsyncSession,
+    tenant_id: str,
+    kind: str,
+    target_ref: str,
+    workspace_id: str,
+    unit_access: str,
+) -> int:
+    """Re-narrow every project override in this unit against the unit's new level.
+
+    THE CASE THIS EXISTS FOR: a unit granted read_write, a project narrowed to write,
+    and then the Org Admin drops the unit to read. `narrow(read, write)` is empty —
+    those two share no operation — so the project must end with no access rather than
+    keeping a write the organisation just withdrew. An override left untouched would
+    do exactly that, because the runtime reads the override as the project's answer.
+
+    Overrides that still fit are left alone: a project deliberately held at read under
+    a read_write unit stays at read when the unit changes to read. Rows whose
+    intersection is empty are DELETED rather than written as some third value, since
+    "no access" is the absence of a grant, not a level.
+    """
+    rows = (
+        await db.execute(
+            text(
+                "SELECT p.id AS project_id, a.access FROM project_connector_access a "
+                "  JOIN projects p ON p.id = a.project_id "
+                " WHERE a.tenant_id = CAST(:t AS uuid) AND a.kind = :k "
+                "   AND a.target_ref = :r AND p.workspace_id = CAST(:w AS uuid)"
+            ),
+            {"t": tenant_id, "k": kind, "r": target_ref, "w": workspace_id},
+        )
+    ).fetchall()
+
+    changed = 0
+    for row in rows:
+        still = narrow(unit_access, row.access)
+        if still == row.access:
+            continue
+        if still is None:
+            await db.execute(
+                text(
+                    "DELETE FROM project_connector_access "
+                    "WHERE tenant_id = CAST(:t AS uuid) AND project_id = :p "
+                    "  AND kind = :k AND target_ref = :r"
+                ),
+                {"t": tenant_id, "p": row.project_id, "k": kind, "r": target_ref},
+            )
+        else:
+            await db.execute(
+                text(
+                    "UPDATE project_connector_access SET access = :a "
+                    "WHERE tenant_id = CAST(:t AS uuid) AND project_id = :p "
+                    "  AND kind = :k AND target_ref = :r"
+                ),
+                {"t": tenant_id, "p": row.project_id, "k": kind, "r": target_ref, "a": still},
+            )
+        changed += 1
+
+    if changed:
+        logger.info(
+            "reconciled %d project override(s) for %s %s in unit %s -> %s",
+            changed, kind, target_ref, workspace_id, unit_access,
+        )
+    return changed
+
+
 @integration_access_router.post(
     "/integrations/access",
     dependencies=[Depends(require_permission("connector:manage"))],
@@ -220,9 +287,10 @@ async def grant_integration_access(
     id: str,
     workspaceId: Optional[str] = None,
     projectId: Optional[str] = None,
+    access: str = DEFAULT_ACCESS,
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """Give a Business Unit an integration.
+    """Give a Business Unit an integration, at a stated access level.
 
     BUSINESS UNIT LEVEL ONLY. Granting is how far the organisation's reach decision
     goes; whether one of that unit's projects switches the integration on is the
@@ -233,6 +301,17 @@ async def grant_integration_access(
     _require_org_admin(request)
     if kind not in ("connector", "mcp"):
         raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
+    # Rejected loudly rather than coerced to the default: a caller who sent a level
+    # meant something by it, and quietly substituting `read` would hand them a
+    # narrower grant than they think they made.
+    if not is_access_level(access):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "bad_access_level",
+                "message": f"access must be one of {', '.join(ACCESS_LEVELS)}.",
+            },
+        )
     if projectId and not workspaceId:
         raise HTTPException(
             status_code=422,
@@ -254,18 +333,31 @@ async def grant_integration_access(
 
     await db.execute(
         text(
-            "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id, granted_by) "
-            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by) "
-            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO NOTHING"
+            "INSERT INTO integration_grants "
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by, access) "
+            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by, :a) "
+            # UPDATE, not DO NOTHING: re-granting at a different level is how an Org
+            # Admin changes their mind, and DO NOTHING made that a silent no-op that
+            # looked like it had worked.
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+            "  SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by"
         ),
         {
             "t": tenant_id, "k": kind, "r": id, "w": workspaceId,
-            "by": getattr(request.state, "user_id", None),
+            "by": getattr(request.state, "user_id", None), "a": access,
         },
     )
+    # NARROWING THE UNIT NARROWS ITS PROJECTS. A project override that no longer
+    # shares an operation with the unit's new level would otherwise sit in the table
+    # granting something the organisation has just withdrawn. They are recomputed
+    # rather than deleted, so a project deliberately held at read under a read_write
+    # unit stays at read.
+    await _reconcile_project_overrides(db, tenant_id, kind, id, workspaceId, access)
     await db.flush()
-    logger.info("integration granted: %s %s -> unit %s", kind, id, workspaceId)
-    return {"ok": True, "changed": True}
+    logger.info(
+        "integration granted: %s %s -> unit %s (%s)", kind, id, workspaceId, access
+    )
+    return {"ok": True, "changed": True, "access": access}
 
 
 @integration_access_router.delete(
