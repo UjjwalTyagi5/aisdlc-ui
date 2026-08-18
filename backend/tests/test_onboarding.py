@@ -69,7 +69,20 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
     # puts an obligation on no one — which the endpoint now reports as
     # `notifiedBusinessUnitAdmin: false` rather than pretending somebody was told.
     from shared.authz.grant import grant_role
-    await grant_role(f"buadmin-{_uuid.uuid4()}", org["bu"], "bu_admin",
+    bu_admin = f"buadmin-{_uuid.uuid4()}"
+    await grant_role(bu_admin, org["bu"], "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+
+    # A second unit with its own admin, who must hear nothing about this. The
+    # notification names a role AND a unit; before it named only the role, and this
+    # person read the other unit's joiners.
+    other_bu, other_admin = str(_uuid.uuid4()), f"buadmin-{_uuid.uuid4()}"
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+    await grant_role(other_admin, other_bu, "bu_admin",
                      tenant_id=org["org"], scope_kind="business_unit")
 
     r = c.post("/onboarding", headers=_admin(org),
@@ -98,9 +111,10 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
         assert req["currentApproverRole"] == "bu_admin"
         assert req["targetRef"] == body["identityId"]
 
-        # Who is also told about it.
-        bell = await notifications.list_for(s, user_id="whoever", role="bu_admin")
+        # Who is also told about it — THIS unit's admin, and only theirs.
+        bell = await notifications.list_for(s, user_id=bu_admin, role="bu_admin")
         assert any(n["kind"] == "member_awaiting_role" for n in bell)
+        assert await notifications.list_for(s, user_id=other_admin, role="bu_admin") == []
 
 
 @pytest.mark.asyncio

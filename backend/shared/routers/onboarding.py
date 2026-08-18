@@ -269,6 +269,10 @@ async def onboard(
                 body=f"Placed in {workspace.display_name} and waiting on you.",
                 href="/users?awaiting=1",
                 recipient_role="bu_admin",
+                # THIS unit's admins, not every unit's. The person was placed here
+                # and it is this unit's admin who owes them a role.
+                recipient_scope_kind="business_unit",
+                recipient_scope_id=str(workspace.id),
             )
             notified_bu_admin = True
         else:

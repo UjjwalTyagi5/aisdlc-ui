@@ -96,6 +96,7 @@ import {
   canReadGovernanceApproval,
   canReadProject,
   filterByProject,
+  notificationViewer,
 } from "@/lib/mock/access-scope";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { canCreateProject } from "@/lib/auth/permissions";
@@ -488,7 +489,9 @@ export const handlers = [
     const session = sessionFromCookies(cookies);
     if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
     return HttpResponse.json(
-      listNotifications(scopeFromCookies(cookies).identityId, effectivePlatformRole(session)),
+      listNotifications(
+        notificationViewer(scopeFromCookies(cookies).identityId, effectivePlatformRole(session)),
+      ),
     );
   }),
   http.post("/api/notifications", async ({ cookies }) => {
@@ -497,8 +500,7 @@ export const handlers = [
     if (!session) return HttpResponse.json({ code: "unauthenticated" }, { status: 401 });
     return HttpResponse.json({
       marked: markNotificationsRead(
-        scopeFromCookies(cookies).identityId,
-        effectivePlatformRole(session),
+        notificationViewer(scopeFromCookies(cookies).identityId, effectivePlatformRole(session)),
       ),
     });
   }),
