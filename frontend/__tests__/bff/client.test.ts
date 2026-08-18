@@ -60,6 +60,7 @@ describe("bearerForRequest", () => {
         isMockAuth: true,
         AUTH_MODE: "mock",
         isAuth0: false,
+        isLocalAuth: false,
       }));
 
       const { mintBffToken } = await import("@/lib/bff/jwt");
@@ -77,6 +78,7 @@ describe("bearerForRequest", () => {
         isMockAuth: true,
         AUTH_MODE: "mock",
         isAuth0: false,
+        isLocalAuth: false,
       }));
 
       const { getAuth0 } = await import("@/lib/auth/auth0");
@@ -94,6 +96,7 @@ describe("bearerForRequest", () => {
         isMockAuth: false,
         AUTH_MODE: "auth0",
         isAuth0: true,
+        isLocalAuth: false,
       }));
 
       const { mintBffToken } = await import("@/lib/bff/jwt");
@@ -108,6 +111,49 @@ describe("bearerForRequest", () => {
     });
   });
 
+  describe("local mode (the path that used to mint from a forgeable cookie)", () => {
+    it("forwards the stored backend token and never mints", async () => {
+      vi.doMock("@/lib/auth/mode", () => ({
+        isOidcEnabled: false,
+        isMockAuth: false,
+        AUTH_MODE: "local",
+        isAuth0: false,
+        isLocalAuth: true,
+      }));
+      vi.doMock("next/headers", () => ({
+        cookies: async () => ({ get: () => ({ value: "backend-issued-token" }) }),
+      }));
+
+      const { mintBffToken } = await import("@/lib/bff/jwt");
+      const { bearerForRequest } = await import("@/lib/bff/client");
+
+      const token = await bearerForRequest(MOCK_SESSION);
+
+      expect(token).toBe("backend-issued-token");
+      // The whole point: the session's permissions never become a signed claim.
+      expect(mintBffToken).not.toHaveBeenCalled();
+    });
+
+    it("refuses the request when there is no stored token rather than minting one", async () => {
+      vi.doMock("@/lib/auth/mode", () => ({
+        isOidcEnabled: false,
+        isMockAuth: false,
+        AUTH_MODE: "local",
+        isAuth0: false,
+        isLocalAuth: true,
+      }));
+      vi.doMock("next/headers", () => ({
+        cookies: async () => ({ get: () => undefined }),
+      }));
+
+      const { mintBffToken } = await import("@/lib/bff/jwt");
+      const { bearerForRequest } = await import("@/lib/bff/client");
+
+      await expect(bearerForRequest(MOCK_SESSION)).rejects.toMatchObject({ status: 401 });
+      expect(mintBffToken).not.toHaveBeenCalled();
+    });
+  });
+
   describe("enterprise OIDC mode (isOidcEnabled=true, !isMockAuth)", () => {
     it("calls getAuth0().getAccessToken() and returns the Auth0 RS256 token", async () => {
       vi.doMock("@/lib/auth/mode", () => ({
@@ -115,6 +161,7 @@ describe("bearerForRequest", () => {
         isMockAuth: false,
         AUTH_MODE: "auth0",
         isAuth0: true,
+        isLocalAuth: false,
       }));
 
       const { getAuth0 } = await import("@/lib/auth/auth0");
@@ -133,6 +180,7 @@ describe("bearerForRequest", () => {
         isMockAuth: false,
         AUTH_MODE: "auth0",
         isAuth0: true,
+        isLocalAuth: false,
       }));
 
       const { mintBffToken } = await import("@/lib/bff/jwt");
@@ -150,6 +198,7 @@ describe("bearerForRequest", () => {
         isMockAuth: true,
         AUTH_MODE: "mock",
         isAuth0: false,
+        isLocalAuth: false,
       }));
 
       const { getAuth0 } = await import("@/lib/auth/auth0");

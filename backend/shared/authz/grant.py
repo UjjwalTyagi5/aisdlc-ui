@@ -33,6 +33,7 @@ from shared.authz.audit import (
     record_rbac_change,
 )
 from shared.authz.permissions import ALL_ROLES, ROLE_TIER
+from shared.authz.token_epoch import bump_user_epoch
 from shared.db import get_db_session_for_tenant
 
 logger = logging.getLogger(__name__)
@@ -50,17 +51,91 @@ class TierConflictError(Exception):
     """
 
 
+class UnitAlreadyAdministeredError(Exception):
+    """Raised when a second Business Unit Admin would be appointed to one unit.
+
+    A unit has exactly one admin. The role is not "somebody who can help run this unit",
+    it is who ANSWERS for it: they approve its role assignments, hold its budget, and are
+    the escalation target its governance requests route to. Two of them makes "the unit's
+    admin" ambiguous in every one of those sentences.
+
+    The cost is real and worth stating: if that person leaves, the unit has no admin until
+    an Organization Admin appoints one. That is the accepted trade — a gap somebody must
+    notice and fix beats a silent second decision-maker.
+    """
+
+
+async def _assert_single_bu_admin(
+    session, user_id: str, scope_kind: str, scope_id: str, role_name: str
+) -> None:
+    """Refuse a second Business Unit Admin for a unit that already has one.
+
+    Enforced HERE rather than at the routes because `grant.py` is the one write path into
+    `role_bindings` — onboarding, `/admin/assignments`, `/admin/members` and the project
+    roster all arrive through it, and a rule implemented per-route is a rule that holds
+    until somebody adds the fifth route.
+
+    Re-granting to the SAME person is a no-op, not a violation: `grant_role` is idempotent
+    and is called again to extend an expiry, so treating that as a conflict would break
+    renewal.
+
+    Liveness applies — an expired or deactivated incumbent is not administering anything,
+    so they must not block an appointment.
+    """
+    if role_name != "bu_admin" or scope_kind != "business_unit":
+        return
+
+    # `active_binding`, not `live_binding`: the question is who administers this UNIT,
+    # which is a question about a scope rather than about a person, so the user filter
+    # that `live_binding` carries would be exactly wrong here.
+    from shared.authz.read_scope import active_binding  # noqa: PLC0415 - import cycle
+
+    row = (
+        await session.execute(
+            text(
+                f"SELECT rb.user_id, u.email FROM role_bindings rb "
+                f"LEFT JOIN users u ON u.id = rb.user_id "
+                f"WHERE {active_binding()} "
+                f"  AND rb.scope_kind = 'business_unit' AND rb.scope_id = :scope_id "
+                f"  AND rb.role_name = 'bu_admin' AND rb.user_id <> :user_id "
+                f"LIMIT 1"
+            ),
+            {
+                "scope_id": scope_id, "user_id": user_id,
+                "now": datetime.now(tz=timezone.utc),
+            },
+        )
+    ).first()
+    if row is not None:
+        who = row.email or row.user_id
+        raise UnitAlreadyAdministeredError(
+            f"This business unit is already administered by {who}. A unit has exactly "
+            "one Business Unit Admin — remove the current one first, or choose a "
+            "different unit."
+        )
+
+
 async def _assert_no_tier_conflict(session, user_id: str, scope_kind: str, scope_id: str, tier: str | None) -> None:
     """Reject a grant that would mix governance and delivery within one scope."""
     if tier is None:
         return
+    # Liveness applies to the conflict too: a governance elevation that has lapsed is
+    # not a tier the person still holds, so it must not block granting them a delivery
+    # role. Otherwise a temporary elevation would leave a permanent footprint on what
+    # they can be given afterwards.
+    from shared.authz.read_scope import live_binding  # noqa: PLC0415 - import cycle
+
     rows = await session.execute(
         text(
-            "SELECT DISTINCT tier FROM role_bindings "
-            "WHERE user_id = :user_id AND scope_kind = :scope_kind AND scope_id = :scope_id "
-            "  AND tier IS NOT NULL AND status <> 'deactivated'"
+            f"SELECT DISTINCT tier FROM role_bindings rb "
+            f"WHERE {live_binding(user_param='user_id')} "
+            f"  AND rb.scope_kind = :scope_kind AND rb.scope_id = :scope_id "
+            f"  AND rb.tier IS NOT NULL"
         ),
-        {"user_id": user_id, "scope_kind": scope_kind, "scope_id": scope_id},
+        {
+            "user_id": user_id, "scope_kind": scope_kind, "scope_id": scope_id,
+            "now": datetime.now(tz=timezone.utc),
+        },
     )
     existing = {r[0] for r in rows}
     conflicting = existing - {tier}
@@ -139,6 +214,9 @@ async def grant_role(
         await _assert_no_tier_conflict(
             session, user_id, scope_kind, str(scope_uuid), effective_tier
         )
+        await _assert_single_bu_admin(
+            session, user_id, scope_kind, str(scope_uuid), role_name
+        )
         # (a) Upsert the User row if absent — User is GLOBAL (non-RLS, D-08).
         # Keeps email/external_id NULL — SCIM will populate them in 7.4.
         await session.execute(
@@ -202,6 +280,17 @@ async def grant_role(
                 "expires_at": expires_at.isoformat() if expires_at else None,
             },
         )
+
+    # NO EPOCH BUMP HERE, and that is the design rather than an omission. Granting only
+    # ever ADDS to what this user may do, so a token minted before it is stale in the
+    # harmless direction: under-privileged, and corrected at their next sign-in. Bumping
+    # would invalidate it for no security gain, and — because `iat` is second-granular
+    # and the epoch rounds up — would refuse a token minted in the same second as the
+    # grant, which is precisely the grant-then-sign-in sequence.
+    #
+    # Reductions are what must bite immediately, and they all go through `revoke_role`,
+    # the override writes, or the custom-role edits — each of which does bump. A role
+    # CHANGE is revoke-then-grant, so the revoke half covers it.
 
     logger.info(
         "grant_role: user=%s scope=%s:%s role=%s tier=%s tenant=%s (idempotent)",
@@ -280,6 +369,13 @@ async def revoke_role(
                 scope_id=str(scope_uuid),
                 role=role_name,
             )
+
+    # THE CASE THIS WHOLE MECHANISM EXISTS FOR. Deleting a binding used to change
+    # nothing until the holder's token lapsed — deleting an org_admin binding left the
+    # badge and the access intact, observed live. Bumped unconditionally, including when
+    # the delete was a no-op: an idempotent revoke of a role someone still holds via
+    # another binding should still re-resolve them.
+    await bump_user_epoch(str(tenant_id), user_id)
 
     logger.info(
         "revoke_role: user=%s scope=%s:%s role=%s tenant=%s (idempotent)",
@@ -409,6 +505,10 @@ async def grant_custom_role(
             role=str(role_uuid),
             extra={"custom_role_owner_scope": owner.scope_kind},
         )
+
+    # No bump, for the same reason as grant_role: assigning a custom role only widens
+    # this user's set. Editing or deleting the role itself is the reduction, and
+    # custom_roles.py bumps every holder there.
 
     logger.info(
         "grant_custom_role: user=%s scope=%s:%s custom_role=%s tenant=%s",

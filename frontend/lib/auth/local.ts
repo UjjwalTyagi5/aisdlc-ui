@@ -12,6 +12,13 @@ export interface LoginResponse {
   permissions: string[];
   /** Organization display name. Optional — older backends do not send it. */
   tenant_name?: string | null;
+  /**
+   * The catalogued role the server resolved from this person's BINDINGS.
+   * Optional — absent from older backends, and null for an account with none.
+   * The authority is the matching token claim (see `lib/auth/token.ts`); this
+   * mirrors it onto the display cookie so the shape is complete.
+   */
+  platform_role?: string | null;
 }
 
 /**
@@ -23,7 +30,7 @@ export interface LoginResponse {
  * the coarse role is presentation only, and every real gate reads `permissions`,
  * which is empty until an admin grants a role.
  */
-function deriveRole(permissions: string[]): Role {
+export function deriveRole(permissions: string[]): Role {
   if (permissions.includes("admin:*")) {
     return "admin";
   }
@@ -68,5 +75,6 @@ export function buildLocalSession(resp: LoginResponse, email: string): Session {
     mode: "local",
     tier: resp.tier,
     permissions: resp.permissions,
+    ...(resp.platform_role ? { platformRole: resp.platform_role } : {}),
   };
 }

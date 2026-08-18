@@ -24,7 +24,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.audit import RBAC_ROLE_REVOKED, record_rbac_change
 from shared.authz.dependency import require_permission
+from shared.authz.project_scope import assert_can_administer_project
+from shared.authz.token_epoch import bump_user_epoch
 from shared.authz.read_scope import administered_workspace_ids, is_org_wide
 from shared.db import get_db_session
 
@@ -64,24 +67,12 @@ async def _project_or_404(db: AsyncSession, tenant_id: str, project_id: str) -> 
 
 
 async def _assert_can_write_project(db: AsyncSession, request: Request, project: Any) -> None:
-    """Org-wide, the parent unit's admin, or this project's own admin. 404 otherwise —
-    a project the caller cannot reach is not confirmed to exist by the error code."""
-    if is_org_wide(request):
-        return
-    administered = await administered_workspace_ids(db, request)
-    if administered is not None and str(project.workspace_id) in administered:
-        return
-    own = (
-        await db.execute(
-            text(
-                "SELECT 1 FROM role_bindings WHERE user_id = :u AND scope_kind = 'project' "
-                "  AND scope_id = :p AND role_name = 'project_admin' AND status <> 'deactivated'"
-            ),
-            {"u": getattr(request.state, "user_id", "") or "", "p": project.id},
-        )
-    ).first()
-    if own is None:
-        raise HTTPException(status_code=404, detail="not found")
+    """Org-wide, the parent unit's admin, or this project's own admin.
+
+    Delegates to `shared.authz.project_scope` — see the note on the twin in
+    project_members.py for why this stopped being written out here.
+    """
+    await assert_can_administer_project(db, request, project)
 
 
 # ── agent access overrides ───────────────────────────────────────────────────
@@ -450,6 +441,19 @@ async def revoke_cross_bu_grant(
     )
     # The seat goes with the loan — leaving the binding would keep them working on a
     # project their own unit has taken them off.
+    #
+    # No rank check here, deliberately: this is the lending unit ending its OWN loan,
+    # and its authority comes from having made the loan rather than from outranking
+    # whatever role the borrowing project gave the person.
+    removed = (
+        await db.execute(
+            text(
+                "SELECT role_name FROM role_bindings WHERE user_id = :u "
+                "  AND scope_kind = 'project' AND scope_id = :p"
+            ),
+            {"u": body.identityId, "p": grant.project_id},
+        )
+    ).fetchall()
     await db.execute(
         text(
             "DELETE FROM role_bindings WHERE user_id = :u AND scope_kind = 'project' "
@@ -457,6 +461,24 @@ async def revoke_cross_bu_grant(
         ),
         {"u": body.identityId, "p": grant.project_id},
     )
+    # Audited on the route's own session, so the revocation and the record of it
+    # commit together. This path removed bindings silently until now.
+    for row in removed:
+        await record_rbac_change(
+            db,
+            tenant_id=tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type=RBAC_ROLE_REVOKED,
+            subject_id=body.identityId,
+            scope_kind="project",
+            scope_id=str(grant.project_id),
+            role=row.role_name,
+            extra={"reason": "cross_bu_loan_ended"},
+        )
     await db.flush()
+    # This path deletes bindings directly rather than through revoke_role, so it has to
+    # invalidate the borrowed person's token itself — otherwise the loan ends and they
+    # keep working on the project until their session lapses.
+    await bump_user_epoch(tenant_id, body.identityId)
     logger.info("cross-bu loan ended: user=%s project=%s", body.identityId, body.projectId)
     return {"ok": True, "changed": True}

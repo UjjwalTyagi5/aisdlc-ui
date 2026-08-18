@@ -1,22 +1,28 @@
-"""Local email+password auth — POST /auth/register, POST /auth/login, GET /auth/me.
+"""Local email+password auth — login, logout, the password lifecycle, and /auth/me.
 
 Mints our HS256 JWT (config.auth.jwt.create_access_token) with tenant_id + permissions
 baked in, exactly as the local middleware path expects. Every account is org tier and
 resolves its permissions through the normal RBAC path. Uniform 401 on any LOGIN failure
 (no account enumeration).
 
-Self-serve registration joins the ONE organization seeded at startup (shared/auth/
-bootstrap.py) and grants NOTHING: the account is created with no role bindings, so it
-resolves to an empty permission set until an admin binds it to a role. Signing up is
-therefore requesting access, not obtaining it — and nobody can create an organization,
-which is why there is no organization field on the form.
+THERE IS NO SELF-SERVE REGISTRATION. `POST /auth/register` was removed: accounts come only
+from an Organization Admin onboarding somebody (`shared/routers/onboarding.py`). The old
+endpoint created an account with no bindings — establishing an identity an admin could
+then bind — which was defensible but left a public account-creating route on a product
+whose whole access model is "an admin admits you". Removing it is one fewer thing to
+misconfigure. The frontend's "Create account" tab went with it.
 
-Registration deliberately DOES return 409 on a duplicate email, unlike login's uniform
-401. Login must not leak which accounts exist; a signup form has to tell you your email
-is already taken or it is unusable.
+HOW SOMEBODY FIRST GETS IN. Onboarding creates the account with `password_hash` NULL and
+emails a single-use link; `POST /auth/reset-password` is what sets the first password. So
+`/auth/forgot-password` and `/auth/reset-password` are not only a recovery path, they are
+the ONLY path to a first password — which is why they are treated as carefully as login.
+No password is ever emailed.
 
-All three routes are public()-marked for the D-05 boot scan, and /auth/register and
-/auth/login are in _EXEMPT_PATHS so the JWT middleware lets them through unauthenticated.
+Every route here is public()-marked for the D-05 boot scan. `/auth/login`,
+`/auth/forgot-password` and `/auth/reset-password` are additionally in `_EXEMPT_PATHS`,
+because a caller presenting a reset link is by definition not authenticated. `/auth/me`,
+`/auth/change-password` and `/auth/logout` are NOT exempt: they need an identity, and
+`public()` there means "no permission required", not "no authentication".
 """
 from __future__ import annotations
 
@@ -28,11 +34,16 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 
 from config.auth.jwt import create_access_token
-from shared.auth.bootstrap import get_default_org_id
+from config.env import RESET_TOKEN_TTL_HOURS
+from shared.auth.denylist import add_jti_to_user_denylist
 from shared.auth.passwords import hash_password, verify_password
 from shared.authz.dependency import public
+from shared.authz.effective_role import resolve_platform_role_for_user
 from shared.authz.resolver import resolve_permissions_for_user
+from shared.authz.token_epoch import bump_user_epoch
 from shared.db import get_db_session_superuser
+from shared.services import email_templates, password_setup
+from shared.services.email import send_email
 
 logger = logging.getLogger(__name__)
 auth_local_router = APIRouter()
@@ -55,6 +66,10 @@ class LoginOut(BaseModel):
     # Organization display name — the app chrome names the org, so the session needs
     # it. None only for an account not yet attached to one.
     tenant_name: str | None = None
+    # Which catalogued role this person acts as. The frontend cannot work this out
+    # from `permissions` — `contributor` and `custom` are the same set — so the
+    # server states it. None for an account with no bindings yet.
+    platform_role: str | None = None
 
 
 async def login(body: LoginIn) -> LoginOut:
@@ -80,9 +95,11 @@ async def login(body: LoginIn) -> LoginOut:
             raise HTTPException(status_code=403, detail="Organization suspended")
         tenant_name = org.display_name if org is not None else None
     perms = await resolve_permissions_for_user(user_id, tenant_id) if tenant_id else []
-    token = create_access_token(user_id=user_id, tenant_id=tenant_id, permissions=perms)
+    platform_role = await resolve_platform_role_for_user(user_id, tenant_id, perms)
+    token = create_access_token(user_id=user_id, tenant_id=tenant_id, permissions=perms,
+                                platform_role=platform_role)
     return LoginOut(token=token, tier="org", user_id=user_id, tenant_id=tenant_id or None,
-                    permissions=perms, tenant_name=tenant_name)
+                    permissions=perms, tenant_name=tenant_name, platform_role=platform_role)
 
 
 @auth_local_router.post("/auth/login", response_model=LoginOut, dependencies=[Depends(public())])
@@ -90,80 +107,17 @@ async def login_endpoint(body: LoginIn) -> LoginOut:
     return await login(body)
 
 
-class RegisterIn(BaseModel):
-    email: EmailStr
-    # Stating the 8-char floor here turns what would be a 500 into a 422 with a
-    # field-level message the signup form can render.
-    password: str = Field(min_length=8, max_length=200)
-
-
-async def register(body: RegisterIn) -> LoginOut:
-    """Create an unprivileged account in the one organization, then sign them in.
-
-    The new user gets NO role bindings, so resolve_permissions_for_user returns an
-    empty list and every permission-gated route refuses them until an admin grants a
-    role. That is the intent: signing up establishes an identity an admin can then
-    bind, it does not hand out access.
-
-    Returns the same shape as login so the caller has one response contract to handle
-    and the user is not bounced to a login form immediately after signing up.
-    """
-    email = body.email.strip().lower()
-
-    org_id = await get_default_org_id()
-    if org_id is None:
-        # Only reachable if the server booted without ORG_ADMIN_EMAILS/PASSWORD set, so
-        # no organization was ever seeded. Signing someone into a tenant-less account
-        # would strand them, so refuse plainly instead.
-        logger.error("register: no organization has been seeded — check ORG_ADMIN_* env")
-        raise HTTPException(status_code=503, detail="Sign-up is not available yet")
-
-    async with get_db_session_superuser() as s:
-        dup = (await s.execute(
-            text("SELECT 1 FROM users WHERE lower(email) = :e"), {"e": email}
-        )).first()
-        if dup:
-            raise HTTPException(
-                status_code=409, detail="An account with that email already exists"
-            )
-
-        user_id = str(_uuid.uuid4())
-        await s.execute(
-            text(
-                "INSERT INTO users (id, email, password_hash, tenant_id, active) "
-                "VALUES (:i, :e, :p, :t, true)"
-            ),
-            {"i": user_id, "e": email, "p": hash_password(body.password), "t": org_id},
-        )
-        tenant_name = (await s.execute(
-            text("SELECT display_name FROM organizations WHERE id = :id"), {"id": org_id}
-        )).scalar()
-
-    # Resolved rather than hardcoded to []: this stays correct if a future default
-    # binding is ever introduced, and it exercises the same path as login.
-    perms = await resolve_permissions_for_user(user_id, org_id)
-    token = create_access_token(user_id=user_id, tenant_id=org_id, permissions=perms)
-    logger.info("registered user=%s in org=%s with %d permission(s)", email, org_id, len(perms))
-    return LoginOut(
-        token=token, tier="org", user_id=user_id, tenant_id=org_id, permissions=perms,
-        tenant_name=tenant_name,
-    )
-
-
-@auth_local_router.post(
-    "/auth/register", response_model=LoginOut, status_code=201,
-    dependencies=[Depends(public())],
-)
-async def register_endpoint(body: RegisterIn) -> LoginOut:
-    return await register(body)
-
-
 @auth_local_router.get("/auth/me", response_model=LoginOut, dependencies=[Depends(public())])
 async def me(request: Request) -> LoginOut:
     perms = getattr(request.state, "permissions", []) or []
     tid = getattr(request.state, "tenant_id", "") or ""
-    return LoginOut(token="", tier="org", user_id=getattr(request.state, "user_id", ""),
-                    tenant_id=tid or None, permissions=perms)
+    uid = getattr(request.state, "user_id", "")
+    # Re-resolved rather than read off the token: this endpoint exists to tell a
+    # client what is true NOW, and a role assigned since the token was minted is
+    # exactly the case it is asked about.
+    return LoginOut(token="", tier="org", user_id=uid, tenant_id=tid or None,
+                    permissions=perms,
+                    platform_role=await resolve_platform_role_for_user(uid, tid, perms))
 
 
 class ChangePasswordIn(BaseModel):
@@ -191,3 +145,182 @@ async def change_password(request: Request, body: ChangePasswordIn) -> dict:
 @auth_local_router.post("/auth/change-password", dependencies=[Depends(public())])
 async def change_password_endpoint(request: Request, body: ChangePasswordIn) -> dict:
     return await change_password(request, body)
+
+
+@auth_local_router.post("/auth/logout", dependencies=[Depends(public())])
+async def logout(request: Request) -> dict:
+    """Revoke the presented token so it dies with the session.
+
+    Deleting the cookie was previously the whole of logout, which meant a token
+    copied off the wire stayed valid for its full lifetime after the user
+    believed they had signed out. That was tolerable only while the BFF minted a
+    fresh short-lived token per request; now that the browser holds one
+    backend-issued token for the session, an unrevokable logout is a real gap.
+
+    `public()` because the caller is signing OUT — requiring a permission to stop
+    holding one is the wrong shape, and the JWT middleware has already
+    established identity by the time this runs (this path is not in
+    _EXEMPT_PATHS).
+
+    Always 200. Logout must not fail: Redis being down, or a legacy token with no
+    jti, leaves the token alive until expiry, but reporting an error would leave
+    the user unable to sign out at all and is not something they can act on.
+    """
+    jti = getattr(request.state, "jti", "") or ""
+    sub = getattr(request.state, "user_id", "") or ""
+    tenant_id = getattr(request.state, "tenant_id", "") or ""
+    redis_client = getattr(request.app.state, "redis_denylist", None)
+
+    if not (jti and sub and redis_client):
+        logger.info("logout: token not revocable (jti=%s redis=%s)", bool(jti), bool(redis_client))
+        return {"ok": True, "revoked": False}
+
+    # Only the token's REMAINING life needs denying — after that its own expiry
+    # refuses it. Clamped at 0 so a just-expired token cannot set a past EXPIREAT.
+    import time as _time  # noqa: PLC0415 - local, keeps module import cheap
+
+    remaining = max(int(getattr(request.state, "token_exp", 0) or 0) - int(_time.time()), 0)
+    await add_jti_to_user_denylist(redis_client, tenant_id, sub, jti, remaining)
+    logger.info("logout: revoked jti for user=%s tenant=%s", sub, tenant_id)
+    return {"ok": True, "revoked": True}
+
+
+# ── first password, and forgotten ones ───────────────────────────────────────
+#
+# One mechanism serving two moments. An onboarded account has `password_hash` NULL and
+# cannot be signed into at all, so the emailed link is not merely a recovery path — it is
+# how anybody ever gets in. That is why these two endpoints are held to the same standard
+# as login rather than treated as a convenience.
+
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+@auth_local_router.post("/auth/forgot-password", dependencies=[Depends(public())])
+async def forgot_password(body: ForgotPasswordIn) -> dict:
+    """Email a single-use reset link, if that address has an account.
+
+    ALWAYS 200, ALWAYS THE SAME BODY. Whether the address exists, is deactivated, or has
+    never been seen, the answer is identical — otherwise this endpoint is an account
+    enumerator, and a more sensitive one than login, because it needs no password to
+    probe with. The uniform response is the whole point of the design and must not be
+    "improved" into a helpful "no such account" message.
+
+    A deactivated account gets no email either. It has been switched off deliberately,
+    and a working reset link would be a way back in.
+    """
+    email = str(body.email).strip().lower()
+    generic = {"ok": True}
+
+    async with get_db_session_superuser() as s:
+        row = (
+            await s.execute(
+                text("SELECT id, active FROM users WHERE lower(email) = :e"), {"e": email}
+            )
+        ).first()
+        if row is None or not row.active:
+            logger.info("forgot-password for unknown or inactive address (no email sent)")
+            return generic
+
+        token = await password_setup.issue(
+            s, user_id=row.id, purpose="reset", ttl_hours=RESET_TOKEN_TTL_HOURS
+        )
+
+    subject, text_body, html_body = email_templates.reset_email(
+        token, RESET_TOKEN_TTL_HOURS
+    )
+    await send_email(email, subject, text_body, html_body)
+    return generic
+
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+@auth_local_router.post("/auth/reset-password", dependencies=[Depends(public())])
+async def reset_password(body: ResetPasswordIn) -> dict:
+    """Spend a link and set the password on the account it belongs to.
+
+    The token is the only credential presented, and consuming it is atomic — see
+    `password_setup.consume` — so a link cannot be redeemed twice.
+
+    400 with a single code on any bad token. The set-password page distinguishes expired
+    from already-used through `GET /auth/reset-password/validate` BEFORE the user types,
+    which is where that distinction is useful; here, having already accepted a password,
+    the only thing left to say is that it could not be applied.
+
+    Setting a password also DEACTIVATES OUTSTANDING TOKENS for that user, which
+    `consume` handles for the one presented — the extra sweep below covers the case of an
+    invite and a reset both being live at once, so completing either retires the other.
+    """
+    async with get_db_session_superuser() as s:
+        user_id = await password_setup.consume(s, body.token)
+        if user_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_token",
+                    "message": "This link is no longer valid. Request a new one.",
+                },
+            )
+
+        active = (
+            await s.execute(text("SELECT active FROM users WHERE id = :i"), {"i": user_id})
+        ).scalar()
+        if not active:
+            # The account was deactivated between issuing the link and using it.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_token",
+                    "message": "This link is no longer valid. Request a new one.",
+                },
+            )
+
+        await s.execute(
+            text("UPDATE users SET password_hash = :ph WHERE id = :i"),
+            {"ph": hash_password(body.new_password), "i": user_id},
+        )
+        await s.execute(
+            text(
+                "UPDATE password_reset_tokens SET used_at = now() "
+                "WHERE user_id = :u AND used_at IS NULL"
+            ),
+            {"u": user_id},
+        )
+
+    # Every token this account holds is now dead, and so is every session: a password
+    # change is the clearest possible statement that older tokens should stop working,
+    # and this is the same mechanism a revocation uses.
+    tenant_id = None
+    async with get_db_session_superuser() as s:
+        tenant_id = (
+            await s.execute(text("SELECT tenant_id FROM users WHERE id = :i"), {"i": user_id})
+        ).scalar()
+    if tenant_id:
+        # exact=True: the credential itself changed, so a token minted in this same
+        # second necessarily came from a login with the NEW password. Rounding up here
+        # refused the user's own fresh session — setting a password and signing straight
+        # in is the ordinary path, and it was 401ing.
+        await bump_user_epoch(str(tenant_id), user_id, exact=True)
+
+    logger.info("password set via link for user=%s", user_id)
+    return {"ok": True}
+
+
+@auth_local_router.get("/auth/reset-password/validate", dependencies=[Depends(public())])
+async def validate_reset_token(token: str = "") -> dict:
+    """Report whether a link is still usable, without spending it.
+
+    Read-only deliberately: a page load must not consume the token, or a mail client that
+    pre-fetches links would burn every invite before its recipient clicked.
+
+    Returns a status the page can render — `ok`, `expired`, `used`, `unknown`. Naming
+    which is safe: whoever holds the link already holds it, so "this one is spent" tells
+    them nothing new, and the alternative is a dead end that becomes a support ticket.
+    """
+    async with get_db_session_superuser() as s:
+        status = await password_setup.inspect(s, token)
+    return {"status": status}

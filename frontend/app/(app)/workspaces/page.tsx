@@ -41,6 +41,8 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useRawSession } from "@/components/auth/session-provider";
 import { hasPermission } from "@/lib/auth/permissions";
+import { awaitsBusinessUnitRole } from "@/lib/roles";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { CreateWorkspaceDialog } from "@/components/app/create-workspace-dialog";
 import { ChangeBuAdminDialog } from "@/components/app/change-bu-admin-dialog";
 import { PageTitle } from "@/components/app/page-title";
@@ -73,6 +75,19 @@ export default function WorkspacesPage() {
   const { active, setActive } = useActiveWorkspace();
   const { isOrgWide, level, scope, managedBusinessUnitIds } = useAccessScope();
   const canManage = hasPermission(session, "workspace:manage");
+
+  // A CONTRIBUTOR HAS NO BUSINESS ON THIS PAGE. They are in a unit and waiting for a
+  // role, so their reach is empty and this screen can only ever render "0 of yours"
+  // over an empty card — a page whose entire content is the absence of content. The
+  // nav already hides it (it needs `workspace:manage`), but the route stayed reachable
+  // by URL, which is how it was being reached. /my-access is the page that actually
+  // answers the question they have, which is what they are waiting for.
+  // The bail-out itself is further down, after every hook has run — returning here
+  // would make the hook order depend on the role.
+  const awaitingRole = awaitsBusinessUnitRole(effectivePlatformRole(session) ?? "");
+  React.useEffect(() => {
+    if (awaitingRole) router.replace("/my-access");
+  }, [awaitingRole, router]);
 
   // Creating a Business Unit is an Organization Admin action — this page's own
   // copy says so, but the button was gated on `workspace:manage`, which a
@@ -108,6 +123,10 @@ export default function WorkspacesPage() {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
+
+  // Redirecting (see `awaitingRole` above). Nothing rather than a flash of an empty
+  // Business Units screen on the way out.
+  if (awaitingRole) return null;
 
   if (workspacesQ.isLoading) {
     return (

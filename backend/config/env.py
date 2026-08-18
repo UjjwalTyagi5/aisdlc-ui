@@ -278,3 +278,38 @@ JIRA_OAUTH_CLIENT_SECRET: str = os.environ.get("JIRA_OAUTH_CLIENT_SECRET", "")
 GITHUB_OAUTH_CLIENT_SECRET: str = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
 SLACK_CLIENT_ID: str = os.environ.get("SLACK_CLIENT_ID", "")
 SLACK_CLIENT_SECRET: str = os.environ.get("SLACK_CLIENT_SECRET", "")
+
+# ── Outbound email (onboarding invites + password reset) ──
+#
+# Provider-agnostic on purpose: every candidate — Gmail, Azure Communication Services,
+# SES, SendGrid, Mailgun — speaks SMTP, so moving between them is configuration and never
+# code. Gmail works for development with an App Password (2FA required on the account;
+# plain-password SMTP auth was removed by Google), but is a poor production choice for
+# THIS traffic: the From address cannot be your own domain, there is no SPF/DKIM/DMARC
+# alignment and so a real spam-folder risk, and a password-setup link that lands in spam
+# means the user cannot get in at all.
+#
+# UNSET IS A SUPPORTED STATE. With no SMTP_HOST the sender logs the message instead of
+# delivering it, so local development and the test suite need no mail server. It is
+# logged at WARNING, not INFO, because an email that silently did not send is the kind of
+# thing that should be visible.
+SMTP_HOST: str = os.environ.get("SMTP_HOST", "")
+SMTP_PORT: int = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME: str = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD: str = os.environ.get("SMTP_PASSWORD", "")
+# STARTTLS on 587 (the common case, including Gmail); implicit TLS on 465.
+SMTP_USE_TLS: bool = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
+SMTP_USE_SSL: bool = os.environ.get("SMTP_USE_SSL", "false").lower() == "true"
+EMAIL_FROM: str = os.environ.get("EMAIL_FROM", "")
+EMAIL_FROM_NAME: str = os.environ.get("EMAIL_FROM_NAME", "SDLC Platform")
+
+# Where the links in those emails point — the BROWSER-facing origin, which is not
+# AGENTIC_BASE_URL (that is this API). A set-password link built against the API host is
+# a link to nothing, so this is separate rather than derived.
+PUBLIC_APP_URL: str = os.environ.get("PUBLIC_APP_URL", "http://localhost:3000")
+
+# How long a set-password / reset link stays valid. Invites are longer because they are
+# sent to somebody who may not be expecting them; a reset is requested deliberately and
+# acted on within minutes.
+INVITE_TOKEN_TTL_HOURS: int = int(os.environ.get("INVITE_TOKEN_TTL_HOURS", "48"))
+RESET_TOKEN_TTL_HOURS: int = int(os.environ.get("RESET_TOKEN_TTL_HOURS", "2"))

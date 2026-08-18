@@ -8,7 +8,10 @@
  * DUMMY-DATA source; a real backend governance service replaces the
  * route-handler bodies, not these shapes.
  */
-import { emitNotification } from "@/lib/mock/notification-fixtures";
+import {
+  emitNotification,
+  type NotificationScopeKind,
+} from "@/lib/mock/notification-fixtures";
 import {
   agentAccessApprover,
   escalationCeilingFor,
@@ -30,6 +33,36 @@ import type {
 
 let nextId = 4;
 let nextEventId = 1;
+
+/**
+ * Which queue a role-addressed notification belongs to — the scope half of the
+ * address, without which `role: "bu_admin"` means every unit's admin.
+ *
+ * THE APPROVER'S LEVEL, NOT THE REQUEST'S, and the difference is why this is a
+ * function. A request about one project that routes to the Business Unit Admin
+ * is addressed to the UNIT: that is where their binding is, and addressing it to
+ * the project would reach nobody. Mirrors `_queue_scope` in the backend's
+ * `governance_requests.py`.
+ *
+ * Returns no scope for an organization-scoped role, whose queue is the
+ * organization and needs none.
+ */
+function queueScopeFor(
+  role: PlatformRole,
+  request: Pick<GovernanceApproval, "workspaceId" | "projectId">,
+): { scopeKind?: NotificationScopeKind; scopeId?: string } {
+  const level = ROLE_META[role]?.scope;
+  if (level === "organization") return {};
+  if (level === "business_unit") {
+    return { scopeKind: "business_unit", scopeId: request.workspaceId };
+  }
+  // Project-scoped, and `custom`, whose level is configurable. Prefer the
+  // project when the request names one; otherwise the unit, which still finds
+  // them — a project binding covers its parent unit.
+  return request.projectId
+    ? { scopeKind: "project", scopeId: request.projectId }
+    : { scopeKind: "business_unit", scopeId: request.workspaceId };
+}
 
 /** Append-only: every state change leaves a row, nothing is ever rewritten. */
 function event(
@@ -414,6 +447,7 @@ export function createGovernanceApproval(input: {
       body: `${created.requestedBy} raised "${created.title}".`,
       href: "/approvals",
       role: approver,
+      ...queueScopeFor(approver, created),
     });
   }
   return created;
@@ -497,6 +531,7 @@ export function escalateGovernanceApproval(
     body: `"${item.title}" was escalated to your queue.`,
     href: "/approvals",
     role: next,
+    ...queueScopeFor(next, item),
   });
   return item;
 }

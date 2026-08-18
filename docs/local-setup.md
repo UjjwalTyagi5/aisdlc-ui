@@ -62,6 +62,38 @@ Check it landed — a migration whose transaction rolls back still logs
 uv run alembic current    # must print the same revision as `uv run alembic heads`
 ```
 
+### If alembic says it cannot locate your revision
+
+```
+Can't locate revision identified by '0036_secret_ref_nullable'
+```
+
+Your database is stamped on the **pre-baseline lineage** and this is the one failure
+that looks like a broken tool rather than a stale database.
+
+`0001_baseline` deliberately replaced the 39 migrations that built the previous schema,
+so this branch's revision ids (`0001_baseline` … `0022_notification_scope`) share none of
+their names with the old ones (`0001_initial_schema` … `0036_secret_ref_nullable`). A
+database migrated before the reset holds a `version_num` that no longer exists in the
+repo, and alembic cannot build its revision map at all — `current` and `heads` die too,
+not just `upgrade`. Nothing about the message says "old lineage".
+
+**The fix is to rebuild**, using the DROP/CREATE lines above. Do not `alembic stamp` your
+way across: the two lineages describe different schemas, and stamping tells alembic a
+migration ran when it did not. The same mismatch has bitten once already, silently — see
+`5090cc2`, where the database sat on the old lineage while the code expected the new
+schema, and the only symptom was a model picker that stayed empty forever.
+
+Check which lineage you are on before rebuilding, if you want to be sure:
+
+```powershell
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -U postgres -d sdlc_product `
+    -c "SELECT version_num FROM alembic_version;"
+```
+
+A `version_num` matching a file in `backend/migrations/versions/` is fine; anything else
+is the pre-baseline lineage.
+
 ## 3. Grants for the app role
 
 ```powershell
@@ -174,6 +206,38 @@ gitignored and overrides the tracked `.env`, which stays in mock mode — **dele
 
 ---
 
+## 7. Email (optional)
+
+Onboarding sends a single-use set-password link, and "Forgot password" sends the same
+kind. **You do not need a mail server to work on this.** With `SMTP_HOST` unset the
+backend logs the whole message — link included — at WARNING and carries on, so the flow
+is fully exercisable: onboard somebody, then copy the link out of the backend log.
+
+To send for real, set these on the **backend** (see `backend/config/env.py` for the full
+commentary):
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=<account@gmail.com>
+SMTP_PASSWORD=<16-char app password>
+SMTP_USE_TLS=true
+EMAIL_FROM=<account@gmail.com>
+PUBLIC_APP_URL=http://localhost:3000
+```
+
+`PUBLIC_APP_URL` is the **browser-facing** origin the emailed links point at — not
+`AGENTIC_BASE_URL`, which is this API. A link built against the API host goes nowhere.
+
+Gmail needs 2FA on the account plus an **App Password**; Google removed plain-password
+SMTP auth. It is fine for development and a poor production choice for this traffic
+specifically: the From address cannot be your own domain, there is no SPF/DKIM alignment
+so a real spam-folder risk, and a set-password link in spam means the user cannot get in
+at all. Any SMTP provider works — Azure Communication Services, SES, SendGrid, Mailgun —
+so moving is configuration, not code.
+
+---
+
 ## Troubleshooting
 
 ### `psql : The term 'psql' is not recognized`
@@ -228,9 +292,9 @@ Start the backend, then re-run the seeder.
 
 ### Login works, but every scoped page is empty
 
-You have no role bindings. Sign in as one of the seeded personas from `DEV_LOGINS.txt`
-rather than an account created through sign-up — self-serve registration deliberately
-grants nothing.
+You have no role bindings. Sign in as one of the seeded personas from `DEV_LOGINS.txt`.
+There is no sign-up: accounts are created by an Organization Admin onboarding somebody,
+and that person receives an emailed link to set their own password.
 
 ### Model picker says "Connect a model provider"
 

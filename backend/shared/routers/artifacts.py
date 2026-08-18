@@ -25,7 +25,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Artifact, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
@@ -47,6 +49,28 @@ class ArtifactPatchIn(BaseModel):
     status: Optional[str] = None
 
 
+async def _assert_project_visible(db: AsyncSession, request: Request, project_id) -> None:
+    """Refuse an artifact read for a project the caller cannot see.
+
+    The tenant join stops a cross-TENANT read; it does nothing about a cross-PROJECT one
+    inside the same organisation, and artifacts are the requirements, designs and code
+    the pipeline produces. `runs.py` guards its equivalents through `_get_run_or_404`;
+    these two were missed. See finding 4 in docs/rbac-audit-2026-08-17.md.
+
+    404, matching the sibling guards: a project the caller cannot reach is not confirmed
+    to exist by the error code.
+    """
+    if is_org_wide(request):
+        return
+    visible = await visible_project_ids(
+        db,
+        user_id=getattr(request.state, "user_id", "") or "",
+        tenant_id=str(request.state.tenant_id),
+    )
+    if visible is not None and str(project_id) not in visible:
+        raise HTTPException(status_code=404, detail="not found")
+
+
 @artifacts_router.get("/projects/{project_id}/artifacts", response_model=List[ArtifactOut])
 async def list_artifacts_for_project(
     project_id: str,
@@ -65,6 +89,7 @@ async def list_artifacts_for_project(
     # Resolve UUID-or-slug to the real project (frontend phase routes are
     # slug-based; slug is a derived, non-queryable field — Plan 02). 404 on miss.
     project = await _get_or_404(db, project_id, tenant_id)
+    await _assert_project_visible(db, request, project.id)
 
     stmt = (
         select(Artifact, Run)
@@ -117,6 +142,7 @@ async def get_artifact(
     """
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, run.project_id)
     return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
 
 

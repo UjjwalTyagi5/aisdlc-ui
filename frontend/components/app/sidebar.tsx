@@ -27,7 +27,9 @@ import {
   visibleObserveNav,
   type NavItem,
 } from "@/lib/nav";
-import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { awaitsBusinessUnitRole } from "@/lib/roles";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { useAccessScope } from "@/hooks/use-access-scope";
 
 import { OrgHeader } from "./org-header";
@@ -158,7 +160,35 @@ function SectionLabel({
 
 // ─── No-workspace state ───────────────────────────────────────────────────────
 
-function NoWorkspaceSection({ collapsed }: { collapsed: boolean }) {
+/**
+ * TWO DIFFERENT NOTHINGS, and telling them apart is the whole point of this
+ * component taking a prop.
+ *
+ * `awaitingRole` — the person IS in a business unit; what they lack is a role in
+ * it. Telling them "no access, ask an admin to add you" is simply false: they were
+ * added, and the sentence sends them to ask for the thing they already have. It
+ * became reachable when a `contributor` binding stopped granting read scope, which
+ * made a placed-but-unassigned person look identical to an unplaced one from the
+ * workspace list alone. `session.platformRole` is what distinguishes them, and it
+ * only became trustworthy once the backend started issuing it — inference could not
+ * tell `contributor` from `custom`.
+ *
+ * Otherwise — genuinely bound to nothing anywhere, where asking to be added is
+ * exactly the right advice.
+ *
+ * The link points at /my-access either way: it is the one ungated page that shows
+ * your own bindings, so it answers "what am I waiting for" for both. It used to
+ * point at /workspaces, which for a Contributor is a page they cannot read — the
+ * empty Business Units screen they landed on came from this button, not from the
+ * nav, which already gates on `workspace:manage`.
+ */
+function NoWorkspaceSection({
+  collapsed,
+  awaitingRole,
+}: {
+  collapsed: boolean;
+  awaitingRole: boolean;
+}) {
   const router = useRouter();
 
   if (collapsed) {
@@ -170,7 +200,9 @@ function NoWorkspaceSection({ collapsed }: { collapsed: boolean }) {
           </div>
         </TooltipTrigger>
         <TooltipContent side="right">
-          No {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} access
+          {awaitingRole
+            ? "Waiting for a role"
+            : `No ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} access`}
         </TooltipContent>
       </Tooltip>
     );
@@ -179,15 +211,25 @@ function NoWorkspaceSection({ collapsed }: { collapsed: boolean }) {
   return (
     <div className="border-line-soft/50 mx-2 rounded-lg border border-dashed px-3 py-2.5">
       <p className="text-muted-foreground/60 font-mono text-[10.5px] font-medium leading-snug">
-        No {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} access.
-        <br />
-        Ask an admin to add you.
+        {awaitingRole ? (
+          <>
+            No role yet.
+            <br />
+            Your {BUSINESS_UNIT_LABEL.toLowerCase()} admin assigns one.
+          </>
+        ) : (
+          <>
+            No {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} access.
+            <br />
+            Ask an admin to add you.
+          </>
+        )}
       </p>
       <button
-        onClick={() => router.push("/workspaces")}
+        onClick={() => router.push("/my-access")}
         className="text-brand-bright mt-1.5 font-mono text-[10.5px] underline underline-offset-2 opacity-80 transition-opacity hover:opacity-100"
       >
-        View {BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} →
+        View my access →
       </button>
     </div>
   );
@@ -257,6 +299,10 @@ export function Sidebar() {
   } = useAccessScope();
 
   const perms = session?.permissions ?? [];
+  // Placed in a unit, waiting to be told what they do there. Read from the role the
+  // SERVER issued, not inferred: `contributor` and `custom` hold the same permissions,
+  // so a permission-derived answer here would mislabel composed bundles as new joiners.
+  const awaitingRole = awaitsBusinessUnitRole(effectivePlatformRole(session) ?? "");
   // The PRD's fixed page set, in three presentational groups (§15.1, §32.1).
   // Every role sees a scoped version of this same set — never a different one.
   //
@@ -406,7 +452,7 @@ export function Sidebar() {
                 </li>
               ))}
             </ul>
-            <NoWorkspaceSection collapsed={collapsed} />
+            <NoWorkspaceSection collapsed={collapsed} awaitingRole={awaitingRole} />
           </>
         )}
 

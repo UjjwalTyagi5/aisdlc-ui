@@ -24,13 +24,19 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.project_scope import require_project_access
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
 from shared.services import dev_workspace_store
 from shared.services import workspace_fs
 
-dev_workspace_router = APIRouter()
+# EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
+# took the project id from the path and filtered on tenant_id alone, so the only gate
+# was the artifact:view floor applied at include time — a permission `contributor`
+# holds. The router-level dependency covers all of them at once, and covers whatever
+# route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
+dev_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
 
 
 class PullRequest(BaseModel):

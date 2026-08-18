@@ -136,6 +136,13 @@ export const PERMISSION_CATALOG: PermGroup[] = [
     perms: [
       { id: "project:create", label: "Create projects", grants: "Create a new project." },
       {
+        id: "project:update",
+        label: "Edit project settings",
+        grants:
+          "Change a project's name, wiring and monthly budget. Held by the Business Unit Admin and by the project's own admin — who is the person asked to set the budget at creation.",
+        legacy: true,
+      },
+      {
         id: "model:manage",
         label: "Manage models",
         grants:
