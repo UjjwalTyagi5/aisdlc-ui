@@ -36,6 +36,21 @@ from shared.authz.dependency import require_permission
 from shared.authz.permissions import ALL_PERMISSIONS, has_permission
 from shared.authz.read_scope import assert_can_write_workspace, is_org_wide
 from shared.authz.resolver import resolve_permissions_for_user
+from shared.authz.token_epoch import bump_many
+
+
+async def _holders_of_custom_role(db, custom_role_id: str) -> list[str]:
+    """Everyone bound to this custom role, for stale-token invalidation."""
+    rows = (
+        await db.execute(
+            text(
+                "SELECT DISTINCT user_id FROM role_bindings "
+                "WHERE custom_role_id = CAST(:rid AS uuid)"
+            ),
+            {"rid": custom_role_id},
+        )
+    ).fetchall()
+    return [r[0] for r in rows]
 from shared.db import get_db_session
 from shared.models.orm import CustomRole
 
@@ -310,6 +325,11 @@ async def update_custom_role(
         )
     await db.flush()
 
+    # Editing a custom role IS editing its holders' permissions — there is no shipped
+    # default to fall back to — so every binding that carries it is now describing the
+    # wrong set in its token.
+    await bump_many(tenant_id, await _holders_of_custom_role(db, str(rid)))
+
     return CustomRoleOut(
         id=str(row.id), name=row.name, description=row.description,
         permissions=list(body.permissions), scopeKind=scope_kind,
@@ -327,5 +347,10 @@ async def delete_custom_role(
         rid = _uuid.UUID(role_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="role_id must be a UUID")
+    # Collected BEFORE the delete: role_bindings cascades on custom_role_id, so after
+    # this statement there is nobody left to look up and the bump would silently do
+    # nothing — a deleted role is the sharpest permission removal there is.
+    holders = await _holders_of_custom_role(db, str(rid))
     await db.execute(text("DELETE FROM custom_roles WHERE id = :rid"), {"rid": str(rid)})
+    await bump_many(_tenant_id(request), holders)
     return OkOut()

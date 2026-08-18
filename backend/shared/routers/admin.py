@@ -33,7 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from shared.authz.dependency import require_permission
-from shared.authz.grant import grant_role, revoke_role
+from shared.authz.grant import UnitAlreadyAdministeredError, grant_role, revoke_role
+from shared.authz.grant_guard import assert_can_grant_role
 from shared.authz.permissions import ALL_ROLES, _ROLE_PERMISSIONS, has_permission
 from shared.authz.read_scope import assert_can_write_workspace
 from shared.db import get_db_session
@@ -241,6 +242,11 @@ async def create_assignment(
         raise HTTPException(
             status_code=422, detail=f"Unknown role '{body.role_name}'"
         )
+    # ...and the other half of that escalation: the workspace check above says
+    # WHERE this caller may grant, never WHAT. Without this, a Business Unit Admin
+    # could grant org_admin inside their own unit and hold admin:* organization-wide
+    # at the next login, because permissions resolve across scopes.
+    await assert_can_grant_role(db, request, body.role_name)
     try:
         await grant_role(
             body.user_id,
@@ -251,6 +257,9 @@ async def create_assignment(
             # but not who gave it, which is the question actually asked afterwards.
             granted_by=getattr(request.state, "user_id", None),
         )
+    except UnitAlreadyAdministeredError as exc:
+        # 409: well-formed request, conflicting world. The message names the incumbent.
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return OkOut()
@@ -271,6 +280,10 @@ async def delete_assignment(
         raise HTTPException(
             status_code=422, detail=f"Unknown role '{body.role_name}'"
         )
+    # Symmetric with the grant. Someone who may not confer a role has no standing
+    # to take it away either — otherwise a Project Admin could strip an Organization
+    # Admin's binding, which is the same authority exercised in the other direction.
+    await assert_can_grant_role(db, request, body.role_name)
     try:
         await revoke_role(
             body.user_id,
@@ -352,6 +365,10 @@ async def create_member(
     await assert_can_write_workspace(db, request, body.workspace_id)
     if body.role_name not in ALL_ROLES:
         raise HTTPException(status_code=422, detail=f"Unknown role '{body.role_name}'")
+    # Creating the account and conferring the role happen together here, so this
+    # route is a grant path like any other: without the rank check a Business Unit
+    # Admin could mint a brand-new org_admin account inside their own unit.
+    await assert_can_grant_role(db, request, body.role_name)
     email = body.email.strip().lower()
     user_id = str(_uuid.uuid4())
     pw_hash = hash_password(body.password)
@@ -368,7 +385,19 @@ async def create_member(
             ),
             {"id": user_id, "email": email, "ph": pw_hash, "tid": tenant_id},
         )
-    await grant_role(user_id, body.workspace_id, body.role_name, tenant_id=tenant_id)
+    try:
+        await grant_role(
+            user_id, body.workspace_id, body.role_name, tenant_id=tenant_id,
+            # Was omitted, so the audit row recorded a role appearing with no author —
+            # on the one route that creates the person and the binding in one act.
+            granted_by=getattr(request.state, "user_id", None),
+        )
+    except UnitAlreadyAdministeredError as exc:
+        # The account was already created above. Reporting the conflict rather than
+        # rolling back is deliberate: the person exists and can be placed elsewhere or
+        # given a different role, and deleting them would discard an email somebody
+        # just typed.
+        raise HTTPException(status_code=409, detail=str(exc))
     return MemberCreateOut(user_id=user_id, email=email, role_name=body.role_name)
 
 

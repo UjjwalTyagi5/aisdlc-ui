@@ -335,22 +335,24 @@ async def create_workspace(
     db.add(ws)
     await db.flush()
 
-    # Auto-add the creator as admin member of the new workspace.
-    creator_id = getattr(request.state, "user_id", None) or ""
-    if creator_id:
-        db.add(
-            RoleBinding(
-                user_id=creator_id,
-                scope_kind="business_unit",
-                scope_id=ws.id,
-                role_name="bu_admin",
-                tier="governance",
-                tenant_id=tenant_uuid,
-            )
-        )
-
+    # THE CREATOR IS NOT MADE THE UNIT'S ADMIN, and removing that was the point.
+    #
+    # This used to bind the creator as `bu_admin` here. It gave them nothing — only an
+    # Organization Admin can reach this route (see the org-wide gate above) and org-wide
+    # standing already reaches every unit without a per-unit binding. What it DID do was
+    # occupy the unit's single admin slot: a unit has exactly one Business Unit Admin, so
+    # the Org Admin who created it could never appoint a real one without first removing
+    # themselves from a unit they were never meant to run.
+    #
+    # A new unit therefore starts with no admin, which is the honest state and the one the
+    # two-step model describes: the Organization Admin creates the unit and then APPOINTS
+    # its admin, deliberately, through onboarding.
+    #
+    # It also wrote `RoleBinding` directly through the ORM, so it skipped the tier check,
+    # the single-admin check and the audit row that `shared/authz/grant.py` exists to
+    # apply. That is the same class of bug as finding 7 in docs/rbac-audit-2026-08-17.md.
     await db.commit()
-    return _to_out(ws, 1 if creator_id else 0, 0)
+    return _to_out(ws, 0, 0)
 
 
 @workspaces_router.get("/{workspace_id}", response_model=WorkspaceOut)

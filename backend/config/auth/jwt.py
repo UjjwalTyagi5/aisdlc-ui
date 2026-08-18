@@ -56,6 +56,7 @@ def create_access_token(
     tenant_id: str = "",
     expires_minutes: int = 60,
     permissions: list[str] | None = None,
+    platform_role: str | None = None,
 ) -> str:
     """Mint a signed JWT for the given user. Used by dev helper scripts and tests.
 
@@ -70,10 +71,24 @@ def create_access_token(
         "sub": user_id,
         "tenant_id": tenant_id,
         "jti": jti,
+        # WHEN this permission set was resolved. `shared/authz/token_epoch.py` compares
+        # it against the last time the caller's access changed: a token minted before a
+        # revocation is refused rather than honoured until it lapses. Without `iat` there
+        # is nothing to compare, which is why a permission edit used to take up to an
+        # hour to bite — see finding 6 in docs/rbac-audit-2026-08-17.md.
+        "iat": datetime.utcnow(),
         "exp": datetime.utcnow() + timedelta(minutes=expires_minutes),
         # Default to empty list (deny-by-default) if no permissions supplied (D-02).
         "permissions": permissions or [],
     }
+    # WHICH of the catalogued roles this person is acting as. PRESENTATION ONLY —
+    # nothing server-side authorizes on it; `permissions` remains the only claim any
+    # gate reads. It is here rather than on the display cookie because the frontend
+    # cannot derive it: `contributor` and `custom` hold identical permission sets, so
+    # inference showed every onboarded Contributor as "Custom". Omitted entirely when
+    # unknown, so a token never asserts a role the bindings do not support.
+    if platform_role:
+        payload["platform_role"] = platform_role
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm="HS256")
 
 

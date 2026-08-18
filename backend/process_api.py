@@ -64,6 +64,7 @@ from config.env import (
     OIDC_PROVIDER,
 )
 from shared.auth.denylist import is_jti_denied
+from shared.authz.token_epoch import is_token_stale
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
 from shared.authz.catalog import assert_rbac_catalog
@@ -682,11 +683,15 @@ app.add_middleware(
 # /auth/ws-ticket is NOT exempt — only authenticated users may mint tickets.
 # /metrics is exempt because the Prometheus scraper sends no JWT; labels carry
 # only agent_type/connector enums, no credentials or user data (T-M3-05).
-# /auth/register joins /auth/login here: both are how a caller obtains a token in the
+# /auth/login and the password-link routes: these are how a caller obtains a token in the
 # first place, so requiring one would make them unreachable.
 _EXEMPT_PATHS = {
     "/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics",
-    "/auth/login", "/auth/register",
+    # A caller presenting a reset link is by definition not authenticated — the token in
+    # the URL is the only thing they have. /auth/register is gone: there is no self-serve
+    # signup, so nothing unauthenticated may create an account.
+    "/auth/login", "/auth/forgot-password", "/auth/reset-password",
+    "/auth/reset-password/validate",
 }
 
 
@@ -733,6 +738,10 @@ async def jwt_auth_middleware(request: Request, call_next):
         # local dev (T-7.4-02: fail-open is the accepted risk for local/dev; enterprise
         # mode requires Redis via ENABLE_SCIM startup precondition enforced in Plan 02).
         jti = claims.get("jti", "")
+        # Stashed so POST /auth/logout can revoke exactly the token that was
+        # presented, without re-parsing the Authorization header itself.
+        request.state.jti = jti
+        request.state.token_exp = claims.get("exp", 0)
         if jti and getattr(request.app.state, "redis_denylist", None):
             if await is_jti_denied(
                 request.app.state.redis_denylist,
@@ -741,6 +750,23 @@ async def jwt_auth_middleware(request: Request, call_next):
                 jti,
             ):
                 return JSONResponse({"detail": "Token revoked"}, status_code=401)
+
+        # STALE-PERMISSION CHECK. The permissions claim is resolved once at login, so a
+        # role revoked or retuned since then is still being honoured by this token.
+        # `is_token_stale` compares the token's `iat` against the last time this user's
+        # access changed; a token minted before that carries a permission set we know to
+        # be wrong. See finding 6 in docs/rbac-audit-2026-08-17.md.
+        #
+        # 401, not 403: nothing about the request is forbidden — the token is out of
+        # date and the caller needs a new one. A 403 would tell somebody who had just
+        # been GRANTED a role that they still lacked it.
+        if await is_token_stale(
+            claims.get("tenant_id", ""), claims.get("sub", ""), claims.get("iat")
+        ):
+            return JSONResponse(
+                {"detail": "Token stale — permissions changed. Sign in again."},
+                status_code=401,
+            )
 
         if _is_enterprise_oidc:
             # ENTERPRISE OIDC PATH (D-01): tenant_id is nested under

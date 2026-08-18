@@ -30,6 +30,7 @@ async def _dispose_shared_engine():
 @pytest.fixture
 async def org():
     org_id, bu = str(_uuid.uuid4()), str(_uuid.uuid4())
+    admin_id = f"admin-{_uuid.uuid4()}"
     async with get_db_session_superuser() as s:
         await s.execute(text(
             "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Onboard Test')"
@@ -38,7 +39,15 @@ async def org():
             "INSERT INTO workspaces (id, organization_id, slug, display_name) "
             "VALUES (:i, :o, 'payments', 'Payments')"
         ), {"i": bu, "o": org_id})
-    yield {"org": org_id, "bu": bu}
+    # The admin gets a REAL org_admin binding, not just a token claiming admin:*.
+    # `assert_can_grant_role` re-resolves the caller's permissions from the database
+    # rather than reading them off the token — deliberately, so a token issued before
+    # a demotion cannot mint a durable grant — and a fixture that only forged the
+    # claim was testing a caller who does not exist in production.
+    from shared.authz.grant import grant_role
+    await grant_role(admin_id, org_id, "org_admin",
+                     tenant_id=org_id, scope_kind="organization")
+    yield {"org": org_id, "bu": bu, "admin": admin_id}
 
 
 def _headers(uid: str, org_id: str, perms: list[str]) -> dict:
@@ -47,7 +56,7 @@ def _headers(uid: str, org_id: str, perms: list[str]) -> dict:
 
 
 def _admin(org: dict) -> dict:
-    return _headers(f"admin-{_uuid.uuid4()}", org["org"], ["admin:*"])
+    return _headers(org["admin"], org["org"], ["admin:*"])
 
 
 @pytest.mark.asyncio
@@ -55,11 +64,33 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
     c = TestClient(process_api.app)
     email = f"amara-{_uuid.uuid4().hex[:6]}@abcbank.com"
 
+    # The unit needs an admin for there to be anybody to hand the decision TO. The
+    # notification addresses a ROLE, so emitting it into a unit with nobody in that role
+    # puts an obligation on no one — which the endpoint now reports as
+    # `notifiedBusinessUnitAdmin: false` rather than pretending somebody was told.
+    from shared.authz.grant import grant_role
+    bu_admin = f"buadmin-{_uuid.uuid4()}"
+    await grant_role(bu_admin, org["bu"], "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+
+    # A second unit with its own admin, who must hear nothing about this. The
+    # notification names a role AND a unit; before it named only the role, and this
+    # person read the other unit's joiners.
+    other_bu, other_admin = str(_uuid.uuid4()), f"buadmin-{_uuid.uuid4()}"
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+    await grant_role(other_admin, other_bu, "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+
     r = c.post("/onboarding", headers=_admin(org),
                json={"email": email, "role": "contributor", "workspaceId": org["bu"]})
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["created"] is True
+    assert body["notifiedBusinessUnitAdmin"] is True
     assert body["roleRequestId"], "the handover request is the point of the flow"
 
     # The account exists and is bound to the unit.
@@ -70,7 +101,7 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
     async with get_db_session_for_tenant(org["org"]) as s:
         binding = (await s.execute(
             text("SELECT role_name, scope_kind FROM role_bindings WHERE user_id = :u"),
-            {"u": body["userId"]},
+            {"u": body["identityId"]},
         )).first()
         assert (binding.role_name, binding.scope_kind) == ("contributor", "business_unit")
 
@@ -78,11 +109,12 @@ async def test_onboarding_a_contributor_hands_the_role_decision_over(org):
         req = await governance.get_request(s, body["roleRequestId"])
         assert req["type"] == "role_assignment"
         assert req["currentApproverRole"] == "bu_admin"
-        assert req["targetRef"] == body["userId"]
+        assert req["targetRef"] == body["identityId"]
 
-        # Who is also told about it.
-        bell = await notifications.list_for(s, user_id="whoever", role="bu_admin")
+        # Who is also told about it — THIS unit's admin, and only theirs.
+        bell = await notifications.list_for(s, user_id=bu_admin, role="bu_admin")
         assert any(n["kind"] == "member_awaiting_role" for n in bell)
+        assert await notifications.list_for(s, user_id=other_admin, role="bu_admin") == []
 
 
 @pytest.mark.asyncio
@@ -147,7 +179,7 @@ async def test_re_onboarding_an_existing_person_places_them_rather_than_failing(
     assert second.status_code == 201, second.text
     # Same person, and the caller can say "added to Payments" rather than "invited".
     assert second.json()["created"] is False
-    assert second.json()["userId"] == first.json()["userId"]
+    assert second.json()["identityId"] == first.json()["identityId"]
 
 
 @pytest.mark.asyncio

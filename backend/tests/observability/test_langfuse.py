@@ -123,8 +123,17 @@ def test_unknown_agent_and_level_fall_back_to_valid_enums():
 
 # ── Endpoint behavior with monkeypatched Langfuse calls ───────────────────────
 
-def _req(tenant_id="t1"):
-    return SimpleNamespace(state=SimpleNamespace(tenant_id=tenant_id))
+def _req(tenant_id="t1", permissions=("admin:*",)):
+    """A fake request for the direct-call mapping tests.
+
+    Org-wide by default. These tests exercise the Langfuse mapping and aggregation, not
+    the scope filter, and a tenant-wide total is a thing only an org-wide caller gets —
+    `_visible_projects` short-circuits on `is_org_wide` before it needs a DB session,
+    which is why these can still be called with `db=None`.
+    """
+    return SimpleNamespace(
+        state=SimpleNamespace(tenant_id=tenant_id, permissions=list(permissions), user_id="u")
+    )
 
 
 def test_get_trace_tenant_guard(monkeypatch):
@@ -140,7 +149,7 @@ def test_get_trace_tenant_guard(monkeypatch):
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(tr.get_trace(_req(tenant_id="t1"), "tr1"))
+        asyncio.run(tr.get_trace(_req(tenant_id="t1"), "tr1", db=None))
     assert ei.value.status_code == 404  # cross-tenant trace is invisible
 
 
@@ -154,7 +163,7 @@ def test_get_trace_maps_detail_and_worst_level(monkeypatch):
 
     monkeypatch.setattr(tr, "_lf_get", _fake_get)
 
-    out = asyncio.run(tr.get_trace(_req("t1"), "tr1"))
+    out = asyncio.run(tr.get_trace(_req("t1"), "tr1", db=None))
     assert out.agentType == "review"
     assert len(out.spans) == 2
     assert out.worstLevel == "error"
@@ -167,9 +176,9 @@ def test_list_and_metrics_disabled_return_empty(monkeypatch):
     import shared.routers.traces as tr
 
     monkeypatch.setattr(tr, "_enabled", lambda: False)
-    rows = asyncio.run(tr.list_traces(_req("t1")))
+    rows = asyncio.run(tr.list_traces(_req("t1"), db=None))
     assert rows == []
-    m = asyncio.run(tr.trace_metrics(_req("t1"), window_days=30))
+    m = asyncio.run(tr.trace_metrics(_req("t1"), window_days=30, db=None))
     assert m.totalTraces == 0 and m.byAgent == []
 
 
@@ -186,7 +195,7 @@ def test_metrics_aggregate(monkeypatch):
         return page
 
     monkeypatch.setattr(tr, "_lf_get", _fake_get)
-    m = asyncio.run(tr.trace_metrics(_req("t1"), window_days=7))
+    m = asyncio.run(tr.trace_metrics(_req("t1"), window_days=7, db=None))
     assert m.totalTraces == 2
     assert m.totalCostUsd == pytest.approx(0.024)
     assert m.byAgent and m.byAgent[0].agentType == "review"

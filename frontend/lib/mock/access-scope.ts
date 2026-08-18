@@ -32,6 +32,7 @@ import { ROLE_META, type PlatformRole } from "@/lib/roles";
 
 import { listMembershipsForIdentity, listWorkspaces } from "./workspace-fixtures";
 import { listProjectMembershipsForIdentity } from "./project-membership-fixtures";
+import type { NotificationQueue, NotificationViewer } from "./notification-fixtures";
 
 // The mock persona map lives in lib/auth so the session builder can read it
 // without pulling this module's fixture graph into its bundle.
@@ -329,4 +330,45 @@ export function filterByBusinessUnit<T>(
 ): T[] {
   if (scope.isOrgWide) return [...rows];
   return rows.filter((row) => canReadBusinessUnit(scope, workspaceIdOf(row)));
+}
+
+// ─── Notification queues ──────────────────────────────────────────────────────
+
+/**
+ * Describe a viewer for the notification store: who they are, the role they are
+ * acting as, and every role queue they hold.
+ *
+ * Lives here rather than in `notification-fixtures.ts` because binding
+ * resolution is this module's job, and the store is deliberately kept free of
+ * the fixture graph so both runtimes can reach it
+ * ([[msw-dual-runtime-mutation-rule]]).
+ *
+ * `covers` is expanded in both directions — see `NotificationQueue`. A unit
+ * binding answers for the unit AND its projects; a project binding answers for
+ * the project AND its parent unit. Deactivated bindings are dropped: a queue you
+ * have been removed from is not yours, which is the liveness rule `live_binding`
+ * enforces server-side.
+ */
+export function notificationViewer(
+  identityId: string | null,
+  actingRole: PlatformRole | null,
+): NotificationViewer {
+  if (!identityId) return { identityId: null, actingRole, queues: [] };
+
+  const queues: NotificationQueue[] = listBindingsForIdentity(identityId)
+    .filter((b) => b.status === "active")
+    .map((b) => ({
+      role: b.role,
+      covers:
+        b.kind === "business_unit"
+          ? [
+              b.scopeId,
+              ...PROJECTS.filter((p) => String(p.workspaceId) === b.scopeId).map((p) =>
+                String(p.id),
+              ),
+            ]
+          : [b.scopeId, ...(b.parentId ? [b.parentId] : [])],
+    }));
+
+  return { identityId, actingRole, queues };
 }

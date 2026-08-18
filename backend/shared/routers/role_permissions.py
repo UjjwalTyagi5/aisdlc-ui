@@ -31,6 +31,7 @@ from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import is_org_wide
 from shared.authz.role_permissions import overrides, shipped_defaults
+from shared.authz.token_epoch import bump_many
 from shared.db import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,26 @@ def _require_org_admin(request: Request) -> None:
                 ),
             },
         )
+
+
+async def _holders_of(db: AsyncSession, tenant_id: str, role: str) -> list[str]:
+    """Everyone in this tenant currently bound to `role`.
+
+    Deliberately NOT filtered on liveness: a binding that is expired or deactivated
+    grants nothing anyway, so bumping its holder costs one re-login and removes the need
+    to reason about whether a lapsed binding could still be carrying a live token minted
+    while it was valid. It could.
+    """
+    rows = (
+        await db.execute(
+            text(
+                "SELECT DISTINCT user_id FROM role_bindings "
+                "WHERE tenant_id = CAST(:t AS uuid) AND role_name = :r"
+            ),
+            {"t": tenant_id, "r": role},
+        )
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 async def _rows(db: AsyncSession, tenant_id: str) -> list[RolePermissionRow]:
@@ -171,6 +192,10 @@ async def save_role_permissions(
         )
         await _audit(db, tenant_id, actor, body.role, "reset", sorted(defaults[body.role]))
         await db.flush()
+        # Reset is a permission change like any other — it can REMOVE permissions the
+        # override had added, so holders must be re-resolved. Easy to miss because this
+        # branch returns early.
+        await bump_many(tenant_id, await _holders_of(db, tenant_id, body.role))
         return _one(await _rows(db, tenant_id), body.role)
 
     requested = sorted(set(body.permissions or []))
@@ -229,9 +254,15 @@ async def save_role_permissions(
     await _audit(db, tenant_id, actor, body.role, "updated", requested)
     await db.flush()
 
+    # Everyone holding this role is now carrying a token that describes the OLD set.
+    # Bumping only the editor would leave the retune invisible to every actual holder
+    # until their tokens lapsed, which is the whole of finding 6.
+    stale = await _holders_of(db, tenant_id, body.role)
+    marked = await bump_many(tenant_id, stale)
+
     logger.info(
-        "role permissions overridden: tenant=%s role=%s by=%s -> %s",
-        tenant_id, body.role, actor, requested,
+        "role permissions overridden: tenant=%s role=%s by=%s -> %s (%d holder(s) re-authenticated)",
+        tenant_id, body.role, actor, requested, marked,
     )
     return _one(await _rows(db, tenant_id), body.role)
 

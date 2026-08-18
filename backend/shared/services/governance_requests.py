@@ -44,11 +44,39 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.permissions import ROLE_SCOPE
 from shared.governance import routing
 from shared.governance.effects import EffectNotAvailable, apply_on_approve
 from shared.services import notifications
 
 logger = logging.getLogger(__name__)
+
+
+def _queue_scope(
+    role: Optional[str], *, workspace_id: Optional[str], project_id: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Where the queue for `role` lives — the scope a notification is addressed to.
+
+    THE APPROVER'S LEVEL, NOT THE REQUEST'S, and the difference is the whole reason
+    this is a function. A request about one project that routes to the Business Unit
+    Admin is addressed to the UNIT: that is where their binding is, and addressing it
+    to the project would reach nobody at all. Getting this backwards fails silently —
+    a notification nobody matches looks exactly like a notification nobody sent.
+
+    Returns (None, None) for the Organization Admin, whose queue is the organization
+    and needs no scope.
+    """
+    scope = ROLE_SCOPE.get(role or "")
+    if role is None or scope == "organization":
+        return None, None
+    if scope == "business_unit":
+        return "business_unit", workspace_id
+    # Project-scoped, and `custom`, whose level is configurable. Prefer the project
+    # when the request names one; otherwise the unit, which still finds them — the
+    # overlap rule in `notifications` matches a project binding against its parent.
+    if project_id:
+        return "project", project_id
+    return "business_unit", workspace_id
 
 
 class GovernanceError(Exception):
@@ -407,7 +435,10 @@ async def create_request(
     # Tell the queue it landed in. Addressed to the ROLE, not a person: whoever
     # holds it now is who should act, including someone appointed after this was
     # raised — a notification addressed to their predecessor would be invisible to
-    # them.
+    # them. Scoped, so it is THAT queue rather than every unit's.
+    approver_scope_kind, approver_scope_id = _queue_scope(
+        approver, workspace_id=workspace_id, project_id=project_id
+    )
     await notifications.emit(
         db,
         tenant_id=tenant_id,
@@ -416,6 +447,8 @@ async def create_request(
         body=summary,
         href="/approvals",
         recipient_role=approver,
+        recipient_scope_kind=approver_scope_kind,
+        recipient_scope_id=approver_scope_id,
     )
     await db.flush()
 
@@ -574,6 +607,11 @@ async def decide(
                 to_role=next_approver,
                 note=reason or "Stage one approved; the agent's owner decides next.",
             )
+            stage_two_kind, stage_two_id = _queue_scope(
+                next_approver,
+                workspace_id=request["workspaceId"],
+                project_id=request["projectId"],
+            )
             await notifications.emit(
                 db,
                 tenant_id=request["tenantId"],
@@ -582,6 +620,8 @@ async def decide(
                 body=f"Approved by the {(decider_role or '').replace('_', ' ')} — now yours to decide.",
                 href="/approvals",
                 recipient_role=next_approver,
+                recipient_scope_kind=stage_two_kind,
+                recipient_scope_id=stage_two_id,
             )
             await db.flush()
             return await get_request(db, request["id"])
@@ -708,10 +748,14 @@ async def escalate(
         to_role=nxt,
         note=note,
     )
+    nxt_scope_kind, nxt_scope_id = _queue_scope(
+        nxt, workspace_id=request["workspaceId"], project_id=request["projectId"]
+    )
     await notifications.emit(
         db, tenant_id=request["tenantId"], kind="request_escalated",
         title=request["title"], body="Escalated to your queue.", href="/approvals",
-        recipient_role=nxt,
+        recipient_role=nxt, recipient_scope_kind=nxt_scope_kind,
+        recipient_scope_id=nxt_scope_id,
     )
     # And the initiator, who is the person actually waiting.
     await notifications.emit(

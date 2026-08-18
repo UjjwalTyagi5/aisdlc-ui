@@ -121,7 +121,18 @@ export function OnboardUserDialog({
       // onboarding is half the transaction — the half that matters to them is
       // the unit admin acting on it, and an admin who thinks they finished
       // granting access has been misled by a bare "invited".
-      if (role === "contributor") {
+      // A NEW account has no password at all until its emailed link is used, so an
+      // invite that did not send leaves somebody who cannot sign in. Saying so first
+      // matters more than the placement: an admin who is not told will assume the
+      // person was contacted and only find out when they say they never got in.
+      const inviteFailed = result.created === true && result.invited === false;
+
+      if (inviteFailed) {
+        toast.warning(`${result.displayName} added — but no email was sent`, {
+          description:
+            "Their account has no password yet and the set-password link could not be delivered. Check the mail settings, then send them a reset link from the sign-in page.",
+        });
+      } else if (role === "contributor") {
         toast.success(`${result.displayName} added to ${unitName(unitId)}`, {
           description: result.notifiedBusinessUnitAdmin
             ? `Its admin has been asked to give them a role. They hold nothing until then.`

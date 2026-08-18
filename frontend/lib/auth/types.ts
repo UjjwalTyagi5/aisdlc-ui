@@ -101,9 +101,18 @@ export interface Session {
 }
 
 /**
- * The full M7.2 permission vocabulary, mirrored EXACTLY from the backend's
- * canonical `ALL_PERMISSIONS` (agentic_app/shared/authz/permissions.py) —
- * single source of truth, no dual maintenance (D-01). 9 strings.
+ * A HAND-MAINTAINED SUBSET of the permission vocabulary — not the whole of it.
+ *
+ * This used to claim it mirrored the backend's `ALL_PERMISSIONS` "EXACTLY … 9
+ * strings". It never did after the catalogue grew: the backend carries 35 and this
+ * lists ten. The drift is already visible in `lib/auth/permissions.ts`, where the
+ * `approvePermissionForPhase` branches added later had to omit their `satisfies
+ * Permission` because the strings do not typecheck here.
+ *
+ * `hasPermission` takes `string`, so this costs typo-safety rather than correctness.
+ * The authoritative list is `lib/auth/permission-catalog.ts`
+ * (`ALL_GRANTABLE_PERMISSIONS`), which IS in exact agreement with the backend.
+ * Reconciling the two is finding 13 in `docs/rbac-audit-2026-08-17.md`.
  *
  * `admin:*` is the wildcard honored by both backend `has_permission` and
  * frontend `hasPermission` — granting it passes every permission check.
@@ -117,4 +126,5 @@ export type Permission =
   | "artifact:approve_testing"
   | "artifact:approve_deployment"
   | "connector:manage"
+  | "project:update"
   | "run:create";
