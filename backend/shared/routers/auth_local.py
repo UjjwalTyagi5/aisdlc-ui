@@ -38,6 +38,7 @@ from config.env import RESET_TOKEN_TTL_HOURS
 from shared.auth.denylist import add_jti_to_user_denylist
 from shared.auth.passwords import hash_password, verify_password
 from shared.authz.dependency import public
+from shared.authz.effective_role import resolve_platform_role_for_user
 from shared.authz.resolver import resolve_permissions_for_user
 from shared.authz.token_epoch import bump_user_epoch
 from shared.db import get_db_session_superuser
@@ -65,6 +66,10 @@ class LoginOut(BaseModel):
     # Organization display name — the app chrome names the org, so the session needs
     # it. None only for an account not yet attached to one.
     tenant_name: str | None = None
+    # Which catalogued role this person acts as. The frontend cannot work this out
+    # from `permissions` — `contributor` and `custom` are the same set — so the
+    # server states it. None for an account with no bindings yet.
+    platform_role: str | None = None
 
 
 async def login(body: LoginIn) -> LoginOut:
@@ -90,9 +95,11 @@ async def login(body: LoginIn) -> LoginOut:
             raise HTTPException(status_code=403, detail="Organization suspended")
         tenant_name = org.display_name if org is not None else None
     perms = await resolve_permissions_for_user(user_id, tenant_id) if tenant_id else []
-    token = create_access_token(user_id=user_id, tenant_id=tenant_id, permissions=perms)
+    platform_role = await resolve_platform_role_for_user(user_id, tenant_id, perms)
+    token = create_access_token(user_id=user_id, tenant_id=tenant_id, permissions=perms,
+                                platform_role=platform_role)
     return LoginOut(token=token, tier="org", user_id=user_id, tenant_id=tenant_id or None,
-                    permissions=perms, tenant_name=tenant_name)
+                    permissions=perms, tenant_name=tenant_name, platform_role=platform_role)
 
 
 @auth_local_router.post("/auth/login", response_model=LoginOut, dependencies=[Depends(public())])
@@ -104,8 +111,13 @@ async def login_endpoint(body: LoginIn) -> LoginOut:
 async def me(request: Request) -> LoginOut:
     perms = getattr(request.state, "permissions", []) or []
     tid = getattr(request.state, "tenant_id", "") or ""
-    return LoginOut(token="", tier="org", user_id=getattr(request.state, "user_id", ""),
-                    tenant_id=tid or None, permissions=perms)
+    uid = getattr(request.state, "user_id", "")
+    # Re-resolved rather than read off the token: this endpoint exists to tell a
+    # client what is true NOW, and a role assigned since the token was minted is
+    # exactly the case it is asked about.
+    return LoginOut(token="", tier="org", user_id=uid, tenant_id=tid or None,
+                    permissions=perms,
+                    platform_role=await resolve_platform_role_for_user(uid, tid, perms))
 
 
 class ChangePasswordIn(BaseModel):

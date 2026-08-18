@@ -32,6 +32,17 @@ export interface BackendTokenClaims {
   tenant_id: string;
   permissions: string[];
   exp: number;
+  /**
+   * Which catalogued role the holder acts as — PRESENTATION ONLY, and absent on
+   * a token minted for an account with no bindings.
+   *
+   * It is a signed claim rather than a display-cookie field because the frontend
+   * cannot derive it: `contributor` and `custom` resolve to the identical
+   * permission set, so inference showed every onboarded Contributor as "Custom".
+   * Putting it on the unsigned cookie would have fixed the label by reintroducing
+   * a smaller version of the hole this module exists to close.
+   */
+  platform_role?: string;
 }
 
 function secretKey(): Uint8Array {
@@ -80,6 +91,9 @@ export async function verifyBackendToken(
         ? rawPerms.filter((p): p is string => typeof p === "string")
         : [],
       exp: typeof payload.exp === "number" ? payload.exp : 0,
+      ...(typeof payload["platform_role"] === "string"
+        ? { platform_role: payload["platform_role"] }
+        : {}),
     };
   } catch {
     return null;

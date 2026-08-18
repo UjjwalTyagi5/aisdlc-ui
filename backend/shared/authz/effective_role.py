@@ -19,6 +19,7 @@ built-in roles exactly.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -27,7 +28,10 @@ from fastapi import Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.authz.read_scope import is_org_wide, live_binding
+from shared.authz.permissions import has_permission
+from shared.authz.read_scope import ORG_WIDE_PERMISSIONS, live_binding
+
+logger = logging.getLogger(__name__)
 
 # Most authority first. Anything not listed is a delivery contributor, which the
 # escalation ladder treats identically — see REQUEST_ESCALATION_CHAIN.
@@ -53,18 +57,26 @@ async def roles_held(db: AsyncSession, user_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-async def effective_platform_role(db: AsyncSession, request: Request) -> Optional[str]:
-    """The caller's role for routing purposes, or None when they hold nothing.
+async def platform_role_for(
+    db: AsyncSession, *, user_id: str, permissions: list[str]
+) -> Optional[str]:
+    """The rule itself, computable without a Request.
 
-    `is_org_wide` is consulted first and not merely as a shortcut: the org admin's
-    binding is at ORGANIZATION scope, and a caller can also reach org-wide standing
-    through `settings:manage` without an `org_admin` row. Reading only bindings would
-    put such a caller on the wrong rung.
+    Split out so LOGIN can answer the same question. The frontend cannot: a
+    Contributor and a `custom` bundle both resolve to exactly `['artifact:view']`,
+    so `effectivePlatformRole`'s permission inference had no way to tell them apart
+    and showed every newly-onboarded Contributor as "Custom". The fix is for the
+    server — which reads bindings, not a permission bundle — to state the role
+    outright, which is what `session.platformRole` has always been the seam for.
+
+    Org-wide standing is checked first and not merely as a shortcut: the org
+    admin's binding is at ORGANIZATION scope, and a caller can also reach org-wide
+    standing through `settings:manage` without an `org_admin` row. Reading only
+    bindings would put such a caller on the wrong rung.
     """
-    if is_org_wide(request):
+    if any(has_permission(permissions, p) for p in ORG_WIDE_PERMISSIONS):
         return "org_admin"
 
-    user_id = getattr(request.state, "user_id", "") or ""
     held = await roles_held(db, user_id)
     if not held:
         return None
@@ -78,6 +90,40 @@ async def effective_platform_role(db: AsyncSession, request: Request) -> Optiona
     # `contributor` is the "no role yet" placeholder and loses to anything real.
     real = [r for r in held if r != "contributor"]
     return real[0] if real else "contributor"
+
+
+async def effective_platform_role(db: AsyncSession, request: Request) -> Optional[str]:
+    """The caller's role for routing purposes, or None when they hold nothing."""
+    return await platform_role_for(
+        db,
+        user_id=getattr(request.state, "user_id", "") or "",
+        permissions=getattr(request.state, "permissions", []) or [],
+    )
+
+
+async def resolve_platform_role_for_user(
+    user_id: str, tenant_id: str, permissions: list[str]
+) -> Optional[str]:
+    """Login-time entry point: opens its own tenant-scoped session.
+
+    Mirrors `resolve_permissions_for_user`, and for the same reason — `role_bindings`
+    is FORCE RLS, so this must run under the tenant GUC or it reads nothing and every
+    caller silently looks role-less.
+    """
+    if not tenant_id:
+        return None
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415 — import cycle
+
+    try:
+        async with get_db_session_for_tenant(tenant_id) as session:
+            return await platform_role_for(
+                session, user_id=user_id, permissions=permissions
+            )
+    except Exception:  # noqa: BLE001
+        # Presentation only — the frontend falls back to inferring from permissions,
+        # which is what it did before this existed. Never fail a login over a label.
+        logger.exception("could not resolve platform role for %s", user_id)
+        return None
 
 
 async def actor_display_name(db: AsyncSession, request: Request) -> str:

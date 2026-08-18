@@ -57,6 +57,11 @@ export async function getSession(): Promise<Session | null> {
       mode: "local",
       tier: display?.tier ?? "org",
       permissions: claims.permissions,
+      // From the SIGNED claim, like everything else that matters here. This is
+      // the authoritative path `effectivePlatformRole` was built to prefer:
+      // `contributor` and `custom` carry identical permissions, so inference
+      // could only ever guess, and it guessed "Custom" for every new joiner.
+      ...(claims.platform_role ? { platformRole: claims.platform_role } : {}),
     };
   }
 
