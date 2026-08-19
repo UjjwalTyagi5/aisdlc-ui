@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { CheckCircle2, Network, ShieldAlert, ShieldCheck, type LucideIcon } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { PwcMark } from "@/components/brand/pwc-mark";
+import { SignInBrandPanel } from "@/components/landing/sign-in-brand-panel";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { isLocalAuth, isMockAuth, isOidcEnabled } from "@/lib/auth/mode";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
@@ -47,61 +48,23 @@ export default async function LoginPage({
 
   return (
     <main className="bg-background relative min-h-dvh">
-      {/* Marketing-light hero strip — enterprise palette, subtle gradient, no floating particles */}
+      {/* THE SAME SURFACE AS THE LANDING POPUP. This route had drifted to a flat
+          panel with plain type and older copy, which mattered more than it sounds:
+          /login is where an expired session and every emailed password link land, so
+          the drifted one was the first thing a returning user saw. */}
+      <div
+        aria-hidden
+        className="bg-mesh pointer-events-none absolute inset-0 -z-10 opacity-70"
+      />
       <div
         aria-hidden
         className="from-primary/5 via-background to-background pointer-events-none absolute inset-x-0 top-0 -z-10 h-80 bg-gradient-to-b"
       />
 
       <div className="mx-auto grid min-h-dvh w-full max-w-6xl grid-cols-1 items-center gap-12 px-6 py-12 lg:grid-cols-[1fr_420px] lg:py-0">
-        {/* Marketing column */}
-        <section className="hidden space-y-8 lg:block" aria-label="Product summary">
-          <div className="flex items-center gap-3">
-            <PwcMark size={44} />
-            <div className="flex flex-col leading-tight">
-              <span className="text-lg font-semibold tracking-tight">SDLC Platform</span>
-              <span className="text-muted-foreground text-xs font-medium tracking-wider uppercase">
-                Powered by PwC
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <h1 className="text-4xl font-semibold tracking-tight">
-              Ship features through coordinated AI agents.
-            </h1>
-            <p className="text-muted-foreground text-base">
-              Requirements to deploy, with human approval at every phase, audited end-to-end,
-              running inside your VPC.
-            </p>
-          </div>
-
-          <ul className="space-y-3">
-            <FeatureRow
-              icon={Network}
-              title="Thirteen agents, one control plane"
-              blurb="Eight agents run Requirements through Documentation. Five more specialize for modernization, migration, and data engineering — picked up automatically by the delivery track you choose."
-            />
-            <FeatureRow
-              icon={ShieldCheck}
-              title="Enterprise-ready on day one"
-              blurb="SSO (SAML / OIDC), tenant isolation, immutable audit, data residency."
-            />
-            <FeatureRow
-              icon={CheckCircle2}
-              title="Plugs into your existing tools"
-              blurb="Jira, Azure DevOps, GitHub, Azure Repos, Slack. No rip-and-replace."
-            />
-          </ul>
-
-          <div className="text-muted-foreground flex items-center gap-4 text-xs">
-            <span>SOC 2 Type I · target GA</span>
-            <span>·</span>
-            <span>GDPR-ready</span>
-            <span>·</span>
-            <span>BYO-LLM-key</span>
-          </div>
-        </section>
+        {/* Marketing column — shared with the landing popup so the two cannot
+            disagree about what the product says about itself. */}
+        <SignInBrandPanel className="hidden py-12 lg:flex" />
 
         {/* Sign-in column */}
         <section className="mx-auto w-full max-w-md space-y-4" aria-label="Sign in">
@@ -122,18 +85,18 @@ export default async function LoginPage({
             </Alert>
           )}
 
-          <Card>
+          <Card className="border-line-soft/60 bg-panel-elevated/80 shadow-2xl backdrop-blur-2xl">
             <CardHeader>
-              <CardTitle className="text-base">
+              <CardTitle className="font-display text-2xl tracking-tight">
                 {isLocalAuth
-                  ? "Sign in"
+                  ? `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`
                   : isMockAuth || !isOidcEnabled
                     ? "Continue (mock mode)"
                     : `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`}
               </CardTitle>
               <CardDescription>
                 {isLocalAuth
-                  ? "Use the email and password for your account. Accounts are created by your administrator."
+                  ? "Use the email and password set up by your administrator."
                   : isMockAuth || !isOidcEnabled
                     ? "Auth0 isn't configured — using a local session cookie. Pick a role to preview permissions."
                     : `Use your work account. Enterprise SSO is configured by your ${BUSINESS_UNIT_LABEL.toLowerCase()} admin.`}
@@ -183,27 +146,5 @@ export default async function LoginPage({
         </section>
       </div>
     </main>
-  );
-}
-
-function FeatureRow({
-  icon: Icon,
-  title,
-  blurb,
-}: {
-  icon: LucideIcon;
-  title: string;
-  blurb: string;
-}) {
-  return (
-    <li className="flex items-start gap-3">
-      <div className="bg-muted text-muted-foreground mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border">
-        <Icon className="size-4" aria-hidden />
-      </div>
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-sm font-medium">{title}</span>
-        <span className="text-muted-foreground text-sm">{blurb}</span>
-      </div>
-    </li>
   );
 }
