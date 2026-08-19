@@ -83,6 +83,7 @@ class ProjectOut(BaseModel):
     slug: str
     description: Optional[str] = None
     template: str
+    track: str
     archived: bool
     owners: List[Any]
     pipeline: List[Any]
@@ -110,6 +111,7 @@ class ProjectOut(BaseModel):
             slug=_slugify(project.display_name),
             description=getattr(project, "description", None),
             template="blank",
+            track=getattr(project, "track", None) or "greenfield",
             archived=project.archived,
             owners=[],
             pipeline=[],
