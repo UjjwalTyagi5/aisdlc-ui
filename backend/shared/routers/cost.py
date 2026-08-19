@@ -282,6 +282,66 @@ async def _spend_map(db: AsyncSession, tenant_id, scope: str) -> dict[str, float
     return {str(sid): float(c or 0.0) for sid, c in rows}
 
 
+class CostSummaryOut(BaseModel):
+    projectId: str
+    monthlySpendUsd: float
+    monthlyBudgetUsd: float | None
+    utilization: float
+    breached80: bool
+    month: str
+    generatedAt: str
+
+
+@cost_router.get(
+    "/summary",
+    response_model=CostSummaryOut,
+    dependencies=[Depends(require_permission("cost:view"))],
+)
+async def get_cost_summary(
+    request: Request, project_id: str = Query(..., alias="project_id"),
+    db: AsyncSession = Depends(get_db_session),
+) -> CostSummaryOut:
+    """GET /cost/summary?project_id=X (task #22's "GET /cost-summary" — nested under
+    this router's existing /cost prefix, alongside /cost/budgets, rather than breaking
+    out a top-level route for one endpoint). One project's current-month spend against
+    its effective budget. A thin adapter over the same durable rollup GET /budgets
+    already reads (usage_monthly + workspace_alloc's effective_cap), deliberately NOT
+    a new cost_events/token_pricing ledger: one already works here, and a second would
+    just be a second number that can disagree with the first.
+    """
+    tenant_id = request.state.tenant_id
+    row = (await db.execute(
+        text("SELECT id, monthly_budget_usd FROM projects WHERE id = :id AND tenant_id = :t"),
+        {"id": project_id, "t": str(tenant_id)},
+    )).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found in this tenant")
+
+    proj_spend = await _spend_map(db, tenant_id, "project")
+    spend_usd = round(proj_spend.get(str(project_id), 0.0), 4)
+    budget_usd = effective_cap("project", row[1])
+    # Deliberately NOT compute_budget_utilization: that function also SETS the
+    # tenant-labeled TENANT_LLM_BUDGET_UTILIZATION gauge, which is the org/tenant-wide
+    # signal GET /cost owns — overwriting it with one project's ratio here would corrupt
+    # that gauge for every other reader. Compute the same ratio locally instead.
+    if budget_usd and budget_usd > 0:
+        utilization = spend_usd / budget_usd
+        breached80 = spend_usd >= 0.8 * budget_usd
+    else:
+        utilization = 0.0
+        breached80 = False
+
+    return CostSummaryOut(
+        projectId=str(project_id),
+        monthlySpendUsd=spend_usd,
+        monthlyBudgetUsd=budget_usd,
+        utilization=utilization,
+        breached80=breached80,
+        month=month_key(),
+        generatedAt=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 @cost_router.get(
     "/budgets",
     response_model=BudgetsOut,

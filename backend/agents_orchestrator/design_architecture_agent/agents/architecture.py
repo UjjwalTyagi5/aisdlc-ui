@@ -1105,8 +1105,10 @@ async def agent(state: AgentState):
         # Bind base tools + any per-run MCP tools here (not in the cached builder) so
         # run-specific MCP tools never leak across runs via the shared orchestrator cache.
         orch = orch.bind_tools(tools + get_skill_tools("design") + get_mcp_tools())
-        response = await orch.ainvoke(
-            clean_messages,
+        from shared.services.model_call_wrapper import guarded_completion
+
+        response = await guarded_completion(
+            resolved, orch, clean_messages, tenant_id=tenant_id, agent_type="design",
             config={"metadata": {"user_api_key_alias": resolved.alias}},
         )
         return {"messages": [response], "resolved_model": resolved}

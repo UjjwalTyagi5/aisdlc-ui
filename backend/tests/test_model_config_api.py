@@ -469,6 +469,7 @@ async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
     never included it at all before this fix)."""
     import httpx
     from process_api import app
+    from shared.authz.grant import grant_role
     from shared.services import model_config as mc
     from shared.services import model_grants as mg
     from tests.test_model_grants import _seed_org_workspace_project
@@ -487,8 +488,17 @@ async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
         created_by="admin1",
     )
 
-    mgmt_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['model:manage'])}"}
-    run_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['run:create'])}"}
+    # GET /model/allowed/bu is now can_perform-scoped (design-doc gap #1, closed) — the
+    # JWT permission claim alone is no longer enough; a real role_bindings row at THIS
+    # business unit is required. bu_admin carries model:manage.
+    mgmt_user = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(mgmt_user, ws_id, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    mgmt_headers = {"Authorization": f"Bearer {mint_token(user_id=mgmt_user, tenant_id=tenant, permissions=['model:manage'])}"}
+    # GET /model/allowed/project is also can_perform-scoped now (run:create, at project
+    # scope) — this user additionally needs a role_bindings row on proj_id itself.
+    run_user = f"developer-{uuid.uuid4()}"
+    await grant_role(run_user, proj_id, "developer", tenant_id=tenant, scope_kind="project")
+    run_headers = {"Authorization": f"Bearer {mint_token(user_id=run_user, tenant_id=tenant, permissions=['run:create'])}"}
     no_perm_headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=[])}"}
 
     async with httpx.AsyncClient(
@@ -522,6 +532,53 @@ async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
         assert proj_resp.status_code == 200, proj_resp.text
         assert '"credentialId"' in proj_resp.text and '"credential_id"' not in proj_resp.text
         assert '"defaultKey"' in proj_resp.text
+
+
+@pytest.mark.asyncio
+async def test_bu_admin_cannot_edit_a_different_business_unit(mint_token):
+    """The point of wiring can_perform into /model/allowed/bu (design-doc gap #1,
+    closed): holding model:manage in the tenant used to be enough to edit ANY
+    business unit's grants. A BU Admin scoped to Unit A must now be denied on
+    Unit B's grants, while their own unit keeps working — and an Organization
+    Admin (bound at the organization scope, which is an ancestor of every BU)
+    is untouched by this change."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
+    ws_b, _ = await _seed_org_workspace_project(tenant, "Unit B")
+
+    bu_admin_a = f"bu-admin-a-{uuid.uuid4()}"
+    await grant_role(bu_admin_a, ws_a, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    bu_a_headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin_a, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    org_admin = f"org-admin-{uuid.uuid4()}"
+    await grant_role(org_admin, tenant, "org_admin", tenant_id=tenant, scope_kind="organization")
+    org_headers = {"Authorization": f"Bearer {mint_token(user_id=org_admin, tenant_id=tenant, permissions=['admin:*'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        own_unit = await client.get("/model/allowed/bu", params={"workspaceId": ws_a}, headers=bu_a_headers)
+        assert own_unit.status_code == 200, own_unit.text
+
+        other_unit = await client.get("/model/allowed/bu", params={"workspaceId": ws_b}, headers=bu_a_headers)
+        assert other_unit.status_code == 403
+
+        other_unit_put = await client.put(
+            "/model/allowed/bu", params={"workspaceId": ws_b}, json={"entries": []}, headers=bu_a_headers,
+        )
+        assert other_unit_put.status_code == 403
+
+        # Org Admin reaches every BU via the organization-scope ancestor rule.
+        org_sees_a = await client.get("/model/allowed/bu", params={"workspaceId": ws_a}, headers=org_headers)
+        assert org_sees_a.status_code == 200
+        org_sees_b = await client.get("/model/allowed/bu", params={"workspaceId": ws_b}, headers=org_headers)
+        assert org_sees_b.status_code == 200
 
 
 # ---------------------------------------------------------------------------
