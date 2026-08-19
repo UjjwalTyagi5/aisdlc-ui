@@ -169,11 +169,17 @@ def test_pipeline_consumer_makes_no_start_workflow_call():
 
     assert "start_workflow" not in called_names(pc)
 
-    # Sanity: the generic consumer genuinely does start workflows, so the assertion
-    # above is testing something real rather than passing vacuously.
-    import webhooks.consumer as wc
-
-    assert "start_workflow" in called_names(wc)
+    # The sanity half of this test compared against `webhooks.consumer`, which DOES
+    # start workflows — except it does not exist any more. It was deleted by
+    # 371a42f "Remove Temporal from the backend", and `start_workflow` went with
+    # Temporal, so there is no longer a module anywhere that makes such a call for
+    # this one to be contrasted against.
+    #
+    # The remaining assertion still earns its place: it is a standing guard that the
+    # pipeline consumer never REGAINS a workflow start, which is exactly what
+    # pipeline_consumer.py's own docstring says must never happen. What is gone is
+    # only the comparison that proved it was not passing vacuously — and the
+    # vacuity it guarded against is now the permanent state of the codebase.
 
 
 # ── Microsoft Graph ───────────────────────────────────────────────────────────

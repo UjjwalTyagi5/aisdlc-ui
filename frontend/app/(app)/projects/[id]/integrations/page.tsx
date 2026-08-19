@@ -50,6 +50,11 @@ const MCP_TEMPLATE = [
   "What our agents would call it for:",
   "Read-only, or does it need to write:",
 ].join("\n");
+import { ProjectAccessList } from "@/components/app/project-access-list";
+import { getProject } from "@/lib/api/projects";
+import { useAccessScope } from "@/hooks/use-access-scope";
+import { canManageBusinessUnit, canManageProject } from "@/lib/mock/access-scope";
+import type { ProjectId } from "@/lib/schemas/ids";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
 
@@ -80,6 +85,21 @@ export default function ProjectIntegrationsPage({
     queryKey: qk.projects.integrations(id),
     queryFn: () => listProjectIntegrations(id),
   });
+
+  // BOTH ADMIN TIERS, which is why the project's unit has to be known here. A
+  // Project Admin holds a binding on the project; a Business Unit Admin holds one
+  // on the unit above it and none on the project, so a `canManageProject` check
+  // alone would hide the control from the very person who runs the unit.
+  // `assert_can_administer_project` accepts exactly this pair server-side.
+  const projectQ = useQuery({
+    queryKey: qk.projects.detail(id as ProjectId),
+    queryFn: () => getProject(id as ProjectId),
+  });
+  const { scope } = useAccessScope();
+  const canManageAccess =
+    scope !== null &&
+    (canManageProject(scope, id) ||
+      canManageBusinessUnit(scope, projectQ.data?.workspaceId ?? null));
 
   if (q.isLoading) {
     return (
@@ -124,6 +144,25 @@ export default function ProjectIntegrationsPage({
           </p>
         </Card>
       )}
+
+      {/* THE ONE DECISION ON THIS PAGE THAT IS NOT SOMEBODY ELSE'S. Everything
+          below is read-only because it was settled above this project; what a
+          project may DO with an integration its unit holds is settled here.
+          Plain markup rather than <Section>, which renders a fixed integration
+          list and takes no children. */}
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="font-display text-[15px] font-semibold">
+            What this project may do
+          </h2>
+          <p className="text-muted-foreground max-w-2xl text-[12.5px]">
+            Each integration this project&apos;s {BUSINESS_UNIT_LABEL.toLowerCase()} was
+            granted, and how much of that grant this project gets. It can be narrowed
+            here, never widened — widening is an Organization Admin&apos;s decision.
+          </p>
+        </div>
+        <ProjectAccessList projectId={id} canManage={canManageAccess} />
+      </section>
 
       <Section
         title="Connectors"

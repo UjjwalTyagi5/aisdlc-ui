@@ -240,7 +240,11 @@ async def _overlay_tenant_credentials(
         # probe_github_actions helper, so the generic branch covers it.
         health = "degraded"
         try:
-            connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+            # unrestricted: an org-level health probe acting for no project. Named
+            # explicitly because it is the fail-open door and should read as one.
+            connector = await get_connector_for_session(
+                kind=kind, tenant_id=tenant_id, unrestricted=True,
+            )
             hc = await connector.health_check()
             health = "healthy" if getattr(hc, "status", "") == "healthy" else "degraded"
         except Exception:  # noqa: BLE001
@@ -751,7 +755,11 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
     status = "invalid"
     error: Optional[str] = None
     try:
-        connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+        # unrestricted: an org-level health probe acting for no project. Named
+        # explicitly because it is the fail-open door and should read as one.
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, unrestricted=True,
+        )
         health = await connector.health_check()
         status = "valid" if getattr(health, "status", "") == "healthy" else "invalid"
         error = getattr(health, "error", None)

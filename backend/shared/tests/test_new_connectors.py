@@ -7,6 +7,7 @@ Covers the three properties that keep the connector layer honest:
   3. Credentials never reach the logs.
 """
 import logging
+import contextlib
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -44,9 +45,33 @@ class _Store:
         self.data.pop(ref, None)
 
 
+@contextlib.contextmanager
 def _patch_store(store):
-    """Patch the lazily-imported secret_store seen by every connector."""
-    return patch.dict(sys.modules, {"shared.services.secret_store": store})
+    """Patch the lazily-imported secret_store seen by every connector.
+
+    BOTH sys.modules AND the package attribute, because which one a connector sees
+    depends on whether the real module was already imported. `from shared.services
+    import secret_store` reads the ATTRIBUTE on the `shared.services` package, and
+    Python sets that attribute the first time the submodule is imported — after which
+    patching sys.modules alone is ignored entirely.
+
+    That made these tests order-dependent in a way that looked like a connector bug:
+    run alone they passed, run after anything that imports `process_api` (which pulls
+    in the real secret_store) every Graph test failed with GraphCredentialsMissing.
+    Patching both covers the module whether or not it has been imported yet.
+    """
+    import shared.services
+
+    real = getattr(shared.services, "secret_store", None)
+    with patch.dict(sys.modules, {"shared.services.secret_store": store}):
+        setattr(shared.services, "secret_store", store)
+        try:
+            yield store
+        finally:
+            if real is not None:
+                setattr(shared.services, "secret_store", real)
+            else:
+                delattr(shared.services, "secret_store")
 
 
 # ── auth_adapter contract ─────────────────────────────────────────────────────

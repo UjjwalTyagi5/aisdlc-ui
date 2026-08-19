@@ -216,6 +216,12 @@ export const governNav: NavItem[] = [
     icon: Users,
     segment: "users",
     requirePermission: "member:manage",
+    // ADMINISTERING A UNIT, not merely holding `member:manage`. A Project Admin holds
+    // that permission too — for their project's own roster — and it let them open an
+    // ORG-WIDE people directory with a role-assignment control on every row. The
+    // permission answers "may this person manage members somewhere"; the scope answers
+    // "over whom", and only the second makes this page theirs.
+    requireScope: "business_unit",
     prdSection: "§36",
   },
   {
@@ -224,6 +230,11 @@ export const governNav: NavItem[] = [
     icon: ShieldCheck,
     segment: "admin",
     requirePermission: "member:manage",
+    // Same reason as Users. This page states what every built-in role may do across
+    // the organisation and lets an Organization Admin retune it — nothing on it is
+    // scoped to a project, so a Project Admin opening it reads the whole tenant's
+    // permission model with no way to act on any of it.
+    requireScope: "business_unit",
     prdSection: "§33.1",
   },
   {
@@ -346,7 +357,7 @@ export const projectNav: ProjectNavItem[] = [
   // use here" is not a settings question for the people who most often ask it,
   // and the Settings tab stays — both render the same card, so the selection
   // cannot disagree between them.
-  { label: "Models", to: "/models", icon: Boxes, segment: "models" },
+  { label: "Model Management", to: "/models", icon: Boxes, segment: "models" },
   // Points at the GLOBAL Agent Studio seeded with this project (`?project=`),
   // not at a project-local route — there isn't one, and there shouldn't be.
   // The studio is a drill-down through one cascade (Org → BU → Project →

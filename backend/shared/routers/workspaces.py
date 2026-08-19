@@ -23,6 +23,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
+from shared.authz.grant import UnitAlreadyAdministeredError, grant_role, revoke_role
+from shared.authz.grant_guard import assert_can_grant_role
 from shared.authz.permissions import ROLE_TIER
 from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -598,8 +600,32 @@ async def update_workspace_member_role(
 
     await _validate_role(db, body.roleName)
 
-    # Find ANY existing role entry for this user in this workspace, then update it.
-    uwr = (
+    # THIS ENDPOINT USED TO ASSIGN `uwr.role_name` AND COMMIT, which bypassed every
+    # rule `grant_role` exists to enforce — on the one screen where roles are actually
+    # changed:
+    #
+    #   * NO RANK CHECK. The route gate is `workspace:manage`, which a Business Unit
+    #     Admin holds, so this was a PATCH away from setting anybody — including
+    #     themselves — to org_admin, and holding admin:* organization-wide at the next
+    #     login. `assert_can_grant_role` is the guard for exactly that, and every other
+    #     grant path calls it.
+    #   * NO AUDIT. `record_rbac_change` never ran, so a role change left no trace at
+    #     all. Ana was moved from Contributor to Project Admin and her history showed
+    #     only the original onboarding grant — the change nobody could account for was
+    #     the one somebody actually made.
+    #   * NO TIER CONFLICT CHECK, so governance and delivery could be held in one
+    #     scope, which is the self-approval the tiers exist to prevent.
+    #   * NO ONE-ADMIN-PER-UNIT CHECK, so a second bu_admin could be installed past
+    #     the rule that refuses it everywhere else.
+    #   * A HANDLER-LEVEL `db.commit()`, which drops the transaction-scoped tenant GUC
+    #     and makes every subsequent read in the request return empty.
+    #
+    # Routed through revoke + grant instead. That is also what produces a readable
+    # history: two events naming the role that went and the role that came, rather
+    # than one row quietly holding a different value than it did yesterday.
+    await assert_can_grant_role(db, request, body.roleName)
+
+    existing = (
         await db.execute(
             select(RoleBinding).where(
                 RoleBinding.user_id == user_id,
@@ -608,11 +634,35 @@ async def update_workspace_member_role(
             )
         )
     ).scalar_one_or_none()
-    if uwr is None:
+    if existing is None:
         raise HTTPException(status_code=404, detail="Member not found in this workspace")
 
-    uwr.role_name = body.roleName
-    await db.commit()
+    previous_role = existing.role_name
+    joined_at = existing.created_at
+    actor = getattr(request.state, "user_id", None)
+
+    if previous_role != body.roleName:
+        # Granting the new role BEFORE revoking the old one would trip the
+        # one-bu-admin and tier-conflict rules against the member's own outgoing
+        # role. Revoke first, and let grant_role fail the change as a whole if the
+        # new role is not allowed — a half-applied change would leave somebody with
+        # no role at all.
+        if previous_role:
+            await revoke_role(
+                user_id, wid, previous_role,
+                tenant_id=str(tenant_uuid), scope_kind="business_unit",
+                revoked_by=actor,
+            )
+        try:
+            await grant_role(
+                user_id, wid, body.roleName,
+                tenant_id=str(tenant_uuid), scope_kind="business_unit",
+                granted_by=actor,
+            )
+        except UnitAlreadyAdministeredError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
 
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     email = user.email if user else None
@@ -622,7 +672,7 @@ async def update_workspace_member_role(
         displayName=None,
         initials=_initials(None, email, user_id),
         roleName=body.roleName,
-        joinedAt=uwr.created_at.isoformat() if uwr.created_at else "",
+        joinedAt=joined_at.isoformat() if joined_at else "",
     )
 
 

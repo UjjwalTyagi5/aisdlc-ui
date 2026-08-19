@@ -66,7 +66,12 @@ async def resolve_auth(tenant_id: str = "") -> tuple[str, str]:
     try:
         from config.connector_factory import get_connector_for_session
 
-        conn = await get_connector_for_session("azure_devops", tenant_id=tenant_id)
+        # unrestricted: this resolves CREDENTIALS via auth_adapter, which is
+        # neither a read nor a write of connector data and is never gated. The
+        # operations performed with those credentials are gated where they happen.
+        conn = await get_connector_for_session(
+            "azure_devops", tenant_id=tenant_id, unrestricted=True,
+        )
         auth = await conn.auth_adapter(tenant_id)
         return (auth.get("org_url") or ADO_ORG_URL, auth.get("pat") or ADO_PAT)
     except Exception:

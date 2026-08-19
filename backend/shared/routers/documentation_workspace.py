@@ -15,19 +15,13 @@ import asyncio
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from shared.authz.project_scope import require_project_access
 from agents_orchestrator.documentation_agent.config.session_state import set_prepared
 from shared.services import ado_repos
 
-# EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
-# took the project id from the path and filtered on tenant_id alone, so the only gate
-# was the artifact:view floor applied at include time — a permission `contributor`
-# holds. The router-level dependency covers all of them at once, and covers whatever
-# route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
-documentation_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
+documentation_workspace_router = APIRouter()
 
 _LANG_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",
