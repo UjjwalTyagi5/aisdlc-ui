@@ -31,6 +31,8 @@ import {
   listIntegrationAccess,
   revokeIntegrationAccess,
 } from "@/lib/api/integration-access";
+import { AccessLevelPicker } from "@/components/app/access-level-picker";
+import { ACCESS_LEVEL_LABEL } from "@/lib/schemas/integration-access";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
@@ -56,6 +58,7 @@ export function UnitAccessList({
   name,
   canRevoke,
   canRevokeProject = true,
+  canGrant = canRevoke,
 }: {
   kind: "connector" | "mcp";
   /** Connector kind or MCP server id. */
@@ -66,6 +69,15 @@ export function UnitAccessList({
   canRevoke: boolean;
   /** Either admin tier, bounded server-side to their own units. */
   canRevokeProject?: boolean;
+  /**
+   * May give a unit the integration, and may change the LEVEL it holds — changing
+   * a level IS a grant, so it carries the same authority as making one.
+   *
+   * Defaults to `canRevoke` because both are the Organization Admin's, and that
+   * flag already gated the grant picker. Named separately so the two questions can
+   * diverge later without a caller having to work out which one it meant.
+   */
+  canGrant?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = React.useState<Set<string>>(new Set());
@@ -87,8 +99,15 @@ export function UnitAccessList({
 
   const grant = useMutation({
     mutationFn: grantIntegrationAccess,
-    onSuccess: (_r, vars) => {
-      toast.success(`${vars.unitName} can now use ${name}`);
+    onSuccess: (r, vars) => {
+      const level = r.access ? ACCESS_LEVEL_LABEL[r.access].toLowerCase() : "";
+      toast.success(
+        `${vars.unitName} can now use ${name}${level ? ` (${level})` : ""}`,
+      );
+      // Permitted but partly hollow — a write-only board can create items but
+      // cannot comment on one. Shown to the admin who chose the level, since
+      // they are the only person who can act on it.
+      for (const w of r.warnings ?? []) toast.warning(w, { duration: 9000 });
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -162,6 +181,31 @@ export function UnitAccessList({
                   })()}
                 </span>
               </button>
+
+              {/* The level this unit holds. Editable only by whoever may grant —
+                  changing a level IS a grant, so it carries the same authority as
+                  making one, and a reader who cannot grant still sees where the
+                  unit stands. */}
+              {unit.access && canGrant ? (
+                <AccessLevelPicker
+                  size="sm"
+                  value={unit.access}
+                  disabled={grant.isPending}
+                  onChange={(next) =>
+                    grant.mutate({
+                      kind,
+                      id: targetId,
+                      workspaceId: unit.id,
+                      unitName: unit.name,
+                      access: next,
+                    })
+                  }
+                />
+              ) : unit.access ? (
+                <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
+                  {ACCESS_LEVEL_LABEL[unit.access]}
+                </Badge>
+              ) : null}
 
               {canRevoke && (
                 <RevokeButton

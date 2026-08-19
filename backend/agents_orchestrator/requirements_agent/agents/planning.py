@@ -1161,8 +1161,25 @@ async def write_requirements_artifact(
 from config.connectors.context import get_connector as _get_active_connector
 
 
-async def _board_connector():
-    """Return (connector, None) using the run-injected connector, or (None, error_str)."""
+async def _board_connector(mode: str = "read"):
+    """Return (connector, None) for the run-injected connector, or (None, error_str).
+
+    `mode` is the kind of operation the caller is about to perform — "read" or
+    "write" — and is checked against the access level this project was granted
+    BEFORE the call is attempted.
+
+    Checking here rather than letting `ScopedConnector` raise is about what the agent
+    reads back. A refusal that arrives as an exception is caught by each tool's
+    `except Exception` and returned as "Error creating Feature 'X': ...", which reads
+    like the board rejected the item — an LLM will reasonably retry it, and retrying a
+    permission denial never succeeds. Refusing up front returns the same shape as "no
+    board is connected": a plain statement of what is not possible and who can change
+    it, which is a thing an agent stops and reports rather than fighting.
+
+    The wrapper still enforces independently. This is the courteous path, not the
+    boundary — the boundary is at connector acquisition and cannot be bypassed by a
+    tool that forgets to pass a mode.
+    """
     try:
         connector = _get_active_connector()
     except Exception:
@@ -1180,6 +1197,26 @@ async def _board_connector():
         )
     except Exception:
         pass
+
+    # `access_level` exists only on a ScopedConnector. A bare connector (a test double,
+    # or an `unrestricted=True` path) has no attribute and is not second-guessed here.
+    level = getattr(connector, "access_level", "__unscoped__")
+    if level != "__unscoped__":
+        from shared.authz.connector_access import label, permits
+
+        if not permits(level, mode):
+            return None, (
+                f"{connector.display_name} is {label(level)} for this project, so it "
+                f"cannot be used to {mode} board items. An administrator can change "
+                f"this on the Integrations page; until then, continue without writing "
+                f"to the board."
+                if mode == "write"
+                else
+                f"{connector.display_name} is {label(level)} for this project, so its "
+                f"board items cannot be read. An administrator can change this on the "
+                f"Integrations page. You can still proceed with pasted or uploaded "
+                f"requirements."
+            )
     return connector, None
 
 
@@ -1383,7 +1420,7 @@ async def create_board_item(
         description: Optional description.
         acceptance_criteria: Optional acceptance criteria text.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1418,7 +1455,7 @@ async def create_board_project(
         key: Optional Jira project key (uppercase, ≤10 chars); ignored for ADO.
         description: Optional project description.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1441,7 +1478,7 @@ async def move_board_item_state(project: str, work_item_ids: List[int], target_s
         work_item_ids: List of work item IDs to move.
         target_state: Target state name (use list_board_states for valid values).
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     moved, failed = [], []
@@ -1468,7 +1505,7 @@ async def add_board_comment(project: str, work_item_id: int, comment: str) -> st
         work_item_id: Work item ID to comment on.
         comment: Comment text to post.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1500,7 +1537,7 @@ async def update_board_item(
         acceptance_criteria: New acceptance criteria (optional; applied on ADO).
         state: New workflow state to transition to (optional; use list_board_states for valid values).
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     changed: List[str] = []
@@ -1536,7 +1573,7 @@ async def delete_board_item(project: str, work_item_id: str) -> str:
         project: Project name (Jira: the project name or key).
         work_item_id: Work item id (ADO, e.g. "42") or Jira issue key (e.g. "SCRUM-5").
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1704,7 +1741,7 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
 
     Returns a summary of created work item IDs.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1753,7 +1790,7 @@ async def write_acceptance_criteria_to_board(
 
     Returns a summary of updated work item IDs.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:
@@ -1797,7 +1834,7 @@ async def write_back_normalized_to_board(
 
     Returns a summary of updated work item IDs.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector("write")
     if err:
         return f"Error: {err}"
     try:

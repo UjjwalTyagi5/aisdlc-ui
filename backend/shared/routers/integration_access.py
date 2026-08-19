@@ -126,16 +126,22 @@ async def list_integration_access(
     ).fetchall()
 
     grants: dict[tuple[str, str], set[str]] = {}
-    for kind, target, ws in (
+    # The LEVEL each unit holds, keyed the same way. Carried alongside rather than
+    # folded into `grants` because callers ask two different questions of this data —
+    # "which units hold it" drives the list, "at what level" drives each row's control
+    # — and a set of ids answers the first without complicating it for the second.
+    grant_levels: dict[tuple[str, str, str], str] = {}
+    for kind, target, ws, access in (
         await db.execute(
             text(
-                "SELECT kind, target_ref, workspace_id FROM integration_grants "
+                "SELECT kind, target_ref, workspace_id, access FROM integration_grants "
                 "WHERE tenant_id = CAST(:t AS uuid)"
             ),
             {"t": tenant_id},
         )
     ).fetchall():
         grants.setdefault((kind, target), set()).add(str(ws))
+        grant_levels[(kind, target, str(ws))] = access
 
     # Which projects wired which integration, and to which stages. Read from the
     # project's own columns — the third level of the cascade, and the only one that
@@ -180,6 +186,10 @@ async def list_integration_access(
                 "id": uid,
                 "name": uname,
                 "via": "granted" if uid in granted else "none",
+                # None for a unit that holds nothing — there is no level without a
+                # grant, and reporting a default here would show the picker a value
+                # the database does not have.
+                "access": grant_levels.get((kind, target, uid)),
                 "projects": usage.get(uid, []),
             }
             for uid, uname in units
