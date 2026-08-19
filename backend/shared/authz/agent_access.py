@@ -15,13 +15,24 @@ grant_guard.py resolves permissions fresh rather than off the token.
 """
 from __future__ import annotations
 
+import uuid as _uuid
+
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.agent_registry import AGENT_DEFAULT_REACH
 from shared.authz.effective_role import effective_platform_role
+from shared.authz.project_scope import resolve_project
 from shared.db import get_db_session
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 async def check_agent_access(
@@ -37,6 +48,17 @@ async def check_agent_access(
     on `project_id`. Resolution order: person-level override -> role-level override ->
     the built-in default reach table -> deny."""
     if not project_id or not user_id:
+        return False
+
+    # `tenant_id`/`project_id` are genuine `uuid` columns on `agent_access_overrides`
+    # (unlike `user_id` — see the comment below), so both must actually be UUID-shaped
+    # before they reach the raw `CAST(... AS uuid)` SQL below. Mirrors
+    # `project_scope.py`'s own `_is_uuid` guard: a real project route is slug-addressed
+    # (`/security/{project_id}/...` where `{project_id}` is a slug like
+    # "payments-portal"), so a caller reaching this function with a slug or other
+    # garbage must fail closed (403 via `assert_agent_access`) rather than crash the
+    # DB call with "invalid input syntax for type uuid" (a 500).
+    if not tenant_id or not _is_uuid(tenant_id) or not _is_uuid(project_id):
         return False
 
     # user_id (agent_access_overrides, users.id) is a String(255) column, NOT uuid
@@ -102,22 +124,37 @@ def require_agent_access(agent_id: str, project_id_param: str = "project_id"):
     """Router-level dependency enforcing `check_agent_access` on `{project_id_param}`.
 
     Mirrors `require_project_access`'s exact shape (Request + Depends(get_db_session),
-    project id read from the path). A route with no `{project_id_param}` path
-    parameter passes through untouched, matching `require_project_access`'s own
-    no-project-in-path behavior — there is nothing to scope to.
+    project id read from the path, `resolve_project` used to turn a UUID *or a slug*
+    into a real project row before anything is checked). A route with no
+    `{project_id_param}` path parameter passes through untouched, matching
+    `require_project_access`'s own no-project-in-path behavior — there is nothing to
+    scope to.
     """
 
     async def _dep(
         request: Request, db: AsyncSession = Depends(get_db_session)
     ) -> None:
-        project_id = request.path_params.get(project_id_param)
-        if not project_id:
+        project_id_raw = request.path_params.get(project_id_param)
+        if not project_id_raw:
             return
         tenant_id = getattr(request.state, "tenant_id", "") or ""
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Forbidden")
         user_id = getattr(request.state, "user_id", "") or ""
+
+        # `{project_id_param}` is a path segment, not necessarily a UUID — real
+        # project routes in this codebase are slug-addressed (e.g.
+        # `/dev/payments-portal/...`, see `project_scope.py`'s own docstring).
+        # `resolve_project` is the same UUID-or-slug lookup `require_project_access`
+        # already uses, so `assert_agent_access` below always receives a genuine
+        # project UUID regardless of how the caller addressed the route.
+        project = await resolve_project(db, str(tenant_id), project_id_raw)
+        if project is None:
+            raise HTTPException(status_code=404, detail="not found")
+
         role = await effective_platform_role(db, request)
         await assert_agent_access(
-            db, tenant_id=str(tenant_id), project_id=str(project_id),
+            db, tenant_id=str(tenant_id), project_id=str(project.id),
             role=role, user_id=str(user_id), agent_id=agent_id,
         )
 
