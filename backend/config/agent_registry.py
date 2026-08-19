@@ -233,7 +233,7 @@ AGENT_DEFAULT_REACH: dict[str, dict[str, str]] = {
     "requirements": {
         "project_admin": "owner", "ba": "owner", "architect": "use",
         "developer": "use", "qa": "use", "security_engineer": "use",
-        "devops_engineer": "none", "data_engineer": "use",
+        "devops_engineer": "none", "data_engineer": "use", "scrum_master": "use",
     },
     "design": {
         "project_admin": "owner", "ba": "use", "architect": "owner",
@@ -268,6 +268,6 @@ AGENT_DEFAULT_REACH: dict[str, dict[str, str]] = {
     "documentation": {
         "project_admin": "owner", "ba": "use", "architect": "use",
         "developer": "use", "qa": "use", "security_engineer": "none",
-        "devops_engineer": "use", "data_engineer": "use",
+        "devops_engineer": "use", "data_engineer": "use", "scrum_master": "use",
     },
 }

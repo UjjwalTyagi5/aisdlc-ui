@@ -76,16 +76,43 @@ def test_an_org_admin_without_security_access_is_refused_before_any_scan_runs(pr
     assert resp.status_code == 403
 
 
-def test_the_form_user_id_can_no_longer_impersonate_someone_else(project_with_org_admin):
-    """The real, authenticated caller is the org_admin (no security access) even though
-    the Form field claims to be someone else entirely -- proving identity now comes from
-    the verified session, not the request body."""
+async def test_the_form_user_id_can_no_longer_impersonate_someone_else(project_with_org_admin):
+    """The real, authenticated caller is the org_admin (no default security access),
+    but the Form `user_id` field names a DIFFERENT, real user who DOES have access via
+    a person-level `agent_access_overrides` row.
+
+    This is the discriminating case an earlier version of this test could not prove:
+    naming a nonexistent user is denied whether or not the route trusts the Form
+    field, since neither identity would have access either way. Here, if the route
+    incorrectly trusted the Form field, the request would SUCCEED (the named user has
+    an override granting them "security"). Since the route correctly resolves
+    identity from the verified session (`request.state.user_id`), it must still 403
+    -- the org_admin session holds no override and no default reach, regardless of
+    who the form claims to be.
+    """
     t = project_with_org_admin
+    overridden_user = f"overridden-{_uuid.uuid4()}"
+
+    # agent_access_overrides.user_id carries a real FK to users.id (Task 3,
+    # fk_agent_access_override_user) — the row must exist before it can be
+    # referenced by an override, same pattern as test_agent_access.py's
+    # test_a_person_level_override_grants_access_without_touching_the_role.
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO users (id, tenant_id, email) VALUES (:i, :t, 'overridden-user@example.com')"
+        ), {"i": overridden_user, "t": t["org"]})
+    async with get_db_session_for_tenant(t["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO agent_access_overrides "
+            "(id, tenant_id, project_id, user_id, phase, involvement) "
+            "VALUES (:i, :t, :p, :u, 'security', 'use')"
+        ), {"i": str(_uuid.uuid4()), "t": t["org"], "p": t["project"], "u": overridden_user})
+
     resp = _client().post(
         "/sdlc/agent/security/chat/",
         data={
             "session_id": str(_uuid.uuid4()),
-            "user_id": "someone-else-entirely",
+            "user_id": overridden_user,
             "text": "scan this",
             "project_id": t["project"],
         },

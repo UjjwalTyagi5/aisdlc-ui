@@ -94,6 +94,17 @@ def downgrade() -> None:
     ALTER TABLE agent_access_overrides DROP COLUMN IF EXISTS user_id;
     """)
 
+    # Person-level grants (user_id set, role NULL) cannot be represented in the
+    # pre-migration schema — the whole point of this migration was to allow that
+    # grain. They do not survive a downgrade: delete them before restoring `role` to
+    # NOT NULL, or any such row would violate the constraint and abort the downgrade
+    # partway through. Filtered on `role IS NULL` rather than `user_id IS NOT NULL`
+    # because the `user_id` column has already been dropped by this point — the two
+    # predicates were equivalent while both columns existed (guaranteed by
+    # ck_agent_access_override_grain, dropped above), and `role IS NULL` still
+    # captures exactly the rows that must go now that only `role` remains.
+    op.execute("DELETE FROM agent_access_overrides WHERE role IS NULL")
+
     # Alter role column back to NOT NULL
     op.alter_column("agent_access_overrides", "role", nullable=False)
 

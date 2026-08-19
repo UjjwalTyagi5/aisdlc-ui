@@ -113,8 +113,13 @@ export default function ProjectOverviewPage() {
     const track = projectQ.data?.track;
     if (!viewerRole || !track) return undefined;
     // TODO(next task): read the project's actually-verified agent list once that
-    // signal exists server-side; until then, nothing renders as built.
-    const builtAgents: Phase[] = [];
+    // signal exists server-side; until then, this list is seeded with only the
+    // agent this plan actually rebuilt and verified end-to-end (Security, via
+    // Tasks 5-7's REST/WS/workspace RBAC enforcement). The other 7 Portfolio-1
+    // agents keep their old, unverified code per the design doc's "assume broken
+    // until properly rebuilt" framing (multi-track-agent-access-design.md) — grow
+    // this list one entry at a time as each agent gets the same Task 5-7 treatment.
+    const builtAgents: Phase[] = ["security"];
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 
