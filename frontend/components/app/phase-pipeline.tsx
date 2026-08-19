@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { SlaCountdown } from "@/components/app/sla-countdown";
 import { PHASE_LABEL as PHASE_LABELS, PHASE_ORDER } from "@/lib/agents";
 import { agentsForTrack } from "@/lib/tracks";
+import type { TileState } from "@/lib/agent-access";
 import type { DeliveryTrack, Phase, PhasePipelineEntry, Status } from "@/lib/schemas";
 
 const STATUS_ICON: Record<Status, LucideIcon> = {
@@ -111,6 +112,19 @@ export interface PhasePipelineProps {
   lockedPhases?: ReadonlySet<Phase>;
   /** Rendered inside a locked row — the ask, in context. */
   renderLockedAction?: (phase: Phase) => React.ReactNode;
+  /**
+   * Per-phase tile state (`lib/agent-access.ts`) — the 4-state model that
+   * supersedes `lockedPhases` for callers that have it: `"owner"`/`"use"`
+   * render the normal open row, `"locked"` renders exactly what
+   * `lockedPhases` renders today, and `"coming_soon"` renders a new,
+   * non-interactive row for agents that are in the track's roster but not
+   * yet actually built — a different claim than "you lack access to this,"
+   * so it gets its own badge rather than reusing the lock.
+   *
+   * Additive: when omitted, `lockedPhases` still drives the locked/unlocked
+   * split as before.
+   */
+  tileState?: (phase: Phase) => TileState;
   /** Visual density. "compact" drops the phase labels — used inside project cards. */
   density?: "default" | "compact";
   /**
@@ -141,6 +155,7 @@ export function PhasePipeline({
   className,
   lockedPhases,
   renderLockedAction,
+  tileState,
 }: PhasePipelineProps) {
   const active =
     activePhase ??
@@ -209,6 +224,13 @@ export function PhasePipeline({
       aria-label="SDLC phase pipeline"
     >
       {roster.map((phase, i) => {
+        // `tileState`, when supplied, supersedes `lockedPhases` (see the
+        // prop doc) and additionally distinguishes "not built yet" from
+        // "no access".
+        const state = tileState?.(phase);
+        const isLocked = state ? state === "locked" : (lockedPhases?.has(phase) ?? false);
+        const isComingSoon = state === "coming_soon";
+
         const entry = entryMap.get(phase);
         if (!entry) {
           // Phase not present in data — show as queued placeholder
@@ -224,8 +246,9 @@ export function PhasePipeline({
             hrefFor,
             false,
             undefined,
-            lockedPhases?.has(phase) ?? false,
+            isLocked,
             renderLockedAction,
+            isComingSoon,
           );
         }
         // Attach SLA deadline only to the phase that is awaiting approval
@@ -241,8 +264,9 @@ export function PhasePipeline({
           hrefFor,
           true,
           phaseDeadline,
-          lockedPhases?.has(phase) ?? false,
+          isLocked,
           renderLockedAction,
+          isComingSoon,
         );
       })}
     </ol>
@@ -259,6 +283,7 @@ function renderPhaseRow(
   slaDeadline?: string,
   locked = false,
   renderLockedAction?: (phase: Phase) => React.ReactNode,
+  comingSoon = false,
 ) {
   const isActivePh = entry.phase === active;
   const done = isDone(entry.status);
@@ -343,15 +368,16 @@ function renderPhaseRow(
         index > 0 && "border-line-soft border-t",
         // Dimmed as a whole, so the contrast between what you can work on and
         // what you cannot reads down the rail at a glance rather than needing
-        // each row inspected for a badge.
-        locked && "opacity-55",
+        // each row inspected for a badge. Applies to "coming soon" too — it
+        // is just as much a row you cannot act on today.
+        (locked || comingSoon) && "opacity-55",
       )}
     >
       <div className="min-w-0 flex-1">
         <p
           className={cn(
             "font-display flex items-center gap-1.5 text-[14.5px] font-bold leading-tight tracking-tight",
-            (!hasData || locked) && "text-muted-foreground",
+            (!hasData || locked || comingSoon) && "text-muted-foreground",
           )}
         >
           {locked && <Lock className="size-3.5 shrink-0" aria-hidden />}
@@ -362,23 +388,34 @@ function renderPhaseRow(
               — you do not have access to this agent
             </span>
           )}
+          {comingSoon && (
+            <span className="sr-only">
+              {" "}
+              — this agent isn't available yet
+            </span>
+          )}
         </p>
         {metaEl}
-        {!locked && progressBar}
+        {!locked && !comingSoon && progressBar}
         {/* SLA countdown — only for the phase currently awaiting approval (D-04) */}
-        {!locked && slaDeadline && entry.status === "awaiting_approval" && (
+        {!locked && !comingSoon && slaDeadline && entry.status === "awaiting_approval" && (
           <SlaCountdown deadline={slaDeadline} className="mt-2" />
         )}
         {locked && renderLockedAction && (
           <div className="mt-2">{renderLockedAction(entry.phase)}</div>
         )}
       </div>
-      {/* The run's status is suppressed on a locked row. "Awaiting approval"
-          is a call to act, and showing it to someone who cannot act on this
-          agent reads as a task they are ignoring. The lock is the status. */}
+      {/* The run's status is suppressed on a locked or coming-soon row.
+          "Awaiting approval" is a call to act, and showing it to someone who
+          cannot act on this agent reads as a task they are ignoring. The
+          lock (or the "coming soon" badge) is the status. */}
       {locked ? (
         <span className="bg-muted text-muted-foreground shrink-0 self-start rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
           No access
+        </span>
+      ) : comingSoon ? (
+        <span className="bg-muted text-muted-foreground shrink-0 self-start rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
+          Coming soon
         </span>
       ) : (
         statusLabel
@@ -399,8 +436,9 @@ function renderPhaseRow(
         // A locked row is never a link. Its destination is the agent's own
         // page, which would refuse the viewer — and a link that only ever
         // leads to a wall is worse than no link, because it costs a click to
-        // learn what the lock already said.
-        const href = locked ? undefined : hrefFor?.(entry.phase);
+        // learn what the lock already said. A coming-soon row has no
+        // destination at all — the page it would lead to doesn't exist yet.
+        const href = locked || comingSoon ? undefined : hrefFor?.(entry.phase);
         return href ? (
           <Link
             href={href}

@@ -48,7 +48,7 @@ import {
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
-import { roleAgentSplit } from "@/lib/agent-access";
+import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-dialog";
@@ -96,24 +96,26 @@ export default function ProjectOverviewPage() {
   const viewerRole = role;
 
   /**
-   * Agents this viewer's role doesn't reach, for the pipeline's locked state.
+   * Per-phase tile state for the pipeline (`lib/agent-access.ts`) — replaces
+   * the old locked/unlocked-only split with the 4-state owner/use/locked/
+   * coming_soon model (multi-track-agent-access-design.md §2.2).
    *
-   * NOT APPLIED to a role that reaches nothing at all. The governance tier
-   * holds no agent access by design (PRD §14.8), and locking all eight rows
-   * for them would read as "you are missing access" when in fact operating
-   * agents was never their job — they are here to see status. A pipeline of
-   * eight padlocks tells an Org Admin nothing they can act on and hides the
-   * run states they came for.
-   *
-   * The lock is for the partially-blocked case, which is the only one where
-   * the distinction between "yours" and "not yours" is information.
+   * Unlike the split this replaces, this does not special-case a role that
+   * reaches nothing at all (e.g. the governance tier, PRD §14.8) to hide its
+   * locks — with `builtAgents` hardcoded empty below, every phase currently
+   * resolves to `coming_soon` regardless of role, which happens to keep a
+   * governance viewer's pipeline free of padlocks for now. That stops being
+   * true the moment `builtAgents` reflects real data, at which point a
+   * zero-reach role would see every phase as `locked` — worth revisiting
+   * when that TODO is picked up.
    */
-  const lockedPhases = React.useMemo(() => {
+  const tileState = React.useMemo(() => {
     const track = projectQ.data?.track;
     if (!viewerRole || !track) return undefined;
-    const { reachable, locked } = roleAgentSplit(viewerRole, track);
-    if (reachable.length === 0) return undefined;
-    return new Set<Phase>(locked);
+    // TODO(next task): read the project's actually-verified agent list once that
+    // signal exists server-side; until then, nothing renders as built.
+    const builtAgents: Phase[] = [];
+    return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 
   // The unit's real name, not the word "Business Unit" — the request names the
@@ -304,7 +306,7 @@ export default function ProjectOverviewPage() {
         hrefFor={(p) =>
           !actionsLocked && ROUTABLE_PHASES.has(p) ? phaseHref(project.id, p) : undefined
         }
-        lockedPhases={lockedPhases}
+        tileState={tileState}
         renderLockedAction={(p) => (
           <RequestAccessButton
             label="Request access"
