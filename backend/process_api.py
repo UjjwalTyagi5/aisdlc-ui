@@ -95,6 +95,7 @@ from shared.routers.notifications import notifications_router
 from shared.routers.project_members import project_members_router
 from shared.routers.integration_access import integration_access_router
 from shared.routers.project_connector_access import project_connector_access_router
+from shared.routers.role_history import role_history_router
 from shared.routers.onboarding import onboarding_router
 from shared.routers.project_scoped import project_scoped_router
 from shared.routers.spend import spend_router
@@ -980,6 +981,7 @@ app.include_router(project_members_router, tags=["projects"])
 # three that is a decision made about somebody else.
 app.include_router(integration_access_router, tags=["integrations"])
 app.include_router(project_connector_access_router, tags=["integrations"])
+app.include_router(role_history_router, tags=["admin"])
 # The Organization Admin's half of the two-step handover: admit a person, place
 # them, and raise the role_assignment request that tells the unit's admin they
 # owe them a job. The third act is the point — without it somebody lands in a
