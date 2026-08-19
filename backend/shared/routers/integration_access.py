@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.connector_access import ACCESS_LEVELS, DEFAULT_ACCESS, is_access_level, narrow
+from shared.authz.connector_capabilities import unsupported_reason, warnings_for
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import administered_workspace_ids, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -312,6 +313,18 @@ async def grant_integration_access(
                 "message": f"access must be one of {', '.join(ACCESS_LEVELS)}.",
             },
         )
+    # A LEVEL THE CONNECTOR CANNOT HONOUR IS REFUSED, not stored. Slack declares no
+    # read capabilities, so `read` — our least-privilege default — would grant a
+    # connector that can do nothing, shown on the hub as a healthy grant. Refusing
+    # only ever happens on POSITIVE knowledge: a connector that cannot be introspected
+    # returns None and is granted whatever was asked for.
+    if kind == "connector":
+        reason = unsupported_reason(id, access)
+        if reason:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unsupported_access_level", "message": reason},
+            )
     if projectId and not workspaceId:
         raise HTTPException(
             status_code=422,
@@ -357,7 +370,14 @@ async def grant_integration_access(
     logger.info(
         "integration granted: %s %s -> unit %s (%s)", kind, id, workspaceId, access
     )
-    return {"ok": True, "changed": True, "access": access}
+    return {
+        "ok": True,
+        "changed": True,
+        "access": access,
+        # Permitted but partly hollow — see `warnings_for`. Returned rather than
+        # logged so the admin who chose the level is the one who reads it.
+        "warnings": warnings_for(id, access) if kind == "connector" else [],
+    }
 
 
 @integration_access_router.delete(

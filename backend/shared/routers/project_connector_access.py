@@ -39,6 +39,7 @@ from shared.authz.connector_access import (
     is_access_level,
     label,
 )
+from shared.authz.connector_capabilities import unsupported_reason, warnings_for
 from shared.authz.connector_grants import effective_access, unit_access
 from shared.authz.dependency import require_permission
 from shared.authz.project_scope import assert_can_administer_project, resolve_project
@@ -182,6 +183,21 @@ async def set_project_integration_access(
             },
         )
 
+    # Same manifest check as the unit door — a project cannot be narrowed TO a mode
+    # the connector does not implement either.
+    #
+    # AFTER the grant check, deliberately. A caller whose unit holds no grant should
+    # be told that and nothing else: "slack has no read capabilities" answers a
+    # question they were not able to ask, and confirms a connector kind exists to
+    # somebody with no access to it.
+    if body.kind == "connector":
+        reason = unsupported_reason(body.targetId, body.access)
+        if reason:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unsupported_access_level", "message": reason},
+            )
+
     # THE ESCALATION REFUSAL. Refused, not narrowed: somebody who asked for write and
     # quietly received read would go on believing they had write, and the first sign
     # otherwise would be an agent failing mid-run.
@@ -223,6 +239,7 @@ async def set_project_integration_access(
         "unitAccess": granted,
         "projectAccess": body.access,
         "effectiveAccess": body.access,
+        "warnings": warnings_for(body.targetId, body.access) if body.kind == "connector" else [],
     }
 
 

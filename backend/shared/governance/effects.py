@@ -321,6 +321,18 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
     if kind not in ("connector", "mcp"):
         raise EffectNotAvailable("connector_access", f"Unknown integration kind {kind!r}.")
 
+    # THE THIRD DOOR carries the manifest check too. A request raised before a
+    # connector's capabilities were known — or approved after they changed — would
+    # otherwise write a level the connector cannot exercise, which is the hollow
+    # grant this validation exists to prevent, arriving by the one route that skips
+    # the endpoint doing the checking.
+    if kind == "connector":
+        from shared.authz.connector_capabilities import unsupported_reason
+
+        reason = unsupported_reason(target_ref, access)
+        if reason:
+            raise EffectNotAvailable("connector_access", reason)
+
     decided_by_tier = request.get("currentApproverRole") or ""
     tenant_id = request["tenantId"]
 
