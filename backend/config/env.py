@@ -242,6 +242,15 @@ ENABLE_WEBHOOK_TRIGGERS: bool = os.environ.get("ENABLE_WEBHOOK_TRIGGERS", "false
 #         load_secret("github-app-installation-id")
 # Slack:  load_secret("slack-bot-token")
 # Azure Repos: reuses ADO_ORG_URL + load_secret("ado-pat")
+# GitHub Actions: secret_store refs gha-pat / gha-owner (written by the Integrations
+#         "Add credentials" form) — see shared/routers/connectors.py.
+# MS Teams + SharePoint: ONE Entra app registration per tenant, shared by both kinds.
+#         secret_store refs msgraph-tenant-id / msgraph-client-id / msgraph-client-secret,
+#         plus non-secret routing refs msteams-team-id, msteams-channel-id,
+#         msteams-webhook-url, sharepoint-site-id, sharepoint-drive-id,
+#         sharepoint-folder-path.
+# Figma:  secret_store refs figma-pat OR figma-access-token (the two auth shapes),
+#         plus the figma-connected marker and the non-secret figma-file-key default.
 # Env-var fallbacks for local dev (never use in production)
 JIRA_URL:        str = os.environ.get("JIRA_URL", "")
 JIRA_EMAIL:      str = os.environ.get("JIRA_EMAIL", "")
@@ -254,6 +263,23 @@ GITHUB_APP_INSTALLATION_ID: str = os.environ.get("GITHUB_APP_INSTALLATION_ID", "
 GITHUB_APP_PRIVATE_KEY:      str = os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
 GITHUB_APP_PRIVATE_KEY_PATH: str = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", "")
 SLACK_BOT_TOKEN: str = os.environ.get("SLACK_BOT_TOKEN", "")
+# GitHub Actions — the per-tenant secret store is authoritative; these are local-dev
+# fallbacks only, matching the tail of every connector's auth ladder.
+GHA_PAT:   str = os.environ.get("GHA_PAT", "")
+GHA_OWNER: str = os.environ.get("GHA_OWNER", "")
+# Microsoft Graph app registration (client-credentials flow) — serves BOTH the
+# ms_teams and sharepoint connectors. Local-dev fallbacks; the per-tenant secret
+# store written by the Integrations form takes precedence.
+MSGRAPH_TENANT_ID:     str = os.environ.get("MSGRAPH_TENANT_ID", "")
+MSGRAPH_CLIENT_ID:     str = os.environ.get("MSGRAPH_CLIENT_ID", "")
+MSGRAPH_CLIENT_SECRET: str = os.environ.get("MSGRAPH_CLIENT_SECRET", "")
+# Figma — accepts EITHER a Personal Access Token or an OAuth2 app. The per-tenant
+# secret store (figma-pat / figma-access-token) is authoritative; FIGMA_PAT is a
+# local-dev fallback only. The OAuth client pair is platform-level, not per-tenant:
+# one registered Figma app serves every tenant, exactly like SLACK_CLIENT_ID.
+FIGMA_PAT:                 str = os.environ.get("FIGMA_PAT", "")
+FIGMA_OAUTH_CLIENT_ID:     str = os.environ.get("FIGMA_OAUTH_CLIENT_ID", "")
+FIGMA_OAUTH_CLIENT_SECRET: str = os.environ.get("FIGMA_OAUTH_CLIENT_SECRET", "")
 
 # Webhook signature secrets (REQ-M6-06) — verify inbound webhook signatures.
 # Loaded KV-first in the FastAPI lifespan, then these env vars as local-dev fallback.
@@ -266,6 +292,14 @@ SLACK_SIGNING_SECRET:  str = os.environ.get("SLACK_SIGNING_SECRET", "")
 JIRA_WEBHOOK_SECRET:   str = os.environ.get("JIRA_WEBHOOK_SECRET", "")
 ADO_WEBHOOK_USER:      str = os.environ.get("ADO_WEBHOOK_USER", "")
 ADO_WEBHOOK_PASSWORD:  str = os.environ.get("ADO_WEBHOOK_PASSWORD", "")
+# GitHub Actions workflow_run deliveries are signed exactly like GitHub Issues
+# (X-Hub-Signature-256, HMAC-SHA256 over the raw body) but with their own secret so a
+# CI webhook can be rotated without touching the issues webhook.
+GHA_WEBHOOK_SECRET:    str = os.environ.get("GHA_WEBHOOK_SECRET", "")
+# Microsoft Graph change notifications carry NO signature — clientState is the only
+# authentication Graph offers, so this must be >=32 bytes of entropy and is compared
+# with hmac.compare_digest. KV name: msgraph-webhook-client-state.
+MSGRAPH_WEBHOOK_CLIENT_STATE: str = os.environ.get("MSGRAPH_WEBHOOK_CLIENT_STATE", "")
 
 # ── M7.4: SCIM Provisioning (REQ-M7-16) ──
 ENABLE_SCIM: bool = os.environ.get("ENABLE_SCIM", "false").lower() == "true"

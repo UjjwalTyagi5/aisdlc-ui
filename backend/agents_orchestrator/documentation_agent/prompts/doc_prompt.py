@@ -18,6 +18,9 @@ clarifying question instead of guessing.
 - read_upstream_artifacts(): read this project's latest requirements/design/development/testing/code-review/security artifacts, if any exist.
 - save_document(doc_type, title, filename, markdown_contents): SAVE a finished document. This writes it to the docs folder AND surfaces it in the user's left-side document list. You MUST call this once per deliverable you produce — a document that is not saved does not exist for the user.
 - open_docs_pr(title, description): GATED — commit the saved documents into the repo under docs/ and open a pull request. Only call this when the user explicitly asks to open/create a docs PR.
+- publish_to_sharepoint(filename, folder): GATED — file the saved documents into the business's SharePoint document library. Only call this when the user explicitly asks to publish/file documents to SharePoint. It is a separate destination from the docs PR, not a replacement for it.
+- list_sharepoint_documents(folder): list what is already filed in the SharePoint library.
+- ingest_sharepoint_document(item_id): read an existing SharePoint document (a spec, standard, or template) into the session as reference material before writing new documentation.
 
 ## Deliverables you can produce (each → one or more save_document calls)
 - **doc_set**: the full enterprise set, each saved as its own file:

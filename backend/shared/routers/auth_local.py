@@ -142,6 +142,61 @@ async def change_password(request: Request, body: ChangePasswordIn) -> dict:
     return {"ok": True}
 
 
+@auth_local_router.post("/auth/refresh", response_model=LoginOut, dependencies=[Depends(public())])
+async def refresh(request: Request) -> LoginOut:
+    """Re-mint this caller's token against what they hold NOW.
+
+    THE PROBLEM THIS SOLVES. Permissions and `platform_role` are baked into the token
+    at login, and a role granted afterwards does not reach a session already holding
+    one — for up to the token's whole lifetime. What the user sees is worse than a
+    plain delay: `visible_project_ids` reads bindings LIVE from the database, so their
+    dashboard immediately shows the project they were just given, while the navigation
+    and the role chip still read the stale claim and show them nothing to do with it.
+    Live data next to a stale identity reads as a broken product, and the person it
+    happens to has no way to know that signing out would fix it.
+
+    WIDENING ONLY IS SAFE TO DO SILENTLY. A stale token is UNDER-privileged — it is
+    the new grant that is missing, never an old one lingering — so re-minting cannot
+    hand anybody more than the database says they have right now. Reductions are not
+    this endpoint's business: they are handled by the token epoch, which refuses the
+    stale token outright rather than waiting to be asked (`shared/authz/token_epoch`).
+
+    AUTHENTICATED BY THE TOKEN IT REPLACES. `public()` marks it as carrying no
+    permission gate, not as unauthenticated: the JWT middleware has already verified
+    the bearer and populated request.state, and a caller with no established identity
+    gets 403 below. It therefore cannot be used to mint a token for somebody else.
+    """
+    user_id = getattr(request.state, "user_id", "") or ""
+    tenant_id = getattr(request.state, "tenant_id", "") or ""
+    if not user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Resolved from the DATABASE, never carried over from the presented token — the
+    # entire point is that the old claim may be out of date.
+    perms = await resolve_permissions_for_user(user_id, tenant_id) if tenant_id else []
+    platform_role = await resolve_platform_role_for_user(user_id, tenant_id, perms)
+
+    tenant_name = None
+    if tenant_id:
+        async with get_db_session_superuser() as s:
+            org = (await s.execute(
+                text("SELECT suspended, display_name FROM organizations WHERE id = :id"),
+                {"id": tenant_id},
+            )).first()
+        # A suspended organization must not be handed a fresh token — that would turn
+        # this into the way to keep working after being cut off.
+        if org is not None and org.suspended:
+            raise HTTPException(status_code=403, detail="Organization suspended")
+        tenant_name = org.display_name if org is not None else None
+
+    token = create_access_token(user_id=user_id, tenant_id=tenant_id, permissions=perms,
+                                platform_role=platform_role)
+    logger.info("token refreshed for %s (role=%s, %d permissions)",
+                user_id, platform_role, len(perms))
+    return LoginOut(token=token, tier="org", user_id=user_id, tenant_id=tenant_id or None,
+                    permissions=perms, tenant_name=tenant_name, platform_role=platform_role)
+
+
 @auth_local_router.post("/auth/change-password", dependencies=[Depends(public())])
 async def change_password_endpoint(request: Request, body: ChangePasswordIn) -> dict:
     return await change_password(request, body)

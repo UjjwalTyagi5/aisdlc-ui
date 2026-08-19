@@ -56,6 +56,8 @@ from config.env import (
     JIRA_WEBHOOK_SECRET,
     ADO_WEBHOOK_USER,
     ADO_WEBHOOK_PASSWORD,
+    GHA_WEBHOOK_SECRET,
+    MSGRAPH_WEBHOOK_CLIENT_STATE,
     ENABLE_OIDC,
     ENABLE_SCIM,
     RBAC_CATALOG_AUTOREPAIR,
@@ -92,6 +94,8 @@ from shared.routers.governance_requests import governance_router
 from shared.routers.notifications import notifications_router
 from shared.routers.project_members import project_members_router
 from shared.routers.integration_access import integration_access_router
+from shared.routers.project_connector_access import project_connector_access_router
+from shared.routers.role_history import role_history_router
 from shared.routers.onboarding import onboarding_router
 from shared.routers.project_scoped import project_scoped_router
 from shared.routers.spend import spend_router
@@ -314,11 +318,16 @@ async def _refresh_health(app: FastAPI) -> None:
 
 
 def _build_connectors_for_health_probe():
-    """Instantiate all five connectors for the health probe loop.
+    """Instantiate every registered connector for the health probe loop.
 
     Each connector is constructed without credentials — credentials are resolved
     ephemerally inside health_check() via auth_adapter(). Instantiation is
     synchronous and cheap (no I/O at construction time).
+
+    Keep this list in sync with config.connectors.router._EXPECTED_CONNECTOR_NAMES:
+    a name expected there but missing here (or whose probe raises, since
+    _probe_all_connectors drops exceptions) makes GET /connectors/health fail its
+    subset test and re-probe inline on every request.
 
     Returns a list of connector instances.
     """
@@ -327,6 +336,10 @@ def _build_connectors_for_health_probe():
     from config.connectors.github_issues import GitHubIssuesConnector
     from config.connectors.azure_repos import AzureReposConnector
     from config.connectors.slack import SlackConnector
+    from config.connectors.github_actions import GitHubActionsConnector
+    from config.connectors.msteams import MSTeamsConnector
+    from config.connectors.sharepoint import SharePointConnector
+    from config.connectors.figma import FigmaConnector
     from config.env import ADO_ORG_URL, JIRA_URL
 
     return [
@@ -335,11 +348,15 @@ def _build_connectors_for_health_probe():
         GitHubIssuesConnector(),
         AzureReposConnector(ADO_ORG_URL),
         SlackConnector(),
+        GitHubActionsConnector(),
+        MSTeamsConnector(),
+        SharePointConnector(),
+        FigmaConnector(),
     ]
 
 
 async def _probe_all_connectors() -> dict:
-    """Probe all five connectors concurrently and return a health cache dict.
+    """Probe every registered connector concurrently and return a health cache dict.
 
     Uses asyncio.gather(return_exceptions=True) so one slow or failing connector
     cannot block the others (REQ-M6-11, T-m6-08-D).  Probe errors are surfaced
@@ -363,7 +380,7 @@ async def _probe_all_connectors() -> dict:
 
 
 async def _refresh_connector_health(app) -> None:
-    """Background coroutine — re-probes all five connector health probes every 30 seconds.
+    """Background coroutine — re-probes every registered connector every 30 seconds.
 
     Probes ADO, Jira, GitHub Issues, Azure Repos, and Slack concurrently via
     asyncio.gather(return_exceptions=True).  One slow connector cannot block the
@@ -450,6 +467,14 @@ async def lifespan(app: FastAPI):
     app.state.jira_webhook_secret = await load_secret("jira-webhook-secret") or JIRA_WEBHOOK_SECRET
     app.state.ado_webhook_user = await load_secret("ado-webhook-user") or ADO_WEBHOOK_USER
     app.state.ado_webhook_password = await load_secret("ado-webhook-password") or ADO_WEBHOOK_PASSWORD
+    # GitHub Actions uses the same HMAC scheme as GitHub Issues but its own secret, so
+    # the CI webhook can be rotated independently.
+    app.state.gha_webhook_secret = await load_secret("gha-webhook-secret") or GHA_WEBHOOK_SECRET
+    # Microsoft Graph sends NO signature — clientState is the only authentication, so
+    # the /webhooks/msgraph route fails closed when this is unset.
+    app.state.msgraph_client_state = (
+        await load_secret("msgraph-webhook-client-state") or MSGRAPH_WEBHOOK_CLIENT_STATE
+    )
 
     # Redis connection pool for the worker pool (REQ-M3-01). Only created when
     # the feature flag is on — ENABLE_WORKER_POOL=false keeps local dev Redis-free.
@@ -587,12 +612,20 @@ async def lifespan(app: FastAPI):
     # Start connector health probe (re-probes connector health every 30s)
     connector_health_task = asyncio.create_task(_refresh_connector_health(app))
 
-    # NO WEBHOOK CONSUMERS. Webhook DELIVERY still works — POST
-    # /webhooks/{connector}/{tenant_id} verifies the signature and puts the event on
-    # its Redis stream — but the consumer that turned those events into runs started a
-    # workflow engine, and there is no longer an engine to start. Events accumulate on
-    # the stream, which is recoverable; silently dropping deliveries would not be.
+    # NO WEBHOOK CONSUMERS for github/jira/azure_repos. Webhook DELIVERY still works —
+    # POST /webhooks/{connector}/{tenant_id} verifies the signature and puts the event
+    # on its Redis stream — but the consumer that turned those events into runs started
+    # a workflow engine, and there is no longer an engine to start (Temporal was
+    # removed). Events accumulate on the stream, which is recoverable; silently
+    # dropping deliveries would not be.
     # BACKLOG: a consumer that starts a conversational run from a webhook event.
+    webhook_consumer_tasks = []
+
+    # CI pipeline runs: records state, never starts a workflow — unaffected by the
+    # Temporal removal above (see PipelineRunConsumer docstring).
+    from webhooks.pipeline_consumer import PipelineRunConsumer
+    webhook_consumer_tasks.append(asyncio.create_task(PipelineRunConsumer().run()))
+    logger.info("Pipeline-run consumer started for connector: github_actions")
 
     # Durable async LangGraph checkpointer pool (enterprise) — opened once here so the
     # agent graphs' astream/ainvoke can persist execution state. No-op in local mode
@@ -947,6 +980,8 @@ app.include_router(project_members_router, tags=["projects"])
 # project wired; this is the permission between them, and the only one of the
 # three that is a decision made about somebody else.
 app.include_router(integration_access_router, tags=["integrations"])
+app.include_router(project_connector_access_router, tags=["integrations"])
+app.include_router(role_history_router, tags=["admin"])
 # The Organization Admin's half of the two-step handover: admit a person, place
 # them, and raise the role_assignment request that tells the unit's admin they
 # owe them a job. The third act is the point — without it somebody lands in a

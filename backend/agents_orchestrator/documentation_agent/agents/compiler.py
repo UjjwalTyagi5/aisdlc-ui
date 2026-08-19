@@ -24,6 +24,9 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     read_upstream_artifacts,
     save_document,
     open_docs_pr,
+    publish_to_sharepoint,
+    list_sharepoint_documents,
+    ingest_sharepoint_document,
 )
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
@@ -45,6 +48,10 @@ _tools = [
     read_upstream_artifacts,
     save_document,
     open_docs_pr,
+    # SharePoint destination — additive to the local-disk save and the git-PR path.
+    publish_to_sharepoint,
+    list_sharepoint_documents,
+    ingest_sharepoint_document,
 ]
 
 

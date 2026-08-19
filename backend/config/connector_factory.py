@@ -21,6 +21,10 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     "github_issues": "config.connectors.github_issues.GitHubIssuesConnector",
     "azure_repos":   "config.connectors.azure_repos.AzureReposConnector",
     "slack":         "config.connectors.slack.SlackConnector",
+    "github_actions": "config.connectors.github_actions.GitHubActionsConnector",
+    "ms_teams":       "config.connectors.msteams.MSTeamsConnector",
+    "sharepoint":     "config.connectors.sharepoint.SharePointConnector",
+    "figma":          "config.connectors.figma.FigmaConnector",
 }
 
 
@@ -31,8 +35,9 @@ def _load_connector_class(dotted_path: str):
     return getattr(module, class_name)
 
 
-async def get_connector_for_session(kind: str = "azure_devops", tenant_id: str = "") -> BaseConnector:
-    """Return a connector instance for the given kind.
+async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> BaseConnector:
+    """Construct the raw connector for `kind`. NOT access-gated — see the public
+    `get_connector_for_session` below, which is what callers must use.
 
     tenant_id must be a non-empty string for all connector kinds except health-probe
     calls which pass tenant_id='__health_probe__' by platform convention.
@@ -78,17 +83,20 @@ async def get_connector_for_session(kind: str = "azure_devops", tenant_id: str =
         return connector_class(org_url=org_url, tenant_id=tenant_id)
     if kind == "azure_repos":
         # Reuses ADO credentials — same org URL as AzureDevOpsConnector
-        return connector_class(org_url=ADO_ORG_URL)
+        return connector_class(org_url=ADO_ORG_URL, tenant_id=tenant_id)
     if kind == "jira":
         from config.env import JIRA_URL
         # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
         # token (not the empty global env), mirroring azure_devops above.
         return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
-    if kind == "slack":
-        return connector_class(org_url="")
-    # github_issues and any future connectors: instantiate with empty org_url;
-    # actual credentials resolved lazily in auth_adapter() via load_secret()
-    return connector_class(org_url="")
+    # slack, github_issues, github_actions, ms_teams, sharepoint, figma and any future
+    # connectors: instantiate with an empty org_url; credentials are resolved lazily
+    # in auth_adapter() from the tenant secret store / Key Vault.
+    #
+    # Every connector constructor accepts org_url= and tenant_id= precisely so this
+    # tail works for all of them. SlackConnector used to take only bot_token, so this
+    # call raised TypeError and get_connector_for_session(kind="slack") was unusable.
+    return connector_class(org_url="", tenant_id=tenant_id)
 
 
 async def list_available_connectors() -> list[dict]:
@@ -104,3 +112,53 @@ async def list_available_connectors() -> list[dict]:
             display_name = kind
         result.append({"kind": kind, "display_name": display_name})
     return result
+
+
+async def get_connector_for_session(
+    kind: str = "azure_devops",
+    tenant_id: str = "",
+    *,
+    project_id: str = "",
+    access: str | None = None,
+    unrestricted: bool = False,
+) -> BaseConnector:
+    """Return a connector for `kind`, bound to the access level it may use.
+
+    THE ONE PLACE ACCESS IS ENFORCED. Agents call `read_adapter` / `write_adapter`
+    from roughly twenty sites across eight modules, and every new agent adds more. A
+    permission check written at those sites is one somebody will forget, and the one
+    they forget is the one that matters. Every connector is obtained here, so the
+    level is bound here and every existing call site became governed without being
+    edited — see `config/connectors/scoped.ScopedConnector`.
+
+    Pass exactly one of:
+
+      project_id    resolve the effective level from the grant cascade. The agent
+                    runtime path: it has `SDLCWorkflowInput.project_id` and no session.
+      access        a level the caller already resolved. The request path, which has a
+                    session open and should not open a second one.
+      unrestricted  no gating. Health probes and org-level admin operations that act
+                    for no project. Explicit and named, because it is the fail-open
+                    door and it should read as one at the call site.
+
+    Passing none of them yields a connector that permits NOTHING — a caller who has
+    not established what they may do has not established that they may do anything.
+    The failure is then a clear `ConnectorAccessDenied` at first use rather than a
+    silent full grant.
+    """
+    raw = await _build_connector(kind=kind, tenant_id=tenant_id)
+
+    if unrestricted:
+        return raw
+
+    level = access
+    if level is None and project_id:
+        from shared.authz.connector_grants import resolve_effective_access
+
+        level = await resolve_effective_access(
+            tenant_id=tenant_id, project_id=project_id, target_ref=kind, kind="connector"
+        )
+
+    from config.connectors.scoped import ScopedConnector
+
+    return ScopedConnector(raw, level)

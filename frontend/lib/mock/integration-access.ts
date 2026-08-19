@@ -74,6 +74,11 @@ export function listIntegrationAccess(
           id,
           name: unitName.get(id) ?? id,
           via,
+          // Mock mode has no grant table, so it cannot know a per-unit level. It
+          // reports the widest, matching how these fixtures have always behaved —
+          // every granted unit could do everything. A null here would render the
+          // picker empty and read as a bug rather than as "not modelled".
+          access: via === "granted" ? ("read_write" as const) : null,
           // EVERY project in the unit, using it or not — an empty `stages`
           // means "could, doesn't". Filtering to users only made granting a
           // project unreachable, the same hole the unit list had.

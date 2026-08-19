@@ -93,7 +93,13 @@ class GitHubIssuesConnector(BaseConnector):
     # Never persisted; resets on process restart.
     _installation_token_cache: Dict[str, Tuple[str, float]] = {}
 
-    def __init__(self, app_id: str = "", installation_id: str = "", org_url: str = "") -> None:
+    def __init__(
+        self,
+        app_id: str = "",
+        installation_id: str = "",
+        org_url: str = "",
+        tenant_id: str = "",
+    ) -> None:
         """Constructor stores only non-secret config; no PAT/key on self.
 
         Args:
@@ -101,11 +107,15 @@ class GitHubIssuesConnector(BaseConnector):
             installation_id: GitHub App installation ID for the org/repo.
             org_url:         Optional "{owner}/{repo}" — convenience alias; ignored
                              if project is passed directly to CRUD methods.
+            tenant_id:       Run context, NOT a credential. The factory sets it so
+                             credential resolution is tenant-scoped without every call
+                             site threading it through (REQ-M7-01).
         """
         # Neither the private key nor any raw credential is stored here.
         self._app_id_hint = app_id  # hint only; KV value takes precedence in auth_adapter
         self._installation_id_hint = installation_id
         self._org_url = org_url.rstrip("/") if org_url else ""
+        self._tenant_id = tenant_id
 
     # ── Identity ──────────────────────────────────────────────────────────
 
@@ -131,6 +141,10 @@ class GitHubIssuesConnector(BaseConnector):
 
         The private key PEM and JWT are never stored on self or logged.
         """
+        # Fall back to the instance tenant set by the factory. Without this the
+        # tenant-scoped KV tier below is skipped whenever a caller relies on the
+        # instance context rather than passing the tenant explicitly.
+        tenant_id = tenant_id or self._tenant_id
         app_id = (
             (await _keyvault.load_secret("github-app-id", tenant_id=tenant_id) if tenant_id else None)
             or await _keyvault.load_secret("github-app-id")
@@ -388,7 +402,13 @@ class GitHubIssuesConnector(BaseConnector):
         retry_ref = [0]
         await await_backoff(self.__class__._tenant_states, tenant_id, retry_ref)
 
-        token = await self._get_installation_token()
+        # Thread the tenant into credential resolution. This previously called
+        # _get_installation_token() with no argument, so every "tenant-scoped" call
+        # silently resolved the GLOBAL KV/env credential and the per-tenant tier was
+        # dead code. "default" is the rate-limit bucket sentinel, not a tenant, so it
+        # is not treated as one; the instance tenant set by the factory wins there.
+        auth_tenant = tenant_id if tenant_id and tenant_id != "default" else self._tenant_id
+        token = await self._get_installation_token(tenant_id=auth_tenant)
         url = f"{_GH_API_BASE}{path}"
 
         async with httpx.AsyncClient(timeout=30) as client:

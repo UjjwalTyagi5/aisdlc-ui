@@ -183,7 +183,10 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
             "repo.read", "doc.changelog.generate", "artifact.read",
             "doc.generate", "vcs.pr.create",
         ],
-        optional_capabilities=[],
+        # OPTIONAL, not required: filing documents to SharePoint depends on the tenant
+        # having connected it. A tenant that has not is fully functional — docs still
+        # save locally and still ship through a git PR.
+        optional_capabilities=["docs.publish", "doc.ingest"],
     ),
 }
 

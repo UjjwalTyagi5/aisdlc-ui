@@ -374,7 +374,9 @@ async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None)
 
     kind = kind or _board_kind(project)
     try:
-        return await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+        return await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, project_id=str(project.id),
+        )
     except Exception:
         raise HTTPException(
             status_code=409,

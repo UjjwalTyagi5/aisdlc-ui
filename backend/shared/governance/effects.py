@@ -70,7 +70,10 @@ _NOT_APPLICABLE = {
 _DECISION_IS_THE_OUTCOME = frozenset(
     {
         "access_request",
-        "connector_access",
+        # `connector_access` used to live here — approving it recorded agreement and
+        # changed nothing, so the requester still had to go and set the grant by hand
+        # and an approved request granted no access at all. It now has a real effect
+        # below, which is what makes approval a gate rather than a note.
         "mcp_server",
         "user_onboarding",
         "agent_access",
@@ -100,6 +103,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_project_archive(db, request)
     if rtype == "model_provider_access":
         return await _apply_model_provider_access(db, request)
+    if rtype == "connector_access":
+        return await _apply_connector_access(db, request)
     if rtype.startswith("agent_default_"):
         return await _apply_agent_default(db, request)
 
@@ -272,3 +277,155 @@ async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str
         request["id"], row.id, row.agent_id, row.version,
     )
     return f"Published {row.agent_id} v{row.version} at {row.scope} scope."
+
+
+async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant the connector access that was asked for, at the tier that approved it.
+
+    THE APPROVAL IS THE GATE, so it has to be the thing that acts. While this type
+    sat in `_DECISION_IS_THE_OUTCOME` an approved request granted nothing — somebody
+    still had to go and set it by hand, and until they did, an agent hit a denial
+    holding an approved request that said otherwise.
+
+    WHICH TIER MAY APPLY WHAT is the same rule the API enforces, restated here
+    because an approval is a second door into the same write:
+
+      org_admin   may grant a BUSINESS UNIT (integration_grants) — the only tier
+                  that can, since a unit granting itself has no grant
+      any tier    may narrow a PROJECT (project_connector_access), bounded by the
+                  unit's grant exactly as the direct endpoint bounds it
+
+    Everything comes from the payload recorded when the request was RAISED, never
+    from the decision: the approver agreed to a level they could read, and letting
+    the decision carry its own would mean approving one thing and applying another.
+    """
+    from shared.authz.connector_access import contains, is_access_level, label
+
+    payload = request.get("payload") or {}
+    target_ref = (payload.get("targetId") or "").strip()
+    kind = (payload.get("kind") or "connector").strip()
+    access = (payload.get("access") or "").strip()
+    scope = (payload.get("scope") or "").strip() or (
+        "project" if request.get("projectId") else "unit"
+    )
+
+    if not target_ref:
+        raise EffectNotAvailable(
+            "connector_access", "This request names no connector to grant."
+        )
+    if not is_access_level(access):
+        raise EffectNotAvailable(
+            "connector_access",
+            "This request records no valid access level (read, write or read_write).",
+        )
+    if kind not in ("connector", "mcp"):
+        raise EffectNotAvailable("connector_access", f"Unknown integration kind {kind!r}.")
+
+    # THE THIRD DOOR carries the manifest check too. A request raised before a
+    # connector's capabilities were known — or approved after they changed — would
+    # otherwise write a level the connector cannot exercise, which is the hollow
+    # grant this validation exists to prevent, arriving by the one route that skips
+    # the endpoint doing the checking.
+    if kind == "connector":
+        from shared.authz.connector_capabilities import unsupported_reason
+
+        reason = unsupported_reason(target_ref, access)
+        if reason:
+            raise EffectNotAvailable("connector_access", reason)
+
+    decided_by_tier = request.get("currentApproverRole") or ""
+    tenant_id = request["tenantId"]
+
+    # ── a grant to the business unit ─────────────────────────────────────────
+    if scope == "unit":
+        if decided_by_tier != "org_admin":
+            raise EffectNotAvailable(
+                "connector_access",
+                "Only an Organization Admin can give a business unit an integration. "
+                "Escalate this request rather than approving it here.",
+            )
+        workspace_id = request.get("workspaceId")
+        if not workspace_id:
+            raise EffectNotAvailable(
+                "connector_access", "This request names no business unit."
+            )
+        await db.execute(
+            text(
+                "INSERT INTO integration_grants "
+                "  (tenant_id, kind, target_ref, workspace_id, granted_by, access) "
+                "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by, :a) "
+                "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+                "  SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by"
+            ),
+            {
+                "t": tenant_id, "k": kind, "r": target_ref, "w": str(workspace_id),
+                "by": request.get("decidedBy"), "a": access,
+            },
+        )
+        logger.info(
+            "connector_access approved: unit %s -> %s %s (%s)",
+            workspace_id, kind, target_ref, access,
+        )
+        return f"{target_ref} granted to the business unit for {label(access)}."
+
+    # ── a narrowing for one project ──────────────────────────────────────────
+    project_id = request.get("projectId")
+    if not project_id:
+        raise EffectNotAvailable(
+            "connector_access", "This request names no project to grant access on."
+        )
+
+    workspace_id = (
+        await db.execute(
+            text("SELECT workspace_id FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": str(project_id)},
+        )
+    ).scalar()
+    if workspace_id is None:
+        raise EffectNotAvailable("connector_access", "That project no longer exists.")
+
+    granted = (
+        await db.execute(
+            text(
+                "SELECT access FROM integration_grants "
+                "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = :w "
+                "  AND kind = :k AND target_ref = :r"
+            ),
+            {"t": tenant_id, "w": workspace_id, "k": kind, "r": target_ref},
+        )
+    ).scalar()
+    if granted is None:
+        raise EffectNotAvailable(
+            "connector_access",
+            f"This project's business unit has not been given {target_ref}. "
+            "An Organization Admin has to grant it to the unit first.",
+        )
+    # THE CEILING HOLDS THROUGH APPROVAL TOO. An approver cannot hand a project more
+    # than the organisation gave the unit — otherwise approving would be the way
+    # round the hierarchy the direct endpoint refuses.
+    if not contains(granted, access):
+        raise EffectNotAvailable(
+            "connector_access",
+            f"The business unit has {label(granted)} access to {target_ref}, so a "
+            f"project cannot be given {label(access)}. The unit's grant has to be "
+            "widened first.",
+        )
+
+    await db.execute(
+        text(
+            "INSERT INTO project_connector_access "
+            "  (tenant_id, project_id, kind, target_ref, access, granted_by) "
+            "VALUES (CAST(:t AS uuid), CAST(:p AS uuid), :k, :r, :a, :by) "
+            "ON CONFLICT (tenant_id, project_id, kind, target_ref) DO UPDATE "
+            "  SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by"
+        ),
+        {
+            "t": tenant_id, "p": str(project_id), "k": kind, "r": target_ref,
+            "a": access, "by": request.get("decidedBy"),
+        },
+    )
+    logger.info(
+        "connector_access approved: project %s -> %s %s (%s)",
+        project_id, kind, target_ref, access,
+    )
+    return f"{target_ref} set to {label(access)} for this project."

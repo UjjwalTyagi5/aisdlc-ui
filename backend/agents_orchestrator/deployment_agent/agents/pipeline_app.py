@@ -81,6 +81,15 @@ class PipelineState(TypedDict, total=False):
     pipeline_run_id: str
     pipeline_run_url: str
     push_succeeded: bool
+    # CI provider selection. `deploy_via` is chosen upstream (deploy/prepare detects it
+    # from the repo, or the user overrides it) and read at execution time by
+    # trigger_deployment_pipeline. Absent means Azure Pipelines, which is what every
+    # existing ADO run relies on.
+    deploy_via: str  # "azure_pipelines" | "github_actions" | "argocd"
+    pipeline_provider: str  # which provider actually ran the trigger
+    gha_owner: str
+    gha_repo: str
+    pipeline_trigger_status: str  # "triggered" | "failed"
     # Phase 9.1 — file generation tracking
     created_files: List[str]
     existing_skipped: List[str]
@@ -1937,7 +1946,160 @@ async def trigger_azure_pipeline(state: PipelineState) -> PipelineState:
         state["pipeline_trigger_status"] = "failed"
         broadcast_log(manager, err, level="ERROR")
 
+    state["pipeline_provider"] = "azure_pipelines"
     return state
+
+
+@tool
+async def trigger_github_actions_workflow(state: PipelineState) -> PipelineState:
+    """Dispatch a GitHub Actions workflow and correlate the resulting run.
+
+    Writes the SAME state keys as trigger_azure_pipeline — pipeline_run_id,
+    pipeline_run_url, pipeline_trigger_status — so the pipeline summary, artifact
+    persistence, and the whole existing frontend deployment surface work unchanged.
+
+    THE 204 PROBLEM: POST .../workflows/{id}/dispatches returns 204 with an empty body
+    and no run id. There is no API that returns one. So after dispatching we poll the
+    runs list for a workflow_dispatch run on the same branch created at/after the
+    moment we dispatched, and correlate on that.
+
+    FAIL-SOFT: if the poll finds nothing (a slow queue, or concurrent runs on the same
+    branch), the dispatch still SUCCEEDED — status stays "triggered" and the run URL
+    falls back to the repo's Actions page. A dispatch that worked must never read as a
+    failure.
+    """
+    import time as _time
+
+    dep_req = state.get("deployment_request") or {}
+    branch = state.get("ado_branch", "main") or "main"
+    tenant_id = state.get("tenant_id", "")
+
+    repo = (dep_req.get("gha_repo") or state.get("gha_repo") or state.get("ado_repo") or "").strip()
+    owner = (dep_req.get("gha_owner") or state.get("gha_owner") or "").strip()
+    workflow = (dep_req.get("gha_workflow") or "deploy.yml").strip()
+
+    if not repo:
+        state.setdefault("errors", []).append(
+            "No GitHub repository to deploy — set 'gha_repo' in the deployment request."
+        )
+        state["pipeline_trigger_status"] = "failed"
+        state["pipeline_provider"] = "github_actions"
+        return state
+
+    # [ASSUMED] A7 — the deploy-target dialog is ADO-only, so with no explicit gha_repo
+    # the ADO repo name is reused as the GitHub repo name. A 404 below says so plainly.
+    target = f"{owner}/{repo}" if owner and "/" not in repo else repo
+
+    try:
+        from config.connector_factory import get_connector_for_session
+
+        connector = await get_connector_for_session(
+            kind="github_actions", tenant_id=tenant_id
+        )
+        dispatched_at = _time.time()
+        await connector.write_adapter(
+            "dispatch_workflow",
+            repo=target,
+            workflow=workflow,
+            ref=branch,
+            tenant_id=tenant_id or "default",
+        )
+        broadcast_log(
+            manager,
+            f"Dispatched GitHub Actions workflow '{workflow}' on {target}@{branch}",
+            level="INFO",
+        )
+
+        # Correlate the run the dispatch created.
+        run_id, web_url = "", ""
+        for _ in range(6):
+            await asyncio.sleep(2)
+            runs = await connector.read_adapter(
+                "list_workflow_runs",
+                repo=target,
+                branch=branch,
+                event="workflow_dispatch",
+                per_page=5,
+                tenant_id=tenant_id or "default",
+            )
+            for run in runs or []:
+                created = run.get("created_at", "")
+                try:
+                    from datetime import datetime
+
+                    created_epoch = datetime.fromisoformat(
+                        created.replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                # 60s of slack absorbs clock skew between us and GitHub.
+                if created_epoch >= dispatched_at - 60:
+                    run_id = str(run.get("id", ""))
+                    web_url = run.get("html_url", "")
+                    break
+            if run_id:
+                break
+
+        state["pipeline_trigger_status"] = "triggered"
+        state["pipeline_run_id"] = run_id
+        state["pipeline_run_url"] = web_url or f"https://github.com/{target}/actions"
+        if run_id:
+            broadcast_log(manager, f"Pipeline run started: {state['pipeline_run_url']}", level="INFO")
+        else:
+            # Informational, NOT an error — the workflow was dispatched successfully.
+            broadcast_log(
+                manager,
+                "Workflow dispatched; the run id could not be correlated yet. "
+                f"Track it at {state['pipeline_run_url']}",
+                level="INFO",
+            )
+    except Exception as exc:
+        detail = classify_error(exc, "GitHub Actions dispatch")
+        if "404" in str(exc):
+            detail = (
+                f"GitHub repo '{target}' or workflow '{workflow}' not found — set "
+                "'gha_repo' / 'gha_workflow' in the deployment request, and confirm the "
+                "workflow declares a workflow_dispatch trigger."
+            )
+        state.setdefault("errors", []).append(detail)
+        state["pipeline_trigger_status"] = "failed"
+        broadcast_log(manager, detail, level="ERROR")
+
+    state["pipeline_provider"] = "github_actions"
+    return state
+
+
+@tool
+async def trigger_deployment_pipeline(state: PipelineState) -> PipelineState:
+    """Trigger the deployment pipeline on whichever CI provider this repo uses.
+
+    The provider is only knowable at execution time: _build_step_plan runs before
+    resolve_ado_target, so deploy_via does not exist when the plan is built. This
+    dispatcher reads it from state instead, which is the only place the answer lives.
+
+    Defaults to Azure Pipelines when deploy_via is absent, so every existing ADO run
+    behaves exactly as it did before this tool existed.
+    """
+    via = (
+        state.get("deploy_via")
+        or (state.get("deployment_request") or {}).get("deploy_via")
+        or "azure_pipelines"
+    )
+    if via == "github_actions":
+        return await trigger_github_actions_workflow.ainvoke({"state": state})
+    if via == "argocd":
+        # GitOps: the commit IS the deployment — Argo reconciles from the repo, so
+        # there is nothing to trigger. Recorded rather than silently skipped.
+        state["pipeline_trigger_status"] = "triggered"
+        state["pipeline_provider"] = "argocd"
+        broadcast_log(
+            manager,
+            "Argo CD is GitOps-driven — the pushed manifests are the deployment; "
+            "no pipeline trigger is required.",
+            level="INFO",
+        )
+        return state
+    return await trigger_azure_pipeline.ainvoke({"state": state})
 
 
 @tool
@@ -2156,5 +2318,8 @@ pipeline_tools_list = [
     write_all_outputs, print_pipeline_summary, update_work_items_to_deployed,
     # ADO deploy mode
     resolve_ado_target, clone_azure_repo, detect_tech_stack,
-    generate_deployment_files, commit_and_push_to_ado, trigger_azure_pipeline,
+    generate_deployment_files, commit_and_push_to_ado,
+    # Provider-aware trigger. trigger_azure_pipeline stays directly callable — the
+    # dispatcher delegates to it, and existing callers still reference it by name.
+    trigger_deployment_pipeline, trigger_azure_pipeline, trigger_github_actions_workflow,
 ]
