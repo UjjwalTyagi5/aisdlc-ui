@@ -24,7 +24,7 @@ async def project_with_two_contributors():
     org = str(_uuid.uuid4())
     unit = str(_uuid.uuid4())
     project = str(_uuid.uuid4())
-    developer = f"dev-{_uuid.uuid4()}"
+    org_admin = f"admin-{_uuid.uuid4()}"
     security_eng = f"sec-{_uuid.uuid4()}"
     async with get_db_session_superuser() as s:
         await s.execute(text(
@@ -39,9 +39,9 @@ async def project_with_two_contributors():
             "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
             "VALUES (:i, :w, :t, 'SW Project')"
         ), {"i": project, "w": unit, "t": org})
-    await grant_role(developer, project, "developer", tenant_id=org, scope_kind="project", granted_by="test")
+    await grant_role(org_admin, org, "org_admin", tenant_id=org, scope_kind="organization", granted_by="test")
     await grant_role(security_eng, project, "security_engineer", tenant_id=org, scope_kind="project", granted_by="test")
-    yield {"org": org, "project": project, "developer": developer, "security_eng": security_eng}
+    yield {"org": org, "project": project, "org_admin": org_admin, "security_eng": security_eng}
 
 
 def _client() -> TestClient:
@@ -55,11 +55,14 @@ def _hdr(user_id: str, org: str, perms: list[str]) -> dict:
     }
 
 
-def test_a_developer_with_no_security_access_gets_403_on_security_scans(project_with_two_contributors):
+def test_an_org_admin_has_no_default_agent_access_and_gets_403_on_security_scans(project_with_two_contributors):
+    """org_admin holds admin:* but that permission is never consulted for agent
+    access (spec §1.4) — confirms the property end-to-end through a real router,
+    not just check_agent_access() in isolation (that's Task 4's job)."""
     t = project_with_two_contributors
     resp = _client().get(
         f"/security/{t['project']}/scans",
-        headers=_hdr(t["developer"], t["org"], ["artifact:view"]),
+        headers=_hdr(t["org_admin"], t["org"], ["admin:*"]),
     )
     assert resp.status_code == 403
 
