@@ -123,6 +123,28 @@ def _admin(t):
         user_id=t["admin"], tenant_id=t["org"], permissions=["admin:*"])}
 
 
+def test_granting_a_notify_only_connector_with_no_level_chosen_works(tree):
+    """THE REGRESSION THIS CAUSED. The grant button sends no level; the server used
+    to fill in `read`, and the capability check then refused the grant it had just
+    constructed — so Slack and MS Teams could not be granted to anybody at all."""
+    r = _client().post("/integrations/access", headers=_admin(tree),
+                       params={"kind": "connector", "id": "slack",
+                               "workspaceId": tree["unit"]})
+    assert r.status_code == 200, r.text
+    # Resolved to the only mode it has, rather than the flat default.
+    assert r.json()["access"] == "write"
+
+
+def test_granting_a_board_with_no_level_chosen_still_defaults_to_read(tree):
+    """The other half — the capability-aware default must not quietly widen a
+    connector that CAN read into something more than least privilege."""
+    r = _client().post("/integrations/access", headers=_admin(tree),
+                       params={"kind": "connector", "id": "jira",
+                               "workspaceId": tree["unit"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["access"] == "read"
+
+
 def test_granting_slack_for_read_is_refused(tree):
     """The trap our own default set: `read` is the default, and on Slack it grants
     a connector that can do nothing while the hub shows a healthy grant."""

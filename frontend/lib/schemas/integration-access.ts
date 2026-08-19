@@ -67,6 +67,15 @@ export const IntegrationAccessRow = z.object({
   /** Whether anything is actually connected behind it. A granted kind with no
    *  connection is a permission with nothing to use yet. */
   onboarded: z.boolean(),
+  /**
+   * The widest level this connector can actually honour — the grant control's
+   * ceiling, so an admin is never offered a level the server will refuse.
+   *
+   * null means "no ceiling known": an MCP server, or a connector that could not be
+   * introspected. The UI must not treat that as "nothing allowed", mirroring the
+   * refuse-only-on-positive-knowledge rule the server-side check follows.
+   */
+  supportedAccess: ConnectorAccessLevel.nullish().default(null),
   /** Every unit the viewer may see, granted or not — `via` says which. */
   units: z.array(AccessUnitEntry).default([]),
   /** How many of them actually hold it. `units.length` counts candidates. */

@@ -31,7 +31,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.connector_access import ACCESS_LEVELS, DEFAULT_ACCESS, is_access_level, narrow
-from shared.authz.connector_capabilities import unsupported_reason, warnings_for
+from shared.authz.connector_capabilities import (
+    default_access_for,
+    supported_level,
+    unsupported_reason,
+    warnings_for,
+)
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import administered_workspace_ids, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -201,6 +206,12 @@ async def list_integration_access(
             "description": description,
             "origin": "organization",
             "onboarded": onboarded,
+            # The widest level this connector can actually honour, so the grant
+            # control never offers one the server will refuse. None for an MCP
+            # server or a connector that cannot be introspected — the UI treats
+            # that as "no ceiling", matching the refuse-only-on-positive-knowledge
+            # rule the validation itself follows.
+            "supportedAccess": supported_level(target) if kind == "connector" else None,
             "units": entries,
             # Counts what the VIEWER can see, so a Business Unit Admin's "1 unit"
             # is their own rather than a number they cannot account for.
@@ -298,7 +309,10 @@ async def grant_integration_access(
     id: str,
     workspaceId: Optional[str] = None,
     projectId: Optional[str] = None,
-    access: str = DEFAULT_ACCESS,
+    # None means the caller did not choose, which is NOT the same as choosing
+    # `read`: a notify-only connector cannot read, and filling in `read` here made
+    # the capability check below refuse a grant the server itself had constructed.
+    access: str | None = None,
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Give a Business Unit an integration, at a stated access level.
@@ -312,10 +326,15 @@ async def grant_integration_access(
     _require_org_admin(request)
     if kind not in ("connector", "mcp"):
         raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
-    # Rejected loudly rather than coerced to the default: a caller who sent a level
-    # meant something by it, and quietly substituting `read` would hand them a
-    # narrower grant than they think they made.
-    if not is_access_level(access):
+    if access is None:
+        # Resolved per connector: `read` where that means something, otherwise the
+        # only mode the connector implements. Still least privilege — you cannot be
+        # narrower than what exists.
+        access = default_access_for(id) if kind == "connector" else DEFAULT_ACCESS
+    # Rejected loudly rather than coerced to the default: a caller who SENT a level
+    # meant something by it, and quietly substituting one would hand them a different
+    # grant than they think they made.
+    elif not is_access_level(access):
         raise HTTPException(
             status_code=422,
             detail={

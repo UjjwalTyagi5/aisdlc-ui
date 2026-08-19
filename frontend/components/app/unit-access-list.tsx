@@ -33,6 +33,7 @@ import {
 } from "@/lib/api/integration-access";
 import { AccessLevelPicker } from "@/components/app/access-level-picker";
 import { ACCESS_LEVEL_LABEL } from "@/lib/schemas/integration-access";
+import type { ConnectorAccessLevel } from "@/lib/schemas/integration-access";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
@@ -287,8 +288,15 @@ export function UnitAccessList({
             units={notHeld}
             name={name}
             busy={grant.isPending}
-            onGrant={(u) =>
-              grant.mutate({ kind, id: targetId, workspaceId: u.id, unitName: u.name })
+            supportedLevel={row.supportedAccess ?? null}
+            onGrant={(u, access) =>
+              grant.mutate({
+                kind,
+                id: targetId,
+                workspaceId: u.id,
+                unitName: u.name,
+                access,
+              })
             }
           />
         </li>
@@ -319,14 +327,28 @@ function GrantUnitPicker({
   units,
   name,
   busy,
+  supportedLevel,
   onGrant,
 }: {
   units: AccessUnitEntry[];
   name: string;
   busy?: boolean;
-  onGrant: (unit: AccessUnitEntry) => void;
+  /**
+   * The widest level this connector can actually honour, or null when unknown.
+   * Caps the picker, so an admin is never offered a level the server will refuse —
+   * Slack and MS Teams implement no reads at all, and Figma no writes.
+   */
+  supportedLevel?: ConnectorAccessLevel | null;
+  onGrant: (unit: AccessUnitEntry, access: ConnectorAccessLevel) => void;
 }) {
   const [open, setOpen] = React.useState(false);
+  // Chosen BEFORE the unit, because it applies to whichever unit is picked next and
+  // because it is the decision an admin is actually making — the unit is just where
+  // it lands. Seeded from what the connector supports rather than a flat "read": on
+  // a notify-only connector `read` is not a narrow grant, it is an empty one.
+  const [level, setLevel] = React.useState<ConnectorAccessLevel>(
+    supportedLevel === "write" ? "write" : "read",
+  );
 
   if (units.length === 0) {
     return (
@@ -349,7 +371,16 @@ function GrantUnitPicker({
           Grant to a {BUSINESS_UNIT_LABEL.toLowerCase()}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 p-0">
+      <PopoverContent align="start" className="w-80 p-0">
+        <div className="border-line-soft space-y-1.5 border-b p-3">
+          <p className="text-[11.5px] font-medium">Access level</p>
+          <AccessLevelPicker
+            size="sm"
+            value={level}
+            ceiling={supportedLevel ?? null}
+            onChange={setLevel}
+          />
+        </div>
         <Command filter={substringFilter}>
           <CommandInput placeholder={`Search ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}…`} />
           <CommandList>
@@ -360,7 +391,7 @@ function GrantUnitPicker({
                 value={u.name}
                 onSelect={() => {
                   setOpen(false);
-                  onGrant(u);
+                  onGrant(u, level);
                 }}
               >
                 <Plus className="size-3.5" aria-hidden />

@@ -108,6 +108,10 @@ export function listIntegrationAccess(
 
     rows.push({
       kind: "connector",
+      // Mock mode does not introspect connector manifests, so it states no ceiling
+      // rather than inventing one. null is "unknown", which the picker treats as
+      // "no cap" — the same answer the server gives for a connector it cannot read.
+      supportedAccess: null,
       id: grant.kind,
       name: connection?.name ?? CONNECTOR_KIND_LABEL[grant.kind] ?? grant.kind,
       description: null,
@@ -139,6 +143,8 @@ export function listIntegrationAccess(
 
     rows.push({
       kind: "mcp",
+      // MCP servers have no capability manifest at all, server-side included.
+      supportedAccess: null,
       id: server.id,
       name: server.server_name,
       description: server.description ?? null,
