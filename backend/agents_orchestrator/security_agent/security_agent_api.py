@@ -22,7 +22,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.agent_access import assert_agent_access
-from shared.authz.effective_role import effective_platform_role
+from shared.authz.effective_role import effective_platform_role, platform_role_for
 
 from agents_orchestrator.security_agent.agents.scanner import app as scan_app
 from agents_orchestrator.security_agent.prompts.security_prompt import SECURITY_SYSTEM_PROMPT
@@ -250,6 +250,20 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             s.tenant_id = tenant_id
         if project_id and not s.project_id:
             s.project_id = project_id
+
+        # Gate every message, not just the first — a session can be reused across
+        # projects on the client side, and the ticket only proves who the caller is,
+        # not which project they may act on. permissions=[] is deliberate: it forces
+        # platform_role_for's DB-backed role_bindings lookup rather than its org-wide
+        # permission shortcut, since admin:* must never grant agent access (spec §1.4).
+        _effective_project = project_id or s.project_id
+        _effective_tenant = tenant_id or s.tenant_id
+        async with get_db_session_for_tenant(_effective_tenant) as _access_db:
+            _role = await platform_role_for(_access_db, user_id=user_id, permissions=[])
+            await assert_agent_access(
+                _access_db, tenant_id=_effective_tenant, project_id=_effective_project,
+                role=_role, user_id=user_id, agent_id="security",
+            )
 
         if not s.target_bound:
             prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
