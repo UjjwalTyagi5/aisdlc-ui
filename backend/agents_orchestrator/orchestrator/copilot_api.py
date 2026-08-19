@@ -663,7 +663,13 @@ async def _stage_connector(shim_input: Any, stage: str, tenant_id: str):
             from workflows.activities._base import stage_connector_kind
 
             kind = stage_connector_kind(shim_input, stage)
-            connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+            # project_id binds the connector to this project's effective access
+            # (unit grant ∩ project narrowing). Without it the connector permits
+            # nothing, which is the correct answer for a turn we cannot scope.
+            connector = await get_connector_for_session(
+                kind=kind, tenant_id=tenant_id,
+                project_id=str(getattr(shim_input, "project_id", "") or ""),
+            )
             set_connector(connector)
             injected = True
     except Exception as exc:  # noqa: BLE001 — resolution failure ≠ dead turn
@@ -1224,7 +1230,10 @@ async def _emit_specific_choice_card(stage: str, graph, run_id: str, tenant_id: 
         if not tenant_id:
             return False
         kind = stage_connector_kind(shim_input, stage)
-        connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id,
+            project_id=str(getattr(shim_input, "project_id", "") or ""),
+        )
         set_connector(connector)
         try:
             if tool_name in _PROJECT_LIST_TOOLS:

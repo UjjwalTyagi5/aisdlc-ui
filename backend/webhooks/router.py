@@ -15,6 +15,8 @@ CRITICAL security requirements:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import time
@@ -36,7 +38,7 @@ logger = logging.getLogger(__name__)
 webhooks_router = APIRouter()
 
 # Connectors that have registered verifiers and normalizers
-_KNOWN_CONNECTORS = frozenset({"github", "jira", "azure_repos", "slack"})
+_KNOWN_CONNECTORS = frozenset({"github", "jira", "azure_repos", "slack", "github_actions"})
 
 # Content-Length hard cap: ~5 MB (T-m6-06-D DoS mitigation)
 _MAX_BODY_BYTES = 5 * 1024 * 1024  # 5 MiB
@@ -51,7 +53,9 @@ def _extract_event_id(connector: str, payload: dict, headers) -> str:
     - slack:       event_id field in JSON body [A1 ASSUMED]
     - azure_repos: top-level 'id' field in JSON body [A2 ASSUMED]
     """
-    if connector == "github":
+    if connector in ("github", "github_actions"):
+        # Actions deliveries carry the same X-GitHub-Delivery GUID as any other
+        # GitHub webhook.
         return headers.get("x-github-delivery") or headers.get("X-GitHub-Delivery") or ""
     if connector == "jira":
         return (
@@ -78,6 +82,127 @@ def _get_verifier_args(connector: str, raw_body: bytes, headers) -> tuple:
     """
     # Return just raw_body and headers; secret injection happens in handler
     return (raw_body, headers)
+
+
+# ── Microsoft Graph change notifications ─────────────────────────────────────
+#
+# DECLARED BEFORE the generic /webhooks/{connector}/{tenant_id} route ON PURPOSE.
+# FastAPI matches in declaration order, so the generic route would otherwise swallow
+# this path and reject it as an unknown connector at step 2 — before the validation
+# handshake could ever answer, which would make the subscription impossible to create.
+#
+# Graph does not fit the generic verify → parse → dedup → normalize → publish pipeline
+# for four reasons:
+#   1. The validation handshake must answer with text/plain, not JSON, and before the
+#      body is read at all.
+#   2. One delivery carries N notifications; the normalizer contract is one-to-one.
+#   3. There is no delivery-id header, so the dedup key must be synthesised per
+#      notification rather than per request.
+#   4. There is no signature. `clientState` is the ONLY authentication Graph offers.
+
+
+@webhooks_router.post("/webhooks/msgraph/{tenant_id}")
+async def receive_msgraph_notification(tenant_id: str, request: Request):
+    """Receive Microsoft Graph change notifications (SharePoint drive items).
+
+    SECURITY: `clientState` is the only authentication available, so it must be high
+    entropy and is compared with hmac.compare_digest. A mismatch on ANY notification
+    rejects the WHOLE batch with a generic 400 — never 401/403, matching the rest of
+    this router (T-m6-06-ID, no auth-semantics leak).
+    """
+    from fastapi.responses import PlainTextResponse
+
+    # Step 1: validation handshake. MUST come first, MUST NOT read the body, and MUST
+    # be text/plain — Graph rejects the subscription otherwise.
+    validation_token = request.query_params.get("validationToken")
+    if validation_token is not None:
+        return PlainTextResponse(validation_token, status_code=200)
+
+    start_ms = time.monotonic() * 1000
+
+    # Step 2: Content-Length cap before reading the body (same guard as the generic route).
+    content_length_hdr = request.headers.get("content-length")
+    if content_length_hdr is not None:
+        try:
+            if int(content_length_hdr) > _MAX_BODY_BYTES:
+                raise HTTPException(status_code=400, detail="Bad Request")
+        except (ValueError, TypeError):
+            pass
+
+    raw_body = await request.body()
+    if len(raw_body) > _MAX_BODY_BYTES:
+        raise HTTPException(status_code=400, detail="Bad Request")
+
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad Request")
+
+    notifications = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(notifications, list):
+        raise HTTPException(status_code=400, detail="Bad Request")
+
+    # Step 3: authenticate EVERY notification before acting on any of them.
+    expected = _get_state_attr(request.app.state, "msgraph_client_state", "")
+    if not expected:
+        # Fail closed: with no configured clientState there is nothing to authenticate
+        # against, so anyone could inject change events.
+        logger.warning("msgraph webhook received but no client state is configured")
+        WEBHOOK_DELIVERIES.labels(connector="msgraph", status="rejected_sig").inc()
+        raise HTTPException(status_code=400, detail="Bad Request")
+
+    for note in notifications:
+        supplied = note.get("clientState", "") if isinstance(note, dict) else ""
+        if not hmac.compare_digest(str(supplied), str(expected)):
+            WEBHOOK_DELIVERIES.labels(connector="msgraph", status="rejected_sig").inc()
+            raise HTTPException(status_code=400, detail="Bad Request")
+
+    # Step 4: dedup + normalize + publish, per notification.
+    redis_client = _get_redis(request)
+    normalizer = get_normalizer("msgraph")
+    accepted = duplicates = 0
+
+    for note in notifications:
+        if not isinstance(note, dict):
+            continue
+        resource_data = note.get("resourceData") or {}
+        event_id = hashlib.sha256(
+            "|".join(
+                [
+                    str(note.get("subscriptionId", "")),
+                    str(note.get("resource", "")),
+                    str(resource_data.get("id", "") if isinstance(resource_data, dict) else ""),
+                    str(note.get("changeType", "")),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+
+        if redis_client is not None and await is_duplicate_event(
+            redis_client, "msgraph", event_id
+        ):
+            duplicates += 1
+            WEBHOOK_DUPLICATES_REJECTED.labels(connector="msgraph").inc()
+            continue
+
+        try:
+            canonical = normalizer(note, tenant_id, event_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("msgraph normalization failed: %s", type(exc).__name__)
+            continue
+
+        # Published to `webhooks:sharepoint`. NOTE: nothing consumes that stream yet —
+        # what a changed SharePoint document should DO to a run is a product decision,
+        # so the events are observable but inert. Whoever builds that consumer must
+        # treat these as untrusted identifiers and re-fetch through the connector.
+        if redis_client is not None:
+            await publish_webhook_event(redis_client, "sharepoint", canonical)
+        accepted += 1
+
+    WEBHOOK_DELIVERIES.labels(connector="msgraph", status="accepted").inc()
+    WEBHOOK_PROCESSING_DURATION.labels(connector="msgraph").observe(
+        time.monotonic() * 1000 - start_ms
+    )
+    return {"status": "accepted", "accepted": accepted, "duplicates": duplicates}
 
 
 @webhooks_router.post("/webhooks/{connector}/{tenant_id}")
@@ -209,6 +334,13 @@ async def _invoke_verifier(verifier, connector: str, raw_body: bytes, request: R
     if connector == "github":
         sig = headers.get("x-hub-signature-256") or headers.get("X-Hub-Signature-256")
         secret = _get_state_attr(state, "github_webhook_secret", "")
+        await verifier(raw_body, sig, secret)
+
+    elif connector == "github_actions":
+        # Same HMAC-SHA256 algorithm as `github`, DIFFERENT secret — a CI webhook can
+        # then be rotated without disturbing the issues webhook.
+        sig = headers.get("x-hub-signature-256") or headers.get("X-Hub-Signature-256")
+        secret = _get_state_attr(state, "gha_webhook_secret", "")
         await verifier(raw_body, sig, secret)
 
     elif connector == "slack":

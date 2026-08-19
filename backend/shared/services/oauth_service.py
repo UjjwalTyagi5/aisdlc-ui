@@ -8,6 +8,7 @@ Supported providers:
 - github:      GitHub App user-auth flow — built + live-deferred (REQ-M7-21)
 - slack:       Slack OAuth v2 — built + live-deferred (REQ-M7-21)
 - azure_repos: Azure AD OAuth 2.0 — built + live-deferred (REQ-M7-21, [ASSUMED] A3)
+- figma:       Figma OAuth 2.0 — the alternative to a pasted PAT (both are supported)
 
 All env vars imported from config.env — never os.getenv.
 """
@@ -17,6 +18,7 @@ import urllib.parse
 
 from config.env import (
     AGENTIC_BASE_URL,
+    FIGMA_OAUTH_CLIENT_ID,
     GITHUB_APP_ID,
     JIRA_OAUTH_CLIENT_ID,
     SLACK_CLIENT_ID,
@@ -51,8 +53,13 @@ def build_oauth_start_url(kind: str, tenant_id: str) -> str:
         return _build_slack_url(state)
     if kind == "azure_repos":
         return _build_azure_repos_url(state)
+    if kind == "figma":
+        return _build_figma_url(state)
 
-    raise ValueError(f"Unknown connector kind: {kind!r}. Supported: jira, github, slack, azure_repos")
+    raise ValueError(
+        f"Unknown connector kind: {kind!r}. "
+        "Supported: jira, github, slack, azure_repos, figma"
+    )
 
 
 def _build_jira_url(state: str) -> str:
@@ -103,6 +110,28 @@ def _build_slack_url(state: str) -> str:
         "state": state,
     }
     return "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode(params)
+
+
+def _build_figma_url(state: str) -> str:
+    """Figma OAuth 2.0 authorization URL.
+
+    Scope: `file_read` — the only scope this connector needs, and the only one it asks
+    for. Figma has no write scope worth requesting here: the connector declares no
+    write capabilities, so asking for more would be permission the platform cannot use.
+
+    `response_type=code` and a registered redirect URI that matches EXACTLY are both
+    mandatory on Figma's side — a trailing-slash mismatch is rejected at the
+    authorize step, before the user ever sees a consent screen.
+    """
+    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/figma/oauth/callback"
+    params = {
+        "client_id": FIGMA_OAUTH_CLIENT_ID,
+        "redirect_uri": callback,
+        "scope": "file_read",
+        "state": state,
+        "response_type": "code",
+    }
+    return "https://www.figma.com/oauth?" + urllib.parse.urlencode(params)
 
 
 def _build_azure_repos_url(state: str) -> str:

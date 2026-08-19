@@ -134,7 +134,12 @@ async def agent_run_scope(
         kind = await _stage_board_kind(tenant_id, project_id, agent_id)
         if kind:
             try:
-                connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+                # Bound to this project's effective access (unit grant ∩ project
+                # narrowing). Board tools then fail closed on an operation the
+                # grant does not admit, the same way they do with no connector.
+                connector = await get_connector_for_session(
+                    kind=kind, tenant_id=tenant_id, project_id=str(project_id or ""),
+                )
                 set_connector(connector)
                 scope.connector_injected = True
             except Exception as exc:  # noqa: BLE001

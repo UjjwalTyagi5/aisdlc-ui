@@ -15,19 +15,13 @@ import asyncio
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from shared.authz.project_scope import require_project_access
 from agents_orchestrator.documentation_agent.config.session_state import set_prepared
 from shared.services import ado_repos
 
-# EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
-# took the project id from the path and filtered on tenant_id alone, so the only gate
-# was the artifact:view floor applied at include time — a permission `contributor`
-# holds. The router-level dependency covers all of them at once, and covers whatever
-# route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
-documentation_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
+documentation_workspace_router = APIRouter()
 
 _LANG_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",
@@ -79,6 +73,13 @@ async def _upstream_summary(tenant_id: str, project_id: str) -> str:
 
 @documentation_workspace_router.get("/{project_id}/connectors")
 async def list_doc_connectors(project_id: str, request: Request) -> dict:
+    """Where this tenant can file documentation (best-effort).
+
+    NOTE: the frontend's listDocConnectors is currently unreferenced (unlike
+    listDeployConnectors, which the deploy-target dialog uses), so the SharePoint entry
+    has no UI effect today. It is here for symmetry with the deployment endpoint and so
+    the data exists when a doc-target picker is built.
+    """
     tenant_id: str = request.state.tenant_id
     azure = False
     try:
@@ -86,7 +87,21 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
         azure = bool(org_url and pat)
     except Exception:
         azure = False
-    return {"connectors": [{"kind": "azure_repos", "label": "Azure Repos", "available": azure}]}
+
+    sharepoint = False
+    try:
+        from shared.services.notification_targets import sharepoint_target
+
+        sharepoint = bool(await sharepoint_target(tenant_id))
+    except Exception:
+        sharepoint = False
+
+    return {
+        "connectors": [
+            {"kind": "azure_repos", "label": "Azure Repos", "available": azure},
+            {"kind": "sharepoint", "label": "SharePoint", "available": sharepoint},
+        ]
+    }
 
 
 @documentation_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")

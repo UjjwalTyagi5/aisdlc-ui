@@ -36,7 +36,8 @@ class RequirementsWorker(AbstractWorker):
         model_id = payload.get("model_id") or fields.get(b"model_id", b"").decode() or None
 
         connector = await get_connector_for_session(
-            kind="azure_devops", tenant_id=tenant_id
+            kind="azure_devops", tenant_id=tenant_id,
+            project_id=str(payload.get("project_id") or ""),
         )
         set_connector(connector)
         try:

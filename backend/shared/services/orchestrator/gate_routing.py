@@ -51,10 +51,18 @@ def can_user_approve(perms: list[str], stage: str) -> bool:
 async def notify_gate_pending(
     run_id: str, stage: str, owner_role: str, tenant_id: str
 ) -> None:
-    """Emit a best-effort audit event when a gate is awaiting approval.
+    """Record and DELIVER a notification when a gate is awaiting approval.
 
-    Uses AuditEventPayload + audit_service.emit (fire-and-forget).  Any failure
-    is logged and swallowed — this seam must never break the gate flow.
+    Two halves, both best-effort:
+      1. An audit event (as before).
+      2. Actual delivery to whichever human channels the tenant configured — Slack,
+         Microsoft Teams, or neither.
+
+    Until the delivery half existed this function only wrote an audit row, so a gate
+    could sit awaiting approval with nobody told. Both call sites in copilot_api
+    (_apply_gate) get delivery for free — neither needed to change.
+
+    Any failure is logged and swallowed: this seam must never break the gate flow.
     """
     try:
         from shared.audit.models import AuditEventPayload
@@ -69,5 +77,20 @@ async def notify_gate_pending(
             payload={"stage": stage, "owner_role": owner_role},
         )
         await audit_service.emit(payload)
+
+        # Deep link into the existing authenticated approval UI rather than an inline
+        # approve action: a chat-card callback carries no user identity the platform
+        # can trust, and honouring one would route around the permission check in
+        # shared/routers/signals.py.
+        from config.env import AGENTIC_BASE_URL
+        from shared.services.notify_dispatch import notify_all
+
+        await notify_all(
+            tenant_id,
+            f"Run {run_id} is awaiting {stage.replace('_', ' ')} approval "
+            f"(owner: {owner_role}).",
+            title="Approval needed",
+            link_url=f"{(AGENTIC_BASE_URL or '').rstrip('/')}/runs/{run_id}",
+        )
     except Exception as exc:  # best-effort: notification must never raise into caller
         logger.warning("notify_gate_pending failed (run=%s stage=%s): %s", run_id, stage, exc)

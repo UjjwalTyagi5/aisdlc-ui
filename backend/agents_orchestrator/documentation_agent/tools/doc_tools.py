@@ -273,6 +273,165 @@ async def save_document(doc_type: str, title: str, filename: str, markdown_conte
     return f"Saved '{title or safe}' as {safe} ({len(markdown_contents)} chars). It now appears in the user's document list. {len(s.generated_docs)} document(s) generated this session."
 
 
+async def _sharepoint_session():
+    """Return (connector, target) for this session's tenant, or (None, reason).
+
+    Additive to the existing outputs: save_document still writes to local disk and
+    open_docs_pr still files a git PR. SharePoint is a third destination, not a
+    replacement for either.
+    """
+    s = get_session(get_session_id())
+    tenant_id = getattr(s, "tenant_id", "") or ""
+    if not tenant_id:
+        return None, "ERROR: no tenant context in this session."
+    try:
+        from shared.services.notification_targets import sharepoint_target
+        from config.connector_factory import get_connector_for_session
+
+        target = await sharepoint_target(tenant_id)
+        if not target:
+            return None, (
+                "ERROR: SharePoint is not connected for this tenant. An admin can "
+                "connect it on the Integrations page (Documents & knowledge)."
+            )
+        connector = await get_connector_for_session(kind="sharepoint", tenant_id=tenant_id)
+        return (connector, target), ""
+    except Exception as exc:
+        return None, f"ERROR reaching SharePoint: {type(exc).__name__}"
+
+
+@tool
+async def publish_to_sharepoint(filename: str = "", folder: str = "") -> str:
+    """Publish saved documents to the project's SharePoint document library (GATED —
+    only call when the user explicitly asks to publish/file documents to SharePoint).
+
+    Args:
+        filename: publish only this document (as named by save_document). Omit to
+                  publish every document generated this session.
+        folder:   override the configured library folder.
+    """
+    s = get_session(get_session_id())
+    if not s.generated_docs:
+        return "ERROR: no documents generated yet. Generate at least one document first."
+
+    resolved, reason = await _sharepoint_session()
+    if not resolved:
+        return reason
+    connector, target = resolved
+
+    docs = s.generated_docs
+    if filename:
+        docs = [d for d in docs if d.get("filename") == filename]
+        if not docs:
+            return f"ERROR: no generated document named {filename!r} in this session."
+
+    drive_id = target.get("drive_id", "")
+    base_folder = (folder or target.get("folder") or "").strip("/")
+
+    published, failures = [], []
+    for doc in docs:
+        name = doc.get("filename") or "document.md"
+        path = f"{base_folder}/{name}" if base_folder else name
+        try:
+            result = await connector.write_adapter(
+                "publish_document",
+                drive_id=drive_id,
+                path=path,
+                content=(doc.get("contents") or "").encode("utf-8"),
+                content_type="text/markdown",
+            )
+            published.append((name, result.get("webUrl", "")))
+            doc["sharepoint_url"] = result.get("webUrl", "")
+        except ValueError as exc:
+            # Over the 4 MB single-PUT ceiling, or a bad path — actionable, so say it.
+            failures.append(f"{name}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{name}: {type(exc).__name__}")
+
+    if published:
+        broadcast_log(
+            manager,
+            f"Published {len(published)} document(s) to SharePoint",
+            level="SUCCESS",
+        )
+    if not published:
+        return "ERROR publishing to SharePoint: " + "; ".join(failures)
+
+    lines = [f"Published {len(published)} document(s) to SharePoint:"]
+    lines += [f"- {n}{f' — {u}' if u else ''}" for n, u in published]
+    if failures:
+        lines.append(f"{len(failures)} failed: " + "; ".join(failures))
+    return "\n".join(lines)
+
+
+@tool
+async def list_sharepoint_documents(folder: str = "") -> str:
+    """List the documents already filed in the project's SharePoint library."""
+    resolved, reason = await _sharepoint_session()
+    if not resolved:
+        return reason
+    connector, target = resolved
+    try:
+        items = await connector.read_adapter(
+            "list_documents",
+            drive_id=target.get("drive_id", ""),
+            folder=folder or target.get("folder", ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR listing SharePoint documents: {type(exc).__name__}"
+    if not items:
+        return "The SharePoint library folder is empty."
+    lines = [f"{len(items)} item(s) in the SharePoint library:"]
+    for it in items[:50]:
+        web_url = it.get("webUrl", "")
+        suffix = f" — {web_url}" if web_url else ""
+        lines.append(
+            f"- {it.get('name', '?')} (id={it.get('id', '')}, {it.get('size', 0)} bytes){suffix}"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def ingest_sharepoint_document(item_id: str) -> str:
+    """Read one SharePoint document into this session as reference material.
+
+    Use it to pull an existing specification or standard out of the business's
+    document library before writing new documentation. Text is extracted with the
+    platform's existing extractor, so pdf/docx/txt/md/csv/xlsx all work.
+    """
+    if not item_id:
+        return "ERROR: item_id is required — call list_sharepoint_documents first."
+    resolved, reason = await _sharepoint_session()
+    if not resolved:
+        return reason
+    connector, target = resolved
+
+    s = get_session(get_session_id())
+    try:
+        data = await connector.read_adapter(
+            "download_document", drive_id=target.get("drive_id", ""), item_id=item_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR downloading SharePoint document: {type(exc).__name__}"
+
+    try:
+        from shared.tools.document_tools import extract_file_text
+
+        tmp_dir = _output_dir(s) / "sharepoint"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', item_id)}.bin"
+        tmp_path.write_bytes(data if isinstance(data, bytes) else bytes(data or b""))
+        text = await asyncio.to_thread(extract_file_text, str(tmp_path))
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR extracting text from the SharePoint document: {type(exc).__name__}"
+
+    text = (text or "").strip()
+    if not text:
+        return f"Downloaded item {item_id} but no readable text could be extracted."
+    broadcast_log(manager, f"Ingested SharePoint document {item_id}", level="INFO")
+    return f"Ingested SharePoint document {item_id} ({len(text)} chars):\n\n{text[:20000]}"
+
+
 @tool
 async def open_docs_pr(title: str = "", description: str = "") -> str:
     """Open a documentation PR with all saved documents committed under docs/ (GATED —

@@ -95,17 +95,25 @@ class SlackConnector(BaseConnector):
 
     _tenant_states: Dict[str, _TenantRateLimitState] = {}
 
-    def __init__(self, bot_token: str = "") -> None:
-        """Constructor stores only a non-secret config hint.
+    def __init__(self, bot_token: str = "", org_url: str = "", tenant_id: str = "") -> None:
+        """Constructor stores only non-secret config hints.
 
         Args:
             bot_token: Optional dev-time token hint.  Key Vault takes precedence in
                        auth_adapter().  Do NOT pass production tokens as constructor args.
+            org_url:   Accepted and ignored — Slack has no org-URL concept.  Present so
+                       the connector factory can construct every kind uniformly
+                       (connector_factory.get_connector_for_session passes org_url= to
+                       all connectors; without it this class raised TypeError).
+            tenant_id: Run context, NOT a credential.  The factory sets it so
+                       auth_adapter()/health_check() can resolve the tenant-scoped bot
+                       token without every call site threading it through (REQ-M7-01).
         """
         # Slack has no org URL concept; workspace is determined by the bot token.
         self._org_url = ""
         # Store hint under a neutral name — it is a fallback only.
         self._bot_token_hint = bot_token
+        self._tenant_id = tenant_id
 
     # ── Identity ──────────────────────────────────────────────────────────
 
@@ -123,10 +131,14 @@ class SlackConnector(BaseConnector):
         """Resolve bot token ephemerally: Key Vault first, env var, then constructor hint.
 
         tenant_id is required — raises ValueError when absent (REQ-M7-01, SC-02).
+        An explicit argument wins; otherwise the instance tenant_id set by the factory
+        is used, so health_check() and the convenience methods resolve per-tenant
+        without threading it through every call site (mirrors AzureDevOpsConnector).
         Credentials are resolved tenant-scoped first, then fall back to the global
         KV name, then to env var / constructor hint (local development only).
         Return value is never stored on self and must not be logged/persisted (REQ-M6-14).
         """
+        tenant_id = tenant_id or self._tenant_id
         if not tenant_id:
             raise ValueError(
                 "tenant_id is required for SlackConnector.auth_adapter() — "

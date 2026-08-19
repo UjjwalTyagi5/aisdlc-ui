@@ -75,7 +75,30 @@ def grants_scope(alias: str = "rb") -> str:
     return f"{alias}.role_name IS DISTINCT FROM 'contributor'"
 
 
+# GOVERNING A UNIT IS WHAT REACHES ACROSS ITS PROJECTS — not being bound at unit level.
+#
+# Every scope query used to map a business_unit binding to the unit's whole project
+# list whatever role held it. A DELIVERY role bound there therefore saw every project
+# in the unit: a Project Admin appointed at unit level could open, and act on, projects
+# nobody had put them on, and an Architect the same. The tier is precisely the
+# distinction the product already draws — governance roles govern a unit, delivery
+# roles deliver inside a project — and it had no expression here.
+#
+# Delivery bindings still reach their OWN scope: a project binding grants that project,
+# which is how somebody gets the projects they are actually on. What goes away is the
+# leap from "bound somewhere in this unit" to "everything in this unit".
+#
+# Mirrors ROLE_TIER in shared/authz/permissions.py. Written as the two governance role
+# names rather than joining the tier column because `role_bindings.tier` is nullable
+# and advisory, while role_name is what every other authz predicate keys on.
+def governs_unit(alias: str = "rb") -> str:
+    """True for a binding whose role governs a whole business unit."""
+    return f"{alias}.role_name IN ('org_admin', 'bu_admin')"
+
+
 _SCOPED = f"{_LIVE} AND {grants_scope()}"
+#: For business_unit-scoped rows: live, confers reach, AND governs the unit.
+_SCOPED_UNIT = f"{_SCOPED} AND {governs_unit()}"
 
 # Holding either means the caller reads the whole organization. Mirrors the
 # frontend's resolveSessionScope(): org_admin holds admin:*, and settings:manage
@@ -108,6 +131,11 @@ async def allowed_workspace_ids(db: AsyncSession, request: Request) -> list[str]
 
     rows = (await db.execute(
         text(
+            # `_SCOPED`, not `_SCOPED_UNIT`: this answers "which units may you SEE",
+            # and somebody bound to a unit is IN it whatever their tier — a Developer
+            # who cannot see the name of their own unit cannot read their own /my-access
+            # page. What a delivery role must NOT get from a unit binding is the unit's
+            # PROJECTS, and that is `visible_project_ids`, which is governance-only.
             f"SELECT DISTINCT w.id FROM workspaces w "
             f"JOIN role_bindings rb ON rb.scope_id = w.id "
             f"WHERE {_SCOPED} AND rb.scope_kind = 'business_unit' "
@@ -139,7 +167,7 @@ async def administered_workspace_ids(db: AsyncSession, request: Request) -> list
     rows = (await db.execute(
         text(
             f"SELECT DISTINCT rb.scope_id FROM role_bindings rb "
-            f"WHERE {_SCOPED} AND rb.scope_kind = 'business_unit'"
+            f"WHERE {_SCOPED_UNIT} AND rb.scope_kind = 'business_unit'"
         ),
         {"u": user_id, "now": datetime.now(tz=timezone.utc)},
     )).fetchall()

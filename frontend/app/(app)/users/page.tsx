@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   Building2,
   Lock,
+  Eye,
   Search,
   ShieldCheck,
   Upload,
@@ -49,6 +50,7 @@ import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { listCrossBuGrants, listUserDirectory, revokeCrossBuGrant } from "@/lib/api/users";
 import { qk } from "@/lib/api/query-keys";
 import { awaitsBusinessUnitRole, ROLE_META, type PlatformRole } from "@/lib/roles";
+import { RoleHistoryDialog } from "@/components/app/role-history-dialog";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { resolveRoleLabel, useAllCustomRoles } from "@/hooks/use-assignable-roles";
 import type { DirectoryEntry } from "@/lib/schemas/user-directory";
@@ -141,6 +143,7 @@ export default function UsersPage() {
   const [borrowOpen, setBorrowOpen] = React.useState(false);
   const queryClient = useQueryClient();
   const [assigning, setAssigning] = React.useState<DirectoryEntry | null>(null);
+  const [viewingHistory, setViewingHistory] = React.useState<DirectoryEntry | null>(null);
   const [reappointing, setReappointing] = React.useState<DirectoryEntry | null>(null);
 
   const canManage = hasPermission(session, "member:manage");
@@ -618,6 +621,22 @@ export default function UsersPage() {
                       </TableCell>
 
                       <TableCell className="py-3 text-right align-top">
+                        {/* WHO CHANGED THIS PERSON'S ROLE, AND WHEN. Beside the
+                            control that changes it, because the question is asked
+                            in the same breath as the change is considered. Shown to
+                            whoever may manage roles here — the server refuses a
+                            history for anybody outside the caller's units, so this
+                            is an affordance rather than the boundary. */}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setViewingHistory(r)}
+                          aria-label={`Role history for ${r.displayName}`}
+                          title="Role history"
+                          className="mr-1 h-7 w-7 align-middle"
+                        >
+                          <Eye className="size-3.5" aria-hidden />
+                        </Button>
                         {isOrgAdmin && r.orgRole !== "org_admin" ? (
                           <Button
                             variant="outline"
@@ -713,6 +732,15 @@ export default function UsersPage() {
           onOpenChange={setBorrowOpen}
           projects={(projectsQ.data?.items ?? []).map((p) => ({ id: String(p.id), name: p.name }))}
           onRaised={() => queryClient.invalidateQueries({ queryKey: ["governance-approvals"] })}
+        />
+      )}
+
+      {viewingHistory && (
+        <RoleHistoryDialog
+          userId={viewingHistory.userId}
+          displayName={viewingHistory.displayName}
+          open
+          onOpenChange={(o) => !o && setViewingHistory(null)}
         />
       )}
 

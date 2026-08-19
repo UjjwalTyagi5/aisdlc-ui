@@ -52,6 +52,11 @@ from agents_orchestrator.design_architecture_agent.prompts.architecture_generati
 from shared.tools.spectral_tool import run_spectral_lint
 from agents_orchestrator.design_architecture_agent.tools.schema_validation_tool import validate_database_schema
 from agents_orchestrator.design_architecture_agent.tools.existing_system_tool import analyze_existing_system
+from agents_orchestrator.design_architecture_agent.tools.figma_tools import (
+    export_figma_frames,
+    list_figma_frames,
+    read_figma_design,
+)
 
 load_dotenv()
 
@@ -669,6 +674,10 @@ tools = [
     analyze_existing_system,
     run_spectral_lint,
     validate_database_schema,
+    # Figma — a design that already exists is a better input than a described one.
+    list_figma_frames,
+    read_figma_design,
+    export_figma_frames,
 ]
 
 
@@ -733,6 +742,14 @@ must be derived from the requirements provided — not invented.
    language mix, and API/DB files. Design to EXTEND the existing system — reuse
    its stack and patterns instead of proposing a greenfield rewrite. If no repo
    path is available, skip this step.
+0b. EXISTING DESIGN (do this when the user mentions Figma or gives a figma.com link):
+   call list_figma_frames(file_url) to get the screen inventory, then
+   read_figma_design(file_url, node_ids) on the screens that matter. Design to the
+   screens that EXIST — name the real components and reuse the real copy instead of
+   inventing a UI the designers did not draw. Use export_figma_frames(node_ids) only
+   when the user wants images embedded in the document; its URLs expire in ~30 days,
+   so never present them as permanent. If Figma is not connected, the tools say so —
+   carry on from the written requirements rather than stopping.
 1. If the user provides file paths → call read_document for EACH file first.
 2. Pass extracted text to generate_architecture.
 3. If no files → use generate_architecture_from_context with conversation context.
