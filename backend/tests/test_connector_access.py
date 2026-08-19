@@ -280,3 +280,66 @@ async def test_narrowing_the_unit_later_narrows_the_project(tree):
 @pytest.mark.asyncio
 async def test_an_unknown_project_gets_nothing(tree):
     assert await _effective(tree["org"], str(_uuid.uuid4())) is None
+
+
+# ── unit reach is governance-only ────────────────────────────────────────────
+#
+# Not a connector rule, but it lives on the same predicates (`read_scope`,
+# `can_perform`) and breaking it would silently widen every connector decision
+# above, since a project's access is resolved from the project it is asked about.
+
+@pytest.mark.asyncio
+async def test_a_delivery_role_bound_to_a_unit_reaches_none_of_its_projects(tree):
+    """GOVERNING a unit is what reaches across its projects — not being bound at
+    unit level. A Project Admin appointed at unit level could otherwise open, and
+    act on, every project in it, including ones nobody had put them on."""
+    from shared.authz.can_perform import visible_project_ids
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, role_name, "
+            "  status, tenant_id) "
+            "VALUES (CAST(:i AS uuid), :u, 'business_unit', CAST(:w AS uuid), "
+            "        'project_admin', 'active', CAST(:t AS uuid))"
+        ), {"i": str(_uuid.uuid4()), "u": "pa", "w": tree["unit"], "t": tree["org"]})
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        assert await visible_project_ids(s, user_id="pa", tenant_id=tree["org"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_governance_role_bound_to_a_unit_reaches_its_projects(tree):
+    """The other half — and the reason this is a tier rule rather than a blanket
+    narrowing. Governing a unit means seeing what is in it."""
+    from shared.authz.can_perform import visible_project_ids
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, role_name, "
+            "  status, tenant_id) "
+            "VALUES (CAST(:i AS uuid), :u, 'business_unit', CAST(:w AS uuid), "
+            "        'bu_admin', 'active', CAST(:t AS uuid))"
+        ), {"i": str(_uuid.uuid4()), "u": "bua", "w": tree["unit"], "t": tree["org"]})
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        seen = await visible_project_ids(s, user_id="bua", tenant_id=tree["org"])
+    assert set(seen or []) == {tree["project"], tree["sibling"]}
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_role_reaches_the_project_it_is_bound_to(tree):
+    """What a delivery role DOES get: the projects somebody put them on, and no
+    sibling of those."""
+    from shared.authz.can_perform import visible_project_ids
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, role_name, "
+            "  status, tenant_id) "
+            "VALUES (CAST(:i AS uuid), :u, 'project', CAST(:p AS uuid), "
+            "        'architect', 'active', CAST(:t AS uuid))"
+        ), {"i": str(_uuid.uuid4()), "u": "arch", "p": tree["project"], "t": tree["org"]})
+
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        seen = await visible_project_ids(s, user_id="arch", tenant_id=tree["org"])
+    assert seen == [tree["project"]]
