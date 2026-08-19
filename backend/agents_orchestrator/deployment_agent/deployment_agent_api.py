@@ -28,6 +28,7 @@ from agents_orchestrator.deployment_agent.agents.pipeline_app import (
     write_all_outputs, print_pipeline_summary, update_work_items_to_deployed,
     resolve_ado_target, clone_azure_repo, detect_tech_stack,
     generate_deployment_files, commit_and_push_to_ado, trigger_azure_pipeline,
+    trigger_deployment_pipeline, trigger_github_actions_workflow,
     verify_testing_gate,
 )
 from config import sdlcSettings
@@ -117,7 +118,10 @@ def _build_step_plan(task: str) -> List[Any]:
             detect_tech_stack,
             generate_deployment_files,
             commit_and_push_to_ado,
-            trigger_azure_pipeline,
+            # Provider-aware: reads deploy_via from state at execution time and
+            # delegates to the Azure Pipelines or GitHub Actions trigger. Defaults to
+            # Azure Pipelines when unset, so existing ADO runs are unchanged.
+            trigger_deployment_pipeline,
             write_all_outputs,
             print_pipeline_summary,
         ]
@@ -651,6 +655,11 @@ async def _handle_user_message(
             "session_id": session_id,
             "session_context": session_context,
             "deployment_request": dep_req,
+            # CI provider chosen upstream (deploy/prepare detection or user override).
+            # Empty means Azure Pipelines — see trigger_deployment_pipeline.
+            "deploy_via": dep_req.get("deploy_via", "") if isinstance(dep_req, dict) else "",
+            "gha_owner": dep_req.get("gha_owner", "") if isinstance(dep_req, dict) else "",
+            "gha_repo": dep_req.get("gha_repo", "") if isinstance(dep_req, dict) else "",
             "deployment_plan": "",
             "docker_compose": "",
             "cicd_pipeline_azure": "",
@@ -822,6 +831,11 @@ async def chat(
             "session_id": session_id,
             "session_context": session_context,
             "deployment_request": dep_req,
+            # CI provider chosen upstream (deploy/prepare detection or user override).
+            # Empty means Azure Pipelines — see trigger_deployment_pipeline.
+            "deploy_via": dep_req.get("deploy_via", "") if isinstance(dep_req, dict) else "",
+            "gha_owner": dep_req.get("gha_owner", "") if isinstance(dep_req, dict) else "",
+            "gha_repo": dep_req.get("gha_repo", "") if isinstance(dep_req, dict) else "",
             "deployment_plan": "",
             "docker_compose": "",
             "cicd_pipeline_azure": "",

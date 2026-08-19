@@ -73,6 +73,9 @@ _KNOWN_KINDS = {
     "azure_repos",
     "github_actions",
     "slack",
+    "ms_teams",
+    "sharepoint",
+    "figma",
     "sso_okta",
     "sso_entra",
 }
@@ -83,6 +86,7 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
     "github": ["github-access-token"],
     "slack": ["slack-bot-token"],
     "azure_repos": ["ado-pat"],
+    "figma": ["figma-access-token"],
 }
 
 # secret_store refs written by the "Add credentials" form (POST /credentials).
@@ -92,7 +96,41 @@ _KIND_SECRET_STORE_REFS: Dict[str, List[str]] = {
     "azure_devops": ["ado-pat", "ado-org-url"],
     "jira": ["jira-url", "jira-email", "jira-api-token"],
     "github_actions": ["gha-pat", "gha-owner"],
+    # ms_teams and sharepoint SHARE one Entra app registration (msgraph-*), so those
+    # three refs are deliberately absent here — see _MSGRAPH_SHARED_REFS below. Only
+    # the per-kind marker and routing config are owned by each kind.
+    "ms_teams": [
+        "msteams-connected",
+        "msteams-team-id",
+        "msteams-channel-id",
+        "msteams-webhook-url",
+    ],
+    "sharepoint": [
+        "sharepoint-connected",
+        "sharepoint-site-id",
+        "sharepoint-drive-id",
+        "sharepoint-folder-path",
+    ],
+    # Figma accepts EITHER a PAT or an OAuth token, so both refs are listed: whichever
+    # shape the tenant used, disconnect must clear it. figma-access-token also appears
+    # in _KIND_KV_SECRETS above because the OAuth callback writes it to Key Vault.
+    "figma": [
+        "figma-connected",
+        "figma-pat",
+        "figma-access-token",
+        "figma-file-key",
+    ],
 }
+
+# The Entra app registration shared by ms_teams and sharepoint, plus the sibling map
+# used to decide when it is safe to delete. Disconnecting ONE Graph connector must not
+# tombstone credentials the other is still using.
+_MSGRAPH_SHARED_REFS: List[str] = [
+    "msgraph-tenant-id",
+    "msgraph-client-id",
+    "msgraph-client-secret",
+]
+_MSGRAPH_SIBLING: Dict[str, str] = {"ms_teams": "sharepoint", "sharepoint": "ms_teams"}
 
 # The single secret whose presence means "this tenant connected this kind". On
 # disconnect it's tombstoned with DISCONNECTED_MARKER (authoritative); the overlay
@@ -101,6 +139,17 @@ _KIND_PRIMARY_CREDENTIAL: Dict[str, str] = {
     "azure_devops": "ado-pat",
     "jira": "jira-api-token",
     "github_actions": "gha-pat",
+    # A per-kind MARKER, not msgraph-client-secret. The two Graph kinds share one app
+    # registration, so naming the shared secret as either kind's primary credential
+    # would mean disconnecting Teams tombstones the secret and silently breaks
+    # SharePoint. The marker's value is the account label.
+    "ms_teams": "msteams-connected",
+    "sharepoint": "sharepoint-connected",
+    # A per-kind MARKER for the same reason as the Graph pair, but a different one:
+    # Figma has TWO credential refs (PAT and OAuth token) and naming either as primary
+    # would tombstone one while leaving the other live — a "disconnected" connector
+    # that still authenticates. FigmaConnector.auth_adapter checks this marker first.
+    "figma": "figma-connected",
 }
 
 # Atlassian token exchange endpoint
@@ -112,6 +161,9 @@ _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 # Slack token exchange endpoint
 _SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+
+# Figma token exchange endpoint
+_FIGMA_TOKEN_URL = "https://api.figma.com/v1/oauth/token"
 
 
 def _build_connector_list(
@@ -137,6 +189,9 @@ _CREDENTIAL_CONNECTORS = [
     ("azure_devops", "ado-pat", "ado-org-url"),
     ("jira", "jira-api-token", "jira-url"),
     ("github_actions", "gha-pat", "gha-owner"),
+    ("ms_teams", "msteams-connected", "msteams-channel-id"),
+    ("sharepoint", "sharepoint-connected", "sharepoint-site-id"),
+    ("figma", "figma-connected", "figma-connected"),
 ]
 
 
@@ -179,25 +234,21 @@ async def _overlay_tenant_credentials(
                 existing.health = "disconnected"
             continue
 
+        # One path for every credential kind. github_actions used to be special-cased
+        # here (and in set_connector_credentials) because it had no connector class to
+        # resolve through; GitHubActionsConnector.health_check now reuses the very same
+        # probe_github_actions helper, so the generic branch covers it.
         health = "degraded"
-        if kind == "github_actions":
-            from shared.services.deployment_probe import probe_github_actions
-
-            try:
-                owner = await secret_store.get_secret(tenant_id, "gha-owner")
-            except Exception:  # noqa: BLE001
-                owner = None
-            ok, _account, _err = await probe_github_actions(secret, owner)
-            health = "healthy" if ok else "degraded"
-        else:
-            try:
-                connector = await get_connector_for_session(
-                    kind=kind, tenant_id=tenant_id, unrestricted=True,
-                )
-                hc = await connector.health_check()
-                health = "healthy" if getattr(hc, "status", "") == "healthy" else "degraded"
-            except Exception:  # noqa: BLE001
-                health = "degraded"
+        try:
+            # unrestricted: an org-level health probe acting for no project. Named
+            # explicitly because it is the fail-open door and should read as one.
+            connector = await get_connector_for_session(
+                kind=kind, tenant_id=tenant_id, unrestricted=True,
+            )
+            hc = await connector.health_check()
+            health = "healthy" if getattr(hc, "status", "") == "healthy" else "degraded"
+        except Exception:  # noqa: BLE001
+            health = "degraded"
 
         try:
             account = await secret_store.get_secret(tenant_id, account_ref)
@@ -372,10 +423,17 @@ async def install_connector(kind: str, request: Request):
 # tenant secret store (Key Vault in prod, Fernet-encrypted DB in dev) and a live
 # probe verifies them. The secret is never echoed back.
 
-_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions"}
+_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions", "ms_teams", "sharepoint", "figma"}
 
 
 class SetCredentialsIn(BaseModel):
+    """Paste-credential payload. Every field is optional and kind-specific.
+
+    ADDITIVE ONLY — no existing field may change type or become required, or the
+    payloads the Integrations dialog already sends ({base_url,email,api_token},
+    {pat,owner}, {org_url,pat}) stop validating.
+    """
+
     # Azure DevOps
     org_url: Optional[str] = None
     pat: Optional[str] = None
@@ -385,6 +443,241 @@ class SetCredentialsIn(BaseModel):
     api_token: Optional[str] = None
     # GitHub Actions (reuses `pat`; owner/org optional)
     owner: Optional[str] = None
+    # Microsoft Graph app registration — ms_teams and sharepoint SHARE one.
+    msgraph_tenant_id: Optional[str] = None
+    msgraph_client_id: Optional[str] = None
+    msgraph_client_secret: Optional[str] = None
+    # Microsoft Teams delivery target: webhook_url OR (team_id AND channel_id).
+    team_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    webhook_url: Optional[str] = None
+    # SharePoint target. drive_id is resolved from site_url when not supplied.
+    site_url: Optional[str] = None
+    drive_id: Optional[str] = None
+    folder_path: Optional[str] = None
+    # Figma. `pat` is reused for the Personal Access Token shape; figma_access_token
+    # is the OAuth shape, normally written by the callback rather than pasted here.
+    # file_url is an optional default file (URL or bare key), not a credential.
+    figma_access_token: Optional[str] = None
+    file_url: Optional[str] = None
+
+
+async def _store_msgraph_app(tenant_id: str, body: SetCredentialsIn, secret_store) -> bool:
+    """Persist the shared Entra app registration when supplied. Returns True if stored.
+
+    ms_teams and sharepoint share one registration, so this writes the same three refs
+    for either kind and only when all three are present — a partial write would leave a
+    half-configured app that fails at token-mint time with a confusing error.
+    """
+    entra_tenant = (body.msgraph_tenant_id or "").strip()
+    client_id = (body.msgraph_client_id or "").strip()
+    client_secret = (body.msgraph_client_secret or "").strip()
+    if not (entra_tenant and client_id and client_secret):
+        return False
+    await secret_store.put_secret(tenant_id, "msgraph-tenant-id", entra_tenant)
+    await secret_store.put_secret(tenant_id, "msgraph-client-id", client_id)
+    await secret_store.put_secret(tenant_id, "msgraph-client-secret", client_secret)
+    # A re-registration invalidates any token cached against the old app.
+    from config.connectors import msgraph as _msgraph
+
+    _msgraph._clear_token_cache()
+    return True
+
+
+async def _store_ms_teams_credentials(
+    tenant_id: str, body: SetCredentialsIn, secret_store
+) -> Optional[str]:
+    """Store Microsoft Teams credentials + delivery target. Returns the account label.
+
+    TWO ACCEPTED SHAPES:
+      1. webhook_url alone — a channel-scoped Incoming Webhook. Needs no Entra app.
+      2. the three msgraph_* values PLUS team_id and channel_id — the Graph path.
+    """
+    webhook_url = (body.webhook_url or "").strip()
+    team_id = (body.team_id or "").strip()
+    channel_id = (body.channel_id or "").strip()
+
+    if not webhook_url and not (team_id and channel_id):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Microsoft Teams needs a delivery target: either 'webhook_url' (a Teams "
+                "Incoming Webhook URL), or both 'team_id' and 'channel_id'."
+            ),
+        )
+
+    stored_app = await _store_msgraph_app(tenant_id, body, secret_store)
+    if not webhook_url and not stored_app:
+        # The Graph path cannot work without an app registration. Fail loudly here
+        # rather than storing a target that can never be reached.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Posting to a Teams channel via Microsoft Graph requires an Entra app "
+                "registration: 'msgraph_tenant_id', 'msgraph_client_id' and "
+                "'msgraph_client_secret'. Alternatively supply 'webhook_url' alone."
+            ),
+        )
+
+    if webhook_url:
+        await secret_store.put_secret(tenant_id, "msteams-webhook-url", webhook_url)
+    if team_id:
+        await secret_store.put_secret(tenant_id, "msteams-team-id", team_id)
+    if channel_id:
+        await secret_store.put_secret(tenant_id, "msteams-channel-id", channel_id)
+
+    account = channel_id or "Incoming webhook"
+    # The marker is what makes the catalogue read this tenant as connected, and what
+    # disconnect tombstones. Its value doubles as the account label.
+    await secret_store.put_secret(tenant_id, "msteams-connected", account)
+    return account
+
+
+async def _store_sharepoint_credentials(
+    tenant_id: str, body: SetCredentialsIn, secret_store
+) -> Optional[str]:
+    """Store SharePoint credentials + target library. Returns the account label.
+
+    Requires the shared Entra app registration and a site_url. drive_id is optional —
+    it is resolved from the site during the verify probe and cached, so later calls
+    need no lookup. An operator can also supply it directly to bypass resolution
+    (useful for /teams/ or root-site URLs, which resolve_site does not handle).
+    """
+    site_url = (body.site_url or "").strip()
+    if not site_url and not (body.drive_id or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="SharePoint requires 'site_url' (or an explicit 'drive_id').",
+        )
+    if not await _store_msgraph_app(tenant_id, body, secret_store):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "SharePoint requires an Entra app registration: 'msgraph_tenant_id', "
+                "'msgraph_client_id' and 'msgraph_client_secret'."
+            ),
+        )
+
+    if body.drive_id:
+        await secret_store.put_secret(tenant_id, "sharepoint-drive-id", body.drive_id.strip())
+    folder = (body.folder_path or "").strip() or "SDLC Documentation"
+    await secret_store.put_secret(tenant_id, "sharepoint-folder-path", folder)
+
+    account = site_url or (body.drive_id or "").strip()
+    await secret_store.put_secret(tenant_id, "sharepoint-connected", account)
+    return account
+
+
+def _clear_figma_auth_cache(tenant_id: str) -> None:
+    """Invalidate FigmaConnector's per-tenant credential cache. Never raises.
+
+    The connector caches resolved credentials for a short TTL to avoid re-walking the
+    secret-store/Key-Vault ladder on every REST call. Any write to a Figma credential
+    must drop that entry, or the old credential stays live until it expires.
+    """
+    try:
+        from config.connectors.figma import clear_auth_cache
+
+        clear_auth_cache(tenant_id)
+    except Exception as exc:  # noqa: BLE001 — cache invalidation must not fail a write
+        logger.warning("figma auth-cache invalidation failed: %s", type(exc).__name__)
+
+
+async def _store_figma_credentials(
+    tenant_id: str, body: SetCredentialsIn, secret_store
+) -> Optional[str]:
+    """Store Figma credentials + an optional default file. Returns the account label.
+
+    TWO ACCEPTED SHAPES, matching the connector's two auth headers:
+      1. `pat` — a Personal Access Token. Simple, no app registration.
+      2. `figma_access_token` — an OAuth2 access token. Normally written by the OAuth
+         callback rather than pasted, but accepted here so an operator holding a token
+         can configure a tenant without running the redirect flow.
+
+    Only ONE is stored. Writing both would leave auth_adapter's precedence rule
+    (OAuth wins) deciding which credential a tenant actually uses, which is not a
+    decision that should depend on the order someone filled in a form.
+    """
+    from config.connectors.figma import extract_file_key
+
+    pat = (body.pat or "").strip()
+    oauth_token = (body.figma_access_token or "").strip()
+
+    if not pat and not oauth_token:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Figma needs a credential: either 'pat' (a Personal Access Token from "
+                "figma.com → Settings → Security) or 'figma_access_token' (an OAuth2 "
+                "access token)."
+            ),
+        )
+
+    # An explicit OAuth token wins — it is user-scoped and revocable from Figma's side.
+    if oauth_token:
+        await secret_store.put_secret(tenant_id, "figma-access-token", oauth_token)
+        await secret_store.delete_secret(tenant_id, "figma-pat")
+        account = "OAuth token"
+    else:
+        await secret_store.put_secret(tenant_id, "figma-pat", pat)
+        await secret_store.delete_secret(tenant_id, "figma-access-token")
+        account = "Personal Access Token"
+
+    # Optional default file. Rejected loudly when unparseable rather than silently
+    # stored — a bad key here surfaces later as a confusing 404 from Figma.
+    file_url = (body.file_url or "").strip()
+    if file_url:
+        file_key = extract_file_key(file_url)
+        if not file_key:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Could not read a Figma file key from {file_url!r}. Paste the file "
+                    "URL (https://www.figma.com/design/<key>/<name>) or the key itself."
+                ),
+            )
+        await secret_store.put_secret(tenant_id, "figma-file-key", file_key)
+
+    # The marker is what makes the catalogue read this tenant as connected, and what
+    # disconnect tombstones. Its value doubles as the account label.
+    await secret_store.put_secret(tenant_id, "figma-connected", account)
+    # The connector caches resolved credentials per tenant; without this the verify
+    # probe immediately below would run against whatever was cached beforehand.
+    _clear_figma_auth_cache(tenant_id)
+    return account
+
+
+async def _resolve_and_cache_sharepoint_ids(tenant_id: str, site_url: str) -> Optional[str]:
+    """Resolve site → drive after a successful probe and cache both ids.
+
+    Returns an error token on failure, or None on success. Never raises: a resolution
+    failure downgrades the credential result to "invalid" with an actionable reason
+    rather than surfacing a 500.
+    """
+    if not site_url:
+        return None
+    try:
+        from shared.services import secret_store
+        from config.connector_factory import get_connector_for_session
+
+        connector = await get_connector_for_session(kind="sharepoint", tenant_id=tenant_id)
+        site = await connector.read_adapter("resolve_site", site_url=site_url)
+        site_id = (site or {}).get("id", "")
+        if not site_id:
+            return "SiteNotFound"
+        await secret_store.put_secret(tenant_id, "sharepoint-site-id", site_id)
+
+        drive = await connector.read_adapter("resolve_drive", site_id=site_id)
+        drive_id = (drive or {}).get("id", "")
+        if not drive_id:
+            return "DriveNotFound"
+        await secret_store.put_secret(tenant_id, "sharepoint-drive-id", drive_id)
+        return None
+    except Exception as exc:  # noqa: BLE001 — a resolution failure is a result, not a 500
+        logger.warning(
+            "sharepoint id resolution failed for tenant=%r: %s", tenant_id, type(exc).__name__
+        )
+        return type(exc).__name__
 
 
 @connectors_resource_router.post(
@@ -428,6 +721,12 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             if owner:
                 await secret_store.put_secret(tenant_id, "gha-owner", owner)
             account = owner or None
+        elif kind == "ms_teams":
+            account = await _store_ms_teams_credentials(tenant_id, body, secret_store)
+        elif kind == "sharepoint":
+            account = await _store_sharepoint_credentials(tenant_id, body, secret_store)
+        elif kind == "figma":
+            account = await _store_figma_credentials(tenant_id, body, secret_store)
         else:  # jira
             base_url = (body.base_url or "").strip()
             email = (body.email or "").strip()
@@ -450,30 +749,33 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             detail="Secret store is not configured. Set SECRET_STORE_KEY (dev) or AZURE_KEY_VAULT_URL (prod).",
         )
 
-    # Live verify probe with the just-stored credentials.
+    # Live verify probe with the just-stored credentials. One path for every kind —
+    # github_actions no longer needs a bespoke branch now that GitHubActionsConnector
+    # exists and its health_check reuses the same probe_github_actions helper.
     status = "invalid"
     error: Optional[str] = None
-    if kind == "github_actions":
-        from shared.services.deployment_probe import probe_github_actions
-
-        ok, probe_account, probe_error = await probe_github_actions(
-            (body.pat or "").strip(), (body.owner or "").strip() or None
+    try:
+        # unrestricted: an org-level health probe acting for no project. Named
+        # explicitly because it is the fail-open door and should read as one.
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, unrestricted=True,
         )
-        status = "valid" if ok else "invalid"
-        error = probe_error
-        if probe_account:
-            account = probe_account
-    else:
-        try:
-            connector = await get_connector_for_session(
-                    kind=kind, tenant_id=tenant_id, unrestricted=True,
-                )
-            health = await connector.health_check()
-            status = "valid" if getattr(health, "status", "") == "healthy" else "invalid"
-            error = getattr(health, "error", None)
-        except Exception as exc:  # noqa: BLE001 — probe failure must not 500; report invalid.
+        health = await connector.health_check()
+        status = "valid" if getattr(health, "status", "") == "healthy" else "invalid"
+        error = getattr(health, "error", None)
+    except Exception as exc:  # noqa: BLE001 — probe failure must not 500; report invalid.
+        status = "invalid"
+        error = type(exc).__name__
+
+    # SharePoint only: once the credential verifies, resolve the site and its default
+    # document library and cache both ids so no later call has to look them up.
+    if kind == "sharepoint" and status == "valid":
+        resolve_error = await _resolve_and_cache_sharepoint_ids(
+            tenant_id, (body.site_url or "").strip()
+        )
+        if resolve_error:
             status = "invalid"
-            error = type(exc).__name__
+            error = resolve_error
 
     # Enable connector for the active workspace (if present)
     workspace_id = request.headers.get("x-workspace-id", "")
@@ -529,6 +831,8 @@ async def oauth_callback(
             await _slack_oauth_exchange(code, state, tenant_id)
         elif kind == "azure_repos":
             await _azure_repos_oauth_exchange(code, state, tenant_id)
+        elif kind == "figma":
+            await _figma_oauth_exchange(code, state, tenant_id)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported connector kind: {kind!r}")
     except HTTPException:
@@ -605,6 +909,16 @@ async def disconnect_connector(kind: str, request: Request, db: AsyncSession = D
                 type(exc).__name__,
             )
 
+    # The Entra app registration is shared by ms_teams and sharepoint, so it may only
+    # be deleted once BOTH are disconnected.
+    await _maybe_purge_shared_graph_secrets(tenant_id, kind)
+
+    # Figma caches resolved credentials per tenant — without this the connector keeps
+    # authenticating with the just-revoked token until the TTL expires, which is
+    # exactly the fail-open a disconnect must not have.
+    if kind == "figma":
+        _clear_figma_auth_cache(tenant_id)
+
     # Remove workspace-level enablement for the active workspace
     workspace_id = request.headers.get("x-workspace-id", "")
     if workspace_id:
@@ -621,6 +935,55 @@ async def disconnect_connector(kind: str, request: Request, db: AsyncSession = D
     connector.installed = False
     logger.info("Connector disconnected: kind=%r tenant=%r", kind, tenant_id)
     return connector
+
+
+async def _maybe_purge_shared_graph_secrets(tenant_id: str, kind: str) -> None:
+    """Delete the shared Entra app credentials — but only when nothing still needs them.
+
+    ms_teams and sharepoint authenticate through ONE app registration. Deleting it on
+    the first disconnect would silently break whichever Graph connector remains, so the
+    sibling's `*-connected` marker is checked first. When the sibling is still
+    connected the shared refs are left exactly as they are.
+
+    Best-effort and never raises — a disconnect must not hard-fail on a vault hiccup.
+    """
+    sibling = _MSGRAPH_SIBLING.get(kind)
+    if not sibling:
+        return
+    try:
+        from shared.services import secret_store
+
+        sibling_marker = _KIND_PRIMARY_CREDENTIAL.get(sibling, "")
+        still_connected = False
+        if sibling_marker:
+            value = await secret_store.get_secret(tenant_id, sibling_marker)
+            still_connected = bool(value) and value != secret_store.DISCONNECTED_MARKER
+
+        if still_connected:
+            logger.info(
+                "disconnect %r: keeping shared Microsoft Graph credentials — %r is still connected",
+                kind,
+                sibling,
+            )
+            return
+
+        for ref in _MSGRAPH_SHARED_REFS:
+            try:
+                await secret_store.delete_secret(tenant_id, ref)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "disconnect %r: failed to delete shared ref %r: %s",
+                    kind,
+                    ref,
+                    type(exc).__name__,
+                )
+        from config.connectors import msgraph as _msgraph
+
+        _msgraph._clear_token_cache()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "disconnect %r: shared Graph credential cleanup failed: %s", kind, type(exc).__name__
+        )
 
 
 # ── Internal exchange helpers ─────────────────────────────────────────────────
@@ -733,6 +1096,69 @@ async def _slack_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
                 "client_secret": SLACK_CLIENT_SECRET,
                 "code": code,
                 "redirect_uri": callback,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _figma_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
+    """Exchange a Figma authorization code for an access token; store it per tenant.
+
+    Writes THREE things, and all three matter:
+      - `figma-access-token` to Key Vault, so the connector's OAuth tier resolves it.
+      - the same value to the tenant secret store, because that is the tier
+        FigmaConnector.auth_adapter reads FIRST and the one _overlay_tenant_credentials
+        checks; a KV-only write would leave the catalogue showing "not connected"
+        immediately after a successful consent.
+      - the `figma-connected` marker, which is what the catalogue and disconnect key
+        off for this kind.
+
+    Any previously pasted PAT is cleared: a tenant that has just completed consent
+    should be using the token they consented with, not one left over from before.
+    T-7.4-22: token values never logged.
+    """
+    verify_oauth_state(state, tenant_id)
+
+    tokens = await _figma_token_exchange(code, tenant_id)
+    access_token = tokens.get("access_token", "")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="Figma returned no access token")
+
+    await store_secret("figma-access-token", access_token, tenant_id=tenant_id)
+
+    from shared.services import secret_store
+
+    await secret_store.put_secret(tenant_id, "figma-access-token", access_token)
+    try:
+        await secret_store.delete_secret(tenant_id, "figma-pat")
+    except Exception as exc:  # noqa: BLE001 — a stale PAT must not fail the connect
+        logger.warning("figma oauth: could not clear stale PAT: %s", type(exc).__name__)
+    await secret_store.put_secret(tenant_id, "figma-connected", "OAuth")
+    _clear_figma_auth_cache(tenant_id)
+
+
+async def _figma_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
+    """POST to Figma's token endpoint; return {access_token, refresh_token, expires_in}.
+
+    NOTE: Figma access tokens EXPIRE (90 days) and this platform does NOT refresh them —
+    the refresh_token is stored but nothing consumes it yet, so a long-lived tenant
+    eventually falls back to "connect again". Refresh is a named follow-on, deliberately
+    not half-built; the PAT shape has no such expiry and remains the lower-maintenance
+    option.
+    """
+    from config.env import FIGMA_OAUTH_CLIENT_ID, FIGMA_OAUTH_CLIENT_SECRET
+
+    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/figma/oauth/callback"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            _FIGMA_TOKEN_URL,
+            data={
+                "client_id": FIGMA_OAUTH_CLIENT_ID,
+                "client_secret": FIGMA_OAUTH_CLIENT_SECRET,
+                "redirect_uri": callback,
+                "code": code,
+                "grant_type": "authorization_code",
             },
         )
         resp.raise_for_status()

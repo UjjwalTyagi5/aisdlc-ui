@@ -21,9 +21,24 @@ from config.connector_factory import list_available_connectors
 
 connectors_router = APIRouter()
 
-# Connector names present in a fully-probed cache (all 5 REQ-M6-11 connectors).
+# Connector names present in a fully-probed cache (every registered connector).
+#
+# CAREFUL: a name listed here whose health_check() RAISES is dropped from the cache by
+# _probe_all_connectors, so the subset test below never passes and this endpoint
+# re-probes inline on every single request. Every connector's health_check must catch
+# Exception and return a ConnectorHealth instead of raising.
 _EXPECTED_CONNECTOR_NAMES = frozenset(
-    {"azure_devops", "jira", "github_issues", "azure_repos", "slack"}
+    {
+        "azure_devops",
+        "jira",
+        "github_issues",
+        "azure_repos",
+        "slack",
+        "github_actions",
+        "ms_teams",
+        "sharepoint",
+        "figma",
+    }
 )
 
 

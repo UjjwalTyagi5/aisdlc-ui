@@ -34,6 +34,7 @@ let GRANTS: ConnectorGrant[] = [
   { kind: "github_actions", businessUnitIds: ["ws_payments", "ws_lending"] },
   { kind: "ms_teams", businessUnitIds: ["ws_platform"] },
   { kind: "sharepoint", businessUnitIds: ["ws_lending"] },
+  { kind: "figma", businessUnitIds: ["ws_platform", "ws_lending"] },
 ];
 
 export function listConnectorGrants(): ConnectorGrant[] {

@@ -21,6 +21,10 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     "github_issues": "config.connectors.github_issues.GitHubIssuesConnector",
     "azure_repos":   "config.connectors.azure_repos.AzureReposConnector",
     "slack":         "config.connectors.slack.SlackConnector",
+    "github_actions": "config.connectors.github_actions.GitHubActionsConnector",
+    "ms_teams":       "config.connectors.msteams.MSTeamsConnector",
+    "sharepoint":     "config.connectors.sharepoint.SharePointConnector",
+    "figma":          "config.connectors.figma.FigmaConnector",
 }
 
 
@@ -79,17 +83,20 @@ async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> B
         return connector_class(org_url=org_url, tenant_id=tenant_id)
     if kind == "azure_repos":
         # Reuses ADO credentials — same org URL as AzureDevOpsConnector
-        return connector_class(org_url=ADO_ORG_URL)
+        return connector_class(org_url=ADO_ORG_URL, tenant_id=tenant_id)
     if kind == "jira":
         from config.env import JIRA_URL
         # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
         # token (not the empty global env), mirroring azure_devops above.
         return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
-    if kind == "slack":
-        return connector_class(org_url="")
-    # github_issues and any future connectors: instantiate with empty org_url;
-    # actual credentials resolved lazily in auth_adapter() via load_secret()
-    return connector_class(org_url="")
+    # slack, github_issues, github_actions, ms_teams, sharepoint, figma and any future
+    # connectors: instantiate with an empty org_url; credentials are resolved lazily
+    # in auth_adapter() from the tenant secret store / Key Vault.
+    #
+    # Every connector constructor accepts org_url= and tenant_id= precisely so this
+    # tail works for all of them. SlackConnector used to take only bot_token, so this
+    # call raised TypeError and get_connector_for_session(kind="slack") was unusable.
+    return connector_class(org_url="", tenant_id=tenant_id)
 
 
 async def list_available_connectors() -> list[dict]:

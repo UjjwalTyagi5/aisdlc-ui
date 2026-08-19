@@ -18,6 +18,11 @@ _VERIFIER_REGISTRY: dict[str, Callable] = {
     "slack": verify_slack_signature,
     "jira": verify_jira_signature,
     "azure_repos": verify_ado_signature,
+    # GitHub Actions signs workflow_run deliveries exactly like any other GitHub
+    # webhook (X-Hub-Signature-256, HMAC-SHA256 over the raw body), so the algorithm is
+    # reused verbatim. Only the SECRET differs — see _invoke_verifier — so a CI webhook
+    # can be rotated without touching the issues webhook.
+    "github_actions": verify_github_signature,
 }
 
 
