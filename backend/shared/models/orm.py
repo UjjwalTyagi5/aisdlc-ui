@@ -71,6 +71,7 @@ class Project(Base):
     external_ref: Mapped[str | None] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     provider_kind: Mapped[str] = mapped_column(String(50), nullable=False, default="azure_devops", server_default="azure_devops")
+    track: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # added in migration 0003 â€” server_default false keeps existing rows at false
     archived: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
     # Per-project stageâ†’MCP-server mapping {agent_id: [mcp_server_id, ...]} (migration 0024).
