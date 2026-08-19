@@ -194,3 +194,77 @@ def get_pipeline_order() -> List[List[str]]:
     for agent_id, defn in AGENT_REGISTRY.items():
         by_pos[defn.pipeline_position].append(agent_id)
     return [by_pos[pos] for pos in sorted(by_pos.keys())]
+
+
+# ── Track portfolios (multi-track-agent-access-design.md §1.4) ─────────────────
+#
+# Each track owns its own agent list. Only Greenfield and Enhancement genuinely
+# share one — both point at the same literal list below, not by convention but by
+# construction, so they can never silently drift apart. Modernization, RPA/Infra
+# Migration, and Data Engineering are independent portfolios; each starts empty
+# because none of their agents exist as AGENT_REGISTRY entries yet (spec Part 5 —
+# an agent id is added here only once it's actually built and mounted).
+_PORTFOLIO_1: list[str] = [
+    "requirements", "design", "development", "code_review",
+    "security", "testing", "deployment", "documentation",
+]
+
+TRACK_PORTFOLIOS: dict[str, list[str]] = {
+    "greenfield": _PORTFOLIO_1,
+    "enhancement": _PORTFOLIO_1,
+    "modernization": [],
+    "rpa_infra": [],
+    "data_engineering": [],
+}
+
+# ── Default role -> agent reach (multi-track-agent-access-design.md Appendix) ──
+#
+# Transcribed directly from PRD §14.7. "owner" = approves this agent's Consequential
+# actions and Sign-offs. "build"/"requests" = does the hands-on work or asks for a
+# specific action; a separate owner approves it. "use" = may chat/run Safe
+# capabilities only. "none" = no default reach (an override can still grant it,
+# per Task 3/4). project_admin is "owner" everywhere by design — the universal
+# fallback approver — expressed as real data here, not a code special-case, so
+# there is exactly one source of truth for who reaches what.
+AGENT_DEFAULT_REACH: dict[str, dict[str, str]] = {
+    "requirements": {
+        "project_admin": "owner", "ba": "owner", "architect": "use",
+        "developer": "use", "qa": "use", "security_engineer": "use",
+        "devops_engineer": "none", "data_engineer": "use",
+    },
+    "design": {
+        "project_admin": "owner", "ba": "use", "architect": "owner",
+        "developer": "none", "qa": "none", "security_engineer": "use",
+        "devops_engineer": "none", "data_engineer": "use",
+    },
+    "development": {
+        "project_admin": "owner", "ba": "use", "architect": "owner",
+        "developer": "build", "qa": "use", "security_engineer": "use",
+        "devops_engineer": "requests", "data_engineer": "none",
+    },
+    "code_review": {
+        "project_admin": "owner", "ba": "use", "architect": "owner",
+        "developer": "requests", "qa": "none", "security_engineer": "use",
+        "devops_engineer": "none", "data_engineer": "none",
+    },
+    "security": {
+        "project_admin": "owner", "ba": "use", "architect": "use",
+        "developer": "use", "qa": "use", "security_engineer": "owner",
+        "devops_engineer": "use", "data_engineer": "use",
+    },
+    "testing": {
+        "project_admin": "owner", "ba": "use", "architect": "use",
+        "developer": "use", "qa": "owner", "security_engineer": "none",
+        "devops_engineer": "use", "data_engineer": "use",
+    },
+    "deployment": {
+        "project_admin": "owner", "ba": "use", "architect": "use",
+        "developer": "none", "qa": "none", "security_engineer": "use",
+        "devops_engineer": "owner", "data_engineer": "none",
+    },
+    "documentation": {
+        "project_admin": "owner", "ba": "use", "architect": "use",
+        "developer": "use", "qa": "use", "security_engineer": "none",
+        "devops_engineer": "use", "data_engineer": "use",
+    },
+}
