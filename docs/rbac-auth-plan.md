@@ -11,7 +11,7 @@ Assessed 2026-08-12 against the running code, not the design docs.
 | Capability | Where | State |
 |---|---|---|
 | Local email + password sign-in | `backend/shared/routers/auth_local.py` | **Done** |
-| Self-serve sign-up (grants nothing) | same, `POST /auth/register` | **Done** |
+| ~~Self-serve sign-up~~ | — | **Removed 2026-08-17** — accounts come only from Org Admin onboarding; the onboarded person gets an emailed single-use link to set their own password. No password is ever emailed. |
 | Single-org bootstrap + seeded org admin | `backend/shared/auth/bootstrap.py` | **Done** |
 | Password hashing (bcrypt via passlib) | `backend/shared/auth/passwords.py` | **Done** |
 | Change password | `POST /auth/change-password` | **Done** |

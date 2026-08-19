@@ -104,7 +104,15 @@ export function NotificationsBell() {
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="bg-line-soft" />
 
-        {items.length === 0 ? (
+        {/* A FAILED FETCH IS NOT AN EMPTY BELL. Both rendered "Nothing yet." until
+            now, which is the most misleading thing this control could say: it is the
+            same sentence for "you are up to date" and "we could not ask". A schema
+            mismatch broke this listing outright and it read as a quiet week. */}
+        {q.isError ? (
+          <p className="text-muted-foreground px-2 py-6 text-center text-[12.5px]">
+            Couldn&apos;t load notifications.
+          </p>
+        ) : items.length === 0 ? (
           <p className="text-muted-foreground px-2 py-6 text-center text-[12.5px]">
             Nothing yet.
           </p>

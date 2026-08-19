@@ -41,7 +41,12 @@ from config.env import (
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.read_scope import is_org_wide
+from shared.db import get_db_session
 from shared.routers._schemas import (
     CostOut,
     ProjectCostSummaryOut,
@@ -244,6 +249,42 @@ def _tenant_tag(request: Request) -> str:
     return f"tenant:{request.state.tenant_id}"
 
 
+async def _visible_projects(db: AsyncSession, request: Request) -> Optional[set[str]]:
+    """The project ids this caller may see traces for, or None for the whole tenant.
+
+    `trace:view` is held by project_admin and security_engineer and says they may read
+    traces — not whose. Every route here was scoped by the Langfuse `tenant:` tag alone,
+    so a project admin saw every project's execution traces, including their prompts and
+    costs. See finding 4 in docs/rbac-audit-2026-08-17.md.
+    """
+    if is_org_wide(request):
+        return None
+    visible = await visible_project_ids(
+        db,
+        user_id=getattr(request.state, "user_id", "") or "",
+        tenant_id=str(request.state.tenant_id),
+    )
+    return None if visible is None else set(visible)
+
+
+def _scope_rows(
+    rows: list[TraceListItemOut], visible: Optional[set[str]]
+) -> list[TraceListItemOut]:
+    """Drop traces belonging to projects this caller cannot see.
+
+    Filtering happens BEFORE any aggregate is computed, not after, so the metric cards
+    are totals over the allowed set rather than a trimmed view of the organisation's.
+
+    `standalone` traces — chat with no project attached — are dropped for a scoped
+    caller. They carry no attribution, so there is no basis on which to decide they are
+    this caller's rather than anyone else's, and a prompt is exactly the kind of content
+    that should not default to visible.
+    """
+    if visible is None:
+        return rows
+    return [r for r in rows if r.projectId in visible]
+
+
 def _apply_trace_filters(
     rows: list[TraceListItemOut], agent: Optional[str], project: Optional[str]
 ) -> list[TraceListItemOut]:
@@ -306,15 +347,25 @@ async def list_traces(
     project: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db_session),
 ) -> list[TraceListItemOut]:
-    """List the requesting tenant's Langfuse traces (newest first)."""
+    """List the traces the caller may see, newest first.
+
+    NOTE ON PAGING: the scope filter is applied to the page Langfuse returned, so a
+    scoped caller can get a short page. Pushing the predicate into Langfuse is not
+    possible — projects are a tag, not a queryable column — and paging first is still
+    right: the alternative is a full-tenant fetch per request.
+    """
     if not _enabled():
         return []
+    visible = await _visible_projects(db, request)
     data = await _lf_get(
         "/api/public/traces",
         {"tags": _tenant_tag(request), "limit": limit, "page": 1},
     )
-    rows = [(_map_list_item(t)) for t in ((data or {}).get("data") or [])]
+    rows = _scope_rows(
+        [(_map_list_item(t)) for t in ((data or {}).get("data") or [])], visible
+    )
     # Resolve real project display names (chat traces without a project stay "Standalone").
     names = await _resolve_project_names({r.projectId for r in rows}, request.state.tenant_id)
     for r in rows:
@@ -335,6 +386,7 @@ async def project_summary(
     request: Request,
     project_id: str,
     window_days: int = Query(7, ge=1, le=365),
+    db: AsyncSession = Depends(get_db_session),
 ) -> ProjectCostSummaryOut:
     """Total LLM cost + input/output tokens for one project over the window.
 
@@ -345,6 +397,12 @@ async def project_summary(
         projectId=project_id, windowDays=window_days, totalCostUsd=0.0,
         inputTokens=0, outputTokens=0, totalTokens=0, generatedAt=_now_iso(),
     )
+    # A project the caller cannot see is refused rather than answered with zeroes:
+    # zeroes are themselves a fact about it, and an indistinguishable one from "no
+    # spend yet".
+    visible = await _visible_projects(db, request)
+    if visible is not None and project_id not in visible:
+        raise HTTPException(status_code=404, detail="not found")
     if not _enabled():
         return empty
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
@@ -385,6 +443,7 @@ async def trace_metrics(
     agent: Optional[str] = None,
     project: Optional[str] = None,
     status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
 ) -> TraceMetricsOut:
     """Windowed aggregate over the tenant's traces (latency p50/p95, cost, by-agent).
 
@@ -413,6 +472,10 @@ async def trace_metrics(
         meta = (data or {}).get("meta") or {}
         if page >= int(meta.get("totalPages") or page):
             break
+    # Scope FIRST, then apply the user's own filters: every figure below is a total,
+    # and a total computed over the tenant and then trimmed would still have been
+    # derived from rows the caller cannot open.
+    items = _scope_rows(items, await _visible_projects(db, request))
     # Rescope to the selected agent/project so the cards match the filtered table.
     items = _apply_trace_filters(items, agent, project)
     if not items:
@@ -451,7 +514,9 @@ async def trace_metrics(
     response_model=TraceOut,
     dependencies=[Depends(require_permission("trace:view"))],
 )
-async def get_trace(request: Request, trace_id: str) -> TraceOut:
+async def get_trace(
+    request: Request, trace_id: str, db: AsyncSession = Depends(get_db_session)
+) -> TraceOut:
     """Full trace detail with spans + a deep-link into the Langfuse UI."""
     if not _enabled():
         raise HTTPException(status_code=404, detail="Tracing disabled")
@@ -463,6 +528,11 @@ async def get_trace(request: Request, trace_id: str) -> TraceOut:
         raise HTTPException(status_code=404, detail="Trace not found")
 
     base = _map_list_item(t)
+    # Project guard, on top of the tenant guard above: the tenant tag stops a
+    # cross-tenant read, not a cross-PROJECT one inside the same organisation.
+    _visible = await _visible_projects(db, request)
+    if _visible is not None and base.projectId not in _visible:
+        raise HTTPException(status_code=404, detail="Trace not found")
     # Resolve the real project display name for the detail header.
     if base.projectId == "standalone":
         project_name = "Standalone"

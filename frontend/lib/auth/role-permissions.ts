@@ -32,6 +32,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "connector:manage",
     "connector:view",
     "project:create",
+    "project:update",
     "model:manage",
     "audit:view",
     "cost:view",
@@ -47,6 +48,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
   project_admin: [
     "member:manage",
     "project:create",
+    // The Project Admin chooses the budget when they create the project, so being
+    // unable to change the figure afterwards was never intended. Editing a project
+    // used to demand `workspace:manage`, which only the Business Unit Admin holds.
+    "project:update",
     "model:manage",
     "run:create",
     "run:view",

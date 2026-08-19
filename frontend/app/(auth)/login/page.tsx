@@ -126,14 +126,14 @@ export default async function LoginPage({
             <CardHeader>
               <CardTitle className="text-base">
                 {isLocalAuth
-                  ? "Sign in or create an account"
+                  ? "Sign in"
                   : isMockAuth || !isOidcEnabled
                     ? "Continue (mock mode)"
                     : `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`}
               </CardTitle>
               <CardDescription>
                 {isLocalAuth
-                  ? "Sign in with your email and password, or create an account and ask an administrator for access."
+                  ? "Use the email and password for your account. Accounts are created by your administrator."
                   : isMockAuth || !isOidcEnabled
                     ? "Auth0 isn't configured — using a local session cookie. Pick a role to preview permissions."
                     : `Use your work account. Enterprise SSO is configured by your ${BUSINESS_UNIT_LABEL.toLowerCase()} admin.`}

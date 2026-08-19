@@ -9,6 +9,7 @@ import { listUserDirectory, scopeUserDirectory } from "@/lib/mock/user-directory
 import { visibleNav } from "@/lib/nav";
 import { ROLE_PERMISSIONS } from "@/lib/auth/role-permissions";
 import { listNotifications } from "@/lib/mock/notification-fixtures";
+import { notificationViewer } from "@/lib/mock/access-scope";
 import { getOrgRole } from "@/lib/mock/org-role-fixtures";
 import {
   findOpenRoleAssignment,
@@ -81,7 +82,7 @@ describe("what an Organization Admin may assign", () => {
 
 describe("the handover to the Business Unit Admin", () => {
   it("notifies the unit's admin, and only them", () => {
-    const before = listNotifications("idn_noah", "bu_admin").length;
+    const before = listNotifications(notificationViewer("idn_noah", "bu_admin")).length;
 
     const { status, body } = onboardIntoOrganization({
       email: "newjoiner@example.test",
@@ -92,14 +93,14 @@ describe("the handover to the Business Unit Admin", () => {
     expect(status).toBe(201);
     expect((body as { notifiedBusinessUnitAdmin: boolean }).notifiedBusinessUnitAdmin).toBe(true);
 
-    const noah = listNotifications("idn_noah", "bu_admin");
+    const noah = listNotifications(notificationViewer("idn_noah", "bu_admin"));
     expect(noah.length).toBe(before + 1);
     expect(noah[0]).toMatchObject({ kind: "member_awaiting_role" });
     expect(noah[0]!.title).toContain("New Joiner");
 
     // Farah runs a different unit — the queue is per unit, not a broadcast.
     expect(
-      listNotifications("idn_farah", "bu_admin").some((n) => n.title.includes("New Joiner")),
+      listNotifications(notificationViewer("idn_farah", "bu_admin")).some((n) => n.title.includes("New Joiner")),
     ).toBe(false);
   });
 
@@ -231,7 +232,7 @@ describe("the request the handover raises", () => {
     // And the person waiting hears about it — they were told nothing when they
     // were onboarded, because there was nothing to tell them.
     expect(
-      listNotifications(identityId, null).some((n) => n.title.includes(ROLE_META.qa.label)),
+      listNotifications(notificationViewer(identityId, null)).some((n) => n.title.includes(ROLE_META.qa.label)),
     ).toBe(true);
   });
 

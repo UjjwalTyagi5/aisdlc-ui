@@ -202,7 +202,21 @@ def test_platform_tier_surface_is_gone():
         import shared.routers.platform  # noqa: F401
 
 
-def test_register_does_not_accept_an_organization():
-    """Signup must not be able to name — let alone create — an organization."""
-    from shared.routers.auth_local import RegisterIn
-    assert set(RegisterIn.model_fields) == {"email", "password"}
+def test_there_is_no_self_serve_registration():
+    """Nothing unauthenticated may create an account.
+
+    Replaces an older test that checked `RegisterIn` carried only email and password —
+    i.e. that signup could not name, let alone create, an organization. That invariant
+    still holds, and now holds more strongly: the endpoint and its request model are
+    gone, so there is no signup to constrain.
+
+    Asserted as a missing SYMBOL as well as a missing route, because re-adding the
+    handler is how this comes back and the model is the first thing to reappear.
+    """
+    import shared.routers.auth_local as auth_local
+
+    assert not hasattr(auth_local, "RegisterIn")
+    assert not hasattr(auth_local, "register")
+
+    import process_api
+    assert "/auth/register" not in {getattr(r, "path", "") for r in process_api.app.routes}

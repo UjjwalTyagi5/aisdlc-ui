@@ -18,6 +18,7 @@ import {
 import { listGovernanceApprovals } from "@/lib/mock/governance-approval-fixtures";
 import { scopeUserDirectory } from "@/lib/mock/user-directory-fixtures";
 import { listNotifications } from "@/lib/mock/notification-fixtures";
+import { notificationViewer } from "@/lib/mock/access-scope";
 import { initialApproverRole } from "@/lib/requests/routing";
 import { CROSS_BU_ASSIGNABLE_ROLES } from "@/lib/roles";
 import type { GovernanceApproval } from "@/lib/schemas/governance-approval";
@@ -149,10 +150,10 @@ describe("asking for someone from another business unit", () => {
   });
 
   it("tells Payments' admin, and not every other unit's", () => {
-    expect(listNotifications("idn_marcus", "bu_admin").some((n) => n.title.includes("Diego"))).toBe(
+    expect(listNotifications(notificationViewer("idn_marcus", "bu_admin")).some((n) => n.title.includes("Diego"))).toBe(
       true,
     );
-    expect(listNotifications("idn_noah", "bu_admin").some((n) => n.title.includes("Diego"))).toBe(
+    expect(listNotifications(notificationViewer("idn_noah", "bu_admin")).some((n) => n.title.includes("Diego"))).toBe(
       false,
     );
   });
@@ -257,7 +258,7 @@ describe("once the parent admin approves", () => {
 
   it("tells the person they were lent", () => {
     expect(
-      listNotifications(DIEGO, "developer").some((n) => n.title.includes("Reconciliation")),
+      listNotifications(notificationViewer(DIEGO, "developer")).some((n) => n.title.includes("Reconciliation")),
     ).toBe(true);
   });
 

@@ -10,8 +10,9 @@ it is never the authoritative authz check.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from shared.authz.role_permissions import effective_for_roles
 from shared.db import get_db_session_for_tenant
@@ -58,11 +59,30 @@ async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str
             # place the two are merged. Joining the default here would let a token
             # minted at login disagree with the scoped checks in can_perform, which
             # reads through the same helper.
+            now = datetime.now(tz=timezone.utc)
+            # ONLY LIVE BINDINGS. This query used to filter on `user_id` alone, so a
+            # deactivated binding and an EXPIRED one both kept granting until the token
+            # lapsed — and since this is the claim every `require_permission` reads,
+            # that was the whole product. `can_perform` filtered both correctly, which
+            # is worse than neither doing it: the two permission readers disagreed about
+            # the same binding, so a temporary elevation was refused on a project page
+            # and honoured everywhere else.
+            #
+            # `status = 'active'` (not `<> 'deactivated'`) matches `can_perform`
+            # exactly. Nothing writes 'invited' today, so the two are equivalent in
+            # practice; picking the strict one means the day something does write it,
+            # an unaccepted invitation grants nothing rather than everything.
+            live = (
+                RoleBinding.user_id == user_id,
+                RoleBinding.status == "active",
+                or_(RoleBinding.expires_at.is_(None), RoleBinding.expires_at > now),
+            )
+
             role_names = list(
                 (
                     await session.execute(
                         select(RoleBinding.role_name).where(
-                            RoleBinding.user_id == user_id,
+                            *live,
                             RoleBinding.role_name.isnot(None),
                         )
                     )
@@ -74,14 +94,16 @@ async def resolve_permissions_for_user(user_id: str, tenant_id: str) -> list[str
 
             # Custom roles carry their own permission rows and are not overridable —
             # editing one IS editing its permissions, so there is no default to
-            # diverge from.
+            # diverge from. Same liveness filter: a custom-role binding expires exactly
+            # like a built-in one, and omitting it here would leave a hole shaped like
+            # the one above but harder to spot.
             custom_stmt = (
                 select(CustomRolePermission.permission_name)
                 .join(
                     RoleBinding,
                     RoleBinding.custom_role_id == CustomRolePermission.custom_role_id,
                 )
-                .where(RoleBinding.user_id == user_id)
+                .where(*live)
             )
             custom_rows = (await session.execute(custom_stmt)).scalars().all()
             return sorted(builtin | set(custom_rows))

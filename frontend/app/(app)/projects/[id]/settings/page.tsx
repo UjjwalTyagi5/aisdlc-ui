@@ -32,7 +32,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
-import { RequireRole } from "@/components/auth/require-role";
+import { RequirePermission } from "@/components/auth/restricted-access";
 import { ProjectModelSelectionCard } from "@/components/app/project-model-selection-card";
 import { ToolsStagePicker, type AccessModeMap, type StageMap } from "@/components/app/tools-stage-picker";
 import { useRawSession } from "@/components/auth/session-provider";
@@ -40,7 +40,6 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { agentsForTrack, TRACK_META } from "@/lib/tracks";
 import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
 import { budgetWindowError, type BudgetWindow } from "@/lib/schemas/budget-window";
-import { useCan } from "@/hooks/use-can";
 import { listConnectors } from "@/lib/api/connectors";
 import { connectorStatusLabel } from "@/lib/connectors";
 import {
@@ -135,15 +134,26 @@ export default function ProjectSettingsPage() {
     ? tabParam!
     : "general";
   const queryClient = useQueryClient();
-  const canUpdate = useCan("project:update");
-  // Budget edits are gated by the backend on workspace:manage (delivery lead + admin),
-  // NOT the legacy project:update capability — mirror that here so the UI matches.
   const session = useRawSession();
-  // `project:update`, not `workspace:manage`. The budget is now set at creation
-  // and the person who set it is the Project Admin — who does NOT hold
-  // workspace:manage, so gating on that left them unable to change the figure
-  // they had just been made to choose.
-  const canManageBudget = hasPermission(session, "project:update");
+  // ONE GATE FOR THE WHOLE PAGE, mirroring PATCH /projects/{id}.
+  //
+  // There used to be two, disagreeing. The fields and Save buttons used
+  // `useCan("project:update")`, which resolves against the legacy admin/member/viewer
+  // matrix — derived heuristically from permissions in local mode, where a Business
+  // Unit Admin holds neither `run:create` nor an approve_* permission and so derived to
+  // "viewer", disabling every field for the person who most obviously administers the
+  // project. The budget field used `hasPermission(session, "project:update")`, which
+  // had the right intent but the string was not a real permission: it lived only in the
+  // legacy `Capability` union, was in neither catalogue and was granted to no role, so
+  // it passed for `admin:*` and nobody else — the change meant to widen the gate closed
+  // it on the very role it was for.
+  //
+  // `project:update` is now a real permission held by bu_admin and project_admin, and
+  // it is what the backend enforces. See docs/rbac-audit-2026-08-17.md.
+  //
+  // Archiving stays on `workspace:manage` further down, matching its own route:
+  // removing a project from a unit is the unit's call, not the project's.
+  const canUpdate = hasPermission(session, "project:update");
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -363,8 +373,8 @@ export default function ProjectSettingsPage() {
                     >
                       Reset
                     </Button>
-                    <RequireRole
-                      capability="project:update"
+                    <RequirePermission
+                      permission="project:update"
                       fallback={<Button disabled>Save</Button>}
                     >
                       <Button
@@ -377,7 +387,7 @@ export default function ProjectSettingsPage() {
                         )}
                         Save
                       </Button>
-                    </RequireRole>
+                    </RequirePermission>
                   </div>
                 </>
               )}
@@ -415,7 +425,7 @@ export default function ProjectSettingsPage() {
                 >
                   Reset
                 </Button>
-                <RequireRole capability="project:update" fallback={<Button disabled>Save</Button>}>
+                <RequirePermission permission="project:update" fallback={<Button disabled>Save</Button>}>
                   <Button
                     disabled={toolsMutation.isPending}
                     aria-busy={toolsMutation.isPending}
@@ -426,7 +436,7 @@ export default function ProjectSettingsPage() {
                     )}
                     Save
                   </Button>
-                </RequireRole>
+                </RequirePermission>
               </div>
             </CardContent>
           </Card>
@@ -438,7 +448,7 @@ export default function ProjectSettingsPage() {
               budgetStartDate: project.budgetStartDate ?? null,
               budgetEndDate: project.budgetEndDate ?? null,
             }}
-            canManage={canManageBudget}
+            canManage={canUpdate}
             saving={budgetMutation.isPending}
             onSave={(v, w) =>
               budgetMutation.mutate({
@@ -470,7 +480,7 @@ export default function ProjectSettingsPage() {
                   </Badge>
                 )}
               </div>
-              <RequireRole capability="project:update">
+              <RequirePermission permission="workspace:manage">
                 <Button
                   variant="outline"
                   onClick={() => archiveMutation.mutate(!project.archived)}
@@ -478,7 +488,7 @@ export default function ProjectSettingsPage() {
                 >
                   {project.archived ? "Restore project" : "Archive project"}
                 </Button>
-              </RequireRole>
+              </RequirePermission>
             </CardContent>
           </Card>
         </TabsContent>

@@ -23,11 +23,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.read_scope import allowed_workspace_ids
 from shared.db import get_db_session
 from shared.models.orm import AuditEvent
 from shared.routers._schemas import AuditEventOut, CursorPage, Paginated, Pagination
@@ -78,12 +80,65 @@ async def list_audit_events(
     if not effective_workspace:
         effective_workspace = request.headers.get("x-workspace-id") or None
 
+    # WHICH units this caller may aggregate over. `audit:view` says they may read an
+    # audit trail; it does not say whose. Both holders of it — bu_admin and
+    # security_engineer — got the WHOLE tenant's trail, and could get it by simply
+    # omitting the workspace filter, which is caller-supplied and therefore not a
+    # control. See finding 4 in docs/rbac-audit-2026-08-17.md.
+    allowed_ws = await allowed_workspace_ids(db, request)
+    allowed_projects = (
+        None
+        if allowed_ws is None
+        else await visible_project_ids(
+            db,
+            user_id=getattr(request.state, "user_id", "") or "",
+            tenant_id=str(tenant_id),
+        )
+    )
+
+    # A unit the caller cannot read is REFUSED rather than quietly ignored — mirroring
+    # spend.py. Silently widening to "all of mine" answers a question about someone
+    # else's unit with the viewer's own events.
+    if effective_workspace and allowed_ws is not None:
+        if effective_workspace not in allowed_ws:
+            raise HTTPException(status_code=404, detail="not found")
+
     stmt = select(AuditEvent).where(AuditEvent.tenant_id == tenant_id)
+
+    if allowed_ws is not None:
+        # TWO PAYLOAD SHAPES, and missing either one makes the filter wrong in a
+        # different direction. Resource events carry `workspace_id` / `project_id`;
+        # RBAC events (shared/authz/audit.py) carry `scope_kind` + `scope_id` instead.
+        # Filtering on `workspace_id` alone would hide a unit admin's own grants and
+        # revocations from them — the events they are most accountable for.
+        #
+        # Anything matching NEITHER is organization-level, and stays hidden: an
+        # org-settings change is a fact about a scope this caller does not administer.
+        ws_txt = list(allowed_ws)
+        proj_txt = list(allowed_projects or [])
+        payload = AuditEvent.payload
+        stmt = stmt.where(
+            or_(
+                payload["workspace_id"].astext.in_(ws_txt),
+                payload["project_id"].astext.in_(proj_txt),
+                and_(
+                    payload["scope_kind"].astext == "business_unit",
+                    payload["scope_id"].astext.in_(ws_txt),
+                ),
+                and_(
+                    payload["scope_kind"].astext == "project",
+                    payload["scope_id"].astext.in_(proj_txt),
+                ),
+            )
+        )
+
     if effective_workspace:
         stmt = stmt.where(
             AuditEvent.payload["workspace_id"].astext == effective_workspace
         )
     if project_id:
+        if allowed_projects is not None and project_id not in allowed_projects:
+            raise HTTPException(status_code=404, detail="not found")
         stmt = stmt.where(
             AuditEvent.payload["project_id"].astext == project_id
         )
