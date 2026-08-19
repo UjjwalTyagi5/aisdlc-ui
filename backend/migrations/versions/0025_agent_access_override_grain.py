@@ -20,19 +20,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Clean up any pre-existing partial indexes using PL/pgSQL
-    op.execute("""
-    DO $$
-    BEGIN
-        IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_agent_access_override_role') THEN
-            DROP INDEX uq_agent_access_override_role;
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_agent_access_override_user') THEN
-            DROP INDEX uq_agent_access_override_user;
-        END IF;
-    END
-    $$;
-    """)
+    # Drop the old single UNIQUE(project_id, role, phase) constraint — it's replaced
+    # below by two partial unique indexes, one per grain. IF EXISTS because this
+    # constraint may already be absent depending on the database's migration history.
+    op.execute(
+        "ALTER TABLE agent_access_overrides DROP CONSTRAINT IF EXISTS uq_agent_access_override"
+    )
 
     # Alter role to be nullable
     op.alter_column("agent_access_overrides", "role", nullable=True)
@@ -57,7 +50,6 @@ def upgrade() -> None:
     )
 
     # Create partial unique index for role-scoped rows
-    # Keep existing unique constraint for backward compatibility with ON CONFLICT
     op.create_index(
         "uq_agent_access_override_role", "agent_access_overrides",
         ["project_id", "role", "phase"], unique=True,
@@ -73,9 +65,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Drop the partial unique index for user_id
+    # Drop both partial unique indexes
     op.execute("""
     DROP INDEX IF EXISTS uq_agent_access_override_user;
+    """)
+    op.execute("""
+    DROP INDEX IF EXISTS uq_agent_access_override_role;
     """)
 
     # Drop the check constraint and foreign key
@@ -101,3 +96,9 @@ def downgrade() -> None:
 
     # Alter role column back to NOT NULL
     op.alter_column("agent_access_overrides", "role", nullable=False)
+
+    # Recreate the original single UNIQUE(project_id, role, phase) constraint
+    op.execute("""
+    ALTER TABLE agent_access_overrides
+    ADD CONSTRAINT uq_agent_access_override UNIQUE (project_id, role, phase);
+    """)
