@@ -391,7 +391,7 @@ function renderPhaseRow(
           {comingSoon && (
             <span className="sr-only">
               {" "}
-              — this agent isn't available yet
+              — this agent isn&apos;t available yet
             </span>
           )}
         </p>
