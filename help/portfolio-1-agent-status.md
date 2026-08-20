@@ -196,6 +196,17 @@ documents its live-verification findings):
    live_e2e test now mocks this the same way Code Review's does:
    `patch.object(scanner, "_resolve_model", return_value=<scripted model>)`, no longer
    patching `langchain_anthropic.ChatAnthropic` directly.
+   **Caveat, found during this task's review (grep-verified, not a guess):
+   `shared.services.model_resolver.resolve_chat_model` does not exist anywhere in the
+   backend** — zero matches for `def resolve_chat_model`, despite 5 files (Code Review,
+   Deployment, Documentation, and now Security's `scanner.py`/its new test) importing
+   and calling it. Every one of these agents' "try BYOK first" branch therefore always
+   raises `ImportError` and silently falls through to the `.env` key today. This task
+   gives Security the **same correct structure** its siblings already have — it does
+   **not** make BYOK functionally work for any of them. Implementing the real
+   `resolve_chat_model` (reading `model_providers`/`model_offerings`) is a separate,
+   cross-agent piece of work, out of scope here — flagging it prominently so nobody
+   assumes "BYOK support" means BYOK actually works yet.
 2. **Semgrep findings dropped CWE.** `run_semgrep_sast` only surfaced `owasp_category`
    from Semgrep's metadata, discarding the `cwe` tags Semgrep also returns. Added a
    `"cwe"` key to the finding dict in `tools/semgrep_sast_tool.py`. Test:
