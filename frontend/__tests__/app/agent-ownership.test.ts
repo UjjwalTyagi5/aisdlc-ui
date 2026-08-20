@@ -43,11 +43,12 @@ describe("AGENT_OWNERSHIP invariants", () => {
     }
   });
 
-  it("Documentation stays reachable by every delivery role", () => {
+  it("Documentation stays reachable by every delivery role except security_engineer", () => {
     // Its acceptance is automatic and every role writes into it — the one
     // genuinely shared surface, and the easiest to lose to an over-zealous
-    // narrowing.
+    // narrowing. Security Engineer is excepted by the PRD (§14.7).
     for (const role of DELIVERY_ROLES) {
+      if (role === "security_engineer") continue;
       expect(roleReachesAgent(role, "documentation"), `${role} lost Documentation`).toBe(
         true,
       );
@@ -67,13 +68,17 @@ describe("AGENT_OWNERSHIP invariants", () => {
   it("holds the roles that were specified explicitly", () => {
     const reach = (role: PlatformRole) => roleAgentSplit(role).reachable.sort();
 
-    expect(reach("ba")).toEqual(["design", "documentation", "requirements"].sort());
-    expect(reach("developer")).toEqual(["development", "documentation"].sort());
+    expect(reach("ba")).toEqual(
+      ["requirements", "design", "development", "review", "security", "testing", "deployment", "documentation"].sort(),
+    );
+    expect(reach("developer")).toEqual(
+      ["requirements", "development", "review", "security", "testing", "documentation"].sort(),
+    );
     expect(reach("qa")).toEqual(
-      ["development", "testing", "documentation", "validation"].sort(),
+      ["requirements", "development", "security", "testing", "documentation", "validation"].sort(),
     );
     expect(reach("devops_engineer")).toEqual(
-      ["development", "deployment", "documentation"].sort(),
+      ["development", "security", "testing", "deployment", "documentation"].sort(),
     );
     // Architect additionally holds `review` and the three modernization-track
     // agents BECAUSE IT OWNS THEM — see the note in lib/roles.ts.
@@ -85,6 +90,7 @@ describe("AGENT_OWNERSHIP invariants", () => {
         "review",
         "security",
         "testing",
+        "deployment",
         "documentation",
         "discovery",
         "strategy",

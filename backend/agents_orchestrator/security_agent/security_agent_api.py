@@ -17,8 +17,23 @@ import uuid
 from uuid import uuid4
 from typing import List
 
-from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    File,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from langchain_core.messages import HumanMessage, ToolMessage
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.authz.agent_access import assert_agent_access
+from shared.authz.effective_role import platform_role_for
+from shared.authz.project_scope import resolve_project
 
 from agents_orchestrator.security_agent.agents.scanner import app as scan_app
 from agents_orchestrator.security_agent.prompts.security_prompt import SECURITY_SYSTEM_PROMPT
@@ -36,7 +51,7 @@ from config.ws_helper import set_session_id, set_user_id
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
 from shared.audit.service import audit_service
-from shared.db import get_db_session_for_tenant
+from shared.db import get_db_session, get_db_session_for_tenant
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -247,6 +262,31 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         if project_id and not s.project_id:
             s.project_id = project_id
 
+        # Gate every message, not just the first — a session can be reused across
+        # projects on the client side, and the ticket only proves who the caller is,
+        # not which project they may act on. permissions=[] is deliberate: it forces
+        # platform_role_for's DB-backed role_bindings lookup rather than its org-wide
+        # permission shortcut, since admin:* must never grant agent access (spec §1.4).
+        _effective_project = project_id or s.project_id
+        _effective_tenant = tenant_id or s.tenant_id
+        async with get_db_session_for_tenant(_effective_tenant) as _access_db:
+            # `project_id` here is client-supplied (from the message payload), same as
+            # the REST route's Form field — resolve it to a real, tenant-scoped project
+            # before it's trusted for anything, so a caller bound to project A can't
+            # submit project B's id and have `assert_agent_access` act on it purely
+            # because the id is UUID-shaped (see `resolve_project`/`require_agent_access`
+            # in shared/authz/agent_access.py, which this mirrors).
+            _project = await resolve_project(_access_db, _effective_tenant, _effective_project)
+            if _project is None:
+                raise HTTPException(status_code=404, detail="not found")
+            _effective_project = str(_project.id)
+
+            _role = await platform_role_for(_access_db, user_id=user_id, permissions=[])
+            await assert_agent_access(
+                _access_db, tenant_id=_effective_tenant, project_id=_effective_project,
+                role=_role, user_id=user_id, agent_id="security",
+            )
+
         if not s.target_bound:
             prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
             if prepared:
@@ -320,18 +360,52 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
 @security_router.post("/chat/")
 async def chat(
+    request: Request,
+    project_id: str = Form(...),
     session_id: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
     text: str = Form(None),
     pipeline_context: str = Form(None),
     uploaded_files: List[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db_session),
 ):
+    # Identity comes from the verified session, never from the form body — the field
+    # above used to be trusted directly, which let any authenticated caller claim to
+    # be anyone (see multi-track-agent-access-design.md's "assume broken" framing).
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
+
+    # `project_id` is client-supplied (a Form field) — resolve it to a real,
+    # tenant-scoped project before trusting it for anything, same as
+    # `require_agent_access`'s own pattern (shared/authz/agent_access.py): a caller
+    # bound to project A must not be able to submit project B's id and have the
+    # agent act on it just because the id is UUID-shaped. Using the resolved id also
+    # means a slug is accepted here too, consistent with how the rest of the
+    # codebase addresses projects.
+    project = await resolve_project(db, str(real_tenant_id), project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="not found")
+    project_id = str(project.id)
+
+    # permissions=[] forces platform_role_for's DB-backed role_bindings lookup rather
+    # than its org-wide permission shortcut (what effective_platform_role would take
+    # for a caller holding admin:*) — admin:* must never grant agent access (spec
+    # §1.4). The WS route (`_process_ws_message`, above) already resolves identity
+    # this way; using the same call here means both routes agree on who the caller is.
+    role = await platform_role_for(db, user_id=str(real_user_id), permissions=[])
+    await assert_agent_access(
+        db, tenant_id=str(real_tenant_id), project_id=project_id,
+        role=role, user_id=str(real_user_id), agent_id="security",
+    )
+
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
-    set_user_id(user_id)
+    set_user_id(real_user_id)
     set_agent_folder("orchestrator")
 
     s = get_session(session_id)
+    s.project_id = s.project_id or project_id
+    s.tenant_id = s.tenant_id or real_tenant_id
     first = not s.system_injected
     user_text = text or "Please run the security scan and submit your review."
     if first:
@@ -343,8 +417,6 @@ async def chat(
         state = {"messages": [HumanMessage(content=user_text)]}
 
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140}
-    # Agent-profile prompt layer (design §3.4): resolve over the BARE constant (the scanner
-    # node re-appends its MCP note) using the session's bound tenant/project. Fail-soft.
     _injected, _skills = await resolve_agent_turn(
         "security", SECURITY_SYSTEM_PROMPT, s.tenant_id, s.project_id
     )

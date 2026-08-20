@@ -140,13 +140,10 @@ const TRACK_AGENTS: Record<DeliveryTrack, readonly Phase[]> = {
     "deployment",
     "documentation",
   ],
-  // PRD §11 — the Track 1 roster plus the Data Engineering agent.
+  // PRD §11 — 6 agents for a data pipeline, no design/development/code-review.
   data_engineering: [
     "requirements",
     "data_engineering",
-    "design",
-    "development",
-    "review",
     "security",
     "testing",
     "deployment",
