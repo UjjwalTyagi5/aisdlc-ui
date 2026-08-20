@@ -31,9 +31,7 @@ from fastapi import (
 from langchain_core.messages import HumanMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.authz.agent_access import assert_agent_access
-from shared.authz.effective_role import platform_role_for
-from shared.authz.project_scope import resolve_project
+from shared.authz.agent_access import assert_agent_access_for_chat
 
 from agents_orchestrator.security_agent.agents.scanner import app as scan_app
 from agents_orchestrator.security_agent.prompts.security_prompt import SECURITY_SYSTEM_PROMPT
@@ -264,27 +262,14 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
         # Gate every message, not just the first — a session can be reused across
         # projects on the client side, and the ticket only proves who the caller is,
-        # not which project they may act on. permissions=[] is deliberate: it forces
-        # platform_role_for's DB-backed role_bindings lookup rather than its org-wide
-        # permission shortcut, since admin:* must never grant agent access (spec §1.4).
+        # not which project they may act on (nor, on its own, that they're even a
+        # member of it — see assert_agent_access_for_chat's docstring).
         _effective_project = project_id or s.project_id
         _effective_tenant = tenant_id or s.tenant_id
         async with get_db_session_for_tenant(_effective_tenant) as _access_db:
-            # `project_id` here is client-supplied (from the message payload), same as
-            # the REST route's Form field — resolve it to a real, tenant-scoped project
-            # before it's trusted for anything, so a caller bound to project A can't
-            # submit project B's id and have `assert_agent_access` act on it purely
-            # because the id is UUID-shaped (see `resolve_project`/`require_agent_access`
-            # in shared/authz/agent_access.py, which this mirrors).
-            _project = await resolve_project(_access_db, _effective_tenant, _effective_project)
-            if _project is None:
-                raise HTTPException(status_code=404, detail="not found")
-            _effective_project = str(_project.id)
-
-            _role = await platform_role_for(_access_db, user_id=user_id, permissions=[])
-            await assert_agent_access(
+            _effective_project = await assert_agent_access_for_chat(
                 _access_db, tenant_id=_effective_tenant, project_id=_effective_project,
-                role=_role, user_id=user_id, agent_id="security",
+                user_id=user_id, agent_id="security",
             )
 
         if not s.target_bound:
@@ -375,27 +360,16 @@ async def chat(
     real_user_id = getattr(request.state, "user_id", "") or ""
     real_tenant_id = getattr(request.state, "tenant_id", "") or ""
 
-    # `project_id` is client-supplied (a Form field) — resolve it to a real,
-    # tenant-scoped project before trusting it for anything, same as
-    # `require_agent_access`'s own pattern (shared/authz/agent_access.py): a caller
-    # bound to project A must not be able to submit project B's id and have the
-    # agent act on it just because the id is UUID-shaped. Using the resolved id also
-    # means a slug is accepted here too, consistent with how the rest of the
-    # codebase addresses projects.
-    project = await resolve_project(db, str(real_tenant_id), project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="not found")
-    project_id = str(project.id)
-
-    # permissions=[] forces platform_role_for's DB-backed role_bindings lookup rather
-    # than its org-wide permission shortcut (what effective_platform_role would take
-    # for a caller holding admin:*) — admin:* must never grant agent access (spec
-    # §1.4). The WS route (`_process_ws_message`, above) already resolves identity
-    # this way; using the same call here means both routes agree on who the caller is.
-    role = await platform_role_for(db, user_id=str(real_user_id), permissions=[])
-    await assert_agent_access(
+    # `project_id` is client-supplied (a Form field) — resolve it to a real project the
+    # caller is actually a member of, and check their role's reach to this agent on
+    # THIS project specifically, before trusting it for anything. See
+    # assert_agent_access_for_chat's docstring for why a plain `resolve_project` +
+    # `assert_agent_access` isn't enough (a role held on a different project would
+    # otherwise be accepted here too). The WS route (`_process_ws_message`, above)
+    # calls the same helper, so both routes agree on who may do what.
+    project_id = await assert_agent_access_for_chat(
         db, tenant_id=str(real_tenant_id), project_id=project_id,
-        role=role, user_id=str(real_user_id), agent_id="security",
+        user_id=str(real_user_id), agent_id="security",
     )
 
     set_websocket_context(manager, session_id)
