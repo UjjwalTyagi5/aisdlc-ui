@@ -7,6 +7,13 @@ work. Full background: [`multi-track-agent-access-design.md`](./multi-track-agen
 in this same folder (Parts 1–3 for what each agent does and who owns it; Part 5 for the
 full build/rebuild checklist this status table tracks against).
 
+**Status as of 2026-08-20: the access-hardening pass (below) is complete for all 8
+agents** — every WS handler and REST `/chat/` route now calls
+`assert_agent_access_for_chat`, checked on every message, with no identity trusted
+from client-supplied form fields. This is **not** a full agent rebuild — see "What
+'done' means" below for exactly what this pass does and does not cover. Branch:
+`portfolio1-access-hardening`.
+
 **If your Claude session is picking this up cold:** read the design doc first, then find
 your agent's section below, then read the relevant router file it names. The Security
 section is the completed reference example — copy its pattern, don't reinvent it.
@@ -60,37 +67,33 @@ Reference implementation, already merged: `backend/agents_orchestrator/security_
 
 ## Per-agent status
 
-### 1. Requirements — owner role: BA — `agent_id="requirements"`
+### 1. Requirements — owner role: BA — `agent_id="requirements"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/requirements_agent/requirements_agent_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_user_message_ws`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`/`tenant_id` Form fields, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_requirements_agent_chat_access.py` (3 passed)
+- Notes: this route trusted the Form `tenant_id` pervasively (audit, langfuse, skills, session persistence), not just at the access check — all of those call sites were switched to the verified `request.state.tenant_id` too, not only the gate itself. Worth checking whether the same broader pattern exists in agents not yet touched.
 
-### 2. Design — owner role: Architect — `agent_id="design"`
+### 2. Design — owner role: Architect — `agent_id="design"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/design_architecture_agent/design_architecture_agent_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_user_message_ws`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_design_agent_chat_access.py` (3 passed)
+- Notes: **this route previously had no `project_id` Form field at all, and no tenant scoping** — a comment in the original code said "This REST endpoint carries no tenant_id (unlike the WS path)." Added `project_id: str = Form(...)` as a new required field to make the check possible — a real contract change, but safe: Design isn't in the frontend's `builtAgents` list yet, so nothing live depends on the old (broken) contract.
 
-### 3. Development — owner role: Architect (Developer builds) — `agent_id="development"`
+### 3. Development — owner role: Architect (Developer builds) — `agent_id="development"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/development_agent/development_agent_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_development_agent_chat_access.py` (3 passed)
+- Notes: no `project_id` Form field here either — project id only exists inside the `pipeline_context` JSON field, reused via the existing `_lf_pid` extraction rather than adding a new field.
 
-### 4. Code Review — owner role: Architect — `agent_id="code_review"`
+### 4. Code Review — owner role: Architect — `agent_id="code_review"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/code_review_agent/code_review_agent_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_code_review_agent_chat_access.py` (3 passed)
+- Notes: this route has no `project_id` Form field either — the review target is bound out-of-band by a separate `POST /review/prepare` call into an in-memory session; the REST check reads the session's already-bound `project_id` instead.
 
 ### 5. Security — owner role: Security Engineer — `agent_id="security"` — **DONE (reference implementation)**
 File: `backend/agents_orchestrator/security_agent/security_agent_api.py`
@@ -104,33 +107,30 @@ File: `backend/agents_orchestrator/security_agent/security_agent_api.py`
 - [x] Frontend `builtAgents` includes `"security"` — the one live, clickable tile today
 - Landed in: PR #12, PR #13 (both merged/open against `main`)
 
-### 6. Testing — owner role: QA/Tester — `agent_id="testing"`
+### 6. Testing — owner role: QA/Tester — `agent_id="testing"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/testing_agent/testing_agent_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`process_user_message_ws`, no leading underscore — differs from the others): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added (edited the ACTIVE decorator; a large commented-out dead duplicate route sits directly above it in the file — left untouched)
+- [x] Test: `backend/tests/test_testing_agent_chat_access.py` (3 passed)
+- Notes: `user_id` Form field is still used for unrelated session/file-path bookkeeping (`_LAST_SESSION`, `input_directory`) — out of scope for this pass; only the auth identity now comes from `request.state`.
 
-### 7. Deployment — owner role: DevOps Engineer — `agent_id="deployment"`
+### 7. Deployment — owner role: DevOps Engineer — `agent_id="deployment"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/deployment_agent/deployment_standalone_api.py` —
 **not** `deployment_agent_api.py` in the same folder, which is a legacy evaluator
 mounted at `/sdlc/agent/deployment_orchestrator` and unused by the frontend's chat
 (`app/api/chat/route.ts`'s `agentWsPath` maps `"deployment"` to `/sdlc/agent/deployment/ws`,
 which is `deployment_standalone_router`).
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_deployment_agent_chat_access.py` (3 passed)
+- Notes: like Design, this route previously had no `project_id` Form field at all — added as a new required field, same reasoning (not live yet, nothing depends on the old contract).
 
-### 8. Documentation — owner role: BA (auto-accept; PA fallback) — `agent_id="documentation"`
+### 8. Documentation — owner role: BA (auto-accept; PA fallback) — `agent_id="documentation"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/documentation_agent/documentation_standalone_api.py`
-- [ ] WS handler: `assert_agent_access` added
-- [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
-- [ ] Test added/passing
-- Assigned to: _TBD_
-- Notes:
+- [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
+- [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
+- [x] Test: `backend/tests/test_documentation_agent_chat_access.py` (3 passed)
+- Notes: no `project_id` Form field here either — reads/writes the in-memory session's already-bound `project_id`, same pattern as Code Review.
 
 ---
 

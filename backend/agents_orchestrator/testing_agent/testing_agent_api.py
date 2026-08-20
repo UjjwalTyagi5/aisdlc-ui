@@ -24,6 +24,8 @@ from config.agent_context import build_agent_input_text, parse_pipeline_context,
 from config import sdlcSettings
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.env import AGENT_RUNTIME_MODE
+from shared.authz.agent_access import assert_agent_access_for_chat
+from shared.db import get_db_session_for_tenant
 from shared.models.testing import TestingArtifact
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
@@ -547,6 +549,18 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
         task_intent = message_data.get("task_intent")
         pipeline_context = message_data.get("pipeline_context")
 
+        # Gate every message, not just the first — a session can be reused across
+        # projects client-side, and the ws-ticket only proves who the caller is, not
+        # which project (or whether they're even a member of it) they may act on here.
+        # See shared/authz/agent_access.py::assert_agent_access_for_chat's docstring.
+        _early_pc = parse_pipeline_context(pipeline_context)
+        _early_project_id = _early_pc.get("project_id") if isinstance(_early_pc, dict) else None
+        async with get_db_session_for_tenant(tenant_id) as _access_db:
+            await assert_agent_access_for_chat(
+                _access_db, tenant_id=tenant_id, project_id=_early_project_id or "",
+                user_id=user_id, agent_id="testing",
+            )
+
         messages = message_data.get("messages")
 
         files_data = message_data.get("files", [])
@@ -1032,13 +1046,14 @@ async def handle_session_cleanup_ws(message_data: dict, websocket: WebSocket):
 
 @testing_router_orchestrator.post("/chat/")
 async def chat(
+    request: Request,
     session_id: str = Form(...),
     user_message: str = Form(None),
     conversation_context: str = Form(None),
     task_intent: str = Form(None),
     pipeline_context: str = Form(None),
     messages: str = Form(None),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility (session/file paths); NOT trusted for identity
     uploaded_files: List[UploadFile] = File(None),
     # Phase B.1 — structured clone_target form fields. UI dropdowns post these
     # instead of the user typing "test branch X of repo Y in project Z".
@@ -1055,6 +1070,19 @@ async def chat(
     api_timeout_s: float = Form(None),
 ):
     """REST endpoint for orchestrator or direct user calls"""
+    # Identity for the access check comes from the verified session, never from the
+    # Form body — see shared/authz/agent_access.py::assert_agent_access_for_chat's
+    # docstring and the WS handler's identical gate above.
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
+    _rest_pc = parse_pipeline_context(pipeline_context)
+    _rest_project_id = _rest_pc.get("project_id") if isinstance(_rest_pc, dict) else None
+    async with get_db_session_for_tenant(real_tenant_id) as _access_db:
+        await assert_agent_access_for_chat(
+            _access_db, tenant_id=real_tenant_id, project_id=_rest_project_id or "",
+            user_id=real_user_id, agent_id="testing",
+        )
+
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
     set_user_id(user_id)
