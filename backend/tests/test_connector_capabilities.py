@@ -123,54 +123,59 @@ def _admin(t):
         user_id=t["admin"], tenant_id=t["org"], permissions=["admin:*"])}
 
 
-def test_granting_a_notify_only_connector_with_no_level_chosen_works(tree):
-    """THE REGRESSION THIS CAUSED. The grant button sends no level; the server used
-    to fill in `read`, and the capability check then refused the grant it had just
-    constructed — so Slack and MS Teams could not be granted to anybody at all."""
-    r = _client().post("/integrations/access", headers=_admin(tree),
-                       params={"kind": "connector", "id": "slack",
-                               "workspaceId": tree["unit"]})
-    assert r.status_code == 200, r.text
-    # Resolved to the only mode it has, rather than the flat default.
-    assert r.json()["access"] == "write"
+# THE GRANT DOOR NO LONGER HAS A LEVEL TO CHECK (migration 0024).
+#
+# Five tests stood here asserting that granting resolved a capability-aware default
+# and refused an unsupported level: Slack granted with no level chosen came out
+# `write` rather than a useless `read`, Jira came out `read`, and `slack` + `read`
+# was a 422. A grant carries no level now, so there is nothing at this door to check.
+#
+# The check did not disappear — it MOVED to where the level is now chosen, which is
+# the project's per-stage picker. That is what the next test covers, and losing it
+# would mean a stage could be set to Slack-read and get a connector that silently
+# permits nothing.
 
 
-def test_granting_a_board_with_no_level_chosen_still_defaults_to_read(tree):
-    """The other half — the capability-aware default must not quietly widen a
-    connector that CAN read into something more than least privilege."""
-    r = _client().post("/integrations/access", headers=_admin(tree),
-                       params={"kind": "connector", "id": "jira",
-                               "workspaceId": tree["unit"]})
-    assert r.status_code == 200, r.text
-    assert r.json()["access"] == "read"
+def test_a_grant_no_longer_carries_or_checks_a_level(tree):
+    """Slack was ungrantable to anybody while the old default fought the check.
+
+    Now it grants like anything else, because granting says nothing about level.
+    """
+    for kind in ("slack", "jira"):
+        r = _client().post("/integrations/access", headers=_admin(tree),
+                           params={"kind": "connector", "id": kind,
+                                   "workspaceId": tree["unit"]})
+        assert r.status_code == 200, r.text
+        assert "access" not in r.json()
 
 
-def test_granting_slack_for_read_is_refused(tree):
-    """The trap our own default set: `read` is the default, and on Slack it grants
-    a connector that can do nothing while the hub shows a healthy grant."""
-    r = _client().post("/integrations/access", headers=_admin(tree),
-                       params={"kind": "connector", "id": "slack",
-                               "workspaceId": tree["unit"], "access": "read"})
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"]["code"] == "unsupported_access_level"
+def test_a_stage_mode_the_connector_cannot_honour_is_refused(tree):
+    """WHERE THE CHECK LIVES NOW. Slack implements no reads, so a stage set to
+    `read` on Slack would hold a connector that can do nothing while the picker
+    shows a configured chip. Refused at the door that writes it."""
+    from shared.routers.projects import _validated_modes
+
+    with pytest.raises(ValueError) as exc:
+        _validated_modes({"requirements::connector::slack": "read"})
+    assert "no read capabilities" in str(exc.value)
 
 
-def test_granting_slack_for_write_succeeds_with_no_warning(tree):
-    r = _client().post("/integrations/access", headers=_admin(tree),
-                       params={"kind": "connector", "id": "slack",
-                               "workspaceId": tree["unit"], "access": "write"})
-    assert r.status_code == 200, r.text
-    assert r.json()["access"] == "write"
-    assert r.json()["warnings"] == []
+def test_a_stage_mode_the_connector_can_honour_is_accepted(tree):
+    from shared.routers.projects import _validated_modes
+
+    ok = {"requirements::connector::slack": "write",
+          "development::connector::jira": "both"}
+    assert _validated_modes(ok) == ok
 
 
-def test_a_write_only_board_grant_returns_its_caveat(tree):
-    """Returned rather than logged, so the admin who chose the level reads it."""
-    r = _client().post("/integrations/access", headers=_admin(tree),
-                       params={"kind": "connector", "id": "jira",
-                               "workspaceId": tree["unit"], "access": "write"})
-    assert r.status_code == 200, r.text
-    assert any("id" in w for w in r.json()["warnings"])
+def test_an_mcp_stage_mode_is_not_capability_checked(tree):
+    """MCP servers have no manifest. Checking them against one would make every
+    MCP assignment impossible."""
+    from shared.routers.projects import _validated_modes
+
+    ref = str(_uuid.uuid4())
+    modes = {"development::mcp::" + ref: "read"}
+    assert _validated_modes(modes) == modes
 
 
 def test_an_mcp_grant_is_not_capability_checked(tree):
@@ -183,10 +188,11 @@ def test_an_mcp_grant_is_not_capability_checked(tree):
 
 
 def test_narrowing_a_project_to_an_unsupported_level_is_refused(tree):
+    """The project-wide default keeps its own copy of the check — it is a second
+    writer of a level, and both writers must refuse what the connector cannot do."""
     c = _client()
     c.post("/integrations/access", headers=_admin(tree),
-           params={"kind": "connector", "id": "slack",
-                   "workspaceId": tree["unit"], "access": "write"})
+           params={"kind": "connector", "id": "slack", "workspaceId": tree["unit"]})
     r = c.put(f"/projects/{tree['project']}/integrations/access", headers=_admin(tree),
               json={"kind": "connector", "targetId": "slack", "access": "read"})
     assert r.status_code == 422, r.text

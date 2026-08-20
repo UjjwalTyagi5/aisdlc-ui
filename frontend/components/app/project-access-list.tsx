@@ -22,23 +22,22 @@ import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 /**
  * What THIS project may do with each integration its unit was granted.
  *
- * THE THIRD RUNG. The organisation permits a kind, a {BUSINESS_UNIT_LABEL} is granted
- * it at a level, and this narrows that level for one project. It is the only decision
- * on this screen that is not somebody else's — which is why the rest of the page is
- * read-only and this is not.
+ * THE PROJECT-WIDE DEFAULT. The organisation grants a {BUSINESS_UNIT_LABEL} REACH to
+ * an integration — whether it may use the thing at all — and this sets what the
+ * project's stages do with it by default. A stage that picked its own mode in
+ * Settings -> Tools per stage overrides this; that is where the real per-agent
+ * decision is made, and this screen is the shortcut for "read-only everywhere here".
  *
- * BOTH LEVELS ARE SHOWN, ALWAYS. "Read only" on its own does not tell you whether
- * that is a choice somebody made here or the most the organisation allows: the first
- * you can undo on this screen, the second needs an Organization Admin. Naming the
- * unit's level next to the project's is what separates them, and it is why the row
- * says "inherited" rather than leaving the reader to infer it from a blank.
+ * THERE IS NO CEILING ANY MORE. The unit's grant used to carry a level that capped
+ * this one, and the picker disabled whatever lay outside it. Backend migration 0024
+ * removed that: a grant is reach only, so nothing above the project bounds the
+ * read/write choice. Nothing here is disabled for being "too wide" — the only
+ * remaining refusal is a connector that cannot honour a level at all (Slack cannot
+ * read), which the server raises and this surfaces verbatim.
  *
- * THE CEILING IS THE UNIT'S GRANT. The picker disables what lies outside it rather
- * than hiding it, and the server refuses independently — so this control makes the
- * boundary visible without being the thing that enforces it. A 403 `exceeds_grant`
- * from the server is surfaced verbatim rather than pre-empted, because the server is
- * the authority on what is allowed and a second copy of that rule here would give it
- * somewhere to drift.
+ * "no default" MEANS the stages fall through to read and write, which is the stage
+ * picker's own documented default. It is labelled rather than left blank because a
+ * blank reads as "nothing", and it means the opposite.
  */
 export function ProjectAccessList({
   projectId,
@@ -83,7 +82,7 @@ export function ProjectAccessList({
     mutationFn: clearProjectIntegrationAccess,
     onSuccess: (_r, vars) => {
       toast.success(
-        `${label(vars.targetId)} follows the ${BUSINESS_UNIT_LABEL.toLowerCase()} again`,
+        `${label(vars.targetId)} has no project default — each stage decides`,
       );
       invalidate();
     },
@@ -127,15 +126,13 @@ export function ProjectAccessList({
             {label(row.targetId)}
           </span>
 
-          {/* What the unit holds — the ceiling, and the thing that explains why an
-              option below is unavailable. */}
-          <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
-            {BUSINESS_UNIT_LABEL}: {ACCESS_LEVEL_LABEL[row.unitAccess]}
-          </Badge>
-
+          {/* No unit badge any more. The unit's grant carries no level to show as a
+              ceiling — it only decides whether this integration appears here at all.
+              What is set below is this project's DEFAULT; a stage that picked its own
+              mode in Settings -> Tools per stage overrides it. */}
           {row.inherited && (
             <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
-              inherited
+              no default
             </Badge>
           )}
 
@@ -144,7 +141,6 @@ export function ProjectAccessList({
               <AccessLevelPicker
                 size="sm"
                 value={row.effectiveAccess}
-                ceiling={row.unitAccess}
                 disabled={busy}
                 onChange={(next) =>
                   narrow.mutate({
@@ -155,15 +151,15 @@ export function ProjectAccessList({
                   })
                 }
               />
-              {/* Only when there is a narrowing to undo. Resetting an inherited row
-                  would be a no-op offered as an action, which reads as broken. */}
+              {/* Only when there is a default to clear. Offered on a row that has
+                  none, it would be a no-op presented as an action. */}
               {!row.inherited && (
                 <Button
                   variant="ghost"
                   size="icon"
                   disabled={busy}
-                  aria-label={`Follow the ${BUSINESS_UNIT_LABEL.toLowerCase()} for ${label(row.targetId)}`}
-                  title={`Follow the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s level again`}
+                  aria-label={`Clear the default for ${label(row.targetId)}`}
+                  title="Clear this default — stages decide for themselves"
                   onClick={() =>
                     reset.mutate({ projectId, kind: row.kind, targetId: row.targetId })
                   }

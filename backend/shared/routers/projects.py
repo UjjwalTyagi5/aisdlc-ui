@@ -29,13 +29,15 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import logging
 
 from shared.authz.can_perform import can_perform, visible_project_ids
+from shared.authz.connector_access import TOOL_ACCESS_MODES, level_from_mode
+from shared.authz.connector_capabilities import unsupported_reason
 from shared.authz.dependency import require_permission
 from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.effective_role import actor_display_name, effective_platform_role
@@ -57,6 +59,44 @@ def _user_id(request: Request) -> str:
     return getattr(request.state, "user_id", "") or ""
 
 
+def _validated_modes(v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+    """Reject a tool access mode outside the picker's vocabulary.
+
+    Rejected at the door rather than filtered out, because the runtime treats an
+    unrecognised mode as NO access (`level_from_mode` fails closed). Silently dropping
+    a typo would hand back a project whose stage looks configured and whose connector
+    refuses every call — a 422 naming the bad value is the difference between a
+    five-second fix and an afternoon.
+    """
+    if v is None:
+        return None
+    bad = sorted({m for m in v.values() if m not in TOOL_ACCESS_MODES})
+    if bad:
+        raise ValueError(
+            f"tool access mode must be one of {', '.join(TOOL_ACCESS_MODES)}; "
+            f"got {', '.join(bad)}"
+        )
+
+    # A LEVEL THE CONNECTOR CANNOT HONOUR IS REFUSED, not stored. Slack implements no
+    # read capabilities, so a stage set to "read" on Slack yields a connector that can
+    # do nothing while the picker shows a configured chip. This check used to guard the
+    # unit grant; the level moved here in migration 0024, so the check moved with it,
+    # and this is now the only place it happens.
+    #
+    # POSITIVE KNOWLEDGE ONLY: `unsupported_reason` returns None for a connector it
+    # cannot introspect, and an unintrospectable connector must stay configurable.
+    for key, mode in v.items():
+        parts = key.split("::")
+        if len(parts) != 3 or parts[1] != "connector":
+            # MCP servers have no manifest to check, and a key we cannot parse is left
+            # to the resolver — which fails closed on it — rather than guessed at here.
+            continue
+        reason = unsupported_reason(parts[2], level_from_mode(mode))
+        if reason:
+            raise ValueError(reason)
+    return v
+
+
 class ProjectCreateIn(BaseModel):
     name: str
     # Which Business Unit the project belongs to. REQUIRED — there is no default
@@ -73,6 +113,12 @@ class ProjectCreateIn(BaseModel):
     mcp_servers: Optional[dict[str, list[str]]] = None
     # Stage→connector-kind mapping {agent_id: [connector_kind, ...]} chosen at creation.
     connectors: Optional[dict[str, list[str]]] = None
+    # Per-(stage, tool) read/write mode, keyed "{agent_id}::{connector|mcp}::{ref}".
+    # THIS IS THE ACCESS DECISION since migration 0024 — the unit grant says whether
+    # the connector is reachable, this says what may be done with it. Validated
+    # below, because an unrecognised mode resolves to NO access at runtime and a
+    # typo would otherwise present as a dead connector rather than a 422.
+    tool_access_modes: Optional[dict[str, str]] = None
     monthlyBudgetUsd: Optional[float] = None
     # Who OWNS the project — bound as `project_admin` at project scope on creation.
     #
@@ -85,14 +131,27 @@ class ProjectCreateIn(BaseModel):
     # accepting an email here would make this a second, quieter account-creating path.
     ownerId: Optional[str] = None
 
+    @field_validator("tool_access_modes")
+    @classmethod
+    def _check_modes(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        return _validated_modes(v)
+
 
 class ProjectPatchIn(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     mcp_servers: Optional[dict[str, list[str]]] = None
     connectors: Optional[dict[str, list[str]]] = None
+    # See ProjectCreateIn.tool_access_modes. Sent whole by the stage picker, so it
+    # replaces rather than merges — a mode removed in the UI must disappear here.
+    tool_access_modes: Optional[dict[str, str]] = None
     # 0 clears the cap (inherit workspace / unlimited); positive sets it.
     monthlyBudgetUsd: Optional[float] = None
+
+    @field_validator("tool_access_modes")
+    @classmethod
+    def _check_modes(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        return _validated_modes(v)
 
 
 class IngestBoardIn(BaseModel):
@@ -255,6 +314,7 @@ async def create_project(
         archived=False,
         mcp_servers=body.mcp_servers or None,
         connectors=body.connectors or None,
+        tool_access_modes=body.tool_access_modes or None,
         monthly_budget_usd=_proj_budget,
     )
     db.add(project)
@@ -615,6 +675,8 @@ async def patch_project(
         project.display_name = body.name
     if body.mcp_servers is not None:
         project.mcp_servers = body.mcp_servers or None
+    if body.tool_access_modes is not None:
+        project.tool_access_modes = body.tool_access_modes or None
     if body.connectors is not None:
         project.connectors = body.connectors or None
     if body.monthlyBudgetUsd is not None:

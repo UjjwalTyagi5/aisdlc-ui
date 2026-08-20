@@ -67,6 +67,8 @@ def _headers(uid: str, org_id: str, perms: list[str]) -> dict:
 
 async def _grant_integration(org: dict, kind: str, target: str, workspace: str) -> None:
     async with get_db_session_for_tenant(org["org"]) as s:
+        # No `access` column since migration 0024 — a grant is reach only, and what
+        # these tests mean by granting is exactly that.
         await s.execute(text(
             "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id) "
             "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid)) ON CONFLICT DO NOTHING"

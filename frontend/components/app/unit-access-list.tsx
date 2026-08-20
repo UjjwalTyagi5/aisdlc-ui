@@ -31,9 +31,6 @@ import {
   listIntegrationAccess,
   revokeIntegrationAccess,
 } from "@/lib/api/integration-access";
-import { AccessLevelPicker } from "@/components/app/access-level-picker";
-import { ACCESS_LEVEL_LABEL } from "@/lib/schemas/integration-access";
-import type { ConnectorAccessLevel } from "@/lib/schemas/integration-access";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
@@ -100,15 +97,13 @@ export function UnitAccessList({
 
   const grant = useMutation({
     mutationFn: grantIntegrationAccess,
-    onSuccess: (r, vars) => {
-      const level = r.access ? ACCESS_LEVEL_LABEL[r.access].toLowerCase() : "";
-      toast.success(
-        `${vars.unitName} can now use ${name}${level ? ` (${level})` : ""}`,
-      );
-      // Permitted but partly hollow — a write-only board can create items but
-      // cannot comment on one. Shown to the admin who chose the level, since
-      // they are the only person who can act on it.
-      for (const w of r.warnings ?? []) toast.warning(w, { duration: 9000 });
+    onSuccess: (_r, vars) => {
+      // No level to report: the grant is reach only. The follow-up action is on
+      // the project, so the toast points there rather than stating a level that
+      // no longer exists at this layer.
+      toast.success(`${vars.unitName} can now use ${name}`, {
+        description: "Each project chooses read or write per stage.",
+      });
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -183,30 +178,12 @@ export function UnitAccessList({
                 </span>
               </button>
 
-              {/* The level this unit holds. Editable only by whoever may grant —
-                  changing a level IS a grant, so it carries the same authority as
-                  making one, and a reader who cannot grant still sees where the
-                  unit stands. */}
-              {unit.access && canGrant ? (
-                <AccessLevelPicker
-                  size="sm"
-                  value={unit.access}
-                  disabled={grant.isPending}
-                  onChange={(next) =>
-                    grant.mutate({
-                      kind,
-                      id: targetId,
-                      workspaceId: unit.id,
-                      unitName: unit.name,
-                      access: next,
-                    })
-                  }
-                />
-              ) : unit.access ? (
-                <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
-                  {ACCESS_LEVEL_LABEL[unit.access]}
-                </Badge>
-              ) : null}
+              {/* NO ACCESS LEVEL HERE. A grant says this unit may use the
+                  integration; whether an agent reads or writes with it is chosen
+                  per stage on the project, in Settings -> Tools per stage. This
+                  row used to carry a Read/Write/Both control, which read as a
+                  usage decision when it was really a ceiling — and the ceiling
+                  is gone (migration 0024). */}
 
               {canRevoke && (
                 <RevokeButton
@@ -288,15 +265,8 @@ export function UnitAccessList({
             units={notHeld}
             name={name}
             busy={grant.isPending}
-            supportedLevel={row.supportedAccess ?? null}
-            onGrant={(u, access) =>
-              grant.mutate({
-                kind,
-                id: targetId,
-                workspaceId: u.id,
-                unitName: u.name,
-                access,
-              })
+            onGrant={(u) =>
+              grant.mutate({ kind, id: targetId, workspaceId: u.id, unitName: u.name })
             }
           />
         </li>
@@ -327,28 +297,14 @@ function GrantUnitPicker({
   units,
   name,
   busy,
-  supportedLevel,
   onGrant,
 }: {
   units: AccessUnitEntry[];
   name: string;
   busy?: boolean;
-  /**
-   * The widest level this connector can actually honour, or null when unknown.
-   * Caps the picker, so an admin is never offered a level the server will refuse —
-   * Slack and MS Teams implement no reads at all, and Figma no writes.
-   */
-  supportedLevel?: ConnectorAccessLevel | null;
-  onGrant: (unit: AccessUnitEntry, access: ConnectorAccessLevel) => void;
+  onGrant: (unit: AccessUnitEntry) => void;
 }) {
   const [open, setOpen] = React.useState(false);
-  // Chosen BEFORE the unit, because it applies to whichever unit is picked next and
-  // because it is the decision an admin is actually making — the unit is just where
-  // it lands. Seeded from what the connector supports rather than a flat "read": on
-  // a notify-only connector `read` is not a narrow grant, it is an empty one.
-  const [level, setLevel] = React.useState<ConnectorAccessLevel>(
-    supportedLevel === "write" ? "write" : "read",
-  );
 
   if (units.length === 0) {
     return (
@@ -372,15 +328,6 @@ function GrantUnitPicker({
         </Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 p-0">
-        <div className="border-line-soft space-y-1.5 border-b p-3">
-          <p className="text-[11.5px] font-medium">Access level</p>
-          <AccessLevelPicker
-            size="sm"
-            value={level}
-            ceiling={supportedLevel ?? null}
-            onChange={setLevel}
-          />
-        </div>
         <Command filter={substringFilter}>
           <CommandInput placeholder={`Search ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}…`} />
           <CommandList>
@@ -391,7 +338,7 @@ function GrantUnitPicker({
                 value={u.name}
                 onSelect={() => {
                   setOpen(false);
-                  onGrant(u, level);
+                  onGrant(u);
                 }}
               >
                 <Plus className="size-3.5" aria-hidden />

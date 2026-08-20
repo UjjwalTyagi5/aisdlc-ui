@@ -47,12 +47,6 @@ export const AccessUnitEntry = z.object({
   /** `granted` — the Org Admin gave it to this unit. `none` — the unit does
    *  not have it, and is listed so it can be given it. */
   via: z.enum(["granted", "none"]),
-  /**
-   * Read, write, or both — null for a unit holding nothing. There is no level
-   * without a grant, and defaulting one here would show a value the database
-   * does not have. Optional so an older backend still parses.
-   */
-  access: ConnectorAccessLevel.nullish().default(null),
   projects: z.array(AccessProjectEntry).default([]),
 });
 export type AccessUnitEntry = z.infer<typeof AccessUnitEntry>;
@@ -67,15 +61,10 @@ export const IntegrationAccessRow = z.object({
   /** Whether anything is actually connected behind it. A granted kind with no
    *  connection is a permission with nothing to use yet. */
   onboarded: z.boolean(),
-  /**
-   * The widest level this connector can actually honour — the grant control's
-   * ceiling, so an admin is never offered a level the server will refuse.
-   *
-   * null means "no ceiling known": an MCP server, or a connector that could not be
-   * introspected. The UI must not treat that as "nothing allowed", mirroring the
-   * refuse-only-on-positive-knowledge rule the server-side check follows.
-   */
-  supportedAccess: ConnectorAccessLevel.nullish().default(null),
+  // NO `access` on a unit and no `supportedAccess` on the row. A grant carries no
+  // level since backend migration 0024 — read vs write is chosen per stage on the
+  // project, so the capability ceiling that shaped the old grant control belongs
+  // with the stage picker rather than here.
   /** Every unit the viewer may see, granted or not — `via` says which. */
   units: z.array(AccessUnitEntry).default([]),
   /** How many of them actually hold it. `units.length` counts candidates. */
@@ -97,7 +86,6 @@ export type IntegrationAccessRow = z.infer<typeof IntegrationAccessRow>;
 export const ProjectIntegrationAccess = z.object({
   kind: z.enum(["connector", "mcp"]),
   targetId: z.string(),
-  unitAccess: ConnectorAccessLevel,
   /** null means the project is not narrowed and inherits the unit's level. */
   projectAccess: ConnectorAccessLevel.nullable(),
   effectiveAccess: ConnectorAccessLevel.nullable(),

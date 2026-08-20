@@ -9,7 +9,7 @@ Layered deliberately:
   * the cascade (unit grant ∩ project narrowing) against real rows
   * the runtime gate, which is what an agent actually hits
 """
-import itertools
+import json as _json
 import uuid as _uuid
 
 import pytest
@@ -36,25 +36,20 @@ async def _dispose_shared_engine():
 def test_read_and_write_are_incomparable():
     """The property the whole design rests on. Ranking the levels 1/2/3 would make
     `write` imply `read`, which is the escalation the level exists to prevent."""
-    assert ca.narrow("read", "write") is None
-    assert ca.narrow("write", "read") is None
-    assert not ca.contains("read", "write")
-    assert not ca.contains("write", "read")
+    # Incomparability is still the property that matters — it is why `permits()` is
+    # a subset test and not a `>=` on a rank. Asserted through `modes()` now that the
+    # `narrow()` / `contains()` pair has gone with the ceiling they served.
+    assert not (ca.modes("read") & ca.modes("write"))
+    assert not ca.modes("read") >= ca.modes("write")
+    assert not ca.modes("write") >= ca.modes("read")
 
 
-def test_read_write_contains_both_halves():
+def test_read_write_admits_both_halves():
+    """The top of the lattice admits everything the two below it do."""
     for level in ("read", "write", "read_write"):
-        assert ca.contains("read_write", level)
-    assert not ca.contains("read", "read_write")
-    assert not ca.contains("write", "read_write")
-
-
-def test_narrowing_is_intersection_for_every_pair():
-    for parent, child in itertools.product(ca.ACCESS_LEVELS, repeat=2):
-        got = ca.narrow(parent, child)
-        assert got == ca.from_modes(ca.modes(parent) & ca.modes(child))
-        # A narrowing can never yield more than its parent.
-        assert got is None or ca.contains(parent, got)
+        assert ca.modes("read_write") >= ca.modes(level)
+    assert not ca.modes("read") >= ca.modes("read_write")
+    assert not ca.modes("write") >= ca.modes("read_write")
 
 
 def test_nothing_permits_anything():
@@ -174,26 +169,30 @@ async def tree():
     # projects is FORCE RLS — needs the tenant GUC.
     async with get_db_session_for_tenant(org) as s:
         for pid, wid, name in ((proj, unit, "Ledger"), (sibling, unit, "Cards")):
+            # Both stages wire jira and slack. A stage that wired nothing has no
+            # access to anything since migration 0024, so the wiring has to be real
+            # for these tests to be about the LEVEL rather than about step 2.
             await s.execute(text(
-                "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
-                "VALUES (:i, :w, :t, :n)"
-            ), {"i": pid, "w": wid, "t": org, "n": name})
+                "INSERT INTO projects (id, workspace_id, tenant_id, display_name, connectors) "
+                "VALUES (:i, :w, :t, :n, CAST(:c AS jsonb))"
+            ), {"i": pid, "w": wid, "t": org, "n": name,
+                "c": _json.dumps({"development": ["jira", "slack"],
+                                  "testing": ["jira"]})})
     yield {"org": org, "unit": unit, "other_unit": other_unit,
            "project": proj, "sibling": sibling}
 
 
-async def _grant(org, unit, ref, access, kind="connector"):
+async def _grant(org, unit, ref, kind="connector"):
+    """Give the unit REACH. No level — migration 0024 removed it from the grant."""
     async with get_db_session_for_tenant(org) as s:
         await s.execute(text(
-            "INSERT INTO integration_grants "
-            "  (tenant_id, kind, target_ref, workspace_id, access) "
-            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :a) "
-            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) "
-            "  DO UPDATE SET access = EXCLUDED.access"
-        ), {"t": org, "k": kind, "r": ref, "w": unit, "a": access})
+            "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id) "
+            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid)) ON CONFLICT DO NOTHING"
+        ), {"t": org, "k": kind, "r": ref, "w": unit})
 
 
-async def _narrow_project(org, project, ref, access, kind="connector"):
+async def _project_default(org, project, ref, access, kind="connector"):
+    """The project-wide default a stage falls through to when its chip is unset."""
     async with get_db_session_for_tenant(org) as s:
         await s.execute(text(
             "INSERT INTO project_connector_access "
@@ -204,77 +203,100 @@ async def _narrow_project(org, project, ref, access, kind="connector"):
         ), {"t": org, "p": project, "k": kind, "r": ref, "a": access})
 
 
-async def _effective(org, project, ref="jira"):
+async def _stage_mode(org, project, agent_id, ref, mode, kind="connector"):
+    """The stage's own chip — the most specific answer, and the usual one."""
+    import json
+    async with get_db_session_for_tenant(org) as s:
+        await s.execute(text(
+            "UPDATE projects SET tool_access_modes = "
+            "  COALESCE(tool_access_modes, '{}'::jsonb) || CAST(:m AS jsonb) "
+            "WHERE id = CAST(:p AS uuid)"
+        ), {"p": project, "m": json.dumps({f"{agent_id}::{kind}::{ref}": mode})})
+
+
+async def _effective(org, project, ref="jira", agent_id="development"):
     async with get_db_session_for_tenant(org) as s:
         return await effective_access(
-            s, tenant_id=org, project_id=project, target_ref=ref
+            s, tenant_id=org, project_id=project, target_ref=ref, agent_id=agent_id
         )
 
 
 @pytest.mark.asyncio
 async def test_no_grant_means_no_access(tree):
-    """Access denied at BU level — the absence of a row IS the denial."""
+    """Access denied at BU level — the absence of a row IS the denial, and since
+    migration 0024 it is the ONLY thing the organisation can still deny."""
     assert await _effective(tree["org"], tree["project"]) is None
 
 
 @pytest.mark.asyncio
-async def test_a_project_inherits_its_units_grant(tree):
-    """No override means inherit. Absence must not read as denial, or adding the
-    override table would have revoked every project's integrations on deploy."""
-    await _grant(tree["org"], tree["unit"], "jira", "read_write")
+async def test_a_wired_stage_with_nothing_set_gets_read_and_write(tree):
+    """What used to be "inherit the unit's level" is now the picker's default.
+
+    There is no unit level left to inherit, and no ceiling over this — the trade
+    migration 0024 made deliberately.
+    """
+    await _grant(tree["org"], tree["unit"], "jira")
     assert await _effective(tree["org"], tree["project"]) == "read_write"
     assert await _effective(tree["org"], tree["sibling"]) == "read_write"
 
 
 @pytest.mark.asyncio
-async def test_a_project_may_be_narrowed_below_its_unit(tree):
-    await _grant(tree["org"], tree["unit"], "jira", "read_write")
-    await _narrow_project(tree["org"], tree["project"], "jira", "read")
+async def test_a_stage_mode_beats_the_project_default(tree):
+    await _grant(tree["org"], tree["unit"], "jira")
+    await _project_default(tree["org"], tree["project"], "jira", "read")
     assert await _effective(tree["org"], tree["project"]) == "read"
-    # Its sibling is untouched — narrowing is per project.
+
+    await _stage_mode(tree["org"], tree["project"], "development", "jira", "write")
+    assert await _effective(tree["org"], tree["project"]) == "write"
+    # Its sibling project is untouched — both levels are per project.
     assert await _effective(tree["org"], tree["sibling"]) == "read_write"
 
 
 @pytest.mark.asyncio
-async def test_a_project_cannot_exceed_its_unit(tree):
-    """The hierarchy rule. A project asking for more than its unit holds gets the
-    intersection, never the wider of the two."""
-    await _grant(tree["org"], tree["unit"], "jira", "read")
-    await _narrow_project(tree["org"], tree["project"], "jira", "read_write")
-    assert await _effective(tree["org"], tree["project"]) == "read"
+async def test_one_connector_two_stages_two_levels(tree):
+    """The reason the decision moved down here in the first place."""
+    await _grant(tree["org"], tree["unit"], "jira")
+    await _stage_mode(tree["org"], tree["project"], "development", "jira", "both")
+    await _stage_mode(tree["org"], tree["project"], "testing", "jira", "read")
+    assert await _effective(tree["org"], tree["project"], agent_id="development") == "read_write"
+    assert await _effective(tree["org"], tree["project"], agent_id="testing") == "read"
 
 
 @pytest.mark.asyncio
-async def test_incomparable_levels_yield_no_access(tree):
-    """A unit granted read and a project set to write share no operation. The
-    answer is nothing — not 'one of them'."""
-    await _grant(tree["org"], tree["unit"], "jira", "read")
-    await _narrow_project(tree["org"], tree["project"], "jira", "write")
-    assert await _effective(tree["org"], tree["project"]) is None
+async def test_a_stage_that_never_wired_it_gets_nothing(tree):
+    """With no ceiling left, the stage wiring is what stops one grant reaching all."""
+    await _grant(tree["org"], tree["unit"], "jira")
+    assert await _effective(tree["org"], tree["project"], agent_id="security") is None
 
 
 @pytest.mark.asyncio
 async def test_another_units_grant_does_not_reach_this_project(tree):
     """Granting Lending does nothing for a Payments project."""
-    await _grant(tree["org"], tree["other_unit"], "jira", "read_write")
+    await _grant(tree["org"], tree["other_unit"], "jira")
     assert await _effective(tree["org"], tree["project"]) is None
 
 
 @pytest.mark.asyncio
 async def test_grants_are_per_connector(tree):
-    await _grant(tree["org"], tree["unit"], "jira", "read_write")
+    await _grant(tree["org"], tree["unit"], "jira")
     assert await _effective(tree["org"], tree["project"], "jira") == "read_write"
     assert await _effective(tree["org"], tree["project"], "slack") is None
 
 
 @pytest.mark.asyncio
-async def test_narrowing_the_unit_later_narrows_the_project(tree):
-    """Permission change after a connector was already configured."""
-    await _grant(tree["org"], tree["unit"], "jira", "read_write")
+async def test_revoking_the_unit_grant_stops_a_configured_stage(tree):
+    """Permission change after a connector was already configured. Revoking is the
+    whole of the organisation's remaining power, so it must reach a live stage."""
+    await _grant(tree["org"], tree["unit"], "jira")
+    await _stage_mode(tree["org"], tree["project"], "development", "jira", "both")
     assert await _effective(tree["org"], tree["project"]) == "read_write"
 
-    await _grant(tree["org"], tree["unit"], "jira", "read")
-    assert await _effective(tree["org"], tree["project"]) == "read"
+    async with get_db_session_for_tenant(tree["org"]) as s:
+        await s.execute(text(
+            "DELETE FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND target_ref = 'jira'"
+        ), {"t": tree["org"]})
+    assert await _effective(tree["org"], tree["project"]) is None
 
 
 @pytest.mark.asyncio

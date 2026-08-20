@@ -78,7 +78,6 @@ export function listIntegrationAccess(
           // reports the widest, matching how these fixtures have always behaved —
           // every granted unit could do everything. A null here would render the
           // picker empty and read as a bug rather than as "not modelled".
-          access: via === "granted" ? ("read_write" as const) : null,
           // EVERY project in the unit, using it or not — an empty `stages`
           // means "could, doesn't". Filtering to users only made granting a
           // project unreachable, the same hole the unit list had.
@@ -111,7 +110,6 @@ export function listIntegrationAccess(
       // Mock mode does not introspect connector manifests, so it states no ceiling
       // rather than inventing one. null is "unknown", which the picker treats as
       // "no cap" — the same answer the server gives for a connector it cannot read.
-      supportedAccess: null,
       id: grant.kind,
       name: connection?.name ?? CONNECTOR_KIND_LABEL[grant.kind] ?? grant.kind,
       description: null,
@@ -144,7 +142,6 @@ export function listIntegrationAccess(
     rows.push({
       kind: "mcp",
       // MCP servers have no capability manifest at all, server-side included.
-      supportedAccess: null,
       id: server.id,
       name: server.server_name,
       description: server.description ?? null,

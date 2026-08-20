@@ -78,6 +78,10 @@ class Project(Base):
     mcp_servers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Per-project stageâ†’connector-kind mapping {agent_id: [connector_kind, ...]} (migration 0025).
     connectors: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Per-(stage, tool) read/write mode, keyed "{agent_id}::{connector|mcp}::{ref}"
+    # (migration 0024). THE access decision for connectors — see
+    # shared/authz/connector_grants.py. NULL / a missing key means "both".
+    tool_access_modes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Monthly USD cost budget (0032). NULL = inherit workspace / unlimited.
     monthly_budget_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -27,6 +27,31 @@ export function connectorKindLabel(kind: string): string {
 }
 
 /**
+ * The connector kinds the product PRESENTS — one tile each on the Integrations
+ * page, and the "N available" any count must be measured against.
+ *
+ * Narrower than `ConnectorKind`, which is the set the API accepts: `azure_repos`
+ * is folded into the consolidated Azure DevOps tile (one credential covers
+ * boards, repos and CI/CD), and the two SSO kinds are identity plumbing rather
+ * than something a project connects.
+ *
+ * Anything that counts connectors reads this, because the alternative is
+ * counting whatever a given source happens to hold — which is how the dashboard
+ * came to claim eleven while the page it links to showed eight. Mirrors
+ * `_CATALOG_KINDS` in backend/shared/routers/connectors.py.
+ */
+export const CONNECTOR_CATALOG_KINDS: ConnectorKind[] = [
+  "jira",
+  "azure_devops",
+  "github",
+  "github_actions",
+  "slack",
+  "ms_teams",
+  "sharepoint",
+  "figma",
+];
+
+/**
  * User-facing status word for a connector's health.
  *
  * The backend still tracks three states (`healthy` / `degraded` /

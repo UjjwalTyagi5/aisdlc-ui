@@ -30,17 +30,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.authz.connector_access import ACCESS_LEVELS, DEFAULT_ACCESS, is_access_level, narrow
-from shared.authz.connector_capabilities import (
-    default_access_for,
-    supported_level,
-    unsupported_reason,
-    warnings_for,
-)
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import administered_workspace_ids, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
-from shared.routers.connectors import _KNOWN_KINDS
+from shared.routers.connectors import _CATALOG_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -130,23 +123,20 @@ async def list_integration_access(
         )
     ).fetchall()
 
+    # Which units hold which integration. A set of ids and nothing more: since
+    # migration 0024 a grant has no level, so "granted or not" is the whole answer
+    # this endpoint has to give about a unit.
     grants: dict[tuple[str, str], set[str]] = {}
-    # The LEVEL each unit holds, keyed the same way. Carried alongside rather than
-    # folded into `grants` because callers ask two different questions of this data —
-    # "which units hold it" drives the list, "at what level" drives each row's control
-    # — and a set of ids answers the first without complicating it for the second.
-    grant_levels: dict[tuple[str, str, str], str] = {}
-    for kind, target, ws, access in (
+    for kind, target, ws in (
         await db.execute(
             text(
-                "SELECT kind, target_ref, workspace_id, access FROM integration_grants "
+                "SELECT kind, target_ref, workspace_id FROM integration_grants "
                 "WHERE tenant_id = CAST(:t AS uuid)"
             ),
             {"t": tenant_id},
         )
     ).fetchall():
         grants.setdefault((kind, target), set()).add(str(ws))
-        grant_levels[(kind, target, str(ws))] = access
 
     # Which projects wired which integration, and to which stages. Read from the
     # project's own columns — the third level of the cascade, and the only one that
@@ -191,10 +181,6 @@ async def list_integration_access(
                 "id": uid,
                 "name": uname,
                 "via": "granted" if uid in granted else "none",
-                # None for a unit that holds nothing — there is no level without a
-                # grant, and reporting a default here would show the picker a value
-                # the database does not have.
-                "access": grant_levels.get((kind, target, uid)),
                 "projects": usage.get(uid, []),
             }
             for uid, uname in units
@@ -206,12 +192,10 @@ async def list_integration_access(
             "description": description,
             "origin": "organization",
             "onboarded": onboarded,
-            # The widest level this connector can actually honour, so the grant
-            # control never offers one the server will refuse. None for an MCP
-            # server or a connector that cannot be introspected — the UI treats
-            # that as "no ceiling", matching the refuse-only-on-positive-knowledge
-            # rule the validation itself follows.
-            "supportedAccess": supported_level(target) if kind == "connector" else None,
+            # No `supportedAccess` here since migration 0024. It existed so the unit
+            # grant control never offered a level the connector could not honour;
+            # that control is gone, and the check moved to where the level is now
+            # chosen — the project's stage picker, validated in routers/projects.py.
             "units": entries,
             # Counts what the VIEWER can see, so a Business Unit Admin's "1 unit"
             # is their own rather than a number they cannot account for.
@@ -221,7 +205,10 @@ async def list_integration_access(
 
     out = [
         _row("connector", k, _CONNECTOR_LABEL.get(k, k), None, k in installed_kinds)
-        for k in sorted(_KNOWN_KINDS)
+        # The presented catalog, not the accept-set: a row here is something an
+        # Org Admin can grant a unit, and granting a kind with no tile hands out
+        # access to a connector nobody can reach.
+        for k in sorted(_CATALOG_KINDS)
     ]
     out += [
         _row("mcp", str(s.id), s.server_name, s.description, True) for s in servers
@@ -233,71 +220,11 @@ async def list_integration_access(
 # The router-level dependency is `connector:view` — a READ permission — which stays for
 # the reads. A write announcing itself as a read is how the next reader concludes these
 # are safe. `_require_org_admin()` in each body remains the operative check.
-async def _reconcile_project_overrides(
-    db: AsyncSession,
-    tenant_id: str,
-    kind: str,
-    target_ref: str,
-    workspace_id: str,
-    unit_access: str,
-) -> int:
-    """Re-narrow every project override in this unit against the unit's new level.
-
-    THE CASE THIS EXISTS FOR: a unit granted read_write, a project narrowed to write,
-    and then the Org Admin drops the unit to read. `narrow(read, write)` is empty —
-    those two share no operation — so the project must end with no access rather than
-    keeping a write the organisation just withdrew. An override left untouched would
-    do exactly that, because the runtime reads the override as the project's answer.
-
-    Overrides that still fit are left alone: a project deliberately held at read under
-    a read_write unit stays at read when the unit changes to read. Rows whose
-    intersection is empty are DELETED rather than written as some third value, since
-    "no access" is the absence of a grant, not a level.
-    """
-    rows = (
-        await db.execute(
-            text(
-                "SELECT p.id AS project_id, a.access FROM project_connector_access a "
-                "  JOIN projects p ON p.id = a.project_id "
-                " WHERE a.tenant_id = CAST(:t AS uuid) AND a.kind = :k "
-                "   AND a.target_ref = :r AND p.workspace_id = CAST(:w AS uuid)"
-            ),
-            {"t": tenant_id, "k": kind, "r": target_ref, "w": workspace_id},
-        )
-    ).fetchall()
-
-    changed = 0
-    for row in rows:
-        still = narrow(unit_access, row.access)
-        if still == row.access:
-            continue
-        if still is None:
-            await db.execute(
-                text(
-                    "DELETE FROM project_connector_access "
-                    "WHERE tenant_id = CAST(:t AS uuid) AND project_id = :p "
-                    "  AND kind = :k AND target_ref = :r"
-                ),
-                {"t": tenant_id, "p": row.project_id, "k": kind, "r": target_ref},
-            )
-        else:
-            await db.execute(
-                text(
-                    "UPDATE project_connector_access SET access = :a "
-                    "WHERE tenant_id = CAST(:t AS uuid) AND project_id = :p "
-                    "  AND kind = :k AND target_ref = :r"
-                ),
-                {"t": tenant_id, "p": row.project_id, "k": kind, "r": target_ref, "a": still},
-            )
-        changed += 1
-
-    if changed:
-        logger.info(
-            "reconciled %d project override(s) for %s %s in unit %s -> %s",
-            changed, kind, target_ref, workspace_id, unit_access,
-        )
-    return changed
-
+# The per-stage move (migration 0024) took `_reconcile_project_overrides` with it.
+# It re-narrowed a project's rows whenever a unit's LEVEL changed; a grant no longer
+# has a level to change, so there is nothing left to reconcile. Revoking still needs
+# no cleanup either — `effective_access()` checks the grant first and returns None
+# without ever reaching a project row.
 
 @integration_access_router.post(
     "/integrations/access",
@@ -309,13 +236,12 @@ async def grant_integration_access(
     id: str,
     workspaceId: Optional[str] = None,
     projectId: Optional[str] = None,
-    # None means the caller did not choose, which is NOT the same as choosing
-    # `read`: a notify-only connector cannot read, and filling in `read` here made
-    # the capability check below refuse a grant the server itself had constructed.
-    access: str | None = None,
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """Give a Business Unit an integration, at a stated access level.
+    """Give a Business Unit reach to an integration.
+
+    NO LEVEL — see the note in the body. This says the unit may use the thing; each
+    project stage says what may be done with it.
 
     BUSINESS UNIT LEVEL ONLY. Granting is how far the organisation's reach decision
     goes; whether one of that unit's projects switches the integration on is the
@@ -326,34 +252,11 @@ async def grant_integration_access(
     _require_org_admin(request)
     if kind not in ("connector", "mcp"):
         raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
-    if access is None:
-        # Resolved per connector: `read` where that means something, otherwise the
-        # only mode the connector implements. Still least privilege — you cannot be
-        # narrower than what exists.
-        access = default_access_for(id) if kind == "connector" else DEFAULT_ACCESS
-    # Rejected loudly rather than coerced to the default: a caller who SENT a level
-    # meant something by it, and quietly substituting one would hand them a different
-    # grant than they think they made.
-    elif not is_access_level(access):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "bad_access_level",
-                "message": f"access must be one of {', '.join(ACCESS_LEVELS)}.",
-            },
-        )
-    # A LEVEL THE CONNECTOR CANNOT HONOUR IS REFUSED, not stored. Slack declares no
-    # read capabilities, so `read` — our least-privilege default — would grant a
-    # connector that can do nothing, shown on the hub as a healthy grant. Refusing
-    # only ever happens on POSITIVE knowledge: a connector that cannot be introspected
-    # returns None and is granted whatever was asked for.
-    if kind == "connector":
-        reason = unsupported_reason(id, access)
-        if reason:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "unsupported_access_level", "message": reason},
-            )
+    # NO ACCESS LEVEL HERE ANY MORE (migration 0024). A grant is a reach decision:
+    # this unit may use Jira, or it may not. What its agents may DO with Jira is
+    # chosen per stage on the project, so the capability check that used to live here
+    # — refusing `read` on a notify-only connector — moved with it. Re-adding a level
+    # to this endpoint reintroduces the ceiling the migration removed.
     if projectId and not workspaceId:
         raise HTTPException(
             status_code=422,
@@ -376,37 +279,22 @@ async def grant_integration_access(
     await db.execute(
         text(
             "INSERT INTO integration_grants "
-            "  (tenant_id, kind, target_ref, workspace_id, granted_by, access) "
-            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by, :a) "
-            # UPDATE, not DO NOTHING: re-granting at a different level is how an Org
-            # Admin changes their mind, and DO NOTHING made that a silent no-op that
-            # looked like it had worked.
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by) "
+            # DO UPDATE rather than DO NOTHING so the row records who granted it most
+            # recently. With the level gone there is nothing else to change, but a
+            # re-grant is still a real act somebody performed.
             "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
-            "  SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by"
+            "  SET granted_by = EXCLUDED.granted_by"
         ),
         {
             "t": tenant_id, "k": kind, "r": id, "w": workspaceId,
-            "by": getattr(request.state, "user_id", None), "a": access,
+            "by": getattr(request.state, "user_id", None),
         },
     )
-    # NARROWING THE UNIT NARROWS ITS PROJECTS. A project override that no longer
-    # shares an operation with the unit's new level would otherwise sit in the table
-    # granting something the organisation has just withdrawn. They are recomputed
-    # rather than deleted, so a project deliberately held at read under a read_write
-    # unit stays at read.
-    await _reconcile_project_overrides(db, tenant_id, kind, id, workspaceId, access)
     await db.flush()
-    logger.info(
-        "integration granted: %s %s -> unit %s (%s)", kind, id, workspaceId, access
-    )
-    return {
-        "ok": True,
-        "changed": True,
-        "access": access,
-        # Permitted but partly hollow — see `warnings_for`. Returned rather than
-        # logged so the admin who chose the level is the one who reads it.
-        "warnings": warnings_for(id, access) if kind == "connector" else [],
-    }
+    logger.info("integration granted: %s %s -> unit %s", kind, id, workspaceId)
+    return {"ok": True, "changed": True}
 
 
 @integration_access_router.delete(
@@ -561,8 +449,16 @@ async def set_connector_grants(
     _require_org_admin(request)
     actor = getattr(request.state, "user_id", None)
 
+    # NO LEVELS TO PRESERVE ANY MORE. This used to read every existing grant's
+    # access level before the DELETE and reuse it on re-insert, because the replace is
+    # DELETE-then-INSERT and a survivor would otherwise have come back at the default
+    # — silently stripping write from every unit that had it. Migration 0024 removed
+    # the level from the grant entirely, so a grant row is now just its own existence
+    # and the replace has nothing to lose.
     if workspaceId:
-        kinds = [k for k in (body.get("kinds") or []) if k in _KNOWN_KINDS]
+        # Filtered against the presented catalog, matching the list read above —
+        # the grantable universe and the listed one must be the same set.
+        kinds = [k for k in (body.get("kinds") or []) if k in _CATALOG_KINDS]
         await db.execute(
             text(
                 "DELETE FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
@@ -589,7 +485,7 @@ async def set_connector_grants(
         )
         for grant in body.get("grants") or []:
             kind = grant.get("kind")
-            if kind not in _KNOWN_KINDS:
+            if kind not in _CATALOG_KINDS:
                 continue
             for ws in grant.get("businessUnitIds") or []:
                 await db.execute(
