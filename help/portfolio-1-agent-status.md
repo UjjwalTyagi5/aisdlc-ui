@@ -217,16 +217,35 @@ documents its live-verification findings):
    run itself. `scan_dependencies` now caches its parsed Trivy findings onto the session
    (`ScanSessionState.last_trivy_findings`, `config/session_state.py`); `generate_sbom`
    cross-references each component against that cache by package name + installed
-   version (`tools/security_tools.py`) — `0` when `scan_dependencies` hasn't run yet this
-   session or nothing matches, never fabricated. Tests:
+   version (`tools/security_tools.py`).
+   **Updated in the final review's fix wave** to fix a real correctness bug the first pass
+   introduced: an empty cache is ambiguous between "scanned, found nothing" and "never
+   scanned" — the original fix used `0` for both, so a component could show a confident,
+   fabricated-looking `"vulnerabilities": 0` even when `scan_dependencies` had simply
+   never run. `last_trivy_findings` now defaults to `None` (not `[]`) as an explicit
+   "not yet scanned" sentinel; `generate_sbom` sets `comp["vulnerabilities"] = None` in
+   that case (a real `0` only appears once `scan_dependencies` has actually run and found
+   no match for that component), and the JSON payload carries a top-level
+   `"vulnerability_data": "trivy" | "not_scanned_yet"` marker. `security_prompt.py` now
+   also tells the model to call `scan_dependencies` before `generate_sbom`. Tests:
    `test_security_agent_tools.py::test_generate_sbom_cross_references_cached_trivy_findings`,
-   `::test_generate_sbom_reports_zero_vulnerabilities_when_no_trivy_scan_ran_yet`, plus a
-   new end-to-end assertion in `test_security_agent_live_e2e.py` (real Trivy run → real
-   SBOM cross-reference, `flask_component["vulnerabilities"] >= 1`). That test's first
-   scripted turn was split so `scan_dependencies` runs alone before the turn that calls
-   `generate_sbom` — LangGraph's `ToolNode` can run same-turn tool_calls concurrently, so
-   leaving `scan_dependencies` in the same turn as `generate_sbom` would flake between 0
-   and the real count depending on execution order.
+   `::test_generate_sbom_leaves_vulnerabilities_null_when_no_trivy_scan_ran_yet`,
+   `::test_generate_sbom_reports_a_real_zero_when_trivy_ran_but_found_no_match`,
+   `::test_scan_dependencies_caches_findings_only_on_a_successful_scan`, plus a new
+   end-to-end assertion in `test_security_agent_live_e2e.py` (real Trivy run → real SBOM
+   cross-reference, `flask_component["vulnerabilities"] >= 1`, `vulnerability_data ==
+   "trivy"`). That test's first scripted turn was split so `scan_dependencies` runs alone
+   before the turn that calls `generate_sbom` — LangGraph's `ToolNode` can run same-turn
+   tool_calls concurrently, so leaving `scan_dependencies` in the same turn as
+   `generate_sbom` would flake between `None` and the real count depending on execution
+   order.
+   **Known minor gap, deferred (not blocking):** `test_security_agent_live_e2e.py` never
+   calls `clear_session("sec-live-e2e-test")`, so a stale session entry leaks in the
+   module-level `_registry` for the rest of that pytest process — test-only, no
+   production impact, no cross-test assertion failures observed. Worth a one-line fix
+   (`clear_session(session_id)` at the end of the test, or converting the session setup
+   into a fixture with `yield` + teardown, matching the existing `scan_target_dir`
+   fixture's pattern) next time this file is touched.
 
 **Open items before this is a *complete* re-verification** (access-hardening + gating
 were already done and shipped in PR #12/#13; the three items above are now fixed —
