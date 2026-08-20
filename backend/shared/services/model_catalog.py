@@ -105,28 +105,42 @@ def _build_catalog() -> dict[str, dict]:
     return catalog
 
 
-_CATALOG: dict[str, dict] = _build_catalog()
+# BUILT ON FIRST USE, NOT AT IMPORT. `_build_catalog()` imports litellm to read its
+# price table, and litellm costs ~7s to import. Doing that at module scope meant every
+# importer of this module paid it -- `pytest --collect-only`, every `uvicorn --reload`
+# restart, every CLI touching a router -- to build a table most of them never read.
+#
+# The cache is the module global below, so the build still happens exactly once per
+# process. Callers go through `_catalog()`; nothing outside this module reads it.
+_CATALOG_CACHE: dict[str, dict] | None = None
+
+
+def _catalog() -> dict[str, dict]:
+    global _CATALOG_CACHE
+    if _CATALOG_CACHE is None:
+        _CATALOG_CACHE = _build_catalog()
+    return _CATALOG_CACHE
 
 # Back-compat alias — the curated presets were historically exported as PROVIDERS.
 PROVIDERS = _CURATED
 
 
 def _ordered_providers() -> list[str]:
-    pinned = [p for p in _PINNED if p in _CATALOG]
-    rest = sorted(p for p in _CATALOG if p not in set(pinned))
+    pinned = [p for p in _PINNED if p in _catalog()]
+    rest = sorted(p for p in _catalog() if p not in set(pinned))
     return pinned + rest
 
 
 def list_providers() -> list[dict]:
     """[{provider, label, models:[...]}] for the catalog API (pinned first)."""
     return [
-        {"provider": p, "label": _CATALOG[p]["label"], "models": _CATALOG[p]["models"]}
+        {"provider": p, "label": _catalog()[p]["label"], "models": _catalog()[p]["models"]}
         for p in _ordered_providers()
     ]
 
 
 def models_for_provider(provider: str) -> list[dict]:
-    return _CATALOG.get(provider, {}).get("models", [])
+    return _catalog().get(provider, {}).get("models", [])
 
 
 def is_valid_model(provider: str, model_id: str) -> bool:
@@ -135,7 +149,7 @@ def is_valid_model(provider: str, model_id: str) -> bool:
 
 def is_known_provider(provider: str) -> bool:
     """True when the provider is in the (LiteLLM + curated) catalog."""
-    return provider in _CATALOG
+    return provider in _catalog()
 
 
 def price_for(provider: str, model_id: str) -> tuple[float | None, float | None]:

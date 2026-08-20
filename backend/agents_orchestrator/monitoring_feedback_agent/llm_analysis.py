@@ -9,7 +9,6 @@ import logging
 import sqlite3
 import numpy as np
 import faiss
-import litellm
 from dotenv import load_dotenv
 import google.generativeai as genai
 from langchain_core.tools import tool
@@ -195,6 +194,8 @@ def rca_agent(state: AgentState) -> AgentState:
       "confidence": <float between 0.0 and 1.0>
     }}
     """
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    import litellm
     response = litellm.completion(
         messages=[{"role": "user", "content": prompt}],
         **resolved_litellm_kwargs(),
@@ -229,6 +230,8 @@ def summary_agent(state: AgentState) -> AgentState:
       "exception_type": "<The primary exception type, e.g., NullPointerException, or null if none is found.>"
     }}
     """
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    import litellm
     response = litellm.completion(
         messages=[{"role": "user", "content": prompt}],
         **resolved_litellm_kwargs(),

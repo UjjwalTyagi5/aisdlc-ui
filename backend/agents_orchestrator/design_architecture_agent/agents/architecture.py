@@ -24,8 +24,6 @@ import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import requests
 from dotenv import load_dotenv
-import litellm
-from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from config.checkpoint import build_checkpointer as _build_checkpointer
@@ -90,6 +88,8 @@ async def _llm_generate_async(prompt: str, system: str = "") -> str:
 
     full_text = []
     try:
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = await litellm.acompletion(
             model=resolved.model,
             custom_llm_provider=resolved.litellm_provider,
@@ -1045,6 +1045,8 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
     cache_key = (alias, model)
     if cache_key in _ORCHESTRATOR_CACHE:
         return _ORCHESTRATOR_CACHE[cache_key]
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,

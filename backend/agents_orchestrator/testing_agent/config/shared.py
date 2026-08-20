@@ -10,7 +10,6 @@ import logging
 import os
 from typing import Optional
 
-from langchain_litellm import ChatLiteLLM
 
 from config import sdlcSettings
 from config.env import AGENTIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
@@ -138,6 +137,8 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
             max_tokens=max_tokens,
         )
         params.update(kwargs)
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        from langchain_litellm import ChatLiteLLM
         return ChatLiteLLM(**params)
 
     # No resolved model in this context. The run resolves + stashes the model up
@@ -159,6 +160,8 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
         max_tokens=max_tokens,
     )
     params.update(kwargs)
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     return ChatLiteLLM(**params)
 
 
