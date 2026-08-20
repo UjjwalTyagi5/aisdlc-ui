@@ -20,7 +20,8 @@ section is the completed reference example — copy its pattern, don't reinvent 
 - [x] Dual-grain `agent_access_overrides` (role-wide OR one named person)
 - [x] `require_agent_access(agent_id)` / `assert_agent_access(...)` (`backend/shared/authz/agent_access.py`) — the enforcement primitive every router below calls
 - [x] Frontend tile states (owner/use/locked/coming soon), `frontend/lib/agent-access.ts`
-- [ ] `POST /runs`'s `active_agents` list validated against the caller's per-agent access (`backend/shared/routers/runs.py`) — **tracked here, in progress**
+- [x] `POST /runs`'s `active_agents` list validated against the caller's per-agent access (`backend/shared/routers/runs.py`) — reuses `assert_agent_access_for_chat`
+- [x] **Bonus fix, found while wiring this up:** `assert_agent_access` alone doesn't check project *membership* — `platform_role_for` resolves a role the caller holds *anywhere in the tenant*, so a Developer on Project A could reach Project B's agents just by naming them. Added `assert_agent_access_for_chat()` (`backend/shared/authz/agent_access.py`) to close this — it's now the one call every agent's WS handler, REST `/chat/` route, and `POST /runs` all use. **If you're hardening one of the 7 agents below, call this, not `assert_agent_access` directly.**
 
 ## What "done" means for an agent below (access-hardening pass only — NOT a full rebuild)
 
@@ -34,17 +35,23 @@ means, for one agent:
 
 1. Its WS route (`/sdlc/agent/<agent>/ws`) resolves identity from the redeemed ticket
    (`claims.get("user_id")`) — already true everywhere; nothing to fix here.
-2. Its WS message handler resolves `project_id` via `resolve_project(...)` before
-   trusting it, then calls `assert_agent_access(..., agent_id="<id>")` on **every**
-   message, not just the first (a session can be reused across projects client-side).
+2. Its WS message handler calls
+   `assert_agent_access_for_chat(db, tenant_id=..., project_id=..., user_id=..., agent_id="<id>")`
+   (from `shared.authz.agent_access`) on **every** message, not just the first (a
+   session can be reused across projects client-side). **Use this helper, not
+   `assert_agent_access` directly** — it also checks the caller is actually a member
+   of the project, which `assert_agent_access` alone does not (see the "bonus fix"
+   note above).
 3. Its REST `POST .../chat/` route stops trusting the `user_id` Form field for identity —
-   pulls `request.state.user_id` / `request.state.tenant_id` instead — resolves
-   `project_id` the same way, and calls `assert_agent_access` before doing any work.
-   `user_id` stays in the form signature for wire compatibility but is documented as
-   unused for auth (see Security's `chat()` for the exact comment to mirror).
+   pulls `request.state.user_id` / `request.state.tenant_id` instead — and calls the
+   same `assert_agent_access_for_chat` helper before doing any work. `user_id` stays
+   in the form signature for wire compatibility but is documented as unused for auth
+   (see Security's `chat()` for the exact comment to mirror).
 4. A quick live/test check that an org_admin (holds `admin:*`, zero default agent access)
    gets denied, and the agent's owning role gets through — mirroring
-   `backend/tests/test_security_agent_chat_access.py`.
+   `backend/tests/test_security_agent_chat_access.py`. Also worth one cross-project
+   case (role held on a different project must still be denied here) — see that same
+   file's `test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_security_agent`.
 
 Reference implementation, already merged: `backend/agents_orchestrator/security_agent/security_agent_api.py`
 (`_process_ws_message`, `chat()`) + `backend/tests/test_security_agent_chat_access.py`.
@@ -87,11 +94,13 @@ File: `backend/agents_orchestrator/code_review_agent/code_review_agent_api.py`
 
 ### 5. Security — owner role: Security Engineer — `agent_id="security"` — **DONE (reference implementation)**
 File: `backend/agents_orchestrator/security_agent/security_agent_api.py`
-- [x] WS handler: `assert_agent_access` added, checked on every message
+- [x] WS handler: `assert_agent_access_for_chat` added, checked on every message
 - [x] REST `/chat/`: `request.state.user_id` used, `user_id` Form field no longer trusted
-- [x] Project-membership check added on both routes (404 if caller isn't on the project)
+- [x] Project-membership check added on both routes (404 if caller isn't on the project) —
+      via `assert_agent_access_for_chat`'s `visible_project_ids` check
 - [x] `security_workspace_router` gated with `Depends(require_agent_access("security"))`
-- [x] Tests: `backend/tests/test_security_agent_chat_access.py`, `backend/tests/test_security_workspace_agent_access.py`
+- [x] Tests: `backend/tests/test_security_agent_chat_access.py` (incl. the cross-project
+      leakage case), `backend/tests/test_security_workspace_agent_access.py`
 - [x] Frontend `builtAgents` includes `"security"` — the one live, clickable tile today
 - Landed in: PR #12, PR #13 (both merged/open against `main`)
 
@@ -104,7 +113,11 @@ File: `backend/agents_orchestrator/testing_agent/testing_agent_api.py`
 - Notes:
 
 ### 7. Deployment — owner role: DevOps Engineer — `agent_id="deployment"`
-File: `backend/agents_orchestrator/deployment_agent/deployment_agent_api.py`
+File: `backend/agents_orchestrator/deployment_agent/deployment_standalone_api.py` —
+**not** `deployment_agent_api.py` in the same folder, which is a legacy evaluator
+mounted at `/sdlc/agent/deployment_orchestrator` and unused by the frontend's chat
+(`app/api/chat/route.ts`'s `agentWsPath` maps `"deployment"` to `/sdlc/agent/deployment/ws`,
+which is `deployment_standalone_router`).
 - [ ] WS handler: `assert_agent_access` added
 - [ ] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access` added
 - [ ] Test added/passing
