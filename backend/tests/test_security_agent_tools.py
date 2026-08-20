@@ -9,6 +9,7 @@ decorated individually with `@pytest.mark.asyncio`.
 """
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 
@@ -54,3 +55,50 @@ def test_resolve_model_falls_back_to_raw_chat_anthropic_when_byok_raises():
 
     assert result is fake_bound_model
     mock_chat_anthropic.assert_called_once()
+
+
+def _fake_semgrep_completed_process(stdout_obj):
+    proc = MagicMock()
+    proc.returncode = 0
+    proc.stdout = json.dumps(stdout_obj)
+    proc.stderr = ""
+    return proc
+
+
+def test_semgrep_sast_tool_preserves_cwe_tags_alongside_owasp():
+    from agents_orchestrator.security_agent.tools import semgrep_sast_tool
+
+    raw_semgrep_output = {
+        "results": [
+            {
+                "check_id": "python.lang.security.audit.subprocess-shell-true",
+                "path": "vulnerable.py",
+                "start": {"line": 4},
+                "end": {"line": 4},
+                "extra": {
+                    "severity": "ERROR",
+                    "message": "shell=True is dangerous",
+                    "metadata": {
+                        "owasp": ["A03:2021"],
+                        "cwe": ["CWE-78: OS Command Injection"],
+                    },
+                },
+            }
+        ]
+    }
+
+    with patch.object(semgrep_sast_tool, "_SEMGREP_BIN", "/fake/semgrep"), patch(
+        "pathlib.Path.exists", return_value=True
+    ), patch(
+        "subprocess.run",
+        return_value=_fake_semgrep_completed_process(raw_semgrep_output),
+    ):
+        result_json = semgrep_sast_tool.run_semgrep_sast.invoke(
+            {"target_path": "/fake/target"}
+        )
+
+    result = json.loads(result_json)
+    assert result["status"] == "ok"
+    finding = result["findings"][0]
+    assert finding["owasp_category"] == ["A03:2021"]
+    assert finding["cwe"] == ["CWE-78: OS Command Injection"]
