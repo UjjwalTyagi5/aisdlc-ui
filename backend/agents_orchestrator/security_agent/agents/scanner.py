@@ -50,10 +50,16 @@ _tools = [
 ]
 
 
-async def agent_node(state: AgentState) -> dict:
-    """Invoke the LLM with the current messages + system prompt."""
-    from langchain_core.messages import SystemMessage
+def _resolve_model(state: AgentState):
+    """Resolve the LLM model for this invocation — tries the caller's in-app
+    BYOK-configured provider first, falls back to the raw .env key on any failure
+    (no provider configured, provider disabled, etc). Mirrors
+    code_review_agent/agents/reviewer.py's _resolve_model exactly, so Security gains
+    BYOK support the same way Code Review already has it."""
     from config.env import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+
+    model_id = state.get("model_id") or ANTHROPIC_MODEL
+    offering_id = state.get("offering_id")
 
     # Dedup by tool name (native wins) — the model API rejects duplicate names,
     # which happens when two BYO MCP servers expose a like-named tool.
@@ -66,14 +72,31 @@ async def agent_node(state: AgentState) -> dict:
         seen.add(name)
         tools.append(t)
 
-    from langchain_anthropic import ChatAnthropic
-    model = ChatAnthropic(
-        model=state.get("model_id") or ANTHROPIC_MODEL,
-        api_key=ANTHROPIC_API_KEY,
-        max_tokens=8192,
-    ).bind_tools(tools)
-
     # Per-workspace agent-profile override (contextvar), falls back to the baked prompt.
+    base = get_prompt_override("security") or SECURITY_SYSTEM_PROMPT
+
+    try:
+        from shared.services.model_resolver import resolve_chat_model
+        return resolve_chat_model(
+            model_id=model_id,
+            offering_id=offering_id,
+            tools=tools,
+            system_prompt=base,
+        )
+    except Exception:
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model=ANTHROPIC_MODEL,
+            api_key=ANTHROPIC_API_KEY,
+            max_tokens=8192,
+        ).bind_tools(tools)
+
+
+async def agent_node(state: AgentState) -> dict:
+    """Invoke the LLM with the current messages + system prompt."""
+    from langchain_core.messages import SystemMessage
+
+    model = _resolve_model(state)
     base = get_prompt_override("security") or SECURITY_SYSTEM_PROMPT
     messages = [SystemMessage(content=base + MCP_TOOLS_PROMPT_NOTE)] + list(state["messages"])
     response = await model.ainvoke(messages)
