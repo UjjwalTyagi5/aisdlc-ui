@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def test_resolve_model_tries_byok_first_and_returns_it_on_success():
     from agents_orchestrator.security_agent.agents.scanner import _resolve_model
@@ -102,3 +104,68 @@ def test_semgrep_sast_tool_preserves_cwe_tags_alongside_owasp():
     finding = result["findings"][0]
     assert finding["owasp_category"] == ["A03:2021"]
     assert finding["cwe"] == ["CWE-78: OS Command Injection"]
+
+
+import pathlib as _pathlib
+
+
+@pytest.mark.asyncio
+async def test_generate_sbom_cross_references_cached_trivy_findings():
+    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
+    from agents_orchestrator.security_agent.tools import security_tools
+    from config.ws_helper import set_session_id
+
+    session_id = "sbom-cross-ref-test"
+    clear_session(session_id)
+    set_session_id(session_id)
+    s = get_session(session_id)
+    s.last_trivy_findings = [
+        {"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"},
+        {"cve": "CVE-2019-1010083", "package": "flask", "installed_version": "0.12.2"},
+    ]
+
+    with patch.object(
+        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
+    ), patch.object(
+        security_tools.pathlib.Path, "exists", return_value=True
+    ), patch.object(
+        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
+    ), patch.object(
+        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
+    ):
+        result_json = await security_tools.generate_sbom.ainvoke({})
+
+    result = json.loads(result_json)
+    flask_component = next(c for c in result["components"] if c["name"] == "flask")
+    assert flask_component["vulnerabilities"] == 2
+
+    clear_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_generate_sbom_reports_zero_vulnerabilities_when_no_trivy_scan_ran_yet():
+    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
+    from agents_orchestrator.security_agent.tools import security_tools
+    from config.ws_helper import set_session_id
+
+    session_id = "sbom-cross-ref-empty-test"
+    clear_session(session_id)
+    set_session_id(session_id)
+    # No last_trivy_findings set -- get_session() default is [].
+
+    with patch.object(
+        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
+    ), patch.object(
+        security_tools.pathlib.Path, "exists", return_value=True
+    ), patch.object(
+        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
+    ), patch.object(
+        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
+    ):
+        result_json = await security_tools.generate_sbom.ainvoke({})
+
+    result = json.loads(result_json)
+    flask_component = next(c for c in result["components"] if c["name"] == "flask")
+    assert flask_component["vulnerabilities"] == 0
+
+    clear_session(session_id)

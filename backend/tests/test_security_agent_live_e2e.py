@@ -91,18 +91,25 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
     s.tenant_id = "test-tenant"
 
     script = [
-        # Turn 1: the "model" runs all four real scanners in one turn (LangGraph's
-        # ToolNode executes parallel tool_calls from a single AIMessage).
+        # Turn 1: scan_dependencies alone, split out from the other three tool calls
+        # so its last_trivy_findings cache write is guaranteed to land before
+        # generate_sbom (turn 2) reads it -- ToolNode may run same-turn tool_calls
+        # concurrently, so this ordering can't be left to chance.
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "scan_dependencies", "args": {}, "id": "call_1"}],
+        ),
+        # Turn 2: the remaining three scanners, including generate_sbom, which now
+        # cross-references turn 1's cached Trivy findings.
         AIMessage(
             content="",
             tool_calls=[
-                {"name": "scan_dependencies", "args": {}, "id": "call_1"},
                 {"name": "scan_code", "args": {}, "id": "call_2"},
                 {"name": "scan_secrets", "args": {}, "id": "call_3"},
                 {"name": "generate_sbom", "args": {}, "id": "call_4"},
             ],
         ),
-        # Turn 2: having seen real findings from all four, the "model" submits the
+        # Turn 3: having seen real findings from all four, the "model" submits the
         # structured review -- exercises submit_security_review's real parsing,
         # Pydantic model construction, and artifact persistence.
         AIMessage(
@@ -141,7 +148,7 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
                 "id": "call_5",
             }],
         ),
-        # Turn 3: no more tool calls -- route_fn sends this straight to END.
+        # Turn 4: no more tool calls -- route_fn sends this straight to END.
         AIMessage(content="Security scan complete: 3 findings, signoff=fail."),
     ]
     model = _ScriptedModel(script)
@@ -157,8 +164,8 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
             config={"configurable": {"thread_id": "sec-live-e2e-test"}},
         )
 
-    # The model was actually driven through all 3 scripted turns.
-    assert model.calls == 3
+    # The model was actually driven through all 4 scripted turns.
+    assert model.calls == 4
 
     def _tool_result(name: str) -> dict:
         msgs = [m for m in result["messages"] if getattr(m, "name", None) == name]
@@ -183,7 +190,8 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
 
     # Real SBOM builder parsed the real requirements.txt.
     sbom_out = _tool_result("generate_sbom")
-    assert any(c["name"] == "flask" and c["version"] == "0.12.2" for c in sbom_out["components"])
+    flask_component = next(c for c in sbom_out["components"] if c["name"] == "flask" and c["version"] == "0.12.2")
+    assert flask_component["vulnerabilities"] >= 1  # cross-referenced from turn 1's real Trivy run
 
     # And submit_security_review actually ran, producing a real confirmation.
     submit_msgs = [m for m in result["messages"] if getattr(m, "name", None) == "submit_security_review"]

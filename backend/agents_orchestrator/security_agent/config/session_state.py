@@ -28,6 +28,7 @@ class ScanSessionState:
     head_sha: str = ""
     target_bound: bool = False
     last_artifact: Optional[dict] = None
+    last_trivy_findings: list = field(default_factory=list)
     system_injected: bool = False
     mcp_tools: list = field(default_factory=list)
     mcp_loaded: bool = False
