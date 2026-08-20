@@ -88,12 +88,61 @@ File: `backend/agents_orchestrator/development_agent/development_agent_api.py`
 - [x] Test: `backend/tests/test_development_agent_chat_access.py` (3 passed)
 - Notes: no `project_id` Form field here either — project id only exists inside the `pipeline_context` JSON field, reused via the existing `_lf_pid` extraction rather than adding a new field.
 
-### 4. Code Review — owner role: Architect — `agent_id="code_review"` — **access-hardening DONE**
+### 4. Code Review — owner role: Architect — `agent_id="code_review"` — **access-hardening DONE; real-logic verification DONE (no builtAgents flip yet — see below)**
 File: `backend/agents_orchestrator/code_review_agent/code_review_agent_api.py`
 - [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
 - [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
 - [x] Test: `backend/tests/test_code_review_agent_chat_access.py` (3 passed)
 - Notes: this route has no `project_id` Form field either — the review target is bound out-of-band by a separate `POST /review/prepare` call into an in-memory session; the REST check reads the session's already-bound `project_id` instead.
+
+**Real-logic verification (2026-08-20), Part 5 steps 3/6, done without a live LLM key**
+(no working provider is configured; the `.env` `ANTHROPIC_API_KEY` fallback is dead — 401).
+Result: **this agent's code was NOT a stub** — contrary to the design doc's blanket
+"assume broken" default, `agents_orchestrator/code_review_agent/` is a real, ~1,100-line
+LangGraph implementation (graph, 7 tools, prompt, typed Pydantic artifact models),
+already following the exact required pattern (§20.2). What was actually missing was
+*proof* it works, not the code itself:
+- The 9 pre-existing tests (`test_code_review_agent_graph.py` etc.) are import-smoke
+  and isolated-unit tests only — none of them ever ran the actual agent loop.
+- **New**: `backend/tests/test_code_review_agent_live_e2e.py` — drives the real compiled
+  `reviewer.app` graph with only the model's `.ainvoke()` response scripted (3 canned
+  turns); every tool call is the real implementation, including a genuine `semgrep`
+  subprocess run against a fixture file with two real, known vulnerabilities (shell=True
+  subprocess, MD5 password hash) generated into a fresh temp dir at test time. Proves the
+  agent→tools→agent→END loop, real tool dispatch, real Semgrep execution, and real
+  `submit_code_review` parsing/persistence all work together. **Not proven: the model's
+  own judgment** (which findings it decides matter, review quality) — that needs a real
+  LLM call, which needs a working provider key (see Open item below).
+- `read_repo_file` / `search_repo` spot-checked directly (real file reads, real repo
+  search, and the path-traversal guard actually blocks a `../../../.env` escape attempt).
+- `run_semgrep_scan` verified with a real subprocess call finding real issues — **gotcha
+  found**: Semgrep's `--config auto` silently skips any path it default-ignores
+  (patterns including `test`/`fixtures` in the path name) *and* any file not tracked by
+  git when run inside a git repo — a scan against an untracked/ignored-looking path
+  returns `"status": "ok", "findings": []]`, not an error. Not a bug in our tool (a real
+  cloned PR/branch always has its files committed), but worth knowing if you're
+  hand-testing this agent.
+- **Semgrep CLI is not declared as a project dependency** — `uv add semgrep` resolves a
+  broken wheel on Windows (a `semgrep-core` binary with no `.exe` extension and missing
+  DLLs; fails with `FileNotFoundError` on any real scan). Working install command:
+  `uv pip install semgrep==1.173.0` (plain `uv pip install`, not `uv add` — the stricter
+  `uv add` resolver also refuses this exact version over an unrelated `click` pin
+  conflict). This is intentionally **not** added to `pyproject.toml`/`uv.lock` yet — do
+  that properly (probably by relaxing the `click==8.2.1` exact pin project-wide, which
+  needs its own check for what else depends on that exact pin) before this ships, rather
+  than forcing a resolver workaround into the lockfile.
+- **`POST /review/prepare` needs a live Azure DevOps connector** (clone URL + PAT) — the
+  actual "click Select target, pull the repo" flow the frontend exposes cannot be
+  exercised without one configured on a real project. Not tested end-to-end through the
+  UI for this reason; the live_e2e test above seeds the equivalent session state directly
+  instead, bypassing the ADO dependency.
+
+**Open items before `builtAgents` can include `"code_review"`:**
+1. A working LLM provider key (BYOK in-app, or a valid `.env` fallback) to prove the
+   model's actual review judgment, not just the plumbing around it.
+2. A real ADO (or other connector) end-to-end pass through the actual "Select target" UI
+   button, once a connector is available on a test project.
+3. Declaring `semgrep` properly in `pyproject.toml` (see gotcha above).
 
 ### 5. Security — owner role: Security Engineer — `agent_id="security"` — **DONE (reference implementation)**
 File: `backend/agents_orchestrator/security_agent/security_agent_api.py`
