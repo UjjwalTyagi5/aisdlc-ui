@@ -22,10 +22,11 @@ from typing import Any, Dict, List
 
 import aiofiles
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import uuid4
 import contextvars
 
@@ -41,6 +42,8 @@ from config.connectors.context import get_connector
 from config.connectors.base import ConnectorNotAvailableError
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import set_session_id, set_user_id, set_provider_kind, get_provider_kind
+from shared.authz.agent_access import assert_agent_access_for_chat
+from shared.db import get_db_session, get_db_session_for_tenant
 from shared.services.agent_run import agent_run_scope
 from shared.services.conversation_service import persist_turn
 from shared.errors import classify_error
@@ -348,6 +351,22 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     conversation_context = message_data.get("conversation_context", "")
     task_intent = message_data.get("task_intent", "")
     pipeline_context = message_data.get("pipeline_context")
+
+    # Gate every message, not just the first — a session can be reused across
+    # projects on the client side, and the ticket only proves who the caller is,
+    # not which project they may act on (nor, on its own, that they're even a
+    # member of it — see assert_agent_access_for_chat's docstring).
+    _access_project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
+    async with get_db_session_for_tenant(tenant_id) as _access_db:
+        try:
+            await assert_agent_access_for_chat(
+                _access_db, tenant_id=tenant_id, project_id=_access_project_id,
+                user_id=user_id, agent_id="requirements",
+            )
+        except HTTPException as exc:
+            await manager.send_agent_response("Error Agent", str(exc.detail), session_id)
+            return
+
     final_message = build_agent_input_text(
         conversation_context=conversation_context,
         task_intent=task_intent,
@@ -548,26 +567,24 @@ async def _handle_session_cleanup_ws(message_data: dict, websocket: WebSocket) -
 
 @requirement_router_orchestrator.post("/chat/")
 async def chat(
+    request: Request,
     conversation_context: str = Form(None),
     task_intent: str = Form(None),
     pipeline_context: str = Form(None),
     provider_kind: str = Form(None),
     session_id: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
     tenant_id: str = Form(None),
     model_id: str = Form(None),
     uploaded_files: List[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """REST endpoint — invokes Requirements Agent and persists typed artifacts."""
-    set_websocket_context(manager, session_id)
-    set_session_id(session_id)
-    set_user_id(user_id)
-    resolved_provider_kind = provider_kind or _session_provider_kinds.get(session_id) or "azure_devops"
-    _session_provider_kinds[session_id] = resolved_provider_kind
-    set_provider_kind(resolved_provider_kind)
-
-    input_directory = f"{esett.FILES}/{user_id}/requirements_agent/{session_id}/input"
-    file_names: List[str] = []
+    # Identity comes from the verified session, never from the form body — the field
+    # above used to be trusted directly, which let any authenticated caller claim to
+    # be anyone (see multi-track-agent-access-design.md's "assume broken" framing).
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
 
     _lf_pid = None
     if pipeline_context:
@@ -577,10 +594,33 @@ async def chat(
             _lf_pid = _pc.get("project_id") if isinstance(_pc, dict) else None
         except Exception:
             _lf_pid = None
-    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id or "")
+
+    # `_lf_pid` is client-supplied (parsed out of the pipeline_context Form field) --
+    # resolve it to a real project the caller is actually a member of, and check their
+    # role's reach to this agent on THIS project specifically, before trusting it for
+    # anything. See assert_agent_access_for_chat's docstring for why a plain
+    # resolve_project + assert_agent_access pair isn't enough (a role held on a
+    # different project would otherwise be accepted here too). The WS route
+    # (`_process_user_message_ws`, above) calls the same helper.
+    _lf_pid = await assert_agent_access_for_chat(
+        db, tenant_id=str(real_tenant_id), project_id=_lf_pid,
+        user_id=str(real_user_id), agent_id="requirements",
+    )
+
+    set_websocket_context(manager, session_id)
+    set_session_id(session_id)
+    set_user_id(real_user_id)
+    resolved_provider_kind = provider_kind or _session_provider_kinds.get(session_id) or "azure_devops"
+    _session_provider_kinds[session_id] = resolved_provider_kind
+    set_provider_kind(resolved_provider_kind)
+
+    input_directory = f"{esett.FILES}/{real_user_id}/requirements_agent/{session_id}/input"
+    file_names: List[str] = []
+
+    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
     from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
-    _lf_ws_rest = await workspace_id_for_project(tenant_id or "", _lf_pid)
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id or "", user_id=user_id, model=model_id, agent_type="requirements", project_id=_lf_pid, workspace_id=_lf_ws_rest)
+    _lf_ws_rest = await workspace_id_for_project(real_tenant_id or "", _lf_pid)
+    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=real_tenant_id or "", user_id=real_user_id, model=model_id, agent_type="requirements", project_id=_lf_pid, workspace_id=_lf_ws_rest)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}
     os.makedirs(input_directory, exist_ok=True)
 
@@ -630,7 +670,7 @@ async def chat(
             except Exception:
                 _pc_pid = None
         sys_content, _ = await resolve_agent_turn(
-            "requirements", sys_content, tenant_id or None, _pc_pid
+            "requirements", sys_content, real_tenant_id or None, _pc_pid
         )
         state: Dict[str, Any] = {"messages": [SystemMessage(content=sys_content)] + incoming_messages}
         _initialized_sessions.add(session_id)
@@ -638,7 +678,7 @@ async def chat(
         state = {"messages": incoming_messages}
     # The agent node resolves the org's model from state["tenant_id"]; without it
     # resolution fails with NoModelConfiguredError even when a model is connected.
-    state["tenant_id"] = tenant_id or ""
+    state["tenant_id"] = real_tenant_id or ""
     if model_id:
         state["model_id"] = model_id
     if file_names:
@@ -655,19 +695,13 @@ async def chat(
     # upstream context (no-op for requirements — no input_artifacts) and clears the
     # connector in finally (REQ-M3-10).
     final_state = None
-    # REST pipeline_context is a JSON string (Form field) — parse it to read project_id.
-    _project_id = None
-    if pipeline_context:
-        try:
-            import json as _json  # noqa: PLC0415
-            _pc = _json.loads(pipeline_context) if isinstance(pipeline_context, str) else pipeline_context
-            _project_id = _pc.get("project_id") if isinstance(_pc, dict) else None
-        except Exception:
-            _project_id = None
-    _turn_skills = await resolve_agent_skills("requirements", tenant_id or None, _project_id)
+    # `_lf_pid` was already resolved (UUID string, not the raw client-supplied value)
+    # and access-checked above by assert_agent_access_for_chat — reuse it rather than
+    # re-parsing pipeline_context a third time.
+    _turn_skills = await resolve_agent_skills("requirements", real_tenant_id or None, _lf_pid)
     async with agent_run_scope(
-        agent_id="requirements", tenant_id=tenant_id or None, session_id=session_id,
-        project_id=_project_id,
+        agent_id="requirements", tenant_id=real_tenant_id or None, session_id=session_id,
+        project_id=_lf_pid,
     ) as scope, skill_context_scope("requirements", _turn_skills):
         if scope.context_block:
             state["messages"].append(HumanMessage(content=scope.context_block))
@@ -686,11 +720,11 @@ async def chat(
         if requirements_payload is not None:
             await _persist_session_artifacts(
                 session_id=session_id,
-                user_id=user_id,
+                user_id=real_user_id,
                 requirements_payload=requirements_payload,
                 handoff_event=None,
                 current_stage="design",
-                tenant_id=tenant_id or None,
+                tenant_id=real_tenant_id or None,
             )
 
     # ── Build response text ───────────────────────────────────────────────────

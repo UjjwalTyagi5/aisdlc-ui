@@ -46,6 +46,7 @@ from agents_orchestrator.development_agent.config.session_state import (
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
 from shared.audit.service import audit_service
+from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.services.conversation_service import persist_turn
 from shared.services.standalone_prompt import resolve_agent_turn, resolve_agent_skills
 from shared.services.skill_runtime import skill_context_scope
@@ -351,6 +352,16 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         pipeline_context = message_data.get("pipeline_context")
         project_id = _project_id_from_message(message_data)
 
+        # Gate every message, not just the first — a session can be reused across
+        # projects on the client side, and the ticket only proves who the caller is,
+        # not which project they may act on (nor that they're even a member of it —
+        # see assert_agent_access_for_chat's docstring).
+        async with get_db_session_for_tenant(tenant_id) as _access_db:
+            project_id = await assert_agent_access_for_chat(
+                _access_db, tenant_id=tenant_id, project_id=project_id,
+                user_id=user_id, agent_id="development",
+            )
+
         s = get_session(session_id)
         first_message = not s.system_injected
         _incoming_text = " ".join(
@@ -499,17 +510,23 @@ async def _handle_cleanup_ws(message_data: dict, websocket: WebSocket):
 
 @development_router_orchestrator.post("/chat/")
 async def chat(
+    request: Request,
     conversation_context: str = Form(None),
     task_intent: str = Form(None),
     pipeline_context: str = Form(None),
     provider_kind: str = Form(None),
     session_id: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
     uploaded_files: List[UploadFile] = File(None),
 ):
+    # Identity comes from the verified session, never from the form body — see
+    # assert_agent_access_for_chat's docstring / Security's chat() for why.
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
+
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
-    set_user_id(user_id)
+    set_user_id(real_user_id)
     set_provider_kind(provider_kind or "azure_devops")
     set_agent_folder("orchestrator")
 
@@ -523,6 +540,17 @@ async def chat(
 
     _lf_pc = parse_pipeline_context(pipeline_context or {}) or {}
     _lf_pid = _lf_pc.get("project_id") if isinstance(_lf_pc, dict) else None
+
+    # project_id here comes from pipeline_context (client-supplied) — resolve it to a
+    # real project the caller is actually a member of, and check their role's reach to
+    # THIS agent on THIS project, before doing any work. See
+    # assert_agent_access_for_chat's docstring / Security's chat() for why a plain
+    # resolve_project + assert_agent_access pair isn't enough.
+    async with get_db_session_for_tenant(str(real_tenant_id)) as _access_db:
+        _lf_pid = await assert_agent_access_for_chat(
+            _access_db, tenant_id=str(real_tenant_id), project_id=_lf_pid,
+            user_id=str(real_user_id), agent_id="development",
+        )
     _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id="")
     _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, agent_type="development", project_id=_lf_pid)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 160, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}

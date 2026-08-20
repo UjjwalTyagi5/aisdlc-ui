@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.can_perform import can_perform
 from shared.authz.dependency import require_any_permission, require_permission
 from shared.authz.workspace import active_workspace_for_request
+from shared.db import get_db_session
 from shared.services import model_config as mc
 from shared.services import model_grants as mg
 from shared.services.model_catalog import list_providers as catalog_providers
@@ -37,6 +40,32 @@ def _user_id(request: Request) -> str:
     return getattr(request.state, "user_id", "") or ""
 
 
+async def _require_scoped(
+    db: AsyncSession, request: Request, *, permission: str, resource_kind: str, resource_id: str,
+    deny_status: int = 403,
+) -> None:
+    """Resource-scoped check layered on top of the router's flat permission floor.
+
+    Closes design-doc gap #1 (docs/superpowers/specs/2026-08-11-model-gateway-bu-cascade-design.md
+    §8.1): the router-level require_permission only asks "does this caller hold the
+    permission ANYWHERE in the tenant" — every BU/Project Admin does. This asks the
+    resource-aware question via can_perform (now that scoped RBAC exists), so a BU
+    Admin can no longer edit a business unit or project that isn't theirs. An
+    Organization Admin's organization-scope role binding still passes, since
+    can_perform treats an ancestor scope as reaching every resource beneath it.
+
+    deny_status defaults to 403 (BU governance routes — workspace ids aren't treated
+    as sensitive elsewhere in this router). Project routes pass 404 instead, matching
+    shared/routers/projects.py:get_project's own precedent: a project the caller may
+    not act on must not be confirmed to exist via a differently-coded response.
+    """
+    if not await can_perform(
+        db, user_id=_user_id(request), permission=permission,
+        tenant_id=_tenant_id(request), resource_kind=resource_kind, resource_id=resource_id,
+    ):
+        raise HTTPException(status_code=deny_status, detail="Forbidden" if deny_status == 403 else "Not found")
+
+
 async def _active_ws(request: Request) -> str | None:
     """The active workspace for model scoping; None (org-wide) if unresolved."""
     try:
@@ -62,6 +91,7 @@ def _to_camel(d: dict, *keys: tuple[str, str]) -> dict:
 
 
 _CRED_KEYS = (("credential_id", "credentialId"), ("credential_name", "credentialName"))
+_BU_ALLOWED_KEYS = _CRED_KEYS + (("allow_project_key", "allowProjectKey"),)
 
 
 # ---- schemas (no secret fields) ----
@@ -93,6 +123,12 @@ class ProviderOut(BaseModel):
     # frontend/lib/schemas/model.ts's ModelProvider — camelCase names match it directly
     # since this is an actual Pydantic response_model, not a bare dict route).
     workspaceId: str | None = None
+    # set = this exact project's own key (PRD §371/§1640) — distinct from workspaceId
+    # scoping, which is the shared BU-level connection.
+    projectId: str | None = None
+    # Org-level guardrail (PRD §376/§563: "guardrails such as max cost per call").
+    # Distinct from OfferingOut.cost_limit_usd, which is the existing monthly budget.
+    max_cost_per_call_usd: float | None = None
     # Synthetic: whether a secret is actually stored (secret_ref is not None), not a
     # real column. A provider can be onboarded keyless (spec §2.3) — a BU/project
     # supplies its own key later.
@@ -111,6 +147,8 @@ def _to_provider_out(d: dict) -> "ProviderOut":
         last_verified_at=d["last_verified_at"], created_at=d["created_at"],
         offerings=[OfferingOut(**o) for o in d["offerings"]],
         workspaceId=d.get("workspace_id"),
+        projectId=d.get("project_id"),
+        max_cost_per_call_usd=d.get("max_cost_per_call_usd"),
         hasKey=d.get("has_key", True),
         approvalStatus=d.get("approval_status") or "active",
         approvalDecidedBy=d.get("approval_decided_by"),
@@ -148,11 +186,16 @@ class CreateProviderIn(BaseModel):
     workspace_id: str | None = Field(default=None, alias="workspaceId")
     visibility: str | None = None
     business_unit_ids: list[str] = Field(default_factory=list, alias="businessUnitIds")
+    max_cost_per_call_usd: float | None = Field(default=None, ge=0, alias="maxCostPerCallUsd")
 
 
 class UpdateProviderIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     display_name: str | None = Field(default=None, max_length=255)
     enabled_models: list[str] | None = None
+    max_cost_per_call_usd: float | None = Field(default=None, ge=0, alias="maxCostPerCallUsd")
+    clear_max_cost_per_call_usd: bool = Field(default=False, alias="clearMaxCostPerCallUsd")
 
 
 class SetDefaultIn(BaseModel):
@@ -179,6 +222,9 @@ class AllowEntryIn(BaseModel):
     provider: str
     model_id: str
     credential_id: str | None = Field(default=None, alias="credentialId")
+    # BU-allowed entries only (ignored on project-selection entries): does this BU let
+    # its projects bring their own key for this model? PRD §371/§1640 — off by default.
+    allow_project_key: bool = Field(default=False, alias="allowProjectKey")
 
 
 class SetOrgGrantsIn(BaseModel):
@@ -187,6 +233,21 @@ class SetOrgGrantsIn(BaseModel):
 
 class SetBuGrantsIn(BaseModel):
     entries: list[AllowEntryIn] = Field(default_factory=list)
+
+
+class CreateProjectProviderIn(BaseModel):
+    """A Project Admin bringing their own key (PRD §371/§1640) — a full connection
+    like CreateProviderIn, but always scoped to exactly one project and never
+    carrying visibility/business_unit_ids (a project key reaches only that project)."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: str = Field(alias="projectId")
+    provider: str = Field(min_length=1, max_length=64, pattern="^[a-z0-9][a-z0-9_-]*$")
+    display_name: str = Field(min_length=1, max_length=255, alias="displayName")
+    api_key: str | None = Field(default=None, max_length=512, alias="apiKey")
+    api_base: str | None = Field(default=None, max_length=512, alias="apiBase")
+    models: list[ModelIn] = Field(default_factory=list)
+    enabled_models: list[str] = Field(default_factory=list, alias="enabledModels")
 
 
 class SetProjectSelectionIn(BaseModel):
@@ -222,6 +283,7 @@ async def create_provider_route(request: Request, body: CreateProviderIn) -> Pro
             _tenant_id(request), provider=body.provider, display_name=body.display_name,
             api_key=body.api_key, models=models, api_base=body.api_base,
             created_by=_user_id(request), workspace_id=body.workspace_id,
+            max_cost_per_call_usd=body.max_cost_per_call_usd,
         )
     except mc.DuplicateProviderNameError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -255,10 +317,16 @@ async def verify_provider_route(request: Request, provider_id: str) -> dict:
 
 @model_router.patch("/providers/{provider_id}", response_model=ProviderOut)
 async def update_provider_route(request: Request, provider_id: str, body: UpdateProviderIn) -> ProviderOut:
+    _cost_kwargs = {}
+    if body.clear_max_cost_per_call_usd:
+        _cost_kwargs["max_cost_per_call_usd"] = None
+    elif body.max_cost_per_call_usd is not None:
+        _cost_kwargs["max_cost_per_call_usd"] = body.max_cost_per_call_usd
     try:
         d = await mc.update_provider(
             _tenant_id(request), provider_id,
             display_name=body.display_name, enabled_models=body.enabled_models,
+            **_cost_kwargs,
         )
     except mc.ProviderNotFoundError:
         raise HTTPException(status_code=404, detail="Provider not found")
@@ -323,20 +391,31 @@ async def set_org_grants_route(request: Request, body: SetOrgGrantsIn) -> list[d
 
 
 @model_router.get("/allowed/bu")
-async def get_bu_allowed_route(request: Request, workspaceId: str) -> list[dict]:
+async def get_bu_allowed_route(
+    request: Request, workspaceId: str, db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    await _require_scoped(
+        db, request, permission="model:manage", resource_kind="business_unit", resource_id=workspaceId,
+    )
     entries = await mg.get_bu_allowed(_tenant_id(request), workspaceId)
-    return [_to_camel(e, *_CRED_KEYS) for e in entries]
+    return [_to_camel(e, *_BU_ALLOWED_KEYS) for e in entries]
 
 
 @model_router.put("/allowed/bu")
-async def set_bu_grants_route(request: Request, workspaceId: str, body: SetBuGrantsIn) -> list[dict]:
+async def set_bu_grants_route(
+    request: Request, workspaceId: str, body: SetBuGrantsIn, db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    await _require_scoped(
+        db, request, permission="model:manage", resource_kind="business_unit", resource_id=workspaceId,
+    )
     try:
         entries = await mg.set_bu_grants(
             _tenant_id(request), workspaceId, [e.model_dump() for e in body.entries],
+            updated_by=_user_id(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    return [_to_camel(e, *_CRED_KEYS) for e in entries]
+    return [_to_camel(e, *_BU_ALLOWED_KEYS) for e in entries]
 
 
 @model_availability_router.get("/availability")
@@ -360,7 +439,14 @@ def _camel_selection(sel: dict) -> dict:
 
 
 @model_options_router.get("/allowed/project")
-async def get_project_selection_route(request: Request, projectId: str) -> dict:
+async def get_project_selection_route(
+    request: Request, projectId: str, db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    # run:create, not model:manage — this router's floor permission (see design doc §4).
+    await _require_scoped(
+        db, request, permission="run:create", resource_kind="project", resource_id=projectId,
+        deny_status=404,
+    )
     try:
         selection = await mg.get_project_selection(_tenant_id(request), projectId)
     except ValueError as exc:
@@ -369,7 +455,13 @@ async def get_project_selection_route(request: Request, projectId: str) -> dict:
 
 
 @model_options_router.put("/allowed/project")
-async def set_project_selection_route(request: Request, projectId: str, body: SetProjectSelectionIn) -> dict:
+async def set_project_selection_route(
+    request: Request, projectId: str, body: SetProjectSelectionIn, db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await _require_scoped(
+        db, request, permission="run:create", resource_kind="project", resource_id=projectId,
+        deny_status=404,
+    )
     try:
         selection = await mg.set_project_selection(
             _tenant_id(request), projectId,
@@ -380,3 +472,77 @@ async def set_project_selection_route(request: Request, projectId: str, body: Se
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return _camel_selection(selection)
+
+
+# ---------------------------------------------------------------------------
+# Project-level BYOK (PRD §371/§1640/§1692/§1698): a Project Admin's own key,
+# reachable only when their Business Unit has explicitly opted a (provider,
+# model_id) into project-level keys via allow_project_key. run:create-gated,
+# matching /model/allowed/project — a Project Admin doesn't hold model:manage.
+# ---------------------------------------------------------------------------
+
+@model_options_router.post("/project-providers", response_model=ProviderOut, status_code=201)
+async def create_project_provider_route(request: Request, body: CreateProjectProviderIn, db: AsyncSession = Depends(get_db_session)) -> ProviderOut:
+    await _require_scoped(
+        db, request, permission="run:create", resource_kind="project", resource_id=body.project_id,
+        deny_status=404,
+    )
+    models: list[dict] = [m.model_dump() for m in body.models]
+    if not models and body.enabled_models:
+        models = [{"model_id": m} for m in body.enabled_models]
+    if not models:
+        raise HTTPException(status_code=422, detail="at least one model is required")
+
+    tenant_id = _tenant_id(request)
+    workspace_id = None
+    for m in models:
+        try:
+            workspace_id = await mg.assert_project_key_allowed(tenant_id, body.project_id, body.provider, m["model_id"])
+        except mg.ProjectKeyNotAllowedError as exc:
+            raise HTTPException(status_code=422, detail={"code": "project_key_not_allowed", "message": str(exc)})
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        d = await mc.create_provider(
+            tenant_id, provider=body.provider, display_name=body.display_name,
+            api_key=body.api_key, models=models, api_base=body.api_base,
+            created_by=_user_id(request), workspace_id=workspace_id, project_id=body.project_id,
+        )
+    except mc.DuplicateProviderNameError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except mc.InvalidModelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _to_provider_out(d)
+
+
+@model_options_router.get("/project-providers", response_model=list[ProviderOut])
+async def list_project_providers_route(request: Request, projectId: str, db: AsyncSession = Depends(get_db_session)) -> list[ProviderOut]:
+    await _require_scoped(
+        db, request, permission="run:create", resource_kind="project", resource_id=projectId,
+        deny_status=404,
+    )
+    return [
+        _to_provider_out(d)
+        for d in await mc.list_providers(_tenant_id(request), project_id=projectId)
+    ]
+
+
+@model_options_router.delete("/project-providers/{provider_id}", status_code=204, response_model=None)
+async def delete_project_provider_route(request: Request, provider_id: str, projectId: str, db: AsyncSession = Depends(get_db_session)) -> None:
+    await _require_scoped(
+        db, request, permission="run:create", resource_kind="project", resource_id=projectId,
+        deny_status=404,
+    )
+    # Ownership check: this route is the ONLY way a Project Admin (no model:manage)
+    # can delete a model_providers row, so it must never delete one that belongs to
+    # a different project than the one just scope-checked above.
+    owned = await mc.list_providers(_tenant_id(request), project_id=projectId)
+    if not any(d["id"] == provider_id for d in owned):
+        raise HTTPException(status_code=404, detail="Provider not found")
+    try:
+        await mc.delete_provider(_tenant_id(request), provider_id)
+    except mc.ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="Provider not found")

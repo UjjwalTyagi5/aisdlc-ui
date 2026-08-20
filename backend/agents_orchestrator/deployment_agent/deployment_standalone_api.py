@@ -17,8 +17,11 @@ import uuid
 from uuid import uuid4
 from typing import List
 
-from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, ToolMessage
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.authz.agent_access import assert_agent_access_for_chat
 
 from agents_orchestrator.deployment_agent.agents.deployer import app as deploy_app
 from agents_orchestrator.deployment_agent.prompts.deploy_prompt import DEPLOY_SYSTEM_PROMPT
@@ -34,7 +37,7 @@ from config.ws_helper import set_session_id, set_user_id
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
 from shared.audit.service import audit_service
-from shared.db import get_db_session_for_tenant
+from shared.db import get_db_session, get_db_session_for_tenant
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -181,6 +184,19 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             s.tenant_id = tenant_id
         if project_id and not s.project_id:
             s.project_id = project_id
+
+        # Gate every message, not just the first — a session can be reused across
+        # projects on the client side, and the ticket only proves who the caller is,
+        # not which project they may act on (nor, on its own, that they're even a
+        # member of it — see assert_agent_access_for_chat's docstring).
+        _effective_project = project_id or s.project_id
+        _effective_tenant = tenant_id or s.tenant_id
+        async with get_db_session_for_tenant(_effective_tenant) as _access_db:
+            _effective_project = await assert_agent_access_for_chat(
+                _access_db, tenant_id=_effective_tenant, project_id=_effective_project,
+                user_id=user_id, agent_id="deployment",
+            )
+
         if not s.target_bound:
             prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
             if prepared:
@@ -240,13 +256,39 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
 
 @deployment_standalone_router.post("/chat/")
-async def chat(session_id: str = Form(...), user_id: str = Form(...), text: str = Form(None),
-               pipeline_context: str = Form(None), uploaded_files: List[UploadFile] = File(None)):
+async def chat(
+    request: Request,
+    project_id: str = Form(...),
+    session_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
+    text: str = Form(None),
+    pipeline_context: str = Form(None),
+    uploaded_files: List[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    # Identity comes from the verified session, never from the form body — see
+    # Security's chat() (security_agent_api.py) for why the field above used to be
+    # trusted directly and what that let an authenticated caller do.
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
+
+    # `project_id` is client-supplied (a Form field) — resolve it to a real project the
+    # caller is actually a member of, and check their role's reach to this agent on
+    # THIS project specifically, before trusting it for anything (see
+    # assert_agent_access_for_chat's docstring). The WS route (`_process_ws_message`,
+    # above) calls the same helper, so both routes agree on who may do what.
+    project_id = await assert_agent_access_for_chat(
+        db, tenant_id=str(real_tenant_id), project_id=project_id,
+        user_id=str(real_user_id), agent_id="deployment",
+    )
+
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
-    set_user_id(user_id)
+    set_user_id(real_user_id)
     set_agent_folder("orchestrator")
     s = get_session(session_id)
+    s.project_id = s.project_id or project_id
+    s.tenant_id = s.tenant_id or real_tenant_id
     first = not s.system_injected
     user_text = text or "Assess deployment readiness and generate the deployment package."
     if first:

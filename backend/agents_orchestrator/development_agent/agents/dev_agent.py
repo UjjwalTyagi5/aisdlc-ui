@@ -227,12 +227,14 @@ async def agent_node(state: DevAgentState):
         logger.error("Dev agent model resolution error (tenant=%s): %s", tenant_id, type(e).__name__)
         return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
     try:
+        from shared.services.model_call_wrapper import guarded_completion
+
         clean = _sanitize_messages(state["messages"])
         llm = _build_llm(resolved.model, resolved.litellm_provider,
                          resolved.api_key, resolved.base_url, resolved.alias)
         bound = llm.bind_tools(tools + get_skill_tools("development") + get_mcp_tools())
-        response = await bound.ainvoke(
-            clean,
+        response = await guarded_completion(
+            resolved, bound, clean, tenant_id=tenant_id, agent_type="development",
             config={"metadata": {"user_api_key_alias": resolved.alias}},
         )
         return {"messages": [response]}

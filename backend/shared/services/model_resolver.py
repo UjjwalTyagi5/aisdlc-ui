@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from sqlalchemy import text
@@ -60,6 +60,9 @@ class ResolvedModel:
     rpm_limit: Optional[int] = None    # per-model requests/min cap (enforced at resolve)
     tpm_limit: Optional[int] = None    # per-model tokens/min cap (enforced at resolve)
     cost_limit_usd: Optional[float] = None  # per-model monthly USD budget (enforced at resolve)
+    max_cost_per_call_usd: Optional[float] = None  # org-level per-call cap (provider row)
+    input_price_per_million: Optional[float] = None  # USD/1M input tokens (offering pricing)
+    extra_kwargs: dict = field(default_factory=dict)  # no-training/provider-specific call params
 
 
 class NoModelConfiguredError(Exception):
@@ -118,8 +121,8 @@ async def _load_enabled(tenant_id: str) -> list[dict]:
     async with get_db_session_for_tenant(tenant_id) as s:
         rows = (await s.execute(text(
             "SELECT o.id AS offering_id, o.model_id, o.is_default, "
-            "o.rpm_limit, o.tpm_limit, o.cost_limit_usd, "
-            "p.id AS provider_id, p.provider, p.display_name, p.secret_ref "
+            "o.rpm_limit, o.tpm_limit, o.cost_limit_usd, o.input_price_per_million, "
+            "p.id AS provider_id, p.provider, p.display_name, p.secret_ref, p.max_cost_per_call_usd "
             "FROM model_offerings o JOIN model_providers p ON p.id = o.provider_id "
             "WHERE o.enabled = true AND p.status = 'valid' AND p.tenant_id = :t AND o.tenant_id = :t "
             "ORDER BY p.display_name, p.provider, o.model_id"
@@ -129,7 +132,9 @@ async def _load_enabled(tenant_id: str) -> list[dict]:
          "provider_id": str(r.provider_id), "provider": r.provider,
          "display_name": r.display_name, "secret_ref": r.secret_ref,
          "rpm_limit": r.rpm_limit, "tpm_limit": r.tpm_limit,
-         "cost_limit_usd": float(r.cost_limit_usd) if r.cost_limit_usd is not None else None}
+         "cost_limit_usd": float(r.cost_limit_usd) if r.cost_limit_usd is not None else None,
+         "max_cost_per_call_usd": float(r.max_cost_per_call_usd) if r.max_cost_per_call_usd is not None else None,
+         "input_price_per_million": float(r.input_price_per_million) if r.input_price_per_million is not None else None}
         for r in rows
     ]
 
@@ -214,6 +219,8 @@ async def resolve_model_for_run(
         raise NoModelConfiguredError(
             f"BYOK key missing for provider {chosen['provider_id']} (tenant {tenant_id})")
 
+    from shared.services.model_call_wrapper import no_training_kwargs  # noqa: PLC0415
+
     resolved = ResolvedModel(
         provider=chosen["provider"],
         litellm_provider=_LITELLM_PROVIDER.get(chosen["provider"], chosen["provider"]),
@@ -226,6 +233,9 @@ async def resolve_model_for_run(
         rpm_limit=chosen.get("rpm_limit"),
         tpm_limit=chosen.get("tpm_limit"),
         cost_limit_usd=chosen.get("cost_limit_usd"),
+        max_cost_per_call_usd=chosen.get("max_cost_per_call_usd"),
+        input_price_per_million=chosen.get("input_price_per_million"),
+        extra_kwargs=no_training_kwargs(chosen["provider"]),
     )
     logger.debug("model resolved tenant=%s model=%s offering=%s alias=%s",
                  tenant_id, resolved.model, resolved.offering_id, resolved.alias)

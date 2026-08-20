@@ -26,7 +26,7 @@ Threat mitigations (T-M4-01, T-M4-02, T-M4-03):
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
@@ -109,6 +109,9 @@ class ProjectCreateIn(BaseModel):
     workspaceId: str
     template: str = "blank"
     description: Optional[str] = None
+    track: Literal[
+        "greenfield", "enhancement", "modernization", "rpa_infra", "data_engineering"
+    ] = "greenfield"
     # Stage→MCP-server mapping {agent_id: [mcp_server_id, ...]} chosen at creation.
     mcp_servers: Optional[dict[str, list[str]]] = None
     # Stage→connector-kind mapping {agent_id: [connector_kind, ...]} chosen at creation.
@@ -312,6 +315,7 @@ async def create_project(
         tenant_id=tenant_uuid,
         display_name=body.name,
         archived=False,
+        track=body.track,
         mcp_servers=body.mcp_servers or None,
         connectors=body.connectors or None,
         tool_access_modes=body.tool_access_modes or None,
