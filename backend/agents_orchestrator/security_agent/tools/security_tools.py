@@ -78,9 +78,12 @@ async def scan_secrets() -> str:
 async def generate_sbom(max_components: int = 200) -> str:
     """Build a lightweight SBOM by parsing dependency manifests in the repo.
 
-    Returns JSON {components:[{name, version, manifest, vulnerabilities}], manifests:[...]}.
-    `vulnerabilities` is populated from the same session's scan_dependencies (Trivy) run,
-    if it has already run this session -- 0 if it hasn't, never fabricated.
+    Returns JSON {components:[{name, version, manifest, vulnerabilities}], manifests:[...],
+    vulnerability_data:"trivy"|"not_scanned_yet"}.
+    `vulnerabilities` is populated from the same session's scan_dependencies (Trivy) run.
+    If scan_dependencies has NOT run this session, every component's `vulnerabilities` is
+    null (not 0) and the top-level `vulnerability_data` is "not_scanned_yet" -- a count is
+    never fabricated, and a real scanned "0 matches" is never confused with "unknown".
     """
     wd = _work_dir()
     if wd is None or not wd.exists():
@@ -105,13 +108,20 @@ async def generate_sbom(max_components: int = 200) -> str:
 
     trivy_findings = get_session(get_session_id()).last_trivy_findings
     for comp in comps:
-        comp["vulnerabilities"] = sum(
-            1 for f in trivy_findings
-            if f.get("package", "").lower() == comp["name"].lower()
-            and f.get("installed_version", "") == comp["version"]
-        )
+        if trivy_findings is None:
+            comp["vulnerabilities"] = None
+        else:
+            comp["vulnerabilities"] = sum(
+                1 for f in trivy_findings
+                if f.get("package", "").lower() == comp["name"].lower()
+                and comp["version"] and f.get("installed_version", "") == comp["version"]
+            )
 
-    return json.dumps({"components": comps[:max_components], "manifests": seen_manifests})
+    return json.dumps({
+        "components": comps[:max_components],
+        "manifests": seen_manifests,
+        "vulnerability_data": "trivy" if trivy_findings is not None else "not_scanned_yet",
+    })
 
 
 def _parse_manifest(fn: str, text: str, rel: str) -> list[dict]:

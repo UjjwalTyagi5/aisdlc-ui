@@ -198,8 +198,8 @@ documents its live-verification findings):
    patching `langchain_anthropic.ChatAnthropic` directly.
    **Caveat, found during this task's review (grep-verified, not a guess):
    `shared.services.model_resolver.resolve_chat_model` does not exist anywhere in the
-   backend** — zero matches for `def resolve_chat_model`, despite 5 files (Code Review,
-   Deployment, Documentation, and now Security's `scanner.py`/its new test) importing
+   backend** — zero matches for `def resolve_chat_model`, despite 4 files (Code Review,
+   Deployment, Documentation, and now Security's `scanner.py`) importing
    and calling it. Every one of these agents' "try BYOK first" branch therefore always
    raises `ImportError` and silently falls through to the `.env` key today. This task
    gives Security the **same correct structure** its siblings already have — it does

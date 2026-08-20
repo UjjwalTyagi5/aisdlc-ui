@@ -28,7 +28,10 @@ class ScanSessionState:
     head_sha: str = ""
     target_bound: bool = False
     last_artifact: Optional[dict] = None
-    last_trivy_findings: list = field(default_factory=list)
+    # None = scan_dependencies has not run this session (unknown); [] = it ran and
+    # found nothing. generate_sbom relies on that distinction to avoid reporting a
+    # confident-looking "0 vulnerabilities" for a scan that never happened.
+    last_trivy_findings: Optional[list] = None
     system_injected: bool = False
     mcp_tools: list = field(default_factory=list)
     mcp_loaded: bool = False

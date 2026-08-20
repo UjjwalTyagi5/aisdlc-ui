@@ -190,6 +190,7 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
 
     # Real SBOM builder parsed the real requirements.txt.
     sbom_out = _tool_result("generate_sbom")
+    assert sbom_out["vulnerability_data"] == "trivy"  # turn 1's real scan_dependencies landed
     flask_component = next(c for c in sbom_out["components"] if c["name"] == "flask" and c["version"] == "0.12.2")
     assert flask_component["vulnerabilities"] >= 1  # cross-referenced from turn 1's real Trivy run
 

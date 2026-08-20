@@ -83,10 +83,14 @@ def _resolve_model(state: AgentState):
             tools=tools,
             system_prompt=base,
         )
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).debug(
+            "BYOK model resolution failed, falling back to .env key: %s", exc
+        )
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
-            model=ANTHROPIC_MODEL,
+            model=model_id,
             api_key=ANTHROPIC_API_KEY,
             max_tokens=8192,
         ).bind_tools(tools)

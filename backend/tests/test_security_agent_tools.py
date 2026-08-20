@@ -53,10 +53,15 @@ def test_resolve_model_falls_back_to_raw_chat_anthropic_when_byok_raises():
         "langchain_anthropic.ChatAnthropic",
         return_value=fake_anthropic_instance,
     ) as mock_chat_anthropic:
-        result = _resolve_model({"model_id": None, "offering_id": None})
+        result = _resolve_model(
+            {"model_id": "claude-caller-requested-model", "offering_id": None}
+        )
 
     assert result is fake_bound_model
     mock_chat_anthropic.assert_called_once()
+    # The fallback must still honour the caller's requested model, not silently
+    # downgrade to the .env default.
+    assert mock_chat_anthropic.call_args.kwargs["model"] == "claude-caller-requested-model"
 
 
 def _fake_semgrep_completed_process(stdout_obj):
@@ -136,6 +141,7 @@ async def test_generate_sbom_cross_references_cached_trivy_findings():
         result_json = await security_tools.generate_sbom.ainvoke({})
 
     result = json.loads(result_json)
+    assert result["vulnerability_data"] == "trivy"
     flask_component = next(c for c in result["components"] if c["name"] == "flask")
     assert flask_component["vulnerabilities"] == 2
 
@@ -143,7 +149,7 @@ async def test_generate_sbom_cross_references_cached_trivy_findings():
 
 
 @pytest.mark.asyncio
-async def test_generate_sbom_reports_zero_vulnerabilities_when_no_trivy_scan_ran_yet():
+async def test_generate_sbom_leaves_vulnerabilities_null_when_no_trivy_scan_ran_yet():
     from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
     from agents_orchestrator.security_agent.tools import security_tools
     from config.ws_helper import set_session_id
@@ -151,7 +157,7 @@ async def test_generate_sbom_reports_zero_vulnerabilities_when_no_trivy_scan_ran
     session_id = "sbom-cross-ref-empty-test"
     clear_session(session_id)
     set_session_id(session_id)
-    # No last_trivy_findings set -- get_session() default is [].
+    # No last_trivy_findings set -- get_session() default is None ("not scanned yet").
 
     with patch.object(
         security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
@@ -165,7 +171,107 @@ async def test_generate_sbom_reports_zero_vulnerabilities_when_no_trivy_scan_ran
         result_json = await security_tools.generate_sbom.ainvoke({})
 
     result = json.loads(result_json)
+    assert result["vulnerability_data"] == "not_scanned_yet"
     flask_component = next(c for c in result["components"] if c["name"] == "flask")
+    assert flask_component["vulnerabilities"] is None
+
+    clear_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_generate_sbom_reports_a_real_zero_when_trivy_ran_but_found_no_match():
+    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
+    from agents_orchestrator.security_agent.tools import security_tools
+    from config.ws_helper import set_session_id
+
+    session_id = "sbom-no-match-test"
+    clear_session(session_id)
+    set_session_id(session_id)
+    s = get_session(session_id)
+    # scan_dependencies DID run (list is non-empty, so not None) but found nothing for flask.
+    s.last_trivy_findings = [
+        {"cve": "CVE-9999-0001", "package": "django", "installed_version": "1.0"},
+    ]
+
+    with patch.object(
+        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
+    ), patch.object(
+        security_tools.pathlib.Path, "exists", return_value=True
+    ), patch.object(
+        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
+    ), patch.object(
+        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
+    ):
+        result_json = await security_tools.generate_sbom.ainvoke({})
+
+    result = json.loads(result_json)
+    assert result["vulnerability_data"] == "trivy"
+    flask_component = next(c for c in result["components"] if c["name"] == "flask")
+    # A REAL zero (scanned, no match) -- distinct from None (never scanned).
     assert flask_component["vulnerabilities"] == 0
+
+    clear_session(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trivy_output, expected_cache",
+    [
+        pytest.param(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "findings": [
+                        {"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"}
+                    ],
+                }
+            ),
+            [{"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"}],
+            id="ok-caches-findings",
+        ),
+        pytest.param(
+            json.dumps({"status": "unavailable", "message": "trivy not installed"}),
+            None,
+            id="unavailable-leaves-cache-untouched",
+        ),
+        pytest.param(
+            "ERROR: trivy blew up and this is not JSON",
+            None,
+            id="non-json-leaves-cache-untouched",
+        ),
+    ],
+)
+async def test_scan_dependencies_caches_findings_only_on_a_successful_scan(
+    trivy_output, expected_cache
+):
+    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
+    from agents_orchestrator.security_agent.tools import security_tools
+    from config.ws_helper import set_session_id
+
+    session_id = "scan-deps-cache-test"
+    clear_session(session_id)
+    set_session_id(session_id)
+    s = get_session(session_id)
+    assert s.last_trivy_findings is None  # default sentinel: not scanned yet
+
+    # Patch the whole tool object (a pydantic StructuredTool won't accept a patched
+    # attribute), so no real Trivy binary is needed.
+    fake_trivy_tool = MagicMock()
+    fake_trivy_tool.invoke.return_value = trivy_output
+
+    with patch.object(
+        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
+    ), patch.object(
+        security_tools.pathlib.Path, "exists", return_value=True
+    ), patch.object(
+        security_tools, "run_trivy_scan", fake_trivy_tool
+    ):
+        result = await security_tools.scan_dependencies.ainvoke({})
+
+    fake_trivy_tool.invoke.assert_called_once_with(
+        {"target_path": str(_pathlib.Path("/fake/does/not/matter"))}
+    )
+    assert result == trivy_output  # raw scanner output is returned verbatim
+    assert get_session(session_id).last_trivy_findings == expected_cache
 
     clear_session(session_id)
