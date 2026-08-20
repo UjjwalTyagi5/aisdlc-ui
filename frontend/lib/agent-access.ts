@@ -71,3 +71,28 @@ export function roleAgentSplit(
 export function agentNamesFor(role: PlatformRole, track?: DeliveryTrack): string[] {
   return roleAgentSplit(role, track).reachable.map((p) => PHASE_LABEL[p]);
 }
+
+export type TileState = "owner" | "use" | "locked" | "coming_soon";
+
+/** Which of the 4 tile states a given (role, phase, track) resolves to.
+ *
+ * `builtAgents` is the caller-supplied list of phases that have actually been
+ * properly built and verified (Task 5-7's Security, once done; nothing else yet) —
+ * NOT the same thing as "is in this track's roster". A phase can be in the roster
+ * and still render coming_soon, per multi-track-agent-access-design.md §2.2: track
+ * membership and "actually works" are two different, both-required conditions.
+ */
+export function tileStateFor(
+  role: PlatformRole,
+  phase: Phase,
+  track: DeliveryTrack,
+  builtAgents: readonly Phase[],
+): TileState {
+  if (!agentsForTrack(track).includes(phase)) return "coming_soon";
+  if (!builtAgents.includes(phase)) return "coming_soon";
+
+  const involvement = involvementFor(role, phase);
+  if (involvement === "none") return "locked";
+  if (involvement === "owner" || involvement === "primary") return "owner";
+  return "use";
+}

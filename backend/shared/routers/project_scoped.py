@@ -143,7 +143,7 @@ async def set_override(
             "INSERT INTO agent_access_overrides "
             "  (id, tenant_id, project_id, role, phase, involvement, set_by) "
             "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :p, :r, :ph, :inv, :by) "
-            "ON CONFLICT (project_id, role, phase) DO UPDATE "
+            "ON CONFLICT (project_id, role, phase) WHERE role IS NOT NULL DO UPDATE "
             "  SET involvement = EXCLUDED.involvement, set_by = EXCLUDED.set_by, "
             "      set_at = now()"
         ),

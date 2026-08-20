@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.project_scope import require_project_access
+from shared.authz.agent_access import require_agent_access
 from agents_orchestrator.security_agent.config.session_state import set_prepared
 from shared.db import get_db_session
 from shared.models.orm import Run
@@ -30,7 +31,12 @@ from shared.services import ado_repos
 # was the artifact:view floor applied at include time — a permission `contributor`
 # holds. The router-level dependency covers all of them at once, and covers whatever
 # route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
-security_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
+security_workspace_router = APIRouter(
+    dependencies=[
+        Depends(require_project_access()),
+        Depends(require_agent_access("security")),
+    ]
+)
 
 
 @security_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")

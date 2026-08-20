@@ -371,6 +371,11 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "primary",
     design: "use",
+    development: "use",
+    review: "use",
+    security: "use",
+    testing: "use",
+    deployment: "use",
     documentation: "use",
   },
 
@@ -390,6 +395,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     review: "primary",
     security: "use",
     testing: "use",
+    deployment: "use",
     documentation: "use",
     discovery: "primary",
     strategy: "primary",
@@ -400,7 +406,11 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // `primary` — never self-approval.
   developer: {
     ...ALL_NONE,
+    requirements: "use",
     development: "build",
+    review: "requests",
+    security: "use",
+    testing: "use",
     documentation: "use",
   },
 
@@ -408,7 +418,9 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Development because that is what it tests.
   qa: {
     ...ALL_NONE,
+    requirements: "use",
     development: "use",
+    security: "use",
     testing: "primary",
     documentation: "use",
     validation: "primary",
@@ -417,16 +429,20 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Owns Security. Reads the code it assesses and the review it feeds.
   security_engineer: {
     ...ALL_NONE,
+    requirements: "use",
+    design: "use",
     development: "use",
     review: "use",
     security: "primary",
-    documentation: "use",
+    deployment: "use",
   },
 
   // Owns Deployment. Reads Development because that is what it ships.
   devops_engineer: {
     ...ALL_NONE,
-    development: "use",
+    development: "requests",
+    security: "use",
+    testing: "use",
     deployment: "primary",
     documentation: "use",
   },
@@ -434,7 +450,10 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Owns Data Engineering. Reads Development for the pipelines' surroundings.
   data_engineer: {
     ...ALL_NONE,
-    development: "use",
+    requirements: "use",
+    design: "use",
+    security: "use",
+    testing: "use",
     documentation: "use",
     data_engineering: "primary",
   },
