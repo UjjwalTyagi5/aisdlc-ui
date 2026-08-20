@@ -1,4 +1,10 @@
-# backend/tests/test_security_agent_chat_access.py
+# backend/tests/test_design_agent_chat_access.py
+"""Portfolio-1 access-hardening pass for the Design agent — mirrors
+test_security_agent_chat_access.py's three cases against
+/sdlc/agent/design/chat/. AGENT_DEFAULT_REACH["design"] makes "architect" the
+owner and does not list "org_admin" at all (zero default agent access, spec
+§1.4), so org_admin is the default-deny caller used throughout.
+"""
 import uuid as _uuid
 
 import pytest
@@ -22,21 +28,14 @@ async def _dispose_shared_engine():
 
 @pytest.fixture
 async def project_with_org_admin():
-    # NOTE: AGENT_DEFAULT_REACH["security"] (backend/config/agent_registry.py) grants
-    # every one of the 8 Portfolio-1 roles at least "use" reach to the security agent
-    # (developer included) -- so a "developer" caller would NOT get a 403 here, despite
-    # what an earlier draft of this test assumed. org_admin is not a key in that table
-    # at all (Organization Admin holds zero agent access by design -- spec §1.4), so it
-    # is the genuine default-deny caller for this route. Same pattern Task 5's
-    # test_security_workspace_agent_access.py already established for the same reason.
     org = str(_uuid.uuid4())
     unit = str(_uuid.uuid4())
     project = str(_uuid.uuid4())
     org_admin = f"admin-{_uuid.uuid4()}"
     async with get_db_session_superuser() as s:
         await s.execute(text(
-            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Chat Test')"
-        ), {"i": org, "s": f"chat-{org[:8]}"})
+            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Design Chat Test')"
+        ), {"i": org, "s": f"design-chat-{org[:8]}"})
         await s.execute(text(
             "INSERT INTO workspaces (id, organization_id, slug, display_name) "
             "VALUES (:i, :o, 'unit', 'Unit')"
@@ -44,7 +43,7 @@ async def project_with_org_admin():
     async with get_db_session_for_tenant(org) as s:
         await s.execute(text(
             "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
-            "VALUES (:i, :w, :t, 'Chat Project')"
+            "VALUES (:i, :w, :t, 'Design Chat Project')"
         ), {"i": project, "w": unit, "t": org})
     await grant_role(org_admin, org, "org_admin", tenant_id=org, scope_kind="organization", granted_by="test")
     yield {"org": org, "project": project, "org_admin": org_admin}
@@ -61,15 +60,15 @@ def _hdr(user_id: str, org: str, perms: list[str]) -> dict:
     }
 
 
-def test_an_org_admin_without_security_access_is_refused_before_any_scan_runs(project_with_org_admin):
+def test_an_org_admin_without_design_access_is_refused_before_any_work_runs(project_with_org_admin):
     t = project_with_org_admin
     resp = _client().post(
-        "/sdlc/agent/security/chat/",
+        "/sdlc/agent/design/chat/",
         data={
             "session_id": str(_uuid.uuid4()),
             "user_id": t["org_admin"],
-            "text": "scan this",
             "project_id": t["project"],
+            "task_intent": "draft the architecture",
         },
         headers=_hdr(t["org_admin"], t["org"], ["admin:*"]),
     )
@@ -77,69 +76,53 @@ def test_an_org_admin_without_security_access_is_refused_before_any_scan_runs(pr
 
 
 async def test_the_form_user_id_can_no_longer_impersonate_someone_else(project_with_org_admin):
-    """The real, authenticated caller is the org_admin (no default security access),
-    but the Form `user_id` field names a DIFFERENT, real user who DOES have access via
-    a person-level `agent_access_overrides` row.
-
-    This is the discriminating case an earlier version of this test could not prove:
-    naming a nonexistent user is denied whether or not the route trusts the Form
-    field, since neither identity would have access either way. Here, if the route
-    incorrectly trusted the Form field, the request would SUCCEED (the named user has
-    an override granting them "security"). Since the route correctly resolves
-    identity from the verified session (`request.state.user_id`), it must still 403
-    -- the org_admin session holds no override and no default reach, regardless of
-    who the form claims to be.
-    """
+    """The real, authenticated caller is the org_admin (no default design access),
+    but the Form `user_id` field names a DIFFERENT, real user who DOES have access
+    via a person-level `agent_access_overrides` row. If the route incorrectly
+    trusted the Form field, this would succeed; since identity comes from the
+    verified session, it must still 403."""
     t = project_with_org_admin
     overridden_user = f"overridden-{_uuid.uuid4()}"
 
-    # agent_access_overrides.user_id carries a real FK to users.id (Task 3,
-    # fk_agent_access_override_user) — the row must exist before it can be
-    # referenced by an override, same pattern as test_agent_access.py's
-    # test_a_person_level_override_grants_access_without_touching_the_role.
     async with get_db_session_superuser() as s:
         await s.execute(text(
-            "INSERT INTO users (id, tenant_id, email) VALUES (:i, :t, 'overridden-user@example.com')"
+            "INSERT INTO users (id, tenant_id, email) VALUES (:i, :t, 'overridden-design@example.com')"
         ), {"i": overridden_user, "t": t["org"]})
     async with get_db_session_for_tenant(t["org"]) as s:
         await s.execute(text(
             "INSERT INTO agent_access_overrides "
             "(id, tenant_id, project_id, user_id, phase, involvement) "
-            "VALUES (:i, :t, :p, :u, 'security', 'use')"
+            "VALUES (:i, :t, :p, :u, 'design', 'use')"
         ), {"i": str(_uuid.uuid4()), "t": t["org"], "p": t["project"], "u": overridden_user})
 
     resp = _client().post(
-        "/sdlc/agent/security/chat/",
+        "/sdlc/agent/design/chat/",
         data={
             "session_id": str(_uuid.uuid4()),
             "user_id": overridden_user,
-            "text": "scan this",
             "project_id": t["project"],
+            "task_intent": "draft the architecture",
         },
         headers=_hdr(t["org_admin"], t["org"], ["admin:*"]),
     )
     assert resp.status_code == 403
 
 
-async def test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_security_agent():
-    """`platform_role_for` resolves a role the caller holds ANYWHERE in the tenant
-    (roles_held's own docstring: "any scope") -- so a Developer added to Project A
-    must NOT be able to target Project B's chat route and be granted "use" access to
-    Security purely because AGENT_DEFAULT_REACH["security"]["developer"] == "use".
-    They hold no binding on Project B at all. This is the scenario
-    assert_agent_access_for_chat's membership check (visible_project_ids) exists for --
-    a plain resolve_project + assert_agent_access pair would incorrectly let this
-    through, since neither checks WHICH project the caller's role binding is on.
-    """
+async def test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_design_agent():
+    """A Developer added to Project A must not reach Project B's Design agent just
+    because AGENT_DEFAULT_REACH["design"] happens to grant some role reach on
+    paper -- they hold no binding on Project B at all. (Developer is actually
+    "none" for design, so use "security_engineer", which is "use" -- the point is
+    proving membership is checked independent of role reach.)"""
     org = str(_uuid.uuid4())
     unit = str(_uuid.uuid4())
     project_a = str(_uuid.uuid4())
     project_b = str(_uuid.uuid4())
-    dev = f"dev-{_uuid.uuid4()}"
+    sec_eng = f"sec-{_uuid.uuid4()}"
     async with get_db_session_superuser() as s:
         await s.execute(text(
-            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Membership Test')"
-        ), {"i": org, "s": f"membership-{org[:8]}"})
+            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Design Membership Test')"
+        ), {"i": org, "s": f"design-membership-{org[:8]}"})
         await s.execute(text(
             "INSERT INTO workspaces (id, organization_id, slug, display_name) "
             "VALUES (:i, :o, 'unit', 'Unit')"
@@ -153,17 +136,16 @@ async def test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_
             "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
             "VALUES (:i, :w, :t, 'Project B')"
         ), {"i": project_b, "w": unit, "t": org})
-    # dev is a Developer on Project A only -- never added to Project B.
-    await grant_role(dev, project_a, "developer", tenant_id=org, scope_kind="project", granted_by="test")
+    await grant_role(sec_eng, project_a, "security_engineer", tenant_id=org, scope_kind="project", granted_by="test")
 
     resp = _client().post(
-        "/sdlc/agent/security/chat/",
+        "/sdlc/agent/design/chat/",
         data={
             "session_id": str(_uuid.uuid4()),
-            "user_id": dev,
-            "text": "scan this",
+            "user_id": sec_eng,
             "project_id": project_b,
+            "task_intent": "draft the architecture",
         },
-        headers=_hdr(dev, org, ["artifact:view"]),
+        headers=_hdr(sec_eng, org, ["artifact:view"]),
     )
     assert resp.status_code == 404

@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, SystemMessage
 from uuid import uuid4
 import contextvars
@@ -42,6 +42,8 @@ from config.context_broker import build_context
 from config.orchestrator_state_client import fetch_session_artifacts
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import broadcast_log, set_session_id, set_user_id, set_provider_kind
+from shared.authz.agent_access import assert_agent_access_for_chat
+from shared.db import get_db_session_for_tenant
 from shared.errors import classify_error
 from shared.models.design import parse_artifact_sections
 from shared.audit import AuditCallbackHandler
@@ -200,6 +202,23 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     pipeline_context = message_data.get("pipeline_context")
 
     _lf_pid = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
+
+    # Gate every message, not just the first — a session can be reused across
+    # projects on the client side. assert_agent_access_for_chat additionally
+    # requires the caller be a MEMBER of the resolved project (not just any
+    # same-tenant user with the right role name — see its docstring), so this
+    # also closes the leak a plain resolve_project + assert_agent_access pair
+    # would miss.
+    if not _lf_pid:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    async with get_db_session_for_tenant(tenant_id) as _access_db:
+        _lf_pid = await assert_agent_access_for_chat(
+            _access_db, tenant_id=tenant_id, project_id=_lf_pid,
+            user_id=user_id, agent_id="design",
+        )
+        if isinstance(pipeline_context, dict):
+            pipeline_context["project_id"] = _lf_pid
+
     from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
     _lf_ws = await workspace_id_for_project(tenant_id or "", _lf_pid)
     _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
@@ -401,18 +420,33 @@ async def _handle_session_cleanup_ws(message_data: dict, websocket: WebSocket) -
 
 @design_router_orchestrator.post("/chat/")
 async def chat(
+    request: Request,
+    project_id: str = Form(...),
     conversation_context: str = Form(None),
     task_intent: str = Form(None),
     pipeline_context: str = Form(None),
     provider_kind: str = Form(None),
     session_id: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
     uploaded_files: List[UploadFile] = File(None),
 ):
     """REST endpoint — invokes Design Agent and persists typed design artifacts."""
+    # Identity comes from the verified session, never from the form body (see
+    # multi-track-agent-access-design.md's "assume broken" framing — the field
+    # above used to be trusted directly, which let any authenticated caller claim
+    # to be anyone). project_id is likewise resolved and access-checked before any
+    # work happens, via the same helper the WS handler above uses.
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
+    async with get_db_session_for_tenant(real_tenant_id) as _access_db:
+        project_id = await assert_agent_access_for_chat(
+            _access_db, tenant_id=real_tenant_id, project_id=project_id,
+            user_id=real_user_id, agent_id="design",
+        )
+
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
-    set_user_id(user_id)
+    set_user_id(real_user_id)
     set_provider_kind(provider_kind or "azure_devops")
     set_agent_folder("orchestrator")
 
@@ -483,7 +517,6 @@ async def chat(
                     total_input_tokens += msg_chunk.usage_metadata.get("input_tokens", 0)
                     total_output_tokens += msg_chunk.usage_metadata.get("output_tokens", 0)
     except Exception as exc:
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=classify_error(exc, "design generation")) from exc
 
     # Persist typed design artifacts when content was generated

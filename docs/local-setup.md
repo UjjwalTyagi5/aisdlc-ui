@@ -240,6 +240,23 @@ so moving is configuration, not code.
 
 ## Troubleshooting
 
+### Code Review agent: Semgrep scans always return zero findings, or crash with `FileNotFoundError`
+
+Semgrep isn't a declared project dependency yet (see `docs/help/portfolio-1-agent-status.md`
+for why). Install it into the backend venv with:
+
+```powershell
+cd backend
+uv pip install semgrep==1.173.0
+```
+
+**Not** `uv add semgrep` — it resolves a broken Windows wheel (a `semgrep-core` binary
+missing its `.exe` extension and required DLLs), which crashes any real scan with
+`FileNotFoundError`. Also: Semgrep's `--config auto` silently skips any file not tracked
+by git, and any path it default-ignores (patterns including `test`/`fixtures`) — a scan
+against such a path returns `"findings": []`, not an error, which looks like "nothing
+wrong" rather than "nothing scanned."
+
 ### `psql : The term 'psql' is not recognized`
 
 The Windows PostgreSQL installer does not add `psql` to PATH. Nothing is broken.
