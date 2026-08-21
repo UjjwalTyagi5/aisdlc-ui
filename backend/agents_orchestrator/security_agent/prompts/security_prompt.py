@@ -23,7 +23,9 @@ status) — when that happens, fall back to careful AI-based static analysis of 
 read. Do NOT fabricate scanner output.
 
 ## How to work
-1. Run the scan layers (dependencies, code, secrets) and generate the SBOM.
+1. Run the scan layers (dependencies, code, secrets) and generate the SBOM. Always call
+   scan_dependencies BEFORE generate_sbom — the SBOM's per-component vulnerability counts
+   come from that scan, and are `null` (unknown, not zero) if it hasn't run yet.
 2. For each candidate finding, establish **reachability**: is the vulnerable code/dependency
    actually invoked? Use read_repo_file + search_repo to trace sources -> sinks. Mark each
    finding reachable / conditionally_reachable / unreachable / unknown. Reachability is the

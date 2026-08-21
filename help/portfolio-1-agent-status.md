@@ -156,6 +156,105 @@ File: `backend/agents_orchestrator/security_agent/security_agent_api.py`
 - [x] Frontend `builtAgents` includes `"security"` — the one live, clickable tile today
 - Landed in: PR #12, PR #13 (both merged/open against `main`)
 
+**Real-logic verification (2026-08-20), Part 5 steps 3/6, done without a live LLM key**
+— same technique and same result as Code Review below: **this agent's code was NOT a
+stub either.** `agents_orchestrator/security_agent/` is a real ~1,280-line
+implementation — the graph (`agents/scanner.py`), 4 real scanning tools (Trivy/SCA,
+Semgrep/SAST, Gitleaks/secrets, a manifest-parsing SBOM builder), repo read/search,
+design-artifact lookup, and `submit_security_review`.
+- **New**: `backend/tests/test_security_agent_live_e2e.py` — drives the real compiled
+  `scanner.app` graph with only the model's `.ainvoke()` scripted (4 turns — see the
+  completion pass below for why `scan_dependencies` was split into its own turn). Every
+  tool call is real: real Trivy scan finding a genuine CVE (flask 0.12.2 →
+  CVE-2018-1000656), real Semgrep finding a real `shell=True` pattern, real Gitleaks
+  finding a real hardcoded GitHub token, and the SBOM builder correctly parsing a real
+  `requirements.txt`. `submit_security_review` builds and persists the artifact
+  correctly. **Not proven: the model's own judgment** — needs a working LLM key (see
+  Open items below).
+- `read_repo_file` / `search_repo` spot-checked directly (same as Code Review — real
+  reads, real search, path-traversal guard confirmed blocking a real escape attempt).
+- **Neither Trivy nor Gitleaks were installed** in this dev environment (Semgrep was,
+  from the Code Review pass). Installed both via `winget`:
+  `winget install --id Gitleaks.Gitleaks` and `winget install --id AquaSecurity.Trivy`.
+  **Gotcha**: winget updates the persistent Windows User `PATH`, but does **not** refresh
+  it in already-running shells (including this session's) — new terminals opened after
+  install pick it up fine; anything already running needs its `PATH` extended manually
+  or to be restarted. Neither tool is declared as a project dependency yet (same
+  situation as Semgrep — see the Code Review section above); for now this is a documented
+  manual environment-setup step, not something `uv sync`/`npm install` gets you.
+
+**Completion pass (2026-08-20)** — three real-logic gaps found during the verification
+above were fixed, each with its own test (mirrors how Code Review's section above
+documents its live-verification findings):
+1. **Model resolution seam.** `agent_node` used to build `ChatAnthropic` inline, always
+   hitting the raw `.env` `ANTHROPIC_API_KEY` and ignoring any in-app BYOK provider.
+   Added `_resolve_model(state)` to `agents/scanner.py`, mirroring Code Review's pattern
+   (try BYOK's `resolve_chat_model` first, fall back to raw `ChatAnthropic` if that
+   raises) — closes the gap called out in the previous version of this note. Tests:
+   `test_security_agent_tools.py::test_resolve_model_tries_byok_first_and_returns_it_on_success`,
+   `::test_resolve_model_falls_back_to_raw_chat_anthropic_when_byok_raises`. The
+   live_e2e test now mocks this the same way Code Review's does:
+   `patch.object(scanner, "_resolve_model", return_value=<scripted model>)`, no longer
+   patching `langchain_anthropic.ChatAnthropic` directly.
+   **Caveat, found during this task's review (grep-verified, not a guess):
+   `shared.services.model_resolver.resolve_chat_model` does not exist anywhere in the
+   backend** — zero matches for `def resolve_chat_model`, despite 4 files (Code Review,
+   Deployment, Documentation, and now Security's `scanner.py`) importing
+   and calling it. Every one of these agents' "try BYOK first" branch therefore always
+   raises `ImportError` and silently falls through to the `.env` key today. This task
+   gives Security the **same correct structure** its siblings already have — it does
+   **not** make BYOK functionally work for any of them. Implementing the real
+   `resolve_chat_model` (reading `model_providers`/`model_offerings`) is a separate,
+   cross-agent piece of work, out of scope here — flagging it prominently so nobody
+   assumes "BYOK support" means BYOK actually works yet.
+2. **Semgrep findings dropped CWE.** `run_semgrep_sast` only surfaced `owasp_category`
+   from Semgrep's metadata, discarding the `cwe` tags Semgrep also returns. Added a
+   `"cwe"` key to the finding dict in `tools/semgrep_sast_tool.py`. Test:
+   `test_security_agent_tools.py::test_semgrep_sast_tool_preserves_cwe_tags_alongside_owasp`.
+3. **SBOM never populated `vulnerabilities`.** `generate_sbom`'s documented output schema
+   promises a `vulnerabilities` count per component; it was never actually computed,
+   leaving the model to manually correlate the SBOM against a separate `scan_dependencies`
+   run itself. `scan_dependencies` now caches its parsed Trivy findings onto the session
+   (`ScanSessionState.last_trivy_findings`, `config/session_state.py`); `generate_sbom`
+   cross-references each component against that cache by package name + installed
+   version (`tools/security_tools.py`).
+   **Updated in the final review's fix wave** to fix a real correctness bug the first pass
+   introduced: an empty cache is ambiguous between "scanned, found nothing" and "never
+   scanned" — the original fix used `0` for both, so a component could show a confident,
+   fabricated-looking `"vulnerabilities": 0` even when `scan_dependencies` had simply
+   never run. `last_trivy_findings` now defaults to `None` (not `[]`) as an explicit
+   "not yet scanned" sentinel; `generate_sbom` sets `comp["vulnerabilities"] = None` in
+   that case (a real `0` only appears once `scan_dependencies` has actually run and found
+   no match for that component), and the JSON payload carries a top-level
+   `"vulnerability_data": "trivy" | "not_scanned_yet"` marker. `security_prompt.py` now
+   also tells the model to call `scan_dependencies` before `generate_sbom`. Tests:
+   `test_security_agent_tools.py::test_generate_sbom_cross_references_cached_trivy_findings`,
+   `::test_generate_sbom_leaves_vulnerabilities_null_when_no_trivy_scan_ran_yet`,
+   `::test_generate_sbom_reports_a_real_zero_when_trivy_ran_but_found_no_match`,
+   `::test_scan_dependencies_caches_findings_only_on_a_successful_scan`, plus a new
+   end-to-end assertion in `test_security_agent_live_e2e.py` (real Trivy run → real SBOM
+   cross-reference, `flask_component["vulnerabilities"] >= 1`, `vulnerability_data ==
+   "trivy"`). That test's first scripted turn was split so `scan_dependencies` runs alone
+   before the turn that calls `generate_sbom` — LangGraph's `ToolNode` can run same-turn
+   tool_calls concurrently, so leaving `scan_dependencies` in the same turn as
+   `generate_sbom` would flake between `None` and the real count depending on execution
+   order.
+   **Known minor gap, deferred (not blocking):** `test_security_agent_live_e2e.py` never
+   calls `clear_session("sec-live-e2e-test")`, so a stale session entry leaks in the
+   module-level `_registry` for the rest of that pytest process — test-only, no
+   production impact, no cross-test assertion failures observed. Worth a one-line fix
+   (`clear_session(session_id)` at the end of the test, or converting the session setup
+   into a fixture with `yield` + teardown, matching the existing `scan_target_dir`
+   fixture's pattern) next time this file is touched.
+
+**Open items before this is a *complete* re-verification** (access-hardening + gating
+were already done and shipped in PR #12/#13; the three items above are now fixed —
+these are what's left):
+1. A working LLM provider key, to prove the model's actual scan judgment/triage, not just
+   the scaffolding around it.
+2. Declare `semgrep`, `gitleaks` (Go binary, not pip-installable — no clean `uv`/`pip`
+   path), and `trivy` (same) properly for a reproducible environment setup.
+
 ### 6. Testing — owner role: QA/Tester — `agent_id="testing"` — **access-hardening DONE**
 File: `backend/agents_orchestrator/testing_agent/testing_agent_api.py`
 - [x] WS handler (`process_user_message_ws`, no leading underscore — differs from the others): `assert_agent_access_for_chat` added, checked every message

@@ -265,6 +265,20 @@ by git, and any path it default-ignores (patterns including `test`/`fixtures`) �
 against such a path returns `"findings": []`, not an error, which looks like "nothing
 wrong" rather than "nothing scanned."
 
+### Security agent: SCA/secret scans return "unavailable" or all-zero findings
+
+Trivy (SCA) and Gitleaks (secrets) are external Go binaries, not pip-installable —
+neither is a project dependency. Install both with `winget`:
+
+```powershell
+winget install --id Gitleaks.Gitleaks --silent --accept-package-agreements --accept-source-agreements
+winget install --id AquaSecurity.Trivy --silent --accept-package-agreements --accept-source-agreements
+```
+
+**Open a new terminal after installing** — `winget` updates the persistent Windows User
+`PATH`, but any shell already open (including one you install from) won't see the change
+until it's restarted. (Semgrep's own gotchas are documented separately, above.)
+
 ### `psql : The term 'psql' is not recognized`
 
 The Windows PostgreSQL installer does not add `psql` to PATH. Nothing is broken.

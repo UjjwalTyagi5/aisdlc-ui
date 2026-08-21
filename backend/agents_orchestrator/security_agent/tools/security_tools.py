@@ -46,7 +46,14 @@ async def scan_dependencies() -> str:
     wd = _work_dir()
     if wd is None or not wd.exists():
         return "ERROR: no scan workspace prepared. Ask the user to select a branch or PR first."
-    return await asyncio.to_thread(run_trivy_scan.invoke, {"target_path": str(wd)})
+    result_json = await asyncio.to_thread(run_trivy_scan.invoke, {"target_path": str(wd)})
+    try:
+        parsed = json.loads(result_json)
+        if parsed.get("status") == "ok":
+            get_session(get_session_id()).last_trivy_findings = parsed.get("findings", [])
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return result_json
 
 
 @tool
@@ -71,8 +78,12 @@ async def scan_secrets() -> str:
 async def generate_sbom(max_components: int = 200) -> str:
     """Build a lightweight SBOM by parsing dependency manifests in the repo.
 
-    Returns JSON {components:[{name, version, manifest}], manifests:[...]}. A best-effort
-    inventory when a full SBOM scanner isn't available.
+    Returns JSON {components:[{name, version, manifest, vulnerabilities}], manifests:[...],
+    vulnerability_data:"trivy"|"not_scanned_yet"}.
+    `vulnerabilities` is populated from the same session's scan_dependencies (Trivy) run.
+    If scan_dependencies has NOT run this session, every component's `vulnerabilities` is
+    null (not 0) and the top-level `vulnerability_data` is "not_scanned_yet" -- a count is
+    never fabricated, and a real scanned "0 matches" is never confused with "unknown".
     """
     wd = _work_dir()
     if wd is None or not wd.exists():
@@ -94,7 +105,23 @@ async def generate_sbom(max_components: int = 200) -> str:
             comps.extend(_parse_manifest(fn, text, rel))
             if len(comps) >= max_components:
                 break
-    return json.dumps({"components": comps[:max_components], "manifests": seen_manifests})
+
+    trivy_findings = get_session(get_session_id()).last_trivy_findings
+    for comp in comps:
+        if trivy_findings is None:
+            comp["vulnerabilities"] = None
+        else:
+            comp["vulnerabilities"] = sum(
+                1 for f in trivy_findings
+                if f.get("package", "").lower() == comp["name"].lower()
+                and comp["version"] and f.get("installed_version", "") == comp["version"]
+            )
+
+    return json.dumps({
+        "components": comps[:max_components],
+        "manifests": seen_manifests,
+        "vulnerability_data": "trivy" if trivy_findings is not None else "not_scanned_yet",
+    })
 
 
 def _parse_manifest(fn: str, text: str, rel: str) -> list[dict]:
