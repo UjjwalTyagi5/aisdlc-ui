@@ -255,11 +255,11 @@ export function UnitAccessList({
           </li>
         );
       })}
-      {/* ALWAYS rendered for an Org Admin, even with nothing left to grant.
+      {/* ALWAYS rendered for whoever may grant, even with nothing left to grant.
           A control that only appears when it has options is a control nobody
           can find: with every unit already holding the integration the screen
           showed only Revoke, and "how do I add one" had no answer on it. */}
-      {canRevoke && (
+      {canGrant && (
         <li>
           <GrantUnitPicker
             units={notHeld}
