@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple
 from typing_extensions import TypedDict
 
 import httpx
-import litellm
 
 from langgraph.graph import StateGraph, END, START
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
@@ -340,6 +339,8 @@ def _generate_with_claude(system_prompt: str, user_content: str, max_tokens: int
             "No BYOK model resolved for this deployment run. An administrator must "
             "configure and verify a model provider in Org Settings -> Model Providers."
         )
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    import litellm
     response = litellm.completion(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

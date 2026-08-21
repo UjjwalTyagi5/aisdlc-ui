@@ -1,3 +1,7 @@
+# PEP 563: makes `-> ChatLiteLLM` below a lazy string, so the import can be
+# deferred to the one place that actually constructs a model.
+from __future__ import annotations
+
 from config.env import AGENTIC_BASE_URL, TESTING_AGENT_HEADLESS
 # FILE: ui_testing_agent.py
 
@@ -12,7 +16,6 @@ from typing import List, Dict, Optional
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from config.ws_helper import set_session_id, broadcast_log, set_user_id, get_session_id, get_user_id
-from langchain_litellm import ChatLiteLLM
 from config.env import LITELLM_BASE_URL
 from functools import partial
 from selenium import webdriver
@@ -78,6 +81,8 @@ def _build_ui_llm() -> ChatLiteLLM:
             "No BYOK model resolved for this UI testing run. An administrator must "
             "configure and verify a model provider in Org Settings → Model Providers."
         )
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     return ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

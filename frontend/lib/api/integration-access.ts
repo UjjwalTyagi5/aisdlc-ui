@@ -33,7 +33,13 @@ export interface RevokeAccessInput {
 }
 
 /**
- * Give access at one level or the other — the mirror of `revokeIntegrationAccess`.
+ * Give a Business Unit reach to an integration — the mirror of
+ * `revokeIntegrationAccess`.
+ *
+ * NO ACCESS LEVEL. A grant says the unit may use the thing; read vs write is
+ * chosen per stage on the project (`Project.toolAccessModes`). The level used to
+ * live here as a ceiling over every project in the unit and was removed in
+ * backend migration 0024 — re-adding it here would reinstate that ceiling.
  *
  * `workspaceId` gives a Business Unit the integration (Organization Admin
  * only). `projectId` turns it on for a project the unit already holds it for,
@@ -44,11 +50,6 @@ export const grantIntegrationAccess = (input: {
   id: string;
   workspaceId?: string;
   projectId?: string;
-  /**
-   * Read, write, or both. Omitted means the server's default, which is `read` —
-   * least privilege, so widening is always somebody's explicit choice.
-   */
-  access?: z.infer<typeof ConnectorAccessLevel>;
   unitName?: string;
   projectName?: string;
 }) =>
@@ -59,19 +60,10 @@ export const grantIntegrationAccess = (input: {
       id: input.id,
       workspaceId: input.workspaceId,
       projectId: input.projectId,
-      access: input.access,
     },
     schema: z.object({
       ok: z.boolean(),
       changed: z.boolean().optional(),
-      access: ConnectorAccessLevel.optional(),
-      /**
-       * Levels that are permitted but partly hollow — a write-only board can
-       * create items but cannot comment on one, because that needs an id only a
-       * read can supply. Surfaced to the admin who chose the level rather than
-       * logged, since they are the only person who can act on it.
-       */
-      warnings: z.array(z.string()).default([]),
     }),
   });
 
@@ -125,7 +117,6 @@ export const setProjectIntegrationAccess = (input: {
     body: { kind: input.kind, targetId: input.targetId, access: input.access },
     schema: z.object({
       ok: z.boolean(),
-      unitAccess: ConnectorAccessLevel,
       projectAccess: ConnectorAccessLevel,
       effectiveAccess: ConnectorAccessLevel,
       warnings: z.array(z.string()).default([]),

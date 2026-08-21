@@ -5,9 +5,7 @@ import aiofiles
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import AIMessage, HumanMessage, AnyMessage
 from config.checkpoint import build_checkpointer
-from langchain_litellm import ChatLiteLLM
 import google.generativeai as genai
-import litellm
 from pathlib import Path
 from typing import List, Annotated
 from langgraph.graph.message import add_messages
@@ -40,6 +38,8 @@ async def _resolve_llm(state) -> object:
         resolve_model_for_run, NoModelConfiguredError, ModelNotEnabledError)
     resolved = await resolve_model_for_run(
         state.get("tenant_id", ""), state.get("model_id"), offering_id=state.get("offering_id"))
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     return ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

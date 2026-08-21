@@ -3,7 +3,6 @@
 import os
 import re
 import json
-import litellm
 from dotenv import load_dotenv
 from ._byok import resolved_litellm_kwargs
 
@@ -44,6 +43,8 @@ def generate_issue_description_and_suggestions(analysis: dict, user_message: str
     """
 
     try:
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = litellm.completion(
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),

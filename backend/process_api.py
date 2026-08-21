@@ -51,6 +51,7 @@ from config.env import (
     LITELLM_BASE_URL,
     ENABLE_WORKER_POOL,
     ENABLE_WEBHOOK_TRIGGERS,
+    ENABLE_CONNECTOR_HEALTH_PROBES,
     GITHUB_WEBHOOK_SECRET,
     SLACK_SIGNING_SECRET,
     JIRA_WEBHOOK_SECRET,
@@ -609,8 +610,19 @@ async def lifespan(app: FastAPI):
     logger.info("RunSweeper started")
     # Start artifact event listener (routes pipeline stage transitions via Redis pub/sub)
     artifact_listener_task = asyncio.create_task(_artifact_event_listener())
-    # Start connector health probe (re-probes connector health every 30s)
-    connector_health_task = asyncio.create_task(_refresh_connector_health(app))
+    # Start connector health probe (re-probes connector health every 30s).
+    # Opt-out for local dev: each probe opens TLS connections to five external SaaS
+    # connectors, and with unconfigured credentials they run out their timeouts rather
+    # than failing fast — the loop then never idles and starves this event loop, which
+    # every request handler shares. Off => /connectors/health serves an empty cache.
+    connector_health_task = None
+    if ENABLE_CONNECTOR_HEALTH_PROBES:
+        connector_health_task = asyncio.create_task(_refresh_connector_health(app))
+    else:
+        app.state.connector_health_cache = {}
+        logger.info(
+            "Connector health probes DISABLED (ENABLE_CONNECTOR_HEALTH_PROBES=false)"
+        )
 
     # NO WEBHOOK CONSUMERS for github/jira/azure_repos. Webhook DELIVERY still works —
     # POST /webhooks/{connector}/{tenant_id} verifies the signature and puts the event
@@ -647,11 +659,16 @@ async def lifespan(app: FastAPI):
     # Flush any buffered Langfuse spans before the process exits.
     from shared.observability import flush_langfuse  # noqa: PLC0415
     flush_langfuse()
-    connector_health_task.cancel()
-    try:
-        await connector_health_task
-    except asyncio.CancelledError:
-        pass
+    if connector_health_task is not None:
+        connector_health_task.cancel()
+        try:
+            await connector_health_task
+        except asyncio.CancelledError:
+            pass
+
+    # Release the per-loop connector HTTP clients (config/connectors/http_client.py).
+    from config.connectors.http_client import aclose_all as _aclose_http_clients
+    await _aclose_http_clients()
     bg_task.cancel()
     try:
         await bg_task

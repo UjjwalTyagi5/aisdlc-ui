@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from shared.authz.connector_access import AccessLevel, from_modes, modes
+from shared.authz.connector_access import AccessLevel, DEFAULT_ACCESS, from_modes, modes
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +148,23 @@ def warnings_for(kind: str, access: str) -> list[str]:
         f"{kind} can create new items with write-only access, but updating or "
         "commenting on an existing one needs its id, which only a read can supply."
     ]
+
+
+def default_access_for(kind: str) -> AccessLevel:
+    """The level to grant when the caller did not name one.
+
+    NOT a flat `read`, and that distinction is the whole function. Least privilege
+    means the narrowest level that is USEFUL, and for a notify-only connector `read`
+    is not narrow — it is empty. Defaulting to it made Slack and MS Teams impossible
+    to grant at all: the button sends no level, the server filled in `read`, and the
+    capability check then refused the grant it had just constructed.
+
+    So: `read` when the connector can read, otherwise the only thing it can do. That
+    is still the narrowest real option, because you cannot be narrower than what
+    exists. A connector that cannot be introspected keeps the plain default, since
+    guessing on absent knowledge is what `supported_modes` returning None is for.
+    """
+    found = supported_modes(kind)
+    if found is None or "read" in found:
+        return DEFAULT_ACCESS
+    return from_modes(found) or DEFAULT_ACCESS

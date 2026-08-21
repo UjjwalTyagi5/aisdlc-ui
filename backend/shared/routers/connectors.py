@@ -65,7 +65,9 @@ logger = logging.getLogger(__name__)
 
 connectors_resource_router = APIRouter()
 
-# Known connector kinds that the catalog exposes (even if not yet in the health cache).
+# Connector kinds the API ACCEPTS — the validation set. Wider than the catalog
+# below: it keeps kinds that still have live plumbing (azure_repos webhooks and
+# normalizers) or belong to another surface entirely (the two SSO kinds).
 _KNOWN_KINDS = {
     "azure_devops",
     "jira",
@@ -78,6 +80,24 @@ _KNOWN_KINDS = {
     "figma",
     "sso_okta",
     "sso_entra",
+}
+
+# Connector kinds the product PRESENTS — one tile per kind on the Integrations
+# page, and the denominator behind the dashboard's "N available". Deliberately
+# narrower than _KNOWN_KINDS: azure_repos is folded into the consolidated
+# azure_devops tile (one credential covers boards, repos and CI/CD), and the two
+# SSO kinds are identity plumbing, not something a project connects. Counting the
+# accept-set here is what made the dashboard say 11 while the page showed 8.
+# Keep in step with CATEGORIES in frontend/app/(app)/integrations/page.tsx.
+_CATALOG_KINDS = {
+    "jira",
+    "azure_devops",
+    "github",
+    "github_actions",
+    "slack",
+    "ms_teams",
+    "sharepoint",
+    "figma",
 }
 
 # KV secret names written at callback per connector kind (D-04: disconnect = delete these)

@@ -31,6 +31,7 @@ import jwt  # PyJWT — already installed; RS256 support via cryptography packag
 
 import shared.keyvault as _keyvault
 from config.connectors.base import BaseConnector, ConnectorNotAvailableError
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -195,17 +196,17 @@ class GitHubIssuesConnector(BaseConnector):
             )
             jwt_token = ""
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{_GH_API_BASE}/app/installations/{installation_id}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {jwt_token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": _GH_API_VERSION,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = get_async_client(timeout=30)
+        resp = await client.post(
+            f"{_GH_API_BASE}/app/installations/{installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {jwt_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": _GH_API_VERSION,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         token: str = data["token"]
 
@@ -307,12 +308,12 @@ class GitHubIssuesConnector(BaseConnector):
         start = time.time()
         try:
             token = await self._get_installation_token()
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{_GH_API_BASE}/rate_limit",
-                    headers=self._gh_headers(token),
-                )
-                resp.raise_for_status()
+            client = get_async_client(timeout=30)
+            resp = await client.get(
+                f"{_GH_API_BASE}/rate_limit",
+                headers=self._gh_headers(token),
+            )
+            resp.raise_for_status()
             latency_ms = (time.time() - start) * 1000
             return ConnectorHealth(
                 connector_name="github_issues",
@@ -411,13 +412,13 @@ class GitHubIssuesConnector(BaseConnector):
         token = await self._get_installation_token(tenant_id=auth_tenant)
         url = f"{_GH_API_BASE}{path}"
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(
-                method,
-                url,
-                headers=self._gh_headers(token),
-                **kwargs,
-            )
+        client = get_async_client(timeout=30)
+        resp = await client.request(
+            method,
+            url,
+            headers=self._gh_headers(token),
+            **kwargs,
+        )
 
         if resp.status_code == 429:
             # Honour X-RateLimit-Reset if present (epoch seconds — A4 ASSUMED).

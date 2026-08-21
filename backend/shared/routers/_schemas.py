@@ -91,6 +91,9 @@ class ProjectOut(BaseModel):
     mcpServers: dict[str, List[str]] = {}
     # Per-project stage→connector-kind mapping {agent_id: [connector_kind, ...]}.
     connectors: dict[str, List[str]] = {}
+    # Per-(stage, tool) read/write mode, "{agent_id}::{connector|mcp}::{ref}" ->
+    # "read" | "write" | "both". Absent key = "both" (migration 0024).
+    toolAccessModes: dict[str, str] = {}
     # Monthly cost budget (0032). None = inherit workspace / unlimited.
     monthlyBudgetUsd: Optional[float] = None
     # Current calendar-month spend from the durable usage rollup (0 unless injected).
@@ -117,6 +120,7 @@ class ProjectOut(BaseModel):
             pipeline=[],
             mcpServers=getattr(project, "mcp_servers", None) or {},
             connectors=getattr(project, "connectors", None) or {},
+            toolAccessModes=getattr(project, "tool_access_modes", None) or {},
             monthlyBudgetUsd=float(_budget) if _budget is not None else None,
             monthlySpendUsd=round(float(spend_usd or 0.0), 4),
             lastActivityAt=_iso(project.updated_at),

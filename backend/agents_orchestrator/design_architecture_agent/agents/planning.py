@@ -19,7 +19,6 @@ from google.ai.generativelanguage import File
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
 from config.checkpoint import build_checkpointer
 from langchain_core.tools import tool
-from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -747,6 +746,8 @@ def agent(state: AgentState):
         )
     except (NoModelConfiguredError, ModelNotEnabledError) as e:
         return {"messages": [AIMessage(content=f"No usable model is configured for this run: {e}")]}
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     orchestrator = ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

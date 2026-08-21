@@ -1,34 +1,33 @@
 import type { Metadata, Viewport } from "next";
-import {
-  Bricolage_Grotesque,
-  Hanken_Grotesk,
-  JetBrains_Mono,
-} from "next/font/google";
+import localFont from "next/font/local";
 
 import { Providers } from "@/components/providers";
 
 import "./globals.css";
 
-const bricolage = Bricolage_Grotesque({
-  subsets: ["latin"],
+// Vendored under app/fonts/ rather than pulled via `next/font/google`, which
+// re-fetches from fonts.googleapis.com on every cold compile and silently falls
+// back to system fonts when the machine is offline. See app/fonts/README.md.
+const bricolage = localFont({
+  src: "./fonts/BricolageGrotesque-latin-var.woff2",
   display: "swap",
   variable: "--font-display",
-  // opsz axis: 12..96 — lets the browser pick the right optical size
-  axes: ["opsz"],
+  // opsz axis: 12..96 — the browser picks the right optical size on its own
+  weight: "200 800",
 });
 
-const hanken = Hanken_Grotesk({
-  subsets: ["latin"],
+const hanken = localFont({
+  src: "./fonts/HankenGrotesk-latin-var.woff2",
   display: "swap",
   variable: "--font-sans",
-  weight: ["400", "500", "600", "700"],
+  weight: "100 900",
 });
 
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
+const jetbrainsMono = localFont({
+  src: "./fonts/JetBrainsMono-latin-var.woff2",
   display: "swap",
   variable: "--font-mono",
-  weight: ["400", "500", "600"],
+  weight: "100 800",
 });
 
 export const metadata: Metadata = {
