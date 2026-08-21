@@ -16,7 +16,6 @@ from xhtml2pdf import pisa
 import textwrap
 import docx 
 import markdown
-import litellm
 from dotenv import load_dotenv
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import PyPDF2
@@ -24,7 +23,6 @@ import shutil
 from config.checkpoint import build_checkpointer as _build_checkpointer
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
-from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -110,6 +108,13 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
         if text:
             parts.append(f"--- File: {os.path.basename(path)} ---\n{text}")
     content = "\n\n".join(parts) + "\n\n" + prompt if parts else prompt
+    # Imported here, not at module scope: `litellm` costs ~7s to import and
+    # drags the whole provider catalogue in with it. Every caller of this module
+    # paid that at import time — including `pytest --collect-only` and every
+    # `uvicorn --reload` restart, neither of which is about to call a model.
+    # Same pattern as copilot_api.py's ChatLiteLLM import.
+    import litellm
+
     response = litellm.completion(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
@@ -2313,6 +2318,8 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
     cache_key = (alias, model)
     if cache_key in _ORCHESTRATOR_CACHE:
         return _ORCHESTRATOR_CACHE[cache_key]
+    from langchain_litellm import ChatLiteLLM  # deferred — see above
+
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,

@@ -99,6 +99,20 @@ async def create_run(
     except BudgetExceededError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    # `active_agents` picks which agents this run actually exercises (build_execution_
+    # plan reads it downstream) — nothing validated it against the caller's per-agent
+    # access before now (design doc §4.1/§4.3), so a caller with no reach to, say, the
+    # Security agent could still start a run naming it in active_agents and have it
+    # execute, bypassing every router-level require_agent_access/assert_agent_access
+    # gate entirely. Checked once here, up front, before the Run row is created.
+    if body.active_agents:
+        from shared.authz.agent_access import assert_agent_access_for_chat
+        for _agent_id in body.active_agents:
+            await assert_agent_access_for_chat(
+                db, tenant_id=str(tenant_id), project_id=str(body.project_id),
+                user_id=_user_id(request), agent_id=_agent_id,
+            )
+
     # Resolve the exact offering up front so the whole run dispatches against ONE
     # provider connection + key (never first-match), and record it for audit.
     resolved_model_id = body.model_id

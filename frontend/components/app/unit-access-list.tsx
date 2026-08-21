@@ -31,8 +31,6 @@ import {
   listIntegrationAccess,
   revokeIntegrationAccess,
 } from "@/lib/api/integration-access";
-import { AccessLevelPicker } from "@/components/app/access-level-picker";
-import { ACCESS_LEVEL_LABEL } from "@/lib/schemas/integration-access";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
@@ -99,15 +97,13 @@ export function UnitAccessList({
 
   const grant = useMutation({
     mutationFn: grantIntegrationAccess,
-    onSuccess: (r, vars) => {
-      const level = r.access ? ACCESS_LEVEL_LABEL[r.access].toLowerCase() : "";
-      toast.success(
-        `${vars.unitName} can now use ${name}${level ? ` (${level})` : ""}`,
-      );
-      // Permitted but partly hollow — a write-only board can create items but
-      // cannot comment on one. Shown to the admin who chose the level, since
-      // they are the only person who can act on it.
-      for (const w of r.warnings ?? []) toast.warning(w, { duration: 9000 });
+    onSuccess: (_r, vars) => {
+      // No level to report: the grant is reach only. The follow-up action is on
+      // the project, so the toast points there rather than stating a level that
+      // no longer exists at this layer.
+      toast.success(`${vars.unitName} can now use ${name}`, {
+        description: "Each project chooses read or write per stage.",
+      });
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -182,30 +178,12 @@ export function UnitAccessList({
                 </span>
               </button>
 
-              {/* The level this unit holds. Editable only by whoever may grant —
-                  changing a level IS a grant, so it carries the same authority as
-                  making one, and a reader who cannot grant still sees where the
-                  unit stands. */}
-              {unit.access && canGrant ? (
-                <AccessLevelPicker
-                  size="sm"
-                  value={unit.access}
-                  disabled={grant.isPending}
-                  onChange={(next) =>
-                    grant.mutate({
-                      kind,
-                      id: targetId,
-                      workspaceId: unit.id,
-                      unitName: unit.name,
-                      access: next,
-                    })
-                  }
-                />
-              ) : unit.access ? (
-                <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
-                  {ACCESS_LEVEL_LABEL[unit.access]}
-                </Badge>
-              ) : null}
+              {/* NO ACCESS LEVEL HERE. A grant says this unit may use the
+                  integration; whether an agent reads or writes with it is chosen
+                  per stage on the project, in Settings -> Tools per stage. This
+                  row used to carry a Read/Write/Both control, which read as a
+                  usage decision when it was really a ceiling — and the ceiling
+                  is gone (migration 0024). */}
 
               {canRevoke && (
                 <RevokeButton
@@ -277,11 +255,11 @@ export function UnitAccessList({
           </li>
         );
       })}
-      {/* ALWAYS rendered for an Org Admin, even with nothing left to grant.
+      {/* ALWAYS rendered for whoever may grant, even with nothing left to grant.
           A control that only appears when it has options is a control nobody
           can find: with every unit already holding the integration the screen
           showed only Revoke, and "how do I add one" had no answer on it. */}
-      {canRevoke && (
+      {canGrant && (
         <li>
           <GrantUnitPicker
             units={notHeld}
@@ -349,7 +327,7 @@ function GrantUnitPicker({
           Grant to a {BUSINESS_UNIT_LABEL.toLowerCase()}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 p-0">
+      <PopoverContent align="start" className="w-80 p-0">
         <Command filter={substringFilter}>
           <CommandInput placeholder={`Search ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}…`} />
           <CommandList>

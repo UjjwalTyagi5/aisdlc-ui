@@ -21,7 +21,7 @@ import uuid
 from uuid import uuid4
 from typing import List
 
-from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from agents_orchestrator.code_review_agent.agents.reviewer import app as review_app
@@ -37,6 +37,7 @@ from config.connection_manager import manager
 from config.env import AGENT_RUNTIME_MODE
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import set_session_id, set_user_id
+from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
 from shared.audit.service import audit_service
@@ -253,6 +254,20 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         if project_id and not s.project_id:
             s.project_id = project_id
 
+        # Gate every message, not just the first — a session can be reused across
+        # projects on the client side, and the ticket only proves who the caller is,
+        # not which project they may act on (nor, on its own, that they're even a
+        # member of it — see assert_agent_access_for_chat's docstring).
+        _effective_project = project_id or s.project_id
+        _effective_tenant = tenant_id or s.tenant_id
+        async with get_db_session_for_tenant(_effective_tenant) as _access_db:
+            _effective_project = await assert_agent_access_for_chat(
+                _access_db, tenant_id=_effective_tenant, project_id=_effective_project,
+                user_id=user_id, agent_id="code_review",
+            )
+        project_id = _effective_project
+        s.project_id = _effective_project
+
         # Bind the prepared review target (cloned repo + diff) on the first turn —
         # keyed by project, like the dev workspace, so it survives the chat's own
         # session id. Without this the agent has no diff to review.
@@ -335,18 +350,35 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
 @code_review_router.post("/chat/")
 async def chat(
+    request: Request,
     session_id: str = Form(...),
-    user_id: str = Form(...),
+    user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
     text: str = Form(None),
     pipeline_context: str = Form(None),
     uploaded_files: List[UploadFile] = File(None),
 ):
-    set_websocket_context(manager, session_id)
-    set_session_id(session_id)
-    set_user_id(user_id)
-    set_agent_folder("orchestrator")
+    # Identity comes from the verified session, never from the form body — see
+    # assert_agent_access_for_chat's docstring / the Security agent's chat() for why
+    # the Form field alone can no longer be trusted here.
+    real_user_id = getattr(request.state, "user_id", "") or ""
+    real_tenant_id = getattr(request.state, "tenant_id", "") or ""
 
     s = get_session(session_id)
+    # This route has no project_id Form field — the review target (and its project)
+    # is bound out-of-band by POST /review/prepare into the session, same as the
+    # diff/target fields below. Check against whatever project the session is
+    # already bound to.
+    async with get_db_session_for_tenant(str(real_tenant_id)) as _access_db:
+        s.project_id = await assert_agent_access_for_chat(
+            _access_db, tenant_id=str(real_tenant_id), project_id=s.project_id or "",
+            user_id=str(real_user_id), agent_id="code_review",
+        )
+
+    set_websocket_context(manager, session_id)
+    set_session_id(session_id)
+    set_user_id(real_user_id)
+    set_agent_folder("orchestrator")
+
     first = not s.system_injected
     user_text = text or "Please review the prepared change and submit your findings."
     if first:

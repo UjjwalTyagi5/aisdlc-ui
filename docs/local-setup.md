@@ -161,6 +161,14 @@ cd backend
 uv run uvicorn process_api:app --reload --port 8001
 ```
 
+> **Keep `watchfiles` installed.** It is pinned in `requirements.txt`/`pyproject.toml`
+> and `--reload` depends on it. Without it uvicorn silently falls back to `StatReload`,
+> which `os.stat()`s every `.py` file under `backend/` four times a second — including
+> the ~15k files in `.venv`. One sweep takes ~4s on a laptop, so the watcher never
+> sleeps and burns a full CPU core at idle, starving the event loop: every endpoint,
+> even `/health`, then answers in >1s. With `watchfiles` the reloader uses OS-native
+> file notifications and sits at 0%.
+
 The first boot creates the single organization. Boot is also where two guards run — see
 [Troubleshooting](#troubleshooting) if it refuses to start; both failures are the guards
 doing their job, not bugs.
@@ -239,6 +247,37 @@ so moving is configuration, not code.
 ---
 
 ## Troubleshooting
+
+### Code Review agent: Semgrep scans always return zero findings, or crash with `FileNotFoundError`
+
+Semgrep isn't a declared project dependency yet (see `docs/help/portfolio-1-agent-status.md`
+for why). Install it into the backend venv with:
+
+```powershell
+cd backend
+uv pip install semgrep==1.173.0
+```
+
+**Not** `uv add semgrep` — it resolves a broken Windows wheel (a `semgrep-core` binary
+missing its `.exe` extension and required DLLs), which crashes any real scan with
+`FileNotFoundError`. Also: Semgrep's `--config auto` silently skips any file not tracked
+by git, and any path it default-ignores (patterns including `test`/`fixtures`) — a scan
+against such a path returns `"findings": []`, not an error, which looks like "nothing
+wrong" rather than "nothing scanned."
+
+### Security agent: SCA/secret scans return "unavailable" or all-zero findings
+
+Trivy (SCA) and Gitleaks (secrets) are external Go binaries, not pip-installable —
+neither is a project dependency. Install both with `winget`:
+
+```powershell
+winget install --id Gitleaks.Gitleaks --silent --accept-package-agreements --accept-source-agreements
+winget install --id AquaSecurity.Trivy --silent --accept-package-agreements --accept-source-agreements
+```
+
+**Open a new terminal after installing** — `winget` updates the persistent Windows User
+`PATH`, but any shell already open (including one you install from) won't see the change
+until it's restarted. (Semgrep's own gotchas are documented separately, above.)
 
 ### `psql : The term 'psql' is not recognized`
 

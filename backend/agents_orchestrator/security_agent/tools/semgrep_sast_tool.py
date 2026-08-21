@@ -74,6 +74,7 @@ def run_semgrep_sast(target_path: str, rulesets: str = "p/owasp-top-ten") -> str
                 "line_start": r.get("start", {}).get("line", 0),
                 "line_end": r.get("end", {}).get("line", 0),
                 "owasp_category": r.get("extra", {}).get("metadata", {}).get("owasp", []),
+                "cwe": r.get("extra", {}).get("metadata", {}).get("cwe", []),
             })
 
         return json.dumps({

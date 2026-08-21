@@ -44,6 +44,7 @@ def mock_redis_client():
     Methods:
       xadd(stream, fields)     — dead-letter write path
       xread(streams, count)    — read back from stream (assertion helper)
+      xdel(stream, msg_id)     — retry worker removing a successfully re-emitted entry
       set(key, value, **kw)    — job status store (evidence export worker)
       get(key)                 — job status read (status polling endpoint)
       aclose()                 — cleanup (awaited in service teardown)
@@ -51,6 +52,7 @@ def mock_redis_client():
     client = MagicMock()
     client.xadd = AsyncMock(return_value=b"1-0")
     client.xread = AsyncMock(return_value=[])
+    client.xdel = AsyncMock(return_value=1)
     client.set = AsyncMock(return_value=True)
     client.get = AsyncMock(return_value=None)
     client.aclose = AsyncMock(return_value=None)

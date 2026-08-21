@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 
 import shared.keyvault as _keyvault
+from config.connectors.http_client import get_async_client
 from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
@@ -154,19 +155,19 @@ async def get_graph_token(tenant_id: str = "") -> str:
         if expires_at - now > _TOKEN_REFRESH_MARGIN_S:
             return token
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{LOGIN_BASE}/{creds['entra_tenant_id']}/oauth2/v2.0/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": creds["client_id"],
-                "client_secret": creds["client_secret"],
-                "scope": GRAPH_SCOPE,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = get_async_client(timeout=30)
+    resp = await client.post(
+        f"{LOGIN_BASE}/{creds['entra_tenant_id']}/oauth2/v2.0/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "scope": GRAPH_SCOPE,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     token = data.get("access_token", "")
     if not token:
@@ -210,8 +211,8 @@ async def graph_request(
     headers.setdefault("Authorization", f"Bearer {token}")
     headers.setdefault("Accept", "application/json")
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.request(method, url, headers=headers, **kwargs)
+    client = get_async_client(timeout=30, follow_redirects=True)
+    resp = await client.request(method, url, headers=headers, **kwargs)
 
     # Graph throttles with 429; SharePoint-backed resources can also emit 503. Both
     # carry Retry-After in seconds when present (A6 — ASSUMED).

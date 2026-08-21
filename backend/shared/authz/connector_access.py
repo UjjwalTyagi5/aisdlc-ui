@@ -1,11 +1,10 @@
 r"""Read, write, or both — the access level attached to a connector grant.
 
-WHY A LEVEL AND NOT A BOOLEAN. `integration_grants` recorded THAT a Business Unit
-may use Jira and never HOW. Every grant was therefore implicitly read+write, which
-is the widest thing it could have meant: an agent granted Jira to read a backlog
-could also transition items and post comments, and nothing anywhere said it should
-not. Connectors already separate `read_adapter` from `write_adapter` — the split
-existed at the point of use and had no counterpart at the point of permission.
+WHERE THE LEVEL LIVES. On the project's STAGE, in `projects.tool_access_modes` —
+not on the unit's grant, which since migration 0024 records only that a Business
+Unit may reach an integration at all. Connectors separate `read_adapter` from
+`write_adapter`, and this is the vocabulary that decides which of the two an agent
+gets. `config/connectors/scoped.ScopedConnector` is what enforces it.
 
 THE LATTICE IS TINY AND THAT IS DELIBERATE. Three levels, ordered by the set of
 operations each admits:
@@ -21,12 +20,17 @@ makes this a lattice rather than a ladder, and it is why `permits()` is a subset
 test rather than a `>=` on an integer. Ranking them 1/2/3 would quietly make
 `write` imply `read`, which is exactly the escalation the level exists to prevent.
 
-INHERITANCE IS INTERSECTION. A project's access is the intersection of what it
-asked for with what its unit was granted, and a unit's with what the organisation
-onboarded. Intersection rather than "the lower one" because of the incomparable
-pair: read ∩ write is EMPTY, not "one of them". A unit granted read-only that
-tries to give a project write access yields no access at all, which is the correct
-and safe answer — and `narrow()` returns None to say so rather than picking a side.
+THERE IS NO INTERSECTION STEP ANY MORE. This module used to carry `narrow()` and
+`contains()` — set intersection, and the "does the parent admit everything the
+child does" test — because a level was resolved by intersecting a project's ask
+with its unit's grant. Migration 0024 removed that ceiling: the stage's level is
+the answer, with nothing above it to intersect against. Both functions were
+deleted rather than left unused, because a lattice operation sitting in an authz
+module reads as load-bearing whether or not anything calls it.
+
+If a ceiling is ever wanted back, the operation to restore is intersection and NOT
+a `>=` on a rank — see the incomparability note above, which is the whole reason
+this was ever a lattice.
 
 NOTHING HERE TOUCHES THE DATABASE. It is pure set arithmetic so it can be unit
 tested exhaustively and called from the request path, the runtime path, and the
@@ -97,39 +101,6 @@ def from_modes(allowed: Iterable[str]) -> Optional[AccessLevel]:
     return None
 
 
-def narrow(parent: Optional[str], child: Optional[str]) -> Optional[AccessLevel]:
-    """The access a child level actually yields under a parent — their intersection.
-
-    THE ONE RULE THE HIERARCHY RESTS ON: Organization → BU → project → agent, each
-    level able to narrow and never to widen. A project asking for read_write under a
-    unit granted read gets read; a project asking for write under a unit granted read
-    gets None, because those two share no operation at all.
-
-    Returns None when the intersection is empty, which callers must treat as "no
-    access" rather than as an error — an empty intersection is a legitimate outcome
-    of two honest decisions, not a fault.
-    """
-    if parent is None or child is None:
-        return None
-    return from_modes(modes(parent) & modes(child))
-
-
-def contains(parent: Optional[str], child: Optional[str]) -> bool:
-    """Does `parent` admit everything `child` does? The escalation test.
-
-    Used at WRITE time by the API: a BU Admin selecting a project's access, or a
-    Project Admin choosing their own, must pass this against the level above them.
-    `narrow()` answers what they would get; this answers whether to refuse them.
-    Refusing is better than silently narrowing when somebody has explicitly asked
-    for more than they may have — they should be told, not quietly given less.
-    """
-    if child is None:
-        return True  # asking for nothing is always within any grant
-    if parent is None:
-        return False
-    return modes(child) <= modes(parent)
-
-
 def label(level: Optional[str]) -> str:
     """Human phrasing, for refusal messages and audit rows."""
     return {
@@ -137,3 +108,51 @@ def label(level: Optional[str]) -> str:
         WRITE: "write-only",
         READ_WRITE: "read and write",
     }.get(level or "", "no access")
+
+
+# ── the per-stage tool mode ───────────────────────────────────────────────────
+#
+# The UI calls the widest level "both"; this module calls it "read_write". They are
+# the same lattice point and the difference is only vocabulary, so the translation
+# lives here rather than being re-derived at each boundary that meets it.
+#
+# The stage mode is stored in `projects.tool_access_modes` (migration 0024), keyed
+# "{agent_id}::{connector|mcp}::{target_ref}" — see accessModeKey() in
+# frontend/components/app/tools-stage-picker.tsx, which is the only writer of it.
+
+#: The vocabulary the stage picker sends. Kept separate from ACCESS_LEVELS so a
+#: payload is validated against what the client actually says, not what we store.
+TOOL_ACCESS_MODES: tuple[str, ...] = ("read", "write", "both")
+
+#: What a stage's mode means when the picker never set one. The picker documents an
+#: unset chip as "both", and with the unit ceiling gone that default IS the answer —
+#: so it is written down here rather than left implicit at the resolver.
+DEFAULT_TOOL_MODE: str = "both"
+
+
+def stage_mode_key(agent_id: str, kind: str, target_ref: str) -> str:
+    """The composite key a stage's mode is stored under. Mirrors accessModeKey()."""
+    return f"{agent_id}::{kind}::{target_ref}"
+
+
+def level_from_mode(mode: Optional[str]) -> Optional[AccessLevel]:
+    """Translate a picker mode into a stored level. Unknown modes yield None.
+
+    Fail-closed on the unrecognised value for the same reason `modes()` does: this is
+    called from the runtime path with a value read out of JSONB, which has no CHECK
+    constraint behind it to guarantee the vocabulary.
+    """
+    if mode == "both":
+        return READ_WRITE
+    if mode in (READ, WRITE):
+        return mode  # type: ignore[return-value]
+    return None
+
+
+def mode_from_level(level: Optional[str]) -> Optional[str]:
+    """The inverse, for handing a stored level back to the picker."""
+    if level == READ_WRITE:
+        return "both"
+    if level in (READ, WRITE):
+        return level
+    return None

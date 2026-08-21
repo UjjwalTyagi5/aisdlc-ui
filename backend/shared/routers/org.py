@@ -29,7 +29,7 @@ from shared.authz.audit import record_rbac_change
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
-from shared.routers.connectors import _KNOWN_KINDS
+from shared.routers.connectors import _CATALOG_KINDS
 from shared.services import org_settings as org_settings_service
 from shared.services.org_settings import OrgSettingsError
 
@@ -241,12 +241,17 @@ async def org_overview(
         params,
     )).scalar() or 0
 
+    # Restricted to the presented catalog so the numerator and the denominator
+    # below count the same universe. Without the kind filter an enabled
+    # azure_repos or SSO row — neither of which has a tile — could push "3 of 8
+    # connected" past a total the Integrations page cannot account for.
     connector_count = (await db.execute(
         text(
-            "SELECT COUNT(*) FROM workspace_connectors wc WHERE wc.enabled = true"
+            "SELECT COUNT(*) FROM workspace_connectors wc "
+            "WHERE wc.enabled = true AND wc.kind = ANY(CAST(:catalog_kinds AS text[]))"
             + _ws_clause("wc.workspace_id")
         ),
-        params,
+        {**params, "catalog_kinds": sorted(_CATALOG_KINDS)},
     )).scalar() or 0
 
     # Spend joins agent_call_logs -> runs -> projects to reach a workspace.
@@ -273,7 +278,7 @@ async def org_overview(
         userCount=int(user_count),
         modelProviderCount=int(model_provider_count),
         connectorCount=int(connector_count),
-        connectorTotalCount=len(_KNOWN_KINDS),
+        connectorTotalCount=len(_CATALOG_KINDS),
         businessUnitCount=int(business_unit_count),
         projectCount=int(project_count),
         budgets=[

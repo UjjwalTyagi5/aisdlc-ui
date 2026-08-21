@@ -119,3 +119,51 @@ async def test_the_form_user_id_can_no_longer_impersonate_someone_else(project_w
         headers=_hdr(t["org_admin"], t["org"], ["admin:*"]),
     )
     assert resp.status_code == 403
+
+
+async def test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_security_agent():
+    """`platform_role_for` resolves a role the caller holds ANYWHERE in the tenant
+    (roles_held's own docstring: "any scope") -- so a Developer added to Project A
+    must NOT be able to target Project B's chat route and be granted "use" access to
+    Security purely because AGENT_DEFAULT_REACH["security"]["developer"] == "use".
+    They hold no binding on Project B at all. This is the scenario
+    assert_agent_access_for_chat's membership check (visible_project_ids) exists for --
+    a plain resolve_project + assert_agent_access pair would incorrectly let this
+    through, since neither checks WHICH project the caller's role binding is on.
+    """
+    org = str(_uuid.uuid4())
+    unit = str(_uuid.uuid4())
+    project_a = str(_uuid.uuid4())
+    project_b = str(_uuid.uuid4())
+    dev = f"dev-{_uuid.uuid4()}"
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Membership Test')"
+        ), {"i": org, "s": f"membership-{org[:8]}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'unit', 'Unit')"
+        ), {"i": unit, "o": org})
+    async with get_db_session_for_tenant(org) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
+            "VALUES (:i, :w, :t, 'Project A')"
+        ), {"i": project_a, "w": unit, "t": org})
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
+            "VALUES (:i, :w, :t, 'Project B')"
+        ), {"i": project_b, "w": unit, "t": org})
+    # dev is a Developer on Project A only -- never added to Project B.
+    await grant_role(dev, project_a, "developer", tenant_id=org, scope_kind="project", granted_by="test")
+
+    resp = _client().post(
+        "/sdlc/agent/security/chat/",
+        data={
+            "session_id": str(_uuid.uuid4()),
+            "user_id": dev,
+            "text": "scan this",
+            "project_id": project_b,
+        },
+        headers=_hdr(dev, org, ["artifact:view"]),
+    )
+    assert resp.status_code == 404

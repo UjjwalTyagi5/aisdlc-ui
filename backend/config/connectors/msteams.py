@@ -32,9 +32,8 @@ import logging
 import time
 from typing import Any, Dict
 
-import httpx
-
 from config.connectors.base import BaseConnector
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -332,11 +331,11 @@ class MSTeamsConnector(BaseConnector):
 
         if webhook_url:
             # Incoming Webhook: the URL itself is the credential, so no Graph token.
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    webhook_url, json=_adaptive_card(message, title, link_url)
-                )
-                resp.raise_for_status()
+            client = get_async_client(timeout=30)
+            resp = await client.post(
+                webhook_url, json=_adaptive_card(message, title, link_url)
+            )
+            resp.raise_for_status()
             return
 
         # [ASSUMED] A5 — Graph app-only channel posting is a protected API. See module docstring.

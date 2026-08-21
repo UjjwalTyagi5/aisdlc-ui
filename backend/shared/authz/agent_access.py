@@ -22,7 +22,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.agent_registry import AGENT_DEFAULT_REACH
-from shared.authz.effective_role import effective_platform_role
+from shared.authz.can_perform import visible_project_ids
+from shared.authz.effective_role import effective_platform_role, platform_role_for
 from shared.authz.project_scope import resolve_project
 from shared.db import get_db_session
 
@@ -118,6 +119,50 @@ async def assert_agent_access(
             status_code=403,
             detail=f"You don't have access to the {agent_id} agent on this project.",
         )
+
+
+async def assert_agent_access_for_chat(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    agent_id: str,
+) -> str:
+    """`assert_agent_access` for the agent WS/REST chat handlers, which have no
+    `{project_id}` path parameter (and, for the WS side, no `Request` at all) for
+    `require_agent_access` to read `project_id` from.
+
+    `assert_agent_access` alone is not enough here: it takes whatever role the caller
+    is passed as given, and `platform_role_for` resolves a role the caller holds
+    ANYWHERE in the tenant (`roles_held`'s own docstring: "any scope") — not
+    specifically on `project_id`. Without this, a Developer on Project A reaches
+    Project B's chat route, `platform_role_for` still answers "developer", and
+    `AGENT_DEFAULT_REACH["security"]["developer"] == "use"` lets them straight in,
+    despite holding no binding on Project B at all. This resolves the project first
+    (UUID or slug, tenant-scoped, 404 if absent — matching `resolve_project`'s own
+    "not found and not yours are the same answer" convention) and requires the caller
+    actually be a member of it (`visible_project_ids`, the same primitive
+    `assert_can_read_project` uses) before resolving role and checking agent reach.
+
+    Returns the resolved project's UUID string, so callers don't need a second
+    `resolve_project` round trip.
+    """
+    project = await resolve_project(db, tenant_id, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="not found")
+    resolved_project_id = str(project.id)
+
+    visible = await visible_project_ids(db, user_id=user_id, tenant_id=tenant_id)
+    if visible is not None and resolved_project_id not in visible:
+        raise HTTPException(status_code=404, detail="not found")
+
+    role = await platform_role_for(db, user_id=user_id, permissions=[])
+    await assert_agent_access(
+        db, tenant_id=tenant_id, project_id=resolved_project_id,
+        role=role, user_id=user_id, agent_id=agent_id,
+    )
+    return resolved_project_id
 
 
 def require_agent_access(agent_id: str, project_id_param: str = "project_id"):

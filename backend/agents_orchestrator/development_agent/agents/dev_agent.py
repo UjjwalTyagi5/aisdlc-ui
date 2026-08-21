@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from typing import Annotated, List, TypedDict
 
-from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from config.checkpoint import build_checkpointer as _build_checkpointer
 from langgraph.graph import END, StateGraph
@@ -175,6 +174,8 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
     cache_key = (alias, model)
     if cache_key in _LLM_CACHE:
         return _LLM_CACHE[cache_key]
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    from langchain_litellm import ChatLiteLLM
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,

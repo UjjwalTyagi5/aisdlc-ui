@@ -44,6 +44,7 @@ import httpx
 
 import shared.keyvault as _keyvault
 from config.connectors.base import BaseConnector
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -409,11 +410,11 @@ class FigmaConnector(BaseConnector):
                     latency_ms=(time.time() - start) * 1000,
                     error="NoCredential",
                 )
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{_FIGMA_API_BASE}/v1/me",
-                    headers=self._figma_headers(auth["token"], auth.get("scheme", "pat")),
-                )
+            client = get_async_client(timeout=15)
+            resp = await client.get(
+                f"{_FIGMA_API_BASE}/v1/me",
+                headers=self._figma_headers(auth["token"], auth.get("scheme", "pat")),
+            )
             if resp.status_code == 200:
                 return ConnectorHealth(
                     connector_name="figma",
@@ -527,13 +528,13 @@ class FigmaConnector(BaseConnector):
                 "the Integrations page (Design & prototyping)."
             )
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.request(
-                method,
-                f"{_FIGMA_API_BASE}{path}",
-                headers=self._figma_headers(auth["token"], auth.get("scheme", "pat")),
-                **kwargs,
-            )
+        client = get_async_client(timeout=60)
+        resp = await client.request(
+            method,
+            f"{_FIGMA_API_BASE}{path}",
+            headers=self._figma_headers(auth["token"], auth.get("scheme", "pat")),
+            **kwargs,
+        )
 
         if resp.status_code == 429:
             # A9 (ASSUMED): Retry-After presence on Figma 429s is documented but
