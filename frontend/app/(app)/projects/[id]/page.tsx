@@ -119,7 +119,7 @@ export default function ProjectOverviewPage() {
     // agents keep their old, unverified code per the design doc's "assume broken
     // until properly rebuilt" framing (multi-track-agent-access-design.md) — grow
     // this list one entry at a time as each agent gets the same Task 5-7 treatment.
-    const builtAgents: Phase[] = ["security"];
+    const builtAgents: Phase[] = ["security", "documentation"];
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 

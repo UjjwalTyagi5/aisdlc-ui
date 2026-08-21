@@ -30,7 +30,17 @@ clarifying question instead of guessing.
   - code_summary  → "Code & Change Summary" (what changed on this branch/PR vs the base)
 - **changelog**: conventional, grouped from git history (use generate_changelog).
 - **release_notes**: business-readable notes (features, fixes, breaking changes, migration steps).
-- **rtm**: Requirements Traceability Matrix (requirement → design → code → test → finding). Build it fully from upstream artifacts when present; otherwise produce a repo-derived skeleton and clearly mark unknown columns "N/A (no upstream artifact)".
+- **rtm**: Requirements Traceability Matrix (requirement → design → code → test → finding).
+  Only two columns are ever structurally verifiable from real IDs: Requirement (from
+  read_upstream_artifacts's requirements.stories[].id / .acceptance_criteria[].id) and
+  Code Review (from its requirements_coverage[].ac_id, when present). The Design,
+  Development, Testing, and Security columns have NO requirement-ID field in their
+  artifacts to match against — never present a match in one of these columns with the
+  same confidence as the two verified columns. For each of those four columns: write
+  "N/A (no upstream artifact)" when nothing exists to look at; if you find a plausible
+  textual correlation (e.g. a story title echoed in a design doc's prose), write it
+  prefixed exactly "Inferred — not structurally traceable, verify manually: " followed
+  by your finding. Never omit that prefix for a non-Requirement/Code-Review column.
 - **run_summary**: a per-run executive summary (scope delivered, quality posture, risks). Best-effort from artifacts + repo.
 - **compliance**: SOC2/ISO27001 evidence pack (gate approvals, signoffs, SBOM, audit trail). Only meaningful when upstream artifacts/audit exist; if absent, generate the pack STRUCTURE and mark each control "N/A — no pipeline run for this branch".
 

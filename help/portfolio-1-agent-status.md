@@ -273,12 +273,107 @@ which is `deployment_standalone_router`).
 - [x] Test: `backend/tests/test_deployment_agent_chat_access.py` (3 passed)
 - Notes: like Design, this route previously had no `project_id` Form field at all — added as a new required field, same reasoning (not live yet, nothing depends on the old contract).
 
-### 8. Documentation — owner role: BA (auto-accept; PA fallback) — `agent_id="documentation"` — **access-hardening DONE**
+### 8. Documentation — owner role: BA (auto-accept; PA fallback) — `agent_id="documentation"` — **DONE (live)**
 File: `backend/agents_orchestrator/documentation_agent/documentation_standalone_api.py`
 - [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
 - [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
 - [x] Test: `backend/tests/test_documentation_agent_chat_access.py` (3 passed)
+- [x] Frontend `builtAgents` includes `"documentation"` — now live and clickable alongside Security's tile
 - Notes: no `project_id` Form field here either — reads/writes the in-memory session's already-bound `project_id`, same pattern as Code Review.
+
+**Real-logic verification (2026-08-20), Part 5 steps 3/6, done without a live LLM key**
+— same technique and same result as Code Review and Security above: **this agent's
+code was NOT a stub either.** `agents_orchestrator/documentation_agent/` is a real
+implementation — the graph (`agents/compiler.py`), 9 tools (repo inspection/read/search,
+`generate_changelog`, `read_upstream_artifacts`, `save_document`, `open_docs_pr`,
+`publish_to_sharepoint`, `list_sharepoint_documents`, `ingest_sharepoint_document`), and
+`doc_prompt.py`.
+- **New**: `backend/tests/test_documentation_agent_live_e2e.py` — drives the real
+  compiled `compiler.app` graph with only the model's `.ainvoke()` scripted (4 turns:
+  concurrent `inspect_repo` + `read_upstream_artifacts`, then `generate_changelog`, then
+  `save_document`, then a no-tool-calls turn to `END`). Every tool call is real: a real
+  git repo with 3 real commits drives `generate_changelog` (real `status`, `commit_count`,
+  grouped `### Added`/`### Fixed` sections with the real commit subjects), and a real
+  seeded Postgres `Run` row (organization/workspace/project/run, `requirements_payload`
+  and `security_artifacts` populated, other artifact columns left null by omission)
+  drives `read_upstream_artifacts` — it returns the real seeded
+  `requirements.stories[0].id == "US-1"` and `security.signoff.decision == "pass"`,
+  and correctly nulls the columns with no upstream artifact (`design is None`, etc.).
+  `save_document` actually wrote the file to disk and updated the session's
+  `generated_docs`. **Not proven: the model's own judgment** — needs a working LLM key
+  (see Open items below).
+- **New**: `backend/tests/test_documentation_agent_tools.py` — 13 isolated unit tests,
+  deliberately narrower/faster than the live_e2e test: 3 `generate_changelog` edge cases
+  (unconventional-prefix bucketing, merge-commit exclusion, the no-commits case), the
+  `read_upstream_artifacts` all-null case with no tenant/project bound, 3 `save_document`
+  guards (filename sanitization, replace-not-duplicate on the same filename, empty-content
+  refusal), 2 `open_docs_pr` precondition checks (no documents generated, no prepared
+  target), 2 SharePoint tools' graceful "not connected" degradation, and the same
+  `_resolve_model` BYOK-first/fallback regression pair Security carries. Two of these
+  tests corrected a wrong assumption made while planning them, not a bug in the tool
+  itself:
+  1. The no-commits case was planned as `status == "ok"`, `commit_count == 0`. Actual
+     behavior: `git log` exits 128 against a zero-commit repo, which `generate_changelog`
+     surfaces as `status == "error"`, `changelog == ""` — the test
+     (`test_generate_changelog_with_no_commits_yet_returns_error_gracefully`) was
+     corrected to match reality, not the tool.
+  2. Patching `shared.services.model_resolver.resolve_chat_model` and
+     `shared.services.notification_targets.sharepoint_target` directly with `patch(...)`
+     as originally planned fails outright — neither target exists to patch (see the
+     `resolve_chat_model` caveat below), so `unittest.mock.patch` has nothing to attach
+     to. Corrected to `patch.dict(sys.modules, {...})`, mocking the whole module at
+     import time, mirroring Security's existing regression-test pattern.
+- **RTM structural-traceability finding.** The `rtm` deliverable's original prompt text
+  told the model to "build it fully from upstream artifacts when present" without
+  qualification — but inspecting the actual upstream artifact models
+  (`shared/models/requirements.py`, `shared/models/code_review.py`) shows only two of
+  the RTM's five non-Requirement columns are backed by a real, structurally matchable
+  ID: Requirements itself (`UserStory.id` / `AcceptanceCriteria.id`) and Code Review
+  (`CoverageEntry.ac_id`, which references an AC id when populated). Design,
+  Development, Testing, and Security have no requirement-ID field anywhere in their
+  artifacts — any "match" the model draws for those columns can only ever be a textual
+  inference (e.g. a story title echoed in a design doc's prose), never a structural one,
+  and the old prompt text let the model present both kinds of "match" with the same
+  confidence. **Fixed**: `backend/agents_orchestrator/documentation_agent/prompts/doc_prompt.py`'s
+  `rtm` bullet now names the two structurally-verified columns explicitly, requires
+  "N/A (no upstream artifact)" for the other four when nothing exists, and requires an
+  exact "Inferred — not structurally traceable, verify manually: " prefix on any
+  textual correlation the model reports for those four — never omitted, never presented
+  as equivalent to a real ID match. Verified the prompt still imports cleanly and
+  contains the new marker text after the edit.
+- `read_repo_file` / `search_repo` behavior matches the pattern already verified for
+  Code Review and Security (real reads, real search) — not independently re-spot-checked
+  in this pass since the live_e2e test already exercises `inspect_repo` end to end.
+
+**Caveat, matching Security's section's own honesty about this:**
+`shared.services.model_resolver.resolve_chat_model` still does not exist anywhere in the
+backend (same grep-verified fact Security's section already documents — zero matches for
+`def resolve_chat_model`). Documentation's `_resolve_model` already had the correct
+try-BYOK-first-then-fall-back structure and already correctly preserves the caller's
+`model_id` on fallback (verified by
+`test_resolve_model_falls_back_to_raw_chat_anthropic_preserving_model_id` — unlike Code
+Review's and pre-fix Security's, it was never hardcoding the fallback model). This task
+only added regression tests locking in that already-correct behavior; it did **not**
+implement the missing `resolve_chat_model` resolver. BYOK still does not functionally
+work for Documentation, or for any of the other three agents that import it, until that
+resolver is actually written — a separate, cross-agent piece of work, out of scope here.
+
+**Known minor gap, deferred, already ledgered in Task 1's own review (not blocking):**
+the live_e2e test's `save_document` call writes a real document file to a real,
+gitignored path under `backend/files/generated-docs/`, and the test has no cleanup step
+for it. Harmless — the path is gitignored and nothing reads stale files there — but
+repeated local/CI runs accumulate unbounded clutter in that directory over time. Worth a
+small follow-up fixture (temp-dir redirect or a teardown `unlink`) next time this file is
+touched.
+
+**Open items before this is a *complete* re-verification** (access-hardening and the go
+-live flip are done; the items above are now fixed):
+1. A working LLM provider key, to prove the model's actual documentation judgment (what
+   it chooses to include, how it phrases inferred RTM correlations), not just the
+   scaffolding and prompt rules around it.
+2. The real `resolve_chat_model` implementation (see caveat above) — cross-agent, not
+   Documentation-specific.
+3. The `save_document` live_e2e cleanup noted above.
 
 ---
 
