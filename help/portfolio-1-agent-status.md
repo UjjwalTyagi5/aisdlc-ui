@@ -345,6 +345,44 @@ implementation — the graph (`agents/compiler.py`), 9 tools (repo inspection/re
   Code Review and Security (real reads, real search) — not independently re-spot-checked
   in this pass since the live_e2e test already exercises `inspect_repo` end to end.
 
+**SharePoint is entirely dead code (found in the whole-branch review, 2026-08-21) —
+documented, not fixed, in this pass.** `doc_tools.py`'s three SharePoint tools
+(`publish_to_sharepoint`, `list_sharepoint_documents`, `ingest_sharepoint_document`) all
+route through `_sharepoint_session()`, which does
+`from shared.services.notification_targets import sharepoint_target` inside a
+try/except. That module — `shared/services/notification_targets.py` — does not exist
+as a file anywhere in the backend (grep-confirmed, and confirmed by running
+`cd backend && uv run python -c "import shared.services.notification_targets"`, which
+raises `ModuleNotFoundError`). So all three SharePoint tools currently always fail in
+production with `"ERROR reaching SharePoint: ModuleNotFoundError"` — not the friendlier
+"SharePoint is not connected for this tenant" message a caller might reasonably expect
+from reading `_sharepoint_session`'s code. The same missing import also breaks
+`shared/routers/documentation_workspace.py`'s `list_doc_connectors` endpoint's
+SharePoint-availability check (it's wrapped in its own try/except, so it silently
+reports `available: false` regardless of any real configuration, rather than raising).
+Note: the unit tests `test_publish_to_sharepoint_reports_not_connected_cleanly` and
+`test_list_sharepoint_documents_reports_not_connected_cleanly`
+(`backend/tests/test_documentation_agent_tools.py`) use
+`patch.dict(sys.modules, {"shared.services.notification_targets": ...})` to inject a
+fake module in place of the real (missing) one — this is the correct way to test the
+"not connected" branch's logic in isolation, but it means these tests **cannot** and do
+not detect that the real module doesn't exist. Passing tests here do not mean
+SharePoint publishing works. Implementing `shared/services/notification_targets.py` for
+real is out of scope for this pass.
+
+**Gated actions are enforced by prompt text only (found in the whole-branch review,
+2026-08-21).** `open_docs_pr` and `publish_to_sharepoint` are gated only by the system
+prompt's instruction ("only call this when the user explicitly asks") —
+`agents/compiler.py`'s tool node (`make_dynamic_tool_node`, in
+`shared/tools/mcp_runtime.py`) has no per-tool authorization check; whatever tool_call
+the model emits, it executes. This is pre-existing and matches every sibling agent
+(Code Review, Security) — not a regression introduced by this plan — but it's worth
+recording now that this branch makes the Documentation agent reachable by real users,
+since it reads repo files and (if SharePoint were ever wired up) external document text
+into model context, both plausible prompt-injection surfaces. No code fix in this
+branch — recorded here as a known limitation for a future cross-agent
+tool-authorization pass.
+
 **Caveat, matching Security's section's own honesty about this:**
 `shared.services.model_resolver.resolve_chat_model` still does not exist anywhere in the
 backend (same grep-verified fact Security's section already documents — zero matches for
@@ -370,10 +408,22 @@ touched.
 -live flip are done; the items above are now fixed):
 1. A working LLM provider key, to prove the model's actual documentation judgment (what
    it chooses to include, how it phrases inferred RTM correlations), not just the
-   scaffolding and prompt rules around it.
+   scaffolding and prompt rules around it. This includes the RTM's exact
+   `"Inferred — not structurally traceable, verify manually: "` prefix (em dash
+   included): it is a prompt instruction, not something any code validates, so with no
+   working LLM key in this environment that guarantee is aspirational until verified
+   against a real model call — same category as the rest of this item, not a separate
+   gap.
 2. The real `resolve_chat_model` implementation (see caveat above) — cross-agent, not
    Documentation-specific.
 3. The `save_document` live_e2e cleanup noted above.
+4. `shared/models/design.py`'s `DesignArtifacts.linked_work_item_ids` field is, in
+   principle, exactly the kind of requirement-ID link the RTM prompt's Design column is
+   told it doesn't have — but grep-confirmed (`grep -rn "linked_work_item_ids"
+   backend/`) it is never assigned anywhere in the backend today, only declared (plus
+   its own deprecated alias, `linked_ado_ids`, in a comment). If this field is ever
+   wired up to be populated for real, the RTM prompt fix above would need revisiting,
+   since it would then be forcing a genuine structural link to be labeled "Inferred".
 
 ---
 
