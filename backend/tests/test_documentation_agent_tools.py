@@ -93,6 +93,17 @@ async def test_generate_changelog_with_no_commits_yet_returns_error_gracefully(b
 
 
 @pytest.mark.asyncio
+async def test_read_repo_file_denies_a_path_traversal_attempt(bound_session):
+    s, d = bound_session
+    (Path(d) / "safe.txt").write_text("safe content", encoding="utf-8")
+
+    result = await doc_tools.read_repo_file.ainvoke({"path": "../../../etc/passwd"})
+
+    assert result.startswith("ERROR")
+    assert "traversal" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_read_upstream_artifacts_returns_all_null_with_no_tenant_bound():
     session_id = "doc-tools-unbound-test"
     clear_session(session_id)

@@ -27,6 +27,13 @@ from shared.db import get_db_session_for_tenant, get_db_session_superuser
 pytestmark = pytest.mark.usefixtures("purge_created_orgs")
 
 
+@pytest.fixture(autouse=True)
+async def _dispose_shared_engine():
+    yield
+    from shared.db import engine
+    await engine.dispose()
+
+
 class _ScriptedModel:
     """Stands in for the real model. Each .ainvoke() call pops the next canned
     response off the script, so the test controls exactly what the "model" decides
