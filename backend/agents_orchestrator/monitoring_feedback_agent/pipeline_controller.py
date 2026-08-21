@@ -9,7 +9,6 @@ from agents_orchestrator.monitoring_feedback_agent.action_decision import genera
 import json
 import re
 import time
-import litellm
 from tenacity import RetryError
 from ._byok import resolved_litellm_kwargs
 
@@ -112,6 +111,8 @@ def process_pasted_logs_batch(input_data: str, user_message: str) -> list:
 
     try:
         print("[Pipeline] Making a SINGLE, all-in-one API call via LiteLLM...")
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = litellm.completion(
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),

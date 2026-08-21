@@ -8,11 +8,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectAccessList } from "@/components/app/project-access-list";
 
 /**
- * The third rung, on screen.
+ * The project-wide default, on screen.
  *
- * The assertions worth having are about the two things a level alone cannot tell
- * you: whether it was chosen here or is the most the organisation allows, and
- * whether a wider one is even offered.
+ * These used to assert a CEILING: the unit's granted level was shown as a badge and
+ * capped the picker. Backend migration 0024 removed the level from the grant — read
+ * vs write is a per-stage decision now — so the assertions worth having changed with
+ * it. What matters here is that the screen no longer claims a unit level it cannot
+ * know, and no longer disables a level nothing bounds.
  */
 vi.mock("@/lib/api/integration-access", () => ({
   listProjectIntegrationAccess: vi.fn(),
@@ -47,7 +49,6 @@ function renderList(rows: unknown[], canManage = true) {
 const row = (over: Record<string, unknown> = {}) => ({
   kind: "connector",
   targetId: "jira",
-  unitAccess: "read_write",
   projectAccess: null,
   effectiveAccess: "read_write",
   effectiveLabel: "read and write",
@@ -56,33 +57,30 @@ const row = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("what a project may do", () => {
-  it("says when a level is inherited rather than chosen here", async () => {
+  it("says when no project default is set rather than leaving a blank", async () => {
     renderList([row()]);
-    expect(await screen.findByText("inherited")).toBeTruthy();
+    expect(await screen.findByText("no default")).toBeTruthy();
   });
 
-  it("names the unit's level alongside the project's", async () => {
-    // "Read only" alone cannot say whether it is a narrowing you can undo here or
-    // the most the organisation allows.
-    renderList([row({ unitAccess: "read_write", effectiveAccess: "read", inherited: false })]);
-    // The BADGE, not the radio of the same name — the badge is what states the
-    // ceiling, and a bare text match finds both.
-    expect(await screen.findByText(/Business Unit: Read and write/)).toBeTruthy();
+  it("never states a level for the business unit", async () => {
+    // The grant carries no level to state. A badge here claiming one would be the
+    // screen inventing a ceiling that no longer exists anywhere behind it.
+    renderList([row({ effectiveAccess: "read", inherited: false })]);
+    await screen.findByRole("radio", { name: "Read only" });
+    expect(screen.queryByText(/Business Unit: /)).toBeNull();
   });
 
-  it("will not offer a level above the unit's grant", async () => {
-    renderList([row({ unitAccess: "read", effectiveAccess: "read" })]);
-    const wider = (await screen.findByRole("radio", {
-      name: "Read and write",
-    })) as HTMLButtonElement;
-    // Disabled, not absent — an admin who cannot find it learns nothing.
-    expect(wider.disabled).toBe(true);
+  it("offers every level, because nothing above the project bounds it", async () => {
+    renderList([row({ effectiveAccess: "read" })]);
+    for (const name of ["Read only", "Write only", "Read and write"]) {
+      const opt = (await screen.findByRole("radio", { name })) as HTMLButtonElement;
+      expect(opt.disabled).toBe(false);
+    }
   });
 
   it("narrows on selection", async () => {
     vi.mocked(setProjectIntegrationAccess).mockResolvedValue({
       ok: true,
-      unitAccess: "read_write",
       projectAccess: "read",
       effectiveAccess: "read",
       warnings: [],
@@ -101,19 +99,18 @@ describe("what a project may do", () => {
     });
   });
 
-  it("offers a reset only when there is a narrowing to undo", async () => {
+  it("offers a clear only when there is a default to clear", async () => {
     renderList([row({ inherited: false, projectAccess: "read", effectiveAccess: "read" })]);
-    expect(await screen.findByRole("button", { name: /Follow the/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /Clear the default/ })).toBeTruthy();
 
     cleanup();
-    renderList([row()]); // inherited
-    await screen.findByText("inherited");
-    // A reset on an inherited row is a no-op offered as an action, which reads
-    // as broken.
-    expect(screen.queryByRole("button", { name: /Follow the/ })).toBeNull();
+    renderList([row()]); // no default set
+    await screen.findByText("no default");
+    // A clear on a row with no default is a no-op offered as an action.
+    expect(screen.queryByRole("button", { name: /Clear the default/ })).toBeNull();
   });
 
-  it("resets back to inheriting", async () => {
+  it("clears back to letting each stage decide", async () => {
     vi.mocked(clearProjectIntegrationAccess).mockResolvedValue({
       ok: true,
       cleared: true,
@@ -121,7 +118,7 @@ describe("what a project may do", () => {
     } as never);
     renderList([row({ inherited: false, projectAccess: "read", effectiveAccess: "read" })]);
 
-    await userEvent.click(await screen.findByRole("button", { name: /Follow the/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Clear the default/ }));
     await waitFor(() => expect(clearProjectIntegrationAccess).toHaveBeenCalled());
     expect(vi.mocked(clearProjectIntegrationAccess).mock.calls[0]![0]).toEqual({
       projectId: "p1",

@@ -669,6 +669,10 @@ async def _stage_connector(shim_input: Any, stage: str, tenant_id: str):
             connector = await get_connector_for_session(
                 kind=kind, tenant_id=tenant_id,
                 project_id=str(getattr(shim_input, "project_id", "") or ""),
+                # `stage` here IS the agent id (see _REPO_STAGES above), and the
+                # stage IS the access decision since migration 0024 — the level lives
+                # per (stage, tool), so project_id alone resolves to no access.
+                agent_id=stage,
             )
             set_connector(connector)
             injected = True
@@ -1233,6 +1237,7 @@ async def _emit_specific_choice_card(stage: str, graph, run_id: str, tenant_id: 
         connector = await get_connector_for_session(
             kind=kind, tenant_id=tenant_id,
             project_id=str(getattr(shim_input, "project_id", "") or ""),
+            agent_id=stage,
         )
         set_connector(connector)
         try:

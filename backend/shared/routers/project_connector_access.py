@@ -1,27 +1,27 @@
-"""What access does ONE project have to an integration its unit was granted?
+"""The project-wide DEFAULT access for an integration its unit was granted.
 
-THE THIRD RUNG OF THE CASCADE. `integration_access.py` owns the middle one — whether
-a Business Unit may use a thing at all, which is the Organization Admin's decision.
-This owns the one below it: whether a particular project gets the whole of that
-grant or a narrower slice of it.
+WHAT THIS BECAME (migration 0024). It used to be the third rung of a cascade: the
+unit grant carried a level, and this narrowed it for one project. The grant no longer
+carries a level — the read/write decision moved down to the individual stage, in
+`projects.tool_access_modes` — so this row is no longer a narrowing under anything.
 
-WHO MAY SET IT, AND WHY BOTH. A Business Unit Admin sets it because deciding what
-each of their projects may do is what running a unit means. A Project Admin sets it
-because tightening their own project needs no permission from above — you may always
-ask for less. `assert_can_administer_project` already encodes exactly that pair, so
+It is now the project's DEFAULT: the level a stage lands on when its own chip was
+never set. `shared/authz/connector_grants.effective_access` reads the two in that
+order, most specific first. That gives a project one place to say "Jira is read-only
+here" without visiting all eight stages, while a stage that disagrees still wins.
+
+WHO MAY SET IT. A Business Unit Admin, because deciding what each of their projects
+may do is what running a unit means; and a Project Admin, because their own project
+is theirs to configure. `assert_can_administer_project` encodes exactly that pair, so
 it is reused rather than restated.
 
-NEITHER MAY EXCEED THE UNIT'S GRANT, and that is the whole point of the rung. The
-check is `contains()` and the refusal is explicit: a request for more than the unit
-holds is REFUSED rather than silently narrowed, because somebody who asked for write
-and quietly received read would go on believing they had write. `narrow()` computes
-what a level yields; `contains()` decides whether to accept it at all. Both exist and
-they answer different questions.
+NOTHING BOUNDS IT FROM ABOVE ANY MORE, and that is a deliberate trade rather than an
+oversight — see the migration. The unit grant is now a reach decision only: it can
+stop a project using an integration at all, but not say what it may do with it.
 
-ABSENCE MEANS INHERIT, NOT DENY. A project with no row here gets its unit's level
-whole. Deleting the row is therefore how you undo a narrowing, and it is a real
-operation rather than a synonym for revoking — revoking is the unit's grant going
-away, which happens a rung up.
+ABSENCE MEANS "the picker default" (both), NOT DENY. Deleting the row is how you undo
+a project-wide default, and it is a real operation rather than a synonym for
+revoking — revoking is the unit's grant going away, which happens a rung up.
 """
 from __future__ import annotations
 
@@ -35,12 +35,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.connector_access import (
     ACCESS_LEVELS,
-    contains,
+    DEFAULT_TOOL_MODE,
     is_access_level,
     label,
+    level_from_mode,
 )
 from shared.authz.connector_capabilities import unsupported_reason, warnings_for
-from shared.authz.connector_grants import effective_access, unit_access
+from shared.authz.connector_grants import unit_is_granted
 from shared.authz.dependency import require_permission
 from shared.authz.project_scope import assert_can_administer_project, resolve_project
 from shared.db import get_db_session
@@ -84,10 +85,11 @@ async def list_project_integration_access(
 ) -> list[dict[str, Any]]:
     """Every integration this project's unit was granted, and what the project gets.
 
-    Reports the unit's level ALONGSIDE the effective one, because the two together
-    are what a reader needs: "read, and your unit has read_write" is a different
-    situation from "read, and that is all there is" — the first is a narrowing
-    somebody chose and can undo here, the second needs a decision a rung up.
+    Reports the project-wide DEFAULT alongside the effective level. It no longer
+    reports a unit level, because the unit no longer has one (migration 0024) — a
+    grant is reach only. `effectiveAccess` here is the project-wide answer: what a
+    stage gets when its own chip is unset. A stage that set one overrides it, and
+    the stage picker is where that is seen.
     """
     tenant_id = _tenant_id(request)
     project = await _project_or_404(db, tenant_id, project_id)
@@ -95,7 +97,7 @@ async def list_project_integration_access(
     granted = (
         await db.execute(
             text(
-                "SELECT kind, target_ref, access FROM integration_grants "
+                "SELECT kind, target_ref FROM integration_grants "
                 "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = :w "
                 "ORDER BY kind, target_ref"
             ),
@@ -119,19 +121,15 @@ async def list_project_integration_access(
     out: list[dict[str, Any]] = []
     for row in granted:
         override = overrides.get((row.kind, row.target_ref))
-        effective = await effective_access(
-            db,
-            tenant_id=tenant_id,
-            project_id=str(project.id),
-            target_ref=row.target_ref,
-            kind=row.kind,
-        )
+        # The project-wide answer, which is what this page is about. `effective_access`
+        # needs a stage to give a stage's answer, and there is no stage here — so the
+        # default chain is applied directly rather than calling it with a blank one.
+        effective = override or level_from_mode(DEFAULT_TOOL_MODE)
         out.append(
             {
                 "kind": row.kind,
                 "targetId": row.target_ref,
-                "unitAccess": row.access,
-                # None means "not narrowed" — the project inherits.
+                # None means "no project-wide default" — stages fall through to "both".
                 "projectAccess": override,
                 "effectiveAccess": effective,
                 "effectiveLabel": label(effective),
@@ -164,14 +162,14 @@ async def set_project_integration_access(
             },
         )
 
-    granted = await unit_access(
+    granted = await unit_is_granted(
         db,
         tenant_id=tenant_id,
         workspace_id=str(project.workspace_id),
         target_ref=body.targetId,
         kind=body.kind,
     )
-    if granted is None:
+    if not granted:
         raise HTTPException(
             status_code=403,
             detail={
@@ -198,21 +196,15 @@ async def set_project_integration_access(
                 detail={"code": "unsupported_access_level", "message": reason},
             )
 
-    # THE ESCALATION REFUSAL. Refused, not narrowed: somebody who asked for write and
-    # quietly received read would go on believing they had write, and the first sign
-    # otherwise would be an agent failing mid-run.
-    if not contains(granted, body.access):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "exceeds_grant",
-                "message": (
-                    f"This business unit has {label(granted)} access to that "
-                    f"integration, so a project cannot be given {label(body.access)}. "
-                    "Ask an Organization Admin to widen the unit's grant first."
-                ),
-            },
-        )
+    # THE ESCALATION REFUSAL IS GONE, and its absence is the point of migration 0024.
+    # There used to be a check here that the requested level fitted inside the unit's
+    # granted level. The grant no longer carries a level, so there is nothing above
+    # this to exceed: whoever may administer the project decides read/write, and the
+    # only thing an Org Admin can still do is revoke the integration outright.
+    #
+    # If a ceiling is ever wanted again, it belongs back on the grant — do not
+    # reintroduce it here, where it would bound the project-wide default while
+    # leaving per-stage modes (the actual decision) unbounded.
 
     await db.execute(
         text(
@@ -236,7 +228,6 @@ async def set_project_integration_access(
         "ok": True,
         "kind": body.kind,
         "targetId": body.targetId,
-        "unitAccess": granted,
         "projectAccess": body.access,
         "effectiveAccess": body.access,
         "warnings": warnings_for(body.targetId, body.access) if body.kind == "connector" else [],
@@ -251,12 +242,12 @@ async def clear_project_integration_access(
     targetId: str = "",
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """Undo a narrowing — the project goes back to inheriting its unit's level.
+    """Clear the project-wide default — its stages fall through to "both".
 
     NOT a revoke. Revoking is the unit's grant going away, a rung up in
-    `integration_access.py`; this only removes the project's own narrower opinion.
-    Deleting a row that does not exist is a no-op rather than a 404: the caller's
-    intent is "this project should inherit", and it already does.
+    `integration_access.py`; this only removes the project's own opinion. Deleting a
+    row that does not exist is a no-op rather than a 404: the caller's intent is
+    "this project should hold no default", and it already does.
     """
     tenant_id = _tenant_id(request)
     project = await _project_or_404(db, tenant_id, project_id)
@@ -275,11 +266,11 @@ async def clear_project_integration_access(
     )
     await db.flush()
 
-    inherited = await effective_access(
-        db, tenant_id=tenant_id, project_id=str(project.id), target_ref=targetId, kind=kind
-    )
+    # With the row gone the project-wide answer is the picker's default; a stage that
+    # set its own chip still overrides it, which is why this is not read back from
+    # `effective_access` (that needs a stage, and this endpoint has none).
     return {
         "ok": True,
         "cleared": bool(result.rowcount),
-        "effectiveAccess": inherited,
+        "effectiveAccess": level_from_mode(DEFAULT_TOOL_MODE),
     }

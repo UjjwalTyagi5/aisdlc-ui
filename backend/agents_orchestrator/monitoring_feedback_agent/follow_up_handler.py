@@ -1,6 +1,5 @@
 import os
 import json
-import litellm
 from typing import List, Dict
 from datetime import datetime
 from uuid import uuid4
@@ -58,6 +57,8 @@ async def handle_follow_up_ws(manager, session_id: str, analysis_context: dict, 
     prompt = _create_prompt(analysis_context, chat_history, follow_up_question)
     
     try:
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = await litellm.acompletion(
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),
@@ -85,6 +86,8 @@ def generate_follow_up_rest(analysis_context: dict, chat_history: List[Dict], fo
     prompt = _create_prompt(analysis_context, chat_history, follow_up_question)
     
     try:
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = litellm.completion(
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),

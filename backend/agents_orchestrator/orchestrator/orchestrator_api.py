@@ -5,7 +5,6 @@ import json
 import httpx
 from datetime import datetime
 from typing import Dict, Any, List, Annotated
-from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, END
 from config.checkpoint import build_checkpointer as _build_checkpointer
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -1013,6 +1012,13 @@ async def decide_stage(state: OrchestratorState) -> OrchestratorState:
             "will work immediately."
         )
         return state
+    # Imported here, not at module scope: `litellm` costs ~7s to import and
+    # drags the whole provider catalogue in with it. Every caller of this module
+    # paid that at import time — including `pytest --collect-only` and every
+    # `uvicorn --reload` restart, neither of which is about to call a model.
+    # Same pattern as copilot_api.py's ChatLiteLLM import.
+    from langchain_litellm import ChatLiteLLM
+
     _orch_llm = ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

@@ -11,7 +11,6 @@ import contextvars
 import base64
 from typing import List, Optional, Dict
 
-import litellm
 from agents_orchestrator.monitoring_feedback_agent._byok import resolved_litellm_kwargs
 from agents_orchestrator.monitoring_feedback_agent.pipeline_controller import process_latest_issue,process_pasted_logs_batch
 import agents_orchestrator.monitoring_feedback_agent.shared_state as shared_state
@@ -145,6 +144,8 @@ def classify_and_separate_input(full_text: str, has_files: bool, chat_history: L
     """
     
     try:
+        # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+        import litellm
         response = litellm.completion(
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),

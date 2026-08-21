@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import shared.keyvault as _keyvault
 from config.connectors.base import BaseConnector, ConnectorNotAvailableError
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -242,8 +243,6 @@ class AzureReposConnector(BaseConnector):
 
     async def _probe_repos_endpoint(self) -> None:
         """Light connectivity probe — raises on any error."""
-        import httpx
-
         auth = await self.auth_adapter()
         org_url = auth["org_url"]
         pat = auth["pat"]
@@ -252,9 +251,9 @@ class AzureReposConnector(BaseConnector):
 
         # Probe the collections/_apis endpoint (doesn't need a project name).
         probe_url = f"{org_url}/_apis/projects?api-version=7.1&$top=1"
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(probe_url, auth=("", pat))
-            resp.raise_for_status()
+        client = get_async_client(timeout=10)
+        resp = await client.get(probe_url, auth=("", pat))
+        resp.raise_for_status()
 
     # ── Audit ─────────────────────────────────────────────────────────────
 

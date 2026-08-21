@@ -1,20 +1,40 @@
-"""What access does THIS project actually have to THIS connector?
+"""What access does THIS STAGE of THIS project actually have to THIS connector?
 
-The cascade in one function. `integration_grants` says what the organisation allowed
-a Business Unit; `project_connector_access` says whether that unit's admin narrowed
-it for one project; the answer is their intersection, computed by
-`connector_access.narrow()` so the incomparable read/write pair is handled in exactly
-one place.
+Three questions in order, and the first `no` ends it:
 
-WHY A PROJECT ROW MAY BE ABSENT. Absence means "inherit the unit's level", not "no
-access". The table was added after projects were already using connectors, so reading
-absence as denial would have revoked every project's integrations the moment the
-migration ran. A project is narrowed only when somebody narrowed it.
+  1. MAY THE UNIT REACH IT AT ALL?  `integration_grants` — the Org Admin's decision,
+     and the only one left above the project. It is a reach decision, not a level:
+     a row means "this Business Unit may use Jira", full stop. Revoking it stops
+     every stage of every project in that unit at once.
+  2. IS IT WIRED TO THIS STAGE?     `projects.connectors[agent_id]` — a connector
+     the project never assigned to this stage is not available to it, which makes
+     the stage assignment a real boundary rather than decoration.
+  3. AT WHAT LEVEL?                 `projects.tool_access_modes[stage::kind::ref]` —
+     read, write, or both, chosen per stage so Jira can be read-only for QA and
+     read-write for Development.
 
-FAIL CLOSED ON EVERYTHING ELSE. No grant, unknown project, missing tenant, a
-database that will not answer — all return None, which every caller must treat as no
-access. The one thing this must never do is return a level it is not sure about,
-because the caller is about to hand an agent a live connector.
+WHERE THE CEILING WENT (migration 0024). `integration_grants.access` used to bound
+step 3 from above, and the two were intersected. That column is gone: the level is
+decided at step 3 and nothing overrules it. This is a deliberate trade — see the
+migration's docstring. The intersection helpers that served it (`narrow`,
+`contains`) were deleted from `connector_access` rather than left unused, so there
+is no half-live ceiling machinery to mistake for the current rule.
+
+Do not reintroduce a level on the grant without deciding which of the two wins:
+two levels that disagree is what this replaced.
+
+WHY AN UNSET MODE IS read_write. The picker documents an untouched chip as "both" and
+has always shown it that way, so a project that assigned a connector to a stage and
+never opened the chip means "both". With the ceiling gone that default is the final
+answer rather than something a grant could still narrow, which makes it worth stating
+loudly: ASSIGNING A CONNECTOR TO A STAGE GRANTS READ AND WRITE UNLESS SOMEBODY SAYS
+OTHERWISE. Step 2 is what keeps that from being a blanket grant.
+
+FAIL CLOSED ON EVERYTHING ELSE. No grant, unknown project, unknown stage, missing
+tenant, a mode string nobody recognises, a database that will not answer — all return
+None, which every caller must treat as no access. The one thing this must never do is
+return a level it is not sure about, because the caller is about to hand an agent a
+live connector.
 """
 from __future__ import annotations
 
@@ -24,33 +44,43 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.authz.connector_access import AccessLevel, narrow
+from shared.authz.connector_access import (
+    AccessLevel,
+    DEFAULT_TOOL_MODE,
+    level_from_mode,
+    stage_mode_key,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def unit_access(
+async def unit_is_granted(
     db: AsyncSession,
     *,
     tenant_id: str,
     workspace_id: str,
     target_ref: str,
     kind: str = "connector",
-) -> Optional[AccessLevel]:
-    """The level the organisation granted this unit, or None if it granted nothing."""
+) -> bool:
+    """Did the organisation give this unit reach to this integration at all?
+
+    A boolean since migration 0024. It used to return the granted LEVEL, which was
+    then a ceiling on the project — the level now lives on the project's stage and
+    the grant answers only whether the unit may touch the integration.
+    """
     if not tenant_id or not workspace_id or not target_ref:
-        return None
+        return False
     row = (
         await db.execute(
             text(
-                "SELECT access FROM integration_grants "
+                "SELECT 1 FROM integration_grants "
                 "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = CAST(:w AS uuid) "
                 "  AND kind = :k AND target_ref = :r"
             ),
             {"t": tenant_id, "w": workspace_id, "k": kind, "r": target_ref},
         )
     ).first()
-    return row.access if row is not None else None
+    return row is not None
 
 
 async def project_override(
@@ -84,47 +114,91 @@ async def effective_access(
     project_id: str,
     target_ref: str,
     kind: str = "connector",
+    agent_id: str = "",
 ) -> Optional[AccessLevel]:
-    """The access this project really has: unit grant ∩ project narrowing.
+    """The access this project's STAGE really has. See the module docstring.
 
-    Returns None for "none at all", which is the answer for an ungranted connector,
-    an unknown project, and a narrowing that shares no operation with its grant.
+    `agent_id` names the stage asking. It is required in practice — omitting it is
+    the caller saying "no stage", and a request that belongs to no stage cannot be
+    checked against one, so it yields None rather than a project-wide answer. The
+    parameter keeps a default only so the signature stays keyword-compatible with the
+    handful of read-only report callers that pass every other field by name.
+
+    Returns None for "none at all": an ungranted unit, an unknown project, a
+    connector this stage never wired, or a mode nobody recognises.
     """
     if not tenant_id or not project_id:
         return None
 
-    workspace = (
+    row = (
         await db.execute(
-            text("SELECT workspace_id FROM projects WHERE id = CAST(:p AS uuid)"),
+            text(
+                "SELECT workspace_id, connectors, mcp_servers, tool_access_modes "
+                "FROM projects WHERE id = CAST(:p AS uuid)"
+            ),
             {"p": project_id},
         )
-    ).scalar()
-    if workspace is None:
+    ).first()
+    if row is None or row.workspace_id is None:
         return None
 
-    granted = await unit_access(
-        db, tenant_id=tenant_id, workspace_id=str(workspace), target_ref=target_ref, kind=kind
-    )
-    if granted is None:
+    # 1. Reach. The Org Admin's only remaining say, and still a hard stop.
+    if not await unit_is_granted(
+        db, tenant_id=tenant_id, workspace_id=str(row.workspace_id),
+        target_ref=target_ref, kind=kind,
+    ):
         return None
 
-    override = await project_override(
+    if not agent_id:
+        return None
+
+    # 2. Wiring. `connectors` / `mcp_servers` are {agent_id: [target_ref, ...]}, the
+    #    same maps the stage picker writes. A stage that never wired this tool has no
+    #    access to it however the unit was granted — with the ceiling gone this is the
+    #    boundary that stops one grant reaching every agent.
+    assigned = (row.connectors if kind == "connector" else row.mcp_servers) or {}
+    if target_ref not in (assigned.get(agent_id) or []):
+        return None
+
+    # 3. Level, most specific first:
+    #      the stage's own mode          projects.tool_access_modes
+    #      the project-wide default      project_connector_access
+    #      the picker's documented default ("both")
+    #
+    #    The middle step is what keeps `project_connector_access` meaningful after the
+    #    ceiling was removed. It was the project's narrowing UNDER a unit level; it is
+    #    now the project's default OVER its stages. Deleting it would have silently
+    #    widened every project that had narrowed itself, and leaving it unread would
+    #    have left a settings page whose control does nothing.
+    modes = row.tool_access_modes or {}
+    mode = modes.get(stage_mode_key(agent_id, kind, target_ref))
+    if mode is not None:
+        return level_from_mode(mode)
+
+    project_default = await project_override(
         db, tenant_id=tenant_id, project_id=project_id, target_ref=target_ref, kind=kind
     )
-    if override is None:
-        # Not narrowed — the project inherits its unit's level whole.
-        return granted
-    return narrow(granted, override)
+    if project_default is not None:
+        return project_default
+
+    return level_from_mode(DEFAULT_TOOL_MODE)
 
 
 async def resolve_effective_access(
-    tenant_id: str, project_id: str, target_ref: str, kind: str = "connector"
+    tenant_id: str,
+    project_id: str,
+    target_ref: str,
+    kind: str = "connector",
+    agent_id: str = "",
 ) -> Optional[AccessLevel]:
     """`effective_access` for callers with no session — the agent runtime.
 
-    Opens its own tenant-scoped session, because `integration_grants` and
-    `project_connector_access` are both FORCE RLS and read nothing without the GUC.
-    Returns None on any failure: a run that cannot prove its access does not get it.
+    Opens its own tenant-scoped session, because `integration_grants` and `projects`
+    are both FORCE RLS and read nothing without the GUC. Returns None on any failure:
+    a run that cannot prove its access does not get it.
+
+    `agent_id` is the stage the run is executing. A caller that cannot name one gets
+    None — see `effective_access`.
     """
     if not tenant_id or not project_id:
         return None
@@ -137,6 +211,7 @@ async def resolve_effective_access(
                 tenant_id=tenant_id,
                 project_id=project_id,
                 target_ref=target_ref,
+                agent_id=agent_id,
                 kind=kind,
             )
     except Exception:  # noqa: BLE001 — fail closed, never fail open

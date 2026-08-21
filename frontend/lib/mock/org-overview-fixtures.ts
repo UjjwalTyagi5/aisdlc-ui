@@ -11,6 +11,7 @@ import { CONNECTORS, PROJECTS } from "@/mocks/fixtures";
 import { listIdentities, listMembers, listWorkspaces } from "@/lib/mock/workspace-fixtures";
 import { listAllModelProviders } from "@/lib/mock/model-fixtures";
 import { visibleConnectorsForScope } from "@/lib/mock/connector-scope";
+import { CONNECTOR_CATALOG_KINDS } from "@/lib/connectors";
 import type { OrgOverview } from "@/lib/schemas/org-overview";
 
 /**
@@ -56,7 +57,11 @@ export function buildOrgOverview(
     userCount,
     modelProviderCount: listAllModelProviders(workspaceIds).length,
     connectorCount: connected.length,
-    connectorTotalCount: connectors.length,
+    // The catalogue's size, not the seeded list's: the Integrations page renders
+    // a tile for every catalogue kind and synthesizes a placeholder for the ones
+    // no fixture seeds, so counting `connectors` here reported a total smaller
+    // than the page it links to.
+    connectorTotalCount: CONNECTOR_CATALOG_KINDS.length,
     businessUnitCount: workspaces.length,
     projectCount: projects.length,
     budgets: workspaces.map((w) => ({

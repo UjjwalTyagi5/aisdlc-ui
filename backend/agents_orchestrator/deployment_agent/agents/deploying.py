@@ -1,6 +1,5 @@
 import os
 import pandas as pd
-import litellm
 from dotenv import load_dotenv
 import re
 import glob
@@ -67,6 +66,8 @@ def _litellm_generate(prompt: str) -> str:
             "No BYOK model resolved for this deployment run. An administrator must "
             "configure and verify a model provider in Org Settings -> Model Providers."
         )
+    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
+    import litellm
     response = litellm.completion(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,

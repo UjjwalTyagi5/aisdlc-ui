@@ -5,6 +5,7 @@ a `connector_access` governance request. A ceiling enforced at one and not the o
 is not a ceiling — approving would simply be the way round it. These tests assert the
 same refusal through both.
 """
+import json as _json
 import uuid as _uuid
 
 import pytest
@@ -42,9 +43,10 @@ async def tree():
         ), {"i": unit, "o": org})
     async with get_db_session_for_tenant(org) as s:
         await s.execute(text(
-            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
-            "VALUES (:i, :w, :t, 'Ledger')"
-        ), {"i": proj, "w": unit, "t": org})
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, connectors) "
+            "VALUES (:i, :w, :t, 'Ledger', CAST(:c AS jsonb))"
+        ), {"i": proj, "w": unit, "t": org,
+            "c": _json.dumps({"development": ["jira"]})})
     from shared.authz.grant import grant_role
     await grant_role(admin, org, "org_admin", tenant_id=org, scope_kind="organization")
     yield {"org": org, "unit": unit, "project": proj, "admin": admin}
@@ -63,74 +65,67 @@ def _admin(t):
     return _hdr(t["admin"], t["org"], ["admin:*"])
 
 
-async def _effective(org, project, ref="jira"):
+async def _effective(org, project, ref="jira", agent_id="development"):
     async with get_db_session_for_tenant(org) as s:
-        return await effective_access(s, tenant_id=org, project_id=project, target_ref=ref)
+        return await effective_access(
+            s, tenant_id=org, project_id=project, target_ref=ref, agent_id=agent_id
+        )
 
 
 # ── the direct door ──────────────────────────────────────────────────────────
 
-def test_a_grant_defaults_to_read(tree):
-    """Least privilege by default: an Org Admin who wants write must say so."""
+def test_a_grant_carries_no_level(tree):
+    """Migration 0024. The three tests that stood here asserted the grant's default
+    level, that a bad one was refused, and that re-granting changed it. A grant is
+    reach only now, so the response states no level at all."""
     c = _client()
     r = c.post("/integrations/access", headers=_admin(tree),
                params={"kind": "connector", "id": "jira", "workspaceId": tree["unit"]})
     assert r.status_code == 200, r.text
-    assert r.json()["access"] == "read"
+    assert "access" not in r.json()
 
 
-def test_a_bad_access_level_is_refused_not_coerced(tree):
-    """A caller who sent a level meant something by it. Substituting the default
-    would hand them a narrower grant than they think they made."""
-    c = _client()
-    r = c.post("/integrations/access", headers=_admin(tree),
-               params={"kind": "connector", "id": "jira",
-                       "workspaceId": tree["unit"], "access": "admin"})
-    assert r.status_code == 422
-    assert r.json().get("detail", {}).get("code") == "bad_access_level"
-
-
-def test_regranting_changes_the_level(tree):
-    """ON CONFLICT DO NOTHING made changing your mind a silent no-op that looked
-    like it had worked."""
+def test_regranting_is_idempotent(tree):
+    """It used to be how an Org Admin changed the level. With no level to change it
+    is simply the same state again, and must not error."""
     c = _client()
     base = {"kind": "connector", "id": "jira", "workspaceId": tree["unit"]}
-    c.post("/integrations/access", headers=_admin(tree), params={**base, "access": "read"})
-    r = c.post("/integrations/access", headers=_admin(tree),
-               params={**base, "access": "read_write"})
-    assert r.json()["access"] == "read_write"
+    assert c.post("/integrations/access", headers=_admin(tree), params=base).status_code == 200
+    assert c.post("/integrations/access", headers=_admin(tree), params=base).status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_a_project_cannot_be_given_more_than_its_unit(tree):
-    """THE ESCALATION REFUSAL, through the API. Refused rather than narrowed —
-    somebody who asked for write and quietly got read would believe they had write."""
+async def test_a_project_may_be_set_wider_than_any_grant(tree):
+    """THE ESCALATION REFUSAL IS GONE, and this pins its absence deliberately.
+
+    A 403 `exceeds_grant` used to come back here. The grant carries no level to
+    exceed since migration 0024, so whoever administers the project decides — which
+    is the trade the change made, not an oversight. If this starts failing, somebody
+    reintroduced a ceiling; the migration's docstring is the thing to read first.
+    """
     c = _client()
     c.post("/integrations/access", headers=_admin(tree),
-           params={"kind": "connector", "id": "jira",
-                   "workspaceId": tree["unit"], "access": "read"})
+           params={"kind": "connector", "id": "jira", "workspaceId": tree["unit"]})
 
-    r = c.put(f"/projects/{tree['project']}/integrations/access", headers=_admin(tree),
+    r = c.put("/projects/" + tree["project"] + "/integrations/access", headers=_admin(tree),
               json={"kind": "connector", "targetId": "jira", "access": "read_write"})
-    assert r.status_code == 403, r.text
-    assert r.json()["detail"]["code"] == "exceeds_grant"
-    # And nothing was written.
-    assert await _effective(tree["org"], tree["project"]) == "read"
+    assert r.status_code == 200, r.text
+    assert await _effective(tree["org"], tree["project"]) == "read_write"
 
 
 @pytest.mark.asyncio
 async def test_a_project_may_be_narrowed_and_restored(tree):
     c = _client()
     c.post("/integrations/access", headers=_admin(tree),
-           params={"kind": "connector", "id": "jira",
-                   "workspaceId": tree["unit"], "access": "read_write"})
+           params={"kind": "connector", "id": "jira", "workspaceId": tree["unit"]})
 
     r = c.put(f"/projects/{tree['project']}/integrations/access", headers=_admin(tree),
               json={"kind": "connector", "targetId": "jira", "access": "read"})
     assert r.status_code == 200, r.text
     assert await _effective(tree["org"], tree["project"]) == "read"
 
-    # Clearing the narrowing restores inheritance — it is not a revoke.
+    # Clearing the project default drops its stages back to the picker's own
+    # default. Not a revoke — the unit still holds the grant.
     r = c.request("DELETE", f"/projects/{tree['project']}/integrations/access",
                   headers=_admin(tree),
                   params={"kind": "connector", "targetId": "jira"})
@@ -147,18 +142,18 @@ def test_narrowing_an_ungranted_connector_is_refused(tree):
 
 
 @pytest.mark.asyncio
-async def test_listing_shows_unit_and_effective_together(tree):
+async def test_the_listing_states_the_project_default_and_no_unit_level(tree):
     c = _client()
     c.post("/integrations/access", headers=_admin(tree),
-           params={"kind": "connector", "id": "jira",
-                   "workspaceId": tree["unit"], "access": "read_write"})
+           params={"kind": "connector", "id": "jira", "workspaceId": tree["unit"]})
     c.put(f"/projects/{tree['project']}/integrations/access", headers=_admin(tree),
           json={"kind": "connector", "targetId": "jira", "access": "read"})
 
     rows = c.get(f"/projects/{tree['project']}/integrations/access",
                  headers=_admin(tree)).json()
     row = next(r for r in rows if r["targetId"] == "jira")
-    assert row["unitAccess"] == "read_write"
+    # No `unitAccess`: reporting one would be the API inventing a ceiling.
+    assert "unitAccess" not in row
     assert row["projectAccess"] == "read"
     assert row["effectiveAccess"] == "read"
     assert row["inherited"] is False
@@ -182,7 +177,9 @@ async def test_approving_a_unit_request_actually_grants(tree):
     }
     async with get_db_session_for_tenant(tree["org"]) as s:
         note = await apply_on_approve(s, request)
-    assert "read and write" in note
+    # The note states no level: the request's `access` is deliberately NOT applied to
+    # the grant, or approving would put a ceiling back by the side door.
+    assert "granted to the business unit" in note
     assert await _effective(tree["org"], tree["project"]) == "read_write"
 
 
@@ -205,13 +202,17 @@ async def test_only_an_org_admin_may_approve_a_unit_grant(tree):
 
 
 @pytest.mark.asyncio
-async def test_approval_cannot_exceed_the_units_grant(tree):
-    """The ceiling holds through approval too, or approving would be the way round
-    the hierarchy the direct endpoint refuses."""
+async def test_approval_is_no_longer_bounded_by_the_units_grant(tree):
+    """The mirror of test_a_project_may_be_set_wider_than_any_grant, at the other door.
+
+    This used to refuse: the ceiling held through approval so that approving could
+    not be the way round a hierarchy the direct endpoint enforced. Both doors lost
+    the ceiling together in migration 0024, which is the point — they must not
+    disagree about what is allowed, whichever one is closed.
+    """
     c = _client()
     c.post("/integrations/access", headers=_admin(tree),
-           params={"kind": "connector", "id": "jira",
-                   "workspaceId": tree["unit"], "access": "read"})
+           params={"kind": "connector", "id": "jira", "workspaceId": tree["unit"]})
 
     request = {
         "type": "connector_access",
@@ -223,10 +224,8 @@ async def test_approval_cannot_exceed_the_units_grant(tree):
                     "access": "read_write", "scope": "project"},
     }
     async with get_db_session_for_tenant(tree["org"]) as s:
-        with pytest.raises(EffectNotAvailable) as exc:
-            await apply_on_approve(s, request)
-    assert "read-only" in str(exc.value)
-    assert await _effective(tree["org"], tree["project"]) == "read"
+        await apply_on_approve(s, request)
+    assert await _effective(tree["org"], tree["project"]) == "read_write"
 
 
 @pytest.mark.asyncio

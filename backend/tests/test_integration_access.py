@@ -215,3 +215,16 @@ async def test_connector_grants_shape_matches_the_ui_contract(org):
     by_kind = {g["kind"]: g["businessUnitIds"] for g in c.get("/connectors/grants", headers=headers).json()}
     assert "github" not in by_kind
     assert by_kind["jira"] == [org["payments"]]
+
+
+# The four tests that stood here pinned an invariant that no longer exists.
+#
+# They asserted that PUT /connectors/grants preserved each surviving grant's ACCESS
+# LEVEL across its DELETE-then-INSERT, so re-saving a policy could not silently strip
+# write access. Migration 0024 removed the level from `integration_grants` entirely —
+# read vs write is decided per project stage now — so a grant row is just its own
+# existence and there is nothing left for a replace to lose.
+#
+# What replaced them: tests/test_per_stage_tool_access.py, which pins the resolution
+# that took over, including the two things that must still fail closed (an ungranted
+# unit, and a stage that never wired the connector).

@@ -119,6 +119,7 @@ async def get_connector_for_session(
     tenant_id: str = "",
     *,
     project_id: str = "",
+    agent_id: str = "",
     access: str | None = None,
     unrestricted: bool = False,
 ) -> BaseConnector:
@@ -133,8 +134,12 @@ async def get_connector_for_session(
 
     Pass exactly one of:
 
-      project_id    resolve the effective level from the grant cascade. The agent
-                    runtime path: it has `SDLCWorkflowInput.project_id` and no session.
+      project_id    resolve the effective level for a stage. The agent runtime path:
+                    it has `SDLCWorkflowInput.project_id` and no session. Pass
+                    `agent_id` WITH it — since migration 0024 the level is stored per
+                    (stage, tool), so a project_id with no stage names no level and
+                    resolves to no access. That is the safe direction, but it will
+                    look like a broken connector, so it is called out here.
       access        a level the caller already resolved. The request path, which has a
                     session open and should not open a second one.
       unrestricted  no gating. Health probes and org-level admin operations that act
@@ -156,7 +161,8 @@ async def get_connector_for_session(
         from shared.authz.connector_grants import resolve_effective_access
 
         level = await resolve_effective_access(
-            tenant_id=tenant_id, project_id=project_id, target_ref=kind, kind="connector"
+            tenant_id=tenant_id, project_id=project_id, target_ref=kind,
+            kind="connector", agent_id=agent_id,
         )
 
     from config.connectors.scoped import ScopedConnector

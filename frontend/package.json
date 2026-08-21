@@ -4,7 +4,7 @@
   "private": true,
   "description": "SDLC Platform — web app (Next.js 15 + React 19 + Tailwind v4)",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --turbo",
     "dev:turbo": "next dev --turbo",
     "build": "next build",
     "start": "next start",

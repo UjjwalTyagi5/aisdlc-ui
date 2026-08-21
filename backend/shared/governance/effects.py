@@ -291,15 +291,16 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
     because an approval is a second door into the same write:
 
       org_admin   may grant a BUSINESS UNIT (integration_grants) — the only tier
-                  that can, since a unit granting itself has no grant
-      any tier    may narrow a PROJECT (project_connector_access), bounded by the
-                  unit's grant exactly as the direct endpoint bounds it
+                  that can, since a unit granting itself has no grant. Reach only:
+                  the grant carries no level (migration 0024)
+      any tier    may set a PROJECT's default (project_connector_access), bounded
+                  by nothing above it, exactly as the direct endpoint now is
 
     Everything comes from the payload recorded when the request was RAISED, never
     from the decision: the approver agreed to a level they could read, and letting
     the decision carry its own would mean approving one thing and applying another.
     """
-    from shared.authz.connector_access import contains, is_access_level, label
+    from shared.authz.connector_access import is_access_level, label
 
     payload = request.get("payload") or {}
     target_ref = (payload.get("targetId") or "").strip()
@@ -349,24 +350,31 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
             raise EffectNotAvailable(
                 "connector_access", "This request names no business unit."
             )
+        # No level on the row since migration 0024 — a grant is reach only, and the
+        # read/write choice belongs to the project's stages. The `access` the request
+        # asked for is deliberately NOT applied here: honouring it would put a level
+        # back on the grant by the approval door after the direct endpoint stopped
+        # accepting one.
         await db.execute(
             text(
                 "INSERT INTO integration_grants "
-                "  (tenant_id, kind, target_ref, workspace_id, granted_by, access) "
-                "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by, :a) "
+                "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by) "
                 "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
-                "  SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by"
+                "  SET granted_by = EXCLUDED.granted_by"
             ),
             {
                 "t": tenant_id, "k": kind, "r": target_ref, "w": str(workspace_id),
-                "by": request.get("decidedBy"), "a": access,
+                "by": request.get("decidedBy"),
             },
         )
         logger.info(
-            "connector_access approved: unit %s -> %s %s (%s)",
-            workspace_id, kind, target_ref, access,
+            "connector_access approved: unit %s -> %s %s", workspace_id, kind, target_ref
         )
-        return f"{target_ref} granted to the business unit for {label(access)}."
+        return (
+            f"{target_ref} granted to the business unit. Each project chooses read "
+            "or write per stage."
+        )
 
     # ── a narrowing for one project ──────────────────────────────────────────
     project_id = request.get("projectId")
@@ -387,7 +395,7 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
     granted = (
         await db.execute(
             text(
-                "SELECT access FROM integration_grants "
+                "SELECT 1 FROM integration_grants "
                 "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = :w "
                 "  AND kind = :k AND target_ref = :r"
             ),
@@ -400,16 +408,10 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
             f"This project's business unit has not been given {target_ref}. "
             "An Organization Admin has to grant it to the unit first.",
         )
-    # THE CEILING HOLDS THROUGH APPROVAL TOO. An approver cannot hand a project more
-    # than the organisation gave the unit — otherwise approving would be the way
-    # round the hierarchy the direct endpoint refuses.
-    if not contains(granted, access):
-        raise EffectNotAvailable(
-            "connector_access",
-            f"The business unit has {label(granted)} access to {target_ref}, so a "
-            f"project cannot be given {label(access)}. The unit's grant has to be "
-            "widened first.",
-        )
+    # THE CEILING CHECK THAT STOOD HERE IS GONE with migration 0024. It refused an
+    # approval that handed a project more than the unit's grant allowed; the grant
+    # carries no level to exceed now. Reach is still checked above — approving access
+    # to an integration the unit was never given remains refused.
 
     await db.execute(
         text(
