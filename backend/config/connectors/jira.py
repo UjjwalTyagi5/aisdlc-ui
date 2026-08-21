@@ -22,6 +22,7 @@ import httpx
 
 import shared.keyvault as _keyvault
 from config.connectors.base import BaseConnector, ConnectorNotAvailableError
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -344,24 +345,24 @@ class JiraConnector(BaseConnector):
         base_url = auth["jira_url"].rstrip("/")
         url = f"{base_url}{path}"
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            if auth.get("mode") == "oauth":
-                # OAuth 3LO: Authorization: Bearer {token} — no Basic Auth tuple.
-                # T-7.4-22: auth["bearer"] is never logged; error paths use type(exc).__name__.
-                resp = await client.request(
-                    method,
-                    url,
-                    headers={"Authorization": f"Bearer {auth['bearer']}"},
-                    **kwargs,
-                )
-            else:
-                # Basic Auth: existing M6 operator-provisioned path (backward-compat).
-                resp = await client.request(
-                    method,
-                    url,
-                    auth=(auth["email"], auth["token"]),
-                    **kwargs,
-                )
+        client = get_async_client(timeout=30)
+        if auth.get("mode") == "oauth":
+            # OAuth 3LO: Authorization: Bearer {token} — no Basic Auth tuple.
+            # T-7.4-22: auth["bearer"] is never logged; error paths use type(exc).__name__.
+            resp = await client.request(
+                method,
+                url,
+                headers={"Authorization": f"Bearer {auth['bearer']}"},
+                **kwargs,
+            )
+        else:
+            # Basic Auth: existing M6 operator-provisioned path (backward-compat).
+            resp = await client.request(
+                method,
+                url,
+                auth=(auth["email"], auth["token"]),
+                **kwargs,
+            )
 
         if resp.status_code == 429:
             # Honor Retry-After header if present (A3 — ASSUMED; verify against live tenant).

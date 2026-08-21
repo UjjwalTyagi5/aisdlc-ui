@@ -31,6 +31,7 @@ import httpx
 
 import shared.keyvault as _keyvault
 from config.connectors.base import BaseConnector
+from config.connectors.http_client import get_async_client
 from config.connectors.models import (
     CapabilityEntry,
     CapabilityManifest,
@@ -327,10 +328,10 @@ class GitHubActionsConnector(BaseConnector):
         auth = await self.auth_adapter(self._auth_tenant(tenant_id))
         url = f"{_GH_API_BASE}{path}"
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(
-                method, url, headers=self._gha_headers(auth["pat"]), **kwargs
-            )
+        client = get_async_client(timeout=30)
+        resp = await client.request(
+            method, url, headers=self._gha_headers(auth["pat"]), **kwargs
+        )
 
         if resp.status_code == 429:
             # Honour X-RateLimit-Reset if present (epoch seconds — A4 ASSUMED).

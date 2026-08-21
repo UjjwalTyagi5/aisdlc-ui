@@ -234,6 +234,17 @@ ENABLE_OIDC: bool = os.environ.get("ENABLE_OIDC", "false").lower() == "true"
 # (WR-03). Single configured IdP per deployment; validated against OIDC_PROVIDERS at boot.
 OIDC_PROVIDER: str = os.environ.get("OIDC_PROVIDER", "entra")
 
+# ── Connector health probes ──
+# process_api.py runs two background loops that re-probe every configured connector
+# every 30s. Defaults ON so deployed environments keep the behaviour the Integrations
+# page depends on. Turn it OFF for local dev: with unreachable or unconfigured
+# credentials each probe drifts toward its own 30s timeout, so the "every 30s" cycle
+# never actually idles — it saturates a core and adds ~1s to every request, because the
+# probes and the request handlers share one event loop.
+ENABLE_CONNECTOR_HEALTH_PROBES: bool = os.environ.get(
+    "ENABLE_CONNECTOR_HEALTH_PROBES", "true"
+).lower() in ("1", "true", "yes")
+
 # ── M6: Webhook Pipeline (REQ-M6-11) ──
 ENABLE_WEBHOOK_TRIGGERS: bool = os.environ.get("ENABLE_WEBHOOK_TRIGGERS", "false").lower() == "true"
 # Connector credential Key Vault secret names (convention only; values loaded via load_secret())

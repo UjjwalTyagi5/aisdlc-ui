@@ -161,6 +161,14 @@ cd backend
 uv run uvicorn process_api:app --reload --port 8001
 ```
 
+> **Keep `watchfiles` installed.** It is pinned in `requirements.txt`/`pyproject.toml`
+> and `--reload` depends on it. Without it uvicorn silently falls back to `StatReload`,
+> which `os.stat()`s every `.py` file under `backend/` four times a second — including
+> the ~15k files in `.venv`. One sweep takes ~4s on a laptop, so the watcher never
+> sleeps and burns a full CPU core at idle, starving the event loop: every endpoint,
+> even `/health`, then answers in >1s. With `watchfiles` the reloader uses OS-native
+> file notifications and sits at 0%.
+
 The first boot creates the single organization. Boot is also where two guards run — see
 [Troubleshooting](#troubleshooting) if it refuses to start; both failures are the guards
 doing their job, not bugs.
