@@ -67,6 +67,9 @@ export const Connector = z.object({
   scope: ConnectorScope.default("organization"),
   /** The owning Business Unit for a `business_unit`-scoped connector; null for org-wide. */
   workspaceId: z.string().nullable().default(null),
+  /** Whether the requesting Business Unit was granted this kind. Only meaningful
+   *  (non-null) when the caller asked with a workspace in view — see GET /connectors. */
+  granted: z.boolean().nullable().optional(),
 });
 export type Connector = z.infer<typeof Connector>;
 

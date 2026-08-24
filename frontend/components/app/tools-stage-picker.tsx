@@ -19,6 +19,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { listConnectors } from "@/lib/api/connectors";
+import { connectorKindLabel } from "@/lib/connectors";
 import { listMcpServers } from "@/lib/api/mcp";
 import { qk } from "@/lib/api/query-keys";
 import { PHASE_ORDER, PHASE_LABEL } from "@/lib/agents";
@@ -303,9 +304,15 @@ export function ToolsStagePicker({
     label: s.server_name,
     hint: s.transport,
   }));
+  // A stage may be wired to a connector as soon as its unit was GRANTED it —
+  // credentials are supplied later, per project, by the project's own members
+  // (see the "NO connect / credential action" note on the Integrations hub), so
+  // this must not wait on `installed`. `granted` is only populated when a
+  // workspace is in view (see GET /connectors); with none, nothing is offered
+  // rather than guessing — see workspaceId's own doc comment above.
   const connectorOptions: Opt[] = (connectors.data ?? [])
-    .filter((c) => c.installed)
-    .map((c) => ({ id: c.kind, label: c.name }));
+    .filter((c) => c.granted === true)
+    .map((c) => ({ id: c.kind, label: connectorKindLabel(c.kind) }));
 
   const toggle = (
     map: StageMap,

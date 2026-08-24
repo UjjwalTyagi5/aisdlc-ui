@@ -1012,6 +1012,7 @@ export function CreateProjectDialog({
                     accessModeValue={accessModeSel}
                     onAccessModeChange={setAccessModeSel}
                     enabled={open}
+                    workspaceId={selectedWorkspaceId}
                   />
                 </div>
               )}
