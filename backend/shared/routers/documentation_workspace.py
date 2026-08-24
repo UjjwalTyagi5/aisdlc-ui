@@ -15,13 +15,22 @@ import asyncio
 import os
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from agents_orchestrator.documentation_agent.config.session_state import set_prepared
+from shared.authz.project_scope import require_project_access
 from shared.services import ado_repos
 
-documentation_workspace_router = APIRouter()
+# EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Was bare APIRouter() — the only
+# gate was the artifact:view floor applied at include time (process_api.py), which
+# contributor holds; a contributor could clone/prepare/read connector state against
+# ANY project id in the tenant. Same finding, same fix, as
+# shared/routers/security_workspace.py — see docs/rbac-audit-2026-08-17.md finding 3,
+# which lists this file as fixed alongside dev/code_review/security_workspace.py but
+# the dependency was never actually attached here (deployment_workspace.py had the
+# identical gap — see that file's own note).
+documentation_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
 
 _LANG_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",

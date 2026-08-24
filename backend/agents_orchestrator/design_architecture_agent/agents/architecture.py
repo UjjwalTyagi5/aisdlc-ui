@@ -1132,12 +1132,13 @@ async def agent(state: AgentState):
         )
         return {"messages": [response], "resolved_model": resolved}
     except Exception as e:
+        # NEVER str(exc) here — credential leakage risk (BYOK-resolved model calls
+        # can surface the tenant's own API key in a provider error message).
         logger.error(
-            "Design agent error (tenant=%s alias=%s): %s: %s",
+            "Design agent error (tenant=%s alias=%s): %s",
             tenant_id,
             resolved.alias,
             type(e).__name__,
-            str(e)[:2000],
         )
         return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
 
@@ -1193,9 +1194,12 @@ async def action(state: AgentState):
             hint = _TOOL_ARG_HINTS.get(tc["name"], "")
             # Log the REAL error (type + traceback) server-side; keep the chat message
             # concise so a huge exception string can't flood the UI as "content".
+            # traceback.format_exc() already carries the exception's own message as
+            # its last line — passing e too would be the same str(exc) exposure the
+            # rest of this codebase avoids (credential leakage risk).
             logger.error(
-                "design tool %s failed: %s: %s\n%s",
-                tc["name"], type(e).__name__, e, traceback.format_exc(),
+                "design tool %s failed: %s\n%s",
+                tc["name"], type(e).__name__, traceback.format_exc(),
             )
             short = str(e)
             if len(short) > 400:
