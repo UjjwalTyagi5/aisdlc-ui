@@ -51,6 +51,7 @@ from config.env import (
     GITHUB_OAUTH_CLIENT_SECRET,
 )
 from shared.auth.oauth_state import verify_oauth_state
+from shared.authz.connector_grants import granted_target_refs
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.keyvault import load_secret, store_secret
@@ -371,26 +372,66 @@ async def _remove_workspace_connector(workspace_id: str, kind: str, db: AsyncSes
     response_model=List[ConnectorOut],
     dependencies=[Depends(require_permission("connector:view"))],
 )
-async def list_connectors(request: Request, db: AsyncSession = Depends(get_db_session)):
+async def list_connectors(
+    request: Request,
+    workspaceId: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
     """Return a Connector[] reshaped from the connector-health cache (T-M4-04).
 
-    Overlaid with this tenant's pasted credentials. When an X-Workspace-Id header
-    is present, further filters to connectors enabled for that workspace — connectors
-    with credentials but no workspace_connectors row appear as disconnected (not yet
-    enabled for this workspace).
+    Overlaid with this tenant's pasted credentials. Workspace scope comes from the
+    `workspaceId` query param when given, else the `X-Workspace-Id` header — the
+    query param lets a caller (the create-project dialog, and Settings' Tools per
+    stage) ask about a Business Unit other than the ambient active-workspace
+    cookie the header is normally sourced from, mirroring GET /model/availability's
+    workspaceId param.
+
+    With a workspace resolved (either source), every entry gets `granted`: whether
+    that Business Unit was given this connector by an Org Admin
+    (`integration_grants`, see shared/authz/connector_grants.py). `installed`/
+    `health` keep their existing, narrower meaning — a real credential exists and
+    was health-checked — and additionally require the workspace to have it enabled
+    (`workspace_connectors`), same as before.
+
+    An EXPLICIT `workspaceId` query param additionally widens the candidate set to
+    every catalogue kind, credentialed or not. Credentials are a project-level,
+    later-stage concern — supplied by a project's own members after it exists, per
+    the "NO connect / credential action" note on the Integrations hub — so a stage
+    picker asking "what may this unit wire up" must not require one up front.
+    Ambient header-only callers (dashboards, status widgets) keep today's
+    credential-only list unchanged; only a caller that deliberately asks about a
+    unit gets the wider, grant-based set.
     """
     tenant_id = getattr(request.state, "tenant_id", "")
-    workspace_id = request.headers.get("x-workspace-id", "")
+    header_workspace_id = request.headers.get("x-workspace-id", "")
+    workspace_id = workspaceId or header_workspace_id
 
     cache = getattr(request.app.state, "connector_health_cache", {})
     connectors = _build_connector_list(cache, tenant_id)
     connectors = await _overlay_tenant_credentials(connectors, tenant_id)
 
     if workspace_id:
+        if workspaceId:
+            by_kind = {c.kind: c for c in connectors}
+            for kind in _CATALOG_KINDS:
+                if kind not in by_kind:
+                    connectors.append(
+                        ConnectorOut(
+                            id=kind, tenantId=tenant_id, kind=kind, name=kind,
+                            installed=False, health="disconnected",
+                            capabilities=[], lastCheckedAt=None,
+                        )
+                    )
+
         enabled_kinds = await _workspace_enabled_kinds(workspace_id, db)
+        granted_kinds = await granted_target_refs(
+            db, tenant_id=tenant_id, workspace_id=workspace_id, kind="connector",
+        )
         for c in connectors:
+            c.granted = c.kind in granted_kinds
             if c.installed and c.kind not in enabled_kinds:
-                # Credentials exist at tenant level but this workspace hasn't enabled it
+                # Credentials exist at tenant level but this workspace hasn't
+                # enabled it.
                 c.installed = False
                 c.health = "disconnected"
 

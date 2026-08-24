@@ -25,11 +25,12 @@ Threat mitigations (T-M4-01, T-M4-02, T-M4-03):
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,6 +98,19 @@ def _validated_modes(v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
     return v
 
 
+class ContributorIn(BaseModel):
+    """An existing person's email plus the role they take on this project.
+
+    Mirrors project_members.py's MemberCreateIn — same shape, same "existing
+    person only" rule (see that file's docstring) — because this is the same act,
+    just batched at creation instead of one add at a time on the roster.
+    """
+
+    email: EmailStr
+    roleName: str = Field(min_length=1, max_length=64)
+    extraAgents: Optional[list[str]] = None
+
+
 class ProjectCreateIn(BaseModel):
     name: str
     # Which Business Unit the project belongs to. REQUIRED — there is no default
@@ -133,6 +147,11 @@ class ProjectCreateIn(BaseModel):
     # A user id, not an email: the dialog picks from people already in the unit, and
     # accepting an email here would make this a second, quieter account-creating path.
     ownerId: Optional[str] = None
+    # People added to the roster at creation time — the dialog's Contributors
+    # section. Was already being sent and silently dropped: Pydantic ignores
+    # unrecognised fields by default, so nobody named here ever actually joined
+    # the project.
+    contributors: Optional[list[ContributorIn]] = None
 
     @field_validator("tool_access_modes")
     @classmethod
@@ -381,6 +400,66 @@ async def create_project(
                 tenant_id=str(tenant_id), scope_kind="project",
                 granted_by=creator,
             )
+
+    # ── contributors ─────────────────────────────────────────────────────────
+    # Same rules as POST /projects/{id}/members (project_members.py): an existing
+    # person only, a role from ALL_ROLES, and a grant no higher than the creator's
+    # own reach. Validated in a first pass so a bad row 422s the whole creation
+    # atomically rather than leaving a project with some contributors added and
+    # others silently missing.
+    if body.contributors:
+        from shared.authz.grant import grant_role  # noqa: PLC0415 - import cycle
+        from shared.authz.grant_guard import assert_can_grant_role  # noqa: PLC0415
+        from shared.authz.permissions import ALL_ROLES  # noqa: PLC0415
+
+        resolved: list[tuple[str, ContributorIn]] = []
+        for contributor in body.contributors:
+            if contributor.roleName not in ALL_ROLES:
+                raise HTTPException(
+                    status_code=422, detail=f"Unknown role '{contributor.roleName}'"
+                )
+            await assert_can_grant_role(db, request, contributor.roleName)
+            user = (
+                await db.execute(
+                    text(
+                        "SELECT id FROM users WHERE lower(email) = :e "
+                        "AND tenant_id = CAST(:t AS uuid)"
+                    ),
+                    {"e": contributor.email.lower(), "t": str(tenant_id)},
+                )
+            ).first()
+            if user is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "no_such_person",
+                        "message": (
+                            f"Nobody in this organisation uses {contributor.email}. "
+                            "They have to be onboarded before they can join a project."
+                        ),
+                    },
+                )
+            resolved.append((user.id, contributor))
+
+        actor = getattr(request.state, "user_id", None)
+        for user_id, contributor in resolved:
+            await grant_role(
+                user_id, str(project.id), contributor.roleName,
+                tenant_id=str(tenant_id), scope_kind="project", granted_by=actor,
+            )
+            if contributor.extraAgents:
+                await db.execute(
+                    text(
+                        "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+                        "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = :p "
+                        "  AND role_name = :r"
+                    ),
+                    {
+                        "a": json.dumps(contributor.extraAgents),
+                        "u": user_id, "p": project.id, "r": contributor.roleName,
+                    },
+                )
+        await db.flush()
 
     # DP6 warn: compute config-time capability-gap and log any shortfalls.
     # Best-effort only — never blocks project creation.
