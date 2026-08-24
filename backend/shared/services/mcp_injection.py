@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def mcp_tools_scope(
-    tenant_id: Optional[str], server_ids: Optional[list[str]], agent_id: str
+    tenant_id: Optional[str],
+    server_ids: Optional[list[str]],
+    agent_id: str,
+    project_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
 ) -> AsyncIterator[list]:
     """Bind the given MCP servers' tools on the mcp_runtime contextvar for the
     block, and clear on exit. No-op (empty tool set) when MCP is disabled, no
@@ -36,13 +40,19 @@ async def mcp_tools_scope(
 
     The contextvar set here is read by the agent node (binds base + MCP tools)
     and the dynamic tool node (dispatch), both of which run within this block.
+
+    `project_id`/`owner_id`, when both given, let this run prefer the calling
+    project member's own credential for a server over the org-registered one —
+    see mcp_registry.resolve_server_configs. Omitted, behaviour is unchanged.
     """
     tools: list = []
     if MCP_ENABLED and tenant_id and server_ids:
         try:
             from shared.services import mcp_client, mcp_registry  # noqa: PLC0415
 
-            configs = await mcp_registry.resolve_server_configs(tenant_id, list(server_ids))
+            configs = await mcp_registry.resolve_server_configs(
+                tenant_id, list(server_ids), project_id=project_id, owner_id=owner_id,
+            )
             tools = await mcp_client.load_tools(configs)
         except Exception as exc:  # noqa: BLE001 — never fail the turn on MCP errors
             logger.warning("MCP tool injection skipped for %s: %s", agent_id, exc)

@@ -18,8 +18,16 @@ export interface McpServerInput {
 
 export type McpServerUpdate = Partial<McpServerInput>;
 
-export const listMcpServers = (activeOnly = false) =>
-  api("/mcp/registry", { query: { active_only: activeOnly }, schema: z.array(McpServer) });
+/**
+ * Omit `workspaceId` for the registry admin page's own view (servers YOU
+ * registered). Pass one to ask what a Business Unit was GRANTED instead,
+ * regardless of who registered it — the Tools-per-stage picker's question.
+ */
+export const listMcpServers = (activeOnly = false, workspaceId?: string | null) =>
+  api("/mcp/registry", {
+    query: { active_only: activeOnly, workspaceId: workspaceId || undefined },
+    schema: z.array(McpServer),
+  });
 
 export const getMcpServer = (id: string) =>
   api(`/mcp/registry/${encodeURIComponent(id)}`, { schema: McpServer });

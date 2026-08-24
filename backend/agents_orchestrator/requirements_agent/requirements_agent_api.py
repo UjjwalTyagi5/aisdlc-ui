@@ -485,7 +485,7 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     _turn_skills = await resolve_agent_skills("requirements", tenant_id or None, _project_id)
     async with agent_run_scope(
         agent_id="requirements", tenant_id=tenant_id or None, session_id=session_id,
-        project_id=_project_id,
+        project_id=_project_id, owner_id=user_id or None,
     ) as scope, skill_context_scope("requirements", _turn_skills):
         if scope.context_block:
             state["messages"].append(HumanMessage(content=scope.context_block))
@@ -701,7 +701,7 @@ async def chat(
     _turn_skills = await resolve_agent_skills("requirements", real_tenant_id or None, _lf_pid)
     async with agent_run_scope(
         agent_id="requirements", tenant_id=real_tenant_id or None, session_id=session_id,
-        project_id=_lf_pid,
+        project_id=_lf_pid, owner_id=real_user_id or None,
     ) as scope, skill_context_scope("requirements", _turn_skills):
         if scope.context_block:
             state["messages"].append(HumanMessage(content=scope.context_block))

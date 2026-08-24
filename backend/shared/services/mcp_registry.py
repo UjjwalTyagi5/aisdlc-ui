@@ -13,7 +13,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from shared.capabilities import taxonomy
 from shared.db import get_db_session_for_tenant
@@ -66,10 +66,53 @@ def to_public(row: McpServer) -> dict[str, Any]:
 
 
 async def list_servers(
-    tenant_id: str, created_by: Optional[str] = None, active_only: bool = False
+    tenant_id: str,
+    created_by: Optional[str] = None,
+    active_only: bool = False,
+    workspace_id: Optional[str] = None,
 ) -> list[dict]:
-    """List servers. created_by enforces per-user (creator-only) visibility."""
+    """List servers.
+
+    `created_by` enforces per-user (creator-only) visibility — the registry admin
+    page's own question, "which of my registrations". `workspace_id` asks the
+    opposite question — "what may THIS BUSINESS UNIT use" — and answers it from
+    grants (`integration_grants`, kind='mcp'), the same axis GET /connectors uses,
+    regardless of who registered the server. A stage picker needs the second
+    question: reusing creator-only visibility there meant an MCP server an Org
+    Admin registered and granted to a unit was invisible to every project in that
+    unit except to the Org Admin's own projects — the grant took effect nowhere.
+    The two modes are mutually exclusive; `workspace_id` wins when both are passed.
+    """
     async with get_db_session_for_tenant(tenant_id) as session:
+        if workspace_id:
+            try:
+                uuid.UUID(workspace_id)
+            except ValueError:
+                return []
+            granted = (
+                await session.execute(
+                    text(
+                        "SELECT target_ref FROM integration_grants "
+                        "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = CAST(:w AS uuid) "
+                        "  AND kind = 'mcp'"
+                    ),
+                    {"t": tenant_id, "w": workspace_id},
+                )
+            ).scalars().all()
+            server_ids = []
+            for ref in granted:
+                try:
+                    server_ids.append(uuid.UUID(ref))
+                except ValueError:
+                    continue
+            if not server_ids:
+                return []
+            stmt = select(McpServer).where(McpServer.id.in_(server_ids))
+            if active_only:
+                stmt = stmt.where(McpServer.is_active.is_(True))
+            rows = (await session.execute(stmt)).scalars().all()
+            return [to_public(r) for r in rows]
+
         stmt = select(McpServer)
         if created_by:
             stmt = stmt.where(McpServer.created_by == created_by)
@@ -203,7 +246,13 @@ async def _decrypt_json(tenant_id: str, ref: Optional[str]) -> Optional[dict]:
         return None
 
 
-async def _rows_to_configs(tenant_id: str, rows: list[McpServer], agent_id: Optional[str]) -> list[ServerConfig]:
+async def _rows_to_configs(
+    tenant_id: str,
+    rows: list[McpServer],
+    agent_id: Optional[str],
+    project_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+) -> list[ServerConfig]:
     configs: list[ServerConfig] = []
     for row in rows:
         if agent_id and row.allowed_stages and agent_id not in row.allowed_stages:
@@ -219,6 +268,28 @@ async def _rows_to_configs(tenant_id: str, rows: list[McpServer], agent_id: Opti
         }
         cfg["env"] = await _decrypt_json(tenant_id, row.env_vars_secret_ref)
         cfg["headers"] = await _decrypt_json(tenant_id, row.headers_secret_ref)
+
+        # Project-scoped personal override — the same axis connectors resolve
+        # through BaseConnector._resolve_credential_override
+        # (config/connectors/base.py): a project member's own credential for
+        # THIS server (project_integration_credentials, kind='mcp') wins over
+        # the org-registered one, when the caller supplied project/owner
+        # context. HTTP-shaped transports only (streamable_http, sse) — merged
+        # into the bearer header, not replacing the org config's other header
+        # entries. `stdio` has no equivalent standard slot: an arbitrary stdio
+        # server expects whatever env var name IT defines, which this platform
+        # has no way to know generically, so a personal override there would be
+        # silently unused rather than actually authenticating — not offered.
+        if project_id and owner_id and row.transport != "stdio":
+            from shared.authz.project_credential import resolve_project_secret  # noqa: PLC0415
+
+            override = await resolve_project_secret(
+                tenant_id=tenant_id, project_id=project_id, owner_id=owner_id,
+                kind="mcp", target_id=str(row.id),
+            )
+            if override:
+                cfg["headers"] = {**(cfg["headers"] or {}), "Authorization": f"Bearer {override}"}
+
         configs.append(cfg)
     return configs
 
@@ -228,12 +299,18 @@ async def resolve_server_configs(
     server_ids: list[str],
     agent_id: Optional[str] = None,
     created_by: Optional[str] = None,
+    project_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
 ) -> list[ServerConfig]:
     """Load active servers by id and decrypt credentials.
 
     Used at run time with the project's per-stage selection (server_ids), and by the
     probe endpoint (with created_by to enforce ownership). agent_id is accepted for
     backward compatibility; stage gating now lives in the project mapping, not here.
+
+    `project_id`/`owner_id`, when both given, let a project member's own MCP
+    credential (see _rows_to_configs) override the org-registered one for their
+    runs — omitted, behaviour is unchanged (org config only).
     """
     if not server_ids:
         return []
@@ -243,4 +320,4 @@ async def resolve_server_configs(
         if created_by:
             stmt = stmt.where(McpServer.created_by == created_by)
         rows = list((await session.execute(stmt)).scalars().all())
-    return await _rows_to_configs(tenant_id, rows, agent_id)
+    return await _rows_to_configs(tenant_id, rows, agent_id, project_id, owner_id)

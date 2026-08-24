@@ -643,7 +643,7 @@ async def _send(websocket: WebSocket, payload: dict) -> None:
 
 
 @asynccontextmanager
-async def _stage_connector(shim_input: Any, stage: str, tenant_id: str):
+async def _stage_connector(shim_input: Any, stage: str, tenant_id: str, owner_id: str = ""):
     """Inject the project's bound board connector for the agent's own tools.
 
     The agent's board tools (list_board_projects, …) read the connector from the
@@ -654,7 +654,13 @@ async def _stage_connector(shim_input: Any, stage: str, tenant_id: str):
     resolve the credentialed connector, and set it for the turn. Fail-soft: any
     miss leaves the contextvar unset and the board tools fail closed with a clear
     message — the turn still proceeds on pasted/uploaded input. clear_connector in
-    finally keeps credentials from surviving the turn (REQ-M3-10)."""
+    finally keeps credentials from surviving the turn (REQ-M3-10).
+
+    `owner_id` — the turn's own user (the websocket auth ticket's claim, threaded
+    in by the caller) — lets the connector prefer THIS person's saved credential
+    (project_integration_credentials) over the tenant-wide one; see
+    BaseConnector._resolve_credential_override. Omitted, behaviour is unchanged
+    (tenant-wide only)."""
     injected = False
     try:
         if tenant_id:
@@ -669,6 +675,7 @@ async def _stage_connector(shim_input: Any, stage: str, tenant_id: str):
             connector = await get_connector_for_session(
                 kind=kind, tenant_id=tenant_id,
                 project_id=str(getattr(shim_input, "project_id", "") or ""),
+                owner_id=owner_id,
                 # `stage` here IS the agent id (see _REPO_STAGES above), and the
                 # stage IS the access decision since migration 0024 — the level lives
                 # per (stage, tool), so project_id alone resolves to no access.
@@ -2559,8 +2566,8 @@ async def copilot_ws(websocket: WebSocket) -> None:
                     # cleared on exit even if a turn raises.
                     async with prompt_override_scope(active, _self_override):
                         async with skill_context_scope(active, skills):
-                            async with _stage_connector(shim_input, active, tenant_id):
-                                async with mcp_tools_for_stage(shim_input, active):
+                            async with _stage_connector(shim_input, active, tenant_id, owner_id=user_id):
+                                async with mcp_tools_for_stage(shim_input, active, owner_id=user_id):
                                     if active in STATE_MACHINE_STAGES:
                                         reply, artifact_md = await _stream_state_machine(
                                             graph, text, run_id, tenant_id, websocket,

@@ -147,13 +147,13 @@ async def test_a_project_may_only_use_what_its_unit_was_granted(org):
     assert c.get(f"/projects/{org['project']}/integrations", headers=headers).json() == []
 
     r = c.put(f"/projects/{org['project']}/integrations", headers=headers,
-              json={"kind": "connector", "targetId": "jira", "account": "acme"})
+              json={"kind": "connector", "targetId": "jira", "label": "Acme bot", "account": "acme"})
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "not_granted"
 
     await _grant_integration(org, "connector", "jira", org["payments"])
     listed = c.get(f"/projects/{org['project']}/integrations", headers=headers).json()
-    assert [i["targetId"] for i in listed] == ["jira"]
+    assert [i["id"] for i in listed] == ["jira"]
     # The project's own wiring is reported alongside the permission.
     assert listed[0]["stages"] == ["development"]
 
@@ -161,41 +161,55 @@ async def test_a_project_may_only_use_what_its_unit_was_granted(org):
 @pytest.mark.asyncio
 async def test_two_people_configuring_the_same_tool_do_not_overwrite_each_other(org):
     """Keyed on the OWNER. Keyed on the project alone, the second contributor to
-    configure Jira silently replaced the first and neither could tell."""
+    configure Jira silently replaced the first and neither could tell. And each
+    only ever sees their own — "You never see theirs" per the project Integrations
+    page's own docstring — never a shared list of every owner's credential."""
     c = TestClient(process_api.app)
     await _grant_integration(org, "connector", "jira", org["payments"])
     alice, bob = await _user(org, "alice"), await _user(org, "bob")
     url = f"/projects/{org['project']}/integrations"
 
     c.put(url, headers=_headers(alice, org["org"], ["admin:*"]),
-          json={"kind": "connector", "targetId": "jira", "account": "alice-bot"})
+          json={"kind": "connector", "targetId": "jira", "label": "Alice's Jira", "account": "alice-bot"})
     c.put(url, headers=_headers(bob, org["org"], ["admin:*"]),
-          json={"kind": "connector", "targetId": "jira", "account": "bob-bot"})
+          json={"kind": "connector", "targetId": "jira", "label": "Bob's Jira", "account": "bob-bot"})
 
-    creds = c.get(url, headers=_headers(alice, org["org"], ["admin:*"])).json()[0]["credentials"]
-    assert {x["ownerId"] for x in creds} == {alice, bob}
-    assert {x["account"] for x in creds} == {"alice-bot", "bob-bot"}
+    alice_view = c.get(url, headers=_headers(alice, org["org"], ["admin:*"])).json()[0]
+    bob_view = c.get(url, headers=_headers(bob, org["org"], ["admin:*"])).json()[0]
+    assert alice_view["credential"]["ownerId"] == alice
+    assert alice_view["credential"]["account"] == "alice-bot"
+    assert bob_view["credential"]["ownerId"] == bob
+    assert bob_view["credential"]["account"] == "bob-bot"
 
 
 @pytest.mark.asyncio
-async def test_a_secret_is_never_stored_or_returned(org):
-    """There is nowhere proper to put one yet, so it is read and discarded rather
-    than written into a column that would end up in every backup."""
+async def test_a_secret_is_stored_but_never_returned_in_plaintext(org):
+    """The raw value never round-trips in a response or sits in plaintext in the
+    row — but it IS stored now (via secret_store, referenced by secret_ref) and
+    genuinely retrievable, which is what makes it usable by a real connector call."""
     c = TestClient(process_api.app)
     await _grant_integration(org, "connector", "jira", org["payments"])
     admin = await _user(org, "orgadmin")
     headers = _headers(admin, org["org"], ["admin:*"])
 
     r = c.put(f"/projects/{org['project']}/integrations", headers=headers,
-              json={"kind": "connector", "targetId": "jira", "secret": "hunter2"})
+              json={"kind": "connector", "targetId": "jira", "label": "Test bot", "secret": "hunter2"})
     assert "hunter2" not in r.text
-    assert r.json()["credentials"][0]["hasSecret"] is False
+    assert r.json()["hasSecret"] is True
 
     async with get_db_session_for_tenant(org["org"]) as s:
         row = (await s.execute(
             text("SELECT secret_ref FROM project_integration_credentials")
         )).first()
-    assert row.secret_ref is None
+    assert row.secret_ref is not None
+    assert row.secret_ref != "hunter2"  # a reference, never the value itself
+
+    from shared.authz.project_credential import resolve_project_secret
+    resolved = await resolve_project_secret(
+        tenant_id=org["org"], project_id=org["project"], owner_id=admin,
+        kind="connector", target_id="jira",
+    )
+    assert resolved == "hunter2"
 
 
 # ── cross-BU loans ───────────────────────────────────────────────────────────

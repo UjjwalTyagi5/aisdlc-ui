@@ -289,8 +289,8 @@ export function ToolsStagePicker({
   workspaceId?: string | null;
 }) {
   const servers = useQuery({
-    queryKey: qk.mcp.list(true),
-    queryFn: () => listMcpServers(true),
+    queryKey: qk.mcp.list(true, workspaceId),
+    queryFn: () => listMcpServers(true, workspaceId),
     enabled,
   });
   const connectors = useQuery({

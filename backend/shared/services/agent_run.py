@@ -111,6 +111,7 @@ async def agent_run_scope(
     tenant_id: Optional[str],
     session_id: Optional[str],
     project_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
 ) -> AsyncIterator[AgentRunScope]:
     """Inject the tenant connector + upstream context for one agent graph run.
 
@@ -119,6 +120,11 @@ async def agent_run_scope(
             upstream artifacts build_context fetches.
         tenant_id: Tenant whose board connector to inject. Falsy → no connector.
         session_id: Run/session id for build_context. Falsy → no upstream context.
+        owner_id: the turn's own user. Lets the board connector and any MCP
+            servers prefer THIS person's saved credential over the tenant/org
+            one — see BaseConnector._resolve_credential_override and
+            mcp_registry.resolve_server_configs. Omitted, behaviour is
+            unchanged (tenant/org credentials only).
 
     Yields:
         AgentRunScope with .connector_injected and .context_block populated.
@@ -139,6 +145,7 @@ async def agent_run_scope(
                 # grant does not admit, the same way they do with no connector.
                 connector = await get_connector_for_session(
                     kind=kind, tenant_id=tenant_id, project_id=str(project_id or ""),
+                    owner_id=owner_id or "",
                 )
                 set_connector(connector)
                 scope.connector_injected = True
@@ -177,7 +184,9 @@ async def agent_run_scope(
 
     server_ids = await project_stage_server_ids(tenant_id, project_id, agent_id)
     try:
-        async with mcp_tools_scope(tenant_id, server_ids, agent_id) as _mcp_tools:
+        async with mcp_tools_scope(
+            tenant_id, server_ids, agent_id, project_id=project_id, owner_id=owner_id,
+        ) as _mcp_tools:
             scope.mcp_tool_count = len(_mcp_tools)
             yield scope
     finally:
