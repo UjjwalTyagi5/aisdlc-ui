@@ -119,6 +119,34 @@ async def test_put_aggregates_across_workspaces(org):
 
 
 @pytest.mark.asyncio
+async def test_unknown_provider_is_silently_dropped(org):
+    """PUT filters against the real provider catalog (model_catalog.list_providers),
+    mirroring set_connector_grants's own _CATALOG_KINDS filter — an arbitrary string
+    must not be writable into integration_grants."""
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+
+    resp = c.put(
+        "/model/providers/grants",
+        headers=headers,
+        params={"workspaceId": org["payments"]},
+        json={"providers": ["anthropic", "not-a-real-provider"]},
+    )
+    assert resp.status_code == 200, resp.text
+    # The unknown one is dropped; the real one still goes through.
+    assert resp.json() == [{"provider": "anthropic", "businessUnitIds": [org["payments"]]}]
+
+    # And it never touched the table — not just absent from the aggregated response.
+    async with get_db_session_for_tenant(org["org"]) as s:
+        rows = (await s.execute(text(
+            "SELECT target_ref FROM integration_grants "
+            "WHERE tenant_id = CAST(:t AS uuid) AND kind = 'model_provider'"
+        ), {"t": org["org"]})).fetchall()
+    assert [r[0] for r in rows] == ["anthropic"]
+
+
+@pytest.mark.asyncio
 async def test_bu_admin_cannot_set_model_provider_grants(org):
     """The org-admin-only gate: a BU Admin holding model:manage (for their own unit's
     provider config) still may not decide which providers a BU is granted."""

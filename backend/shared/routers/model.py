@@ -599,7 +599,14 @@ async def set_model_provider_grants_route(
         )
     tenant_id = _tenant_id(request)
     actor = _user_id(request)
-    providers = [p for p in (body.get("providers") or []) if isinstance(p, str) and p.strip()]
+    # Filtered against the presented catalog, matching set_connector_grants's own
+    # _CATALOG_KINDS filter (integration_access.py) — the grantable universe must be
+    # a real provider slug, not an arbitrary string a caller happens to send.
+    catalog = {p["provider"] for p in catalog_providers()}
+    providers = [
+        p for p in (body.get("providers") or [])
+        if isinstance(p, str) and p.strip() and p in catalog
+    ]
 
     await db.execute(
         text(
