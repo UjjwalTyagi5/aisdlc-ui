@@ -50,16 +50,25 @@ async def _check_db_reachable() -> bool:
         return False
 
 
-def _mint_token(tenant_id: str = "test-tenant-001", exp_offset: int = 3600) -> str:
-    """Mint a signed HS256 token using the configured secret."""
+def _mint_token(tenant_id: str | None = None, exp_offset: int = 3600) -> str:
+    """Mint a signed HS256 token using the configured secret.
+
+    tenant_id defaults to a fresh UUID, not a literal string: require_permission's
+    workspace-resolution fallback (active_workspace_for_request) runs a real
+    uuid.UUID(str(tenant_id)) against Postgres, and a non-UUID tenant_id 500s instead
+    of the clean 404-then-fall-through-to-permission-check it's designed to produce
+    for a tenant with no seeded workspace. permissions defaults to the wildcard since
+    these tests exercise the routes' shape/tenant-scoping, not RBAC.
+    """
     try:
         import jwt
         now = int(time.time())
         payload = {
             "sub": "test-user-001",
-            "tenant_id": tenant_id,
+            "tenant_id": tenant_id or str(uuid.uuid4()),
             "iat": now,
             "exp": now + exp_offset,
+            "permissions": ["admin:*"],
         }
         return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM or "HS256")
     except ImportError:
@@ -192,26 +201,44 @@ async def test_tenant_isolation_projects():
         pytest.skip("Postgres unreachable — skipping DB-dependent test (POSTGRES_CONN_STRING set but DB not running)")
 
     from httpx import ASGITransport, AsyncClient
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from sqlalchemy.pool import NullPool
-    from shared.models.orm import Project
+    from shared.db import get_db_session_for_tenant, get_db_session_superuser
+    from shared.models.orm import Organization, Project, Workspace
 
     tenant_a = str(uuid.uuid4())
     tenant_b = str(uuid.uuid4())
+    workspace_id = uuid.uuid4()
 
-    # Seed one project for tenant A
-    engine = create_async_engine(POSTGRES_CONN_STRING, poolclass=NullPool)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    _NIL_WORKSPACE = uuid.UUID("00000000-0000-0000-0000-000000000001")
-    async with Session() as session:
+    # organizations/workspaces are global (no RLS) — organization.id IS the tenant_id
+    # (see test_development_agent_chat_access.py's project_with_org_admin fixture for
+    # the same pattern). A real row is required: projects.workspace_id is FK'd to
+    # workspaces.id, so an arbitrary UUID here fails the FK constraint outright.
+    async with get_db_session_superuser() as session:
+        session.add(Organization(id=uuid.UUID(tenant_a), slug=f"tenant-a-{tenant_a[:8]}", display_name="Tenant A"))
+        session.add(Workspace(id=workspace_id, organization_id=uuid.UUID(tenant_a), slug="unit", display_name="Unit"))
+
+    # GET /projects filters through visible_project_ids (role-binding reach), not just
+    # RLS — a permissions claim on the JWT is not a role binding. Without this, "test
+    # -user-001" has org_admin's permission wildcard but no bound scope, so the
+    # visibility query returns [] and even tenant A can't see its own project.
+    from shared.authz.grant import grant_role
+    await grant_role(
+        "test-user-001", uuid.UUID(tenant_a), "org_admin",
+        tenant_id=tenant_a, scope_kind="organization", granted_by="test",
+    )
+
+    # Seed one project for tenant A. Must go through get_db_session_for_tenant, not a
+    # raw engine session — it SETs LOCAL app.current_tenant_id, which RLS's WITH CHECK
+    # on the projects table requires to admit the INSERT at all (a raw session with no
+    # GUC set is rejected outright: "new row violates row-level security policy").
+    async with get_db_session_for_tenant(tenant_a) as session:
         proj = Project(
-            workspace_id=_NIL_WORKSPACE,
+            workspace_id=workspace_id,
             tenant_id=uuid.UUID(tenant_a),
             display_name="Tenant A Project",
             archived=False,
         )
         session.add(proj)
-        await session.commit()
+        await session.flush()
         project_id = str(proj.id)
 
     try:
@@ -246,15 +273,15 @@ async def test_tenant_isolation_projects():
             f"Tenant A should see its own project {project_id}, but it's missing: {project_ids_a}"
         )
     finally:
-        # Cleanup: remove the seeded row
-        async with Session() as session:
-            from sqlalchemy import delete as sa_delete
-            from shared.models.orm import Project as P
-            await session.execute(
-                sa_delete(P).where(P.id == uuid.UUID(project_id))
-            )
-            await session.commit()
-        await engine.dispose()
+        # Cleanup: same tenant-scoped session — RLS applies to DELETE too. Organization/
+        # workspace are superuser-scoped (no RLS) and must go after the project, since
+        # projects.workspace_id/organizations FKs would otherwise block their deletion.
+        from sqlalchemy import delete as sa_delete
+        async with get_db_session_for_tenant(tenant_a) as session:
+            await session.execute(sa_delete(Project).where(Project.id == uuid.UUID(project_id)))
+        async with get_db_session_superuser() as session:
+            await session.execute(sa_delete(Workspace).where(Workspace.id == workspace_id))
+            await session.execute(sa_delete(Organization).where(Organization.id == uuid.UUID(tenant_a)))
 
 
 @pytest.mark.unit
@@ -267,25 +294,31 @@ async def test_project_detail_cross_tenant_returns_404():
         pytest.skip("Postgres unreachable — skipping DB-dependent test (POSTGRES_CONN_STRING set but DB not running)")
 
     from httpx import ASGITransport, AsyncClient
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from sqlalchemy.pool import NullPool
-    from shared.models.orm import Project
+    from shared.db import get_db_session_for_tenant, get_db_session_superuser
+    from shared.models.orm import Organization, Project, Workspace
 
     tenant_a = str(uuid.uuid4())
     tenant_b = str(uuid.uuid4())
+    workspace_id = uuid.uuid4()
 
-    engine = create_async_engine(POSTGRES_CONN_STRING, poolclass=NullPool)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    _NIL_WORKSPACE = uuid.UUID("00000000-0000-0000-0000-000000000001")
-    async with Session() as session:
+    # organizations/workspaces are global (no RLS) — organization.id IS the tenant_id.
+    # A real row is required: projects.workspace_id is FK'd to workspaces.id.
+    async with get_db_session_superuser() as session:
+        session.add(Organization(id=uuid.UUID(tenant_a), slug=f"tenant-a-{tenant_a[:8]}", display_name="Tenant A"))
+        session.add(Workspace(id=workspace_id, organization_id=uuid.UUID(tenant_a), slug="unit", display_name="Unit"))
+
+    # get_db_session_for_tenant SETs LOCAL app.current_tenant_id, which RLS's WITH
+    # CHECK on the projects table requires to admit the INSERT — see the identical
+    # note in test_tenant_isolation_projects above.
+    async with get_db_session_for_tenant(tenant_a) as session:
         proj = Project(
-            workspace_id=_NIL_WORKSPACE,
+            workspace_id=workspace_id,
             tenant_id=uuid.UUID(tenant_a),
             display_name="Tenant A Secret Project",
             archived=False,
         )
         session.add(proj)
-        await session.commit()
+        await session.flush()
         project_id = str(proj.id)
 
     try:
@@ -303,11 +336,9 @@ async def test_project_detail_cross_tenant_returns_404():
             f"Expected 404 for cross-tenant project access, got {resp.status_code}: {resp.text}"
         )
     finally:
-        async with Session() as session:
-            from sqlalchemy import delete as sa_delete
-            from shared.models.orm import Project as P
-            await session.execute(
-                sa_delete(P).where(P.id == uuid.UUID(project_id))
-            )
-            await session.commit()
-        await engine.dispose()
+        from sqlalchemy import delete as sa_delete
+        async with get_db_session_for_tenant(tenant_a) as session:
+            await session.execute(sa_delete(Project).where(Project.id == uuid.UUID(project_id)))
+        async with get_db_session_superuser() as session:
+            await session.execute(sa_delete(Workspace).where(Workspace.id == workspace_id))
+            await session.execute(sa_delete(Organization).where(Organization.id == uuid.UUID(tenant_a)))

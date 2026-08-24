@@ -13,12 +13,40 @@ from typing import Annotated, TypedDict
 
 import pytest
 
-from config.env import POSTGRES_SYNC_CONN_STRING
+from config.env import POSTGRES_MIGRATIONS_CONN_STRING, POSTGRES_SYNC_CONN_STRING
 
 _SKIP_NO_PG = pytest.mark.skipif(
     not POSTGRES_SYNC_CONN_STRING,
     reason="POSTGRES_SYNC_CONN_STRING not set — skipping Postgres checkpointer tests",
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_checkpoint_tables():
+    """One-time DDL bootstrap of the checkpoint_* tables via the superuser role.
+
+    PostgresSaver.setup() issues CREATE TABLE IF NOT EXISTS — but sdlc_app has only
+    USAGE on schema public, deliberately no CREATE (scripts/grant_app_role.sql), so
+    calling .setup() with POSTGRES_SYNC_CONN_STRING (the app role) always raises
+    InsufficientPrivilege, regardless of whether the tables already exist: Postgres
+    checks CREATE privilege before it checks IF NOT EXISTS. This mirrors production
+    (config/checkpoint.py calls .setup() with the app role too, and only WARNS on
+    failure — it relies on an ops step having created the schema beforehand with a
+    privileged role). Skips cleanly, same as _SKIP_NO_PG, when no migrations
+    connection is configured.
+    """
+    if not POSTGRES_MIGRATIONS_CONN_STRING or not POSTGRES_SYNC_CONN_STRING:
+        return
+    import psycopg
+    from psycopg.rows import dict_row
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    migrations_sync_dsn = POSTGRES_MIGRATIONS_CONN_STRING.replace("postgresql+asyncpg://", "postgresql://")
+    conn = psycopg.connect(migrations_sync_dsn, autocommit=True, row_factory=dict_row)
+    try:
+        PostgresSaver(conn).setup()
+    finally:
+        conn.close()
 
 
 def _build_minimal_graph(checkpointer):
@@ -64,7 +92,6 @@ def test_postgres_checkpointer_persistence():
     # --- Write ---
     conn1 = psycopg.connect(POSTGRES_SYNC_CONN_STRING, autocommit=True, row_factory=dict_row)
     cp1 = PostgresSaver(conn1)
-    cp1.setup()
     graph1 = _build_minimal_graph(cp1)
     graph1.invoke({"messages": [HumanMessage(content=sent_content)]}, config=config)
     conn1.close()
@@ -110,7 +137,6 @@ def test_concurrent_checkpointer_sessions():
 
         conn = psycopg.connect(POSTGRES_SYNC_CONN_STRING, autocommit=True, row_factory=dict_row)
         cp = PostgresSaver(conn)
-        cp.setup()
         graph = _build_minimal_graph(cp)
 
         for i in range(MESSAGES_PER_TASK):

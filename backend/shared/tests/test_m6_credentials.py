@@ -108,7 +108,7 @@ async def test_slack_connector_no_credential_on_instance():
     if not _SLACK_AVAILABLE:
         pytest.skip("SlackConnector not implemented")
     # Pass a token at init time, but check the connector doesn't expose it on __dict__
-    connector = SlackConnector(bot_token="xoxb-init-token")
+    connector = SlackConnector(bot_token="xoxb-init-token", tenant_id="test-tenant")
     # The connector may store it internally, but should not expose it under known secret attr names
     dangerous_attrs = {"_token", "_secret", "_pat", "_bot_token"}
     exposed = dangerous_attrs & set(connector.__dict__.keys())

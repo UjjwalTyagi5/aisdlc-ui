@@ -13,8 +13,6 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool
 
 from config.env import POSTGRES_CONN_STRING, REDIS_URL
 
@@ -34,16 +32,16 @@ async def test_artifact_write_read_roundtrip():
     second opens) to confirm the data was committed to Postgres, not just held
     in memory.
     """
-    from shared.models.orm import Run, Base
+    from sqlalchemy import delete as sa_delete
+    from shared.db import get_db_session_for_tenant
+    from shared.models.orm import Run
     from shared.models.artifacts import RequirementsArtifact
 
-    engine = create_async_engine(POSTGRES_CONN_STRING, poolclass=NullPool)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
     run_id = uuid.uuid4()
-    org_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
-    workspace_id = uuid.UUID("00000000-0000-0000-0000-000000000002")
-    project_id = uuid.UUID("00000000-0000-0000-0000-000000000003")
+    # Run.tenant_id carries no FK (unlike project_id) — a fresh UUID needs no
+    # organization/workspace seeding, just a real UUID so RLS's WITH CHECK on the
+    # runs table is satisfied by the tenant-scoped session below.
+    tenant_id = str(uuid.uuid4())
     session_id = str(uuid.uuid4())
 
     artifact = RequirementsArtifact(
@@ -54,38 +52,38 @@ async def test_artifact_write_read_roundtrip():
         version=1,
     )
 
-    # --- Write session ---
-    async with session_factory() as write_session:
-        run = Run(
-            id=run_id,
-            org_id=org_id,
-            workspace_id=workspace_id,
-            project_id=project_id,
-            session_id=session_id,
-            current_stage="requirements",
-            requirements_payload=artifact.model_dump(),
+    try:
+        # --- Write session --- get_db_session_for_tenant SETs LOCAL
+        # app.current_tenant_id, which RLS's WITH CHECK on the runs table requires
+        # to admit the INSERT at all.
+        async with get_db_session_for_tenant(tenant_id) as write_session:
+            run = Run(
+                id=run_id,
+                tenant_id=uuid.UUID(tenant_id),
+                current_stage="requirements",
+                requirements_payload=artifact.model_dump(),
+            )
+            write_session.add(run)
+
+        # --- Read session (separate connection, same tenant GUC) ---
+        async with get_db_session_for_tenant(tenant_id) as read_session:
+            result = await read_session.execute(select(Run).where(Run.id == run_id))
+            retrieved_run = result.scalar_one_or_none()
+
+        assert retrieved_run is not None, f"Run {run_id} not found after commit"
+        assert retrieved_run.requirements_payload is not None, "requirements_payload is None"
+
+        read_artifact = RequirementsArtifact(**retrieved_run.requirements_payload)
+        assert read_artifact.agent_session_id == session_id, (
+            f"agent_session_id mismatch: expected '{session_id}', got '{read_artifact.agent_session_id}'"
         )
-        write_session.add(run)
-        await write_session.commit()
-
-    # --- Read session (separate connection) ---
-    async with session_factory() as read_session:
-        result = await read_session.execute(select(Run).where(Run.id == run_id))
-        retrieved_run = result.scalar_one_or_none()
-
-    await engine.dispose()
-
-    assert retrieved_run is not None, f"Run {run_id} not found after commit"
-    assert retrieved_run.requirements_payload is not None, "requirements_payload is None"
-
-    read_artifact = RequirementsArtifact(**retrieved_run.requirements_payload)
-    assert read_artifact.agent_session_id == session_id, (
-        f"agent_session_id mismatch: expected '{session_id}', got '{read_artifact.agent_session_id}'"
-    )
-    assert read_artifact.brd_content == artifact.brd_content, (
-        f"brd_content mismatch: expected '{artifact.brd_content}', got '{read_artifact.brd_content}'"
-    )
-    assert read_artifact.version == 1
+        assert read_artifact.brd_content == artifact.brd_content, (
+            f"brd_content mismatch: expected '{artifact.brd_content}', got '{read_artifact.brd_content}'"
+        )
+        assert read_artifact.version == 1
+    finally:
+        async with get_db_session_for_tenant(tenant_id) as cleanup_session:
+            await cleanup_session.execute(sa_delete(Run).where(Run.id == run_id))
 
 
 @pytest.mark.integration
@@ -98,7 +96,9 @@ async def test_artifact_ready_redis_event():
     events are missed. Uses asyncio.wait_for with a 5-second timeout.
     """
     import redis.asyncio as aioredis
-    from shared.services.artifact_service import write_artifact, _ARTIFACT_CHANNEL
+    from shared.db import get_db_session_for_tenant
+    from shared.models.orm import Run
+    from shared.services.artifact_service import write_and_notify, _ARTIFACT_CHANNEL
     from shared.models.artifacts import RequirementsArtifact
 
     session_id = str(uuid.uuid4())
@@ -107,7 +107,14 @@ async def test_artifact_ready_redis_event():
         brd_content="Redis event test BRD",
         version=1,
     )
-    run_id = str(uuid.uuid4())
+    tenant_id = str(uuid.uuid4())
+    run_id = uuid.uuid4()
+
+    # persist_artifact (which write_and_notify calls) UPDATES an existing run row —
+    # it does not create one — so a Run must be seeded first, same tenant-scoped
+    # session RLS requires for the earlier roundtrip test.
+    async with get_db_session_for_tenant(tenant_id) as seed_session:
+        seed_session.add(Run(id=run_id, tenant_id=uuid.UUID(tenant_id), current_stage="requirements"))
 
     received_event: dict | None = None
 
@@ -133,25 +140,31 @@ async def test_artifact_ready_redis_event():
     # Brief yield to let subscriber register before the write fires
     await asyncio.sleep(0.1)
 
-    await write_artifact(
-        artifact_type="requirements",
-        artifact=artifact,
-        run_id=run_id,
-    )
-
     try:
-        await asyncio.wait_for(subscriber_task, timeout=5.0)
-    except asyncio.TimeoutError:
-        subscriber_task.cancel()
-        pytest.fail(
-            "Timed out waiting for artifact_ready Redis event after 5 seconds. "
-            "Check that artifact_service.write_artifact publishes to the correct channel."
+        await write_and_notify(
+            run_id=str(run_id),
+            artifact_type="requirements",
+            artifact_data=artifact.model_dump(),
+            tenant_id=tenant_id,
         )
 
-    assert received_event is not None, "No event received on Redis channel"
-    assert received_event.get("event") == "artifact_ready", (
-        f"Expected event='artifact_ready', got: {received_event}"
-    )
-    assert received_event.get("artifact_type") == "requirements", (
-        f"Expected artifact_type='requirements', got: {received_event}"
-    )
+        try:
+            await asyncio.wait_for(subscriber_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            subscriber_task.cancel()
+            pytest.fail(
+                "Timed out waiting for artifact_ready Redis event after 5 seconds. "
+                "Check that artifact_service.write_and_notify publishes to the correct channel."
+            )
+
+        assert received_event is not None, "No event received on Redis channel"
+        assert received_event.get("event") == "artifact_ready", (
+            f"Expected event='artifact_ready', got: {received_event}"
+        )
+        assert received_event.get("artifact_type") == "requirements", (
+            f"Expected artifact_type='requirements', got: {received_event}"
+        )
+    finally:
+        from sqlalchemy import delete as sa_delete
+        async with get_db_session_for_tenant(tenant_id) as cleanup_session:
+            await cleanup_session.execute(sa_delete(Run).where(Run.id == run_id))

@@ -100,7 +100,7 @@ async def test_still_emits_when_payload_null_and_list_tool_called(monkeypatch):
             assert name == "list_projects"
             return [{"id": "p1", "name": "Payments"}]
 
-    async def _fake_get_connector_for_session(kind, tenant_id):
+    async def _fake_get_connector_for_session(kind, tenant_id, **kwargs):
         return _FakeConnector()
 
     monkeypatch.setattr(copilot_api, "_detect_handoff", _fake_detect_handoff)

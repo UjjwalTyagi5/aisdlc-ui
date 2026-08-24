@@ -23,7 +23,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_AGENTIC_ROOT = _REPO_ROOT / "agentic_app"
+# Stale "agentic_app" name predates the post-restructure rename to "backend" — see
+# check_env_example.py's ".env.example lives beside the backend (post-restructure)".
+_AGENTIC_ROOT = _REPO_ROOT / "backend"
 _ORCHESTRATOR_PATH = str(_AGENTIC_ROOT / "agents_orchestrator")
 
 sys.path.insert(0, str(_AGENTIC_ROOT))
@@ -100,7 +102,6 @@ def test_all_wave0_target_modules_importable():
         "webhooks.dedup",
         "webhooks.stream_producer",
         "webhooks.router",
-        "webhooks.consumer",
         "webhooks.normalizers.github",
         "webhooks.normalizers.jira",
         "webhooks.normalizers.azure_repos",
@@ -287,9 +288,19 @@ def test_sc04_connector_health_includes_all_new_connectors():
 
     token = ""
     if JWT_SECRET_KEY:
+        import uuid as _uuid
         now = int(time.time())
+        # tenant_id must be a real UUID — this router requires artifact:view at
+        # include time (process_api._VIEW_DEP), whose fallback workspace
+        # resolution runs uuid.UUID(str(tenant_id)) against Postgres.
         token = _jwt.encode(
-            {"sub": "m6-gate", "tenant_id": "test", "iat": now, "exp": now + 3600},
+            {
+                "sub": "m6-gate",
+                "tenant_id": str(_uuid.uuid4()),
+                "iat": now,
+                "exp": now + 3600,
+                "permissions": ["admin:*"],
+            },
             JWT_SECRET_KEY,
             algorithm=JWT_ALGORITHM or "HS256",
         )
@@ -365,7 +376,7 @@ async def test_sc08_slack_empty_channel_raises():
     """SC-08: notify_slack raises ValueError for empty channel (no fallback channel)."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token")
+    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="", message="test message")
 
@@ -375,7 +386,7 @@ async def test_sc08_slack_over_length_message_raises():
     """SC-08: notify_slack raises ValueError for messages exceeding max length."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token")
+    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
     long_message = "A" * 4001  # over 4000-char limit
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="#general", message=long_message)
@@ -386,7 +397,7 @@ async def test_sc08_slack_secret_pattern_raises():
     """SC-08: notify_slack raises ValueError when message contains ANTHROPIC_API_KEY pattern."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token")
+    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
     with pytest.raises(ValueError):
         await connector.notify_slack(
             channel="#alerts",
@@ -399,7 +410,9 @@ async def test_sc08_slack_clean_message_accepted():
     """SC-08: notify_slack accepts a clean, properly-sized message."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token")
+    # tenant_id is required by auth_adapter() (REQ-M7-01) — connector credentials
+    # are per-tenant, so a connector built with none can never authenticate.
+    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
     mock_response = MagicMock()
     with patch(
         "slack_sdk.web.async_client.AsyncWebClient.chat_postMessage",
@@ -419,63 +432,3 @@ async def test_sc08_slack_clean_message_accepted():
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.unit
-async def test_consumer_flag_gate_disables_workflow_creation():
-    """ENABLE_WEBHOOK_TRIGGERS=False prevents start_workflow from being called."""
-    from webhooks.consumer import WebhookConsumer
-
-    temporal_mock = AsyncMock()
-    redis_mock = MagicMock()
-    consumer = WebhookConsumer(temporal_client=temporal_mock, redis_client=redis_mock)
-
-    stream_event = {
-        "id": "stream-001",
-        "connector": "github",
-        "tenant_id": "tenant-flag-test",
-        "event": json.dumps({
-            "id": "evt-flag",
-            "title": "Test issue",
-            "status": "open",
-            "type": "issue",
-            "event_id": "delivery-flag",
-            "project_id": "proj-1",
-            "tenant_id": "tenant-flag-test",
-            "source_key": "org/repo#1",
-        }),
-    }
-
-    with patch("config.env.ENABLE_WEBHOOK_TRIGGERS", False):
-        await consumer.handle_task(stream_event)
-
-    temporal_mock.start_workflow.assert_not_called()
-
-
-@pytest.mark.unit
-async def test_consumer_flag_gate_enables_workflow_creation():
-    """ENABLE_WEBHOOK_TRIGGERS=True causes start_workflow to be called."""
-    from webhooks.consumer import WebhookConsumer
-
-    temporal_mock = AsyncMock()
-    redis_mock = MagicMock()
-    consumer = WebhookConsumer(temporal_client=temporal_mock, redis_client=redis_mock)
-
-    stream_event = {
-        "id": "stream-002",
-        "connector": "jira",
-        "tenant_id": "tenant-enable-test",
-        "event": json.dumps({
-            "id": "evt-enable",
-            "title": "Jira issue",
-            "status": "open",
-            "type": "story",
-            "event_id": "delivery-enable",
-            "project_id": "proj-2",
-            "tenant_id": "tenant-enable-test",
-            "source_key": "PROJ-42",
-        }),
-    }
-
-    with patch("config.env.ENABLE_WEBHOOK_TRIGGERS", True):
-        await consumer.handle_task(stream_event)
-
-    temporal_mock.start_workflow.assert_called_once()

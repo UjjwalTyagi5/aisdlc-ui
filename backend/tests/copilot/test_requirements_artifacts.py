@@ -79,7 +79,11 @@ async def test_appends_markdown_section_for_substantial_reply(monkeypatch):
     assert sec["id"] == "requirements-doc-1"
     assert sec["stage"] == "requirements"
     assert sec["kind"] == "markdown"
-    assert sec["title"] == "Requirements"
+    # _reply_artifact_title prefers the first markdown heading, else the first
+    # non-empty line, over the flat "Requirements" fallback (distinguishable panel
+    # titles across incremental captures) — LONG_REPLY has no heading, so its first
+    # line is what's derived.
+    assert sec["title"] == "Given a user is on the login page"
     assert sec["content"] == LONG_REPLY.strip()
 
     assert len(sent) == 1

@@ -8,6 +8,7 @@ does not yet include the new connector entries.
 """
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -30,15 +31,24 @@ _NEW_CONNECTORS = {"jira", "github_issues", "azure_repos", "slack"}
 
 
 def _mint_token() -> str:
-    """Mint a signed JWT for authenticated endpoint access."""
+    """Mint a signed JWT for authenticated endpoint access.
+
+    tenant_id is a real UUID (not a literal string): this router requires
+    artifact:view at include time (process_api._VIEW_DEP), whose fallback
+    workspace resolution runs uuid.UUID(str(tenant_id)) against Postgres — a
+    non-UUID tenant_id 500s instead of cleanly 404-ing into "no workspace, fall
+    through to the permission check". permissions carries the wildcard so this
+    stays a route-shape test, not an RBAC test.
+    """
     if not JWT_SECRET_KEY:
         return "no-token"
     now = int(time.time())
     payload = {
         "sub": "test-health-user",
-        "tenant_id": "test-tenant",
+        "tenant_id": str(uuid.uuid4()),
         "iat": now,
         "exp": now + 3600,
+        "permissions": ["admin:*"],
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM or "HS256")
 

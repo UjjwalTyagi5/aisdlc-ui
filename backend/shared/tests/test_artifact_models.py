@@ -65,7 +65,10 @@ class TestDesignArtifact(unittest.TestCase):
     def test_model_dump_has_all_expected_keys(self):
         artifact = self.model_cls()
         result = artifact.model_dump()
-        expected_keys = {"hld", "lld", "api_contracts", "database_schema", "c4_diagram_url", "adrs", "version"}
+        expected_keys = {
+            "hld", "lld", "api_contracts", "database_schema", "c4_diagram_url", "adrs",
+            "security_checklist", "version",
+        }
         self.assertEqual(set(result.keys()), expected_keys)
 
     def test_default_version_is_1(self):

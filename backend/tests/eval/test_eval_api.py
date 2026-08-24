@@ -64,27 +64,20 @@ def _make_eval_record(
 
 @pytest.fixture(autouse=True)
 def _mock_workspace_resolution(monkeypatch):
-    """Patch resolve_default_workspace and resolve_workspace_for_run so
-    require_permission's workspace-derivation step does not need a live
-    Postgres connection in unit tests.
+    """Patch resolve_workspace_for_run so require_permission's workspace-derivation
+    step does not need a live Postgres connection in unit tests.
 
     The eval router uses run_param="run_id" so the dependency calls
-    resolve_workspace_for_run, not resolve_default_workspace.  Both are
-    patched to prevent unexpected DB connections (mirrors cost API test
-    pattern, but also covers the run_param path).
+    resolve_workspace_for_run — the no-run_param fallback (now
+    active_workspace_for_request; resolve_default_workspace no longer exists as a
+    name in shared.authz.dependency, see shared/tests's own note on this exact
+    rename) is never reached here and needs no patch.
     """
     import uuid as _uuid
-
-    async def _fake_resolve_default(tenant_id: str):
-        return _uuid.uuid4()
 
     async def _fake_resolve_for_run(run_id: str, tenant_id: str):
         return _uuid.uuid4()
 
-    monkeypatch.setattr(
-        "shared.authz.dependency.resolve_default_workspace",
-        _fake_resolve_default,
-    )
     monkeypatch.setattr(
         "shared.authz.dependency.resolve_workspace_for_run",
         _fake_resolve_for_run,

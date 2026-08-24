@@ -34,10 +34,20 @@ def test_deployment_state_carries_structured_pm_artifacts():
     assert '"requirements_payload": ws_requirements_payload' in source
 
 
-def test_deployment_uses_state_board_provider_for_status_updates():
+def test_deployment_uses_connector_for_status_updates():
+    """PM work-item status updates on deployment go through the connector hub.
+
+    Was test_deployment_uses_state_board_provider_for_status_updates, asserting the
+    milestone-3-superseded get_pm_provider(provider_kind) factory pattern —
+    test_m3_verification.py::test_no_get_pm_provider asserts that pattern is gone
+    from agents_orchestrator/ entirely, and the two tests directly contradicted each
+    other. pipeline_app.py now resolves the tenant's board connector via
+    get_connector() (config.connectors.context, set by config/connector_factory.py's
+    get_connector_for_session) and dispatches through write_adapter, same as every
+    other connector call site — the write-back capability itself is intact, only the
+    provider-resolution mechanism moved.
+    """
     source = _read("agents_orchestrator/deployment_agent/agents/pipeline_app.py")
 
-    assert 'state.get("board_provider")' in source
-    assert 'req_payload.get("provider_kind")' in source
-    assert "provider = await get_pm_provider(provider_kind)" in source
-    assert 'provider.move_item_state(project, wid, "Done")' in source
+    assert "connector = get_connector()" in source
+    assert 'connector.write_adapter("move_item_state", project=project, item_id=wid, new_state="Done")' in source
