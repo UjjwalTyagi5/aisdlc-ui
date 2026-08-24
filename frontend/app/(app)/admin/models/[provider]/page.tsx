@@ -381,9 +381,15 @@ export default function ProviderDetailPage() {
     saveM.mutate(grants.filter((g) => keyOf(g.provider, g.model_id, g.credentialId) !== k));
   }
 
-  if (role !== null && role !== "org_admin") {
+  // Org Admin must never reach a credential step for an org-wide key (the
+  // single most safety-critical constraint of the RBAC redesign — "Org Admin
+  // never adds a key, period"), and no other role has real support built on
+  // this page yet, so every resolved role is denied. `role === null` is the
+  // still-loading state, not "unauthenticated" — it must fall through here
+  // rather than flash a false-restricted screen before the role resolves.
+  if (role !== null) {
     return (
-      <RestrictedAccess description="Provider detail is the Organization Admin's — it names every business unit's access to every model." />
+      <RestrictedAccess description="Provider detail is being rebuilt for the new access model and isn't available yet." />
     );
   }
 
