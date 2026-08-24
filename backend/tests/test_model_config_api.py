@@ -96,6 +96,73 @@ async def test_verify_unknown_provider_raises():
 
 
 # ---------------------------------------------------------------------------
+# Task 10: probe_provider — stateless pre-save credential check (BU Admin's
+# "Test" button, spec §5). Unlike verify_provider, no `model_providers` row is
+# ever created, so these assert the DB stays untouched, not just the status.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_probe_provider_valid_then_invalid_creates_no_row(monkeypatch):
+    from shared.services import model_config as mc
+
+    tenant = str(uuid.uuid4())
+
+    async def _ok(provider, model, api_key, api_base=None):
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+    res = await mc.probe_provider("anthropic", "sk-test", model="claude-sonnet-4-6")
+    assert res == {"status": "valid"}
+
+    async def _bad(provider, model, api_key, api_base=None):
+        return False
+    monkeypatch.setattr(mc, "_probe_model", _bad)
+    res = await mc.probe_provider("anthropic", "sk-test", model="claude-sonnet-4-6")
+    assert res == {"status": "invalid"}
+
+    # Stateless: probing never wrote a model_providers row for this tenant.
+    assert await mc.list_providers(tenant) == []
+
+
+@pytest.mark.asyncio
+async def test_probe_provider_empty_key_is_invalid_without_probing(monkeypatch):
+    from shared.services import model_config as mc
+
+    async def _boom(provider, model, api_key, api_base=None):
+        raise AssertionError("must not probe with an empty key")
+    monkeypatch.setattr(mc, "_probe_model", _boom)
+
+    res = await mc.probe_provider("anthropic", "   ", model="claude-sonnet-4-6")
+    assert res == {"status": "invalid"}
+
+
+@pytest.mark.asyncio
+async def test_probe_provider_falls_back_to_first_catalog_model(monkeypatch):
+    """Mirrors verify_provider's own fallback (model_config.py:351-354) — a caller
+    mid-onboarding with no model chosen yet still gets a real probe, not a 422."""
+    from shared.services import model_config as mc
+
+    seen: dict = {}
+
+    async def _ok(provider, model, api_key, api_base=None):
+        seen["model"] = model
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+
+    res = await mc.probe_provider("anthropic", "sk-test")  # no model passed
+    assert res == {"status": "valid"}
+    assert seen["model"], "expected a fallback model id from the catalog"
+
+
+@pytest.mark.asyncio
+async def test_probe_provider_unknown_provider_no_models_raises():
+    from shared.services import model_config as mc
+    from shared.services.model_config import InvalidModelError
+
+    with pytest.raises(InvalidModelError):
+        await mc.probe_provider("not-a-real-provider", "sk-test")
+
+
+# ---------------------------------------------------------------------------
 # Task 3: update / set_default / delete
 # ---------------------------------------------------------------------------
 
@@ -285,6 +352,42 @@ async def test_options_requires_run_create_not_model_manage():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/model/providers", json={
             "provider": "anthropic", "display_name": "x", "api_key": "k", "enabled_models": [],
+        })
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_via_api_creates_no_provider_row(monkeypatch):
+    """Task 10 — POST /model/providers/probe: the BU Admin's "Test" button. Gated
+    by the router's flat model:manage floor like every other write route here, and
+    genuinely stateless — list_providers stays empty after a probe."""
+    import shared.services.model_config as mc
+
+    tenant = str(uuid.uuid4())
+    app = _model_app(["model:manage"], tenant)
+
+    async def _ok(provider, model, api_key, api_base=None):
+        return True
+    monkeypatch.setattr(mc, "_probe_model", _ok)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/model/providers/probe", json={
+            "provider": "anthropic", "api_key": "sk-test", "model": "claude-sonnet-4-6",
+        })
+        assert r.status_code == 200, r.text
+        assert r.json() == {"status": "valid"}
+        r2 = await c.get("/model/providers")
+    assert r2.status_code == 200
+    assert r2.json() == []
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_requires_model_manage():
+    tenant = str(uuid.uuid4())
+    app = _model_app(["run:create"], tenant)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/model/providers/probe", json={
+            "provider": "anthropic", "api_key": "sk-test",
         })
     assert r.status_code == 403
 

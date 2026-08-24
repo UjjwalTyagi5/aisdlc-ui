@@ -10,6 +10,7 @@ import {
   ModelProvider,
   ModelProviderGrant,
   OrgModelGrant,
+  ProbeResult,
   ProjectModelSelection,
   VerifyResult,
 } from "@/lib/schemas/model";
@@ -106,6 +107,21 @@ export const verifyModelProvider = (id: string) =>
     method: "POST",
     schema: VerifyResult,
   });
+
+/**
+ * Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+ * Task 10). Runs the same 1-token live probe as `verifyModelProvider`, but before
+ * any `model_providers` row exists, so nothing here is created, read or written.
+ * Lets Save stay disabled until the key it's about to persist is known-good,
+ * rather than only learning that after the row (and its secret) are committed.
+ */
+export const probeModelProvider = (body: {
+  provider: string;
+  api_key: string;
+  api_base?: string;
+  /** The model to probe with — normally the first one chosen in the dialog. */
+  model?: string;
+}) => api("/model/providers/probe", { method: "POST", body, schema: ProbeResult });
 
 export const updateModelProvider = (
   id: string,

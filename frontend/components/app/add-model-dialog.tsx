@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { GrantVisibilityControl } from "@/components/app/grant-visibility-control";
-import { addModelProvider, verifyModelProvider } from "@/lib/api/models";
+import { addModelProvider, probeModelProvider, verifyModelProvider } from "@/lib/api/models";
 import { providerLabel } from "@/lib/models/provider-labels";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { GrantVisibility } from "@/lib/schemas/grant";
@@ -148,6 +148,7 @@ export function AddModelDialog({
   needsApproval,
   grantableWorkspaces,
   initialProvider = null,
+  mode = "org",
   onAdded,
 }: {
   open: boolean;
@@ -174,6 +175,14 @@ export function AddModelDialog({
   /** Pre-selected vendor slug. Set from a provider's own screen, where the
    *  answer is the page you are on; null from the list, where it is a question. */
   initialProvider?: string | null;
+  /**
+   * "org" (default): today's onboarding shape — key optional, verified only
+   * after Save. "bu-add-key": a BU Admin adding their own key to a provider
+   * their org already granted (spec §5) — always paired with `initialProvider`
+   * (no picker either way), but here the key is REQUIRED and must pass a
+   * live "Test" before Save enables, rather than being verified afterward.
+   */
+  mode?: "org" | "bu-add-key";
   onAdded: () => void;
 }) {
   const [provider, setProvider] = React.useState<ModelProviderKind | "">(initialProvider ?? "");
@@ -181,6 +190,11 @@ export function AddModelDialog({
   const [displayName, setDisplayName] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
   const [apiBase, setApiBase] = React.useState("");
+  // bu-add-key only: the pre-save "Test" button's result. Gates Save — a key
+  // that has never been proven to work must not be the one that gets stored.
+  const [testStatus, setTestStatus] = React.useState<"idle" | "testing" | "valid" | "invalid">(
+    "idle",
+  );
   const [enabled, setEnabled] = React.useState<Record<string, boolean>>({});
   const [modelQuery, setModelQuery] = React.useState("");
   const [pending, setPending] = React.useState(false);
@@ -202,6 +216,7 @@ export function AddModelDialog({
 
   /** True when the vendor came from the page rather than from the picker. */
   const providerLocked = !!initialProvider;
+  const isBuAddKey = mode === "bu-add-key";
 
   const resolvedTargetId = targetUnits
     ? (targetUnitId || targetUnits[0]?.id || "")
@@ -228,6 +243,7 @@ export function AddModelDialog({
       setDisplayName("");
       setApiKey("");
       setApiBase("");
+      setTestStatus("idle");
       setEnabled({});
       setModelQuery("");
       setCustomModels([]);
@@ -241,6 +257,16 @@ export function AddModelDialog({
       setPending(false);
     }
   }, [open, initialProvider]);
+
+  // A passing Test is a claim about ONE exact (key, base) pair. Edit either
+  // afterward and the claim is stale — re-idle rather than let a proven-good
+  // result silently vouch for a key that was never actually tested.
+  React.useEffect(() => {
+    setTestStatus("idle");
+    // apiKey/apiBase are exactly what a Test result is a claim about — no
+    // other identifier is read here, so there's nothing else for the deps
+    // array to name.
+  }, [apiKey, apiBase]);
 
   // Switching target unit invalidates the model picks: they were chosen from
   // the other unit's grants and may not exist in this one. A locked provider
@@ -285,20 +311,32 @@ export function AddModelDialog({
   const chosenModelCount = enabledModels.length + validCustomModels.length;
   const hasModels = chosenModelCount > 0;
 
-  // The KEY IS OPTIONAL. Registering a provider without one is a real choice:
-  // its models enter the catalogue and can be granted, and each Business Unit
-  // brings its own secret. Demanding a key here made that impossible, so an
-  // organisation approving a provider it does not itself pay for had no route.
+  // Whichever model got chosen first is what "Test" probes with — the models
+  // step always comes before the credential step, so by the time a key can be
+  // typed at all, this is never empty in bu-add-key mode (Credential doesn't
+  // render until `hasModels`).
+  const probeModel = enabledModels[0] ?? validCustomModels[0]?.model_id ?? null;
+
+  // THE KEY IS OPTIONAL — except in bu-add-key mode, where it is the entire
+  // point of the dialog (spec §5): a BU Admin opened this specifically to
+  // bring their own credential, so an empty key here isn't a deferred choice
+  // the way it is for an Org Admin registering a provider centrally, it's an
+  // incomplete one.
   const sharedValid = displayName.trim().length > 0;
   const endpoint = provider ? ENDPOINT_REQUIRED[provider] : undefined;
   const endpointValid = !endpoint || apiBase.trim().length > 0;
+  const keyValid = !isBuAddKey || apiKey.trim().length > 0;
+  // A key that has never been proven to work must not be the one that gets
+  // stored — Save stays closed until "Test" has said so for THIS key.
+  const testPassed = !isBuAddKey || testStatus === "valid";
   // Reach is genuinely optional HERE, and only here: onboarding a provider and
   // deciding who may use it are two decisions, and an admin who holds the key
   // but not yet the answer must still be able to save. Editing an existing
   // grant is the opposite case — emptying it there means "revoke everywhere",
   // which is a thing to warn about rather than to wave through.
   const targetValid = !targetUnits || !!resolvedTargetId;
-  const canSubmit = !!provider && hasModels && sharedValid && endpointValid && targetValid;
+  const canSubmit =
+    !!provider && hasModels && sharedValid && endpointValid && keyValid && testPassed && targetValid;
 
   // Numbered so the reveal reads as progress. Availability exists only for the
   // Org Admin, so the step after it shifts up rather than leaving a hole.
@@ -313,6 +351,31 @@ export function AddModelDialog({
 
   const updateCustomModel = (i: number, patch: Partial<(typeof customModels)[number]>) =>
     setCustomModels((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
+
+  // bu-add-key only: proves the key before anything is created with it. Uses
+  // the same live 1-token probe `verifyModelProvider` runs post-save, but
+  // stateless — no `model_providers` row exists yet for it to check.
+  const handleTest = async () => {
+    if (!provider || !apiKey.trim() || !probeModel || testStatus === "testing") return;
+    setTestStatus("testing");
+    try {
+      const result = await probeModelProvider({
+        provider,
+        api_key: apiKey,
+        api_base: apiBase.trim() || undefined,
+        model: probeModel,
+      });
+      setTestStatus(result.status === "valid" ? "valid" : "invalid");
+      if (result.status !== "valid") {
+        toast.error("Key rejected — verification failed");
+      }
+    } catch (err) {
+      setTestStatus("invalid");
+      toast.error("Couldn't test this key", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
 
   const handleSubmit = async () => {
     if (!canSubmit || pending) return;
@@ -396,17 +459,19 @@ export function AddModelDialog({
       <DialogContent className="max-h-[92vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="font-display">
-            {providerLocked ? `Add a model to ${lockedLabel}` : "Add model provider"}
+            {isBuAddKey ? `Add a key for ${lockedLabel}` : providerLocked ? `Add a model to ${lockedLabel}` : "Add model provider"}
           </DialogTitle>
           <DialogDescription>
             {/* The provider step is a question from the list and a statement
                 from a provider's own screen, so the instruction must not keep
                 telling you to pick something already picked. */}
-            {providerLocked
-              ? "Choose the models, then the key that carries them. Any key you give is stored in the tenant's secrets vault and never shown again, and we run a 1-token live probe to verify it on save."
-              : needsApproval
-                ? "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again. Your Business Unit Admin approves before it's live — no live verification runs until then."
-                : "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again, and we run a 1-token live probe to verify it on save."}
+            {isBuAddKey
+              ? "Choose the models, then the key that carries them. The key is required and must pass Test before this can be saved — it's stored in the tenant's secrets vault and never shown again."
+              : providerLocked
+                ? "Choose the models, then the key that carries them. Any key you give is stored in the tenant's secrets vault and never shown again, and we run a 1-token live probe to verify it on save."
+                : needsApproval
+                  ? "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again. Your Business Unit Admin approves before it's live — no live verification runs until then."
+                  : "Pick the provider, then its models, then the key. Any key you give is stored in the tenant's secrets vault and never shown again, and we run a 1-token live probe to verify it on save."}
           </DialogDescription>
         </DialogHeader>
 
@@ -688,22 +753,67 @@ export function AddModelDialog({
                 <Label htmlFor="api-key">
                   API key{" "}
                   <span className="text-muted-foreground/60 font-normal normal-case">
-                    (optional)
+                    {isBuAddKey ? "(required)" : "(optional)"}
                   </span>
                 </Label>
-                <Input
-                  id="api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-… — leave blank to let each unit bring its own"
-                  autoComplete="off"
-                />
-                <p className="text-muted-foreground text-[11.5px]">
-                  {apiKey.trim().length > 0
-                    ? "The platform pays for these models — no business unit needs a key."
-                    : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
-                </p>
+                <div className="flex gap-2">
+                  <Input
+                    id="api-key"
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={
+                      isBuAddKey ? "sk-…" : "sk-… — leave blank to let each unit bring its own"
+                    }
+                    autoComplete="off"
+                    aria-invalid={isBuAddKey && testStatus === "invalid"}
+                    className="flex-1"
+                  />
+                  {/* A separate, explicit affordance rather than folding this into
+                      Save: Save commits (creates the row, writes the secret) and
+                      Test must not — this key may still be wrong, and a wrong key
+                      should be cheap to find out. */}
+                  {isBuAddKey && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleTest}
+                      disabled={!apiKey.trim() || !probeModel || testStatus === "testing" || pending}
+                      className="border-line-soft shrink-0"
+                    >
+                      {testStatus === "testing" ? (
+                        <Loader2 className="size-4 animate-spin" aria-hidden />
+                      ) : null}
+                      Test
+                    </Button>
+                  )}
+                </div>
+                {isBuAddKey ? (
+                  <p
+                    className={cn(
+                      "text-[11.5px]",
+                      testStatus === "valid"
+                        ? "text-success"
+                        : testStatus === "invalid"
+                          ? "text-warning"
+                          : "text-muted-foreground",
+                    )}
+                  >
+                    {testStatus === "testing"
+                      ? "Testing…"
+                      : testStatus === "valid"
+                        ? "Key verified — this can now be saved."
+                        : testStatus === "invalid"
+                          ? "Key rejected — check it and test again."
+                          : "This business unit's own key. Test it before Save enables."}
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground text-[11.5px]">
+                    {apiKey.trim().length > 0
+                      ? "The platform pays for these models — no business unit needs a key."
+                      : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -848,8 +958,21 @@ export function AddModelDialog({
             className="from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
           >
             {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-            {/* A save with no key runs no probe, so it must not promise a test. */}
-            {pending ? (apiKey.trim() ? "Testing…" : "Saving…") : apiKey.trim() ? "Test & Save" : "Save"}
+            {/* bu-add-key already proved the key via the standalone Test button
+                above, so this button just commits it — "Add key" names the act,
+                not a probe it isn't running here. A save with no key elsewhere
+                runs no probe either, so it must not promise a test. */}
+            {isBuAddKey
+              ? pending
+                ? "Adding…"
+                : "Add key"
+              : pending
+                ? apiKey.trim()
+                  ? "Testing…"
+                  : "Saving…"
+                : apiKey.trim()
+                  ? "Test & Save"
+                  : "Save"}
           </Button>
         </DialogFooter>
       </DialogContent>

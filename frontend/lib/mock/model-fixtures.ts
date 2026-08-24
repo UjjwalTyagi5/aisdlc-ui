@@ -995,6 +995,20 @@ export function verifyModelProvider(id: string): { id: string; status: ModelProv
   return { id: provider.id, status: provider.status };
 }
 
+/** Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+ *  Task 10). No provider row exists yet, so unlike `verifyModelProvider` above
+ *  there's nothing to look up or update: deterministic on the key alone,
+ *  mirroring that function's own simplicity (this fixture never simulates a
+ *  live-network failure). */
+export function probeModelProvider(input: {
+  provider: string;
+  api_key: string;
+  api_base?: string | null;
+  model?: string | null;
+}): { status: ModelProviderStatus } {
+  return { status: input.api_key.trim() ? "valid" : "invalid" };
+}
+
 export function setModelDefaultOffering(offeringId: string): void {
   for (const provider of PROVIDERS) {
     for (const offering of provider.offerings) {

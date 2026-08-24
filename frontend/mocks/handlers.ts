@@ -118,6 +118,7 @@ import {
   getOrgModelGrants,
   getProjectModelSelection,
   listModelProviders,
+  probeModelProvider,
   rejectModelProvider,
   setBuModelGrants,
   setProjectModelSelection,
@@ -1164,6 +1165,16 @@ export const handlers = [
     const result = verifyModelProvider(String(params.id));
     if (!result) return HttpResponse.json({ code: "not_found" }, { status: 404 });
     return HttpResponse.json(result);
+  }),
+  http.post("/api/model/providers/probe", async ({ request }) => {
+    await lag();
+    const body = (await request.json()) as {
+      provider: string;
+      api_key: string;
+      api_base?: string;
+      model?: string;
+    };
+    return HttpResponse.json(probeModelProvider(body));
   }),
   http.put("/api/model/default", async ({ request }) => {
     await lag();

@@ -252,6 +252,10 @@ export type ModelProvider = z.infer<typeof ModelProvider>;
 
 export const VerifyResult = z.object({ id: z.string(), status: ModelProviderStatus });
 
+/** Stateless pre-save credential check (BU Admin's "Test" button, spec §5) — no
+ *  provider row exists yet, so there's no `id` to carry, unlike `VerifyResult`. */
+export const ProbeResult = z.object({ status: ModelProviderStatus });
+
 export const ModelOption = z.object({
   /** Stable id of the exact provider connection + model. The unit of selection. */
   offering_id: z.string(),

@@ -192,6 +192,18 @@ class CreateProviderIn(BaseModel):
     max_cost_per_call_usd: float | None = Field(default=None, ge=0, alias="maxCostPerCallUsd")
 
 
+class ProbeProviderIn(BaseModel):
+    """Same field names as `CreateProviderIn`'s credential fields — deliberately, so a
+    frontend caller can send the same shape it already builds for onboarding without a
+    separate mapping for this pre-save check."""
+
+    provider: str = Field(min_length=1, max_length=64)
+    api_key: str = Field(min_length=1, max_length=512)
+    api_base: str | None = Field(default=None, max_length=512)
+    # The model to probe with — normally whichever the caller picked first.
+    model: str | None = Field(default=None, max_length=200)
+
+
 class UpdateProviderIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -363,6 +375,19 @@ async def assign_provider_to_project_route(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return _camel_selection(selection)
+
+
+@model_router.post("/providers/probe")
+async def probe_provider_route(body: ProbeProviderIn) -> dict:
+    """Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+    Task 10). Unlike POST /providers + POST /providers/{id}/verify, nothing is created,
+    read or written for any tenant or business unit here, so no `_require_scoped` call
+    is needed beyond the router's flat `model:manage` floor: there is no resource yet
+    to scope the check against."""
+    try:
+        return await mc.probe_provider(body.provider, body.api_key, body.api_base, body.model)
+    except mc.InvalidModelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @model_router.post("/providers/{provider_id}/verify")

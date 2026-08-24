@@ -306,6 +306,34 @@ async def _probe_model(provider: str, model: str, api_key: str, api_base: str | 
         return False
 
 
+async def probe_provider(
+    provider: str, api_key: str, api_base: str | None = None, model: str | None = None,
+) -> dict:
+    """Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+    Task 10), fired before `create_provider` has ever been called. No `model_providers`
+    row exists yet to update, unlike `verify_provider`: this touches no database at all,
+    it only exercises the same `_probe_model` live-completion call directly.
+
+    `model` should be one of the models the caller is about to onboard (the dialog
+    passes whichever one was picked first); when omitted, falls back to the catalog's
+    own first model for `provider`, mirroring `verify_provider`'s own fallback so a
+    caller mid-onboarding with no model chosen yet still gets a real answer rather than
+    a 422.
+    """
+    api_key = (api_key or "").strip()
+    if not api_key:
+        return {"status": "invalid"}
+    probe_model = (model or "").strip()
+    if not probe_model:
+        from shared.services.model_catalog import models_for_provider
+        models = models_for_provider(provider)
+        probe_model = models[0]["model_id"] if models else ""
+    if not probe_model:
+        raise InvalidModelError(f"no model to probe for provider {provider!r}")
+    ok = await _probe_model(provider, probe_model, api_key, (api_base or "").strip() or None)
+    return {"status": "valid" if ok else "invalid"}
+
+
 async def verify_provider(tenant_id: str, provider_id: str) -> dict:
     async with get_db_session_for_tenant(tenant_id) as s:
         row = await _provider_row(s, provider_id)
