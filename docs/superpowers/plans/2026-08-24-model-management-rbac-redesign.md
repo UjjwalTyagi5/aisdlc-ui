@@ -1174,6 +1174,71 @@ git commit -m "feat: Org Admin grants providers to business units and curates wh
 
 ---
 
+### Task 9.1: Frontend — close the Org-Admin key-add loophole in `[provider]/page.tsx`
+
+**Inserted after Task 9's review** (not in the original plan). Task 9's reviewer found
+that `frontend/app/(app)/admin/models/[provider]/page.tsx` — outside Task 9's declared
+file scope, so untouched by it — is still gated `role !== "org_admin"` → deny (i.e.
+ONLY `org_admin` passes) and still renders `AddModelDialog`/`EditProviderDialog`/delete
+with `targetUnits={null}` (org-wide, unmodified, still has a credential step). An Org
+Admin who navigates here by direct URL can still add an org-wide API key today —
+directly violating "Org Admin never adds a key, period," the single most
+safety-critical constraint of this whole redesign (see spec §2 amendment 5, §5 Org
+Admin section). Task 9 only removed the *link* to this page (the card title no longer
+routes here for `isOrg`); it never closed the page itself.
+
+**Scope, deliberately minimal:** flip the access gate to deny `org_admin` outright. Do
+NOT attempt to build real `bu_admin` rendering on this page here — that is Task 11's
+job (it already reads/rewrites this same 895-line file substantially; folding BU-admin
+support in here too would duplicate that work and risk the two tasks fighting over the
+same file). The correct interim state is: this route is unreachable by anyone until
+Task 11 lands. That is strictly safer than today's live loophole.
+
+**Files:**
+- Modify: `frontend/app/(app)/admin/models/[provider]/page.tsx` (only the access-gate
+  condition, currently `if (role !== null && role !== "org_admin") { <RestrictedAccess ... /> }`
+  around line 384 — read the surrounding ~15 lines fresh before editing, line numbers
+  may have drifted).
+
+- [ ] **Step 1: Read the current gate in full context**
+
+Read `frontend/app/(app)/admin/models/[provider]/page.tsx` around its access check
+(search for `RestrictedAccess` and `role`). Confirm the exact current condition and
+what `role` can be (`null` while loading, `"org_admin"`, `"bu_admin"`,
+`"project_admin"`, etc. — check `effectivePlatformRole`'s return type).
+
+- [ ] **Step 2: Flip the gate**
+
+Change the condition so `org_admin` is denied (route becomes inaccessible to
+`org_admin` specifically) while preserving the existing `null` (still-loading)
+handling — do not flash a false "restricted" state before the role resolves. The
+simplest correct form is inverting the allow-list to an explicit deny for
+`org_admin` while nobody else is allowed in yet either (since no other role has real
+support built here today) — i.e. functionally this page becomes unreachable by every
+role until Task 11 adds real `bu_admin` support. Confirm this doesn't regress any
+currently-passing test that exercises this page as `org_admin` (grep for existing
+tests against this file first — if any assert `org_admin` sees real content here,
+that test's assumption is now intentionally wrong and must be updated to expect
+`RestrictedAccess` instead, not deleted).
+
+- [ ] **Step 3: Manual/automated verification**
+
+Run the frontend test suite for any test file covering this page
+(`grep -rl "admin/models/\[provider\]\|ProviderDetail" frontend/**/__tests__/` or
+similar) and confirm it still passes with the updated expectation. If no test exists
+covering this page's access gate, note that as a minor deferred gap in the report
+rather than adding a large new test file — this is a narrowly-scoped safety fix, not
+the task to build out this page's test coverage.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add frontend/app/\(app\)/admin/models/\[provider\]/page.tsx
+git commit -m "fix: close Org Admin's direct-URL key-add loophole on the provider detail page"
+```
+
+---
+
 ### Task 10: Frontend — BU Admin view: "Add key" flow with mandatory key + Test button
 
 **Files:**
