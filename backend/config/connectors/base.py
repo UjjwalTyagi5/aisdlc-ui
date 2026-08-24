@@ -56,6 +56,50 @@ class BaseConnector(ABC):
         completion (REQ-M3-10).
         """
 
+    # ── Project-scoped credential override ───────────────────────────────
+
+    async def _resolve_credential_override(self, tenant_id: str, target_id: str) -> "str | None":
+        """The primary-credential override for THIS call, if any — checked before
+        falling back to the tenant-wide credential in auth_adapter().
+
+        `target_id` is the connector's own kind name (e.g. "jira") — the caller
+        does NOT pass `kind="connector"` separately; it's hardcoded below to match
+        the `kind` column `project_integration_credentials` actually stores for
+        every connector-type row (`ProjectIntegrationKind` on the frontend is
+        "connector" | "mcp", never a specific connector name — passing the
+        connector's own name as `kind` here would look up a row that can never
+        exist, which is exactly the bug this note is here to stop someone
+        reintroducing).
+
+        Two sources, in order:
+          1. `self._credential_override` — the ad-hoc, not-yet-saved value a Test
+             Connection request is validating. Never written to secret_store.
+          2. The project-scoped personal credential a project member saved for
+             themselves (`project_integration_credentials`), if the connector
+             factory attached project/owner context — see
+             config/connector_factory.py::get_connector_for_session.
+
+        NOT a violation of auth_adapter's "never store the resolved credential on
+        self" rule (REQ-M3-10): `_credential_override` is the one-shot value this
+        single ephemeral instance exists to validate, and
+        `_project_id_for_creds`/`_project_owner_id` are routing identifiers, not
+        secrets — the same category as `_tenant_id`/`_org_url`, which every
+        connector already stores on self.
+        """
+        override = getattr(self, "_credential_override", None)
+        if override:
+            return override
+        project_id = getattr(self, "_project_id_for_creds", "")
+        owner_id = getattr(self, "_project_owner_id", "")
+        if not (project_id and owner_id):
+            return None
+        from shared.authz.project_credential import resolve_project_secret  # noqa: PLC0415
+
+        return await resolve_project_secret(
+            tenant_id=tenant_id, project_id=project_id, owner_id=owner_id,
+            kind="connector", target_id=target_id,
+        )
+
     # ── Capability declaration ────────────────────────────────────────────
 
     @abstractmethod

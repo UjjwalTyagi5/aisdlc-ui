@@ -4,8 +4,9 @@ import * as React from "react";
 import { use } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { KeyRound, Plug, ShieldCheck, Terminal } from "lucide-react";
+import { CheckCircle2, KeyRound, Plug, ShieldCheck, Terminal, XCircle } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { PageTitle } from "@/components/app/page-title";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,9 @@ import { qk } from "@/lib/api/query-keys";
 import {
   listProjectIntegrations,
   saveProjectCredential,
+  testProjectCredential,
   type ProjectIntegration,
+  type ProjectIntegrationCredentialTestResult,
 } from "@/lib/api/project-integrations";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
@@ -145,24 +148,29 @@ export default function ProjectIntegrationsPage({
         </Card>
       )}
 
-      {/* THE ONE DECISION ON THIS PAGE THAT IS NOT SOMEBODY ELSE'S. Everything
-          below is read-only because it was settled above this project; what a
-          project may DO with an integration its unit holds is settled here.
-          Plain markup rather than <Section>, which renders a fixed integration
-          list and takes no children. */}
-      <section className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="font-display text-[15px] font-semibold">
-            What this project may do
-          </h2>
-          <p className="text-muted-foreground max-w-2xl text-[12.5px]">
-            Each integration this project&apos;s {BUSINESS_UNIT_LABEL.toLowerCase()} was
-            granted, and how much of that grant this project gets. It can be narrowed
-            here, never widened — widening is an Organization Admin&apos;s decision.
-          </p>
-        </div>
-        <ProjectAccessList projectId={id} canManage={canManageAccess} />
-      </section>
+      {/* THE ONE DECISION ON THIS PAGE THAT IS NOT SOMEBODY ELSE'S — and only for
+          the person who may make it. `ProjectAccessList` itself already renders
+          read-only when `canManageAccess` is false, but a contributor (BA,
+          Developer, ...) opening this page to configure their OWN credential has
+          no use for an admin narrowing control they cannot touch, badges and
+          all — it's noise in front of the one thing they came here to do. Shown
+          only to whoever `assert_can_administer_project` would let act on it
+          server-side: this project's Admin, or its Business Unit's Admin. */}
+      {canManageAccess && (
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="font-display text-[15px] font-semibold">
+              What this project may do
+            </h2>
+            <p className="text-muted-foreground max-w-2xl text-[12.5px]">
+              Each integration this project&apos;s {BUSINESS_UNIT_LABEL.toLowerCase()} was
+              granted, and how much of that grant this project gets. It can be narrowed
+              here, never widened — widening is an Organization Admin&apos;s decision.
+            </p>
+          </div>
+          <ProjectAccessList projectId={id} canManage={canManageAccess} />
+        </section>
+      )}
 
       <Section
         title="Connectors"
@@ -328,6 +336,9 @@ function CredentialDialog({
   const [label, setLabel] = React.useState("");
   const [account, setAccount] = React.useState("");
   const [secret, setSecret] = React.useState("");
+  const [testResult, setTestResult] = React.useState<ProjectIntegrationCredentialTestResult | null>(
+    null,
+  );
 
   // Reset to the integration being edited each time the dialog opens, so a
   // second Configure never shows the previous target's values.
@@ -335,7 +346,19 @@ function CredentialDialog({
     setLabel(integration?.credential?.label ?? "");
     setAccount(integration?.credential?.account ?? "");
     setSecret("");
+    setTestResult(null);
   }, [integration]);
+
+  const test = useMutation({
+    mutationFn: () =>
+      testProjectCredential(projectId, {
+        kind: integration!.kind,
+        targetId: integration!.id,
+        secret,
+      }),
+    onSuccess: setTestResult,
+    onError: (e: Error) => setTestResult({ ok: false, message: e.message }),
+  });
 
   const save = useMutation({
     mutationFn: () =>
@@ -396,12 +419,45 @@ function CredentialDialog({
               value={secret}
               autoComplete="off"
               placeholder={isUpdate ? "Leave blank to keep the current one" : "Token or key"}
-              onChange={(e) => setSecret(e.target.value)}
+              onChange={(e) => {
+                setSecret(e.target.value);
+                setTestResult(null);
+              }}
             />
             <p className="text-muted-foreground text-[11.5px]">
-              Stored in the tenant&apos;s secrets vault and never echoed back.
+              Yours alone — a colleague on this project keeps their own, and never sees
+              this one.
             </p>
           </div>
+
+          {secret && (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => test.mutate()}
+                disabled={test.isPending}
+              >
+                {test.isPending ? "Testing…" : "Test connection"}
+              </Button>
+              {testResult && (
+                <p
+                  className={cn(
+                    "flex items-center gap-1.5 text-[12.5px]",
+                    testResult.ok ? "text-success" : "text-destructive",
+                  )}
+                >
+                  {testResult.ok ? (
+                    <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
+                  ) : (
+                    <XCircle className="size-3.5 shrink-0" aria-hidden />
+                  )}
+                  {testResult.message}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         <DialogFooter>

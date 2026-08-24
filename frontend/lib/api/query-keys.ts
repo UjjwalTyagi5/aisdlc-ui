@@ -74,7 +74,8 @@ export const qk = {
     grantMatrix: () => ["model", "grant-matrix"] as const,
   },
   mcp: {
-    list: (activeOnly?: boolean) => ["mcp", "list", activeOnly ?? false] as const,
+    list: (activeOnly?: boolean, workspaceId?: string | null) =>
+      ["mcp", "list", activeOnly ?? false, workspaceId ?? null] as const,
     detail: (id: string) => ["mcp", "detail", id] as const,
   },
   conversations: {

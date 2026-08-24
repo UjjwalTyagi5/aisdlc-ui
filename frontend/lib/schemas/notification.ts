@@ -30,6 +30,11 @@ export const NotificationKind = z.enum([
    *  admin to give them a role. Addressed to that unit's admins, never
    *  broadcast — it is an item of work, not news. */
   "member_awaiting_role",
+  /** A pending project (Project Admin creation awaiting its Business Unit
+   *  Admin's approval) was approved and this person was seated on it — the
+   *  contributors deferred at creation time, not the requester (who already
+   *  gets `request_approved`). */
+  "project_activated",
 ]);
 export type NotificationKind = z.infer<typeof NotificationKind>;
 

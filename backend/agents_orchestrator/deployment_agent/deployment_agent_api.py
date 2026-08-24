@@ -700,7 +700,10 @@ async def _handle_user_message(
         from shared.services.mcp_injection import mcp_tools_scope, project_stage_server_ids  # noqa: PLC0415
         _dep_pid = ws_pipeline_context.get("project_id")
         _dep_mcp_ids = await project_stage_server_ids(tenant_id or None, _dep_pid, "deployment")
-        async with mcp_tools_scope(tenant_id or None, _dep_mcp_ids, "deployment"):
+        async with mcp_tools_scope(
+            tenant_id or None, _dep_mcp_ids, "deployment",
+            project_id=_dep_pid, owner_id=str(user_id) or None,
+        ):
             for step_tool in _build_step_plan(task):
                 if pipeline_state.get("status") == "blocked":
                     break

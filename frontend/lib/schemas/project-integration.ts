@@ -63,6 +63,24 @@ export const ProjectIntegrationCredentialInput = z.object({
 });
 export type ProjectIntegrationCredentialInput = z.infer<typeof ProjectIntegrationCredentialInput>;
 
+/** Tries a credential live, before it's saved anywhere — never persisted. */
+export const ProjectIntegrationCredentialTestInput = z.object({
+  kind: ProjectIntegrationKind,
+  targetId: z.string().min(1),
+  secret: z.string().min(1, "Enter a secret to test").max(4000),
+});
+export type ProjectIntegrationCredentialTestInput = z.infer<
+  typeof ProjectIntegrationCredentialTestInput
+>;
+
+export const ProjectIntegrationCredentialTestResult = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+});
+export type ProjectIntegrationCredentialTestResult = z.infer<
+  typeof ProjectIntegrationCredentialTestResult
+>;
+
 /**
  * One row of a project's Integrations screen: an approved integration, plus
  * whatever credential the project has configured against it.

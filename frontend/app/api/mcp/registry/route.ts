@@ -9,19 +9,24 @@ import { bffProxy } from "@/lib/bff/proxy";
  * Integrations hub listed four servers ("Filesystem", "Postgres (staging)", …)
  * against an `mcp_servers` table holding none.
  *
- * The scope filter that ran here is gone with the fixtures. It narrowed the
- * fixture registry to the viewer's Business Units; the backend answers the same
- * question from its own row ownership (`created_by`), and a second filter in
- * this tier could only ever disagree with it.
- *
- * `active_only` is forwarded rather than re-implemented — it is the backend's
- * query parameter, spelled the same way.
+ * `active_only` and `workspaceId` are forwarded rather than re-implemented — both
+ * are the backend's own query parameters. Without `workspaceId` the backend
+ * answers from row ownership (`created_by`) — the registry admin page's own
+ * question. WITH one (the Tools-per-stage picker, at project creation and in
+ * Settings — mirrors GET /connectors's identical param) it answers from grants
+ * instead, regardless of who registered the server — see
+ * shared/services/mcp_registry.py::list_servers.
  */
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const activeOnly = req.nextUrl.searchParams.get("active_only") === "true";
-  return bffProxy(`/mcp/registry${activeOnly ? "?active_only=true" : ""}`);
+  const workspaceId = req.nextUrl.searchParams.get("workspaceId");
+  const qs = new URLSearchParams();
+  if (activeOnly) qs.set("active_only", "true");
+  if (workspaceId) qs.set("workspaceId", workspaceId);
+  const suffix = qs.toString();
+  return bffProxy(`/mcp/registry${suffix ? `?${suffix}` : ""}`);
 }
 
 /**

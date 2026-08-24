@@ -107,6 +107,16 @@ class SonarQubeConnector(BaseConnector):
         if not server_url:
             server_url = await _keyvault.load_secret("sonarqube-url")
 
+        # Project-scoped personal override, checked first: a credential this project
+        # member set for themselves — or the ad-hoc value Test Connection is
+        # validating — wins over the tenant-wide token below.
+        override = await self._resolve_credential_override(tenant_id, "sonarqube")
+        if override:
+            return {
+                "sonarqube_url": _normalize_base_url(server_url or self._org_url),
+                "token": override,
+            }
+
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
         token_raw = await _tenant_secret("sonarqube-token")
         disconnected = token_raw == _ss.DISCONNECTED_MARKER  # explicitly disconnected

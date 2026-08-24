@@ -120,6 +120,17 @@ class ConfluenceConnector(BaseConnector):
         if not email:
             email = await _keyvault.load_secret("confluence-email")
 
+        # Project-scoped personal override, checked first: a credential this project
+        # member set for themselves — or the ad-hoc value Test Connection is
+        # validating — wins over the tenant-wide token below.
+        override = await self._resolve_credential_override(tenant_id, "confluence")
+        if override:
+            return {
+                "confluence_url": _normalize_base_url(site_url or self._org_url),
+                "email": email or "",
+                "token": override,
+            }
+
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
         token_raw = await _tenant_secret("confluence-api-token")
         disconnected = token_raw == _ss.DISCONNECTED_MARKER  # explicitly disconnected

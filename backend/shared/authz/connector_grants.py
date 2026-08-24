@@ -39,6 +39,7 @@ live connector.
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from typing import Optional
 
 from sqlalchemy import text
@@ -70,6 +71,12 @@ async def unit_is_granted(
     """
     if not tenant_id or not workspace_id or not target_ref:
         return False
+    try:
+        _uuid.UUID(workspace_id)
+    except ValueError:
+        # See granted_target_refs's identical guard — a malformed id fails
+        # closed here rather than raising past the caller.
+        return False
     row = (
         await db.execute(
             text(
@@ -97,6 +104,15 @@ async def granted_target_refs(
     round trip per kind — noticeable once the catalogue is a dozen-plus entries.
     """
     if not tenant_id or not workspace_id:
+        return set()
+    try:
+        _uuid.UUID(workspace_id)
+    except ValueError:
+        # A malformed id (stale cookie, mock-mode leftover, tampered header) is
+        # "no unit to check against" — same answer as no workspace at all, not a
+        # 500. asyncpg validates UUIDs client-side and raises before the query
+        # ever reaches Postgres, so this has to be caught here rather than left
+        # to fail closed at the database.
         return set()
     rows = (
         await db.execute(

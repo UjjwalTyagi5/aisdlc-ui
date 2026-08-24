@@ -85,6 +85,12 @@ class ProjectOut(BaseModel):
     template: str
     track: str
     archived: bool
+    # Project-creation approval gate (migration 0028) — see
+    # shared/governance/effects.py for what flips these.
+    approvalStatus: str = "active"
+    approvalDecidedBy: Optional[str] = None
+    approvalDecidedAt: Optional[str] = None
+    approvalReason: Optional[str] = None
     owners: List[Any]
     pipeline: List[Any]
     # Per-project stage→MCP-server mapping {agent_id: [mcp_server_id, ...]}.
@@ -116,6 +122,12 @@ class ProjectOut(BaseModel):
             template="blank",
             track=getattr(project, "track", None) or "greenfield",
             archived=project.archived,
+            approvalStatus=getattr(project, "approval_status", None) or "active",
+            approvalDecidedBy=getattr(project, "approval_decided_by", None),
+            approvalDecidedAt=(
+                _iso(dat) if (dat := getattr(project, "approval_decided_at", None)) else None
+            ),
+            approvalReason=getattr(project, "approval_reason", None),
             owners=[],
             pipeline=[],
             mcpServers=getattr(project, "mcp_servers", None) or {},
