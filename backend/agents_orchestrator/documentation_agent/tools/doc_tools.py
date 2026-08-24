@@ -432,6 +432,156 @@ async def ingest_sharepoint_document(item_id: str) -> str:
     return f"Ingested SharePoint document {item_id} ({len(text)} chars):\n\n{text[:20000]}"
 
 
+async def _confluence_session():
+    """Return (connector, default_space_or_""), or (None, reason).
+
+    Unlike SharePoint's drive_id, a default space is a CONVENIENCE not a gate (see
+    notification_targets.confluence_target) — the tools below accept an explicit
+    space on every call, so a tenant with no default configured can still use them.
+    Only a missing tenant context or an unbuildable connector refuses outright.
+    """
+    s = get_session(get_session_id())
+    tenant_id = getattr(s, "tenant_id", "") or ""
+    if not tenant_id:
+        return None, "ERROR: no tenant context in this session."
+    try:
+        from shared.services.notification_targets import confluence_target
+        from config.connector_factory import get_connector_for_session
+
+        target = await confluence_target(tenant_id)
+        connector = await get_connector_for_session(kind="confluence", tenant_id=tenant_id)
+        return (connector, (target or {}).get("space", "")), ""
+    except Exception as exc:  # noqa: BLE001
+        return None, f"ERROR reaching Confluence: {type(exc).__name__}"
+
+
+@tool
+async def publish_to_confluence(space: str = "", filename: str = "", parent_id: str = "") -> str:
+    """Publish saved documents to a Confluence space (GATED — only call when the user
+    explicitly asks to publish/file documents to Confluence).
+
+    Republishing an already-published document UPDATES that same page (Confluence
+    version-increments it) instead of creating a duplicate.
+
+    Args:
+        space:     the space key or id to publish into. Omit to use the tenant's
+                    configured default space (Integrations page → Confluence).
+        filename:  publish only this document (as named by save_document). Omit to
+                    publish every document generated this session.
+        parent_id: optional parent page id, to nest under an existing page.
+    """
+    s = get_session(get_session_id())
+    if not s.generated_docs:
+        return "ERROR: no documents generated yet. Generate at least one document first."
+
+    resolved, reason = await _confluence_session()
+    if not resolved:
+        return reason
+    connector, default_space = resolved
+    target_space = (space or default_space or "").strip()
+    if not target_space:
+        return (
+            "ERROR: no Confluence space given and none is configured as a default. "
+            "Pass a space key, or ask an admin to set one on the Integrations page."
+        )
+
+    docs = s.generated_docs
+    if filename:
+        docs = [d for d in docs if d.get("filename") == filename]
+        if not docs:
+            return f"ERROR: no generated document named {filename!r} in this session."
+
+    published, failures = [], []
+    for doc in docs:
+        title = doc.get("title") or doc.get("filename") or "Document"
+        content = f"<p>{doc.get('contents', '')}</p>"
+        try:
+            existing_id = doc.get("confluence_page_id", "")
+            if existing_id:
+                result = await connector.write_adapter(
+                    "update_page", page_id=existing_id, title=title, content=content,
+                )
+            else:
+                result = await connector.write_adapter(
+                    "create_page", space=target_space, title=title, content=content,
+                    parent_id=parent_id,
+                )
+                doc["confluence_page_id"] = result.get("id", "")
+            published.append((title, result.get("url", "")))
+            doc["confluence_url"] = result.get("url", "")
+        except ValueError as exc:
+            failures.append(f"{title}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{title}: {type(exc).__name__}")
+
+    if published:
+        broadcast_log(
+            manager,
+            f"Published {len(published)} document(s) to Confluence",
+            level="SUCCESS",
+        )
+    if not published:
+        return "ERROR publishing to Confluence: " + "; ".join(failures)
+
+    lines = [f"Published {len(published)} document(s) to Confluence (space {target_space}):"]
+    lines += [f"- {t}{f' — {u}' if u else ''}" for t, u in published]
+    if failures:
+        lines.append(f"{len(failures)} failed: " + "; ".join(failures))
+    return "\n".join(lines)
+
+
+@tool
+async def list_confluence_pages(space: str = "") -> str:
+    """List the pages already filed in a Confluence space (or the tenant's default)."""
+    resolved, reason = await _confluence_session()
+    if not resolved:
+        return reason
+    connector, default_space = resolved
+    target_space = (space or default_space or "").strip()
+    if not target_space:
+        return (
+            "ERROR: no Confluence space given and none is configured as a default. "
+            "Pass a space key, or ask an admin to set one on the Integrations page."
+        )
+    try:
+        pages = await connector.read_adapter("list_pages", space=target_space)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR listing Confluence pages: {type(exc).__name__}"
+    if not pages:
+        return f"The Confluence space {target_space!r} has no pages."
+    lines = [f"{len(pages)} page(s) in Confluence space {target_space}:"]
+    for p in pages[:50]:
+        url = p.get("url", "")
+        suffix = f" — {url}" if url else ""
+        lines.append(f"- {p.get('title', '?')} (id={p.get('id', '')}){suffix}")
+    return "\n".join(lines)
+
+
+@tool
+async def ingest_confluence_page(page_id: str) -> str:
+    """Read one Confluence page's content into this session as reference material.
+
+    Use it to pull an existing spec or standard out of the team's wiki before writing
+    new documentation. Call list_confluence_pages first to find a page id.
+    """
+    if not page_id:
+        return "ERROR: page_id is required — call list_confluence_pages first."
+    resolved, reason = await _confluence_session()
+    if not resolved:
+        return reason
+    connector, _default_space = resolved
+    try:
+        page = await connector.read_adapter("fetch_page_detail", page_id=page_id)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR reading Confluence page: {type(exc).__name__}"
+    content = (page.get("content") or "").strip()
+    if not content:
+        return f"Fetched page {page_id} ({page.get('title', '?')}) but it has no content."
+    broadcast_log(manager, f"Ingested Confluence page {page_id}", level="INFO")
+    title = page.get("title", "?")
+    return f"Ingested Confluence page {page_id!r} ({title!r}, {len(content)} chars):\n\n{content[:20000]}"
+
+
 @tool
 async def open_docs_pr(title: str = "", description: str = "") -> str:
     """Open a documentation PR with all saved documents committed under docs/ (GATED —

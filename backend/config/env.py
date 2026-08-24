@@ -266,6 +266,14 @@ ENABLE_WEBHOOK_TRIGGERS: bool = os.environ.get("ENABLE_WEBHOOK_TRIGGERS", "false
 JIRA_URL:        str = os.environ.get("JIRA_URL", "")
 JIRA_EMAIL:      str = os.environ.get("JIRA_EMAIL", "")
 JIRA_API_TOKEN:  str = os.environ.get("JIRA_API_TOKEN", "")
+# Confluence: same credential shape as Jira (Basic Auth — email + API token) but
+# configured independently; see config/connectors/confluence.py module docstring.
+CONFLUENCE_URL:       str = os.environ.get("CONFLUENCE_URL", "")
+CONFLUENCE_EMAIL:     str = os.environ.get("CONFLUENCE_EMAIL", "")
+CONFLUENCE_API_TOKEN: str = os.environ.get("CONFLUENCE_API_TOKEN", "")
+# SonarQube: token-based Basic auth (token as username, empty password) — no email.
+SONARQUBE_URL:   str = os.environ.get("SONARQUBE_URL", "")
+SONARQUBE_TOKEN: str = os.environ.get("SONARQUBE_TOKEN", "")
 GITHUB_APP_ID:   str = os.environ.get("GITHUB_APP_ID", "")
 GITHUB_APP_INSTALLATION_ID: str = os.environ.get("GITHUB_APP_INSTALLATION_ID", "")
 # Local-dev fallbacks for the GitHub App private key (KV `github-app-private-key` wins).

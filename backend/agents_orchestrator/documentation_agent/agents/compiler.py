@@ -27,6 +27,9 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     publish_to_sharepoint,
     list_sharepoint_documents,
     ingest_sharepoint_document,
+    publish_to_confluence,
+    list_confluence_pages,
+    ingest_confluence_page,
 )
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
@@ -52,6 +55,10 @@ _tools = [
     publish_to_sharepoint,
     list_sharepoint_documents,
     ingest_sharepoint_document,
+    # Confluence destination — same shape, additive alongside SharePoint.
+    publish_to_confluence,
+    list_confluence_pages,
+    ingest_confluence_page,
 ]
 
 

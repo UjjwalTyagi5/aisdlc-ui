@@ -750,6 +750,8 @@ const KIND_LABEL: Record<ConnectorKind, string> = {
   ms_teams: "Microsoft Teams",
   sharepoint: "SharePoint",
   figma: "Figma",
+  confluence: "Confluence",
+  sonarqube: "SonarQube",
   sso_okta: "Okta SSO",
   sso_entra: "Microsoft Entra SSO",
 };
