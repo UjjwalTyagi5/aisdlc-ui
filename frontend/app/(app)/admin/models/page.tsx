@@ -307,6 +307,10 @@ export default function ModelProvidersPage() {
   // unit it belongs to, so the cards can say so when there is more than one.
   const providers = providerQueries.flatMap((q) => q.data ?? []);
 
+  // Needed before providerGroups below (Org Admin's grid is catalog-seeded);
+  // moved up from where it used to sit purely for `effectiveCatalog`.
+  const catalog = catalogQ.data ?? [];
+
   /**
    * One card per PROVIDER, not per connection.
    *
@@ -316,6 +320,19 @@ export default function ModelProvidersPage() {
    * split one vendor's models across two places for no reason a reader could
    * see. The subscriptions live on the detail screen, which already lists them
    * and is where testing, editing and removing a key belongs.
+   *
+   * FOR AN ORG ADMIN THE GRID IS CATALOG-SEEDED, not connection-seeded. "Add
+   * provider" is gone from their flow entirely (Step 2 above) — granting a
+   * business unit reach to a provider and curating its models (the card's own
+   * controls, see `ProviderCard`) is now the ONLY thing an Org Admin does with
+   * a provider here, and both of those act on a catalog SLUG, not on an
+   * existing `model_providers` connection row (`PUT /model/providers/grants`
+   * accepts any catalog provider). A brand-new tenant has zero connections
+   * anywhere, so building this grid from connections alone would leave an Org
+   * Admin with no card — and so no way — to grant a provider nobody has ever
+   * connected to yet. `!isOrg`'s grid is deliberately NOT catalog-seeded: a BU
+   * or Project Admin's screen is about what has actually been onboarded or
+   * granted to them, not the abstract catalog.
    */
   const providerGroups = ((): [string, typeof providers][] => {
     // Plain function, not useMemo: this sits below an early return, so a hook
@@ -327,7 +344,24 @@ export default function ModelProvidersPage() {
       list.push(p);
       by.set(p.provider, list);
     }
-    return [...by.entries()];
+    if (!isOrg) {
+      return [...by.entries()];
+    }
+    // Catalog order first — the more legible, canonical ordering — with each
+    // provider's real connections (if any) merged in. A connection whose slug
+    // is somehow absent from the catalog (should not happen, but "off the
+    // catalog" must not mean "invisible") is appended after rather than
+    // dropped.
+    const seen = new Set<string>();
+    const merged: [string, typeof providers][] = [];
+    for (const c of catalog) {
+      merged.push([c.provider, by.get(c.provider) ?? []]);
+      seen.add(c.provider);
+    }
+    for (const [kind, group] of by) {
+      if (!seen.has(kind)) merged.push([kind, group]);
+    }
+    return merged;
   })();
 
   /**
@@ -340,22 +374,33 @@ export default function ModelProvidersPage() {
    * six names); the questions that bring you here are "which contract is the EU
    * one" and "who serves gpt-5.1", and neither is visible until you drill in.
    * A search that finds what a card does not display is the point.
+   *
+   * For an Org Admin, "who serves gpt-5.1" now has to be answerable even for a
+   * provider nobody has connected to yet — its card carries no offerings to
+   * search, only the catalog's own model list, so that's consulted too.
    */
   const q = query.trim().toLowerCase();
   const visibleGroups = q
-    ? providerGroups.filter(
-        ([kind, group]) =>
-          providerLabel(kind).toLowerCase().includes(q) ||
-          kind.toLowerCase().includes(q) ||
+    ? providerGroups.filter(([kind, group]) => {
+        if (providerLabel(kind).toLowerCase().includes(q) || kind.toLowerCase().includes(q)) {
+          return true;
+        }
+        if (
           group.some(
             (p) =>
               p.display_name.toLowerCase().includes(q) ||
               p.offerings.some((o) => o.model_id.toLowerCase().includes(q)),
-          ),
-      )
+          )
+        ) {
+          return true;
+        }
+        if (isOrg) {
+          const catalogModels = catalog.find((c) => c.provider === kind)?.models ?? [];
+          if (catalogModels.some((m) => m.model_id.toLowerCase().includes(q))) return true;
+        }
+        return false;
+      })
     : providerGroups;
-
-  const catalog = catalogQ.data ?? [];
 
   // Everything the viewer could credential anywhere they're bound — the union
   // across their units. The dialog narrows this again to the ONE unit being
@@ -460,11 +505,19 @@ export default function ModelProvidersPage() {
         </p>
       )}
 
-      {providers.length === 0 ? (
+      {/* Org Admin's grid is catalog-seeded (see providerGroups above), so
+          this only fires when the catalog itself has nothing in it — a
+          near-impossible state in practice, not "nobody has connected a
+          provider yet" (which is now the NORMAL starting state for a brand
+          new tenant, and renders a full grid of zero-connection cards
+          instead). `!isOrg` is unchanged: it's still keyed on actual
+          connections, since a BU/Project Admin's screen is about what has
+          been onboarded or granted to them, not the abstract catalog. */}
+      {providerGroups.length === 0 ? (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
             {isOrg
-              ? "No model provider configured yet. Agent runs are blocked until an admin adds and verifies one."
+              ? "The model catalogue is empty right now, so there's nothing to grant yet."
               : scopedUnits.length === 1
                 ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
                 : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
