@@ -332,6 +332,39 @@ async def create_provider_route(
     return _to_provider_out(d)
 
 
+@model_router.post("/providers/{provider_id}/assign")
+async def assign_provider_to_project_route(
+    request: Request, provider_id: str, body: dict, db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """A BU Admin pushes a provider connection they already created (Task 4's flow) onto
+    one of their own projects — populates that project's ProjectModelSelection.selected
+    (mg.assign_provider_to_project) so the project's own admin can later pick it as their
+    default/master key (Task 12)."""
+    project_id = body.get("projectId")
+    if not project_id:
+        raise HTTPException(status_code=422, detail="projectId is required")
+    # Ownership first, same order/precedent as every other resource-scoped route in this
+    # file: a caller who doesn't administer this project's business unit at all must not
+    # be told anything further, including whether the provider exists. 404 (not 403)
+    # matches shared/routers/projects.py:get_project's precedent for project routes.
+    await _require_scoped(
+        db, request, permission="model:manage", resource_kind="project", resource_id=project_id,
+        deny_status=404,
+    )
+    try:
+        selection = await mg.assign_provider_to_project(
+            _tenant_id(request), provider_id=provider_id, project_id=project_id,
+            actor_id=_user_id(request),
+        )
+    except mc.ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    except mg.ProjectOutsideUnitError:
+        raise HTTPException(status_code=403, detail="That project is not in your business unit.")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return _camel_selection(selection)
+
+
 @model_router.post("/providers/{provider_id}/verify")
 async def verify_provider_route(request: Request, provider_id: str) -> dict:
     try:

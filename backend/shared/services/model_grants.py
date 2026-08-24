@@ -23,6 +23,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from shared.db import get_db_session_for_tenant
+from shared.services import model_config as mc
 
 
 class NotAllowedForUnitError(Exception):
@@ -34,6 +35,12 @@ class ProjectKeyNotAllowedError(Exception):
     """A project tried to onboard its own key for a (provider, model_id) its Business
     Unit hasn't opted into project-level keys for (PRD §371/§1640 — 'only if the
     Business Unit allows it'), or for a model the BU never made reachable at all."""
+
+
+class ProjectOutsideUnitError(Exception):
+    """assign_provider_to_project's target project belongs to a different Business
+    Unit than the provider connection being pushed onto it (or the provider isn't
+    BU-scoped at all — an org-wide connection has no single unit to push from)."""
 
 
 def _grant_reaches(visibility: str, business_unit_ids: list[str], workspace_id: str) -> bool:
@@ -409,6 +416,75 @@ async def set_project_selection(
                 "ON CONFLICT (project_id) DO UPDATE SET selected = :sel, default_key = :dk, updated_at = now()"
             ),
             {"id": str(_uuid.uuid4()), "t": tenant_id, "p": project_id, "sel": _json_dumps(selected), "dk": default_key},
+        )
+    return await get_project_selection(tenant_id, project_id)
+
+
+async def assign_provider_to_project(
+    tenant_id: str, provider_id: str, project_id: str, actor_id: str,
+) -> dict:
+    """A BU Admin pushes a `model_providers` row they already created (mc.create_provider's
+    BU-scoped, key-required flow — Task 4) onto one of their own projects: appends one
+    ModelAllowEntry-shaped dict per ENABLED offering to that project's stored `selected`
+    list, in the exact on-disk shape set_project_selection already writes/get_project_selection
+    already reads (provider/model_id/credential_id/credential_name keys, JSONB column,
+    ON CONFLICT (project_id) upsert) — so the two never disagree about what "selected"
+    contains. `default_key` is read back and re-written unchanged; the ON CONFLICT clause
+    only ever assigns `selected`, so an existing default_key can never be clobbered by
+    this path even under a concurrent write.
+
+    Ownership — does the caller actually administer the target project's Business Unit —
+    is checked one layer up at the router (_require_scoped in model.py), matching every
+    other BU/project route in this module (see module docstring). This function only
+    checks the one thing that check can't: that the PROVIDER named is actually scoped to
+    that SAME Business Unit, not just that the caller administers some unit or other.
+    """
+    if not mc._is_valid_uuid(provider_id):
+        raise mc.ProviderNotFoundError(provider_id)
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        row = await mc._provider_row(s, provider_id)
+        if row is None:
+            raise mc.ProviderNotFoundError(provider_id)
+        offerings = await mc._offerings_for(s, provider_id)
+
+    provider_workspace_id = str(row.workspace_id) if row.workspace_id else None
+    project_workspace_id = await _project_workspace_id(tenant_id, project_id)
+    if provider_workspace_id is None or provider_workspace_id != str(project_workspace_id):
+        raise ProjectOutsideUnitError(
+            f"provider {provider_id!r} is not scoped to project {project_id!r}'s business unit"
+        )
+
+    new_entries = [
+        {"provider": row.provider, "model_id": o["model_id"],
+         "credential_id": provider_id, "credential_name": row.display_name}
+        for o in offerings if o["enabled"]
+    ]
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        sel_row = (await s.execute(
+            text("SELECT selected, default_key FROM project_model_selections WHERE project_id = :p"),
+            {"p": project_id},
+        )).first()
+        selected = list(sel_row.selected) if sel_row and sel_row.selected else []
+        existing_keys = {_entry_key(e) for e in selected}
+        for e in new_entries:
+            key = _entry_key(e)
+            if key not in existing_keys:
+                selected.append(e)
+                existing_keys.add(key)
+        default_key = sel_row.default_key if sel_row else None
+        await s.execute(
+            text(
+                "INSERT INTO project_model_selections (id, tenant_id, project_id, selected, default_key, updated_at) "
+                "VALUES (:id, :t, :p, :sel, :dk, now()) "
+                # Unlike set_project_selection's upsert, default_key is deliberately NOT in
+                # the UPDATE SET clause — this path only ever appends to `selected` and must
+                # never touch an already-set defaultKey (the brief's stated contract).
+                "ON CONFLICT (project_id) DO UPDATE SET selected = :sel, updated_at = now()"
+            ),
+            {"id": str(_uuid.uuid4()), "t": tenant_id, "p": project_id,
+             "sel": _json_dumps(selected), "dk": default_key},
         )
     return await get_project_selection(tenant_id, project_id)
 
