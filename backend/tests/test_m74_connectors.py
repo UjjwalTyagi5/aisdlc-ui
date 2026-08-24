@@ -21,7 +21,9 @@ pytestmark = pytest.mark.asyncio
 def _make_test_app_with_permission(has_perm: bool):
     """Create a minimal FastAPI test app with connectors router mounted.
 
-    Patches resolve_default_workspace so permission checks work without a DB.
+    Patches active_workspace_for_request so permission checks work without a DB —
+    require_permission()'s no-run_param path resolves the workspace through that
+    function (shared.authz.workspace), not resolve_default_workspace.
     """
     from fastapi import FastAPI, Request
     from shared.routers.connectors import connectors_resource_router
@@ -129,7 +131,7 @@ class TestStoreSecret:
 
             with (
                 patch("shared.keyvault.SecretClient", return_value=mock_client),
-                patch("shared.keyvault.DefaultAzureCredential", return_value=mock_cred),
+                patch("shared.keyvault.get_azure_credential", return_value=mock_cred),
             ):
                 result = await keyvault.store_secret("jira-access-token", "my-token", tenant_id="t1")
 
@@ -159,7 +161,7 @@ class TestStoreSecret:
 
             with (
                 patch("shared.keyvault.SecretClient", return_value=mock_client),
-                patch("shared.keyvault.DefaultAzureCredential", return_value=mock_cred),
+                patch("shared.keyvault.get_azure_credential", return_value=mock_cred),
             ):
                 result = await keyvault.store_secret("sec", "val", tenant_id="t1")
 
@@ -228,7 +230,7 @@ class TestJiraOAuthCallback:
         app = _make_test_app_with_permission(True)
 
         with (
-            patch("shared.authz.dependency.resolve_default_workspace", new_callable=AsyncMock),
+            patch("shared.authz.dependency.active_workspace_for_request", new_callable=AsyncMock),
             patch("shared.services.oauth_service.JIRA_OAUTH_CLIENT_ID", "cid"),
             patch("shared.services.oauth_service.AGENTIC_BASE_URL", "https://api.example.com"),
         ):
@@ -414,7 +416,7 @@ class TestConnectorManageGate:
         app = _make_test_app_with_permission(False)
 
         with (
-            patch("shared.authz.dependency.resolve_default_workspace", new_callable=AsyncMock),
+            patch("shared.authz.dependency.active_workspace_for_request", new_callable=AsyncMock),
         ):
             with TestClient(app, raise_server_exceptions=False) as client:
                 resp = client.post("/connectors/jira/install")
@@ -426,7 +428,7 @@ class TestConnectorManageGate:
         app = _make_test_app_with_permission(True)
 
         with (
-            patch("shared.authz.dependency.resolve_default_workspace", new_callable=AsyncMock),
+            patch("shared.authz.dependency.active_workspace_for_request", new_callable=AsyncMock),
             patch("shared.services.oauth_service.JIRA_OAUTH_CLIENT_ID", "cid"),
             patch("shared.services.oauth_service.AGENTIC_BASE_URL", "https://api.example.com"),
         ):
@@ -440,7 +442,7 @@ class TestConnectorManageGate:
         app = _make_test_app_with_permission(False)
 
         with (
-            patch("shared.authz.dependency.resolve_default_workspace", new_callable=AsyncMock),
+            patch("shared.authz.dependency.active_workspace_for_request", new_callable=AsyncMock),
         ):
             with TestClient(app, raise_server_exceptions=False) as client:
                 resp = client.get("/connectors/jira/oauth/callback?code=abc&state=xyz")

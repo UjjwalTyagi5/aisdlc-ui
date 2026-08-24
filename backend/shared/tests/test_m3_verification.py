@@ -14,8 +14,10 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).parents[3]
-_ORCHESTRATOR_PATH = str(_REPO_ROOT / "agentic_app" / "agents_orchestrator")
-_AGENTIC_APP_PATH = str(_REPO_ROOT / "agentic_app")
+# Stale "agentic_app" name predates the post-restructure rename to "backend" — see
+# check_env_example.py's ".env.example lives beside the backend (post-restructure)".
+_ORCHESTRATOR_PATH = str(_REPO_ROOT / "backend" / "agents_orchestrator")
+_AGENTIC_APP_PATH = str(_REPO_ROOT / "backend")
 
 
 @pytest.mark.unit

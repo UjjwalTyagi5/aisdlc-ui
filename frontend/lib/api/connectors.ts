@@ -80,6 +80,8 @@ export const setConnectorCredentials = (
     email?: string;
     api_token?: string;
     owner?: string;
+    /** Confluence default space (optional convenience — not required to connect). */
+    space_key?: string;
     /** Which Business Unit the resulting connection belongs to. Required of a
      *  viewer bound to more than one — a credential lands in exactly one unit,
      *  and picking for them is how a key ends up in the wrong one. Ignored for

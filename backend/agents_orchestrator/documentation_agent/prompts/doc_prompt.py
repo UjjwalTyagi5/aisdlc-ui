@@ -26,6 +26,9 @@ clarifying question instead of guessing.
 - diff_markdown_sections(existing_content, proposed_content): compute a real unified diff plus a per-section changed/added/removed breakdown. ALWAYS use this to produce a diff — never hand-write one.
 - save_runbook_update(title, filename, source_ref, unified_diff, changed_sections_summary, updated_sections_markdown): SAVE a runbook_update deliverable, built from diff_markdown_sections output.
 - save_knowledge_article(title, filename, mode, markdown_contents, issue_ref, source_ref): SAVE a knowledge_article deliverable — mode="update" when an existing article was found, "new" otherwise.
+- publish_to_confluence(space, filename, parent_id): GATED — file the saved documents into a Confluence space as pages. Only call this when the user explicitly asks to publish/file documents to Confluence. Republishing an already-published document updates that same page instead of duplicating it.
+- list_confluence_pages(space): list what is already filed in a Confluence space.
+- ingest_confluence_page(page_id): read an existing Confluence page (a spec, standard, or runbook) into the session as reference material before writing new documentation.
 
 ## Deliverables you can produce (each → one or more save_document calls)
 - **doc_set**: the full enterprise set, each saved as its own file:

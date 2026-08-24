@@ -26,23 +26,14 @@ def test_single_alembic_head() -> None:
     assert len(heads) == 1, f"expected exactly 1 head, got {heads}"
 
 
-def test_head_is_0010() -> None:
-    script_dir = _script_directory()
-    heads = script_dir.get_heads()
-    assert heads[0] == "0010"
-
-
-def test_chain_links_eval_then_scim_then_audit() -> None:
-    script_dir = _script_directory()
-    heads = script_dir.get_heads()
-    head_revision = script_dir.get_revision(heads[0])
-
-    # 0010 (eval_records, milestone-9.3) chains off 0009 (SCIM, milestone-7.4
-    # renumbered by REQ-M9-00) chains off 0008 (audit) chains off 0007 (RBAC).
-    assert head_revision.down_revision == "0009"
-
-    scim_revision = script_dir.get_revision(head_revision.down_revision)
-    assert scim_revision.down_revision == "0008"
-
-    audit_revision = script_dir.get_revision(scim_revision.down_revision)
-    assert audit_revision.down_revision == "0007"
+# NOTE — test_head_is_0010 and test_chain_links_eval_then_scim_then_audit removed:
+# both pinned the *milestone-9.3-era* head/chain — "0010" was the newest revision
+# only at that milestone's own PR. The chain has since grown past it (27 migrations
+# at last count, several with merge-heads revisions resolving parallel branches),
+# and revision "0010" in this repo's actual history is 0010_governance_requests, not
+# the "0010_eval_records" these tests assumed — eval-records support was folded into
+# 0001_baseline.py instead of landing as its own migration. Point-in-time gates like
+# these go stale by design as development continues past their milestone; the
+# durable invariant they were protecting — exactly one Alembic head, no orphaned
+# branches — is what test_single_alembic_head above still checks, unpinned to any
+# specific revision number.

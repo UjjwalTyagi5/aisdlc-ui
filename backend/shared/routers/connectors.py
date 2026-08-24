@@ -51,6 +51,7 @@ from config.env import (
     GITHUB_OAUTH_CLIENT_SECRET,
 )
 from shared.auth.oauth_state import verify_oauth_state
+from shared.authz.connector_grants import granted_target_refs
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.keyvault import load_secret, store_secret
@@ -78,6 +79,8 @@ _KNOWN_KINDS = {
     "ms_teams",
     "sharepoint",
     "figma",
+    "confluence",
+    "sonarqube",
     "sso_okta",
     "sso_entra",
 }
@@ -98,6 +101,8 @@ _CATALOG_KINDS = {
     "ms_teams",
     "sharepoint",
     "figma",
+    "confluence",
+    "sonarqube",
 }
 
 # KV secret names written at callback per connector kind (D-04: disconnect = delete these)
@@ -115,6 +120,8 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
 _KIND_SECRET_STORE_REFS: Dict[str, List[str]] = {
     "azure_devops": ["ado-pat", "ado-org-url"],
     "jira": ["jira-url", "jira-email", "jira-api-token"],
+    "confluence": ["confluence-url", "confluence-email", "confluence-api-token", "confluence-space-key"],
+    "sonarqube": ["sonarqube-url", "sonarqube-token"],
     "github_actions": ["gha-pat", "gha-owner"],
     # ms_teams and sharepoint SHARE one Entra app registration (msgraph-*), so those
     # three refs are deliberately absent here — see _MSGRAPH_SHARED_REFS below. Only
@@ -158,6 +165,8 @@ _MSGRAPH_SIBLING: Dict[str, str] = {"ms_teams": "sharepoint", "sharepoint": "ms_
 _KIND_PRIMARY_CREDENTIAL: Dict[str, str] = {
     "azure_devops": "ado-pat",
     "jira": "jira-api-token",
+    "confluence": "confluence-api-token",
+    "sonarqube": "sonarqube-token",
     "github_actions": "gha-pat",
     # A per-kind MARKER, not msgraph-client-secret. The two Graph kinds share one app
     # registration, so naming the shared secret as either kind's primary credential
@@ -208,6 +217,8 @@ def _build_connector_list(
 _CREDENTIAL_CONNECTORS = [
     ("azure_devops", "ado-pat", "ado-org-url"),
     ("jira", "jira-api-token", "jira-url"),
+    ("confluence", "confluence-api-token", "confluence-url"),
+    ("sonarqube", "sonarqube-token", "sonarqube-url"),
     ("github_actions", "gha-pat", "gha-owner"),
     ("ms_teams", "msteams-connected", "msteams-channel-id"),
     ("sharepoint", "sharepoint-connected", "sharepoint-site-id"),
@@ -361,26 +372,66 @@ async def _remove_workspace_connector(workspace_id: str, kind: str, db: AsyncSes
     response_model=List[ConnectorOut],
     dependencies=[Depends(require_permission("connector:view"))],
 )
-async def list_connectors(request: Request, db: AsyncSession = Depends(get_db_session)):
+async def list_connectors(
+    request: Request,
+    workspaceId: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
     """Return a Connector[] reshaped from the connector-health cache (T-M4-04).
 
-    Overlaid with this tenant's pasted credentials. When an X-Workspace-Id header
-    is present, further filters to connectors enabled for that workspace — connectors
-    with credentials but no workspace_connectors row appear as disconnected (not yet
-    enabled for this workspace).
+    Overlaid with this tenant's pasted credentials. Workspace scope comes from the
+    `workspaceId` query param when given, else the `X-Workspace-Id` header — the
+    query param lets a caller (the create-project dialog, and Settings' Tools per
+    stage) ask about a Business Unit other than the ambient active-workspace
+    cookie the header is normally sourced from, mirroring GET /model/availability's
+    workspaceId param.
+
+    With a workspace resolved (either source), every entry gets `granted`: whether
+    that Business Unit was given this connector by an Org Admin
+    (`integration_grants`, see shared/authz/connector_grants.py). `installed`/
+    `health` keep their existing, narrower meaning — a real credential exists and
+    was health-checked — and additionally require the workspace to have it enabled
+    (`workspace_connectors`), same as before.
+
+    An EXPLICIT `workspaceId` query param additionally widens the candidate set to
+    every catalogue kind, credentialed or not. Credentials are a project-level,
+    later-stage concern — supplied by a project's own members after it exists, per
+    the "NO connect / credential action" note on the Integrations hub — so a stage
+    picker asking "what may this unit wire up" must not require one up front.
+    Ambient header-only callers (dashboards, status widgets) keep today's
+    credential-only list unchanged; only a caller that deliberately asks about a
+    unit gets the wider, grant-based set.
     """
     tenant_id = getattr(request.state, "tenant_id", "")
-    workspace_id = request.headers.get("x-workspace-id", "")
+    header_workspace_id = request.headers.get("x-workspace-id", "")
+    workspace_id = workspaceId or header_workspace_id
 
     cache = getattr(request.app.state, "connector_health_cache", {})
     connectors = _build_connector_list(cache, tenant_id)
     connectors = await _overlay_tenant_credentials(connectors, tenant_id)
 
     if workspace_id:
+        if workspaceId:
+            by_kind = {c.kind: c for c in connectors}
+            for kind in _CATALOG_KINDS:
+                if kind not in by_kind:
+                    connectors.append(
+                        ConnectorOut(
+                            id=kind, tenantId=tenant_id, kind=kind, name=kind,
+                            installed=False, health="disconnected",
+                            capabilities=[], lastCheckedAt=None,
+                        )
+                    )
+
         enabled_kinds = await _workspace_enabled_kinds(workspace_id, db)
+        granted_kinds = await granted_target_refs(
+            db, tenant_id=tenant_id, workspace_id=workspace_id, kind="connector",
+        )
         for c in connectors:
+            c.granted = c.kind in granted_kinds
             if c.installed and c.kind not in enabled_kinds:
-                # Credentials exist at tenant level but this workspace hasn't enabled it
+                # Credentials exist at tenant level but this workspace hasn't
+                # enabled it.
                 c.installed = False
                 c.health = "disconnected"
 
@@ -443,7 +494,9 @@ async def install_connector(kind: str, request: Request):
 # tenant secret store (Key Vault in prod, Fernet-encrypted DB in dev) and a live
 # probe verifies them. The secret is never echoed back.
 
-_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions", "ms_teams", "sharepoint", "figma"}
+_CREDENTIAL_KINDS = {
+    "azure_devops", "jira", "confluence", "sonarqube", "github_actions", "ms_teams", "sharepoint", "figma",
+}
 
 
 class SetCredentialsIn(BaseModel):
@@ -457,7 +510,7 @@ class SetCredentialsIn(BaseModel):
     # Azure DevOps
     org_url: Optional[str] = None
     pat: Optional[str] = None
-    # Jira (Basic auth)
+    # Jira / Confluence (both Basic auth, same shape — kind decides which secret refs)
     base_url: Optional[str] = None
     email: Optional[str] = None
     api_token: Optional[str] = None
@@ -475,6 +528,8 @@ class SetCredentialsIn(BaseModel):
     site_url: Optional[str] = None
     drive_id: Optional[str] = None
     folder_path: Optional[str] = None
+    # Confluence default space (optional convenience — see notification_targets.confluence_target).
+    space_key: Optional[str] = None
     # Figma. `pat` is reused for the Personal Access Token shape; figma_access_token
     # is the OAuth shape, normally written by the callback rather than pasted here.
     # file_url is an optional default file (URL or bare key), not a credential.
@@ -732,6 +787,16 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             await secret_store.put_secret(tenant_id, "ado-org-url", org_url)
             await secret_store.put_secret(tenant_id, "ado-pat", pat)
             account = org_url
+        elif kind == "sonarqube":
+            server_url = (body.org_url or "").strip()
+            token = (body.pat or "").strip()
+            if not server_url or not token:
+                raise HTTPException(
+                    status_code=422, detail="SonarQube requires 'org_url' (server URL) and 'pat' (token)."
+                )
+            await secret_store.put_secret(tenant_id, "sonarqube-url", server_url)
+            await secret_store.put_secret(tenant_id, "sonarqube-token", token)
+            account = server_url
         elif kind == "github_actions":
             pat = (body.pat or "").strip()
             owner = (body.owner or "").strip()
@@ -747,6 +812,23 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             account = await _store_sharepoint_credentials(tenant_id, body, secret_store)
         elif kind == "figma":
             account = await _store_figma_credentials(tenant_id, body, secret_store)
+        elif kind == "confluence":
+            base_url = (body.base_url or "").strip()
+            email = (body.email or "").strip()
+            api_token = (body.api_token or "").strip()
+            if not base_url or not email or not api_token:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Confluence requires 'base_url', 'email', and 'api_token'.",
+                )
+            await secret_store.put_secret(tenant_id, "confluence-url", base_url)
+            await secret_store.put_secret(tenant_id, "confluence-email", email)
+            await secret_store.put_secret(tenant_id, "confluence-api-token", api_token)
+            if (body.space_key or "").strip():
+                await secret_store.put_secret(
+                    tenant_id, "confluence-space-key", body.space_key.strip()
+                )
+            account = base_url
         else:  # jira
             base_url = (body.base_url or "").strip()
             email = (body.email or "").strip()

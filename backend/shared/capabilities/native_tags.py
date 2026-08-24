@@ -202,6 +202,10 @@ NATIVE_TAGS: dict[str, dict[str, "str | list[str]"]] = {
         "publish_to_sharepoint": "docs.publish",
         "list_sharepoint_documents": "doc.ingest",
         "ingest_sharepoint_document": "doc.ingest",
+        # Confluence destination — same taxonomy tags as the SharePoint triple above.
+        "publish_to_confluence": "docs.publish",
+        "list_confluence_pages": "doc.ingest",
+        "ingest_confluence_page": "doc.ingest",
     },
     # Other agents tagged in subsequent cohorts — empty until their fan-out tasks land.
 }

@@ -1,8 +1,8 @@
 """Resolve where a tenant's notifications and documents actually go.
 
-A connector answers "can we reach Teams / Slack / SharePoint at all". This module
-answers the separate question "and which channel or library", which is routing
-configuration rather than a credential.
+A connector answers "can we reach Teams / Slack / SharePoint / Confluence / Azure
+DevOps Wiki at all". This module answers the separate question "and which channel,
+library, space, or wiki", which is routing configuration rather than a credential.
 
 WHY THESE LIVE IN THE SECRET STORE, not a new column:
 
@@ -127,3 +127,16 @@ async def figma_target(tenant_id: str) -> Optional[Dict[str, str]]:
     """
     file_key = await _get(tenant_id, "figma-file-key")
     return {"file_key": file_key} if file_key else None
+
+
+async def confluence_target(tenant_id: str) -> Optional[Dict[str, str]]:
+    """Which Confluence space this tenant files generated documentation into.
+
+    Same shape as `figma_target`: a CONVENIENCE, not a gate. The Documentation agent's
+    Confluence tools accept an explicit space key/id on every call, so a tenant with no
+    default configured can still use them by naming a space each time. None here means
+    "no default configured", NOT "Confluence is unavailable" — connectedness is the
+    `confluence-api-token` credential's job (checked by the connector itself).
+    """
+    space = await _get(tenant_id, "confluence-space-key")
+    return {"space": space} if space else None

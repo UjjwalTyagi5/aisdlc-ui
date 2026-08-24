@@ -61,6 +61,21 @@ def _make_request(permissions: list[str]) -> SimpleNamespace:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_project_visibility(monkeypatch):
+    """_get_run_or_404 now also checks can_perform(..., "artifact:view", resource_kind=
+    "project", ...) — a real DB-backed project-membership query that didn't exist when
+    this test's MagicMock db was written, and that mock has no shape for it (every
+    session.execute(...) call returns the same Run-shaped result_mock regardless of
+    query). These tests are about the stage-setting RBAC/mutation logic downstream of
+    that check, not project-membership visibility, so it's stubbed to always allow —
+    matching what every caller here (org_admin, and a developer who per the test's own
+    comment does hold artifact:view) would actually get back from a real DB.
+    """
+    import shared.routers.runs as runs_module
+    monkeypatch.setattr(runs_module, "can_perform", AsyncMock(return_value=True))
+
+
 @pytest.mark.unit
 async def test_set_stage_org_admin_jumps_to_any_stage():
     """org_admin (admin:*) can set current_stage to a valid stage, incl. jumping backward."""

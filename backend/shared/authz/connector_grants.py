@@ -83,6 +83,34 @@ async def unit_is_granted(
     return row is not None
 
 
+async def granted_target_refs(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    kind: str = "connector",
+) -> set[str]:
+    """Every target_ref this unit was granted, in one query.
+
+    Same answer as calling `unit_is_granted` once per candidate, but a picker
+    checking a whole catalogue (see GET /connectors) would otherwise issue one
+    round trip per kind — noticeable once the catalogue is a dozen-plus entries.
+    """
+    if not tenant_id or not workspace_id:
+        return set()
+    rows = (
+        await db.execute(
+            text(
+                "SELECT target_ref FROM integration_grants "
+                "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = CAST(:w AS uuid) "
+                "  AND kind = :k"
+            ),
+            {"t": tenant_id, "w": workspace_id, "k": kind},
+        )
+    ).scalars().all()
+    return set(rows)
+
+
 async def project_override(
     db: AsyncSession,
     *,

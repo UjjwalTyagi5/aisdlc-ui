@@ -27,7 +27,9 @@ if _SKIP:
 
 
 def _make_connector(bot_token="xoxb-fake-token") -> SlackConnector:
-    return SlackConnector(bot_token=bot_token)
+    # tenant_id is required by auth_adapter() (REQ-M7-01) — connector credentials
+    # are per-tenant, so a connector built with none can never authenticate.
+    return SlackConnector(bot_token=bot_token, tenant_id="test-tenant")
 
 
 @pytest.mark.unit

@@ -14,7 +14,7 @@ def test_agent_definition_has_orchestration_fields():
 def test_all_agents_present():
     assert set(AGENT_REGISTRY.keys()) == {
         "requirements", "design", "development", "testing", "deployment",
-        "code_review", "security",
+        "code_review", "security", "documentation",
     }
 
 
@@ -45,7 +45,9 @@ def test_security_agent_registered():
     assert sec.pipeline_position == 4
     assert sec.output_artifact == "security_artifacts"
     assert "development_artifacts" in sec.input_artifacts
-    assert sec.gate_type == "approval_required"
+    # "mandatory", not "approval_required" — security signoff is a stricter,
+    # non-bypassable gate (shared with deployment's release decision).
+    assert sec.gate_type == "mandatory"
     assert sec.can_parallel_with == ["code_review"]
 
 

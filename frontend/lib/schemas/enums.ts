@@ -130,6 +130,8 @@ export const ConnectorKind = z.enum([
   "ms_teams",
   "sharepoint",
   "figma",
+  "confluence",
+  "sonarqube",
   "sso_okta",
   "sso_entra",
 ]);

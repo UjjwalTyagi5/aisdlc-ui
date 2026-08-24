@@ -32,6 +32,9 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     diff_markdown_sections,
     save_runbook_update,
     save_knowledge_article,
+    publish_to_confluence,
+    list_confluence_pages,
+    ingest_confluence_page,
 )
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
@@ -62,6 +65,10 @@ _tools = [
     diff_markdown_sections,
     save_runbook_update,
     save_knowledge_article,
+    # Confluence destination — same shape, additive alongside SharePoint.
+    publish_to_confluence,
+    list_confluence_pages,
+    ingest_confluence_page,
 ]
 
 

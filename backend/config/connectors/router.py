@@ -38,6 +38,8 @@ _EXPECTED_CONNECTOR_NAMES = frozenset(
         "ms_teams",
         "sharepoint",
         "figma",
+        "confluence",
+        "sonarqube",
     }
 )
 

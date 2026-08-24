@@ -686,6 +686,89 @@ async def decide(
     return await get_request(db, request["id"])
 
 
+# ── closed by side effect, not by decision ──────────────────────────────────
+
+
+async def complete_role_assignment(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    role_label: str,
+    decided_by_id: Optional[str],
+    decided_by_name: str,
+) -> None:
+    """Close any open `role_assignment` request this role change discharges.
+
+    A role assignment is not approved, it is DONE — see onboarding.py, which
+    raises the request in the first place: "it closes when a role is actually
+    assigned rather than by being approved." `decide()` cannot do this: a
+    role_assignment request names no role of its own (that is the entire ask),
+    so `apply_on_approve` has no case for it, and the frontend's Assign-role
+    dialog reaches this role change through `update_workspace_member_role`, not
+    through `decide()`, precisely because approving without a chosen role would
+    close the request with nobody having said which one.
+
+    NO-OP when no request is open, by design — the docstring on the frontend's
+    completeRoleAssignment mock states the same contract: a role changed for any
+    OTHER reason (a correction, a later re-assignment) must not invent a request
+    to close. NEVER raises: this is a side effect of a role change that already
+    committed, not a precondition of it — a governance-table hiccup must not
+    undo (or appear to undo) a grant that already took effect.
+    """
+    try:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT id FROM governance_requests "
+                    f"WHERE type = 'role_assignment' AND workspace_id = CAST(:w AS uuid) "
+                    f"  AND target_ref = :u AND {_OPEN_SQL} "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"w": workspace_id, "u": user_id},
+            )
+        ).first()
+        if row is None:
+            return
+        request_id = str(row.id)
+        now = datetime.now(tz=timezone.utc)
+        note = f"Assigned {role_label}."
+
+        result = await db.execute(
+            text(
+                "UPDATE governance_requests SET status = 'approved', decided_by = :by, "
+                "  decided_at = :at, reason = :why, current_approver_role = NULL, "
+                "  approval_stage = NULL, updated_at = now() "
+                f"WHERE id = :i AND {_OPEN_SQL}"
+            ),
+            {"by": decided_by_name, "at": now, "why": note, "i": request_id},
+        )
+        if not result.rowcount:
+            return  # closed by someone else between the SELECT and here — fine.
+
+        await _emit(
+            db,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            kind="approved",
+            actor=decided_by_name,
+            actor_id=decided_by_id,
+            actor_role=None,
+            note=note,
+        )
+        await db.flush()
+        logger.info(
+            "governance request auto-closed by role assignment: id=%s workspace=%s user=%s role=%s",
+            request_id, workspace_id, user_id, role_label,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort side effect, see docstring
+        logger.warning(
+            "complete_role_assignment: could not close request for workspace=%s user=%s: %s",
+            workspace_id, user_id, type(exc).__name__,
+        )
+
+
 # ── climbing ─────────────────────────────────────────────────────────────────
 
 

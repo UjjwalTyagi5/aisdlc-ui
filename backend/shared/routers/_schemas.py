@@ -586,6 +586,10 @@ class ConnectorOut(BaseModel):
     capabilities: List[Any]
     lastCheckedAt: Optional[str]
     account: Optional[str] = None
+    # Whether the requesting Business Unit was granted this kind (integration_grants).
+    # Only set when the caller resolved a workspace (query param or header) — absent
+    # otherwise, since "granted" has no meaning without a unit to check it against.
+    granted: Optional[bool] = None
 
     @classmethod
     def from_health_entry(cls, connector_name: str, entry: dict, tenant_id: str) -> "ConnectorOut":
