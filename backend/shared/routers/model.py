@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import can_perform
 from shared.authz.dependency import require_any_permission, require_permission
+from shared.authz.read_scope import is_org_wide
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.services import model_config as mc
@@ -546,3 +548,74 @@ async def delete_project_provider_route(request: Request, provider_id: str, proj
         await mc.delete_provider(_tenant_id(request), provider_id)
     except mc.ProviderNotFoundError:
         raise HTTPException(status_code=404, detail="Provider not found")
+
+
+# ---------------------------------------------------------------------------
+# Model-provider grants (which Business Unit may USE which onboarded provider) —
+# same integration_grants rows Task 2's generic POST/DELETE /integrations/access
+# routes write (kind='model_provider'), through a purpose-built shape mirroring
+# list_connector_grants/set_connector_grants in integration_access.py. Unlike
+# connectors there is no whole-policy replace mode: the Org Admin's grant UI always
+# acts per business unit for providers, so PUT always takes a workspaceId.
+# ---------------------------------------------------------------------------
+
+@model_router.get("/providers/grants")
+async def list_model_provider_grants_route(request: Request, db: AsyncSession = Depends(get_db_session)) -> list[dict]:
+    """Which providers are granted to which business units, as {provider, businessUnitIds[]}."""
+    tenant_id = _tenant_id(request)
+    rows = (
+        await db.execute(
+            text(
+                "SELECT target_ref, workspace_id FROM integration_grants "
+                "WHERE tenant_id = CAST(:t AS uuid) AND kind = 'model_provider'"
+            ),
+            {"t": tenant_id},
+        )
+    ).fetchall()
+    by_provider: dict[str, list[str]] = {}
+    for target, ws in rows:
+        by_provider.setdefault(target, []).append(str(ws))
+    return [
+        {"provider": p, "businessUnitIds": sorted(v)}
+        for p, v in sorted(by_provider.items())
+    ]
+
+
+@model_router.put("/providers/grants")
+async def set_model_provider_grants_route(
+    request: Request, workspaceId: str, body: dict, db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    """Replace one business unit's whole model-provider grant set (delete-then-insert).
+
+    Org Admin only — a Business Unit Admin holds model:manage for configuring their
+    own unit's provider connections, but a unit that could grant itself use of a
+    provider has no grant (same rule as connectors; see integration_access.py's
+    _require_org_admin).
+    """
+    if not is_org_wide(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an Organization Admin decides which providers a business unit may use.",
+        )
+    tenant_id = _tenant_id(request)
+    actor = _user_id(request)
+    providers = [p for p in (body.get("providers") or []) if isinstance(p, str) and p.strip()]
+
+    await db.execute(
+        text(
+            "DELETE FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND kind = 'model_provider' AND workspace_id = CAST(:w AS uuid)"
+        ),
+        {"t": tenant_id, "w": workspaceId},
+    )
+    for p in providers:
+        await db.execute(
+            text(
+                "INSERT INTO integration_grants "
+                "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), :by)"
+            ),
+            {"t": tenant_id, "r": p, "w": workspaceId, "by": actor},
+        )
+    await db.flush()
+    return await list_model_provider_grants_route(request, db=db)
