@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Org Admin grants a Business Unit access to a *provider* (not specific models); BU Admin can only add keys for providers the org granted them, with a mandatory API key + live Test; BU Admin pushes specific keys to specific projects; Project Admin picks a master key among what was pushed.
+**Goal:** Org Admin grants a Business Unit access to a *provider*, and separately curates which specific models within that provider the BU may use — both steps keyless, no credential anywhere in Org Admin's flow (**revised mid-plan, see spec §2 amendment 5** — the original goal said "provider, not specific models"; model curation is restored, only key-adding is what Org Admin never does). BU Admin can only add keys for providers the org granted them, constrained to Org-Admin-curated models, with a mandatory API key + live Test. BU Admin pushes specific keys to specific projects; Project Admin picks a master key among what was pushed.
 
 **Architecture:** Reuse the existing connector-grant machinery (`integration_grants` table, generalized to a third `kind='model_provider'`) rather than building a parallel grant system. Reuse the existing `UnitAccessPicker` component unchanged for the Org Admin's grant-toggle UI. Add one new resource-scoped check (BU must hold a `model_provider` grant before creating a BU-scoped `ModelProvider`) to the existing `POST /model/providers` handler, which today has no workspace-ownership check at all — a real, standalone gap fixed as part of this work.
 
@@ -14,7 +14,8 @@
 
 - Every new/changed backend route stays under the existing `/model` or `/integrations`/`/connectors` prefixes — no new top-level routers.
 - No change to `backend/shared/services/model_resolver.py` — confirmed out of scope by spec §6/§9.
-- `api_key` is required (not optional) only on the **BU-scoped** provider-creation path (`workspace_id` set). Org-wide creation (`workspace_id is None`) keeps today's optional/keyless behavior.
+- `api_key` is required (not optional) only on the **BU-scoped** provider-creation path (`workspace_id` set). Org-wide creation (`workspace_id is None`) keeps today's optional/keyless behavior at the BACKEND route level (Task 4 leaves that branch untouched, correctly) — but per the mid-plan amendment, there is no Org Admin UI action that calls it anymore (no "Add an org-wide key" button — see Task 9's revision).
+- Org Admin curates which models a BU may use via the pre-existing, UNMODIFIED `org_model_grants` read/write path (`getOrgModelGrants`/`setOrgModelGrants`) — this was originally going to be retired from the write path; that retirement is reversed (spec §2 amendment 5, §3.3). Nothing in Tasks 1-8 touches this table; only Task 9 restores writing to it via the UI.
 - Reuse `integration_grants` (migration `0015_integration_grants`) via a third `kind='model_provider'` — do not create a new grant table.
 - Reuse `UnitAccessPicker` (`frontend/components/app/unit-access-picker.tsx`) unchanged for the Org Admin grant-toggle UI — it is already fully generic (`units`, `selected`, `onToggle` props, no connector-specific code).
 - Follow this repo's existing test-per-layer discipline: backend tests pass before frontend work starts on the same slice.
@@ -926,15 +927,22 @@ git commit -m "feat: frontend API client for provider grants and project key ass
 
 ---
 
-### Task 9: Frontend — Org Admin view: remove "Add provider", add the grant-toggle dropdown
+### Task 9: Frontend — Org Admin view: remove "Add provider", add grant-toggle + model curation
+
+**REVISED mid-plan (see spec §2 amendment 5, ledger's "MID-IMPLEMENTATION DESIGN
+AMENDMENT" entry after Task 4): the Org Admin's flow is provider-grant AND per-model
+curation, both keyless — NOT provider-grant-only as originally planned. There is no
+"Add an org-wide key" action anymore; it's removed from scope entirely (Steps 5-6
+below are the replacement, not the original "add org-wide key" content — if you are
+reading an older cached copy of this plan, discard any step here about org-wide keys).**
 
 **Files:**
 - Modify: `frontend/app/(app)/admin/models/page.tsx:339-498` (main render), `:522-578` (`ProviderCard`)
 - Test: check for an existing test file with `grep -rl "ModelProvidersPage\|admin/models" frontend/__tests__/` and update it, or note in the commit if none exists yet
 
 **Interfaces:**
-- Consumes: `listModelProviderGrants()`, `setModelProviderGrants()` from Task 8; `UnitAccessPicker` from `frontend/components/app/unit-access-picker.tsx` (unchanged, already generic — `{units, selected, onToggle}` props).
-- Produces: Org Admin's `/admin/models` page with the "Add provider" button removed for `scope === "org"`, provider cards rendering an inline `UnitAccessPicker` instead of a `Link` when `scope === "org"`.
+- Consumes: `listModelProviderGrants()`, `setModelProviderGrants()` from Task 8; `UnitAccessPicker` from `frontend/components/app/unit-access-picker.tsx` (unchanged, already generic — `{units, selected, onToggle}` props); `getOrgModelGrants()`/`setOrgModelGrants()` from `frontend/lib/api/models.ts:32-36` (pre-existing, UNMODIFIED by this plan — this is the restored per-model curation write path, see spec §3.3); `getModelCatalog()` (pre-existing) for the list of models a given provider actually offers.
+- Produces: Org Admin's `/admin/models` page with the "Add provider" button removed for `scope === "org"`; provider cards rendering an inline `UnitAccessPicker` for the provider-grant toggle; a NEW per-BU model-curation control (Step 5 below) reachable once a BU is granted.
 
 - [ ] **Step 1: Add a grants query, gated on `isOrg`**
 
@@ -1091,31 +1099,77 @@ function ProviderCard({
 
 Note: removing the `relative` + `::after` stretched-link pattern's dependency on the whole card being a click target is intentional for `isOrg` — the card body is no longer a link at all in that branch, only the (removed) chevron was hinting at navigation; the `UnitAccessPicker` popover is its own interactive control. Import `UnitAccessPicker` at the top of the file: `import { UnitAccessPicker } from "@/components/app/unit-access-picker";`.
 
-- [ ] **Step 5: Add the separate, de-emphasized "add org-wide key" action for Org Admin**
+- [ ] **Step 5: Add per-BU model curation, reachable once a BU is granted a provider**
 
-Per spec §5, this stays a real action but visually secondary. Add a small text-button in the page header, next to (not replacing) the removed primary button, visible only when `isOrg`:
-```tsx
-{isOrg && (
-  <button
-    type="button"
-    onClick={() => setAddOpen(true)}
-    className="text-muted-foreground hover:text-foreground text-[12.5px] underline underline-offset-2"
-  >
-    Add an org-wide key
-  </button>
-)}
-```
-Place this directly below the `<PageTitle>` in the header, not in the button's old position — it should read as a secondary, textual affordance, not a call-to-action button. The existing `AddModelDialog` (unchanged in this task — Task 10 changes it for BU scope only) still opens via `setAddOpen(true)` and still works for org-wide keyed/keyless onboarding exactly as today.
+This is the restored piece from spec §2 amendment 5 — Org Admin, after granting a
+provider to a BU (Step 3/4's `UnitAccessPicker`), can ALSO pick which specific models
+of that provider the BU may use. No key field anywhere in this control.
 
-- [ ] **Step 6: Manual verification (no automated test framework covers full page interaction here — confirm via the running app)**
+Add a small "Models" affordance per granted BU. The simplest correct placement:
+change the provider card's title (currently a plain `<h3>` for `isOrg`, Step 4) into a
+button that opens a `Dialog` (reuse the existing `Dialog`/`DialogContent` primitives
+already used by `AddModelDialog` — check its imports at the top of
+`add-model-dialog.tsx` for the exact import path, e.g. `@/components/ui/dialog`) titled
+"Models — {providerLabel(kind)}". Inside:
 
-Start the backend and frontend (see the "Commands to start everything" note the user already has from earlier this session), sign in as an org_admin seeded persona, navigate to `/admin/models`, confirm: no "Add provider" button in the header where the primary button used to be; a small "Add an org-wide key" text link is present and opens the existing dialog; each provider card shows a `UnitAccessPicker` popover, not a link; toggling a business unit in the popover persists across a page reload.
+- One section per BU currently in `grantedUnitIds` (from Step 3's data). If
+  `grantedUnitIds` is empty, show "Grant this provider to a business unit first."
+- For each granted BU, fetch that BU's current curated models — call
+  `getOrgModelGrants()` (org-wide read, unmodified) ONCE for the whole dialog (it
+  returns every `OrgModelGrant` row across all providers/units — filter client-side to
+  rows where `provider === kind` and the BU appears in `businessUnitIds` for
+  `visibility: "specific"`, or unconditionally if `visibility: "global"`), then render a
+  checkbox list of `getModelCatalog()`'s models for this provider (`catalog.find(c =>
+  c.provider === kind)?.models ?? []`), each checkbox reflecting whether that model_id
+  is currently granted (globally, or specifically to this BU).
+- Toggling a checkbox calls `setOrgModelGrants(entries)` with the FULL updated entries
+  array (mirroring `setBuModelGrants`'s existing replace-whole-set contract already
+  documented in `frontend/lib/api/models.ts:44-50`) — compute the new array by
+  add/removing one `{provider, model_id, visibility: "specific", business_unit_ids:
+  [...]}` entry (or adjusting an existing entry's `business_unit_ids`) from whatever
+  `getOrgModelGrants()` returned, then call `setOrgModelGrants` and invalidate
+  `qk.model.buAllowed(workspaceId)` (existing query key, used by `getBuAllowedModels`)
+  for every affected BU so their availability view picks up the change.
+- This is real, non-trivial state-merging logic — write it as a small pure helper
+  function (e.g. `toggleModelForUnit(grants: OrgModelGrant[], provider: string,
+  modelId: string, workspaceId: string): OrgModelGrant[]`) that you can unit-test in
+  isolation (Step 6 below), rather than inlining the merge logic directly in a JSX
+  event handler.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Unit test the merge helper**
+
+Add `frontend/lib/api/__tests__/toggle-model-for-unit.test.ts` (or colocate the helper
+and its test wherever this codebase's convention places small pure-function tests near
+component files — check an existing example like `frontend/components/app/__tests__/`
+for the pattern) covering: toggling a model ON for a BU that has no existing entry for
+this provider (creates one, `visibility: "specific"`); toggling OFF the last BU on a
+`specific` entry (the entry's `business_unit_ids` becomes empty — decide and document
+whether this removes the entry rows entirely or leaves an empty-array entry; removing
+it entirely is simpler and matches "no access" cleanly); toggling a model that already
+has a `global` visibility entry (a per-BU toggle should not apply to a globally-granted
+model — either disable that checkbox in the UI with a tooltip explaining it's granted
+globally, or, if toggled anyway, correctly narrow just that BU out via a `specific`
+override — pick the simpler UI treatment: disable the checkbox for already-global
+models, with the same "Granted globally" copy `UnitAccessPicker` already uses for its
+own `isGlobal` case).
+
+Run: `cd frontend && npx vitest run toggle-model-for-unit` (or whatever the actual test runner command is per `package.json`).
+Expected: all cases pass.
+
+- [ ] **Step 7: Manual verification (no automated test framework covers full page interaction here — confirm via the running app)**
+
+Start the backend and frontend, sign in as an org_admin seeded persona, navigate to
+`/admin/models`, confirm: no "Add provider" button in the header; each provider card's
+title opens the grant popover via `UnitAccessPicker` (BU toggle) as before; clicking
+the "Models" affordance on a card with at least one granted BU opens the curation
+dialog, shows the right models checked/unchecked per BU, and a checkbox toggle
+persists across a page reload. Confirm no key field appears anywhere in either dialog.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/app/\(app\)/admin/models/page.tsx
-git commit -m "feat: Org Admin grants providers to business units instead of adding models"
+git add frontend/app/\(app\)/admin/models/page.tsx frontend/lib/api/toggle-model-for-unit.ts frontend/lib/api/__tests__/toggle-model-for-unit.test.ts
+git commit -m "feat: Org Admin grants providers to business units and curates which models within them"
 ```
 
 ---
@@ -1130,6 +1184,21 @@ git commit -m "feat: Org Admin grants providers to business units instead of add
 **Interfaces:**
 - Consumes: `verifyModelProvider(id)` from `frontend/lib/api/models.ts:103-107` (already exists, already builds the live-probe verify call this Test button needs — confirm its exact behavior by reading its current call sites, e.g. wherever the existing detail page already uses it, before wiring a new button to it).
 - Produces: for BU-scoped (`!isOrg`) rendering, `AddModelDialog` requires `api_key`, shows a "Test" button beside the key field that must succeed before "Save" enables, and skips the provider-picker step (provider is fixed to whichever tile was clicked).
+
+**Note on the model picker (per spec §2 amendment 5 / §3.4):** the model-picker step
+inside `AddModelDialog` should ALREADY be constrained to Org-Admin-curated models for
+this BU with NO new plumbing — `ModelProvidersPage` already computes
+`effectiveCatalog = isOrg ? catalog : filterCatalogToAllowed(catalog, allAllowed)`
+(`page.tsx:318`), and `allAllowed` is derived from `allowedByUnit`, which reads
+`getBuAllowedModels()` — itself derived from `org_model_grants` (unmodified by this
+plan; Task 9's Step 5 is what now WRITES to it again). This constraint was never
+actually removed from the read side even under the plan's original (provider-only)
+version — confirm this is still true when you read the file in Step 1, and treat it as
+"verify unchanged," not "build new." If for some reason `effectiveCatalog` was ALSO
+being widened elsewhere for the BU-scope `AddModelDialog` call site specifically (i.e.
+if some other code path bypasses this filter), that would be a real gap to fix as part
+of this task — but the expectation going in is that no fix is needed here, only
+verification.
 
 - [ ] **Step 1: Read the full current `AddModelDialog` implementation**
 
