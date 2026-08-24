@@ -1257,7 +1257,7 @@ Using whatever existing project-list API this file (or `projects.ts`) already ex
 
 - [ ] **Step 3: Manual verification**
 
-As a bu_admin with at least one keyed provider, open its detail page, assign a key to one of the BU's projects, confirm no error and (per Task 12) that the project's Settings → Model tab now shows it.
+As a bu_admin with at least one keyed provider, open its detail page, assign a key to one of the BU's projects, confirm no error and (per Task 13, renumbered — see the new Task 12 inserted below) that the project's Settings → Model tab now shows it.
 
 - [ ] **Step 4: Commit**
 
@@ -1268,7 +1268,112 @@ git commit -m "feat: BU Admin can assign a provider key to a project from its de
 
 ---
 
-### Task 12: Frontend — Project Admin's Settings → Model tab: assigned keys + master picker
+### Task 12: Backend — fix `set_project_selection` to recognize BU-assigned connections
+
+**INSERTED mid-plan (see ledger's "Task 6 — MAJOR FINDING" entry).** Task 6's implementer
+discovered, and verified two independent ways (a direct service-level call bypassing
+HTTP/RBAC, and a full HTTP-level test through the real router with a real Project Admin
+actor), that `PUT /model/allowed/project` (`set_project_selection`,
+`backend/shared/services/model_grants.py:390`) — unchanged by every prior task in this
+plan — rejects the exact `selected` payload Task 5's `assign_provider_to_project` itself
+writes. A Project Admin can never successfully call this route again — including just to
+set `defaultKey` — once their BU Admin has assigned them a key via the new flow. This does
+NOT block `resolve_model_for_run` (confirmed: `defaultKey` is never read by the resolver;
+resolution reads `selected` directly from storage, unvalidated at read time) — only the
+next task's frontend UI action is blocked without this fix.
+
+**Files:**
+- Read first: `backend/shared/services/model_grants.py:373-420` or thereabouts (the exact
+  line numbers may have drifted — search for `_project_owned_offering_keys` and
+  `set_project_selection` and read both functions in full) plus
+  `backend/tests/test_model_provider_rbac_chain.py` (Task 6's new test file — the failing
+  step there, currently asserting the CURRENT 400 as a documented known gap, is your
+  reproduction case and becomes your fail-first test once you invert its assertion).
+- Modify: `backend/shared/services/model_grants.py` (`_project_owned_offering_keys` or a
+  sibling check inside `set_project_selection`)
+- Modify: `backend/tests/test_model_provider_rbac_chain.py` — flip the Task-6-authored
+  assertion that currently expects `400` to instead expect `200`/success, and assert the
+  `defaultKey` was actually set to the assigned provider's id. Do not delete the
+  documentation of what used to be broken — convert it into a comment explaining what
+  this task fixed, matching this codebase's own established pattern of narrating a fix's
+  history inline (see e.g. `security_agent_api.py`'s "bonus fix" comments from earlier
+  work this session, or `0024_per_stage_tool_access.py`'s migration docstring style).
+- Test: also add a case to whatever existing test file already covers
+  `set_project_selection`/`_project_owned_offering_keys` directly (grep for
+  `_project_owned_offering_keys` across `backend/tests/` to find it) — a unit-level test
+  is more precise than only the capstone HTTP test for pinning the exact fix.
+
+**Interfaces:**
+- Consumes: nothing new — this fixes existing, already-shipped code using data Tasks 1-5
+  already produce (`model_providers` rows with `workspace_id` set, `project_id` NULL).
+- Produces: `set_project_selection` now accepts a `selected` entry whose `credentialId`
+  points to a `model_providers` row where `workspace_id` equals the target project's own
+  workspace — not only an exact `project_id` match (which only ever matched
+  project-scoped connections, a different, pre-existing, narrower case this plan never
+  touched).
+
+- [ ] **Step 1: Read the two functions in full**
+
+Run: `grep -n "_project_owned_offering_keys\|def set_project_selection" backend/shared/services/model_grants.py` and read both functions completely, plus their call sites, before writing anything. Understand exactly what `allowed_keys` and `own_keys` currently mean and where each is populated from.
+
+- [ ] **Step 2: Write/flip the failing test**
+
+In `test_model_provider_rbac_chain.py`, change the assertion in
+`test_full_chain_org_grant_to_run_resolution`'s step 6 (currently: asserts `400` on the
+Project Admin's `PUT /model/allowed/project` call, with a comment explaining the known
+gap) to instead assert `200` and that the response's `defaultKey` equals the assigned
+provider id. Also add a focused unit test directly against
+`_project_owned_offering_keys` (or wherever the actual gap lives once you've read Step 1)
+proving it now returns/accepts a workspace-scoped `model_providers` row for a project in
+that workspace.
+
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_model_provider_rbac_chain.py -v`
+Expected: FAIL — the flipped assertion now expects 200 but the code still returns 400.
+
+- [ ] **Step 3: Implement the fix**
+
+Extend the relevant check (`_project_owned_offering_keys` or a sibling function/query
+inside `set_project_selection`) to also treat a `model_providers` row as "owned" by a
+project when `model_providers.workspace_id` equals the project's own `workspace_id` —
+not only when `model_providers.project_id` exactly equals the project's id. Look up the
+project's `workspace_id` the same way the rest of this file (or `model.py`'s routes)
+already does for other checks (there should be an existing helper — reuse it, don't
+write a new project→workspace lookup from scratch). Do not weaken the check in the
+other direction — a connection scoped to a DIFFERENT workspace than the project's own
+must still be rejected.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: same as Step 2, plus the new unit test from Step 2.
+Expected: PASS.
+
+- [ ] **Step 5: Run the full regression subset Task 6 already used, to confirm no new breakage**
+
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_integration_access.py tests/test_model_provider_grants.py tests/test_model_config_api.py tests/test_model_provider_assign.py tests/test_model_provider_rbac_chain.py tests/test_model_grants.py tests/test_model_provider_foundation.py -q`
+Expected: same 1 pre-existing unrelated failure as Tasks 3-6 documented
+(`test_bu_availability_matrix_and_project_use_camel_case`), nothing new. If a DIFFERENT
+test in this set that previously passed now fails, that's new breakage from this fix —
+investigate before committing, since it likely means the widened check is now too
+permissive somewhere.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/shared/services/model_grants.py backend/tests/test_model_provider_rbac_chain.py
+git commit -m "fix: let a project's own admin set defaultKey on a BU-assigned connection
+
+set_project_selection only recognized a model_providers row as
+'owned' by a project via an exact project_id match or the old
+org_model_grants table — neither covers a BU-scoped connection
+pushed by the new assign-to-project flow (Task 5), so a Project
+Admin could never successfully call this route again once their
+BU Admin assigned them a key. Found and diagnosed by Task 6's
+capstone RBAC-chain test."
+```
+
+---
+
+### Task 13: Frontend — Project Admin's Settings → Model tab: assigned keys + master picker
 
 **Files:**
 - Read first: `frontend/components/app/project-model-selection-card.tsx` (found during Task investigation — this is very likely the existing component already implementing `defaultKey` selection; read it in full before deciding what changes vs. what's already correct)
@@ -1300,7 +1405,7 @@ If Step 1 finds nothing to change, skip the commit and note in the final report 
 
 ---
 
-### Task 13: Full regression pass
+### Task 14: Full regression pass
 
 **Files:** none (verification-only task)
 
@@ -1319,7 +1424,7 @@ Run: `cd frontend && npx tsc --noEmit`
 
 - [ ] **Step 4: Report**
 
-Summarize: total tasks completed, any deviations from this plan made during implementation (e.g. Task 10's mode (a)/(b) branch, Task 12's found-nothing-to-change outcome), full regression status, and the exact `git log --oneline` of this worktree's branch since it forked from main.
+Summarize: total tasks completed, any deviations from this plan made during implementation (e.g. Task 10's mode (a)/(b) branch, Task 13's found-nothing-to-change outcome, Task 6's mid-plan discovery of the `set_project_selection` gap and Task 12's insertion to fix it), full regression status, and the exact `git log --oneline` of this worktree's branch since it forked from main.
 
 ---
 
