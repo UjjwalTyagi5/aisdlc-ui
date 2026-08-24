@@ -25,6 +25,8 @@ TILE_KINDS = {
     "ms_teams",
     "sharepoint",
     "figma",
+    "confluence",
+    "sonarqube",
 }
 
 

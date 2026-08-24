@@ -20,7 +20,7 @@ async def test_scope_sets_and_clears_connector(monkeypatch):
     async def _fake_kind(tenant_id, project_id, agent_id):
         return "azure_devops"
 
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         assert kind == "azure_devops"
         assert tenant_id == "tenant-123"
         return mock_connector
@@ -45,7 +45,7 @@ async def test_scope_sets_and_clears_connector(monkeypatch):
 async def test_scope_no_tenant_is_noop(monkeypatch):
     called = {"n": 0}
 
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         called["n"] += 1
         return MagicMock()
 
@@ -64,7 +64,7 @@ async def test_scope_no_tenant_is_noop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scope_empty_tenant_string_is_noop(monkeypatch):
-    async def _boom(kind="azure_devops", tenant_id=""):
+    async def _boom(kind="azure_devops", tenant_id="", **kwargs):
         raise AssertionError("should not be called for empty tenant_id")
 
     monkeypatch.setattr("shared.services.agent_run.get_connector_for_session", _boom)
@@ -80,7 +80,7 @@ async def test_scope_resolution_failure_is_failsoft(monkeypatch):
     async def _fake_kind(tenant_id, project_id, agent_id):
         return "azure_devops"
 
-    async def _raise(kind="azure_devops", tenant_id=""):
+    async def _raise(kind="azure_devops", tenant_id="", **kwargs):
         raise RuntimeError("secret store down")
 
     monkeypatch.setattr("shared.services.agent_run._stage_board_kind", _fake_kind)
@@ -103,7 +103,7 @@ async def test_scope_clears_connector_on_error(monkeypatch):
     async def _fake_kind(tenant_id, project_id, agent_id):
         return "azure_devops"
 
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         return mock_connector
 
     monkeypatch.setattr("shared.services.agent_run._stage_board_kind", _fake_kind)
@@ -139,7 +139,7 @@ async def test_scope_no_board_assigned_injects_nothing(monkeypatch):
     async def _no_board(tenant_id, project_id, agent_id):
         return None
 
-    async def _boom(kind="azure_devops", tenant_id=""):
+    async def _boom(kind="azure_devops", tenant_id="", **kwargs):
         raise AssertionError("must not resolve a connector when no board is assigned")
 
     monkeypatch.setattr("shared.services.agent_run._stage_board_kind", _no_board)
@@ -156,7 +156,7 @@ async def test_scope_no_board_assigned_injects_nothing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scope_context_block_empty_for_requirements(monkeypatch):
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         return MagicMock()
 
     monkeypatch.setattr("shared.services.agent_run.get_connector_for_session", _fake_get)

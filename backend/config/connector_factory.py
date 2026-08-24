@@ -25,6 +25,8 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     "ms_teams":       "config.connectors.msteams.MSTeamsConnector",
     "sharepoint":     "config.connectors.sharepoint.SharePointConnector",
     "figma":          "config.connectors.figma.FigmaConnector",
+    "confluence":     "config.connectors.confluence.ConfluenceConnector",
+    "sonarqube":      "config.connectors.sonarqube.SonarQubeConnector",
 }
 
 
@@ -89,6 +91,12 @@ async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> B
         # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
         # token (not the empty global env), mirroring azure_devops above.
         return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
+    if kind == "confluence":
+        from config.env import CONFLUENCE_URL
+        return connector_class(org_url=CONFLUENCE_URL, tenant_id=tenant_id)
+    if kind == "sonarqube":
+        from config.env import SONARQUBE_URL
+        return connector_class(org_url=SONARQUBE_URL, tenant_id=tenant_id)
     # slack, github_issues, github_actions, ms_teams, sharepoint, figma and any future
     # connectors: instantiate with an empty org_url; credentials are resolved lazily
     # in auth_adapter() from the tenant secret store / Key Vault.

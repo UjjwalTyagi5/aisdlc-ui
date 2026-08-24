@@ -14,14 +14,11 @@ type Params = Promise<{ id: string; userId: string }>;
  * that keeps that a READ. Enforced in the API rather than by which buttons the
  * page renders — the page is not where that decision belongs.
  *
- * ONE SIDE EFFECT IS LOST. `assignBusinessUnitRole` also closed any open
- * `role_assignment` request for this person, so the obligation was discharged by
- * the write rather than by whichever screen the admin used. Governance requests
- * do not exist in the backend (see app/api/governance-approvals/route.ts), so
- * there is no request left to close — the queue that held it is empty.
- *
- * BACKLOG: re-attach the close-the-request side effect when governance requests
- * land, in FastAPI rather than here, so it fires for every caller.
+ * The side effect the mock's `assignBusinessUnitRole` had — closing any open
+ * `role_assignment` request for this person — now lives in FastAPI's
+ * `update_workspace_member_role` (`shared/routers/workspaces.py`, calling
+ * `complete_role_assignment` in `shared/services/governance_requests.py`), so it
+ * fires for every caller of this endpoint, not just this one screen.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Params }) {
   const { id, userId } = await params;

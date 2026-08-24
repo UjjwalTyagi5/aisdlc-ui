@@ -61,6 +61,8 @@ const KIND_BRAND: Record<ConnectorKind, { mark: string; bg: string }> = {
   ms_teams: { mark: "T", bg: "#4B53BC" }, // Teams indigo
   sharepoint: { mark: "SP", bg: "#038387" }, // SharePoint teal
   figma: { mark: "F", bg: "#1E1E1E" }, // Figma near-black (its 5-colour mark has no single brand colour)
+  confluence: { mark: "C", bg: "#1868DB" }, // Confluence blue (Atlassian family, distinct from Jira's)
+  sonarqube: { mark: "SQ", bg: "#4E9BCD" }, // SonarQube blue
   sso_okta: { mark: "OK", bg: "#007DC1" }, // Okta blue
   sso_entra: { mark: "ME", bg: "#0A66C2" }, // Microsoft Entra blue
 };
@@ -162,6 +164,12 @@ const CATEGORIES: { id: string; title: string; blurb: string; kinds: ConnectorKi
     kinds: ["github_actions"],
   },
   {
+    id: "quality",
+    title: "Code quality & security",
+    blurb: "Read live quality-gate status and issues, and triage them, for the Testing and Review agents.",
+    kinds: ["sonarqube"],
+  },
+  {
     id: "notifications",
     title: "Notifications & approvals",
     blurb: "Human-in-the-loop alerts and gate approvals.",
@@ -171,7 +179,7 @@ const CATEGORIES: { id: string; title: string; blurb: string; kinds: ConnectorKi
     id: "documents",
     title: "Documents & knowledge",
     blurb: "Read specifications and file generated documentation where the business looks for it.",
-    kinds: ["sharepoint"],
+    kinds: ["sharepoint", "confluence"],
   },
   {
     id: "design",
@@ -769,6 +777,8 @@ function CredentialsDialog({
 }) {
   const open = !!kind;
   const isJira = kind === "jira";
+  const isConfluence = kind === "confluence";
+  const isSonarQube = kind === "sonarqube";
   const isGithubActions = kind === "github_actions";
   const isFigma = kind === "figma";
   const mustChooseUnit = targetUnits.length > 1;
@@ -784,6 +794,7 @@ function CredentialsDialog({
   const [ghOwner, setGhOwner] = React.useState("");
   const [figmaToken, setFigmaToken] = React.useState("");
   const [figmaFileUrl, setFigmaFileUrl] = React.useState("");
+  const [confluenceSpaceKey, setConfluenceSpaceKey] = React.useState("");
   const [pending, setPending] = React.useState(false);
 
   // Reset all fields whenever the dialog closes or switches connector.
@@ -798,12 +809,13 @@ function CredentialsDialog({
       setGhOwner("");
       setFigmaToken("");
       setFigmaFileUrl("");
+      setConfluenceSpaceKey("");
       setUnitId("");
       setPending(false);
     }
   }, [open]);
 
-  const fieldsValid = isJira
+  const fieldsValid = isJira || isConfluence
     ? Boolean(baseUrl.trim() && email.trim() && apiToken.trim())
     : isGithubActions
       ? Boolean(ghToken.trim())
@@ -816,7 +828,14 @@ function CredentialsDialog({
     if (!kind || !canSubmit || pending) return;
     setPending(true);
     try {
-      const fields = isJira
+      const fields = isConfluence
+        ? {
+            base_url: baseUrl.trim(),
+            email: email.trim(),
+            api_token: apiToken,
+            space_key: confluenceSpaceKey.trim() || undefined,
+          }
+        : isJira
         ? { base_url: baseUrl.trim(), email: email.trim(), api_token: apiToken }
         : isGithubActions
           ? { pat: ghToken, owner: ghOwner.trim() || undefined }
@@ -857,11 +876,15 @@ function CredentialsDialog({
           <DialogDescription>
             {isJira
               ? "Paste your Jira site URL, account email, and an API token. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
-              : isGithubActions
+              : isConfluence
+                ? "Paste your Confluence site URL, account email, and an API token — the same kind of token Jira uses, configured separately here. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
+                : isGithubActions
                 ? "Paste a GitHub Personal Access Token (scopes: repo, workflow) and, optionally, the owner/org. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
                 : isFigma
                   ? "Paste a Figma personal access token (Figma → Settings → Security → Personal access tokens). Read-only: the Design agent reads your screens and never writes to them. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
-                  : "Paste your Azure DevOps organization URL and a Personal Access Token — this one connection powers boards, repos, and CI/CD. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."}
+                  : isSonarQube
+                    ? "Paste your SonarQube server URL and a user token (My Account → Security → Generate Token). Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
+                    : "Paste your Azure DevOps organization URL and a Personal Access Token — this one connection powers boards, repos, and CI/CD. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."}
           </DialogDescription>
         </DialogHeader>
 
@@ -950,7 +973,7 @@ function CredentialsDialog({
                 </p>
               </div>
             </>
-          ) : isJira ? (
+          ) : isJira || isConfluence ? (
             <>
               <div className="space-y-1.5">
                 <Label htmlFor="jira-base-url">Site URL</Label>
@@ -984,21 +1007,46 @@ function CredentialsDialog({
                   autoComplete="off"
                 />
               </div>
+              {isConfluence && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="confluence-space">
+                    Default space{" "}
+                    <span className="text-muted-foreground/60 normal-case">(optional)</span>
+                  </Label>
+                  <Input
+                    id="confluence-space"
+                    value={confluenceSpaceKey}
+                    onChange={(e) => setConfluenceSpaceKey(e.target.value)}
+                    placeholder="ENG"
+                    autoComplete="off"
+                  />
+                  <p className="text-muted-foreground text-[11px]">
+                    The space the Documentation agent files pages into when nobody names
+                    one. It can always be given a different space at the time of asking.
+                  </p>
+                </div>
+              )}
             </>
           ) : (
             <>
               <div className="space-y-1.5">
-                <Label htmlFor="ado-org-url">Organization URL</Label>
+                <Label htmlFor="ado-org-url">
+                  {isSonarQube ? "Server URL" : "Organization URL"}
+                </Label>
                 <Input
                   id="ado-org-url"
                   value={orgUrl}
                   onChange={(e) => setOrgUrl(e.target.value)}
-                  placeholder="https://dev.azure.com/your-org"
+                  placeholder={
+                    isSonarQube ? "https://sonar.your-company.com" : "https://dev.azure.com/your-org"
+                  }
                   autoComplete="off"
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="ado-pat">Personal Access Token</Label>
+                <Label htmlFor="ado-pat">
+                  {isSonarQube ? "User token" : "Personal Access Token"}
+                </Label>
                 <Input
                   id="ado-pat"
                   type="password"

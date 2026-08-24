@@ -32,6 +32,18 @@ _skip_no_db = pytest.mark.skipif(
     reason="POSTGRES_CONN_STRING not set — skipping DB-dependent RLS coverage tests",
 )
 
+# Tables that carry a tenant_id column but are DELIBERATELY global (non-RLS), each
+# documented at its ORM class in shared/models/orm.py:
+#   users:          "lookup by sub before tenant GUC is set (D-08)" — login has to
+#                    resolve identity before any tenant context exists to scope by.
+#   agent_sessions:  "faithful replacement for the legacy Django agent_session table
+#                    ... tenant_id is recorded for future RLS hardening but is not an
+#                    RLS anchor (mirrors Django, which had no isolation here)".
+# A tenant_id column is a signal this gate uses to FIND candidates, not a promise
+# that every one must be RLS-anchored — these two are exceptions by design, not by
+# accident, so they're named here rather than silently narrowing the query.
+_GLOBAL_TENANT_ID_TABLES = {"users", "agent_sessions"}
+
 
 @pytest.fixture(autouse=True)
 async def _dispose_shared_engine():
@@ -76,11 +88,13 @@ async def test_all_tenant_id_tables_have_rls_enabled():
                   AND pc.relrowsecurity = false
             """)
         )
-        unprotected = [row[0] for row in result.fetchall()]
+        unprotected = [row[0] for row in result.fetchall() if row[0] not in _GLOBAL_TENANT_ID_TABLES]
 
     assert unprotected == [], (
         f"Tables with tenant_id but relrowsecurity=false in pg_class: {unprotected}. "
-        "Add ALTER TABLE <name> ENABLE ROW LEVEL SECURITY (and FORCE) to the migration."
+        "Add ALTER TABLE <name> ENABLE ROW LEVEL SECURITY (and FORCE) to the migration, "
+        "or — if this table is deliberately global — add it to _GLOBAL_TENANT_ID_TABLES "
+        "above with the same justification its ORM class docstring carries."
     )
 
 

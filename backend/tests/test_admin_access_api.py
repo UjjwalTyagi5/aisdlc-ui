@@ -63,7 +63,7 @@ async def test_list_roles_matches_backend_matrix():
     roles = await list_roles()
     assert {r.name for r in roles} == set(ALL_ROLES)
     by_name = {r.name: r for r in roles}
-    assert by_name["admin"].permissions == ["admin:*"]
-    assert "artifact:approve_design" in by_name["tech_lead"].permissions
+    assert by_name["org_admin"].permissions == ["admin:*"]
+    assert "artifact:approve_design" in by_name["architect"].permissions
     # Every role carries a human label.
     assert all(r.label for r in roles)

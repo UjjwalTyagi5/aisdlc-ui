@@ -11,12 +11,9 @@ Every other file under agentic_app that imports AsyncSessionFactory must use it
 only inside get_db_session_* wrapper functions, never as a direct call in
 background paths.
 
-Audit covers the 10 call sites enumerated in the plan callsite_checklist:
-  1  webhooks/consumer.py (_ensure_webhook_run_row)
+Audit covers the call sites enumerated in the plan callsite_checklist:
   2  process_api.py (_handle_artifact_ready)
-  3  workflows/activities/sync_status_activity.py
   4  workflows/activities/_base.py (check_existing_artifact)
-  5  workflows/activities/emit_escalation_activity.py
   6  config/connectors/jira.py (audit_emitter)
   7  config/connectors/slack.py (audit_emitter)
   8  config/connectors/github_issues.py (audit_emitter)
@@ -25,6 +22,18 @@ Audit covers the 10 call sites enumerated in the plan callsite_checklist:
 
 And the deviation call site resolved at execute-time:
   D1 shared/services/artifact_service.py (persist_artifact — background pipeline path)
+
+REMOVED FROM THE AUDIT — gone with Temporal, not renamed:
+  1  webhooks/consumer.py (_ensure_webhook_run_row) — WebhookConsumer no longer exists
+     (see shared/tests/test_m6_verification.py's module docstring: "WebhookConsumer is
+     gone with Temporal: it existed to turn a stream event into a workflow, and there
+     is no engine to start").
+  3  workflows/activities/sync_status_activity.py — Temporal @activity.defn wrapper;
+     gone per workflows/activities/__init__.py's own docstring. Status sync is now the
+     bridge in workflows/activities/pipeline_session.py.
+  5  workflows/activities/emit_escalation_activity.py — same removal; gate-pending /
+     escalation notification now lives in shared/services/orchestrator/gate_routing.py
+     and shared/governance/routing.py (notify_gate_pending), not a Temporal activity.
 """
 from __future__ import annotations
 
@@ -50,11 +59,8 @@ _BARE_CALL_PATTERN = re.compile(r"\bAsyncSessionFactory\s*\(\s*\)")
 # ── MIGRATED call sites (must NOT contain bare AsyncSessionFactory()) ─────────
 
 _MIGRATED_FILES = [
-    "webhooks/consumer.py",                           # site 1
     "process_api.py",                                 # site 2
-    "workflows/activities/sync_status_activity.py",   # site 3
     "workflows/activities/_base.py",                  # site 4
-    "workflows/activities/emit_escalation_activity.py",  # site 5
     "config/connectors/jira.py",                      # site 6
     "config/connectors/slack.py",                     # site 7
     "config/connectors/github_issues.py",             # site 8
@@ -122,9 +128,6 @@ def test_allowlisted_files_still_exist_and_contain_factory():
 # ── Positive contract: migrated files must use the replacement API ─────────────
 
 _TENANT_SESSION_USERS = [
-    "webhooks/consumer.py",
-    "workflows/activities/emit_escalation_activity.py",
-    "workflows/activities/sync_status_activity.py",
     "workflows/activities/_base.py",
     "config/connectors/jira.py",
     "config/connectors/slack.py",
@@ -135,8 +138,24 @@ _TENANT_SESSION_USERS = [
 ]
 
 
+# Connectors no longer call get_db_session_for_tenant directly for audit writes — all
+# five route audit_emitter() through shared/audit/service.py's audit_service.emit(),
+# which itself calls get_db_session_for_tenant(str(payload.tenant_id)) (see
+# shared/audit/service.py). One tenant-scoped write path shared by every connector,
+# rather than five copies of the same call — the tenant-scoping guarantee this test
+# checks for is still satisfied, just centralized one level down.
+_AUDIT_SERVICE_INDIRECT_USERS = {
+    "config/connectors/jira.py",
+    "config/connectors/slack.py",
+    "config/connectors/github_issues.py",
+    "config/connectors/azure_repos.py",
+    "config/connectors/azure_devops.py",
+}
+
+
 def test_migrated_files_use_tenant_session_api():
-    """Assert that key migrated files import get_db_session_for_tenant.
+    """Assert that key migrated files use the tenant-scoped session — directly, or via
+    shared.audit.service.audit_service for the connector audit_emitter call sites.
 
     This is a positive-contract check: each migrated write path must actively
     reference the tenant-scoped session function, not just avoid AsyncSessionFactory().
@@ -144,12 +163,16 @@ def test_migrated_files_use_tenant_session_api():
     missing: list[str] = []
     for rel_path in _TENANT_SESSION_USERS:
         source = _read(rel_path)
-        if "get_db_session_for_tenant" not in source:
-            missing.append(rel_path)
+        if "get_db_session_for_tenant" in source:
+            continue
+        if rel_path in _AUDIT_SERVICE_INDIRECT_USERS and "audit_service" in source:
+            continue
+        missing.append(rel_path)
 
     assert not missing, (
         "REQ-M7-07 positive contract: the following migrated files do not reference "
-        "get_db_session_for_tenant — verify the migration was applied correctly:\n"
+        "get_db_session_for_tenant (directly, or via audit_service for connector "
+        "audit_emitter call sites) — verify the migration was applied correctly:\n"
         + "\n".join(f"  {f}" for f in missing)
     )
 
@@ -169,40 +192,9 @@ def test_process_api_early_returns_on_missing_tenant():
     )
 
 
-def test_webhook_consumer_preserves_best_effort():
-    """_ensure_webhook_run_row must preserve the D-07 best-effort wrapper.
-
-    The outer try/except must still fall back to a throwaway UUID so a
-    tenant-resolution or DB failure never blocks the trigger.
-    """
-    source = _read("webhooks/consumer.py")
-    assert "get_db_session_for_tenant" in source, (
-        "_ensure_webhook_run_row must use get_db_session_for_tenant"
-    )
-    # Best-effort fallback: returns str(uuid.uuid4()) on any exception
-    assert "uuid.uuid4()" in source, (
-        "_ensure_webhook_run_row best-effort fallback (D-07) must be preserved"
-    )
-    # The outer try/except that wraps the whole DB path
-    assert "except Exception" in source, (
-        "Best-effort outer except Exception block must still exist (D-07)"
-    )
-
-
-def test_sdlcworkflow_threads_tenant_id():
-    """SDLCWorkflow.run must thread tenant_id into _sync_status calls (REQ-M7-07).
-
-    Contextvars do not cross worker/process boundaries — the tenant must be
-    passed as an explicit argument.
-    """
-    source = _read("workflows/sdlc_workflow.py")
-    assert "tenant_id = input.tenant_id" in source, (
-        "SDLCWorkflow.run must extract tenant_id from input and pass it to _sync_status"
-    )
-    assert "tenant_id=input.tenant_id" not in source or True, "formatting variant — OK"
-    # The _sync_status helper must accept tenant_id
-    assert "def _sync_status" in source, "SDLCWorkflow._sync_status must exist"
-    # sync_run_status_activity must receive tenant_id in args list
-    assert "args=[run_id, status, stage, gate_pending, event_type, tenant_id]" in source, (
-        "_sync_status must pass tenant_id as the 6th positional arg to sync_run_status_activity"
-    )
+# NOTE — test_webhook_consumer_preserves_best_effort and test_sdlcworkflow_threads_
+# tenant_id removed: both read files (webhooks/consumer.py, workflows/sdlc_workflow.py)
+# that no longer exist — Temporal WorkflowDefn/activity plumbing retired along with
+# WebhookConsumer (see the module docstring's "REMOVED FROM THE AUDIT" section above).
+# tenant_id threading for the conversational path that replaced them is covered by
+# tests/test_m74_byok.py's test_tenant_id_threaded_through_pipeline_session.

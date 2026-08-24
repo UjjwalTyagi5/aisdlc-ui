@@ -29,6 +29,7 @@ from shared.authz.permissions import ROLE_TIER
 from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Project, Role, RoleBinding, UsageMonthly, User, Workspace
+from shared.services.governance_requests import complete_role_assignment
 
 workspaces_router = APIRouter()
 
@@ -132,6 +133,11 @@ class AddMemberIn(BaseModel):
 
 class UpdateMemberRoleIn(BaseModel):
     roleName: str = Field(min_length=1, max_length=64)
+    # Cosmetic-with-teeth: a custom role's display name lives in the roles store,
+    # not in roleName (an opaque id like "role_3"), so without it the governance
+    # request this endpoint closes (see complete_role_assignment below) would
+    # record a raw id in its "Assigned ___." note instead of a name a human wrote.
+    roleLabel: Optional[str] = None
 
 
 # ─── serialisers ─────────────────────────────────────────────────────────────
@@ -663,6 +669,21 @@ async def update_workspace_member_role(
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
+
+        # Close the onboarding-raised role_assignment request this discharges, if
+        # one is open — see onboarding.py: "it closes when a role is actually
+        # assigned rather than by being approved." Best-effort; never raises, so a
+        # governance-table hiccup can never undo the role change above.
+        from shared.authz.effective_role import actor_display_name
+        await complete_role_assignment(
+            db,
+            tenant_id=str(tenant_uuid),
+            workspace_id=workspace_id,
+            user_id=user_id,
+            role_label=body.roleLabel or body.roleName,
+            decided_by_id=actor,
+            decided_by_name=await actor_display_name(db, request),
+        )
 
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     email = user.email if user else None

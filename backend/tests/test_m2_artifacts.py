@@ -6,7 +6,6 @@ test_artifact_persistence_no_handoff:
   Part 2 — artifact import round-trip: verifies artifact models and service
   are importable and the write_and_notify call path is wired correctly.
 """
-import subprocess
 import sys
 import os
 import pytest
@@ -14,27 +13,16 @@ import pytest
 
 @pytest.mark.integration
 async def test_artifact_persistence_no_handoff():
-    """Verify: requirements agent writes artifact to Postgres; no HANDOFF:: string in any agent file."""
-    # Part 1: grep gate — must return zero matches
-    agents_dir = os.path.join(
-        os.path.dirname(__file__), "..", "agents_orchestrator"
-    )
-    agents_dir = os.path.realpath(agents_dir)
-    result = subprocess.run(
-        ["grep", "-r", "--include=*.py", "HANDOFF::", agents_dir],
-        capture_output=True,
-        text=True,
-    )
-    matches = [
-        line for line in result.stdout.splitlines()
-        if not os.path.basename(line.split(":")[0]).startswith("test_")
-    ]
-    assert not matches, (
-        f"HANDOFF:: sentinel still present in agent files:\n"
-        + "\n".join(matches)
-    )
+    """Verify: requirements agent writes artifact to Postgres; artifact service is wired correctly.
 
-    # Part 2: artifact service is importable and types are correct
+    Was also a grep gate for zero HANDOFF:: matches in agents_orchestrator/ (Part 1).
+    Removed — see shared/tests/test_m2_verification.py's module docstring for the
+    full reasoning: HANDOFF:: was reintroduced as the Copilot chat flow's live
+    stage-transition sentinel (parsed by copilot_api.py's _detect_handoff, emitted
+    by the requirements/design prompts), so the gate now fails permanently against
+    correct, deliberate code rather than catching leftover legacy debt.
+    """
+    # Artifact service is importable and types are correct
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from shared.services.artifact_service import (
         persist_artifact,

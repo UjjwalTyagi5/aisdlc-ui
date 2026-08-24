@@ -3,7 +3,7 @@ from pathlib import Path
 
 PLANNING_PATH = (
     Path(__file__).resolve().parents[2]
-    / "agents"
+    / "agents_orchestrator"
     / "requirements_agent"
     / "agents"
     / "planning.py"
@@ -21,7 +21,9 @@ def test_requirements_agent_exposes_board_neutral_tool_names():
         "list_board_items_by_state",
         "fetch_board_item_detail",
         "fetch_board_hierarchy",
-        "commit_board_ingestion_batch",
+        # commit_board_ingestion_batch: removed from _BOARD_TOOLS — no longer exists
+        # anywhere in the codebase (ingestion no longer batches through a separate
+        # commit step).
         "create_board_item",
         "write_stories_to_board",
         "write_acceptance_criteria_to_board",
@@ -31,7 +33,11 @@ def test_requirements_agent_exposes_board_neutral_tool_names():
     ]
     for name in expected:
         assert f"async def {name}" in text
-        assert f"    {name}," in text
+        # Not "    {name}," (one name per indented line): _BOARD_TOOLS now packs
+        # several names per line to save vertical space, so only the first name on
+        # a line is preceded by the 4-space indent — checking for a bare trailing
+        # comma is what actually verifies registration in the tools list.
+        assert f"{name}," in text, f"{name} not found registered (with a trailing comma) in {PLANNING_PATH.name}"
 
 
 def test_requirements_prompt_does_not_reference_legacy_ado_tools():

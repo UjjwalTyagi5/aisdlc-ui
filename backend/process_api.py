@@ -341,7 +341,9 @@ def _build_connectors_for_health_probe():
     from config.connectors.msteams import MSTeamsConnector
     from config.connectors.sharepoint import SharePointConnector
     from config.connectors.figma import FigmaConnector
-    from config.env import ADO_ORG_URL, JIRA_URL
+    from config.connectors.confluence import ConfluenceConnector
+    from config.connectors.sonarqube import SonarQubeConnector
+    from config.env import ADO_ORG_URL, JIRA_URL, CONFLUENCE_URL, SONARQUBE_URL
 
     return [
         AzureDevOpsConnector(ADO_ORG_URL),
@@ -353,6 +355,8 @@ def _build_connectors_for_health_probe():
         MSTeamsConnector(),
         SharePointConnector(),
         FigmaConnector(),
+        ConfluenceConnector(CONFLUENCE_URL),
+        SonarQubeConnector(SONARQUBE_URL),
     ]
 
 

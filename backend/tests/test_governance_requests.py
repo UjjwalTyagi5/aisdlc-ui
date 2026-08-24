@@ -254,6 +254,59 @@ async def test_only_the_current_approver_decides(org):
 
 
 @pytest.mark.asyncio
+async def test_role_assignment_closes_when_the_role_is_actually_assigned(org):
+    """The onboarding.py contract: a role_assignment request closes because the
+    membership changed, not because someone clicked approve on it — decide()
+    cannot apply it (no role is named in the request itself), so
+    complete_role_assignment is the only path that ever closes one.
+
+    Regression test for the exact bug reported live: a BU Admin used the "Assign
+    role" dialog (which calls update_workspace_member_role, not decide()), the
+    Users page showed the new role immediately, and the request sat in the
+    inbox forever because nothing ever closed it — complete_role_assignment did
+    not exist yet.
+    """
+    ana = f"ana-{_uuid.uuid4()}"
+    req = await _raise(
+        org, initiator=f"orgadmin-{_uuid.uuid4()}", role="org_admin",
+        rtype="role_assignment", system_raised=True, target_ref=ana,
+        payload={"userId": ana, "email": f"{ana}@abcbank.com"},
+        title=f"Role needed: Ana in {org['bu']}",
+    )
+    assert req["status"] == "submitted"
+    assert req["currentApproverRole"] == "bu_admin"
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await svc.complete_role_assignment(
+            s, tenant_id=org["org"], workspace_id=org["bu"], user_id=ana,
+            role_label="Project Admin", decided_by_id="farah-1", decided_by_name="Farah",
+        )
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        out = await svc.get_request(s, req["id"])
+    assert out["status"] == "approved"
+    assert out["decidedBy"] == "Farah"
+    assert out["decidedAt"] is not None
+    assert out["currentApproverRole"] is None
+    assert out["reason"] == "Assigned Project Admin."
+    assert out["timeline"][-1]["kind"] == "approved"
+    assert out["timeline"][-1]["note"] == "Assigned Project Admin."
+
+
+@pytest.mark.asyncio
+async def test_role_assignment_close_is_a_noop_with_no_open_request(org):
+    """A role changed for some other reason (correction, re-assignment) must not
+    invent a request to close — same contract the frontend mock documents."""
+    priya = f"priya-{_uuid.uuid4()}"
+    async with get_db_session_for_tenant(org["org"]) as s:
+        # Must not raise even though no role_assignment request exists at all.
+        await svc.complete_role_assignment(
+            s, tenant_id=org["org"], workspace_id=org["bu"], user_id=priya,
+            role_label="Developer", decided_by_id="farah-1", decided_by_name="Farah",
+        )
+
+
+@pytest.mark.asyncio
 async def test_self_approval_is_reported_ahead_of_already_closed(org):
     """The more specific answer wins: 'you raised this' beats 'this is closed'."""
     alice, bob = f"alice-{_uuid.uuid4()}", f"bob-{_uuid.uuid4()}"

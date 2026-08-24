@@ -2,30 +2,36 @@
 
 Covers:
   (a) 401 without a Bearer token on /artifacts/{id}, /connectors, /runs/{id}/signals/{name}
-      (MUST pass — no DB required, mirrors Plan 02 harness)
+      (MUST pass — no DB required, mirrors Plan 02 harness). The signals path stays
+      covered here even though no route now matches it (see note below): the JWT
+      middleware gates every path before routing, so this still exercises real
+      behaviour rather than testing a route that no longer exists.
   (b) With a valid HS256 token, GET /connectors returns a list with Connector
       contract fields (id, tenantId, kind, name, installed, health, capabilities,
       lastCheckedAt).
-  (c) POST /runs/{id}/signals/hitl.decision returns SignalAck shape
-      (accepted=True, signalName, runId, idempotencyKey).
 
 Tests use httpx AsyncClient + ASGITransport (same pattern as Plan 02 test harness).
-
-DB-required tests (c) skip cleanly when POSTGRES_CONN_STRING is not set; the 401
-assertions and connector list test always run in CI even without Postgres.
 
 Threat mitigations verified:
   T-M4-04: GET /connectors requires auth (test_connectors_requires_auth)
   T-M4-05: GET /artifacts/{id} requires auth (test_artifacts_requires_auth)
-  T-M4-06: signals stub returns SignalAck + records audit trail
-           (test_signal_returns_ack)
+
+NOTE — signal-dispatch tests removed: POST /runs/{id}/signals/{name} (T-M4-06's
+SignalAck-returning stub) is gone from process_api.py — no signals_router is
+included anywhere, and shared.routers._schemas.SignalAck has no other reader.
+Gate/stage progression moved to the Copilot-driven flow in shared/routers/runs.py
+("Chat-driven progression: for a Copilot-driven run there is no workflow, so the
+gate decision mutates run state directly here") — the same architectural move that
+retired WebhookConsumer (see shared/tests/test_m6_verification.py). The two tests
+that posted to the dead route and asserted a SignalAck body were removed rather than
+left red against functionality that no longer exists.
 """
 import time
 import uuid
 
 import pytest
 
-from config.env import JWT_SECRET_KEY, JWT_ALGORITHM, POSTGRES_CONN_STRING
+from config.env import JWT_SECRET_KEY, JWT_ALGORITHM
 
 # Guard: process_api imports the full agents_orchestrator tree which requires
 # langgraph, aiofiles, python-docx, and other heavy deps not installed in
@@ -51,39 +57,26 @@ _skip_no_jwt = pytest.mark.skipif(
     reason="JWT_SECRET_KEY not set — skipping resource router auth tests",
 )
 
-_skip_no_db = pytest.mark.skipif(
-    not POSTGRES_CONN_STRING,
-    reason="POSTGRES_CONN_STRING not set — skipping DB-dependent resource router tests",
-)
+def _mint_token(tenant_id: str | None = None, exp_offset: int = 3600) -> str:
+    """Mint a signed HS256 token using the configured secret.
 
-
-async def _check_db_reachable() -> bool:
-    """Probe Postgres once; return False if unreachable so DB tests can skip cleanly."""
-    if not POSTGRES_CONN_STRING:
-        return False
-    try:
-        from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy import text
-        from sqlalchemy.pool import NullPool
-        engine = create_async_engine(POSTGRES_CONN_STRING, poolclass=NullPool)
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        await engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-def _mint_token(tenant_id: str = "test-tenant-001", exp_offset: int = 3600) -> str:
-    """Mint a signed HS256 token using the configured secret."""
+    tenant_id defaults to a fresh UUID, not a literal string: require_permission's
+    workspace-resolution fallback (active_workspace_for_request) now runs a real
+    uuid.UUID(str(tenant_id)) against Postgres, and a non-UUID tenant_id 500s instead
+    of the clean 404-then-fall-through-to-permission-check it's designed to produce
+    for a tenant with no seeded workspace. permissions defaults to the wildcard so
+    these tests exercise the routes' shape, not RBAC — narrower grants belong in
+    RBAC-specific tests.
+    """
     try:
         import jwt
         now = int(time.time())
         payload = {
             "sub": "test-user-001",
-            "tenant_id": tenant_id,
+            "tenant_id": tenant_id or str(uuid.uuid4()),
             "iat": now,
             "exp": now + exp_offset,
+            "permissions": ["admin:*"],
         }
         return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM or "HS256")
     except ImportError:
@@ -196,81 +189,3 @@ async def test_connectors_returns_list():
             f"connector.health must be a valid ConnectorHealth enum value: {item}"
         )
 
-
-# ── Signal ack tests (DB-dependent) ─────────────────────────────────────────
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@_skip_no_jwt
-@_skip_no_db
-@_skip_no_process_api
-async def test_signal_returns_ack():
-    """POST /runs/{id}/signals/hitl.decision returns SignalAck shape (T-M4-06).
-
-    Validates the stub returns accepted=True + correct field names matching
-    the Zod SignalAck schema: {accepted, signalName, runId, idempotencyKey}.
-    """
-    if not await _check_db_reachable():
-        pytest.skip(
-            "Postgres unreachable — skipping DB-dependent signal ack test "
-            "(POSTGRES_CONN_STRING set but DB not running)"
-        )
-
-    from httpx import ASGITransport, AsyncClient
-    from process_api import app
-
-    run_id = str(uuid.uuid4())
-    idempotency_key = f"test-idem-{uuid.uuid4()}"
-    token = _mint_token()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            f"/runs/{run_id}/signals/hitl.decision",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"idempotencyKey": idempotency_key, "payload": {"decision": "approve"}},
-        )
-    assert resp.status_code == 200, (
-        f"Expected 200 on signal dispatch, got {resp.status_code}: {resp.text}"
-    )
-    body = resp.json()
-    assert body.get("accepted") is True, f"SignalAck.accepted must be True: {body}"
-    assert body.get("signalName") == "hitl.decision", (
-        f"SignalAck.signalName must equal the signal name: {body}"
-    )
-    assert body.get("runId") == run_id, f"SignalAck.runId must echo the run_id: {body}"
-    assert "idempotencyKey" in body, f"SignalAck must contain idempotencyKey: {body}"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@_skip_no_jwt
-@_skip_no_db
-@_skip_no_process_api
-async def test_signal_with_no_idempotency_key_auto_generates():
-    """POST /runs/{id}/signals/{name} with no idempotencyKey in body gets one auto-generated."""
-    if not await _check_db_reachable():
-        pytest.skip(
-            "Postgres unreachable — skipping DB-dependent signal auto-key test "
-            "(POSTGRES_CONN_STRING set but DB not running)"
-        )
-
-    from httpx import ASGITransport, AsyncClient
-    from process_api import app
-
-    run_id = str(uuid.uuid4())
-    token = _mint_token()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            f"/runs/{run_id}/signals/custom.signal",
-            headers={"Authorization": f"Bearer {token}"},
-            json={},
-        )
-    assert resp.status_code == 200, (
-        f"Expected 200 on signal dispatch without idempotencyKey, got {resp.status_code}: {resp.text}"
-    )
-    body = resp.json()
-    assert body.get("accepted") is True
-    assert body.get("idempotencyKey"), "Auto-generated idempotencyKey must be non-empty"

@@ -214,7 +214,7 @@ class TestKeyvaultTenantScoping:
 
         with patch("shared.keyvault.AZURE_KEY_VAULT_URL", "https://vault.example.com"), \
              patch("shared.keyvault.SecretClient", return_value=mock_client), \
-             patch("shared.keyvault.DefaultAzureCredential", return_value=mock_credential):
+             patch("shared.keyvault.get_azure_credential", return_value=mock_credential):
             from shared.keyvault import load_secret
             result = await load_secret("jira-url", tenant_id="abc")
 
@@ -245,7 +245,7 @@ class TestKeyvaultTenantScoping:
 
         with patch("shared.keyvault.AZURE_KEY_VAULT_URL", "https://vault.example.com"), \
              patch("shared.keyvault.SecretClient", return_value=mock_client), \
-             patch("shared.keyvault.DefaultAzureCredential", return_value=mock_credential):
+             patch("shared.keyvault.get_azure_credential", return_value=mock_credential):
             from shared.keyvault import load_secret
             result = await load_secret("jira-url")
 

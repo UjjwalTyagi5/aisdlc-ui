@@ -3,13 +3,33 @@ tenant connector is live for the graph run (live-pass finding F1).
 
 These tests stub the graph stream and the scope's connector resolution, then assert
 a connector is live inside the stream and released afterward.
+
+chat() now requires a verified `request` (identity comes from request.state, never
+a trusted form field — see its docstring) and both handlers call
+assert_agent_access_for_chat against a real project. Neither concern is what this
+test is about, so both are stubbed out here the same way test_agent_run_scope.py
+stubs _stage_board_kind: this is a connector-injection unit test, not an access- or
+project-resolution integration test.
 """
-from unittest.mock import MagicMock
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import agents_orchestrator.requirements_agent.requirements_agent_api as api
 from config.connectors.context import get_connector
+
+_TENANT_ID = str(uuid.uuid4())
+
+
+async def _fake_access_check(db, *, tenant_id, project_id, user_id, agent_id):
+    """Bypass the real project/membership DB check — no project exists in this test."""
+    return None
+
+
+async def _fake_stage_kind(tenant_id, project_id, agent_id):
+    return "azure_devops"
 
 
 @pytest.mark.asyncio
@@ -17,11 +37,13 @@ async def test_rest_chat_enters_scope_with_connector(monkeypatch, tmp_path):
     mock_connector = MagicMock()
     mock_connector.display_name = "Azure DevOps"
 
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         return mock_connector
 
     # Resolve the connector inside the real agent_run_scope.
     monkeypatch.setattr("shared.services.agent_run.get_connector_for_session", _fake_get)
+    monkeypatch.setattr("shared.services.agent_run._stage_board_kind", _fake_stage_kind)
+    monkeypatch.setattr(api, "assert_agent_access_for_chat", _fake_access_check)
 
     connector_seen = {}
 
@@ -46,16 +68,20 @@ async def test_rest_chat_enters_scope_with_connector(monkeypatch, tmp_path):
     # Fresh session so first_turn branch runs.
     api._initialized_sessions.discard("sess-rest-1")
 
+    fake_request = SimpleNamespace(state=SimpleNamespace(user_id="user-1", tenant_id=_TENANT_ID))
+
     await api.chat(
+        request=fake_request,
         conversation_context="pull my ADO work items",
         task_intent="",
         pipeline_context=None,
         provider_kind="azure_devops",
         session_id="sess-rest-1",
         user_id="user-1",
-        tenant_id="tenant-123",
+        tenant_id=_TENANT_ID,
         model_id=None,
         uploaded_files=None,
+        db=AsyncMock(),
     )
 
     assert connector_seen["value"] is mock_connector
@@ -69,10 +95,12 @@ async def test_ws_chat_enters_scope_with_connector(monkeypatch, tmp_path):
     mock_connector = MagicMock()
     mock_connector.display_name = "Azure DevOps"
 
-    async def _fake_get(kind="azure_devops", tenant_id=""):
+    async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
         return mock_connector
 
     monkeypatch.setattr("shared.services.agent_run.get_connector_for_session", _fake_get)
+    monkeypatch.setattr("shared.services.agent_run._stage_board_kind", _fake_stage_kind)
+    monkeypatch.setattr(api, "assert_agent_access_for_chat", _fake_access_check)
 
     connector_seen = {}
 
@@ -112,7 +140,7 @@ async def test_ws_chat_enters_scope_with_connector(monkeypatch, tmp_path):
         {"session_id": "sess-ws-1", "conversation_context": "pull my ADO work items"},
         websocket=MagicMock(),
         user_id="user-1",
-        tenant_id="tenant-123",
+        tenant_id=_TENANT_ID,
     )
 
     assert connector_seen["value"] is mock_connector

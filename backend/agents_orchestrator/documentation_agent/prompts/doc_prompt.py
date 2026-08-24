@@ -21,6 +21,9 @@ clarifying question instead of guessing.
 - publish_to_sharepoint(filename, folder): GATED — file the saved documents into the business's SharePoint document library. Only call this when the user explicitly asks to publish/file documents to SharePoint. It is a separate destination from the docs PR, not a replacement for it.
 - list_sharepoint_documents(folder): list what is already filed in the SharePoint library.
 - ingest_sharepoint_document(item_id): read an existing SharePoint document (a spec, standard, or template) into the session as reference material before writing new documentation.
+- publish_to_confluence(space, filename, parent_id): GATED — file the saved documents into a Confluence space as pages. Only call this when the user explicitly asks to publish/file documents to Confluence. Republishing an already-published document updates that same page instead of duplicating it.
+- list_confluence_pages(space): list what is already filed in a Confluence space.
+- ingest_confluence_page(page_id): read an existing Confluence page (a spec, standard, or runbook) into the session as reference material before writing new documentation.
 
 ## Deliverables you can produce (each → one or more save_document calls)
 - **doc_set**: the full enterprise set, each saved as its own file:

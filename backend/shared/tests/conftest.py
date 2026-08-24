@@ -29,9 +29,18 @@ async def db_session(pg_conn_string):
     try:
         yield session
     finally:
-        await session.rollback()
-        await session.close()
-        await engine.dispose()
+        # RuntimeError("Event loop is closed") here is Windows ProactorEventLoop
+        # teardown noise, not a real failure: pytest-asyncio's per-test loop can
+        # finish closing before asyncpg's connection-close callback (scheduled via
+        # loop.create_task inside engine.dispose()) gets to run. The test's own
+        # assertions have already completed by this point either way.
+        try:
+            await session.rollback()
+            await session.close()
+            await engine.dispose()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
 
 
 @pytest_asyncio.fixture
@@ -41,7 +50,12 @@ async def redis_client(redis_url_str):
     try:
         yield client
     finally:
-        await client.aclose()
+        # Same Windows ProactorEventLoop teardown race as db_session above.
+        try:
+            await client.aclose()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
 
 
 @pytest_asyncio.fixture

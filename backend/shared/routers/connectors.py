@@ -78,6 +78,8 @@ _KNOWN_KINDS = {
     "ms_teams",
     "sharepoint",
     "figma",
+    "confluence",
+    "sonarqube",
     "sso_okta",
     "sso_entra",
 }
@@ -98,6 +100,8 @@ _CATALOG_KINDS = {
     "ms_teams",
     "sharepoint",
     "figma",
+    "confluence",
+    "sonarqube",
 }
 
 # KV secret names written at callback per connector kind (D-04: disconnect = delete these)
@@ -115,6 +119,8 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
 _KIND_SECRET_STORE_REFS: Dict[str, List[str]] = {
     "azure_devops": ["ado-pat", "ado-org-url"],
     "jira": ["jira-url", "jira-email", "jira-api-token"],
+    "confluence": ["confluence-url", "confluence-email", "confluence-api-token", "confluence-space-key"],
+    "sonarqube": ["sonarqube-url", "sonarqube-token"],
     "github_actions": ["gha-pat", "gha-owner"],
     # ms_teams and sharepoint SHARE one Entra app registration (msgraph-*), so those
     # three refs are deliberately absent here — see _MSGRAPH_SHARED_REFS below. Only
@@ -158,6 +164,8 @@ _MSGRAPH_SIBLING: Dict[str, str] = {"ms_teams": "sharepoint", "sharepoint": "ms_
 _KIND_PRIMARY_CREDENTIAL: Dict[str, str] = {
     "azure_devops": "ado-pat",
     "jira": "jira-api-token",
+    "confluence": "confluence-api-token",
+    "sonarqube": "sonarqube-token",
     "github_actions": "gha-pat",
     # A per-kind MARKER, not msgraph-client-secret. The two Graph kinds share one app
     # registration, so naming the shared secret as either kind's primary credential
@@ -208,6 +216,8 @@ def _build_connector_list(
 _CREDENTIAL_CONNECTORS = [
     ("azure_devops", "ado-pat", "ado-org-url"),
     ("jira", "jira-api-token", "jira-url"),
+    ("confluence", "confluence-api-token", "confluence-url"),
+    ("sonarqube", "sonarqube-token", "sonarqube-url"),
     ("github_actions", "gha-pat", "gha-owner"),
     ("ms_teams", "msteams-connected", "msteams-channel-id"),
     ("sharepoint", "sharepoint-connected", "sharepoint-site-id"),
@@ -443,7 +453,9 @@ async def install_connector(kind: str, request: Request):
 # tenant secret store (Key Vault in prod, Fernet-encrypted DB in dev) and a live
 # probe verifies them. The secret is never echoed back.
 
-_CREDENTIAL_KINDS = {"azure_devops", "jira", "github_actions", "ms_teams", "sharepoint", "figma"}
+_CREDENTIAL_KINDS = {
+    "azure_devops", "jira", "confluence", "sonarqube", "github_actions", "ms_teams", "sharepoint", "figma",
+}
 
 
 class SetCredentialsIn(BaseModel):
@@ -457,7 +469,7 @@ class SetCredentialsIn(BaseModel):
     # Azure DevOps
     org_url: Optional[str] = None
     pat: Optional[str] = None
-    # Jira (Basic auth)
+    # Jira / Confluence (both Basic auth, same shape — kind decides which secret refs)
     base_url: Optional[str] = None
     email: Optional[str] = None
     api_token: Optional[str] = None
@@ -475,6 +487,8 @@ class SetCredentialsIn(BaseModel):
     site_url: Optional[str] = None
     drive_id: Optional[str] = None
     folder_path: Optional[str] = None
+    # Confluence default space (optional convenience — see notification_targets.confluence_target).
+    space_key: Optional[str] = None
     # Figma. `pat` is reused for the Personal Access Token shape; figma_access_token
     # is the OAuth shape, normally written by the callback rather than pasted here.
     # file_url is an optional default file (URL or bare key), not a credential.
@@ -732,6 +746,16 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             await secret_store.put_secret(tenant_id, "ado-org-url", org_url)
             await secret_store.put_secret(tenant_id, "ado-pat", pat)
             account = org_url
+        elif kind == "sonarqube":
+            server_url = (body.org_url or "").strip()
+            token = (body.pat or "").strip()
+            if not server_url or not token:
+                raise HTTPException(
+                    status_code=422, detail="SonarQube requires 'org_url' (server URL) and 'pat' (token)."
+                )
+            await secret_store.put_secret(tenant_id, "sonarqube-url", server_url)
+            await secret_store.put_secret(tenant_id, "sonarqube-token", token)
+            account = server_url
         elif kind == "github_actions":
             pat = (body.pat or "").strip()
             owner = (body.owner or "").strip()
@@ -747,6 +771,23 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             account = await _store_sharepoint_credentials(tenant_id, body, secret_store)
         elif kind == "figma":
             account = await _store_figma_credentials(tenant_id, body, secret_store)
+        elif kind == "confluence":
+            base_url = (body.base_url or "").strip()
+            email = (body.email or "").strip()
+            api_token = (body.api_token or "").strip()
+            if not base_url or not email or not api_token:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Confluence requires 'base_url', 'email', and 'api_token'.",
+                )
+            await secret_store.put_secret(tenant_id, "confluence-url", base_url)
+            await secret_store.put_secret(tenant_id, "confluence-email", email)
+            await secret_store.put_secret(tenant_id, "confluence-api-token", api_token)
+            if (body.space_key or "").strip():
+                await secret_store.put_secret(
+                    tenant_id, "confluence-space-key", body.space_key.strip()
+                )
+            account = base_url
         else:  # jira
             base_url = (body.base_url or "").strip()
             email = (body.email or "").strip()

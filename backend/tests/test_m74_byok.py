@@ -57,17 +57,22 @@ class TestAgentStateTenantId:
         hints = DevAgentState.__annotations__
         assert "tenant_id" in hints, "DevAgentState in dev_agent.py must have tenant_id field"
 
-    async def test_tenant_id_passed_from_activity_to_graph(self):
-        """Activity ainvoke call includes 'tenant_id' in the initial input dict.
+    async def test_tenant_id_threaded_through_pipeline_session(self):
+        """The conversational path passes tenant_id into the stage's session (REQ-M7-18).
 
-        Verifies by inspecting the activity source that the pattern
-        `'tenant_id': input.tenant_id` appears in the ainvoke call.
+        Was test_tenant_id_passed_from_activity_to_graph, importing
+        workflows.activities.requirements_activity — a Temporal @activity.defn
+        wrapper. workflows/activities/__init__.py's own docstring: "The per-agent
+        @activity.defn wrappers that used to sit beside these were Temporal bindings
+        and are gone with it." tenant_id threading itself is very much still a live
+        concern; it's verified against its actual current carrier,
+        workflows/activities/pipeline_session.py, instead.
         """
         import inspect
-        from workflows.activities import requirements_activity
-        src = inspect.getsource(requirements_activity)
-        assert "input.tenant_id" in src, (
-            "requirements_activity must pass input.tenant_id in the ainvoke dict"
+        from workflows.activities import pipeline_session
+        src = inspect.getsource(pipeline_session)
+        assert "input.tenant_id" in src or "tenant_id = getattr(input" in src, (
+            "pipeline_session must thread tenant_id from the activity input"
         )
 
 
@@ -127,13 +132,33 @@ class TestByokNoLeak:
                     )
 
     async def test_exception_handler_does_not_log_str_exc(self):
-        """Exception handlers in design agent must not log str(exc) — only type name (SC#8)."""
+        """Exception handlers in design agent must not log str(exc) — only type name (SC#8).
+
+        Was a whole-file substring check ("str(e)" not in src or "logger" not in
+        src) — which fails the moment BOTH strings appear anywhere in the file, even
+        when they're nowhere near each other. architecture.py legitimately uses
+        str(e) once outside logging (a truncated tool-error message shown to the
+        user in chat, not written to server logs — see the comment at that call
+        site), so the blunt check could never pass while that call exists. The
+        actual guard this test is for — no logger.* call embeds str(exc) or the bare
+        exception object — is checked directly against each logger call site below.
+        """
         import inspect
+        import re
         from agents_orchestrator.design_architecture_agent.agents import architecture
         src = inspect.getsource(architecture)
-        # Check that str(e) is not in a logger.* call in the exception handler context
-        # We allow print(f"... {e}") removal; the replacement should be logger.error with type(e).__name__
-        # The key guard: the exception handler should NOT pass str(e) to logger
-        assert "str(e)" not in src or "logger" not in src, (
-            "architecture.py should not log str(e) in exception handler — use type(e).__name__ (SC#8)"
+        # One level of nested parens is enough for every logger call in this file
+        # (e.g. type(e).__name__ inside logger.error(...)).
+        logger_calls = re.findall(r"logger\.\w+\((?:[^()]|\([^()]*\))*\)", src)
+        assert logger_calls, "expected at least one logger.* call in architecture.py"
+        # "str(e)" catches the direct case; ", e," / ", e)" catches the bare exception
+        # object passed as a positional %s arg (implicitly str()'d by logging) without
+        # matching legitimate type(e)/str(e) subexpressions, which are "(e)" not ", e".
+        offenders = [
+            call for call in logger_calls
+            if "str(e)" in call or re.search(r",\s*e\s*[,)]", call)
+        ]
+        assert not offenders, (
+            "architecture.py logs str(exc) or the bare exception object — use "
+            f"type(e).__name__ instead (SC#8): {offenders}"
         )

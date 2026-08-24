@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ORCHESTRATOR = ROOT / "agents" / "orchestrator" / "orchestrator_api.py"
+ORCHESTRATOR = ROOT / "agents_orchestrator" / "orchestrator" / "orchestrator_api.py"
 
 
 def test_orchestrator_routes_monitoring_feedback_stage():
