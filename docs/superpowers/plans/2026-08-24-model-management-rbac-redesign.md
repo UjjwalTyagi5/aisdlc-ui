@@ -1304,6 +1304,44 @@ git commit -m "feat: BU Admin's Add key flow requires a credential and a passing
 
 ### Task 11: Frontend — BU Admin's keys-list-per-provider page gains "Assign to project"
 
+**AMENDED after Task 9.1** (see ledger's "Task 9.1" section). This task's original brief
+below assumed `frontend/app/(app)/admin/models/[provider]/page.tsx` already had working
+`bu_admin` rendering and only needed one new action added to it. That assumption is now
+FALSE: Task 9.1 (a safety fix, inserted after Task 9's review found Org Admin could still
+add a credential here via direct URL) flipped this page's access gate to deny **every**
+role, deliberately, as an interim state — the ledger's Task 9.1 entry explicitly notes
+"this page becomes unreachable by every role until Task 11 lands." **This task is
+therefore larger than its Steps below describe**: before Step 1 can even be attempted, a
+real `bu_admin` branch must be built on this page from scratch. Do this as a new **Step 0**
+inserted before the original Step 1:
+
+- [ ] **Step 0 (NEW): Build real `bu_admin` rendering on this page**
+
+Read the current access gate (near the `RestrictedAccess` call — Task 9.1 changed it to
+`if (role !== null) { <RestrictedAccess ... /> }`, denying everyone). Read
+`frontend/app/(app)/admin/models/page.tsx`'s own `scope`/`isOrg` pattern
+(`role === "org_admin" ? "org" : role === "bu_admin" ? "bu" : ...`) as the reference for
+how this codebase already distinguishes role-scoped rendering elsewhere in this exact
+feature. Build an equivalent branch here: a `bu_admin` viewer should see THIS provider's
+connections/keys scoped to their own business unit(s) only (use `useScopedBusinessUnits`,
+already used elsewhere in this feature, to get the units they're bound to — never show a
+key belonging to a unit they aren't bound to). Reuse as much of the existing org-admin
+rendering's structure (the keys list, its layout, edit/verify/delete actions) as makes
+sense for parity — a BU Admin needs the same key-management actions (add — already built
+by Task 10 as a per-card trigger on the OTHER page, so this page's job is list/edit/
+verify/delete of already-added keys, plus the new "Assign to project" action below), just
+scoped to their own unit's connections instead of every connection org-wide. Org Admin
+still gets `RestrictedAccess` — Task 9.1's fix stands; this step only ADDS a working
+`bu_admin` branch, it does not reopen the page to `org_admin`. Verify: an org_admin who
+navigates here still sees `RestrictedAccess`; a bu_admin sees only their own unit(s)'
+connections for this provider, never another unit's.
+
+Once Step 0 is done, proceed with the ORIGINAL Steps 1-4 below, which build on top of it.
+
+---
+
+**Original brief (Steps 1-4, still valid, now executed on top of Step 0's new bu_admin branch):**
+
 **Files:**
 - Read first (full file, 895 lines): `frontend/app/(app)/admin/models/[provider]/page.tsx`
 - Modify: same file
@@ -1314,7 +1352,7 @@ git commit -m "feat: BU Admin's Add key flow requires a credential and a passing
 
 - [ ] **Step 1: Read the full current detail-page implementation**
 
-Run: `cat frontend/app/(app)/admin/models/[provider]/page.tsx` (895 lines). Identify: how it currently distinguishes org-admin vs BU-admin rendering (mirroring the pattern already read in `page.tsx`'s `scope` logic), where each credential/key row is rendered, and whether a "which projects use my BU" data source already exists on this page or needs a new query (`useScopedBusinessUnits`'s associated projects, or a project-list-by-workspace API call — check `frontend/lib/api/projects.ts` for an existing `listProjects(workspaceId)`-shaped function before adding a new one).
+Run: `cat frontend/app/(app)/admin/models/[provider]/page.tsx` (895 lines, plus whatever Step 0 above added). Identify: where each credential/key row is rendered in the new `bu_admin` branch you just built in Step 0, and whether a "which projects use my BU" data source already exists on this page or needs a new query (`useScopedBusinessUnits`'s associated projects, or a project-list-by-workspace API call — check `frontend/lib/api/projects.ts` for an existing `listProjects(workspaceId)`-shaped function before adding a new one).
 
 - [ ] **Step 2: Add an "Assign to project" action per key row, BU-scope only**
 
