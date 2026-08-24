@@ -370,21 +370,44 @@ async def assert_project_key_allowed(tenant_id: str, project_id: str, provider: 
     return workspace_id
 
 
-async def _project_owned_offering_keys(tenant_id: str, project_id: str, selected: list[dict]) -> set[tuple]:
+async def _project_owned_offering_keys(
+    tenant_id: str, project_id: str, workspace_id: str, selected: list[dict],
+) -> tuple[set[tuple], set[tuple]]:
     """(provider, model_id, credential_id) keys within `selected` whose credential_id
-    is a model_providers row this exact project owns — the second acceptance path
-    set_project_selection allows alongside the BU-shared allowed set."""
+    is a model_providers row this project owns — the second acceptance path
+    set_project_selection allows alongside the BU-shared allowed set. Returns
+    `(own_keys, bu_scoped_keys)`: `own_keys` is every such key regardless of how it's
+    owned; `bu_scoped_keys` is the subset owned via workspace scoping (see (b) below),
+    for callers that need to tell the two provenances apart.
+
+    "Owns" means either: (a) a project-scoped connection (mp.project_id = this exact
+    project — the project's own BYOK key, pre-existing/narrower case), OR (b) a
+    BU-scoped connection (mp.workspace_id = this project's own workspace, mp.project_id
+    NULL) — added by Task 12 to recognize the connections `assign_provider_to_project`
+    (Task 5) pushes onto a project. Before this, case (b) fell through this query's
+    exact-project_id filter entirely (a BU-scoped row's project_id is NULL, never equal
+    to :p), so a Project Admin could never again successfully call set_project_selection
+    — including just to set defaultKey — once their BU Admin assigned them a key via the
+    new flow. A row scoped to a DIFFERENT workspace than this project's own still isn't
+    matched by either clause, so that direction stays exactly as strict as before."""
     cred_ids = {e.get("credential_id") for e in selected if e.get("credential_id")}
     if not cred_ids:
-        return set()
+        return set(), set()
     async with get_db_session_for_tenant(tenant_id) as s:
         rows = (await s.execute(
-            text("SELECT mp.id AS provider_id, mp.provider, mo.model_id FROM model_providers mp "
-                 "JOIN model_offerings mo ON mo.provider_id = mp.id "
-                 "WHERE mp.tenant_id = :t AND mp.project_id = :p AND mp.id = ANY(:ids)"),
-            {"t": tenant_id, "p": project_id, "ids": list(cred_ids)},
+            text("SELECT mp.id AS provider_id, mp.provider, mo.model_id, mp.project_id AS mp_project_id "
+                 "FROM model_providers mp JOIN model_offerings mo ON mo.provider_id = mp.id "
+                 "WHERE mp.tenant_id = :t AND mp.id = ANY(:ids) "
+                 "AND (mp.project_id = :p OR mp.workspace_id = :w)"),
+            {"t": tenant_id, "p": project_id, "w": workspace_id, "ids": list(cred_ids)},
         )).fetchall()
-    return {(r.provider, r.model_id, str(r.provider_id)) for r in rows}
+    own_keys = {(r.provider, r.model_id, str(r.provider_id)) for r in rows}
+    # BU-scoped == matched only via the workspace_id clause, i.e. mp.project_id IS NULL
+    # (a project-scoped row always has mp.project_id = :p, never NULL).
+    bu_scoped_keys = {
+        (r.provider, r.model_id, str(r.provider_id)) for r in rows if r.mp_project_id is None
+    }
+    return own_keys, bu_scoped_keys
 
 
 async def set_project_selection(
@@ -397,12 +420,25 @@ async def set_project_selection(
     # creating it), for a model its BU made reachable under any credential — checked by
     # model_id alone here since the BU's shared credential_id differs from the project's own.
     reachable_models = {(e["provider"], e["model_id"]) for e in bu_allowed}
-    own_keys = await _project_owned_offering_keys(tenant_id, project_id, selected)
+    own_keys, bu_scoped_keys = await _project_owned_offering_keys(
+        tenant_id, project_id, workspace_id, selected,
+    )
     for e in selected:
         key = _entry_key(e)
         if key in allowed_keys:
             continue
-        if key in own_keys and (e["provider"], e["model_id"]) in reachable_models:
+        # Task 12: a BU-scoped connection (bu_scoped_keys) needs no further reachability
+        # check against `reachable_models` — that set is derived solely from the OLD
+        # org_model_grants curation table, which the NEW integration_grants-gated,
+        # BU-scoped provider-creation path (Task 4) and assign_provider_to_project
+        # (Task 5) never write to. Reachability for THIS connection was already proven
+        # at push time: Task 4 required a model-provider grant to create it, and Task 5
+        # required its workspace_id to match this exact project's workspace before
+        # pushing it here. Requiring `reachable_models` on top would be enforcing an
+        # unrelated, inapplicable legacy gate — the very bug this task fixes. The
+        # pre-existing project-owned-key case (own_keys minus bu_scoped_keys) is
+        # untouched: it still requires `reachable_models`, exactly as before.
+        if key in own_keys and (key in bu_scoped_keys or (e["provider"], e["model_id"]) in reachable_models):
             continue
         raise NotAllowedForUnitError(
             f"{e['provider']}/{e['model_id']} is not in this project's business unit's allowed set"

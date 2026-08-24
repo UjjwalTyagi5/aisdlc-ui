@@ -143,24 +143,24 @@ async def test_full_chain_org_grant_to_run_resolution(mint_token, monkeypatch):
             json={"selected": get_resp.json()["selected"], "defaultKey": provider_id},
             headers=proj_headers,
         )
-        # KNOWN GAP found by this capstone test (see task-6-report.md): PUT
-        # /model/allowed/project (set_project_selection, shared/services/
-        # model_grants.py) is unchanged by this plan per spec §4 — it re-validates
-        # the ENTIRE echoed-back `selected` array against org_model_grants-derived
-        # allowed_keys/own_keys. Neither recognizes an entry whose credential_id
-        # points at a BU-scoped (workspace_id-only) model_providers row pushed via
+        # FIXED by Task 12 (was a KNOWN GAP found by this capstone test, see
+        # task-6-report.md): PUT /model/allowed/project (set_project_selection,
+        # shared/services/model_grants.py) re-validates the ENTIRE echoed-back
+        # `selected` array against org_model_grants-derived allowed_keys/own_keys.
+        # Previously, neither recognized an entry whose credential_id points at a
+        # BU-scoped (workspace_id-only) model_providers row pushed via
         # assign_provider_to_project (Task 5): allowed_keys never contains it
         # (Org Admin's NEW provider-grant flow never writes org_model_grants), and
-        # own_keys' `_project_owned_offering_keys` filters on the exact
+        # own_keys' `_project_owned_offering_keys` filtered on the exact
         # project_id — this connection's project_id is NULL (it's BU-scoped). So a
-        # Project Admin currently CANNOT successfully call this endpoint once their
-        # BU Admin has assigned them a key — confirmed by direct investigation (a
+        # Project Admin could not successfully call this endpoint once their BU
+        # Admin had assigned them a key — confirmed by direct investigation (a
         # standalone repro against shared/services/model_grants.py), not a fixture
-        # bug. Asserting the CURRENT (broken) status deliberately, as a regression
-        # trap: flip this to 200 (and re-fetch/assert defaultKey) once
-        # set_project_selection/_project_owned_offering_keys is extended to also
-        # accept the project's own workspace-scoped, grant-derived connections.
-        assert put_resp.status_code == 400, put_resp.text
+        # bug. Task 12 extended `_project_owned_offering_keys` to also match a
+        # model_providers row whose workspace_id equals the project's own
+        # workspace_id, so this now succeeds and defaultKey is actually set.
+        assert put_resp.status_code == 200, put_resp.text
+        assert put_resp.json()["defaultKey"] == provider_id, put_resp.json()
 
     # 5. resolve_model_for_run resolves that exact offering — unmodified by this
     # plan (backend/shared/services/model_resolver.py). `defaultKey` is never read
