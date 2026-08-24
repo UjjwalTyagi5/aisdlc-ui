@@ -589,26 +589,45 @@ async def test_bu_admin_cannot_edit_a_different_business_unit(mint_token):
 
 @pytest.mark.asyncio
 async def test_provider_out_roundtrips_workspace_and_haskey(mint_token):
-    """A BU-scoped, keyless connection must round-trip workspaceId as the REAL workspace
-    id and hasKey as false. Before the fix, ProviderOut had no such fields at all, so the
+    """A BU-scoped connection must round-trip workspaceId as the REAL workspace id and
+    hasKey correctly. Before the C2 fix, ProviderOut had no such fields at all, so the
     frontend's Zod defaults silently fabricated workspaceId=null / hasKey=true instead of
-    the response ever saying so — the dangerous, silent kind of bug."""
+    the response ever saying so — the dangerous, silent kind of bug.
+
+    Updated for Task 4: BU-scoped creation now requires real ownership of the target
+    workspace, a model_provider grant, and a real api_key — a keyless BU-scoped
+    connection is no longer reachable through this route at all (see
+    test_bu_scoped_provider_creation_requires_api_key), so this now exercises the fixed
+    happy path (real key -> hasKey True) instead of the keyless one it used to."""
     import httpx
     from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
     import uuid
 
     tenant = str(uuid.uuid4())
-    ws_id = str(uuid.uuid4())
-    token = mint_token(tenant_id=tenant, permissions=["model:manage"])
-    headers = {"Authorization": f"Bearer {token}"}
+    ws_id, _ = await _seed_org_workspace_project(tenant, "Unit A")
+
+    bu_admin = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(bu_admin, ws_id, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    org_admin = f"org-admin-{uuid.uuid4()}"
+    org_headers = {"Authorization": f"Bearer {mint_token(user_id=org_admin, tenant_id=tenant, permissions=['admin:*'])}"}
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        grant_resp = await client.put(
+            "/model/providers/grants", params={"workspaceId": ws_id}, json={"providers": ["anthropic"]},
+            headers=org_headers,
+        )
+        assert grant_resp.status_code == 200, grant_resp.text
+
         create_resp = await client.post(
             "/model/providers",
             json={
-                "provider": "anthropic", "display_name": "C2 keyless BU",
+                "provider": "anthropic", "display_name": "C2 BU key", "api_key": "sk-test-123",
                 "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_id,
             },
             headers=headers,
@@ -616,7 +635,7 @@ async def test_provider_out_roundtrips_workspace_and_haskey(mint_token):
         assert create_resp.status_code == 201, create_resp.text
         body = create_resp.json()
         assert body["workspaceId"] == ws_id
-        assert body["hasKey"] is False
+        assert body["hasKey"] is True
         assert body["approvalStatus"] == "active"
         assert body["approvalDecidedBy"] is None
         assert body["approvalDecidedAt"] is None
@@ -626,7 +645,7 @@ async def test_provider_out_roundtrips_workspace_and_haskey(mint_token):
         assert list_resp.status_code == 200
         row = next(p for p in list_resp.json() if p["id"] == body["id"])
         assert row["workspaceId"] == ws_id
-        assert row["hasKey"] is False
+        assert row["hasKey"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -782,3 +801,198 @@ async def test_availability_accepts_model_manage_for_bu_admin_governance_view(mi
             "/model/availability", params={"workspaceId": str(uuid.uuid4())}, headers=no_perm_headers,
         )
         assert denied.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Task 4: BU-scoped provider creation is now gated on real ownership of the
+# target business unit (via _require_scoped/can_perform, resource_kind=
+# "business_unit") AND on a model_provider grant for the requested provider
+# (granted_target_refs, kind="model_provider") — closing the gap where any
+# tenant-wide model:manage holder could plant a provider connection under ANY
+# business unit, with no grant at all. api_key also becomes REQUIRED on the
+# BU-scoped path specifically; org-wide creation (workspaceId omitted) keeps
+# its existing optional/keyless behaviour unchanged.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_bu_scoped_provider_creation_requires_ownership(mint_token):
+    """A caller who administers a DIFFERENT business unit — not the target one — must
+    be denied even though model:manage is a tenant-wide permission and even though the
+    target BU already holds the grant and a real key is supplied."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
+    ws_b, _ = await _seed_org_workspace_project(tenant, "Unit B")
+
+    bu_admin_a = f"bu-admin-a-{uuid.uuid4()}"
+    await grant_role(bu_admin_a, ws_a, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    bu_a_headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin_a, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    org_admin = f"org-admin-{uuid.uuid4()}"
+    org_headers = {"Authorization": f"Bearer {mint_token(user_id=org_admin, tenant_id=tenant, permissions=['admin:*'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # Grant Unit B (not Unit A) access to anthropic.
+        grant_resp = await client.put(
+            "/model/providers/grants", params={"workspaceId": ws_b}, json={"providers": ["anthropic"]},
+            headers=org_headers,
+        )
+        assert grant_resp.status_code == 200, grant_resp.text
+
+        resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "anthropic", "display_name": "Wrong BU", "api_key": "sk-test-123",
+                "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_b,
+            },
+            headers=bu_a_headers,
+        )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bu_scoped_provider_creation_requires_grant(mint_token):
+    """The caller administers their OWN business unit but it has no model_provider
+    grant at all — this is the bug the whole redesign exists to fix: previously this
+    succeeded with a 201."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_id, _ = await _seed_org_workspace_project(tenant, "Unit A")
+
+    bu_admin = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(bu_admin, ws_id, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "anthropic", "display_name": "Test key", "api_key": "sk-test-123",
+                "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_id,
+            },
+            headers=headers,
+        )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bu_scoped_provider_creation_requires_api_key(mint_token):
+    """The BU owns the resource and holds the grant, but sends no api_key — must 422,
+    not silently create a keyless connection the way org-wide onboarding still can."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_id, _ = await _seed_org_workspace_project(tenant, "Unit A")
+
+    bu_admin = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(bu_admin, ws_id, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    bu_headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    org_admin = f"org-admin-{uuid.uuid4()}"
+    org_headers = {"Authorization": f"Bearer {mint_token(user_id=org_admin, tenant_id=tenant, permissions=['admin:*'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        grant_resp = await client.put(
+            "/model/providers/grants", params={"workspaceId": ws_id}, json={"providers": ["anthropic"]},
+            headers=org_headers,
+        )
+        assert grant_resp.status_code == 200, grant_resp.text
+
+        resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "anthropic", "display_name": "Test key", "api_key": "",
+                "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_id,
+            },
+            headers=bu_headers,
+        )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bu_scoped_provider_creation_succeeds_once_granted(mint_token):
+    """Own BU, real grant, real key — the fixed happy path must still 201."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from tests.test_model_grants import _seed_org_workspace_project
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    ws_id, _ = await _seed_org_workspace_project(tenant, "Unit A")
+
+    bu_admin = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(bu_admin, ws_id, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    bu_headers = {"Authorization": f"Bearer {mint_token(user_id=bu_admin, tenant_id=tenant, permissions=['model:manage'])}"}
+
+    org_admin = f"org-admin-{uuid.uuid4()}"
+    org_headers = {"Authorization": f"Bearer {mint_token(user_id=org_admin, tenant_id=tenant, permissions=['admin:*'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        grant_resp = await client.put(
+            "/model/providers/grants", params={"workspaceId": ws_id}, json={"providers": ["anthropic"]},
+            headers=org_headers,
+        )
+        assert grant_resp.status_code == 200, grant_resp.text
+
+        resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "anthropic", "display_name": "Test key", "api_key": "sk-test-123",
+                "enabled_models": ["claude-sonnet-4-6"], "workspaceId": ws_id,
+            },
+            headers=bu_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["workspaceId"] == ws_id
+        assert body["hasKey"] is True
+
+
+@pytest.mark.asyncio
+async def test_org_wide_provider_creation_still_allows_no_key(mint_token):
+    """Org-wide creation (workspaceId omitted) is untouched by this gate: no ownership
+    check, no grant check, and api_key stays optional — a provider can still be
+    onboarded org-wide keyless (spec §2.3), a BU/project supplying its own key later."""
+    import httpx
+    from process_api import app
+    import uuid
+
+    tenant = str(uuid.uuid4())
+    headers = {"Authorization": f"Bearer {mint_token(tenant_id=tenant, permissions=['model:manage'])}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/model/providers",
+            json={
+                "provider": "openai", "display_name": "Org-wide, keyless", "api_key": "",
+                "enabled_models": ["gpt-4o"],
+            },
+            headers=headers,
+        )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["hasKey"] is False

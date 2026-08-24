@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import can_perform
+from shared.authz.connector_grants import granted_target_refs
 from shared.authz.dependency import require_any_permission, require_permission
 from shared.authz.read_scope import is_org_wide
 from shared.authz.workspace import active_workspace_for_request
@@ -275,7 +276,31 @@ async def list_providers_route(request: Request, scope: str | None = None, works
 
 
 @model_router.post("/providers", response_model=ProviderOut, status_code=201)
-async def create_provider_route(request: Request, body: CreateProviderIn) -> ProviderOut:
+async def create_provider_route(
+    request: Request, body: CreateProviderIn, db: AsyncSession = Depends(get_db_session),
+) -> ProviderOut:
+    if body.workspace_id is not None:
+        # Ownership first, same order as every other resource-scoped route in this
+        # file (see get_bu_allowed_route above): a caller who doesn't administer this
+        # business unit at all should not learn anything further about it, including
+        # whether it holds a grant.
+        await _require_scoped(
+            db, request, permission="model:manage", resource_kind="business_unit", resource_id=body.workspace_id,
+        )
+        if not (body.api_key or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="api_key is required when adding a key to a business unit's provider.",
+            )
+        granted = await granted_target_refs(
+            db, tenant_id=_tenant_id(request), workspace_id=body.workspace_id, kind="model_provider",
+        )
+        if body.provider not in granted:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your organization has not granted this business unit access to {body.provider!r}.",
+            )
+
     # Accept either rich `models` (with pricing) or back-compat bare `enabled_models`.
     models: list[dict] = [m.model_dump() for m in body.models]
     if not models and body.enabled_models:
