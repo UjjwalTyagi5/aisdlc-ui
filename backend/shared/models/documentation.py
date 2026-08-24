@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 DocType = Literal[
     "doc_set", "overview", "sdd", "api_reference", "code_summary",
     "changelog", "release_notes", "rtm", "run_summary", "compliance", "custom",
+    "runbook_update", "knowledge_article",
 ]
 
 
@@ -26,6 +27,9 @@ class GeneratedDoc(BaseModel):
     path: str = ""              # local path on disk (or blob URL later)
     contents: str = ""          # markdown body (served to the viewer)
     bytes: int = 0
+    diff: Optional[str] = None          # runbook_update: unified diff of the changed sections
+    source_ref: Optional[str] = None    # where the prior version was read from (wiki page path / SharePoint item)
+    issue_ref: Optional[str] = None     # knowledge_article: the fixed issue this article is about
 
 
 class DocContext(BaseModel):

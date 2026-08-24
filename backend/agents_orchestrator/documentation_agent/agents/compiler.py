@@ -27,6 +27,11 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     publish_to_sharepoint,
     list_sharepoint_documents,
     ingest_sharepoint_document,
+    read_wiki_page,
+    list_wiki_pages,
+    diff_markdown_sections,
+    save_runbook_update,
+    save_knowledge_article,
 )
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
@@ -52,6 +57,11 @@ _tools = [
     publish_to_sharepoint,
     list_sharepoint_documents,
     ingest_sharepoint_document,
+    read_wiki_page,
+    list_wiki_pages,
+    diff_markdown_sections,
+    save_runbook_update,
+    save_knowledge_article,
 ]
 
 

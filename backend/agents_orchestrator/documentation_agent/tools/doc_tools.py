@@ -9,6 +9,7 @@ Read-only on the repo except the explicit open_docs_pr.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import pathlib
@@ -236,7 +237,7 @@ async def save_document(doc_type: str, title: str, filename: str, markdown_conte
     user's left-side document list. Call once per deliverable.
 
     Args:
-        doc_type: one of overview|sdd|api_reference|code_summary|changelog|release_notes|rtm|run_summary|compliance|doc_set|custom
+        doc_type: one of overview|sdd|api_reference|code_summary|changelog|release_notes|rtm|run_summary|compliance|doc_set|runbook_update|knowledge_article|custom
         title: human-readable title (shown in the list)
         filename: kebab-case filename ending in .md (e.g. "api-reference.md")
         markdown_contents: the full GitHub-flavored Markdown body
@@ -261,6 +262,7 @@ async def save_document(doc_type: str, title: str, filename: str, markdown_conte
         "type": doc_type if doc_type in {
             "overview", "sdd", "api_reference", "code_summary", "changelog",
             "release_notes", "rtm", "run_summary", "compliance", "doc_set", "custom",
+            "runbook_update", "knowledge_article",
         } else "custom",
         "title": title or safe,
         "filename": safe,
@@ -430,6 +432,203 @@ async def ingest_sharepoint_document(item_id: str) -> str:
         return f"Downloaded item {item_id} but no readable text could be extracted."
     broadcast_log(manager, f"Ingested SharePoint document {item_id}", level="INFO")
     return f"Ingested SharePoint document {item_id} ({len(text)} chars):\n\n{text[:20000]}"
+
+
+async def _ado_wiki_session():
+    """Return (connector, target) for this session's tenant's ADO wiki, or (None, reason).
+
+    Mirrors _sharepoint_session(): a third read source alongside the repo and
+    SharePoint, used to locate the current runbook / knowledge article content.
+    """
+    s = get_session(get_session_id())
+    tenant_id = getattr(s, "tenant_id", "") or ""
+    if not tenant_id:
+        return None, "ERROR: no tenant context in this session."
+    try:
+        from shared.services.notification_targets import ado_wiki_target
+        from config.connector_factory import get_connector_for_session
+
+        target = await ado_wiki_target(tenant_id)
+        if not target:
+            return None, (
+                "ERROR: Azure DevOps Wiki is not configured for this tenant. An admin "
+                "can set ado-wiki-project / ado-wiki-id on the Integrations page, or "
+                "use the SharePoint tools instead if the runbook lives there."
+            )
+        connector = await get_connector_for_session(kind="azure_devops", tenant_id=tenant_id)
+        return (connector, target), ""
+    except Exception as exc:
+        return None, f"ERROR reaching Azure DevOps Wiki: {type(exc).__name__}"
+
+
+@tool
+async def read_wiki_page(page_path: str = "") -> str:
+    """Read one page from the project's Azure DevOps wiki (e.g. the current runbook).
+
+    Args:
+        page_path: wiki page path, e.g. "/Runbooks/Payments Service". Empty uses the
+                   tenant's configured default runbook path.
+    """
+    resolved, reason = await _ado_wiki_session()
+    if not resolved:
+        return reason
+    connector, target = resolved
+    path = page_path or target.get("runbook_path", "/Runbooks")
+    try:
+        page = await connector.read_adapter(
+            "get_wiki_page", project=target.get("project", ""),
+            wiki_id=target.get("wiki_id", ""), path=path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR reading wiki page {path!r}: {type(exc).__name__}"
+    content = (page.get("content") or "").strip()
+    if not content:
+        return f"Wiki page {path!r} exists but has no content."
+    broadcast_log(manager, f"Read wiki page {path}", level="INFO")
+    return f"Wiki page {path!r} (version {page.get('version', '?')}):\n\n{content[:20000]}"
+
+
+@tool
+async def list_wiki_pages(path_prefix: str = "") -> str:
+    """List page paths under a subtree of the project's Azure DevOps wiki — use this to
+    locate the runbook or to search for an existing knowledge article before deciding
+    whether to update one or create a new one.
+
+    Args:
+        path_prefix: wiki path to list under, e.g. "/Knowledge Base". Empty uses the
+                     tenant's configured default knowledge-base path.
+    """
+    resolved, reason = await _ado_wiki_session()
+    if not resolved:
+        return reason
+    connector, target = resolved
+    prefix = path_prefix or target.get("kb_path", "/Knowledge Base")
+    try:
+        pages = await connector.read_adapter(
+            "list_wiki_pages", project=target.get("project", ""),
+            wiki_id=target.get("wiki_id", ""), path_prefix=prefix,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR listing wiki pages under {prefix!r}: {type(exc).__name__}"
+    if not pages:
+        return f"No wiki pages found under {prefix!r}."
+    lines = [f"{len(pages)} page(s) under {prefix!r}:"]
+    lines += [f"- {p['path']}" for p in pages[:100]]
+    return "\n".join(lines)
+
+
+@tool
+async def diff_markdown_sections(existing_content: str, proposed_content: str) -> str:
+    """Compute a real diff between the current document and a proposed update — call
+    this instead of hand-writing a diff. Returns JSON with a unified diff and a
+    per-section ("## " heading) breakdown of what changed, was added, or was removed.
+    Use it to ground a runbook_update or knowledge_article "update" deliverable.
+    """
+    old_lines = (existing_content or "").splitlines(keepends=True)
+    new_lines = (proposed_content or "").splitlines(keepends=True)
+    unified = "".join(difflib.unified_diff(
+        old_lines, new_lines, fromfile="current", tofile="proposed", lineterm="",
+    ))
+
+    def _sections(text: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        heading, buf = "(preamble)", []
+        for line in (text or "").splitlines():
+            if line.startswith("## "):
+                out[heading] = "\n".join(buf).strip()
+                heading, buf = line[3:].strip(), []
+            else:
+                buf.append(line)
+        out[heading] = "\n".join(buf).strip()
+        return out
+
+    old_secs, new_secs = _sections(existing_content), _sections(proposed_content)
+    sections = []
+    for heading in dict.fromkeys(list(old_secs) + list(new_secs)):
+        in_old, in_new = heading in old_secs, heading in new_secs
+        if in_old and not in_new:
+            status = "removed"
+        elif in_new and not in_old:
+            status = "added"
+        elif old_secs.get(heading) != new_secs.get(heading):
+            status = "changed"
+        else:
+            status = "unchanged"
+        sections.append({"heading": heading, "status": status})
+
+    return json.dumps({"unified_diff": unified, "sections": sections})
+
+
+@tool
+async def save_runbook_update(
+    title: str, filename: str, source_ref: str, unified_diff: str,
+    changed_sections_summary: str, updated_sections_markdown: str,
+) -> str:
+    """Save a RUNBOOK_UPDATE artifact: the diff against the current runbook, which
+    sections need updating, and the updated section content. Call diff_markdown_sections
+    first to compute unified_diff / changed_sections_summary from real content — do not
+    fabricate the diff.
+
+    Args:
+        title: human-readable title (e.g. "Runbook update — Payments Service").
+        filename: kebab-case filename ending in .md.
+        source_ref: where the current runbook was read from (wiki page path or
+                    SharePoint item/filename), for traceability.
+        unified_diff: the unified diff text from diff_markdown_sections.
+        changed_sections_summary: which sections changed/were added/removed, e.g.
+                                   "## Rollback steps — changed; ## Escalation — added".
+        updated_sections_markdown: the full updated content for each changed section.
+    """
+    if not updated_sections_markdown or not updated_sections_markdown.strip():
+        return "ERROR: refusing to save a runbook update with no updated section content."
+    body = (
+        f"# {title or 'Runbook Update'}\n\n"
+        f"Source: {source_ref or '(unspecified)'}\n\n"
+        f"## Sections requiring update\n{changed_sections_summary.strip()}\n\n"
+        f"## Diff\n```diff\n{unified_diff.strip()}\n```\n\n"
+        f"## Updated section content\n{updated_sections_markdown.strip()}\n"
+    )
+    result = await save_document.ainvoke({
+        "doc_type": "runbook_update", "title": title, "filename": filename,
+        "markdown_contents": body,
+    })
+    if not result.startswith("ERROR"):
+        s = get_session(get_session_id())
+        if s.generated_docs:
+            s.generated_docs[-1]["diff"] = unified_diff
+            s.generated_docs[-1]["source_ref"] = source_ref
+    return result
+
+
+@tool
+async def save_knowledge_article(
+    title: str, filename: str, mode: str, markdown_contents: str,
+    issue_ref: str = "", source_ref: str = "",
+) -> str:
+    """Save a KNOWLEDGE_ARTICLE artifact — either a proposed update to an article that
+    already exists for the fixed issue, or a new article from the standard template
+    (Symptom / Root cause / Resolution steps / Related links) when none exists. Search
+    with list_wiki_pages / list_sharepoint_documents first to decide which mode applies.
+
+    Args:
+        mode: "update" (an article already exists for this issue) or "new".
+        issue_ref: the fixed issue this article documents (id, title, or PR ref).
+        source_ref: the existing article's path/id when mode="update"; empty for "new".
+    """
+    if mode not in ("update", "new"):
+        return "ERROR: mode must be 'update' or 'new'."
+    if not markdown_contents or not markdown_contents.strip():
+        return "ERROR: refusing to save an empty knowledge article."
+    result = await save_document.ainvoke({
+        "doc_type": "knowledge_article", "title": title, "filename": filename,
+        "markdown_contents": markdown_contents,
+    })
+    if not result.startswith("ERROR"):
+        s = get_session(get_session_id())
+        if s.generated_docs:
+            s.generated_docs[-1]["issue_ref"] = issue_ref
+            s.generated_docs[-1]["source_ref"] = source_ref
+    return result
 
 
 @tool

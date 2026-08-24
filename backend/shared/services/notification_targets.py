@@ -98,6 +98,24 @@ async def sharepoint_target(tenant_id: str) -> Optional[Dict[str, str]]:
     }
 
 
+async def ado_wiki_target(tenant_id: str) -> Optional[Dict[str, str]]:
+    """Which Azure DevOps wiki this tenant's runbooks/knowledge articles live in.
+
+    Returns {"project", "wiki_id", "runbook_path", "kb_path"} or None. `wiki_id` is the
+    operative value — every wiki-pages call addresses a wiki by id — so a configuration
+    without one is treated as unconfigured, same contract as sharepoint_target above.
+    """
+    wiki_id = await _get(tenant_id, "ado-wiki-id")
+    if not wiki_id:
+        return None
+    return {
+        "project": await _get(tenant_id, "ado-wiki-project"),
+        "wiki_id": wiki_id,
+        "runbook_path": await _get(tenant_id, "ado-wiki-runbook-path") or "/Runbooks",
+        "kb_path": await _get(tenant_id, "ado-wiki-kb-path") or "/Knowledge Base",
+    }
+
+
 async def figma_target(tenant_id: str) -> Optional[Dict[str, str]]:
     """Which Figma file this tenant's design work defaults to.
 
