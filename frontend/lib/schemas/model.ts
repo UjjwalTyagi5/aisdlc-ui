@@ -150,6 +150,20 @@ export const ModelGrantMatrix = z.object({
 export type ModelGrantMatrix = z.infer<typeof ModelGrantMatrix>;
 
 /**
+ * Which business units may use one provider — the Org Admin's per-provider
+ * grant list backing GET/PUT `/model/providers/grants`. Distinct from
+ * `OrgModelGrant`: that one governs which MODELS enter the catalogue and how
+ * far each reaches; this one governs which business units may create their
+ * own connection to a PROVIDER at all (the gate a BU-scoped provider
+ * creation checks before letting a BU Admin onboard a key).
+ */
+export const ModelProviderGrant = z.object({
+  provider: ModelProviderKind,
+  businessUnitIds: z.array(z.string()),
+});
+export type ModelProviderGrant = z.infer<typeof ModelProviderGrant>;
+
+/**
  * What one project actually uses, and where its options came from.
  *
  * The org grants say what a project *may* use; this says what it

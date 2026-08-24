@@ -72,6 +72,8 @@ export const qk = {
     availability: (workspaceId: string) => ["model", "availability", workspaceId] as const,
     /** Org Admin only: every model crossed with every business unit. */
     grantMatrix: () => ["model", "grant-matrix"] as const,
+    /** Org Admin only: which business units may use which provider. */
+    providerGrants: () => ["model", "providerGrants"] as const,
   },
   mcp: {
     list: (activeOnly?: boolean) => ["mcp", "list", activeOnly ?? false] as const,

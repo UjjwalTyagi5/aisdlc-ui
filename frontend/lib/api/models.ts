@@ -8,6 +8,7 @@ import {
   ModelGrantMatrix,
   ModelOptions,
   ModelProvider,
+  ModelProviderGrant,
   OrgModelGrant,
   ProjectModelSelection,
   VerifyResult,
@@ -148,3 +149,42 @@ export const getModelOptions = (projectId?: string) =>
  */
 export const getModelGrantMatrix = () =>
   api("/model/grant-matrix", { schema: ModelGrantMatrix });
+
+/**
+ * Which business units may use which provider — the Org Admin's grant list.
+ * Distinct from `getOrgModelGrants`: that one governs which MODELS enter the
+ * catalogue; this one governs which units may create their own connection to
+ * a PROVIDER at all.
+ */
+export const listModelProviderGrants = () =>
+  api("/model/providers/grants", { schema: z.array(ModelProviderGrant) });
+
+/** Replace one business unit's full provider-grant set. Org Admin only. */
+export const setModelProviderGrants = (workspaceId: string, providers: string[]) =>
+  api("/model/providers/grants", {
+    method: "PUT",
+    query: { workspaceId },
+    body: { providers },
+    schema: z.array(ModelProviderGrant),
+  });
+
+/** BU Admin pushes an already-added key onto one of their projects. */
+export const assignProviderToProject = (providerId: string, projectId: string) =>
+  api(`/model/providers/${encodeURIComponent(providerId)}/assign`, {
+    method: "POST",
+    body: { projectId },
+  });
+
+/** Grant one business unit reach to a provider (Org Admin only). */
+export const grantModelProvider = (provider: string, workspaceId: string) =>
+  api("/integrations/access", {
+    method: "POST",
+    query: { kind: "model_provider", id: provider, workspaceId },
+  });
+
+/** Revoke a business unit's reach to a provider entirely (Org Admin only). */
+export const revokeModelProvider = (provider: string, workspaceId: string) =>
+  api("/integrations/access", {
+    method: "DELETE",
+    query: { kind: "model_provider", id: provider, workspaceId, level: "unit" },
+  });
