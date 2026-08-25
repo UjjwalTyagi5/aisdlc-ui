@@ -55,6 +55,17 @@ describe("AgentRail inheritance badge", () => {
     expect(screen.getByText("Inherited from Business Unit")).toBeTruthy();
   });
 
+  it("shows 'Inherited from Project' for project", () => {
+    render(
+      <AgentRail
+        agents={[entry({ inherited_from: "project" })]}
+        selectedId="design"
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Inherited from Project")).toBeTruthy();
+  });
+
   it("falls back to a plain 'default' label when there's no active version and nothing inherited", () => {
     render(
       <AgentRail
