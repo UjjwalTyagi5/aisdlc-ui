@@ -161,7 +161,13 @@ async def create_provider(
         models = [{"model_id": m} for m in (enabled_models or [])]
     if not provider or not display_name:
         raise ValueError("provider and display_name are required")
-    if not models:
+    # A real credential with no models to serve is a connection nobody can
+    # ever use — but a genuinely keyless registration (Org Admin's provider-
+    # level, model-curation-comes-later flow) is exactly a placeholder with
+    # nothing chosen yet; org_model_grants curates by provider+model_id
+    # directly and never joins against this row's own offerings, so an empty
+    # models list here is a real, functional state, not a data gap.
+    if not models and api_key:
         raise ValueError("at least one model is required")
 
     is_custom = not is_known_provider(provider)
