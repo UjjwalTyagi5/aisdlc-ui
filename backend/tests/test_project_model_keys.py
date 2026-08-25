@@ -6,11 +6,20 @@ import uuid
 
 import pytest
 
-from tests.test_model_grants import _seed_org_workspace_project, _seed_provider
+from tests.test_model_grants import _grant_provider, _seed_org_workspace_project, _seed_provider
 
 
 async def _grant_and_allow_project_key(tenant: str, ws_id: str, provider_row: dict, model_id: str, allow: bool):
     from shared.services import model_grants as mg
+
+    # get_bu_allowed (which assert_project_key_allowed reads through) now also
+    # requires the PROVIDER itself to be granted to this BU
+    # (integration_grants(kind='model_provider')), not just the model-level
+    # org_model_grants/bu_model_key_policy rows below — see model_grants.py's
+    # coupling fix. Every caller of this helper needs this regardless of
+    # `allow`, since even the "blocked" tests exercise the reachability check
+    # first.
+    await _grant_provider(tenant, ws_id)
 
     await mg.set_org_grants(
         tenant,

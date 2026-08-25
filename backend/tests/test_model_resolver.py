@@ -169,6 +169,12 @@ async def test_resolver_respects_project_grant_scope():
     async with get_db_session_for_tenant(tenant) as s:
         await s.execute(text("UPDATE model_providers SET status='valid' WHERE id=:i"), {"i": created["id"]})
 
+    # get_bu_allowed now also requires the PROVIDER to be granted to this BU
+    # (integration_grants(kind='model_provider')), not just the model-level
+    # org_model_grants entry below — see model_grants.py's coupling fix.
+    from tests.test_model_grants import _grant_provider
+    await _grant_provider(tenant, ws_id)
+
     # Grant only claude-sonnet-4-6 to this project's BU — claude-opus-4-8 is onboarded
     # but never granted, so it must become unresolvable for this project.
     await mg.set_org_grants(

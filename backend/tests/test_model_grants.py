@@ -58,14 +58,21 @@ async def _grant_provider(tenant_id: str, workspace_id: str, provider: str = "an
     writes — get_bu_allowed now requires this in addition to an org_model_grants row
     (see model_grants.py's coupling fix): a model only reaches a BU when its provider
     is ALSO currently granted, not just curated. Every test below that expects a
-    positive get_bu_allowed/get_availability/set_bu_grants result needs this."""
+    positive get_bu_allowed/get_availability/set_bu_grants result needs this.
+
+    ON CONFLICT DO NOTHING: some callers (e.g. a test that re-runs the same setup
+    helper with a different `allow_project_key` value) legitimately grant the same
+    (tenant, provider, workspace) more than once — the real PUT route this mirrors
+    is a delete-then-insert (idempotent by construction); a bare INSERT here isn't,
+    and previously raised a duplicate-key IntegrityError on the second call."""
     from shared.db import get_db_session_for_tenant
 
     async with get_db_session_for_tenant(tenant_id) as s:
         await s.execute(
             text(
                 "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id, granted_by) "
-                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), 'admin1')"
+                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), 'admin1') "
+                "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO NOTHING"
             ),
             {"t": tenant_id, "r": provider, "w": workspace_id},
         )
