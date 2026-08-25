@@ -13,17 +13,33 @@ import {
 
 import { api } from "./client";
 
+/** Chain ids so the cascade can resolve inheritance past the requested tier —
+ *  mirrors ProfileChainIds in lib/api/agent-profiles.ts. */
+export interface SkillChainIds {
+  workspaceId?: string | null;
+  projectId?: string | null;
+}
+
 /**
- * Merged vendor + custom skills for an agent at a scope. `scopeId` is required
- * for "workspace"/"project" scope, omit (or pass null) for "org".
+ * Merged vendor + custom skills for an agent at a scope, including any inherited
+ * from an ancestor tier (see origin_scope on each item). `scopeId` is required for
+ * "workspace"/"project" scope, omit (or pass null) for "org". `chain` supplies the
+ * ancestor ids needed to resolve inheritance — omit to get today's exact-scope-only
+ * behavior.
  */
 export const listAgentSkills = (
   agentId: string,
   scope: SkillScope,
   scopeId?: string | null,
+  chain?: SkillChainIds,
 ) =>
   api("/agent-skills", {
-    query: { agent_id: agentId, scope, scope_id: scopeId },
+    query: {
+      agent_id: agentId,
+      scope,
+      scope_id: scopeId,
+      workspace_id: chain?.workspaceId,
+    },
     schema: SkillList,
   });
 

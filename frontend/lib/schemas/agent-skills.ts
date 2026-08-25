@@ -46,6 +46,10 @@ export const SkillListItem = z.object({
   deletable: z.boolean(),
   version: z.number().int().nullable(),
   active_version: z.number().int().nullable(),
+  /** Which tier this item's content actually lives at — null for vendor skills
+   *  (no scope of their own). Differs from the requested scope when the item is
+   *  inherited from an ancestor tier rather than authored at this one. */
+  origin_scope: SkillScope.nullable(),
 });
 export type SkillListItem = z.infer<typeof SkillListItem>;
 
