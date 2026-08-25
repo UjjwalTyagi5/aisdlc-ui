@@ -47,7 +47,7 @@ PIPELINE_ORDER: tuple[str, ...] = (
     "security", "testing", "deployment", "documentation",
 )
 
-SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project")
+SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project", "user")
 SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
 
 
@@ -300,7 +300,7 @@ def _user_id(request: Request) -> str:
 def _validate_scope(scope: str, scope_id: str | None) -> None:
     if scope not in SCOPE_VALUES:
         raise HTTPException(status_code=422, detail=f"scope must be one of {SCOPE_VALUES}")
-    if scope in ("workspace", "project") and not scope_id:
+    if scope in ("workspace", "project", "user") and not scope_id:
         raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
 
 

@@ -10,6 +10,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from shared.routers import agent_profiles as ap
 
 
@@ -213,6 +216,18 @@ def test_ancestor_chain_project_without_workspace_id_still_gets_org():
     # No workspace_id supplied -> workspace ancestor can't be resolved, but org
     # needs no id at all, so it's still reachable (matches the workspace-scope case).
     assert ap.ancestor_chain("project", "proj-1", None) == [("org", None)]
+
+
+# ── _validate_scope ─────────────────────────────────────────────────────────────────
+
+def test_validate_scope_accepts_user_with_scope_id():
+    ap._validate_scope("user", "11111111-1111-1111-1111-111111111111")  # no raise
+
+
+def test_validate_scope_rejects_user_without_scope_id():
+    with pytest.raises(HTTPException) as exc:
+        ap._validate_scope("user", None)
+    assert exc.value.status_code == 422
 
 
 # ── build_preview_layers ───────────────────────────────────────────────────────────

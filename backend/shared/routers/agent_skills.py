@@ -170,7 +170,7 @@ def _validate_agent(agent_id: str) -> None:
 def _validate_scope(scope: str, scope_id: str | None) -> None:
     if scope not in SCOPE_VALUES:
         raise HTTPException(status_code=422, detail=f"scope must be one of {SCOPE_VALUES}")
-    if scope in ("workspace", "project") and not scope_id:
+    if scope in ("workspace", "project", "user") and not scope_id:
         raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
 
 

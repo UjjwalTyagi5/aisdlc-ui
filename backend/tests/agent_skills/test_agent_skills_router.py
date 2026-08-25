@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from shared.routers import agent_skills as sk
 
@@ -149,6 +150,18 @@ def test_origin_constrained_to_enum():
     # The detail route's origin param is the vendor|custom Enum, so a stray segment
     # can never be misread as an origin.
     assert [e.value for e in sk.Origin] == ["vendor", "custom"]
+
+
+# ── _validate_scope ─────────────────────────────────────────────────────────────────
+
+def test_validate_scope_accepts_user_with_scope_id():
+    sk._validate_scope("user", "11111111-1111-1111-1111-111111111111")  # no raise
+
+
+def test_validate_scope_rejects_user_without_scope_id():
+    with pytest.raises(HTTPException) as exc:
+        sk._validate_scope("user", None)
+    assert exc.value.status_code == 422
 
 
 # ── Endpoint tests ─────────────────────────────────────────────────────────────────────
