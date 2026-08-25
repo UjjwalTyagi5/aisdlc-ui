@@ -127,7 +127,7 @@ def test_summary_empty():
     s = ap.build_agent_summary("design", [])
     assert s == {
         "agent_id": "design", "active_version": None, "latest_version": None,
-        "draft_count": 0, "updated_at": None, "active": None,
+        "draft_count": 0, "updated_at": None, "active": None, "inherited_from": None,
     }
 
 
@@ -154,6 +154,64 @@ def test_summary_no_active_pointer():
     assert s["active_version"] is None
     assert s["latest_version"] == 2
     assert s["active"] is None
+
+
+def test_summary_inherits_from_nearest_ancestor():
+    # Own tier has nothing; workspace has an active row; org also has one — nearest wins.
+    ws_row = _profile(1, True, prepend="ws-prepend")
+    org_row = _profile(1, True, prepend="org-prepend")
+    s = ap.build_agent_summary("design", [], ancestor_active=[("workspace", ws_row), ("org", org_row)])
+    assert s["inherited_from"] == "workspace"
+    assert s["active"] == {
+        "prompt_prepend": "ws-prepend", "prompt_append": "", "output_contract_extra": "",
+    }
+    assert s["active_version"] is None  # still no OWN version — inheriting, not authored here
+    assert s["latest_version"] is None
+    assert s["draft_count"] == 0
+
+
+def test_summary_falls_through_to_farther_ancestor():
+    # Nearest ancestor (workspace) has nothing active; org does.
+    org_row = _profile(2, True, prepend="org-prepend")
+    s = ap.build_agent_summary("design", [], ancestor_active=[("workspace", None), ("org", org_row)])
+    assert s["inherited_from"] == "org"
+    assert s["active"]["prompt_prepend"] == "org-prepend"
+
+
+def test_summary_own_tier_active_wins_over_ancestors():
+    own_rows = [_profile(1, True, prepend="own-prepend")]
+    ancestor = [("workspace", _profile(5, True, prepend="ws-prepend"))]
+    s = ap.build_agent_summary("design", own_rows, ancestor_active=ancestor)
+    assert s["inherited_from"] is None
+    assert s["active"]["prompt_prepend"] == "own-prepend"
+
+
+def test_summary_no_ancestors_and_no_own_active_stays_null():
+    # No ancestor_active passed at all — must match today's exact behavior.
+    s = ap.build_agent_summary("design", [])
+    assert s == {
+        "agent_id": "design", "active_version": None, "latest_version": None,
+        "draft_count": 0, "updated_at": None, "active": None, "inherited_from": None,
+    }
+
+
+# ── ancestor_chain ──────────────────────────────────────────────────────────────────
+
+def test_ancestor_chain_org_has_none():
+    assert ap.ancestor_chain("org", None, None) == []
+
+
+def test_ancestor_chain_workspace_is_org():
+    assert ap.ancestor_chain("workspace", "ws-1", None) == [("org", None)]
+
+
+def test_ancestor_chain_project_is_workspace_then_org():
+    assert ap.ancestor_chain("project", "proj-1", "ws-1") == [("workspace", "ws-1"), ("org", None)]
+
+
+def test_ancestor_chain_project_without_workspace_id_degrades_to_none():
+    # No workspace_id supplied -> no inheritance resolution attempted, never an error.
+    assert ap.ancestor_chain("project", "proj-1", None) == []
 
 
 # ── build_preview_layers ───────────────────────────────────────────────────────────

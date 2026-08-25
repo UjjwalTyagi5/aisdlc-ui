@@ -50,6 +50,23 @@ PIPELINE_ORDER: tuple[str, ...] = (
 SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project")
 SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
 
+
+def ancestor_chain(scope: str, scope_id: str | None, workspace_id: str | None) -> list[tuple[str, str | None]]:
+    """Nearest-first ancestor (scope, scope_id) pairs above `scope`, for inheritance
+    resolution. `workspace_id` is the project's own parent BU — required to resolve a
+    project's ancestors; omitted, a project-scope request simply gets no ancestors
+    back (degrades to no-inheritance behavior, never errors). Shared with
+    skill_store.py's list_skills_merged, which needs the identical chain shape.
+    """
+    if scope == "org":
+        return []
+    if scope == "workspace":
+        return [("org", None)]
+    if scope == "project":
+        return [("workspace", workspace_id), ("org", None)] if workspace_id else []
+    return []
+
+
 VENDOR_LAYER_NAME = "Vendor base prompt (identity, tools, safety, HANDOFF contract)"
 
 # ── Lint rules (module-level so tests + preview reuse them; design §3.5 guardrails) ──
@@ -140,32 +157,61 @@ def apply_publish_flip(rows: Iterable, target_id) -> Optional[int]:
     return previous_active_version
 
 
-def build_agent_summary(agent_id: str, rows: Iterable) -> dict:
-    """Summarize all version rows for one agent+scope into the summary[] shape."""
+def _active_content(row) -> dict:
+    return {
+        "prompt_prepend": row.prompt_prepend or "",
+        "prompt_append": row.prompt_append or "",
+        "output_contract_extra": row.output_contract_extra or "",
+    }
+
+
+def _nearest_ancestor_active(ancestor_active: list[tuple[str, object]]) -> tuple[str | None, object | None]:
+    for anc_scope, row in ancestor_active:
+        if row is not None:
+            return anc_scope, row
+    return None, None
+
+
+def build_agent_summary(
+    agent_id: str, rows: Iterable, ancestor_active: list[tuple[str, object]] | None = None,
+) -> dict:
+    """Summarize all version rows for one agent+scope into the summary[] shape.
+
+    `ancestor_active` (nearest-first) is consulted ONLY when this tier has no active
+    row of its own — draft_count/latest_version always describe THIS tier's own
+    history, never an ancestor's; only `active`/`inherited_from` fall through.
+    """
     rows = list(rows)
+    ancestor_active = ancestor_active or []
     if not rows:
+        inherited_from, inherited_row = _nearest_ancestor_active(ancestor_active)
         return {
-            "agent_id": agent_id,
-            "active_version": None,
-            "latest_version": None,
-            "draft_count": 0,
-            "updated_at": None,
-            "active": None,
+            "agent_id": agent_id, "active_version": None, "latest_version": None,
+            "draft_count": 0, "updated_at": None,
+            "active": _active_content(inherited_row) if inherited_row is not None else None,
+            "inherited_from": inherited_from,
         }
     active_rows = [r for r in rows if r.is_active]
     active = max(active_rows, key=lambda r: r.version) if active_rows else None
     updated_candidates = [r.updated_at for r in rows if r.updated_at is not None]
+
+    inherited_from = None
+    active_content = None
+    if active is not None:
+        active_content = _active_content(active)
+    else:
+        inherited_from, inherited_row = _nearest_ancestor_active(ancestor_active)
+        if inherited_row is not None:
+            active_content = _active_content(inherited_row)
+
     return {
         "agent_id": agent_id,
         "active_version": active.version if active else None,
         "latest_version": max(r.version for r in rows),
         "draft_count": sum(1 for r in rows if not r.is_active),
         "updated_at": _iso(max(updated_candidates)) if updated_candidates else None,
-        "active": {
-            "prompt_prepend": active.prompt_prepend or "",
-            "prompt_append": active.prompt_append or "",
-            "output_contract_extra": active.output_contract_extra or "",
-        } if active else None,
+        "active": active_content,
+        "inherited_from": inherited_from,
     }
 
 
