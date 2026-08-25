@@ -5,10 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Building2, Check } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -18,26 +16,28 @@ import {
 } from "@/components/ui/card";
 import { getProjectModelSelection, setProjectModelSelection } from "@/lib/api/models";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
-import { RequestAccessButton } from "@/components/requests/request-access-button";
 import type { ModelAllowEntry } from "@/lib/schemas/model";
 
 const keyOf = (e: ModelAllowEntry) => `${e.provider}::${e.model_id}`;
 
 /**
- * Which of its inherited models a project actually uses (PRD §34.2).
+ * Which of the models pushed to this project is its "master" key (PRD §34.2,
+ * design decision #4).
  *
- * Everything above this card is governance — the Org Admin decides which
- * models the organization may use and which {BUSINESS_UNIT_LABEL}s get each
- * one. They don't know which model suits this team's work, so the last
- * narrowing belongs to the Project Admin, and only the last one. This card can
- * therefore never *add* a model: everything it offers came down the cascade,
- * and a model the Org Admin revokes disappears from here whether the project
- * had selected it or not.
+ * This card used to let a Project Admin browse the whole set their Business
+ * Unit had been granted and freely tick which ones the project runs on — genuine
+ * self-service selection, straight out of `inherited`. That's gone: a
+ * Business Unit Admin now decides which credentialed models actually reach a
+ * project (`assignProviderToProject`, from the provider's own screen), and
+ * `selected` is that pushed set, not a catalogue to shop from. The one thing
+ * left for the Project Admin to decide is which of THOSE pushed entries is
+ * the default — everything else here is read-only.
  *
- * A project that has never touched this inherits the whole granted set. That
- * is shown as inheritance, not as a selection someone made — the distinction
- * matters when the Org Admin later grants another model and the project should
- * pick it up automatically.
+ * A project that has never been assigned anything still resolves `selected`
+ * to the whole inherited set server-side (`usingDefaults`), so this can show
+ * models before any Business Unit Admin has explicitly pushed one — that is
+ * shown as inheritance, never as a selection someone made, and there is still
+ * no control here to add or remove from it.
  */
 export function ProjectModelSelectionCard({
   projectId,
@@ -51,16 +51,35 @@ export function ProjectModelSelectionCard({
 
   const selectionQ = useQuery({ queryKey, queryFn: () => getProjectModelSelection(projectId) });
 
-  const [draft, setDraft] = React.useState<Set<string> | null>(null);
   const [draftDefault, setDraftDefault] = React.useState<string | null>(null);
 
-  // Reset the draft whenever the server's answer changes, so an Org Admin
-  // granting another model mid-edit doesn't leave a stale checkbox set.
-  const serverSignature = selectionQ.data
-    ? `${selectionQ.data.selected.map(keyOf).sort().join(",")}|${selectionQ.data.defaultKey ?? ""}`
+  const data = selectionQ.data;
+  /**
+   * Deduped on `keyOf`, because that key is the SELECTION IDENTITY here, not
+   * just a React key.
+   *
+   * The same model can reach a project twice — pushed by two different
+   * credentials, or once by the old self-service path and once by a Business
+   * Unit Admin's push — and on a screen that says "which models does this
+   * project use" they are one row, not two identical ones wired to the same
+   * "make default" control.
+   */
+  const selected = React.useMemo(() => {
+    const seen = new Set<string>();
+    return (data?.selected ?? []).filter((e) => {
+      const k = keyOf(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [data]);
+
+  // Reset the draft whenever the server's answer changes, so a Business Unit
+  // Admin pushing another key mid-edit doesn't leave a stale pick behind.
+  const serverSignature = data
+    ? `${selected.map(keyOf).sort().join(",")}|${data.defaultKey ?? ""}`
     : null;
   React.useEffect(() => {
-    setDraft(null);
     setDraftDefault(null);
   }, [serverSignature]);
 
@@ -68,61 +87,26 @@ export function ProjectModelSelectionCard({
     mutationFn: (input: { selected: ModelAllowEntry[]; defaultKey: string | null }) =>
       setProjectModelSelection(projectId, input),
     onSuccess: () => {
-      toast.success("Project models updated");
+      toast.success("Default model updated");
       queryClient.invalidateQueries({ queryKey });
     },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Could not save model selection"),
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Could not save default model"),
   });
 
-  const data = selectionQ.data;
-  /**
-   * Deduped on `keyOf`, because that key is the SELECTION IDENTITY here, not
-   * just a React key.
-   *
-   * The same model reaches a unit more than once when it is granted both
-   * org-wide and to that unit specifically — two grant rows, one model. On a
-   * screen that says "which models may this project use" they are one choice,
-   * and rendering both produced two identical rows wired to the same
-   * checkbox: ticking either appeared to tick both, and React warned about
-   * the duplicate key on top.
-   *
-   * Making the key unique instead would have been the wrong fix — it would
-   * have silenced the warning and left the two indistinguishable rows.
-   */
-  const inherited = React.useMemo(() => {
-    const seen = new Set<string>();
-    return (data?.inherited ?? []).filter((e) => {
-      const k = keyOf(e);
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-  }, [data]);
-  const serverSelected = React.useMemo(
-    () => new Set((data?.selected ?? []).map(keyOf)),
-    [data],
-  );
-
-  const selected = draft ?? serverSelected;
   const defaultKey = draftDefault ?? data?.defaultKey ?? null;
-  const dirty = draft !== null || draftDefault !== null;
-
-  const toggle = (k: string, on: boolean) => {
-    const next = new Set(selected);
-    if (on) next.add(k);
-    else next.delete(k);
-    setDraft(next);
-    // Dropping the default model has to promote something, or the project
-    // resolves to nothing on its next run.
-    if (!on && defaultKey === k) setDraftDefault([...next][0] ?? null);
-  };
+  const dirty = draftDefault !== null;
 
   const save = () => {
-    const entries = inherited.filter((e) => selected.has(keyOf(e)));
-    saveM.mutate({
-      selected: entries,
-      defaultKey: defaultKey && selected.has(defaultKey) ? defaultKey : (entries[0] ? keyOf(entries[0]) : null),
-    });
+    // `selected` itself is never edited here — only re-sent as-is, exactly as
+    // the server returned it, since the PUT endpoint replaces the whole list
+    // rather than merging. Picking a default must never accidentally drop or
+    // add an entry a Business Unit Admin pushed.
+    const entries = data?.selected ?? [];
+    const resolvedDefault =
+      defaultKey && selected.some((e) => keyOf(e) === defaultKey)
+        ? defaultKey
+        : (selected[0] ? keyOf(selected[0]) : null);
+    saveM.mutate({ selected: entries, defaultKey: resolvedDefault });
   };
 
   return (
@@ -153,10 +137,7 @@ export function ProjectModelSelectionCard({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setDraft(null);
-                  setDraftDefault(null);
-                }}
+                onClick={() => setDraftDefault(null)}
                 disabled={saveM.isPending}
               >
                 Cancel
@@ -172,45 +153,36 @@ export function ProjectModelSelectionCard({
       <CardContent>
         {selectionQ.isLoading ? (
           <p className="text-muted-foreground text-sm">Loading…</p>
-        ) : inherited.length === 0 ? (
+        ) : selected.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            Your Organization Admin hasn&apos;t granted this{" "}
-            {BUSINESS_UNIT_LABEL.toLowerCase()} any models yet. Ask them to grant some — a project
-            can only use what it inherits.
+            Your {BUSINESS_UNIT_LABEL} Admin hasn&apos;t assigned this project any models yet. Ask
+            them to push a key from a provider&apos;s own screen — a project can only use what its{" "}
+            {BUSINESS_UNIT_LABEL.toLowerCase()} Admin has explicitly given it.
           </p>
         ) : (
           <ul className="divide-y rounded-md border">
-            {inherited.map((e) => {
+            {selected.map((e) => {
               const k = keyOf(e);
-              const on = selected.has(k);
               const isDefault = defaultKey === k;
               return (
-                <li
-                  key={k}
-                  className={cn(
-                    "flex flex-wrap items-center gap-3 px-3 py-2.5 text-sm",
-                    !on && "opacity-60",
-                  )}
-                >
-                  <Checkbox
-                    id={`model-${k}`}
-                    checked={on}
-                    disabled={!canManage || saveM.isPending}
-                    onCheckedChange={(c) => toggle(k, c === true)}
-                    aria-label={`Use ${e.model_id} on this project`}
-                  />
-                  <label htmlFor={`model-${k}`} className="min-w-0 flex-1 cursor-pointer">
+                <li key={k} className="flex flex-wrap items-center gap-3 px-3 py-2.5 text-sm">
+                  <div className="min-w-0 flex-1">
                     <span className="font-mono text-[12.5px]">{e.model_id}</span>
                     <span className="text-muted-foreground ml-2 text-[11.5px]">{e.provider}</span>
-                  </label>
+                    {e.credentialName && (
+                      <span className="text-muted-foreground ml-2 text-[11px]">
+                        via {e.credentialName}
+                      </span>
+                    )}
+                  </div>
 
                   {isDefault ? (
                     <Badge className="gap-1 font-mono text-[10px]">
                       <Check className="size-3" aria-hidden />
                       default
                     </Badge>
-                  ) : canManage ? (
-                    on && (
+                  ) : (
+                    canManage && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -221,24 +193,6 @@ export function ProjectModelSelectionCard({
                         Make default
                       </Button>
                     )
-                  ) : (
-                    // The contributor's half of this row. A model the unit
-                    // holds but the project has not turned on is the one thing
-                    // they can actually do something about — and the person
-                    // who grants it is the Project Admin, one tick away on
-                    // this very card. `model_credential` tier-routes there.
-                    !on && (
-                      <RequestAccessButton
-                        label="Request access"
-                        className="h-7"
-                        prefill={{
-                          type: "model_credential",
-                          title: `${e.model_id} on this project`,
-                          description: `Requesting ${e.model_id} (${e.provider}). It is granted to the ${BUSINESS_UNIT_LABEL.toLowerCase()} but not turned on for this project.`,
-                          projectId,
-                        }}
-                      />
-                    )
                   )}
                 </li>
               );
@@ -246,9 +200,9 @@ export function ProjectModelSelectionCard({
           </ul>
         )}
 
-        {!canManage && inherited.length > 0 && (
+        {!canManage && selected.length > 0 && (
           <p className="text-muted-foreground mt-3 text-xs">
-            Only a Project Admin can change which of these the project uses.
+            Only a Project Admin can change which of these is the default.
           </p>
         )}
       </CardContent>

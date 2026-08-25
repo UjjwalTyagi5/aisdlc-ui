@@ -22,7 +22,9 @@ from typing import Optional
 
 from sqlalchemy import text
 
+from shared.authz.connector_grants import granted_target_refs
 from shared.db import get_db_session_for_tenant
+from shared.services import model_config as mc
 
 
 class NotAllowedForUnitError(Exception):
@@ -34,6 +36,14 @@ class ProjectKeyNotAllowedError(Exception):
     """A project tried to onboard its own key for a (provider, model_id) its Business
     Unit hasn't opted into project-level keys for (PRD §371/§1640 — 'only if the
     Business Unit allows it'), or for a model the BU never made reachable at all."""
+
+
+class ProjectOutsideUnitError(Exception):
+    """assign_provider_to_project's target project belongs to a different Business
+    Unit than the provider connection being pushed onto it (or the provider isn't
+    BU-scoped at all — an org-wide connection has no single unit to push from), or
+    the provider connection is itself project-scoped — one project's own private
+    key, never assignable to another project regardless of business unit."""
 
 
 def _grant_reaches(visibility: str, business_unit_ids: list[str], workspace_id: str) -> bool:
@@ -160,8 +170,31 @@ async def set_bu_key_policy(
 
 
 async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
+    """A model reaches this BU only when BOTH layers say so: `org_model_grants`
+    (this specific model was curated for the BU, or marked `global`) AND the
+    provider it belongs to is currently granted via `integration_grants`
+    (kind='model_provider') — the mechanism `PUT /model/providers/grants`
+    writes. These are two genuinely separate tables from two different
+    design passes, and neither used to check the other: a `global`-visibility
+    model, or one `specific`-granted before the provider-grant mechanism
+    existed (or after it was later revoked), would still show as "available"
+    with no way to actually reach it — and revoking a provider's grant had no
+    effect on models that had already been curated under it. Requiring both
+    closes that gap: a curated-but-provider-revoked model now correctly
+    disappears, matching what "revoke" is supposed to mean.
+    """
     grants = await get_org_grants(tenant_id)
     policy = await get_bu_key_policy(tenant_id, workspace_id)
+    # Mirrors get_bu_key_policy's own guard just above: workspace_id is compared
+    # against a UUID column, so a malformed value (an old-style BU id not yet
+    # migrated) must not crash the request — treat it as "no provider grants",
+    # the same safe-empty fallback the rest of this module already uses.
+    granted_providers: set[str] = set()
+    if _is_valid_uuid(workspace_id):
+        async with get_db_session_for_tenant(tenant_id) as s:
+            granted_providers = await granted_target_refs(
+                s, tenant_id=tenant_id, workspace_id=workspace_id, kind="model_provider",
+            )
     return [
         {
             "provider": g["provider"], "model_id": g["model_id"],
@@ -171,6 +204,7 @@ async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
         }
         for g in grants
         if _grant_reaches(g["visibility"], g["business_unit_ids"], workspace_id)
+        and g["provider"] in granted_providers
     ]
 
 
@@ -363,21 +397,44 @@ async def assert_project_key_allowed(tenant_id: str, project_id: str, provider: 
     return workspace_id
 
 
-async def _project_owned_offering_keys(tenant_id: str, project_id: str, selected: list[dict]) -> set[tuple]:
+async def _project_owned_offering_keys(
+    tenant_id: str, project_id: str, workspace_id: str, selected: list[dict],
+) -> tuple[set[tuple], set[tuple]]:
     """(provider, model_id, credential_id) keys within `selected` whose credential_id
-    is a model_providers row this exact project owns — the second acceptance path
-    set_project_selection allows alongside the BU-shared allowed set."""
+    is a model_providers row this project owns — the second acceptance path
+    set_project_selection allows alongside the BU-shared allowed set. Returns
+    `(own_keys, bu_scoped_keys)`: `own_keys` is every such key regardless of how it's
+    owned; `bu_scoped_keys` is the subset owned via workspace scoping (see (b) below),
+    for callers that need to tell the two provenances apart.
+
+    "Owns" means either: (a) a project-scoped connection (mp.project_id = this exact
+    project — the project's own BYOK key, pre-existing/narrower case), OR (b) a
+    BU-scoped connection (mp.workspace_id = this project's own workspace, mp.project_id
+    NULL) — added by Task 12 to recognize the connections `assign_provider_to_project`
+    (Task 5) pushes onto a project. Before this, case (b) fell through this query's
+    exact-project_id filter entirely (a BU-scoped row's project_id is NULL, never equal
+    to :p), so a Project Admin could never again successfully call set_project_selection
+    — including just to set defaultKey — once their BU Admin assigned them a key via the
+    new flow. A row scoped to a DIFFERENT workspace than this project's own still isn't
+    matched by either clause, so that direction stays exactly as strict as before."""
     cred_ids = {e.get("credential_id") for e in selected if e.get("credential_id")}
     if not cred_ids:
-        return set()
+        return set(), set()
     async with get_db_session_for_tenant(tenant_id) as s:
         rows = (await s.execute(
-            text("SELECT mp.id AS provider_id, mp.provider, mo.model_id FROM model_providers mp "
-                 "JOIN model_offerings mo ON mo.provider_id = mp.id "
-                 "WHERE mp.tenant_id = :t AND mp.project_id = :p AND mp.id = ANY(:ids)"),
-            {"t": tenant_id, "p": project_id, "ids": list(cred_ids)},
+            text("SELECT mp.id AS provider_id, mp.provider, mo.model_id, mp.project_id AS mp_project_id "
+                 "FROM model_providers mp JOIN model_offerings mo ON mo.provider_id = mp.id "
+                 "WHERE mp.tenant_id = :t AND mp.id = ANY(:ids) "
+                 "AND (mp.project_id = :p OR mp.workspace_id = :w)"),
+            {"t": tenant_id, "p": project_id, "w": workspace_id, "ids": list(cred_ids)},
         )).fetchall()
-    return {(r.provider, r.model_id, str(r.provider_id)) for r in rows}
+    own_keys = {(r.provider, r.model_id, str(r.provider_id)) for r in rows}
+    # BU-scoped == matched only via the workspace_id clause, i.e. mp.project_id IS NULL
+    # (a project-scoped row always has mp.project_id = :p, never NULL).
+    bu_scoped_keys = {
+        (r.provider, r.model_id, str(r.provider_id)) for r in rows if r.mp_project_id is None
+    }
+    return own_keys, bu_scoped_keys
 
 
 async def set_project_selection(
@@ -390,12 +447,25 @@ async def set_project_selection(
     # creating it), for a model its BU made reachable under any credential — checked by
     # model_id alone here since the BU's shared credential_id differs from the project's own.
     reachable_models = {(e["provider"], e["model_id"]) for e in bu_allowed}
-    own_keys = await _project_owned_offering_keys(tenant_id, project_id, selected)
+    own_keys, bu_scoped_keys = await _project_owned_offering_keys(
+        tenant_id, project_id, workspace_id, selected,
+    )
     for e in selected:
         key = _entry_key(e)
         if key in allowed_keys:
             continue
-        if key in own_keys and (e["provider"], e["model_id"]) in reachable_models:
+        # Task 12: a BU-scoped connection (bu_scoped_keys) needs no further reachability
+        # check against `reachable_models` — that set is derived solely from the OLD
+        # org_model_grants curation table, which the NEW integration_grants-gated,
+        # BU-scoped provider-creation path (Task 4) and assign_provider_to_project
+        # (Task 5) never write to. Reachability for THIS connection was already proven
+        # at push time: Task 4 required a model-provider grant to create it, and Task 5
+        # required its workspace_id to match this exact project's workspace before
+        # pushing it here. Requiring `reachable_models` on top would be enforcing an
+        # unrelated, inapplicable legacy gate — the very bug this task fixes. The
+        # pre-existing project-owned-key case (own_keys minus bu_scoped_keys) is
+        # untouched: it still requires `reachable_models`, exactly as before.
+        if key in own_keys and (key in bu_scoped_keys or (e["provider"], e["model_id"]) in reachable_models):
             continue
         raise NotAllowedForUnitError(
             f"{e['provider']}/{e['model_id']} is not in this project's business unit's allowed set"
@@ -409,6 +479,92 @@ async def set_project_selection(
                 "ON CONFLICT (project_id) DO UPDATE SET selected = :sel, default_key = :dk, updated_at = now()"
             ),
             {"id": str(_uuid.uuid4()), "t": tenant_id, "p": project_id, "sel": _json_dumps(selected), "dk": default_key},
+        )
+    return await get_project_selection(tenant_id, project_id)
+
+
+async def assign_provider_to_project(
+    tenant_id: str, provider_id: str, project_id: str, actor_id: str,
+) -> dict:
+    """A BU Admin pushes a `model_providers` row they already created (mc.create_provider's
+    BU-scoped, key-required flow — Task 4) onto one of their own projects: appends one
+    ModelAllowEntry-shaped dict per ENABLED offering to that project's stored `selected`
+    list, in the exact on-disk shape set_project_selection already writes/get_project_selection
+    already reads (provider/model_id/credential_id/credential_name keys, JSONB column,
+    ON CONFLICT (project_id) upsert) — so the two never disagree about what "selected"
+    contains. `default_key` is read back and re-written unchanged; the ON CONFLICT clause
+    only ever assigns `selected`, so an existing default_key can never be clobbered by
+    this path even under a concurrent write.
+
+    Ownership — does the caller actually administer the target project's Business Unit —
+    is checked one layer up at the router (_require_scoped in model.py), matching every
+    other BU/project route in this module (see module docstring). This function only
+    checks the two things that check can't: that the PROVIDER named is actually
+    scoped to that SAME Business Unit (not just that the caller administers some unit
+    or other), and that it is not itself a project-scoped connection — a project's own
+    BYOK key (create_project_provider_route) carries its owning project's own
+    workspace_id, so without this second check it would pass the workspace-match check
+    for every sibling project in the same unit and could be pushed onto any of them.
+    """
+    if not mc._is_valid_uuid(provider_id):
+        raise mc.ProviderNotFoundError(provider_id)
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        row = await mc._provider_row(s, provider_id)
+        if row is None:
+            raise mc.ProviderNotFoundError(provider_id)
+        offerings = await mc._offerings_for(s, provider_id)
+
+    if row.project_id is not None:
+        # A project-scoped connection is one project's own private BYOK key
+        # (create_project_provider_route writes it with BOTH project_id AND that
+        # project's own workspace_id set — see that route's docstring). Without this
+        # check such a row would pass the workspace-match check below for EVERY
+        # sibling project in the same business unit, letting a BU Admin (or a Project
+        # Admin abusing this same route) push one project's private key onto another
+        # project. Reject it outright, independent of which project is being targeted
+        # — a project-scoped credential is never legitimately assignable via this path.
+        raise ProjectOutsideUnitError(
+            f"provider {provider_id!r} is a project's own key and cannot be assigned to another project"
+        )
+
+    provider_workspace_id = str(row.workspace_id) if row.workspace_id else None
+    project_workspace_id = await _project_workspace_id(tenant_id, project_id)
+    if provider_workspace_id is None or provider_workspace_id != str(project_workspace_id):
+        raise ProjectOutsideUnitError(
+            f"provider {provider_id!r} is not scoped to project {project_id!r}'s business unit"
+        )
+
+    new_entries = [
+        {"provider": row.provider, "model_id": o["model_id"],
+         "credential_id": provider_id, "credential_name": row.display_name}
+        for o in offerings if o["enabled"]
+    ]
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        sel_row = (await s.execute(
+            text("SELECT selected, default_key FROM project_model_selections WHERE project_id = :p"),
+            {"p": project_id},
+        )).first()
+        selected = list(sel_row.selected) if sel_row and sel_row.selected else []
+        existing_keys = {_entry_key(e) for e in selected}
+        for e in new_entries:
+            key = _entry_key(e)
+            if key not in existing_keys:
+                selected.append(e)
+                existing_keys.add(key)
+        default_key = sel_row.default_key if sel_row else None
+        await s.execute(
+            text(
+                "INSERT INTO project_model_selections (id, tenant_id, project_id, selected, default_key, updated_at) "
+                "VALUES (:id, :t, :p, :sel, :dk, now()) "
+                # Unlike set_project_selection's upsert, default_key is deliberately NOT in
+                # the UPDATE SET clause — this path only ever appends to `selected` and must
+                # never touch an already-set defaultKey (the brief's stated contract).
+                "ON CONFLICT (project_id) DO UPDATE SET selected = :sel, updated_at = now()"
+            ),
+            {"id": str(_uuid.uuid4()), "t": tenant_id, "p": project_id,
+             "sel": _json_dumps(selected), "dk": default_key},
         )
     return await get_project_selection(tenant_id, project_id)
 

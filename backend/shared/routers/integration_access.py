@@ -250,8 +250,8 @@ async def grant_integration_access(
     """
     tenant_id = _tenant_id(request)
     _require_org_admin(request)
-    if kind not in ("connector", "mcp"):
-        raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
+    if kind not in ("connector", "mcp", "model_provider"):
+        raise HTTPException(status_code=422, detail="kind must be 'connector', 'mcp', or 'model_provider'")
     # NO ACCESS LEVEL HERE ANY MORE (migration 0024). A grant is a reach decision:
     # this unit may use Jira, or it may not. What its agents may DO with Jira is
     # chosen per stage on the project, so the capability check that used to live here
@@ -323,8 +323,8 @@ async def revoke_integration_access(
     "wrong id".
     """
     tenant_id = _tenant_id(request)
-    if kind not in ("connector", "mcp"):
-        raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
+    if kind not in ("connector", "mcp", "model_provider"):
+        raise HTTPException(status_code=422, detail="kind must be 'connector', 'mcp', or 'model_provider'")
 
     if level == "unit":
         _require_org_admin(request)
