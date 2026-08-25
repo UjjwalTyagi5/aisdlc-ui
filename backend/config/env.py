@@ -10,6 +10,23 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]  # platform/backend
 REPO_ROOT = Path(__file__).resolve().parents[3]     # repo root
 load_dotenv(BACKEND_ROOT / ".env")
 
+# ── where secrets come from ──────────────────────────────────────────────────
+# ENV=dev (the default) reads everything below from .env, exactly as it always has.
+# Any other value means the secrets live in Azure Key Vault, and this call writes them
+# into os.environ BEFORE the first constant is read — which is why none of the
+# os.environ.get(...) lines in this file needed to change.
+#
+# ORDER IS LOAD-BEARING: this must run after load_dotenv (it needs AZURE_KEY_VAULT_URL
+# and ENV, both of which come from .env) and before anything reads a setting. Moving it
+# below a constant means that constant silently keeps its .env value in production.
+#
+# It raises rather than falling back when the vault is required and unreachable. See
+# config/secret_bootstrap.py for why a refusal to boot is the safe failure here.
+from config.secret_bootstrap import current_env, hydrate_environment  # noqa: E402
+
+ENV: str = current_env()
+hydrate_environment()
+
 
 def _ensure_toolchains_on_path() -> None:
     """Add well-known toolchain install dirs to PATH for THIS process (and every
