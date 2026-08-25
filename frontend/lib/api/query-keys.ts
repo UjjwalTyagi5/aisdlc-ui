@@ -187,6 +187,8 @@ export const qk = {
     workspaces: () => ["access", "workspaces"] as const,
     roles: () => ["access", "roles"] as const,
     members: (workspaceId: string) => ["access", "members", workspaceId] as const,
+    /** The whole org roster, with no workspace context — see listOrgMembers. */
+    orgMembers: () => ["access", "org-members"] as const,
   },
   devWorkspace: {
     adoProjects: (id: ProjectId) => ["dev-workspace", "ado-projects", id] as const,

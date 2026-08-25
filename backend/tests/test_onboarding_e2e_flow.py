@@ -369,6 +369,7 @@ async def test_a_bu_admin_creates_a_project_and_names_its_owner(org, _capture_em
     admin_hdr = await _as_themselves(admin_id, t["org"])
     created = c.post("/projects", headers=admin_hdr, json={
         "name": "Card Rails", "workspaceId": unit, "ownerId": owner_id,
+        "monthlyBudgetUsd": 10,
     })
     assert created.status_code in (200, 201), created.text
     project_id = created.json()["id"]
@@ -397,6 +398,7 @@ async def test_a_bu_admin_can_own_the_project_they_create(org, _capture_email):
     admin_hdr = await _as_themselves(admin_id, t["org"])
     created = c.post("/projects", headers=admin_hdr, json={
         "name": "Self Owned", "workspaceId": unit, "ownerId": admin_id,
+        "monthlyBudgetUsd": 10,
     })
     assert created.status_code in (200, 201), created.text
 
@@ -420,9 +422,11 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
     admin_hdr = await _as_themselves(admin_id, t["org"])
 
     joined = c.post("/projects", headers=admin_hdr,
-                    json={"name": "Card Rails", "workspaceId": unit}).json()["id"]
+                    json={"name": "Card Rails", "workspaceId": unit,
+                          "monthlyBudgetUsd": 10}).json()["id"]
     other = c.post("/projects", headers=admin_hdr,
-                   json={"name": "Fraud Engine", "workspaceId": unit}).json()["id"]
+                   json={"name": "Fraud Engine", "workspaceId": unit,
+                         "monthlyBudgetUsd": 10}).json()["id"]
 
     contrib_email = f"con-{_uuid.uuid4().hex[:6]}@e2ebank.com"
     contrib_id = _onboard(c, t, contrib_email, "contributor", unit).json()["identityId"]
@@ -490,7 +494,8 @@ async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_
     admin_hdr = await _as_themselves(admin_id, t["org"])
 
     seed = c.post("/projects", headers=admin_hdr,
-                  json={"name": "Seed", "workspaceId": unit}).json()["id"]
+                  json={"name": "Seed", "workspaceId": unit,
+                        "monthlyBudgetUsd": 10}).json()["id"]
     pa_email = f"pa-{_uuid.uuid4().hex[:6]}@e2ebank.com"
     pa_id = _onboard(c, t, pa_email, "contributor", unit).json()["identityId"]
     c.post(f"/projects/{seed}/members", headers=admin_hdr,
@@ -498,7 +503,8 @@ async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_
 
     pa_hdr = await _as_themselves(pa_id, t["org"])
     created = c.post("/projects", headers=pa_hdr,
-                     json={"name": "Their Idea", "workspaceId": unit})
+                     json={"name": "Their Idea", "workspaceId": unit,
+                           "monthlyBudgetUsd": 10})
     assert created.status_code in (200, 201), created.text
 
     # Server-side approval state now exists — the project is created pending

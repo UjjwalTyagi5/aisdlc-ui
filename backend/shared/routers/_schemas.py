@@ -100,10 +100,25 @@ class ProjectOut(BaseModel):
     # Per-(stage, tool) read/write mode, "{agent_id}::{connector|mcp}::{ref}" ->
     # "read" | "write" | "both". Absent key = "both" (migration 0024).
     toolAccessModes: dict[str, str] = {}
-    # Monthly cost budget (0032). None = inherit workspace / unlimited.
+    # TOTAL cost budget (0032). None = inherit workspace / unlimited. The field name
+    # is historical — spend is accumulated over the project's life, not per month
+    # (shared/services/budget_store.py).
     monthlyBudgetUsd: Optional[float] = None
-    # Current calendar-month spend from the durable usage rollup (0 unless injected).
+    # Lifetime spend from the durable usage rollup (0 unless injected).
     monthlySpendUsd: float = 0.0
+    # How long the budget is authorised for (0035), `YYYY-MM-DD` or null. The
+    # frontend has rendered and validated this pair for some time
+    # (lib/schemas/budget-window.ts); returning it is what finally lets the cost and
+    # settings pages show the window a project was actually created with.
+    budgetStartDate: Optional[str] = None
+    budgetEndDate: Optional[str] = None
+    # Set when a settings edit was QUEUED rather than applied — a Project Admin's
+    # edit becomes a request for their Business Unit Admin. The project in this
+    # response is therefore unchanged, and the client must say "sent for approval"
+    # rather than "saved". Absent/false on every other response.
+    pendingApproval: bool = False
+    pendingRequestId: Optional[str] = None
+    pendingApproverRole: Optional[str] = None
     lastActivityAt: str
     createdAt: str
 
@@ -122,6 +137,12 @@ class ProjectOut(BaseModel):
             template="blank",
             track=getattr(project, "track", None) or "greenfield",
             archived=project.archived,
+            budgetStartDate=(
+                d.isoformat() if (d := getattr(project, "budget_start_date", None)) else None
+            ),
+            budgetEndDate=(
+                d.isoformat() if (d := getattr(project, "budget_end_date", None)) else None
+            ),
             approvalStatus=getattr(project, "approval_status", None) or "active",
             approvalDecidedBy=getattr(project, "approval_decided_by", None),
             approvalDecidedAt=(

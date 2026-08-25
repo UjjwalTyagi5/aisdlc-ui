@@ -34,6 +34,7 @@ REQUEST_TYPES: tuple[str, ...] = (
     "model_credential",
     "budget_increase",
     "project_archive",
+    "project_settings_change",
     "agent_default_org",
     "agent_default_workspace",
     "agent_default_project",
@@ -59,6 +60,7 @@ REQUEST_TYPE_LABEL: dict[str, str] = {
     "model_credential": "Model credential",
     "budget_increase": "Budget headroom",
     "project_archive": "Project archive",
+    "project_settings_change": "Project settings change",
     "agent_default_org": "Agent default — organization",
     "agent_default_workspace": "Agent default — business unit",
     "agent_default_project": "Agent default — project",
@@ -118,18 +120,28 @@ AGENT_OWNER_ROLE: dict[str, str] = {
 
 # Mirrors frontend/lib/governance.ts::GOVERNANCE_APPROVER_ROLE. Exhaustive over
 # REQUEST_TYPES on purpose: a new type cannot be added without a decision here.
-# For the tier-routed types the entry is the FLOOR, used only when no requester
-# role is known — `initial_approver_role` computes the real approver from who
-# asked.
+#
+# ONLY THE TYPE_ROUTED ENTRIES ARE READ. `initial_approver_role` consults this map
+# inside `if request_type in TYPE_ROUTED` and nowhere else, so an entry for a
+# tier-routed type is inert — kept for exhaustiveness, not consulted. (The
+# "tier-routed floors" heading below predates that and describes an intent the
+# code does not implement; the values happen to match what tier routing produces
+# for a contributor, which is why nobody noticed.)
 GOVERNANCE_APPROVER_ROLE: dict[str, str] = {
     "project_creation": "bu_admin",
     "model_credential": "bu_admin",
-    # A BU Admin asking for more budget for their own unit needs the tier above
-    # them, not a peer.
+    # NOT USED FOR ROUTING any more — budget_increase left TYPE_ROUTED, and this
+    # map is only read inside that branch (initial_approver_role). The entry stays
+    # because the Record must stay exhaustive over REQUEST_TYPES, which is what
+    # stops a new type being added without a decision here
+    # (test_governance_requests.py asserts the two sets match).
     "budget_increase": "org_admin",
     # A Project Admin (owner) or Org Admin archives directly; a BU Admin
     # archiving a project they do not own needs the Org Admin's sign-off.
     "project_archive": "org_admin",
+    # Tier-routed (absent from TYPE_ROUTED), so this entry is inert — kept for
+    # exhaustiveness. A Project Admin's settings edit goes to their BU Admin.
+    "project_settings_change": "bu_admin",
     "agent_default_org": "org_admin",
     "agent_default_workspace": "bu_admin",
     "agent_default_project": "project_admin",
@@ -161,7 +173,6 @@ GOVERNANCE_APPROVER_ROLE: dict[str, str] = {
 TYPE_ROUTED: frozenset[str] = frozenset(
     {
         "project_creation",
-        "budget_increase",
         "project_archive",
         "agent_default_org",
         "agent_default_workspace",
@@ -176,6 +187,13 @@ TYPE_ROUTED: frozenset[str] = frozenset(
         # Project Admin needs the unit's admin (because the model the unit was
         # never granted is above them). Fixed to bu_admin it always skipped the
         # Project Admin.
+        #
+        # `budget_increase` is ABSENT for the same reason. Pinned to org_admin it
+        # sent a Project Admin's ask for their own project's headroom past the
+        # Business Unit Admin, who owns the unit's cap and has both the standing
+        # and the context to answer it. Tier-routed, the same type means two
+        # asks: a Project Admin's climbs to their BU Admin, a BU Admin's to the
+        # Org Admin.
     }
 )
 
@@ -239,6 +257,12 @@ SYSTEM_RAISED: frozenset[str] = frozenset(
         "role_assignment",
         "cross_bu_assignment",
         "project_archive",
+        # Filed by SAVING project settings, never chosen from the picker: the
+        # Project Admin edits the form they always edited and the platform turns
+        # it into a request behind them. Offering "Project settings change" as a
+        # thing to raise by hand would ask them to describe an edit in prose that
+        # the form already captured exactly.
+        "project_settings_change",
         "agent_default_org",
         "agent_default_workspace",
         "agent_default_project",

@@ -235,3 +235,118 @@ async def test_a_project_summary_for_a_foreign_project_is_refused(two_units):
     # Their own project is answered normally (zeroed while Langfuse is off).
     assert c.get(f"/traces/project-summary?project_id={t['proj_a']}",
                  headers=hdr).status_code == 200
+
+
+# ── the dashboard must not count other organizations ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_org_overview_counts_only_this_organization(two_units):
+    """THE LEAK THIS CLOSES.
+
+    `org_overview` filtered units only by the caller's own bindings, adding NO
+    clause at all for an org-wide caller, on the stated assumption that RLS
+    confined the query to the tenant. `workspaces` has no row-level security, so
+    an Org Admin's dashboard counted every workspace in the database and listed
+    other tenants' units and their budgets among their own.
+
+    A second organization exists here purely so this test can fail if the filter
+    is ever dropped again — `projectCount` was always right, because `projects`
+    happens to have RLS, which is exactly what made the bug easy to miss.
+    """
+    other_org = str(_uuid.uuid4())
+    other_unit = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'Someone Else')"
+        ), {"i": other_org, "s": f"other-{other_org[:8]}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name, monthly_budget_usd) "
+            "VALUES (:i, :o, 'theirs', 'Their Unit', 4242)"
+        ), {"i": other_unit, "o": other_org})
+
+    try:
+        c = _client()
+        ozzy = f"ozzy-{_uuid.uuid4()}"
+        r = c.get("/org/overview", headers=_hdr(ozzy, two_units["org"], ["admin:*"]))
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        assert body["businessUnitCount"] == 2, (
+            f"counted {body['businessUnitCount']} units; this org has 2"
+        )
+        names = {b["name"] for b in body["budgets"]}
+        assert "Their Unit" not in names, f"another org's unit leaked into budgets: {names}"
+        assert names == {"unit-a", "unit-b"}
+    finally:
+        async with get_db_session_superuser() as s:
+            await s.execute(text("DELETE FROM workspaces WHERE id = CAST(:i AS uuid)"),
+                            {"i": other_unit})
+            await s.execute(text("DELETE FROM organizations WHERE id = CAST(:i AS uuid)"),
+                            {"i": other_org})
+
+
+# ── a unit admin sets THEIR OWN budget, and only theirs ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_sets_their_own_budget_without_approval(two_units):
+    """Raising your own unit's cap is yours to do — no request, no approver."""
+    c = _client()
+    admin_a = await _bu_admin_of(two_units["unit_a"], two_units["org"])
+    hdr = _hdr(admin_a, two_units["org"], ["workspace:manage", "artifact:view"])
+
+    # 2500, not more: the fixture's org caps at 5000 and unit_b already holds
+    # 2000, so a larger figure is refused by the allocation guard — which is
+    # correct, and a different rule from the one under test here.
+    r = c.put("/cost/budgets", headers=hdr, json={
+        "scope": "workspace", "id": two_units["unit_a"], "monthlyBudgetUsd": 2500,
+    })
+    assert r.status_code == 204, r.text
+
+    async with get_db_session_for_tenant(two_units["org"]) as s:
+        cap = (await s.execute(
+            text("SELECT monthly_budget_usd FROM workspaces WHERE id = CAST(:i AS uuid)"),
+            {"i": two_units["unit_a"]},
+        )).scalar()
+    assert float(cap) == 2500.0
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_set_another_units_budget(two_units):
+    """THE HOLE THIS CLOSES.
+
+    `workspace:manage` says the caller may manage SOME unit; it never said which,
+    and the only other check was that the row belonged to the same organization.
+    So any Business Unit Admin could set any unit's budget in the tenant —
+    including zeroing a sibling's, which is how this was found.
+    """
+    c = _client()
+    admin_a = await _bu_admin_of(two_units["unit_a"], two_units["org"])
+    hdr = _hdr(admin_a, two_units["org"], ["workspace:manage", "artifact:view"])
+
+    before = 2000.0  # unit_b's budget from the fixture
+    r = c.put("/cost/budgets", headers=hdr, json={
+        "scope": "workspace", "id": two_units["unit_b"], "monthlyBudgetUsd": 1,
+    })
+    # 404, not 403: a unit they cannot administer reads the same as one that does
+    # not exist, matching assert_can_administer_project.
+    assert r.status_code == 404, r.text
+
+    async with get_db_session_for_tenant(two_units["org"]) as s:
+        cap = (await s.execute(
+            text("SELECT monthly_budget_usd FROM workspaces WHERE id = CAST(:i AS uuid)"),
+            {"i": two_units["unit_b"]},
+        )).scalar()
+    assert float(cap) == before, "a sibling unit's budget was changed"
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_set_the_org_budget(two_units):
+    """The organization's own cap is the tier above every unit admin."""
+    c = _client()
+    admin_a = await _bu_admin_of(two_units["unit_a"], two_units["org"])
+    r = c.put("/cost/budgets",
+              headers=_hdr(admin_a, two_units["org"], ["workspace:manage", "artifact:view"]),
+              json={"scope": "org", "id": two_units["org"], "monthlyBudgetUsd": 1})
+    assert r.status_code == 403, r.text
