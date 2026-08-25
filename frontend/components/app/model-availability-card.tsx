@@ -5,7 +5,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Building2, CheckCircle2, ChevronRight, Globe, KeyRound } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { getModelAvailability } from "@/lib/api/models";
@@ -17,12 +16,15 @@ import type { CatalogProvider, ModelAvailability } from "@/lib/schemas/model";
  * What this Business Unit has been given, and what (if anything) it still has
  * to do about it.
  *
- * Read-only on purpose. A Business Unit Admin used to curate their own subset
- * here, which meant the answer to "what can we use?" was partly their own
- * doing — so a model missing from a project could be the Org Admin's decision
- * or their own, and the page couldn't tell you which. Now the list is
- * consequence, not choice, and the only action left on it is the one that is
- * genuinely theirs: supplying a key where the organization didn't.
+ * Read-only. A Business Unit Admin used to curate their own subset here,
+ * which meant the answer to "what can we use?" was partly their own doing —
+ * so a model missing from a project could be the Org Admin's decision or
+ * their own, and the page couldn't tell you which. Now the list is
+ * consequence, not choice. Supplying a key where the organization didn't is
+ * genuinely theirs to do, but that action lives at the page's single "Add
+ * key" button (spec §5, Task 10) rather than per row here — this card's job
+ * is answering "what's granted and what still needs a key," not launching
+ * the flow that fixes it.
  */
 export function ModelAvailabilityCard({
   workspaceId,
@@ -31,7 +33,6 @@ export function ModelAvailabilityCard({
    *  and go to their {BUSINESS_UNIT_LABEL} Admin for approval first. */
   audience,
   catalog = [],
-  onAddKey,
 }: {
   workspaceId: string;
   workspaceName: string;
@@ -47,16 +48,6 @@ export function ModelAvailabilityCard({
    * `rows` below.
    */
   catalog?: CatalogProvider[];
-  /**
-   * BU Admin only: opens the "Add key" dialog fixed to a row's provider.
-   * This is the "supplying a key where the organization didn't" action the
-   * docstring above promises — it used to only be reachable from a provider
-   * card that had zero connections at all, so a provider with SOME keyed
-   * models (a stale/unrelated subscription, say) but a newly-granted model
-   * still needing one had no way in. Per-row is the correct grain: whether a
-   * key is needed is a per-MODEL fact, not a per-provider one.
-   */
-  onAddKey?: (provider: string) => void;
 }) {
   const q = useQuery({
     queryKey: qk.model.availability(workspaceId),
@@ -172,7 +163,6 @@ export function ModelAvailabilityCard({
                 key={`${r.provider}::${r.model_id}::${i}`}
                 row={r}
                 audience={audience}
-                onAddKey={onAddKey}
               />
             ))}
           </ul>
@@ -181,7 +171,7 @@ export function ModelAvailabilityCard({
         {rows.length > 0 && (
           <p className="text-muted-foreground mt-3 text-[11.5px]">
             {audience === "bu"
-              ? "Models keyed centrally need nothing from you. For the rest, add a provider below with your own credentials."
+              ? "Models keyed centrally need nothing from you. For the rest, use the “Add key” button above."
               : `Models keyed centrally need nothing from you. For the rest, ask your ${BUSINESS_UNIT_LABEL} Admin to assign this project a key.`}
           </p>
         )}
@@ -236,14 +226,11 @@ export function ModelAvailabilityCard({
 function AvailabilityRow({
   row,
   audience,
-  onAddKey,
 }: {
   row: ModelAvailability;
   audience: "bu" | "project";
-  onAddKey?: (provider: string) => void;
 }) {
   const covered = row.centrallyCredentialed || row.locallyCredentialed;
-  const canAddKey = !covered && audience === "bu" && !!onAddKey;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-3">
       <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{row.model_id}</span>
@@ -265,17 +252,6 @@ function AvailabilityRow({
           tone="warning"
           label={audience === "bu" ? "Needs your credentials" : "Needs credentials"}
         />
-      )}
-      {canAddKey && (
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-6 shrink-0 px-2 text-[11px]"
-          onClick={() => onAddKey(row.provider)}
-        >
-          Add key
-        </Button>
       )}
       {!covered && <span className="sr-only">This model cannot run until a key is added.</span>}
     </li>

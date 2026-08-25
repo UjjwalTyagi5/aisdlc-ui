@@ -178,9 +178,11 @@ export function AddModelDialog({
   /**
    * "org" (default): today's onboarding shape — key optional, verified only
    * after Save. "bu-add-key": a BU Admin adding their own key to a provider
-   * their org already granted (spec §5) — always paired with `initialProvider`
-   * (no picker either way), but here the key is REQUIRED and must pass a
-   * live "Test" before Save enables, rather than being verified afterward.
+   * their org already granted (spec §5) — the key is REQUIRED and must pass
+   * a live "Test" before Save enables, rather than being verified afterward.
+   * Independent of `initialProvider`: reached from the page's single "Add
+   * key" button, the provider combobox stays live (just narrowed to granted
+   * providers via `catalog`) rather than locked to one tile's answer.
    */
   mode?: "org" | "bu-add-key";
   onAdded: () => void;

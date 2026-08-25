@@ -256,18 +256,23 @@ export default function ModelProvidersPage() {
   // now live on the provider's own screen, which is the only place that also
   // shows what each key serves.
   //
-  // `addKeyProvider` is the BU Admin's "Add key" (spec §5, Task 10): set to a
-  // provider slug by clicking THAT provider's own granted-but-unkeyed tile,
-  // never by a page-level button — there is no provider picker in that flow
-  // at all, so there is nothing for a bare button with no tile behind it to
-  // open. There used to also be a Project Admin page-level "Add provider"
-  // button opening this same dialog with no provider preset (`addOpen`) —
-  // removed: it opened a real credential form whose Save always 403s
-  // server-side (POST /model/providers is BU-scoped-only), so the only thing
-  // it ever accomplished was collecting a real API key from a Project Admin
-  // right before throwing it away. Same self-service-browse-and-add pattern
-  // Task 13 already removed from project-model-selection-card.tsx.
-  const [addKeyProvider, setAddKeyProvider] = React.useState<string | null>(null);
+  // BU Admin's "Add key" (spec §5, Task 10) is a single page-level button,
+  // same placement as Org Admin's "Add provider" — reached from ONE place
+  // rather than scattered per-model or per-tile triggers, so it's always the
+  // same flow: pick from whatever the Org Admin granted this unit (never the
+  // full catalog), name the key (so a model can hold more than one — e.g. a
+  // prod and a staging subscription for the same model), add the credential,
+  // pass Test. This used to be triggered per-row (a "Models available"
+  // entry) or per-tile (a granted-but-unkeyed provider card) instead — both
+  // removed in favor of the one consolidated entry point. There used to also
+  // be a Project Admin page-level "Add provider" button opening this same
+  // dialog with no provider preset — removed separately: it opened a real
+  // credential form whose Save always 403s server-side (POST /model/providers
+  // is BU-scoped-only), so the only thing it ever accomplished was collecting
+  // a real API key from a Project Admin right before throwing it away. Same
+  // self-service-browse-and-add pattern Task 13 already removed from
+  // project-model-selection-card.tsx.
+  const [addKeyOpen, setAddKeyOpen] = React.useState(false);
   // Org Admin's own registration action — keyless, see AddProviderDialog.
   const [addProviderOpen, setAddProviderOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -356,19 +361,6 @@ export default function ModelProvidersPage() {
       list.push(p);
       by.set(p.provider, list);
     }
-    // A BU Admin's grid also carries a tile for every provider their Org
-    // Admin granted but nobody in this unit has keyed yet (spec §5) — with
-    // ZERO connections, `by` alone would never produce one, and "Add key"
-    // (Task 10) has nowhere to live without a tile to put it on. An empty
-    // array (not omitted) is the signal `ProviderCard` reads to know there's
-    // no detail page to link to yet.
-    if (scope === "bu") {
-      for (const unitAllowed of Object.values(allowedByUnit)) {
-        for (const entry of unitAllowed) {
-          if (!by.has(entry.provider)) by.set(entry.provider, []);
-        }
-      }
-    }
     return [...by.entries()];
   })();
 
@@ -406,14 +398,6 @@ export default function ModelProvidersPage() {
   // Admin sees the full catalog (they define what's permitted at all), while a
   // BU or Project Admin sees only what the Org Admin granted their units.
   const effectiveCatalog = isOrg ? catalog : filterCatalogToAllowed(catalog, allAllowed);
-
-  // How many models a granted-but-unkeyed provider tile can say it's holding a
-  // place for (bu scope only) — there's no connection yet to count offerings
-  // from, so this counts the grant itself instead.
-  const grantedModelCountByProvider = new Map<string, number>();
-  for (const e of allAllowed) {
-    grantedModelCountByProvider.set(e.provider, (grantedModelCountByProvider.get(e.provider) ?? 0) + 1);
-  }
 
   const HEADER_COPY: Record<"org" | "bu" | "project", { eyebrow: string; title: string; body: string }> = {
     org: {
@@ -457,11 +441,8 @@ export default function ModelProvidersPage() {
             that unit are the only other actions Org Admin has. Onboarding an
             actual key lives entirely on each business unit / project's own
             screen. Project Admin has no page-level trigger here at all:
-            there is no working self-service onboarding route for them (see
-            the header copy below), only the BU Admin's per-card "Add key"
-            (spec §5, Task 10) — its provider is always already fixed by the
-            tile clicked, so a bare page-level button with no tile behind it
-            would have nothing to open. */}
+            there is no working self-service onboarding route for them — see
+            the header copy below. */}
         {isOrg && (
           <Button
             onClick={() => setAddProviderOpen(true)}
@@ -469,6 +450,15 @@ export default function ModelProvidersPage() {
           >
             <Plus className="size-4" aria-hidden />
             Add provider
+          </Button>
+        )}
+        {scope === "bu" && (
+          <Button
+            onClick={() => setAddKeyOpen(true)}
+            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+          >
+            <Plus className="size-4" aria-hidden />
+            Add key
           </Button>
         )}
       </header>
@@ -501,7 +491,6 @@ export default function ModelProvidersPage() {
                narrowed to what this scope was granted, which is precisely the
                list the card already shows. What it needs on top is the rest. */
             catalog={catalog}
-            onAddKey={scope === "bu" ? (provider) => setAddKeyProvider(provider) : undefined}
           />
         ))}
 
@@ -599,8 +588,6 @@ export default function ModelProvidersPage() {
                   grantableWorkspaces={grantUnits}
                   onToggleGrant={(workspaceId) => toggleProviderGrant(kind, workspaceId)}
                   catalog={catalog}
-                  onAddKey={scope === "bu" ? () => setAddKeyProvider(kind) : undefined}
-                  grantedModelCount={grantedModelCountByProvider.get(kind) ?? 0}
                 />
               ))}
             </div>
@@ -608,35 +595,29 @@ export default function ModelProvidersPage() {
         </div>
       )}
 
-      <AddModelDialog
-        open={!!addKeyProvider}
-        onOpenChange={(v) => {
-          if (!v) {
-            setAddKeyProvider(null);
-          }
-        }}
-        catalog={effectiveCatalog}
-        catalogLoading={catalogQ.isLoading || (!isOrg && allowedQueries.some((q) => q.isLoading))}
-        targetUnits={isOrg ? null : scopedUnits}
-        allowedByUnit={allowedByUnit}
-        fullCatalog={catalog}
-        // The only remaining caller of this dialog on this page is the BU
-        // Admin's "Add key" (addKeyProvider, mode="bu-add-key"), which is
-        // never a pending-approval flow — the Project Admin's page-level
-        // "Add provider" that used to need this true is gone (it opened a
-        // credential form that always 403'd server-side; see the header
-        // comment above).
-        needsApproval={false}
-        grantableWorkspaces={isOrg ? grantableWorkspaces : null}
-        initialProvider={addKeyProvider}
-        mode={addKeyProvider ? "bu-add-key" : "org"}
-        onAdded={() => {
-          invalidateProviders();
-          // Org-wide onboarding writes grants too, and every unit's view of
-          // what it may use is derived from those.
-          queryClient.invalidateQueries({ queryKey: ["model"] });
-        }}
-      />
+      {scope === "bu" && (
+        <AddModelDialog
+          open={addKeyOpen}
+          onOpenChange={setAddKeyOpen}
+          // Unlocked: no tile or row decides the provider ahead of time
+          // any more, so the combobox is live — but it only ever offers
+          // what's actually granted, since `catalog` here is already
+          // narrowed by `filterCatalogToAllowed`, never the full catalogue.
+          catalog={effectiveCatalog}
+          catalogLoading={catalogQ.isLoading || allowedQueries.some((q) => q.isLoading)}
+          targetUnits={scopedUnits}
+          allowedByUnit={allowedByUnit}
+          fullCatalog={catalog}
+          needsApproval={false}
+          grantableWorkspaces={null}
+          initialProvider={null}
+          mode="bu-add-key"
+          onAdded={() => {
+            invalidateProviders();
+            queryClient.invalidateQueries({ queryKey: ["model"] });
+          }}
+        />
+      )}
 
       {isOrg && (
         <AddProviderDialog
@@ -689,12 +670,10 @@ function ProviderCard({
   grantableWorkspaces,
   onToggleGrant,
   catalog,
-  onAddKey,
-  grantedModelCount,
 }: {
   kind: string;
-  /** Every subscription onboarded for this provider — zero for a BU Admin's
-   *  granted-but-unkeyed tile (see `onAddKey`), at least one otherwise. */
+  /** Every subscription onboarded for this provider — at least one, since
+   *  the grid is connection-seeded for every scope. */
   connections: ModelProvider[];
   /** This month's spend for the provider KIND, or null while it loads. */
   spendUsd: number | null;
@@ -710,19 +689,9 @@ function ProviderCard({
   /** The full catalogue, for the model-curation dialog's provider models —
    *  Org Admin only, unused otherwise. */
   catalog: CatalogProvider[];
-  /** BU Admin scope only, and only set at all when `connections` is empty:
-   *  opens the "Add key" dialog fixed to this provider (spec §5, Task 10).
-   *  Undefined for the Org Admin view and for a BU's already-keyed tiles,
-   *  which keep the detail-page Link instead. */
-  onAddKey?: () => void;
-  /** How many models the BU was granted for this provider — the only figure a
-   *  zero-connection tile has to show instead of a model/spend count that has
-   *  nothing to be counted from yet. Unused once `connections` is non-empty. */
-  grantedModelCount?: number;
 }) {
   const label = providerLabel(kind);
   const [modelsOpen, setModelsOpen] = React.useState(false);
-  const isUnkeyed = !!onAddKey && connections.length === 0;
 
   /**
    * Models across EVERY subscription, de-duplicated.
@@ -754,14 +723,6 @@ function ProviderCard({
               />
             </button>
           </h3>
-        ) : isUnkeyed ? (
-          // No detail page exists yet for zero connections, so this is text,
-          // not a link — the stretched ::after overlay below belongs only to
-          // the Link case, and the "Add key" button is this tile's one and
-          // only interactive element.
-          <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
-            <span className="block truncate">{label}</span>
-          </h3>
         ) : (
           <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
             <Link
@@ -773,27 +734,18 @@ function ProviderCard({
           </h3>
         )}
         <p className="text-muted-foreground mt-0.5 font-mono text-[11.5px] tabular-nums">
-          {isUnkeyed ? (
+          {modelCount} {modelCount === 1 ? "model" : "models"}
+          {typeof spendUsd === "number" && (
             <>
-              {grantedModelCount ?? 0} {grantedModelCount === 1 ? "model" : "models"} granted ·
-              not yet keyed
-            </>
-          ) : (
-            <>
-              {modelCount} {modelCount === 1 ? "model" : "models"}
-              {typeof spendUsd === "number" && (
-                <>
-                  {" · "}
-                  <span className="text-foreground font-semibold">
-                    {spendUsd.toLocaleString(undefined, {
-                      style: "currency",
-                      currency: "USD",
-                      maximumFractionDigits: 0,
-                    })}
-                  </span>
-                  <span className="ml-1 font-sans">this month</span>
-                </>
-              )}
+              {" · "}
+              <span className="text-foreground font-semibold">
+                {spendUsd.toLocaleString(undefined, {
+                  style: "currency",
+                  currency: "USD",
+                  maximumFractionDigits: 0,
+                })}
+              </span>
+              <span className="ml-1 font-sans">this month</span>
             </>
           )}
         </p>
@@ -804,16 +756,6 @@ function ProviderCard({
           selected={grantedUnitIds}
           onToggle={onToggleGrant}
         />
-      ) : isUnkeyed ? (
-        <Button
-          type="button"
-          size="sm"
-          onClick={onAddKey}
-          className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
-        >
-          <Plus className="size-3.5" aria-hidden />
-          Add key
-        </Button>
       ) : (
         <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
       )}
