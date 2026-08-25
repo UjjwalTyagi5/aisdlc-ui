@@ -694,15 +694,27 @@ function ProviderCard({
   const [modelsOpen, setModelsOpen] = React.useState(false);
 
   /**
-   * Models across EVERY subscription, de-duplicated.
+   * For Org Admin: the CATALOGUE's total for this provider — how many models
+   * it offers, period. This is the figure that's actually consistent and
+   * meaningful at this level: a connection's own enabled-offerings count is
+   * just an accident of when/how it was registered (a keyless registration
+   * has zero, an old one auto-seeded with the whole catalogue has all of
+   * them), which is why the SAME provider could read "0 models" one day and
+   * "55 models" another with nothing about the vendor having changed. Org
+   * Admin's question here is "how big is this vendor", not "how many models
+   * does whichever connection happens to exist right now serve".
    *
-   * A model can appear on two keys; counting it twice would claim the provider
-   * offers more models than it does — the same double-count the spend figure
-   * avoids by being keyed on the provider rather than the connection.
+   * For BU/Project: unchanged — models across EVERY subscription, de-
+   * duplicated (a model can appear on two keys; counting it twice would
+   * claim the provider offers more models than it does, the same double-
+   * count the spend figure avoids by being keyed on the provider rather than
+   * the connection). This figure IS meaningful at that level: it's asking
+   * "how many models can we actually run", which is exactly what's keyed.
    */
-  const modelCount = new Set(
-    connections.flatMap((c) => c.offerings.filter((o) => o.enabled).map((o) => o.model_id)),
-  ).size;
+  const modelCount = isOrg
+    ? (catalog.find((c) => c.provider === kind)?.models.length ?? 0)
+    : new Set(connections.flatMap((c) => c.offerings.filter((o) => o.enabled).map((o) => o.model_id)))
+        .size;
 
   return (
     <Card className="border-line-soft bg-panel-elevated focus-within:ring-ring relative flex flex-row items-center gap-3 px-4 py-3.5 shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow focus-within:ring-2 hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
