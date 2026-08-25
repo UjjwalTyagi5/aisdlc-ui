@@ -230,6 +230,71 @@ def test_validate_scope_rejects_user_without_scope_id():
     assert exc.value.status_code == 422
 
 
+# ── assert_can_write_agent_scope ────────────────────────────────────────────────────
+
+def test_write_check_shared_tier_draft_matches_todays_skill_edit_gate():
+    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "org", None, "u1", action="draft")
+    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "workspace", "ws-1", "u1", action="draft")
+    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "project", "proj-1", "u1", action="draft")
+
+
+def test_write_check_shared_tier_draft_denies_without_skill_edit():
+    for scope, sid in (("org", None), ("workspace", "ws-1"), ("project", "proj-1")):
+        with pytest.raises(HTTPException) as exc:
+            ap.assert_can_write_agent_scope([], "bu_admin", scope, sid, "u1", action="draft")
+        assert exc.value.status_code == 403
+
+
+def test_write_check_shared_tier_publish_matches_todays_workspace_manage_gate():
+    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "org", None, "u1", action="publish")
+    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "workspace", "ws-1", "u1", action="publish")
+    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "project", "proj-1", "u1", action="publish")
+
+
+def test_write_check_shared_tier_publish_denies_developer_without_workspace_manage():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope(["skill:edit"], "developer", "workspace", "ws-1", "u1", action="publish")
+    assert exc.value.status_code == 403
+
+
+def test_write_check_user_scope_allows_own_id_for_non_governance_role():
+    # No perms needed at all for the personal tier — it's role + self-ownership only,
+    # matching frontend canPublishAtTier's rule exactly (role !== org_admin && !== bu_admin).
+    ap.assert_can_write_agent_scope([], "developer", "user", "u1", "u1", action="draft")
+    ap.assert_can_write_agent_scope([], "contributor", "user", "u1", "u1", action="publish")
+    ap.assert_can_write_agent_scope([], "project_admin", "user", "u1", "u1", action="draft")
+
+
+def test_write_check_user_scope_denies_someone_elses_id():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope([], "developer", "user", "someone-else", "u1", action="draft")
+    assert exc.value.status_code == 403
+
+
+def test_write_check_user_scope_denies_org_admin():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope(["admin:*"], "org_admin", "user", "u1", "u1", action="draft")
+    assert exc.value.status_code == 403
+
+
+def test_write_check_user_scope_denies_bu_admin():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "user", "u1", "u1", action="publish")
+    assert exc.value.status_code == 403
+
+
+def test_write_check_user_scope_denies_missing_scope_id():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope([], "developer", "user", None, "u1", action="draft")
+    assert exc.value.status_code == 403
+
+
+def test_write_check_user_scope_denies_role_none():
+    with pytest.raises(HTTPException) as exc:
+        ap.assert_can_write_agent_scope([], None, "user", "u1", "u1", action="draft")
+    assert exc.value.status_code == 403
+
+
 # ── build_preview_layers ───────────────────────────────────────────────────────────
 
 def _scope_row(scope, prepend="", append="", contract=""):

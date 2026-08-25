@@ -34,6 +34,7 @@ from config.agent_registry import AGENT_REGISTRY
 from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
+from shared.authz.permissions import has_permission
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.models.orm import AgentProfile
@@ -302,6 +303,46 @@ def _validate_scope(scope: str, scope_id: str | None) -> None:
         raise HTTPException(status_code=422, detail=f"scope must be one of {SCOPE_VALUES}")
     if scope in ("workspace", "project", "user") and not scope_id:
         raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
+
+
+def assert_can_write_agent_scope(
+    perms: list[str],
+    role: str | None,
+    scope: str,
+    scope_id: str | None,
+    actor_user_id: str,
+    *,
+    action: str,
+) -> None:
+    """Scope-aware authorization for an Agent Studio write (Behavior draft/publish;
+    Skills create/update/delete/toggle/activate). Raises HTTPException(403) on denial.
+
+    org/workspace/project: UNCHANGED from before this function existed — the exact
+    same permission string that used to gate the route via Depends(require_permission
+    (...)) is checked here instead, one line later, after `scope` is known. "draft"
+    needs "skill:edit" (create_draft/preview, Skills' create/update/delete/toggle);
+    "publish" needs "workspace:manage" (publish/unpublish, Skills' activate). Same
+    permission, same actors pass/fail, zero behavior change for these three tiers.
+
+    user: self-service, mirrors propose()'s existing "a personal default is nobody
+    else's to approve" reasoning for the SAME tier (see propose()'s NOT_A_SHARED_TIER
+    guard below). Allowed only when `role` is neither "org_admin" nor "bu_admin" (PRD
+    §14.8 — governance-only roles never run an agent, so a personal default they set
+    could never take effect) AND `scope_id` equals the caller's own user id — writing
+    anyone else's personal scope is denied regardless of role. This is the
+    server-authoritative twin of `canPublishAtTier` in frontend/lib/governance.ts,
+    whose own docstring already says it's meant to be "shared by the client gate and
+    BOTH server runtimes" — this closes that gap for the personal tier specifically.
+    """
+    if scope == "user":
+        if role is None or role in ("org_admin", "bu_admin"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if not actor_user_id or not scope_id or str(scope_id) != str(actor_user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    required = "skill:edit" if action == "draft" else "workspace:manage"
+    if not has_permission(perms, required):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 def _validate_agent(agent_id: str) -> None:
