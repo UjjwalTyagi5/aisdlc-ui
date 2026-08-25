@@ -214,6 +214,11 @@ class CredentialIn(BaseModel):
     targetId: str = Field(min_length=1, max_length=255)
     label: str = Field(min_length=1, max_length=120)
     account: Optional[str] = Field(default=None, max_length=255)
+    # NO baseUrl. Where the project authenticates is the project's decision, not
+    # each member's — it moved to project_integration_config in migration 0032,
+    # behind assert_can_administer_project. A contributor who could set it here
+    # could point the project's Jira at any host they liked.
+    #
     # Accepted and NEVER stored — see the handler.
     secret: Optional[str] = None
 
@@ -268,6 +273,29 @@ async def list_project_integrations(
             {"t": tenant_id, "w": project.workspace_id},
         )
     ).fetchall()
+
+    # The project's configured instance per integration — everyone SEES it (you
+    # cannot sanely supply a credential without knowing which server it is for),
+    # only an administrator may change it. See migration 0032.
+    instance: dict[tuple[str, str], Optional[str]] = {}
+    for r in (
+        await db.execute(
+            text(
+                "SELECT kind, target_id, base_url FROM project_integration_config "
+                "WHERE project_id = :p"
+            ),
+            {"p": project.id},
+        )
+    ).fetchall():
+        instance[(r.kind, r.target_id)] = r.base_url
+
+    # Whether THIS viewer may change those URLs — one authority check for the
+    # whole list rather than one per row.
+    try:
+        await assert_can_administer_project(db, request, project)
+        can_manage_instance = True
+    except HTTPException:
+        can_manage_instance = False
 
     mine: dict[tuple[str, str], Any] = {}
     for r in (
@@ -324,10 +352,21 @@ async def list_project_integrations(
                 "name": name,
                 "description": description,
                 "stages": stages,
-                # Every connector authenticates as somebody; no MCP server in this
-                # catalogue does (they're service-to-service, not a personal login).
-                "needsProjectCredential": kind == "connector",
+                # Only the kinds that actually READ a personal credential ask for
+                # one. Not `kind == "connector"`: Teams and SharePoint are
+                # connectors that authenticate through the tenant's Entra app,
+                # so asking their members for a credential was asking for
+                # something the platform would never consult.
+                "needsProjectCredential": (
+                    kind == "connector" and target in _PERSONAL_CREDENTIAL_KINDS
+                ),
                 "credential": _credential_out(cred_row, project.id) if cred_row else None,
+                # Which instance this project talks to, and whether the viewer
+                # may change it. Null means none is configured — for Jira and
+                # friends that is a setup step still owed by an administrator;
+                # for a fixed-host connector it is simply not a question.
+                "baseUrl": instance.get((kind, target)),
+                "canManageInstance": can_manage_instance,
             }
         )
     return out
@@ -360,7 +399,7 @@ async def upsert_project_credential(
     — and keyed on the project alone the second contributor to configure Jira would
     silently replace the first, with neither able to tell.
 
-    THE SECRET IS ACTUALLY STORED, and actually used: `shared.authz.project_credential.resolve_project_secret`
+    THE SECRET IS ACTUALLY STORED, and actually used: `shared.authz.project_credential.resolve_project_credential`
     is checked by every connector's `auth_adapter()` (via
     `BaseConnector._resolve_credential_override`) ahead of the tenant-wide
     credential, whenever the connector factory was given this project+owner (see
@@ -436,19 +475,189 @@ async def upsert_project_credential(
 
 # Connector kinds whose auth_adapter() checks BaseConnector._resolve_credential_override
 # (config/connectors/base.py) — see each connector's own "Project-scoped personal
-# override" comment. The rest (github, slack, ms_teams, sharepoint, figma) are
-# OAuth-first or share a single org app registration with no simple "one string is
-# the whole credential" shape to override per person; testing them here would
-# silently test the tenant-wide credential instead and call that a personal test.
-_PROJECT_CREDENTIAL_TESTABLE_KINDS = frozenset(
-    {"jira", "azure_devops", "confluence", "sonarqube", "github_actions"}
+# override" comment.
+#
+# THE SAME SET ANSWERS TWO QUESTIONS, and it must, because they are the same
+# question: "may I test a personal credential here" and "does this integration
+# want one from me" are both "does this connector read the override at all".
+# Splitting them let `needsProjectCredential` drift into `kind == "connector"`,
+# which told every member that Microsoft Teams and SharePoint needed a
+# credential from them — neither can accept one, both authenticate through the
+# tenant's shared Entra app registration (config/connectors/msgraph.py), and the
+# page counted them in "N integrations need a credential from you". An
+# instruction nobody can carry out is worse than no instruction.
+_PERSONAL_CREDENTIAL_KINDS = frozenset(
+    {"jira", "azure_devops", "confluence", "sonarqube", "github_actions", "github", "figma", "slack"}
 )
+
+# Kept as an alias: this is what the test-connection gate reads, and naming it
+# separately would invite the two lists to diverge again.
+_PROJECT_CREDENTIAL_TESTABLE_KINDS = _PERSONAL_CREDENTIAL_KINDS
+
+
+class InstanceIn(BaseModel):
+    kind: str = "connector"
+    targetId: str = Field(min_length=1, max_length=255)
+    # Blank clears it — "we no longer pin an instance" has to be expressible,
+    # and it is a different statement from never having set one.
+    baseUrl: Optional[str] = Field(default=None, max_length=500)
+
+
+@project_scoped_router.put("/projects/{project_id}/integrations/instance")
+async def set_project_integration_instance(
+    project_id: str,
+    body: InstanceIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Pin WHICH instance this project's integration talks to.
+
+    SEPARATE FROM THE CREDENTIAL, and gated differently, because the two answer
+    to different people. A credential is the caller's own identity and every
+    delivery role may set theirs (see the PUT above). The instance is where that
+    identity gets SENT, which is a governance decision: left on the credential,
+    any contributor could point the project's Jira at a host of their choosing
+    and the platform would authenticate and read there quite happily.
+
+    `assert_can_administer_project` is the same gate the project's other
+    settings writes use — org-wide, the parent unit's admin, or this project's
+    own admin.
+    """
+    tenant_id = _tenant_id(request)
+    project = await _project_or_404(db, tenant_id, project_id)
+    await assert_can_administer_project(db, request, project)
+
+    if body.kind not in ("connector", "mcp"):
+        raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
+
+    url = (body.baseUrl or "").strip() or None
+    if url and not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "bad_url",
+                "message": "The URL must start with http:// or https://.",
+            },
+        )
+
+    await db.execute(
+        text(
+            "INSERT INTO project_integration_config "
+            "  (id, tenant_id, project_id, kind, target_id, base_url, set_by) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :p, :k, :r, :u, :by) "
+            "ON CONFLICT (project_id, kind, target_id) DO UPDATE "
+            "  SET base_url = EXCLUDED.base_url, set_by = EXCLUDED.set_by, "
+            "      updated_at = now()"
+        ),
+        {
+            "i": str(_uuid.uuid4()), "t": tenant_id, "p": project.id,
+            "k": body.kind, "r": body.targetId, "u": url,
+            "by": getattr(request.state, "user_id", None),
+        },
+    )
+    await db.flush()
+    return {"kind": body.kind, "targetId": body.targetId, "baseUrl": url}
+
+
+async def _project_instance_url(
+    db: AsyncSession, project_id: Any, kind: str, target_id: str
+) -> Optional[str]:
+    """The project's pinned instance for one integration, or None."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT base_url FROM project_integration_config "
+                "WHERE project_id = :p AND kind = :k AND target_id = :r"
+            ),
+            {"p": project_id, "k": kind, "r": target_id},
+        )
+    ).first()
+    return (row.base_url if row else None) or None
+
+
+async def _resolve_probe_url(
+    db: AsyncSession, request: Request, project: Any, body: "CredentialTestIn"
+) -> Optional[str]:
+    """Which URL the test probe should use.
+
+    A caller who may pin the instance may also try one before pinning it — they
+    could save it and test afterwards regardless, so honouring it here adds no
+    authority, it only removes a pointless round trip. Anyone else gets the
+    project's stored instance no matter what they sent, so the probe can never
+    become a way to aim an authenticated request somewhere unsanctioned.
+    """
+    if body.baseUrl:
+        try:
+            await assert_can_administer_project(db, request, project)
+        except HTTPException:
+            pass  # not theirs to choose — fall through to the pinned instance
+        else:
+            candidate = body.baseUrl.strip()
+            if candidate.lower().startswith(("http://", "https://")):
+                return candidate
+            # A scheme-less URL is what produces UnsupportedProtocol deep in
+            # httpx; refuse it here where the message can still name the field.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "bad_url",
+                    "message": "The URL must start with http:// or https://.",
+                },
+            )
+    return await _project_instance_url(db, project.id, body.kind, body.targetId)
+
+
+def _test_failure_message(health: Any) -> str:
+    """Turn a failed ConnectorHealth into something a person can act on.
+
+    The mapping is the same across every connector because the failures are:
+    401/403 means the identity was rejected, 404 means the address was wrong.
+    Anything unrecognised falls through carrying its own code rather than being
+    flattened into a shrug — an unknown error the reader can quote to us beats a
+    known-nothing message.
+    """
+    raw = str(getattr(health, "error", "") or "").strip()
+    # Connectors spell the same failure two ways — "HTTP 401" (Jira, Confluence,
+    # SonarQube) and "http_401" (GitHub Actions, Figma). Normalise rather than
+    # listing both, so a connector added later gets the readable message whichever
+    # convention its author picked.
+    err = raw.replace("_", " ").upper() if raw.lower().startswith("http") else raw
+    known = {
+        "HTTP 401": "Rejected the credential (HTTP 401) — check the account and token match.",
+        "HTTP 403": "Authenticated, but not permitted (HTTP 403) — the account lacks access.",
+        # A 3xx on an API call is a redirect to a sign-in page, which is how
+        # Azure DevOps refuses a bad PAT rather than answering 401.
+        "HTTP 302": "Rejected the credential — the server redirected to a sign-in page.",
+        "HTTP 404": "No such target (HTTP 404) — check the URL.",
+        "invalid_token": "The server rejected this token as invalid.",
+        "not_authenticated": "Reached the server, but the credential signed nobody in.",
+        "no_org_url": "No URL to connect to — fill in the URL field first.",
+        # slack_sdk raises this for auth_test failures, which in practice means
+        # invalid_auth. The class name alone reads like a crash to the person
+        # who just pasted a token.
+        "SlackApiError": "Slack rejected this token — check it starts with xoxb- and is still installed.",
+        # httpx's error for a URL with no scheme, which in practice means the
+        # instance is unset and the probe had nothing to call.
+        "UnsupportedProtocol": "No URL is set for this project yet — fill in the URL field first.",
+    }
+    if err in known:
+        return known[err]
+    return f"Couldn't connect ({raw or 'unknown error'})."
 
 
 class CredentialTestIn(BaseModel):
     kind: str
     targetId: str = Field(min_length=1, max_length=255)
     secret: str = Field(min_length=1, max_length=4000)
+    # Honoured ONLY for a caller who may set the instance anyway; ignored for
+    # everyone else in favour of the project's pinned URL. Without it the person
+    # doing first-time setup cannot test the URL they are about to save — they
+    # get a probe against the empty stored value — and with it unconditionally,
+    # any contributor could aim an authenticated request at a host of their
+    # choosing, which is the hole migration 0032 closed. The authority check is
+    # what makes both true at once.
+    baseUrl: Optional[str] = Field(default=None, max_length=500)
+    account: Optional[str] = Field(default=None, max_length=255)
 
 
 @project_scoped_router.post(
@@ -470,7 +679,7 @@ async def test_project_credential(
     A failed attempt leaves nothing behind to clean up.
     """
     tenant_id = _tenant_id(request)
-    await _project_or_404(db, tenant_id, project_id)
+    project = await _project_or_404(db, tenant_id, project_id)
 
     if body.kind == "mcp":
         from shared.services import mcp_registry, mcp_client  # noqa: PLC0415
@@ -512,17 +721,31 @@ async def test_project_credential(
     connector = await get_connector_for_session(
         kind=body.targetId, tenant_id=tenant_id, unrestricted=True,
     )
-    connector._credential_override = body.secret  # noqa: SLF001 — this call only, never persisted
+    # This call only, never persisted — read by BaseConnector._resolve_credential_override
+    # ahead of everything else, so health_check() below exercises exactly the
+    # combination the user is about to save rather than a mix of theirs and the tenant's.
+    connector._credential_override = body.secret  # noqa: SLF001
+    connector._credential_override_base_url = await _resolve_probe_url(  # noqa: SLF001
+        db, request, project, body
+    )
+    connector._credential_override_account = body.account  # noqa: SLF001
 
     try:
         health = await connector.health_check()
         ok = getattr(health, "status", "") in ("healthy", "ok")
         return {
             "ok": ok,
-            # type(exc).__name__ only if the health check itself failed closed rather
-            # than raised — NEVER the raw exception text (credential leakage risk,
-            # the same rule every connector's own auth_adapter follows).
-            "message": "Connected." if ok else f"Couldn't connect ({getattr(health, 'status', 'unknown')}).",
+            # `health.error` — NOT `health.status`. Status is always the word
+            # "unhealthy", which tells someone staring at a failed credential
+            # nothing they cannot already see. The error carries WHICH failure
+            # ("HTTP 401", "HTTP 404", "invalid_token"), and the difference
+            # between a wrong token and a wrong site URL is the entire question
+            # they are trying to answer.
+            #
+            # Safe to surface: every connector's health_check sets this to an
+            # HTTP status or an exception CLASS name, never str(exc) — the same
+            # credential-leakage rule their auth_adapters follow.
+            "message": "Connected." if ok else _test_failure_message(health),
         }
     except Exception as exc:  # noqa: BLE001 — a bad credential must read as "failed", not 500
         return {"ok": False, "message": f"Couldn't connect ({type(exc).__name__})."}

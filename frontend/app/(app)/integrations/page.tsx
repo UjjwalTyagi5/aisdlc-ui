@@ -503,6 +503,7 @@ export default function IntegrationsPage() {
                 glyph={<KindGlyph kind={c.kind} />}
                 access={accessByKind.get(`connector:${c.kind}`)}
                 granted={permittedKinds.has(c.kind)}
+                showUnitCount={isOrgAdmin}
                 requestPrefill={{
                   type: "connector_access",
                   title: `${KIND_LABEL[c.kind]} access`,
@@ -564,6 +565,7 @@ export default function IntegrationsPage() {
                 category="MCP server"
                 glyph={<GenericGlyph mark={r.name.slice(0, 2).toUpperCase()} />}
                 access={accessByKind.get(`mcp:${r.id}`)}
+                showUnitCount={isOrgAdmin}
               />
             ))}
           </ul>
@@ -637,6 +639,7 @@ function IntegrationCard({
   access,
   granted = true,
   requestPrefill,
+  showUnitCount = false,
 }: {
   href: string;
   label: string;
@@ -647,6 +650,15 @@ function IntegrationCard({
   granted?: boolean;
   /** Seeds the request raised from an ungranted tile. */
   requestPrefill?: RaiseRequestPrefill;
+  /**
+   * Show the "N business units" clause. Only worth stating for someone who
+   * oversees more than one — an Org Admin, comparing units against each
+   * other. Every other viewer's `access.units` is capped at the one unit
+   * they administer or belong to (grantedUnitCount is scoped to what the
+   * VIEWER can see), so the count is always 1 and says nothing a Business
+   * Unit or Project Admin doesn't already know about their own unit.
+   */
+  showUnitCount?: boolean;
 }) {
   return (
     <li className="h-full">
@@ -694,8 +706,12 @@ function IntegrationCard({
               changes, and the only one worth the row. */}
           {granted && access && (
             <p className="text-muted-foreground mt-2 font-mono text-[11px]">
-              {access.units} {access.units === 1 ? "business unit" : "business units"}
-              {" · "}
+              {showUnitCount && (
+                <>
+                  {access.units} {access.units === 1 ? "business unit" : "business units"}
+                  {" · "}
+                </>
+              )}
               {access.projects} {access.projects === 1 ? "project" : "projects"}
             </p>
           )}

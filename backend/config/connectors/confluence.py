@@ -124,11 +124,17 @@ class ConfluenceConnector(BaseConnector):
         # member set for themselves — or the ad-hoc value Test Connection is
         # validating — wins over the tenant-wide token below.
         override = await self._resolve_credential_override(tenant_id, "confluence")
-        if override:
+        if override and override.token:
+            # Their own site and email win: those were typed alongside the token
+            # and are the pair that authenticates. Blank falls through to the
+            # tenant-wide values resolved above, so an older credential that
+            # carried only a token behaves exactly as it did.
             return {
-                "confluence_url": _normalize_base_url(site_url or self._org_url),
-                "email": email or "",
-                "token": override,
+                "confluence_url": _normalize_base_url(
+                    override.base_url or site_url or self._org_url
+                ),
+                "email": override.account or email or "",
+                "token": override.token,
             }
 
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
@@ -200,9 +206,22 @@ class ConfluenceConnector(BaseConnector):
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health_check(self) -> ConnectorHealth:
+        """Probe the credential, not just the site.
+
+        MUST hit an endpoint Confluence refuses anonymously. This used to call
+        `list_spaces()` (GET /wiki/api/v2/spaces), which a site with anonymous
+        browsing enabled answers with HTTP 200 and an empty result set — so
+        `raise_for_status()` never fired and any token, including a garbage one,
+        reported healthy. The identical bug was confirmed live on Jira before
+        being fixed the same way; see JiraConnector.health_check.
+
+        /wiki/rest/api/user/current (v1 — v2 has no equivalent) is the account
+        behind the credential: 401 when the email/token pair is wrong, 404 when
+        the site URL is, and unreachable anonymously.
+        """
         start = time.time()
         try:
-            await self.list_spaces()
+            await self._confluence_request_with_retry("GET", "/user/current", v1=True)
             latency_ms = (time.time() - start) * 1000
             return ConnectorHealth(
                 connector_name="confluence",

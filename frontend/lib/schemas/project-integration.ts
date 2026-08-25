@@ -68,10 +68,33 @@ export const ProjectIntegrationCredentialTestInput = z.object({
   kind: ProjectIntegrationKind,
   targetId: z.string().min(1),
   secret: z.string().min(1, "Enter a secret to test").max(4000),
+  account: z.string().max(200).nullable().optional(),
+  /**
+   * The instance to probe. Honoured by the server ONLY for a caller who may
+   * pin it anyway — otherwise the project's stored instance is used regardless
+   * of what is sent, so this cannot aim an authenticated request off-target.
+   * Sent so first-time setup can test a URL before saving it.
+   */
+  baseUrl: z.string().max(500).nullable().optional(),
 });
 export type ProjectIntegrationCredentialTestInput = z.infer<
   typeof ProjectIntegrationCredentialTestInput
 >;
+
+/** Admin-only: pin which instance this project's integration talks to. */
+export const ProjectIntegrationInstanceInput = z.object({
+  kind: ProjectIntegrationKind,
+  targetId: z.string().min(1),
+  baseUrl: z.string().max(500).nullable().optional(),
+});
+export type ProjectIntegrationInstanceInput = z.infer<typeof ProjectIntegrationInstanceInput>;
+
+export const ProjectIntegrationInstance = z.object({
+  kind: ProjectIntegrationKind,
+  targetId: z.string(),
+  baseUrl: z.string().nullable(),
+});
+export type ProjectIntegrationInstance = z.infer<typeof ProjectIntegrationInstance>;
 
 export const ProjectIntegrationCredentialTestResult = z.object({
   ok: z.boolean(),
@@ -96,5 +119,19 @@ export const ProjectIntegration = z.object({
   /** Whether this integration expects a project-specific credential at all. */
   needsProjectCredential: z.boolean(),
   credential: ProjectIntegrationCredential.nullable(),
+  /**
+   * WHICH instance this project talks to — the Jira site, the Azure DevOps
+   * organization, the SonarQube server.
+   *
+   * It belongs to the PROJECT, not to each member's credential: two projects
+   * may legitimately point at different instances, but where an identity gets
+   * sent is a governance decision, not a contributor's. Everyone sees it (you
+   * cannot sanely supply a token without knowing which server it is for); only
+   * `canManageInstance` may change it. Null when none is pinned — a setup step
+   * still owed, or a connector with a fixed API host.
+   */
+  baseUrl: z.string().max(500).nullable().optional(),
+  /** Whether the viewer may change `baseUrl` (administers this project). */
+  canManageInstance: z.boolean().default(false),
 });
 export type ProjectIntegration = z.infer<typeof ProjectIntegration>;

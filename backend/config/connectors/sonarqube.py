@@ -111,10 +111,14 @@ class SonarQubeConnector(BaseConnector):
         # member set for themselves — or the ad-hoc value Test Connection is
         # validating — wins over the tenant-wide token below.
         override = await self._resolve_credential_override(tenant_id, "sonarqube")
-        if override:
+        if override and override.token:
+            # Their own server URL wins; blank falls back to the tenant-wide one
+            # resolved above, then to the env default further down.
             return {
-                "sonarqube_url": _normalize_base_url(server_url or self._org_url),
-                "token": override,
+                "sonarqube_url": _normalize_base_url(
+                    override.base_url or server_url or SONARQUBE_URL or self._org_url
+                ),
+                "token": override.token,
             }
 
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
@@ -197,10 +201,33 @@ class SonarQubeConnector(BaseConnector):
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health_check(self) -> ConnectorHealth:
+        """Probe the credential, not just the server.
+
+        MUST distinguish a valid token from an absent one. This used to call
+        `list_projects()` (GET /api/projects/search), which a server allowing
+        anonymous browsing answers with HTTP 200 and an empty component list —
+        so `raise_for_status()` never fired and any token reported healthy. The
+        identical bug was confirmed live on Jira; see JiraConnector.health_check.
+
+        /api/authentication/validate is SonarQube's own token check. NOTE it
+        answers HTTP 200 either way and puts the verdict in the BODY as
+        {"valid": true|false} — so the status code alone is exactly the trap
+        this method is being fixed for, and the body must be read.
+        """
         start = time.time()
         try:
-            await self.list_projects()
+            data, _ = await self._sonar_request_with_retry(
+                "GET", "/api/authentication/validate"
+            )
             latency_ms = (time.time() - start) * 1000
+            if not (isinstance(data, dict) and data.get("valid") is True):
+                return ConnectorHealth(
+                    connector_name="sonarqube",
+                    status="unhealthy",
+                    latency_ms=latency_ms,
+                    # Not an HTTP failure — the server answered 200 and said no.
+                    error="invalid_token",
+                )
             return ConnectorHealth(
                 connector_name="sonarqube",
                 status="healthy",

@@ -106,29 +106,38 @@ class JiraConnector(BaseConnector):
         # is validating — always wins, including over the tenant's shared OAuth
         # token (asking for it means asking for THEIR identity to be used).
         override = await self._resolve_credential_override(tenant_id, "jira")
-        if override:
-            jira_url = (
-                await _keyvault.load_secret("jira-url", tenant_id=tenant_id)
-                or await _keyvault.load_secret("jira-url")
-                or JIRA_URL
-                or self._org_url
-            )
-            email = (
-                await _keyvault.load_secret("jira-email", tenant_id=tenant_id)
-                or await _keyvault.load_secret("jira-email")
-                or JIRA_EMAIL
-            )
-            try:
-                from shared.services import secret_store as _ss_ov  # lazy: avoid import cycle
-                stored_url = await _ss_ov.get_secret(tenant_id, "jira-url")
-                stored_email = await _ss_ov.get_secret(tenant_id, "jira-email")
-            except Exception:  # noqa: BLE001
-                stored_url = stored_email = None
+        if override and override.token:
+            # The member's OWN site and email win outright: they were typed
+            # together with the token and are the pair that authenticates. Only
+            # when they were left blank does the tenant-wide chain answer, so a
+            # credential saved before those fields existed still works.
+            jira_url = override.base_url
+            email = override.account
+            if not (jira_url and email):
+                try:
+                    from shared.services import secret_store as _ss_ov  # lazy: avoid import cycle
+                    stored_url = await _ss_ov.get_secret(tenant_id, "jira-url")
+                    stored_email = await _ss_ov.get_secret(tenant_id, "jira-email")
+                except Exception:  # noqa: BLE001
+                    stored_url = stored_email = None
+                jira_url = jira_url or (
+                    stored_url
+                    or await _keyvault.load_secret("jira-url", tenant_id=tenant_id)
+                    or await _keyvault.load_secret("jira-url")
+                    or JIRA_URL
+                    or self._org_url
+                )
+                email = email or (
+                    stored_email
+                    or await _keyvault.load_secret("jira-email", tenant_id=tenant_id)
+                    or await _keyvault.load_secret("jira-email")
+                    or JIRA_EMAIL
+                )
             return {
                 "mode": "basic",
-                "jira_url": _normalize_base_url(stored_url or jira_url),
-                "email": stored_email or email or "",
-                "token": override,
+                "jira_url": _normalize_base_url(jira_url or ""),
+                "email": email or "",
+                "token": override.token,
             }
 
         # ── OAuth-first: check for tenant-provisioned OAuth 3LO token (REQ-M7-20) ──
@@ -256,9 +265,23 @@ class JiraConnector(BaseConnector):
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health_check(self) -> ConnectorHealth:
+        """Probe the credential, not just the site.
+
+        MUST hit an endpoint Jira refuses anonymously. This used to call
+        `list_projects()` (GET /rest/api/3/project), which a site with anonymous
+        browsing enabled answers with HTTP 200 and an empty list — so
+        `raise_for_status()` never fired and ANY token, including a garbage one,
+        reported healthy. "Test connection" on the project Integrations page runs
+        exactly this, so it was confirming credentials it had never checked.
+
+        `/rest/api/3/myself` is the account behind the credential: 401 when the
+        email/token pair is wrong, 404 when the site URL is, and it cannot be
+        reached anonymously. It works unchanged on the OAuth path too — the
+        gateway URL in auth_adapter() prefixes the same /rest/api/3/... paths.
+        """
         start = time.time()
         try:
-            await self.list_projects()
+            await self._jira_request_with_retry("GET", "/rest/api/3/myself")
             latency_ms = (time.time() - start) * 1000
             return ConnectorHealth(
                 connector_name="jira",

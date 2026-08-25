@@ -141,8 +141,11 @@ class GitHubActionsConnector(BaseConnector):
         # member set for themselves — or the ad-hoc value Test Connection is
         # validating — wins over the tenant-wide PAT below.
         override = await self._resolve_credential_override(tid, "github_actions")
-        if override:
-            return {"pat": override, "owner": owner or ""}
+        if override and override.token:
+            # `account` carries the owner/org here — a PAT is only meaningful
+            # against the account it was issued for, so the member's own value
+            # wins over the tenant-wide `gha-owner` resolved above.
+            return {"pat": override.token, "owner": override.account or owner or ""}
 
         pat, disconnected = await self._resolve_ref(tid, "gha-pat", GHA_PAT)
         if disconnected:

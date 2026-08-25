@@ -13,13 +13,16 @@ abstract here — they become convenience methods on the concrete connector
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from config.connectors.models import (
     CapabilityManifest,
     ConnectorAuditEvent,
     ConnectorHealth,
 )
+
+if TYPE_CHECKING:  # import cycle at runtime: authz imports services imports connectors
+    from shared.authz.project_credential import ProjectCredentialFields
 
 
 class ConnectorNotAvailableError(Exception):
@@ -58,9 +61,19 @@ class BaseConnector(ABC):
 
     # ── Project-scoped credential override ───────────────────────────────
 
-    async def _resolve_credential_override(self, tenant_id: str, target_id: str) -> "str | None":
-        """The primary-credential override for THIS call, if any — checked before
-        falling back to the tenant-wide credential in auth_adapter().
+    async def _resolve_credential_override(
+        self, tenant_id: str, target_id: str
+    ) -> "ProjectCredentialFields | None":
+        """The credential override for THIS call, if any — checked before falling
+        back to the tenant-wide credential in auth_adapter().
+
+        Returns the WHOLE credential, not just the token: base_url and account
+        (the site/organization URL, and the email or owner that goes with it)
+        travel with the secret because a connector needs all three to
+        authenticate, and a token pointing at somebody else's tenant-wide URL
+        authenticates against the wrong instance. Fields may individually be
+        None; each caller falls back per field, so a credential saved before
+        base_url existed keeps working unchanged.
 
         `target_id` is the connector's own kind name (e.g. "jira") — the caller
         does NOT pass `kind="connector"` separately; it's hardcoded below to match
@@ -72,8 +85,11 @@ class BaseConnector(ABC):
         reintroducing).
 
         Two sources, in order:
-          1. `self._credential_override` — the ad-hoc, not-yet-saved value a Test
-             Connection request is validating. Never written to secret_store.
+          1. `self._credential_override` and its `_base_url` / `_account`
+             companions — the ad-hoc, not-yet-saved values a Test Connection
+             request is validating. Never written to secret_store. Testing the
+             token against a different URL than the one being saved would report
+             a pass for a credential that then fails, so all three are carried.
           2. The project-scoped personal credential a project member saved for
              themselves (`project_integration_credentials`), if the connector
              factory attached project/owner context — see
@@ -86,16 +102,24 @@ class BaseConnector(ABC):
         secrets — the same category as `_tenant_id`/`_org_url`, which every
         connector already stores on self.
         """
+        from shared.authz.project_credential import (  # noqa: PLC0415
+            ProjectCredentialFields,
+            resolve_project_credential,
+        )
+
         override = getattr(self, "_credential_override", None)
         if override:
-            return override
+            return ProjectCredentialFields(
+                base_url=getattr(self, "_credential_override_base_url", None) or None,
+                account=getattr(self, "_credential_override_account", None) or None,
+                token=override,
+            )
         project_id = getattr(self, "_project_id_for_creds", "")
         owner_id = getattr(self, "_project_owner_id", "")
         if not (project_id and owner_id):
             return None
-        from shared.authz.project_credential import resolve_project_secret  # noqa: PLC0415
 
-        return await resolve_project_secret(
+        return await resolve_project_credential(
             tenant_id=tenant_id, project_id=project_id, owner_id=owner_id,
             kind="connector", target_id=target_id,
         )
