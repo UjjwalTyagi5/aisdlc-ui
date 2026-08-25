@@ -26,7 +26,7 @@ export function LoginDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-line-soft/60 bg-panel-elevated/80 flex flex-col gap-5 p-8 shadow-2xl backdrop-blur-2xl sm:max-w-md sm:p-10">
+      <DialogContent className="border-line-soft/50 bg-panel-elevated/60 flex flex-col gap-5 p-8 shadow-2xl backdrop-blur-2xl sm:max-w-md sm:p-10">
         <div className="flex items-center justify-center gap-3">
           <PwcMark size={40} />
           <span className="font-display text-sm font-bold tracking-tight">SDLC Platform</span>
