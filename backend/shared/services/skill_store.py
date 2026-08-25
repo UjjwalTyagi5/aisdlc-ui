@@ -35,6 +35,26 @@ logger = logging.getLogger(__name__)
 
 _SCOPE_RANK = {"org": 0, "workspace": 1, "project": 2}
 
+
+def _toggle_precedence(
+    toggle_rows_with_rank: list[tuple[int, "AgentSkillToggle"]],
+) -> dict[tuple[str, str], bool]:
+    """(origin, skill_key) -> effective enabled, nearest scope (highest rank) wins.
+    Shared shape with resolve_active_skills' own nearest-wins toggle logic, but kept
+    as a separate small helper here rather than refactored to share code with that
+    function — resolve_active_skills is on the RUNTIME path (every agent turn) and
+    has no test coverage of its own yet; extending its signature to serve this
+    management-list use case is a bigger, riskier change than this feature needs.
+    """
+    best: dict[tuple[str, str], tuple[int, bool]] = {}
+    for rank, t in toggle_rows_with_rank:
+        k = (t.origin, t.skill_key)
+        cur = best.get(k)
+        if cur is None or rank > cur[0]:
+            best[k] = (rank, bool(t.enabled))
+    return {k: v[1] for k, v in best.items()}
+
+
 _INDEX_HEADER = (
     "AVAILABLE SKILLS — call load_skill(\"<key>\") to load full instructions "
     "BEFORE applying one:"
@@ -217,11 +237,19 @@ def _list_item(
     }
 
 
-async def list_skills_merged(tenant_id, agent_id, scope, scope_id) -> list[dict]:
-    """Management list for one scope: vendor skills + custom skills authored here,
-    each with its effective enabled flag at this scope. Fail-soft to []."""
+async def list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None) -> list[dict]:
+    """Management list for one scope: vendor skills + custom skills authored here OR
+    inherited from an ancestor tier (nearest wins per skill_key), each with its
+    effective enabled flag (nearest applicable toggle wins, own scope included).
+    Fail-soft to [].
+
+    `ancestor`: nearest-first [(scope, scope_id), ...] above `scope` — see
+    shared.routers.agent_profiles.ancestor_chain. None/[] (default) matches today's
+    exact behavior: no ancestor tiers are consulted at all.
+    """
     if not tenant_id:
         return []
+    ancestor = ancestor or []
     sid = _as_uuid(scope_id) if scope != "org" else None
     try:
         async with get_db_session_for_tenant(str(tenant_id)) as session:
@@ -240,35 +268,75 @@ async def list_skills_merged(tenant_id, agent_id, scope, scope_id) -> list[dict]
                     AgentSkillToggle.scope_id.is_(None) if sid is None else AgentSkillToggle.scope_id == sid,
                 )
             )).scalars().all())
+
+            ancestor_custom: list[tuple[str, AgentSkill]] = []
+            ancestor_toggle_rows: list[tuple[str, AgentSkillToggle]] = []
+            for anc_scope, anc_scope_id in ancestor:
+                anc_sid = _as_uuid(anc_scope_id) if anc_scope != "org" else None
+                anc_custom_rows = list((await session.execute(
+                    select(AgentSkill).where(
+                        AgentSkill.agent_id == str(agent_id),
+                        AgentSkill.scope == anc_scope,
+                        AgentSkill.scope_id.is_(None) if anc_sid is None else AgentSkill.scope_id == anc_sid,
+                        AgentSkill.deleted_at.is_(None),
+                        AgentSkill.is_active.is_(True),
+                    )
+                )).scalars().all())
+                ancestor_custom.extend((anc_scope, r) for r in anc_custom_rows)
+                anc_toggle_rows = list((await session.execute(
+                    select(AgentSkillToggle).where(
+                        AgentSkillToggle.agent_id == str(agent_id),
+                        AgentSkillToggle.scope == anc_scope,
+                        AgentSkillToggle.scope_id.is_(None) if anc_sid is None else AgentSkillToggle.scope_id == anc_sid,
+                    )
+                )).scalars().all())
+                ancestor_toggle_rows.extend((anc_scope, t) for t in anc_toggle_rows)
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_skills_merged(%s/%s) failed: %s", tenant_id, agent_id, exc)
         return []
 
-    toggles = {(t.origin, t.skill_key): bool(t.enabled) for t in toggle_rows}
+    own_rank = _SCOPE_RANK.get(scope, 0)
+    toggle_ranked = [(own_rank, t) for t in toggle_rows] + [
+        (_SCOPE_RANK.get(anc_scope, -1), t) for anc_scope, t in ancestor_toggle_rows
+    ]
+    enabled_by_key = _toggle_precedence(toggle_ranked)
+
     items: list[dict] = []
 
     for v in vendor_skills_for(str(agent_id)):
-        items.append(_list_item(
-            origin="vendor", skill_key=v.skill_key, agent_id=v.agent_id,
-            display_name=v.display_name, description=v.description,
-            when_to_use=v.when_to_use, runtime=v.runtime,
-            enabled=toggles.get(("vendor", v.skill_key), True),
-            version=None, active_version=None,
-        ))
+        items.append({
+            **_list_item(
+                origin="vendor", skill_key=v.skill_key, agent_id=v.agent_id,
+                display_name=v.display_name, description=v.description,
+                when_to_use=v.when_to_use, runtime=v.runtime,
+                enabled=enabled_by_key.get(("vendor", v.skill_key), True),
+                version=None, active_version=None,
+            ),
+            "origin_scope": None,
+        })
 
-    # For custom skills only the active version is surfaced in the list.
-    active_by_key: dict[str, AgentSkill] = {}
+    # Own scope's active custom rows, tagged with this scope; then ancestor rows for
+    # any skill_key not already claimed by the own scope (nearest-first order already
+    # guaranteed by the caller's `ancestor` argument, so first-inserted-per-key wins).
+    active_by_key: dict[str, tuple[str, AgentSkill]] = {}
     for r in custom_rows:
         if r.is_active:
-            active_by_key[r.skill_key] = r
-    for skill_key, r in active_by_key.items():
-        items.append(_list_item(
-            origin="custom", skill_key=r.skill_key, agent_id=r.agent_id,
-            display_name=r.display_name or r.skill_key, description=r.description or "",
-            when_to_use=r.when_to_use or "", runtime=r.runtime or "llm",
-            enabled=toggles.get(("custom", r.skill_key), True),
-            version=r.version, active_version=r.version,
-        ))
+            active_by_key[r.skill_key] = (scope, r)
+    for anc_scope, r in ancestor_custom:
+        if r.skill_key not in active_by_key:
+            active_by_key[r.skill_key] = (anc_scope, r)
+
+    for skill_key, (origin_scope, r) in active_by_key.items():
+        items.append({
+            **_list_item(
+                origin="custom", skill_key=r.skill_key, agent_id=r.agent_id,
+                display_name=r.display_name or r.skill_key, description=r.description or "",
+                when_to_use=r.when_to_use or "", runtime=r.runtime or "llm",
+                enabled=enabled_by_key.get(("custom", r.skill_key), True),
+                version=r.version, active_version=r.version,
+            ),
+            "origin_scope": origin_scope,
+        })
 
     items.sort(key=lambda i: (i["origin"] != "custom", i["display_name"].lower()))
     return items
