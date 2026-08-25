@@ -264,6 +264,17 @@ def test_preview_scope_row_with_prepend_and_append_appears_twice():
     assert len(org_layers) == 2  # prepend before vendor, append after
 
 
+def test_preview_layers_include_workspace_between_org_and_draft():
+    # Org layer, then workspace layer, then draft — nearest-to-farthest is OUTERMOST
+    # first in the returned list (mirrors build_preview_layers' existing SCOPE_ORDER
+    # sort: org(0) before workspace(1) before project(2), draft always innermost).
+    org_row = _scope_row("org", prepend="org-says-hi")
+    ws_row = _scope_row("workspace", prepend="ws-says-hi")
+    layers = ap.build_preview_layers([org_row, ws_row], "draft-prepend", "", "")
+    prepend_sources = [l["source"] for l in layers if "prepend" in l["name"].lower()]
+    assert prepend_sources == ["org", "workspace", "draft"]
+
+
 # ── version serialization ──────────────────────────────────────────────────────────
 
 def test_version_dict_shape_and_snake_case():

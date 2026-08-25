@@ -616,19 +616,24 @@ async def preview(
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
 
-    # Active lower-scope layers the draft stacks on. Only the org layer is reliably
-    # resolvable from a draft payload (which carries no workspace id); a project-scoped
-    # draft's workspace layer is therefore omitted (documented deviation).
+    # Active layers from every ancestor tier the draft would stack on. `DraftIn`
+    # doesn't carry workspace_id/project_id (draft-create genuinely doesn't need
+    # them — a draft only ever belongs to its own tier), but preview's frontend
+    # caller (behavior-tab.tsx) already sends them via a superset body; FastAPI
+    # ignores fields DraftIn doesn't declare, so read them off the raw request
+    # body instead of widening DraftIn's contract for every other caller.
+    raw = await request.json()
+    workspace_id = raw.get("workspace_id")
     lower_rows: list = []
-    if SCOPE_ORDER.get(body.scope, 0) > 0:
-        lower_rows = list((await db.execute(
+    for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, workspace_id):
+        anc_rows = list((await db.execute(
             select(AgentProfile).where(
                 AgentProfile.agent_id == body.agent_id,
-                AgentProfile.scope == "org",
-                AgentProfile.scope_id.is_(None),
                 AgentProfile.is_active.is_(True),
+                *_scope_filters(anc_scope, anc_scope_id),
             )
         )).scalars().all())
+        lower_rows.extend(anc_rows)
 
     layers = build_preview_layers(
         lower_rows,
