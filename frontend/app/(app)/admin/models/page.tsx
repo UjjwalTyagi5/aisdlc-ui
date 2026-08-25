@@ -18,6 +18,7 @@ import {
 } from "@/components/app/model-governance-summary";
 import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
 import { AddModelDialog, filterCatalogToAllowed } from "@/components/app/add-model-dialog";
+import { AddProviderDialog } from "@/components/app/add-provider-dialog";
 import { ProviderModelCurationDialog } from "@/components/app/provider-model-curation-dialog";
 import { UnitAccessPicker } from "@/components/app/unit-access-picker";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
@@ -267,6 +268,8 @@ export default function ModelProvidersPage() {
   // right before throwing it away. Same self-service-browse-and-add pattern
   // Task 13 already removed from project-model-selection-card.tsx.
   const [addKeyProvider, setAddKeyProvider] = React.useState<string | null>(null);
+  // Org Admin's own registration action — keyless, see AddProviderDialog.
+  const [addProviderOpen, setAddProviderOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
 
   // Prefix-invalidate: with one query per unit there is no single key to name,
@@ -317,9 +320,6 @@ export default function ModelProvidersPage() {
   // One flat list across every unit in view; each provider still knows which
   // unit it belongs to, so the cards can say so when there is more than one.
   const providers = providerQueries.flatMap((q) => q.data ?? []);
-
-  // Needed before providerGroups below (Org Admin's grid is catalog-seeded);
-  // moved up from where it used to sit purely for `effectiveCatalog`.
   const catalog = catalogQ.data ?? [];
 
   /**
@@ -332,18 +332,19 @@ export default function ModelProvidersPage() {
    * see. The subscriptions live on the detail screen, which already lists them
    * and is where testing, editing and removing a key belongs.
    *
-   * FOR AN ORG ADMIN THE GRID IS CATALOG-SEEDED, not connection-seeded. "Add
-   * provider" is gone from their flow entirely (Step 2 above) — granting a
-   * business unit reach to a provider and curating its models (the card's own
-   * controls, see `ProviderCard`) is now the ONLY thing an Org Admin does with
-   * a provider here, and both of those act on a catalog SLUG, not on an
-   * existing `model_providers` connection row (`PUT /model/providers/grants`
-   * accepts any catalog provider). A brand-new tenant has zero connections
-   * anywhere, so building this grid from connections alone would leave an Org
-   * Admin with no card — and so no way — to grant a provider nobody has ever
-   * connected to yet. `!isOrg`'s grid is deliberately NOT catalog-seeded: a BU
-   * or Project Admin's screen is about what has actually been onboarded or
-   * granted to them, not the abstract catalog.
+   * The grid is connection-seeded for every scope, Org Admin included — a
+   * provider shows up here once it has been ADDED (via `AddProviderDialog`,
+   * keyless) or credentialed, never before. This was briefly catalog-seeded
+   * (every provider in the whole catalogue rendering unconditionally) to solve
+   * a brand-new tenant's bootstrap problem — Org Admin had no way to reach a
+   * provider nobody had ever connected to, since "Add provider" was removed
+   * along with the old provider+model+key dialog — but showing the entire
+   * ~40-provider catalogue by default is the wrong shape for a screen that's
+   * supposed to answer "which providers does this org actually use". The
+   * bootstrap problem is solved instead by `AddProviderDialog`: a small,
+   * genuinely keyless registration action (spec §2 amendment 5 stays intact —
+   * it never collects a credential) that puts exactly the provider you picked
+   * onto this grid.
    */
   const providerGroups = ((): [string, typeof providers][] => {
     // Plain function, not useMemo: this sits below an early return, so a hook
@@ -355,37 +356,20 @@ export default function ModelProvidersPage() {
       list.push(p);
       by.set(p.provider, list);
     }
-    if (!isOrg) {
-      // A BU Admin's grid also carries a tile for every provider their Org
-      // Admin granted but nobody in this unit has keyed yet (spec §5) — with
-      // ZERO connections, `by` alone would never produce one, and "Add key"
-      // (Task 10) has nowhere to live without a tile to put it on. An empty
-      // array (not omitted) is the signal `ProviderCard` reads to know there's
-      // no detail page to link to yet.
-      if (scope === "bu") {
-        for (const unitAllowed of Object.values(allowedByUnit)) {
-          for (const entry of unitAllowed) {
-            if (!by.has(entry.provider)) by.set(entry.provider, []);
-          }
+    // A BU Admin's grid also carries a tile for every provider their Org
+    // Admin granted but nobody in this unit has keyed yet (spec §5) — with
+    // ZERO connections, `by` alone would never produce one, and "Add key"
+    // (Task 10) has nowhere to live without a tile to put it on. An empty
+    // array (not omitted) is the signal `ProviderCard` reads to know there's
+    // no detail page to link to yet.
+    if (scope === "bu") {
+      for (const unitAllowed of Object.values(allowedByUnit)) {
+        for (const entry of unitAllowed) {
+          if (!by.has(entry.provider)) by.set(entry.provider, []);
         }
       }
-      return [...by.entries()];
     }
-    // Catalog order first — the more legible, canonical ordering — with each
-    // provider's real connections (if any) merged in. A connection whose slug
-    // is somehow absent from the catalog (should not happen, but "off the
-    // catalog" must not mean "invisible") is appended after rather than
-    // dropped.
-    const seen = new Set<string>();
-    const merged: [string, typeof providers][] = [];
-    for (const c of catalog) {
-      merged.push([c.provider, by.get(c.provider) ?? []]);
-      seen.add(c.provider);
-    }
-    for (const [kind, group] of by) {
-      if (!seen.has(kind)) merged.push([kind, group]);
-    }
-    return merged;
+    return [...by.entries()];
   })();
 
   /**
@@ -398,32 +382,19 @@ export default function ModelProvidersPage() {
    * six names); the questions that bring you here are "which contract is the EU
    * one" and "who serves gpt-5.1", and neither is visible until you drill in.
    * A search that finds what a card does not display is the point.
-   *
-   * For an Org Admin, "who serves gpt-5.1" now has to be answerable even for a
-   * provider nobody has connected to yet — its card carries no offerings to
-   * search, only the catalog's own model list, so that's consulted too.
    */
   const q = query.trim().toLowerCase();
   const visibleGroups = q
-    ? providerGroups.filter(([kind, group]) => {
-        if (providerLabel(kind).toLowerCase().includes(q) || kind.toLowerCase().includes(q)) {
-          return true;
-        }
-        if (
+    ? providerGroups.filter(
+        ([kind, group]) =>
+          providerLabel(kind).toLowerCase().includes(q) ||
+          kind.toLowerCase().includes(q) ||
           group.some(
             (p) =>
               p.display_name.toLowerCase().includes(q) ||
               p.offerings.some((o) => o.model_id.toLowerCase().includes(q)),
-          )
-        ) {
-          return true;
-        }
-        if (isOrg) {
-          const catalogModels = catalog.find((c) => c.provider === kind)?.models ?? [];
-          if (catalogModels.some((m) => m.model_id.toLowerCase().includes(q))) return true;
-        }
-        return false;
-      })
+          ),
+      )
     : providerGroups;
 
   // Everything the viewer could credential anywhere they're bound — the union
@@ -479,16 +450,27 @@ export default function ModelProvidersPage() {
           <PageTitle>{copy.title}</PageTitle>
         </div>
 
-        {/* Org Admin no longer credentials anything here — they grant a
-            provider to a business unit (per-card toggle below) and curate
-            which models of it reach that unit; onboarding an actual key
-            moved entirely to each business unit / project's own screen.
-            Project Admin has no page-level trigger here at all: there is no
-            working self-service onboarding route for them (see the header
-            copy below), only the BU Admin's per-card "Add key" (spec §5,
-            Task 10) — its provider is always already fixed by the tile
-            clicked, so a bare page-level button with no tile behind it would
-            have nothing to open. */}
+        {/* Org Admin no longer credentials anything here — "Add provider" is
+            purely keyless registration (AddProviderDialog), so a provider
+            can appear on the grid at all; granting it to a business unit
+            (per-card toggle below) and curating which models of it reach
+            that unit are the only other actions Org Admin has. Onboarding an
+            actual key lives entirely on each business unit / project's own
+            screen. Project Admin has no page-level trigger here at all:
+            there is no working self-service onboarding route for them (see
+            the header copy below), only the BU Admin's per-card "Add key"
+            (spec §5, Task 10) — its provider is always already fixed by the
+            tile clicked, so a bare page-level button with no tile behind it
+            would have nothing to open. */}
+        {isOrg && (
+          <Button
+            onClick={() => setAddProviderOpen(true)}
+            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+          >
+            <Plus className="size-4" aria-hidden />
+            Add provider
+          </Button>
+        )}
       </header>
 
       {/* The estate before the inventory: how many models exist, how far they
@@ -532,22 +514,19 @@ export default function ModelProvidersPage() {
         </p>
       )}
 
-      {/* Org Admin's grid is catalog-seeded (see providerGroups above), so
-          this only fires when the catalog itself has nothing in it — a
-          near-impossible state in practice, not "nobody has connected a
-          provider yet" (which is now the NORMAL starting state for a brand
-          new tenant, and renders a full grid of zero-connection cards
-          instead). BU scope is ALSO catalog-adjacent now (providerGroups
-          above seeds a tile for every provider grant, even a totally
-          unconnected one), so this now only fires for a BU with zero
-          provider grants at all — nothing to click "Add key" on yet, hence
-          no button here for it either. Project scope has no button here
-          either any more — see the header comment above. */}
+      {/* Connection-seeded for every scope. For Org Admin this fires until at
+          least one provider has been added (AddProviderDialog) — the NORMAL
+          starting state for a brand new tenant. BU scope also carries a tile
+          for every provider grant even before it's keyed (see providerGroups
+          above), so this only fires for a BU with zero provider grants at
+          all — nothing to click "Add key" on yet, hence no button here for
+          it either. Project scope has no button here either — see the
+          header comment above. */}
       {providerGroups.length === 0 ? (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
             {isOrg
-              ? "The model catalogue is empty right now, so there's nothing to grant yet."
+              ? "No model provider added yet. Add one to grant it to a business unit and curate its models."
               : scope === "bu"
                 ? scopedUnits.length === 1
                   ? `Your Organization Admin hasn't granted ${scopedUnits[0]!.name} a provider yet.`
@@ -556,6 +535,15 @@ export default function ModelProvidersPage() {
                   ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
                   : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
           </p>
+          {isOrg && (
+            <Button
+              onClick={() => setAddProviderOpen(true)}
+              className="from-brand-gradient-from to-brand-gradient-to mt-5 bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
+            >
+              <Plus className="size-4" aria-hidden />
+              Add provider
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -649,6 +637,14 @@ export default function ModelProvidersPage() {
         }}
       />
 
+      {isOrg && (
+        <AddProviderDialog
+          open={addProviderOpen}
+          onOpenChange={setAddProviderOpen}
+          catalog={catalog}
+          existingProviderKinds={providerGroups.map(([kind]) => kind)}
+        />
+      )}
     </div>
   );
 }
