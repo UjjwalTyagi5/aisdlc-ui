@@ -355,7 +355,7 @@ async def test_the_raw_token_is_never_stored(org):
             text("INSERT INTO users (id, email, tenant_id) VALUES (:i, :e, CAST(:t AS uuid))"),
             {"i": user, "e": f"{user}@abcbank.com", "t": t["org"]},
         )
-        token = await password_setup.issue(s, user_id=user, purpose="reset", ttl_hours=1)
+        token = await password_setup.issue(s, user_id=user, purpose="reset", ttl_minutes=60)
         stored = (await s.execute(
             text("SELECT token_hash FROM password_reset_tokens WHERE user_id = :u"),
             {"u": user},

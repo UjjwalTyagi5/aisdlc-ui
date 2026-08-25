@@ -43,7 +43,7 @@ def _hash(token: str) -> str:
 
 
 async def issue(
-    session: AsyncSession, *, user_id: str, purpose: Purpose, ttl_hours: int
+    session: AsyncSession, *, user_id: str, purpose: Purpose, ttl_minutes: int
 ) -> str:
     """Create a token for `user_id` and return the RAW value, once.
 
@@ -52,7 +52,8 @@ async def issue(
     and "I clicked the newest link" would not mean the older one is dead.
     """
     token = secrets.token_urlsafe(_TOKEN_BYTES)
-    expires = datetime.now(tz=timezone.utc) + timedelta(hours=ttl_hours)
+    # Minutes, because the shortest thing an hours-based TTL could express was an hour.
+    expires = datetime.now(tz=timezone.utc) + timedelta(minutes=ttl_minutes)
 
     await session.execute(
         text(
@@ -78,7 +79,7 @@ async def issue(
         {"u": user_id, "h": _hash(token), "p": purpose, "e": expires},
     )
     logger.info(
-        "password %s token issued user=%s ttl=%dh", purpose, user_id, ttl_hours
+        "password %s token issued user=%s ttl=%dm", purpose, user_id, ttl_minutes
     )
     return token
 
