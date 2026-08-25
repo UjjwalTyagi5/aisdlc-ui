@@ -161,3 +161,115 @@ describe("bu-add-key mode — no provider picker", () => {
     expect(await screen.findByText("Anthropic")).toBeTruthy();
   });
 });
+
+/**
+ * `page.tsx` renders ONE persistent `AddModelDialog` instance and toggles it
+ * by changing `initialProvider`/`open` as props — it never unmounts/remounts
+ * the component the way every case above (which always mounts fresh with
+ * `initialProvider` already set) does. That distinction hid a real bug: the
+ * `provider` state only ever tracked `initialProvider` via the CLOSE-time
+ * reset effect, so the first open ever — or an open whose `initialProvider`
+ * changed since the dialog was last closed (e.g. "Add key" clicked on a
+ * different row without closing first) — left `provider` stuck stale, and
+ * every step after "Provider" (gated on that state, not the prop) silently
+ * never rendered, even though the locked-provider text itself looked correct.
+ */
+describe("bu-add-key mode — long-lived instance whose initialProvider changes", () => {
+  it("renders the Models step on the very first open, not just on a second one", async () => {
+    const onAdded = vi.fn();
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <AddModelDialog
+        open={false}
+        onOpenChange={onOpenChange}
+        catalog={catalog}
+        catalogLoading={false}
+        targetUnits={null}
+        allowedByUnit={{}}
+        fullCatalog={catalog}
+        needsApproval={false}
+        grantableWorkspaces={null}
+        initialProvider={null}
+        mode="org"
+        onAdded={onAdded}
+      />,
+    );
+
+    // Simulate clicking "Add key" on a granted row: page.tsx flips both
+    // `open` and `initialProvider` on the SAME already-mounted instance.
+    rerender(
+      <AddModelDialog
+        open
+        onOpenChange={onOpenChange}
+        catalog={catalog}
+        catalogLoading={false}
+        targetUnits={null}
+        allowedByUnit={{}}
+        fullCatalog={catalog}
+        needsApproval={false}
+        grantableWorkspaces={null}
+        initialProvider="anthropic"
+        mode="bu-add-key"
+        onAdded={onAdded}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("checkbox", { name: /claude-sonnet-5/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("switches to the second row's provider without the dialog ever closing", async () => {
+    const catalogTwoProviders: CatalogProvider[] = [
+      ...catalog,
+      {
+        provider: "openai",
+        label: "OpenAI",
+        models: [
+          { model_id: "gpt-5.1", label: "GPT-5.1", input_price_per_million: 2, output_price_per_million: 8 },
+        ],
+      },
+    ];
+    const onAdded = vi.fn();
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <AddModelDialog
+        open
+        onOpenChange={onOpenChange}
+        catalog={catalogTwoProviders}
+        catalogLoading={false}
+        targetUnits={null}
+        allowedByUnit={{}}
+        fullCatalog={catalogTwoProviders}
+        needsApproval={false}
+        grantableWorkspaces={null}
+        initialProvider="anthropic"
+        mode="bu-add-key"
+        onAdded={onAdded}
+      />,
+    );
+    expect(await screen.findByRole("checkbox", { name: /claude-sonnet-5/ })).toBeInTheDocument();
+
+    // Still open — the row that was clicked next belongs to a different
+    // provider, same as clicking a different granted row's "Add key" while
+    // this instance was never closed in between.
+    rerender(
+      <AddModelDialog
+        open
+        onOpenChange={onOpenChange}
+        catalog={catalogTwoProviders}
+        catalogLoading={false}
+        targetUnits={null}
+        allowedByUnit={{}}
+        fullCatalog={catalogTwoProviders}
+        needsApproval={false}
+        grantableWorkspaces={null}
+        initialProvider="openai"
+        mode="bu-add-key"
+        onAdded={onAdded}
+      />,
+    );
+
+    expect(await screen.findByRole("checkbox", { name: /gpt-5\.1/ })).toBeInTheDocument();
+  });
+});

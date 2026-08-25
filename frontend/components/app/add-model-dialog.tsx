@@ -258,6 +258,20 @@ export function AddModelDialog({
     }
   }, [open, initialProvider]);
 
+  // `provider` (state) only tracked `initialProvider` (prop) via the
+  // close-time reset above — fine when the dialog unmounts between uses, but
+  // this instance is long-lived (page.tsx renders it once and toggles `open`
+  // by changing `initialProvider`), so the FIRST open ever, or an open
+  // whose `initialProvider` changed since the last close (e.g. "Add key"
+  // clicked on a different row before the dialog was ever closed), left
+  // `provider` stuck at its stale/initial value. `providerLocked`'s own text
+  // still read correctly (it's derived straight from the prop), so Step 1
+  // looked right while every step after it — gated on `provider` — silently
+  // never rendered. Keep it synced continuously whenever locked.
+  React.useEffect(() => {
+    if (initialProvider) setProvider(initialProvider);
+  }, [initialProvider]);
+
   // A passing Test is a claim about ONE exact (key, base) pair. Edit either
   // afterward and the claim is stale — re-idle rather than let a proven-good
   // result silently vouch for a key that was never actually tested.
