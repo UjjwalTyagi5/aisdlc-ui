@@ -243,6 +243,15 @@ export const governNav: NavItem[] = [
     icon: BrainCircuit,
     segment: "models",
     requirePermission: "model:manage",
+    // ADMINISTERING A UNIT, not merely holding `model:manage` — same reasoning
+    // as Users/Roles & Access below. A Project Admin holds that permission too,
+    // for their own projects' model selection, and the OR gate put this
+    // ORG-WIDE catalogue page (every provider, every unit's grant) in their
+    // sidebar too, unreachable from any project and answering a question that
+    // isn't theirs. Their own is the project-scoped Model Management page,
+    // reached from inside a project ("This project" section below) — same
+    // place a Developer or BA reaches theirs.
+    requireScope: "business_unit",
     prdSection: "§34.2",
   },
   {
@@ -254,18 +263,20 @@ export const governNav: NavItem[] = [
     href: "/integrations",
     icon: Plug,
     segment: "integrations",
-    // `connector:manage`, NOT `connector:view`. This is the estate — which
-    // kinds the organization permits and which units hold them — and it is
-    // only actionable for the three tiers that grant: Org Admin, Business
-    // Unit Admin, Project Admin.
+    // `connector:manage`, NOT `connector:view` — keeps every delivery role
+    // (which only holds `connector:view`) out of an org-wide estate page that
+    // answers a question that isn't theirs; see the comment that used to sit
+    // here for the fuller reasoning.
     //
-    // Every delivery role holds `connector:view`, so the OR gate put this in
-    // a contributor's sidebar too, where it answered a question they don't
-    // have. Theirs is "which integrations may I use here, and where does my
-    // key go" — that is the project's own Integrations screen, which they
-    // still reach both from the project tabs and from the "This project"
-    // section of this sidebar.
+    // ALSO requireScope: "business_unit", for the identical reason as Model
+    // Management above and as Users/Roles & Access: a Project Admin holds
+    // `connector:manage` too, for their own projects, and the OR gate on
+    // permission alone put this ORG-WIDE estate — every connector, every
+    // unit's grant — in their sidebar, unreachable from any project. Their own
+    // is the project-scoped Integrations screen ("This project" section
+    // below), the same place a Developer or BA reaches theirs.
     requirePermission: "connector:manage",
+    requireScope: "business_unit",
     prdSection: "§34.3, §34.4",
   },
 ];

@@ -329,8 +329,10 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     _design_skills = await resolve_agent_skills("design", tenant_id or None, _project_id)
 
     try:
-        async with mcp_tools_scope(tenant_id or None, _mcp_ids, "design"), \
-                skill_context_scope("design", _design_skills):
+        async with mcp_tools_scope(
+            tenant_id or None, _mcp_ids, "design",
+            project_id=_project_id, owner_id=str(user_id) or None,
+        ), skill_context_scope("design", _design_skills):
             async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
                 msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
                 if hasattr(msg_chunk, "content") and msg_chunk.content:

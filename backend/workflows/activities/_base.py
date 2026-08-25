@@ -152,7 +152,7 @@ def stage_connector_kind(input, agent_id: str, default: str = "azure_devops") ->
 
 
 @asynccontextmanager
-async def mcp_tools_for_stage(input, agent_id: str) -> AsyncIterator[None]:
+async def mcp_tools_for_stage(input, agent_id: str, owner_id: str = "") -> AsyncIterator[None]:
     """Resolve + inject this stage's MCP tools for the duration of graph.ainvoke.
 
     Reads SDLCWorkflowInput.mcp_servers[agent_id], loads the matching tenant's MCP
@@ -166,12 +166,20 @@ async def mcp_tools_for_stage(input, agent_id: str) -> AsyncIterator[None]:
     Delegates to the shared mcp_tools_scope so the pipeline and interactive-chat
     surfaces resolve/inject identically (the only difference is where the server
     ids come from — here, SDLCWorkflowInput.mcp_servers[agent_id]).
+
+    `owner_id`, alongside `input.project_id`, lets a server prefer this turn's own
+    user's saved credential over the org-registered one — see
+    mcp_registry.resolve_server_configs. Omitted, behaviour is unchanged.
     """
     from shared.services.mcp_injection import mcp_tools_scope  # noqa: PLC0415
 
     selection = getattr(input, "mcp_servers", None)
     server_ids = selection.get(agent_id) if isinstance(selection, dict) else None
-    async with mcp_tools_scope(getattr(input, "tenant_id", None), server_ids, agent_id):
+    project_id = str(getattr(input, "project_id", "") or "") or None
+    async with mcp_tools_scope(
+        getattr(input, "tenant_id", None), server_ids, agent_id,
+        project_id=project_id, owner_id=owner_id or None,
+    ):
         yield
 
 

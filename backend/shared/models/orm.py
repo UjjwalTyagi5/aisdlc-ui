@@ -74,6 +74,12 @@ class Project(Base):
     track: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # added in migration 0003 â€” server_default false keeps existing rows at false
     archived: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
+    # Project-creation approval gate (migration 0028). 'active' | 'pending_approval' |
+    # 'rejected' â€” see shared/governance/effects.py for what flips it.
+    approval_status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    approval_decided_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    approval_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
     # Per-project stageâ†’MCP-server mapping {agent_id: [mcp_server_id, ...]} (migration 0024).
     # Chosen at project creation from the creator's MCP servers; threaded into each run.
     mcp_servers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

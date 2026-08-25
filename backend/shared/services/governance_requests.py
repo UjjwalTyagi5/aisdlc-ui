@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.permissions import ROLE_SCOPE
 from shared.governance import routing
-from shared.governance.effects import EffectNotAvailable, apply_on_approve
+from shared.governance.effects import EffectNotAvailable, apply_on_approve, apply_on_reject
 from shared.services import notifications
 
 logger = logging.getLogger(__name__)
@@ -627,12 +627,22 @@ async def decide(
             return await get_request(db, request["id"])
 
     # 4 ── an approval that cannot take effect is refused, not recorded.
+    #
+    # `decidedBy`/`reason` are set on this in-memory dict here, one step ahead of the
+    # UPDATE below that actually writes them — the row is still open at this point, so
+    # reading either off `request` would give the pre-decision (null) value. Every
+    # effect that wants the decider's name or the stated reason (project_creation's
+    # approve/reject, connector_access's `granted_by`) reads it from here.
+    request["decidedBy"] = decider_name
+    request["reason"] = reason
     effect_note: Optional[str] = None
     if decision == "approve":
         try:
             effect_note = await apply_on_approve(db, request)
         except EffectNotAvailable as exc:
             raise EffectUnavailable(exc.detail, code="EFFECT_UNAVAILABLE")
+    else:
+        effect_note = await apply_on_reject(db, request)
 
     status = "approved" if decision == "approve" else "rejected"
     # Guarded on status in the UPDATE as well as checked above: two approvers

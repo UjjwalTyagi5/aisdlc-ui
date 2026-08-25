@@ -1,0 +1,39 @@
+"""Add 'project_activated' to the notifications.kind check constraint.
+
+Fires when a pending project (migration 0028) is approved and a deferred
+contributor is seated — see shared/governance/effects.py::_apply_project_creation.
+Mirrors NotificationKind in frontend/lib/schemas/notification.ts.
+
+Revision ID: 0029_notification_kind
+Revises: 0028_project_approval
+"""
+from alembic import op
+
+revision = "0029_notification_kind"
+down_revision = "0028_project_approval"
+branch_labels = None
+depends_on = None
+
+_OLD_KINDS = (
+    "hitl_pending", "run_failed", "run_completed", "budget_near_cap",
+    "guardrail_blocked", "mention", "request_created", "request_assigned",
+    "request_approval_required", "request_approved", "request_rejected",
+    "request_escalated", "member_awaiting_role",
+)
+_NEW_KINDS = _OLD_KINDS + ("project_activated",)
+
+
+def upgrade() -> None:
+    op.drop_constraint("ck_notification_kind", "notifications", type_="check")
+    op.create_check_constraint(
+        "ck_notification_kind", "notifications",
+        "kind IN (" + ", ".join(f"'{k}'" for k in _NEW_KINDS) + ")",
+    )
+
+
+def downgrade() -> None:
+    op.drop_constraint("ck_notification_kind", "notifications", type_="check")
+    op.create_check_constraint(
+        "ck_notification_kind", "notifications",
+        "kind IN (" + ", ".join(f"'{k}'" for k in _OLD_KINDS) + ")",
+    )

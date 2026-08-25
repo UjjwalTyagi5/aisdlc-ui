@@ -457,8 +457,10 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         _dev_skills = await resolve_agent_skills("development", tenant_id or None, _project_id)
 
         _final_response = ""
-        async with mcp_tools_scope(tenant_id or None, _mcp_ids, "development"), \
-                skill_context_scope("development", _dev_skills):
+        async with mcp_tools_scope(
+            tenant_id or None, _mcp_ids, "development",
+            project_id=_project_id, owner_id=str(user_id) or None,
+        ), skill_context_scope("development", _dev_skills):
             _final_response = await _stream_agent_response(state, config, websocket, session_id)
 
         # Persist the agent turn to the conversation transcript (§11A) — best-effort.

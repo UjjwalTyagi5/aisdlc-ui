@@ -3,7 +3,9 @@ import { z } from "zod";
 import {
   ProjectIntegration,
   ProjectIntegrationCredential,
+  ProjectIntegrationCredentialTestResult,
   type ProjectIntegrationCredentialInput,
+  type ProjectIntegrationCredentialTestInput,
 } from "@/lib/schemas/project-integration";
 
 import { api } from "./client";
@@ -12,6 +14,8 @@ export type {
   ProjectIntegration,
   ProjectIntegrationCredential,
   ProjectIntegrationCredentialInput,
+  ProjectIntegrationCredentialTestInput,
+  ProjectIntegrationCredentialTestResult,
   ProjectIntegrationKind,
 } from "@/lib/schemas/project-integration";
 
@@ -30,4 +34,18 @@ export const saveProjectCredential = (
     method: "PUT",
     body: input,
     schema: ProjectIntegrationCredential,
+  });
+
+/**
+ * Try a credential live, before saving it. Never written anywhere — the
+ * value lives only for the one connector call this makes.
+ */
+export const testProjectCredential = (
+  projectId: string,
+  input: ProjectIntegrationCredentialTestInput,
+) =>
+  api(`/projects/${encodeURIComponent(projectId)}/integrations/test-connection`, {
+    method: "POST",
+    body: input,
+    schema: ProjectIntegrationCredentialTestResult,
   });
