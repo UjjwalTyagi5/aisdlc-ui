@@ -279,12 +279,22 @@ async def get_catalog() -> list[dict]:
 
 
 @model_router.get("/providers", response_model=list[ProviderOut])
-async def list_providers_route(request: Request, scope: str | None = None, workspaceId: str | None = None) -> list[ProviderOut]:
+async def list_providers_route(
+    request: Request, scope: str | None = None, workspaceId: str | None = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> list[ProviderOut]:
     ws = workspaceId or await _active_ws(request)
-    return [
-        _to_provider_out(d)
-        for d in await mc.list_providers(_tenant_id(request), workspace_id=ws, scope=scope)
-    ]
+    rows = await mc.list_providers(_tenant_id(request), workspace_id=ws, scope=scope)
+    if ws and scope != "all":
+        # mc.list_providers only filters by OWNERSHIP (org-wide-or-mine) — never by
+        # whether this business unit was actually granted the provider. An org-wide
+        # ("centrally keyed") connection used to show up for every unit unconditionally,
+        # which is exactly backwards from "the Org Admin decides which providers a unit
+        # may reach at all" (PUT /model/providers/grants). Org Admin's own scope="all"
+        # view stays unfiltered — they define the grants, they aren't subject to them.
+        granted = await granted_target_refs(db, tenant_id=_tenant_id(request), workspace_id=ws, kind="model_provider")
+        rows = [d for d in rows if d["provider"] in granted]
+    return [_to_provider_out(d) for d in rows]
 
 
 @model_router.post("/providers", response_model=ProviderOut, status_code=201)

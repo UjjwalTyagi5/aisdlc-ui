@@ -22,6 +22,7 @@ from typing import Optional
 
 from sqlalchemy import text
 
+from shared.authz.connector_grants import granted_target_refs
 from shared.db import get_db_session_for_tenant
 from shared.services import model_config as mc
 
@@ -169,8 +170,31 @@ async def set_bu_key_policy(
 
 
 async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
+    """A model reaches this BU only when BOTH layers say so: `org_model_grants`
+    (this specific model was curated for the BU, or marked `global`) AND the
+    provider it belongs to is currently granted via `integration_grants`
+    (kind='model_provider') — the mechanism `PUT /model/providers/grants`
+    writes. These are two genuinely separate tables from two different
+    design passes, and neither used to check the other: a `global`-visibility
+    model, or one `specific`-granted before the provider-grant mechanism
+    existed (or after it was later revoked), would still show as "available"
+    with no way to actually reach it — and revoking a provider's grant had no
+    effect on models that had already been curated under it. Requiring both
+    closes that gap: a curated-but-provider-revoked model now correctly
+    disappears, matching what "revoke" is supposed to mean.
+    """
     grants = await get_org_grants(tenant_id)
     policy = await get_bu_key_policy(tenant_id, workspace_id)
+    # Mirrors get_bu_key_policy's own guard just above: workspace_id is compared
+    # against a UUID column, so a malformed value (an old-style BU id not yet
+    # migrated) must not crash the request — treat it as "no provider grants",
+    # the same safe-empty fallback the rest of this module already uses.
+    granted_providers: set[str] = set()
+    if _is_valid_uuid(workspace_id):
+        async with get_db_session_for_tenant(tenant_id) as s:
+            granted_providers = await granted_target_refs(
+                s, tenant_id=tenant_id, workspace_id=workspace_id, kind="model_provider",
+            )
     return [
         {
             "provider": g["provider"], "model_id": g["model_id"],
@@ -180,6 +204,7 @@ async def get_bu_allowed(tenant_id: str, workspace_id: str) -> list[dict]:
         }
         for g in grants
         if _grant_reaches(g["visibility"], g["business_unit_ids"], workspace_id)
+        and g["provider"] in granted_providers
     ]
 
 

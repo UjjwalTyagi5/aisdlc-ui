@@ -575,7 +575,7 @@ async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
     from shared.authz.grant import grant_role
     from shared.services import model_config as mc
     from shared.services import model_grants as mg
-    from tests.test_model_grants import _seed_org_workspace_project
+    from tests.test_model_grants import _grant_provider, _seed_org_workspace_project
     import uuid
 
     tenant = str(uuid.uuid4())
@@ -584,6 +584,7 @@ async def test_bu_availability_matrix_and_project_use_camel_case(mint_token):
         tenant, provider="anthropic", display_name="C1b", api_key="sk-x",
         enabled_models=["claude-sonnet-4-6"], created_by="admin1",
     )
+    await _grant_provider(tenant, ws_id)
     await mg.set_org_grants(
         tenant,
         [{"provider": "anthropic", "model_id": "claude-sonnet-4-6",
@@ -763,15 +764,16 @@ async def test_get_options_route_threads_project_id(mint_token, monkeypatch):
     from process_api import app
     from shared.services import model_config as mc
     from shared.services import model_grants as mg
-    from tests.test_model_grants import _seed_org_workspace_project
+    from tests.test_model_grants import _grant_provider, _seed_org_workspace_project
     import uuid
 
     tenant = str(uuid.uuid4())
-    _, proj_id = await _seed_org_workspace_project(tenant, "Unit A")
+    ws_id, proj_id = await _seed_org_workspace_project(tenant, "Unit A")
     created = await mc.create_provider(
         tenant, provider="anthropic", display_name="I4", api_key="sk-x",
         enabled_models=["claude-sonnet-4-6", "claude-opus-4-8"], created_by="admin1",
     )
+    await _grant_provider(tenant, ws_id)
 
     async def _ok(p, m, k):
         return True
@@ -839,8 +841,14 @@ async def test_create_provider_malformed_workspace_id_rejected_not_widened():
 @pytest.mark.asyncio
 async def test_availability_malformed_workspace_id_does_not_crash(mint_token):
     """Same discovery, through the HTTP surface: GET /model/availability with a
-    not-yet-migrated workspace id must not 500 — it should read as centrally-credentialed
-    only, with nothing locally credentialed (since there's no real backend BU to check)."""
+    not-yet-migrated workspace id must not 500. Was: reads as centrally-credentialed
+    regardless, since `global` visibility used to bypass every workspace-specific
+    check. Now: `get_bu_allowed` also requires the provider to be granted via
+    `integration_grants` for THIS workspace (closing the "I revoked the provider
+    but the model still shows as available" gap) — and a malformed workspace id
+    can never resolve a real grant, so the safe, correct answer is an empty list,
+    not a false positive. The crash-safety property is what this test guards;
+    only the expected payload changed."""
     import httpx
     from process_api import app
     from shared.services import model_config as mc
@@ -876,8 +884,7 @@ async def test_availability_malformed_workspace_id_does_not_crash(mint_token):
             "/model/availability", params={"workspaceId": "ws_platform"}, headers=headers,
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert any(e["model_id"] == "claude-sonnet-4-6" and e["centrallyCredentialed"] for e in body)
+        assert resp.json() == []
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,24 @@ async def _seed_provider(tenant_id: str, models: list[str], workspace_id: str | 
     )
 
 
+async def _grant_provider(tenant_id: str, workspace_id: str, provider: str = "anthropic") -> None:
+    """Same integration_grants(kind='model_provider') row PUT /model/providers/grants
+    writes — get_bu_allowed now requires this in addition to an org_model_grants row
+    (see model_grants.py's coupling fix): a model only reaches a BU when its provider
+    is ALSO currently granted, not just curated. Every test below that expects a
+    positive get_bu_allowed/get_availability/set_bu_grants result needs this."""
+    from shared.db import get_db_session_for_tenant
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(
+            text(
+                "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), 'admin1')"
+            ),
+            {"t": tenant_id, "r": provider, "w": workspace_id},
+        )
+
+
 @pytest.mark.asyncio
 async def test_global_grant_reaches_every_bu():
     from shared.services import model_grants as mg
@@ -61,6 +79,7 @@ async def test_global_grant_reaches_every_bu():
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
     offering_id = provider["offerings"][0]["id"]
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -80,6 +99,11 @@ async def test_specific_grant_reaches_only_named_bu():
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     ws_b, _ = await _seed_org_workspace_project(tenant, "Unit B")
     provider = await _seed_provider(tenant, ["claude-opus-4-8"])
+    # Both units hold the PROVIDER grant — this test is specifically about the
+    # MODEL-level specific/named-BU distinction, so the provider layer must not
+    # be what's excluding ws_b (that would pass for the wrong reason).
+    await _grant_provider(tenant, ws_a)
+    await _grant_provider(tenant, ws_b)
 
     await mg.set_org_grants(
         tenant,
@@ -117,6 +141,7 @@ async def test_project_using_defaults_inherits_bu_set_live():
     tenant = str(uuid.uuid4())
     ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -162,6 +187,7 @@ async def test_effective_project_offerings_scoped_once_a_grant_exists():
     ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6", "claude-opus-4-8"])
     offering_ids = {o["model_id"]: o["id"] for o in provider["offerings"]}
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -211,6 +237,7 @@ async def test_set_bu_grants_noop_when_already_globally_granted():
     tenant = str(uuid.uuid4())
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
