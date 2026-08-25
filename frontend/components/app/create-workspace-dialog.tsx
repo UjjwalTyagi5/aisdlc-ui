@@ -65,7 +65,6 @@ const FormSchema = WorkspaceCreateInput.omit({
 })
   .extend({
     buAdminEmail: z.string().email("Enter a valid email"),
-    buAdminName: z.string().optional(),
     monthlyBudgetUsd: z
       .string()
       .refine((v) => v.trim() === "" || (Number.isFinite(Number(v)) && Number(v) >= 0), {
@@ -265,7 +264,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
       budgetEndDate: "",
       isActive: true,
       buAdminEmail: "",
-      buAdminName: "",
     },
   });
 
@@ -279,7 +277,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
         budgetEndDate: "",
         isActive: true,
         buAdminEmail: "",
-        buAdminName: "",
       });
       setGrantedModels([]);
       setGrantedConnectors([]);
@@ -302,7 +299,9 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
       });
       const admin = await onboardPerson({
         email: values.buAdminEmail,
-        displayName: values.buAdminName || undefined,
+        // No display name: the dialog no longer asks for one. Onboarding derives it from
+        // the address, and the person can set their own on first sign-in.
+        displayName: undefined,
         workspaceId: ws.id,
         role: "bu_admin",
       });
@@ -605,25 +604,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                       enter a new address to invite them.
                     </FormDescription>
                     <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="buAdminName"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                      Name <span className="normal-case opacity-60">(optional)</span>
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Jane Doe"
-                        autoComplete="off"
-                        className="border-line-soft bg-surface-1"
-                        {...field}
-                      />
-                    </FormControl>
                   </FormItem>
                 )}
               />
