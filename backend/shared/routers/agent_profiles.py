@@ -40,11 +40,12 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Iterable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.agent_registry import AGENT_REGISTRY
@@ -52,6 +53,7 @@ from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
 from shared.authz.permissions import has_permission
+from shared.authz.read_scope import live_binding
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.models.orm import AgentProfile
@@ -405,6 +407,92 @@ def assert_own_user_scope(scope: str, scope_id: str | None, actor_user_id: str) 
     """
     if scope == "user" and not _same_actor(scope_id, actor_user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+async def resolve_actor_tier_access(
+    tenant_id: str, actor_user_id: str, perms: list[str], scope: str, scope_id: str | None,
+) -> tuple[bool, bool]:
+    """(owns, may_propose) for `actor_user_id` on this EXACT (scope, scope_id) — a
+    real per-resource lookup, never the global "highest standing" role
+    (`effective_platform_role`/`resolve_platform_role_for_user` are scope-blind and
+    must not be reused here — a bu_admin on Workspace X must not pass an ownership
+    check for Workspace Y just because they're "a bu_admin" tenant-wide).
+
+    owns: may publish/unpublish/activate this tier directly.
+    may_propose: may draft-and-file-for-approval at this tier. Irrelevant once
+    `owns` is True, but reported independently — callers decide precedence.
+
+    org: owns via the admin:* wildcard alone (org_admin always carries it; no
+    role_bindings lookup needed for a role that IS the wildcard). may_propose via
+    a live bu_admin binding ANYWHERE in the tenant — org is the tenant's one
+    instance, so "one tier up from workspace" needs no specific workspace id.
+
+    workspace: owns via a live bu_admin binding scoped to this exact workspace.
+    may_propose via a live project_admin binding on ANY project whose
+    workspace_id is this workspace (one tier up from "some project in this BU").
+
+    project: owns via a live project_admin binding scoped to this exact project.
+    may_propose via ANY live role_binding scoped to this exact project, excluding
+    role_name='contributor' — contributor is documented elsewhere as "not enough
+    to open an agent"; membership alone earns propose access for every other role.
+    """
+    from shared.authz.permissions import has_permission as _has_perm  # noqa: PLC0415 - already imported at module scope, kept local for symmetry with other lazy imports here
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    if scope == "org":
+        owns = _has_perm(perms, "admin:*")
+        async with get_db_session_for_tenant(tenant_id) as session:
+            hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'business_unit' AND rb.role_name = 'bu_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        return owns, hit is not None
+
+    if scope == "workspace":
+        async with get_db_session_for_tenant(tenant_id) as session:
+            owns_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'business_unit' AND rb.scope_id = :w "
+                    f"AND rb.role_name = 'bu_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "w": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+            propose_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.role_name = 'project_admin' "
+                    f"AND rb.scope_id IN (SELECT id FROM projects WHERE workspace_id = CAST(:w AS uuid)) "
+                    f"LIMIT 1"
+                ),
+                {"u": actor_user_id, "w": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        return owns_hit is not None, propose_hit is not None
+
+    if scope == "project":
+        async with get_db_session_for_tenant(tenant_id) as session:
+            owns_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.scope_id = :p "
+                    f"AND rb.role_name = 'project_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "p": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+            propose_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.scope_id = :p "
+                    f"AND rb.role_name != 'contributor' LIMIT 1"
+                ),
+                {"u": actor_user_id, "p": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        return owns_hit is not None, propose_hit is not None
+
+    return False, False
 
 
 def _validate_agent(agent_id: str) -> None:
