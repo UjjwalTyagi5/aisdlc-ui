@@ -12,10 +12,15 @@ lazily and these tests patch the accessors, the whole suite runs regardless.
 """
 from __future__ import annotations
 
+import uuid
+
 import httpx
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
 
+from process_api import app
+from shared.db import get_db_session_for_tenant
 from shared.routers import agent_skills as sk
 
 TENANT_A = "00000000-0000-0000-0000-000000000001"
@@ -619,3 +624,136 @@ async def test_list_skills_workspace_scope_ancestor_is_org_unconditionally(monke
 def _async(return_value):
     from unittest.mock import AsyncMock
     return AsyncMock(return_value=return_value)
+
+
+# ── create_skill / toggle_skill / update_skill / delete_skill / activate_version:
+#    scope-aware write authorization (route-level) ──────────────────────────────────
+#
+# Duplicated locally rather than imported from tests/agent_profiles/test_agent_profiles_
+# router.py's identical helper — no shared conftest fixture exists for this (checked
+# backend/tests/conftest.py), and this repo's tests generally favor small local
+# duplication over new shared fixtures for one-off setup like this.
+
+async def _bind_role(tenant_id: str, user_id: str, role: str, scope_kind: str, scope_id: str | None) -> None:
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(text(
+            "INSERT INTO users (id, email, password_hash, tenant_id, active) "
+            "VALUES (:i, :e, 'x', CAST(:t AS uuid), true) ON CONFLICT (id) DO NOTHING"
+        ), {"i": user_id, "e": f"{user_id}@example.com", "t": tenant_id})
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, role_name, tenant_id) "
+            "VALUES (gen_random_uuid(), :u, :sk, CAST(:si AS uuid), :r, CAST(:t AS uuid))"
+        ), {"u": user_id, "sk": scope_kind, "si": scope_id, "r": role, "t": tenant_id})
+
+
+@pytest.mark.asyncio
+async def test_create_skill_user_scope_own_id_succeeds(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "user", "scope_id": user_id,
+                "skill_key": "my-skill", "display_name": "My Skill", "body": "do the thing",
+            },
+            headers=headers,
+        )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_create_skill_user_scope_someone_elses_id_403s(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "user", "scope_id": str(uuid.uuid4()),
+                "skill_key": "my-skill", "display_name": "My Skill", "body": "do the thing",
+            },
+            headers=headers,
+        )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_skill_project_scope_unchanged_contributor_denied(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "contributor", "business_unit", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "my-skill", "display_name": "My Skill", "body": "do the thing",
+            },
+            headers=headers,
+        )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_activate_version_workspace_scope_unchanged_bu_admin_allowed(monkeypatch, mint_token):
+    async def fake_activate(*args, **kwargs):
+        return {"skill_key": "k", "version": 2}
+
+    class FakeStore:
+        activate_custom_version = staticmethod(fake_activate)
+
+    monkeypatch.setattr(sk, "_store", lambda: FakeStore)
+
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "workspace:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills/k/activate/2",
+            params={"agent_id": "requirements", "scope": "workspace", "scope_id": ws_id},
+            headers=headers,
+        )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_activate_version_workspace_scope_unchanged_developer_denied(monkeypatch, mint_token):
+    async def fake_activate(*args, **kwargs):
+        return {"skill_key": "k", "version": 2}
+
+    class FakeStore:
+        activate_custom_version = staticmethod(fake_activate)
+
+    monkeypatch.setattr(sk, "_store", lambda: FakeStore)
+
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "skill:edit"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills/k/activate/2",
+            params={"agent_id": "requirements", "scope": "workspace", "scope_id": ws_id},
+            headers=headers,
+        )
+    assert resp.status_code == 403
