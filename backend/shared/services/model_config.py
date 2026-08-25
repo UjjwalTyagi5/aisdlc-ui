@@ -285,23 +285,39 @@ async def list_providers(
 
 
 async def _probe_model(provider: str, model: str, api_key: str, api_base: str | None = None) -> bool:
-    """1-token live completion to validate the key. Returns True on success.
+    """Small live completion to validate the key. Returns True on success.
     Wrapped so tests can monkeypatch it without network. Never logs the key.
-    `api_base` targets a custom/self-hosted/OpenAI-compatible endpoint."""
+    `api_base` targets a custom/self-hosted/OpenAI-compatible endpoint.
+
+    16 tokens, not 1: reasoning models (GPT-5 family, o-series, ...) spend part of
+    their budget on an invisible reasoning trace before any visible output token —
+    at max_tokens=1 they can hit the limit having emitted nothing, which some
+    providers report as a content/length error rather than success.
+    """
     import litellm
+    kwargs: dict = dict(
+        model=model,
+        custom_llm_provider=provider,
+        api_key=api_key,
+        messages=[{"role": "user", "content": "ping"}],
+        max_tokens=16,
+    )
+    if api_base:
+        kwargs["api_base"] = api_base
     try:
-        kwargs: dict = dict(
-            model=model,
-            custom_llm_provider=provider,
-            api_key=api_key,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
-        )
-        if api_base:
-            kwargs["api_base"] = api_base
         await litellm.acompletion(**kwargs)
         return True
     except Exception as exc:  # noqa: BLE001 — any provider/auth error => invalid
+        # Newer reasoning models on Azure/OpenAI reject `max_tokens` outright and
+        # name their own replacement in the error text — swap it in and retry once
+        # rather than mark a genuinely valid key/deployment as invalid.
+        if "max_completion_tokens" in str(exc) and "max_tokens" in kwargs:
+            retry_kwargs = {**kwargs, "max_completion_tokens": kwargs.pop("max_tokens")}
+            try:
+                await litellm.acompletion(**retry_kwargs)
+                return True
+            except Exception as retry_exc:  # noqa: BLE001
+                exc = retry_exc
         # Log the provider's actual message (not just the class) so verify failures are
         # diagnosable. LiteLLM/Anthropic error text carries the reason (bad model / key /
         # param) and never echoes the api_key.
