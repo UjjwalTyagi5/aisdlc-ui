@@ -336,6 +336,7 @@ async def get_summary(
     request: Request,
     scope: str,
     scope_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db_session),
 ):
     _tenant_id(request)
@@ -348,7 +349,23 @@ async def get_summary(
     by_agent: dict[str, list] = {a: [] for a in PIPELINE_ORDER}
     for r in rows:
         by_agent.setdefault(r.agent_id, []).append(r)
-    return {"agents": [build_agent_summary(a, by_agent.get(a, [])) for a in PIPELINE_ORDER]}
+
+    ancestor_by_agent: dict[str, list[tuple[str, object]]] = {a: [] for a in PIPELINE_ORDER}
+    for anc_scope, anc_scope_id in ancestor_chain(scope, scope_id, workspace_id):
+        anc_rows = list((await db.execute(
+            select(AgentProfile).where(
+                AgentProfile.agent_id.in_(PIPELINE_ORDER),
+                AgentProfile.is_active.is_(True),
+                *_scope_filters(anc_scope, anc_scope_id),
+            )
+        )).scalars().all())
+        for r in anc_rows:
+            ancestor_by_agent.setdefault(r.agent_id, []).append((anc_scope, r))
+
+    return {"agents": [
+        build_agent_summary(a, by_agent.get(a, []), ancestor_by_agent.get(a))
+        for a in PIPELINE_ORDER
+    ]}
 
 
 @agent_profiles_router.get("/versions")
