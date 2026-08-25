@@ -240,11 +240,12 @@ async def list_skills(
     scope: str,
     scope_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ):
     tenant_id = _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
-    ancestor = ancestor_chain(scope, scope_id, workspace_id)
+    ancestor = ancestor_chain(scope, scope_id, workspace_id, project_id)
     skills = await _store().list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=ancestor)
     return {"skills": skills}
 

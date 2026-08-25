@@ -52,12 +52,15 @@ SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project", "user")
 SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
 
 
-def ancestor_chain(scope: str, scope_id: str | None, workspace_id: str | None) -> list[tuple[str, str | None]]:
+def ancestor_chain(
+    scope: str, scope_id: str | None, workspace_id: str | None, project_id: str | None = None,
+) -> list[tuple[str, str | None]]:
     """Nearest-first ancestor (scope, scope_id) pairs above `scope`, for inheritance
     resolution. `workspace_id` is the project's own parent BU — required to resolve a
     project's WORKSPACE ancestor specifically; omitted, a project-scope request still
-    resolves its org ancestor (which needs no id at all, same as the workspace-scope
-    case below), just not its workspace ancestor. Never errors on a missing id.
+    resolves its org ancestor, just not its workspace ancestor. `project_id` is
+    additionally needed to resolve a PERSONAL (user) scope's project ancestor — the
+    only scope whose full chain is longer than one hop. Never errors on a missing id.
     Shared with skill_store.py's list_skills_merged, which needs the identical chain
     shape.
     """
@@ -67,6 +70,14 @@ def ancestor_chain(scope: str, scope_id: str | None, workspace_id: str | None) -
         return [("org", None)]
     if scope == "project":
         return [("workspace", workspace_id), ("org", None)] if workspace_id else [("org", None)]
+    if scope == "user":
+        chain: list[tuple[str, str | None]] = []
+        if project_id:
+            chain.append(("project", project_id))
+        if workspace_id:
+            chain.append(("workspace", workspace_id))
+        chain.append(("org", None))
+        return chain
     return []
 
 
@@ -380,6 +391,7 @@ async def get_summary(
     scope: str,
     scope_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    project_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db_session),
 ):
     _tenant_id(request)
@@ -394,7 +406,7 @@ async def get_summary(
         by_agent.setdefault(r.agent_id, []).append(r)
 
     ancestor_by_agent: dict[str, list[tuple[str, object]]] = {a: [] for a in PIPELINE_ORDER}
-    for anc_scope, anc_scope_id in ancestor_chain(scope, scope_id, workspace_id):
+    for anc_scope, anc_scope_id in ancestor_chain(scope, scope_id, workspace_id, project_id):
         anc_rows = list((await db.execute(
             select(AgentProfile).where(
                 AgentProfile.agent_id.in_(PIPELINE_ORDER),
@@ -685,8 +697,9 @@ async def preview(
     # body instead of widening DraftIn's contract for every other caller.
     raw = await request.json()
     workspace_id = raw.get("workspace_id")
+    project_id = raw.get("project_id")
     lower_rows: list = []
-    for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, workspace_id):
+    for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, workspace_id, project_id):
         anc_rows = list((await db.execute(
             select(AgentProfile).where(
                 AgentProfile.agent_id == body.agent_id,

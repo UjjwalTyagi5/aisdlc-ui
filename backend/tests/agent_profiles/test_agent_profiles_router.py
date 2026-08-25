@@ -223,6 +223,33 @@ def test_ancestor_chain_project_without_workspace_id_still_gets_org():
     assert ap.ancestor_chain("project", "proj-1", None) == [("org", None)]
 
 
+def test_ancestor_chain_user_scope_full_chain():
+    assert ap.ancestor_chain("user", "u1", "ws-1", "proj-1") == [
+        ("project", "proj-1"), ("workspace", "ws-1"), ("org", None),
+    ]
+
+
+def test_ancestor_chain_user_scope_no_project_id():
+    assert ap.ancestor_chain("user", "u1", "ws-1", None) == [
+        ("workspace", "ws-1"), ("org", None),
+    ]
+
+
+def test_ancestor_chain_user_scope_no_workspace_id():
+    assert ap.ancestor_chain("user", "u1", None, "proj-1") == [
+        ("project", "proj-1"), ("org", None),
+    ]
+
+
+def test_ancestor_chain_user_scope_no_ids_at_all():
+    assert ap.ancestor_chain("user", "u1", None, None) == [("org", None)]
+
+
+def test_ancestor_chain_existing_calls_unaffected_by_new_param():
+    # 3-positional-arg call sites (every one that predates this task) keep working.
+    assert ap.ancestor_chain("project", "proj-1", "ws-1") == [("workspace", "ws-1"), ("org", None)]
+
+
 # ── _validate_scope ─────────────────────────────────────────────────────────────────
 
 def test_validate_scope_accepts_user_with_scope_id():
