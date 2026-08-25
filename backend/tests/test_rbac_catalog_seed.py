@@ -7,6 +7,7 @@ in the system would notice.
 """
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from shared.authz.catalog import (
     CATALOG_PERMISSIONS,
@@ -100,16 +101,70 @@ async def test_verify_detects_a_removed_permission():
         assert await verify_rbac_catalog(s) == []
 
 
+class _Probe(Exception):
+    """Raised to unwind a savepoint that was only ever asked a question."""
+
+
+async def _a_role_safe_to_delete(s) -> str | None:
+    """A catalogue role that no role_binding references, found by ASKING THE CONSTRAINT.
+
+    This test used to hard-code 'qa' and fail the moment anything in the database held
+    that role — which, on a development database that has run the suite a few times, is
+    always. The failure looked like an RBAC bug and was only ever test isolation.
+
+    Counting the bindings first does not work, and the reason is worth stating: the
+    session here sets no tenant GUC, `role_bindings` is FORCE row-level security, and
+    `sdlc_app` does NOT hold BYPASSRLS. So `SELECT count(*)` returns 0 no matter how
+    many rows exist, while the foreign key — which is enforced by the system and sees
+    every tenant — still refuses the delete. The only honest question is whether the
+    DELETE is permitted, so that is the question this asks, inside a savepoint that is
+    always rolled back.
+    """
+    for name in ALL_ROLES:
+        if name == "custom":
+            continue  # not a row in `roles`
+        try:
+            async with s.begin_nested():
+                await s.execute(
+                    text("DELETE FROM role_permissions WHERE role_name = :n"), {"n": name}
+                )
+                await s.execute(text("DELETE FROM roles WHERE name = :n"), {"n": name})
+                raise _Probe  # unwind: this was a question, not a change
+        except _Probe:
+            return name
+        except IntegrityError:
+            continue  # some binding depends on it; try the next
+    return None
+
+
 @pytest.mark.asyncio
 async def test_seed_order_satisfies_the_foreign_keys():
     """role_permissions references roles AND permissions, so it must be written last.
 
     Asserted by deleting an edge and its endpoint, then reseeding: if the order were
     wrong this raises ForeignKeyViolation rather than repairing.
+
+    WHICH role is deleted is chosen at runtime rather than hard-coded — see
+    `_a_role_safe_to_delete`. The assertion is about seed ORDER and any catalogue role
+    demonstrates it equally well, so pinning one only coupled the test to whatever role
+    bindings happened to exist.
     """
     async with get_db_session_superuser() as s:
         await seed_rbac_catalog(s)
-        await s.execute(text("DELETE FROM role_permissions WHERE role_name='qa'"))
-        await s.execute(text("DELETE FROM roles WHERE name='qa'"))
+        victim = await _a_role_safe_to_delete(s)
+        if victim is None:
+            # Not a failure, and not something to "fix" by deleting the bindings: a
+            # database where every catalogue role is held by somebody is a database in
+            # normal use. `role_bindings_role_name_fkey` is NOT DEFERRABLE, so there is
+            # no transaction-local way around it either. This assertion is therefore
+            # only available on a database with no role holders — which is exactly what
+            # CI has, and what the assertion was always implicitly assuming.
+            pytest.skip(
+                "every catalogue role is held by at least one role_binding here, so no "
+                "role can be dropped to exercise the reseed (expected on a used database; "
+                "this asserts fully on a clean one)"
+            )
+        await s.execute(text("DELETE FROM role_permissions WHERE role_name = :n"), {"n": victim})
+        await s.execute(text("DELETE FROM roles WHERE name = :n"), {"n": victim})
         await seed_rbac_catalog(s)
         assert await verify_rbac_catalog(s) == []

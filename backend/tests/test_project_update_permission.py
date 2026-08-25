@@ -83,9 +83,19 @@ def test_the_string_is_grantable_and_granted():
 
 
 @pytest.mark.asyncio
-async def test_a_project_admin_can_change_the_budget_they_were_made_to_set(two_units):
-    """The bug, from the user's side. This was a 403 before: the route wanted
-    `workspace:manage`, which a Project Admin does not hold."""
+async def test_a_project_admins_budget_edit_is_queued_for_approval(two_units):
+    """Reaching the route is no longer the same as changing the figure.
+
+    This test used to assert the budget came back as 250. It does not any more, and the
+    change is deliberate rather than a regression: a Project Admin's settings edit is now
+    a request their Business Unit Admin decides (projects.py::_queue_settings_change).
+
+    The permission half of the original bug still holds and is still what this asserts
+    first — `project:update`, not `workspace:manage`, so the call is authorised and
+    answers 200. What changed is the effect: 200 means "filed", and the assertions below
+    exist so that "filed" can never quietly become "silently dropped". The project keeps
+    its old value AND a request exists naming the new one.
+    """
     t = two_units
     user = f"pa-{_uuid.uuid4()}"
     await grant_role(user, t["proj_a"], "project_admin",
@@ -97,7 +107,64 @@ async def test_a_project_admin_can_change_the_budget_they_were_made_to_set(two_u
         json={"monthlyBudgetUsd": 250},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["monthlyBudgetUsd"] == 250
+    body = r.json()
+
+    # Not applied — the approver must not be asked about something already done.
+    assert body["monthlyBudgetUsd"] is None
+    assert body["pendingApproval"] is True
+    assert body["pendingRequestId"]
+    assert body["pendingApproverRole"] == "bu_admin"
+
+    # And the figure survived into the request, rather than the edit evaporating.
+    async with get_db_session_for_tenant(t["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT type, status, payload FROM governance_requests WHERE id = :i"
+        ), {"i": body["pendingRequestId"]})).first()
+    assert row is not None, "the edit was accepted but no request was filed"
+    assert row.type == "project_settings_change"
+    assert row.status == "submitted"
+    assert row.payload["changes"]["monthlyBudgetUsd"] == 250
+
+
+@pytest.mark.asyncio
+async def test_the_bu_admin_approving_it_applies_the_budget(two_units):
+    """The other end of the loop, which nothing covered.
+
+    A queue nobody drains is worse than no queue: the Project Admin is told the change
+    was sent, the Business Unit Admin approves it, and if the effect never fires the
+    figure is simply wrong with everyone believing it was agreed. This walks the whole
+    path — edit, file, decide, apply — and asserts the number actually lands.
+    """
+    t = two_units
+    pa = f"pa-{_uuid.uuid4()}"
+    bu = f"bu-{_uuid.uuid4()}"
+    await grant_role(pa, t["proj_a"], "project_admin",
+                     tenant_id=t["org"], scope_kind="project")
+    await grant_role(bu, t["unit_a"], "bu_admin",
+                     tenant_id=t["org"], scope_kind="business_unit")
+
+    c = _client()
+    filed = c.patch(
+        f"/projects/{t['proj_a']}",
+        headers=_hdr(pa, t["org"], ["artifact:view", "project:update", "member:manage"]),
+        json={"monthlyBudgetUsd": 250},
+    )
+    assert filed.status_code == 200, filed.text
+    request_id = filed.json()["pendingRequestId"]
+
+    decided = c.post(
+        f"/governance-approvals/{request_id}/decide",
+        headers=_hdr(bu, t["org"], ["artifact:view", "governance:decide"]),
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+
+    async with get_db_session_for_tenant(t["org"]) as s:
+        budget = (await s.execute(text(
+            "SELECT monthly_budget_usd FROM projects WHERE id = :i"
+        ), {"i": t["proj_a"]})).scalar()
+    assert budget is not None, "approved, but the change never reached the project"
+    assert float(budget) == 250
 
 
 @pytest.mark.asyncio
