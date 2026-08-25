@@ -469,13 +469,25 @@ export function AddModelDialog({
     ? (activeCatalog.find((c) => c.provider === initialProvider)?.label ??
       providerLabel(initialProvider))
     : null;
+  // bu-add-key is no longer always paired with a locked provider (the page's
+  // single "Add key" button opens it unlocked) — the title must reflect
+  // whatever's currently chosen in the live combobox, not `lockedLabel`,
+  // which is null whenever nothing was pre-selected and rendered the literal
+  // string "null" via template-literal interpolation.
+  const chosenLabel = lockedLabel ?? selectedCatalog?.label ?? (provider ? providerLabel(provider) : null);
 
   return (
     <Dialog open={open} onOpenChange={(v) => !pending && onOpenChange(v)}>
       <DialogContent className="max-h-[92vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="font-display">
-            {isBuAddKey ? `Add a key for ${lockedLabel}` : providerLocked ? `Add a model to ${lockedLabel}` : "Add model provider"}
+            {isBuAddKey
+              ? chosenLabel
+                ? `Add a key for ${chosenLabel}`
+                : "Add a key"
+              : providerLocked
+                ? `Add a model to ${lockedLabel}`
+                : "Add model provider"}
           </DialogTitle>
           <DialogDescription>
             {/* The provider step is a question from the list and a statement
