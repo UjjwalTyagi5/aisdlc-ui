@@ -133,13 +133,20 @@ class GitHubActionsConnector(BaseConnector):
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
 
-        pat, disconnected = await self._resolve_ref(tid, "gha-pat", GHA_PAT)
-        if disconnected:
-            return {"pat": "", "owner": ""}
-
         owner, _ = await self._resolve_ref(tid, "gha-owner", GHA_OWNER)
         if not owner and self._org_url:
             owner = self._org_url.split("/")[0]
+
+        # Project-scoped personal override, checked first: a credential this project
+        # member set for themselves — or the ad-hoc value Test Connection is
+        # validating — wins over the tenant-wide PAT below.
+        override = await self._resolve_credential_override(tid, "github_actions")
+        if override:
+            return {"pat": override, "owner": owner or ""}
+
+        pat, disconnected = await self._resolve_ref(tid, "gha-pat", GHA_PAT)
+        if disconnected:
+            return {"pat": "", "owner": ""}
         return {"pat": pat or "", "owner": owner or ""}
 
     # ── Capability declaration ────────────────────────────────────────────

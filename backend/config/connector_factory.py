@@ -127,6 +127,7 @@ async def get_connector_for_session(
     tenant_id: str = "",
     *,
     project_id: str = "",
+    owner_id: str = "",
     agent_id: str = "",
     access: str | None = None,
     unrestricted: bool = False,
@@ -154,12 +155,23 @@ async def get_connector_for_session(
                     for no project. Explicit and named, because it is the fail-open
                     door and it should read as one at the call site.
 
+    `owner_id`, alongside `project_id`, is who the run belongs to — not an access
+    decision, a credential one. It lets `BaseConnector._resolve_credential_override`
+    (config/connectors/base.py) check whether THIS person saved their own credential
+    for this connector on this project (`project_integration_credentials`) before the
+    connector falls back to the tenant-wide one. Omitted, connector calls behave
+    exactly as before this existed — the tenant-wide credential, unconditionally.
+
     Passing none of them yields a connector that permits NOTHING — a caller who has
     not established what they may do has not established that they may do anything.
     The failure is then a clear `ConnectorAccessDenied` at first use rather than a
     silent full grant.
     """
     raw = await _build_connector(kind=kind, tenant_id=tenant_id)
+    # Routing identifiers, not secrets — see the "not a REQ-M3-10 violation" note on
+    # BaseConnector._resolve_credential_override.
+    raw._project_id_for_creds = project_id  # noqa: SLF001
+    raw._project_owner_id = owner_id  # noqa: SLF001
 
     if unrestricted:
         return raw

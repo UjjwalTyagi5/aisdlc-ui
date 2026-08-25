@@ -70,7 +70,13 @@ class McpTestConnectionIn(BaseModel):
 
 
 @mcp_registry_router.get("", dependencies=[Depends(require_permission("connector:view"))])
-async def list_servers(request: Request, active_only: bool = False):
+async def list_servers(request: Request, active_only: bool = False, workspaceId: Optional[str] = None):
+    if workspaceId:
+        # A stage picker asking "what may this unit use" — grant-scoped, not
+        # creator-scoped. See mcp_registry.list_servers's docstring.
+        return await mcp_registry.list_servers(
+            _tenant_id(request), active_only=active_only, workspace_id=workspaceId
+        )
     # Creator-only visibility: a user sees only the servers they registered.
     return await mcp_registry.list_servers(
         _tenant_id(request), created_by=_user_id(request), active_only=active_only

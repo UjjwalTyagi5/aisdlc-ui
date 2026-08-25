@@ -321,6 +321,15 @@ async def create_project(
     ws_id = await assert_workspace_in_tenant(str(tenant_id), body.workspaceId)
     request.state.workspace_id = ws_id
 
+    # A Project Admin's own creation needs the owning Business Unit Admin's sign-off
+    # (PRD-aligned governance addition) — an Org Admin or BU Admin creating is already
+    # at or above that tier, so theirs go live directly. Computed from the CALLER's
+    # actual role, never from the client's speculative `approvalStatus` in the create
+    # payload (ProjectCreateIn declares no such field) — a client that could name its
+    # own approval status would not need an approver at all.
+    creator_role = await effective_platform_role(db, request)
+    pending = creator_role == "project_admin"
+
     # Default budget + hierarchical guard (0032): a new project defaults to the project
     # budget and must fit under its workspace's remaining budget, else 409 "Budget low"
     # (blocks creation until the workspace cap is raised).
@@ -339,6 +348,7 @@ async def create_project(
         connectors=body.connectors or None,
         tool_access_modes=body.tool_access_modes or None,
         monthly_budget_usd=_proj_budget,
+        approval_status="pending_approval" if pending else "active",
     )
     db.add(project)
     await db.flush()
@@ -407,6 +417,13 @@ async def create_project(
     # own reach. Validated in a first pass so a bad row 422s the whole creation
     # atomically rather than leaving a project with some contributors added and
     # others silently missing.
+    #
+    # NOT SEATED YET if the project itself is pending — a contributor added to a
+    # project that doesn't officially exist would have working access to it before
+    # anyone agreed it should run. Their resolved (user_id, role, extras) go into
+    # the governance request's payload instead, and _apply_project_creation
+    # (shared/governance/effects.py) seats + notifies them at approval time.
+    pending_contributors: list[dict] = []
     if body.contributors:
         from shared.authz.grant import grant_role  # noqa: PLC0415 - import cycle
         from shared.authz.grant_guard import assert_can_grant_role  # noqa: PLC0415
@@ -441,25 +458,62 @@ async def create_project(
                 )
             resolved.append((user.id, contributor))
 
-        actor = getattr(request.state, "user_id", None)
-        for user_id, contributor in resolved:
-            await grant_role(
-                user_id, str(project.id), contributor.roleName,
-                tenant_id=str(tenant_id), scope_kind="project", granted_by=actor,
-            )
-            if contributor.extraAgents:
-                await db.execute(
-                    text(
-                        "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
-                        "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = :p "
-                        "  AND role_name = :r"
-                    ),
-                    {
-                        "a": json.dumps(contributor.extraAgents),
-                        "u": user_id, "p": project.id, "r": contributor.roleName,
-                    },
+        if pending:
+            pending_contributors = [
+                {
+                    "userId": user_id,
+                    "roleName": contributor.roleName,
+                    "extraAgents": contributor.extraAgents or [],
+                }
+                for user_id, contributor in resolved
+            ]
+        else:
+            actor = getattr(request.state, "user_id", None)
+            for user_id, contributor in resolved:
+                await grant_role(
+                    user_id, str(project.id), contributor.roleName,
+                    tenant_id=str(tenant_id), scope_kind="project", granted_by=actor,
                 )
+                if contributor.extraAgents:
+                    await db.execute(
+                        text(
+                            "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+                            "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = :p "
+                            "  AND role_name = :r"
+                        ),
+                        {
+                            "a": json.dumps(contributor.extraAgents),
+                            "u": user_id, "p": project.id, "r": contributor.roleName,
+                        },
+                    )
+            await db.flush()
+
+    # ── file the approval request ────────────────────────────────────────────
+    if pending:
+        await governance_service.create_request(
+            db,
+            tenant_id=str(tenant_id),
+            initiator_id=getattr(request.state, "user_id", "") or "",
+            initiator_name=await actor_display_name(db, request),
+            initiator_role=creator_role,
+            request_type="project_creation",
+            title=f"Create {project.display_name}",
+            description=(
+                f"{project.display_name} was proposed by its Project Admin and "
+                "needs this business unit's sign-off before it goes live."
+            ),
+            workspace_id=str(ws_id),
+            project_id=str(project.id),
+            target_ref=str(project.id),
+            payload={"contributors": pending_contributors},
+            # NOT system_raised: unlike project_archive (SYSTEM_RAISED,
+            # filed on someone else's behalf), `project_creation` is already in
+            # `_PROJECT_ADMIN_RAISABLE` — a Project Admin filing this about their
+            # own creation is exactly the raisable act the type describes, just
+            # triggered by POST /projects instead of the manual picker.
+        )
         await db.flush()
+        await db.refresh(project)
 
     # DP6 warn: compute config-time capability-gap and log any shortfalls.
     # Best-effort only — never blocks project creation.

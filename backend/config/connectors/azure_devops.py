@@ -85,6 +85,13 @@ class AzureDevOpsConnector(BaseConnector):
                 "tenant_id is required for AzureDevOpsConnector.auth_adapter() — "
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
+        # Project-scoped personal override, checked first: a credential this project
+        # member set for themselves — or the ad-hoc value Test Connection is
+        # validating — wins over the tenant-wide PAT below.
+        override = await self._resolve_credential_override(tid, "azure_devops")
+        if override:
+            return {"org_url": self._org_url, "pat": override}
+
         # Resolution order: tenant secret store (Key Vault in prod, Fernet-encrypted
         # DB in local dev — the path the Integrations "Add credentials" form writes
         # to) → global KV name → env var (local fallback). The secret_store read is

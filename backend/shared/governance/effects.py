@@ -16,16 +16,24 @@ it, and the request is the record that they were asked and said yes. Wiring a si
 effect onto those would mean this module performing grants it has no business
 performing.
 
-Three types have an effect the backend cannot perform yet; each raises
+Two types have an effect the backend cannot perform yet; each raises
 `EffectNotAvailable` rather than silently approving into a void:
-  project_creation      there is no pending-project state to activate — `POST /projects`
-                        creates directly, so approval has nothing to flip.
   role_assignment       closed by ASSIGNING a role, not by approving; the write lives in
                         `PATCH /workspaces/{id}/members/{userId}`.
   cross_bu_assignment   there is no cross-BU grant table, so a loan cannot be recorded.
+
+`project_creation` used to be a third: `POST /projects` created the project directly,
+so approval had nothing to flip. Migration 0028 gave it a pending state
+(`Project.approval_status`), so approving now activates it — see
+`_apply_project_creation` below. It is also, so far, the only type whose REJECTION
+needs a real effect rather than a bare status flip: every other type's rejection
+leaves nothing behind to undo, but a rejected project_creation still has to flip its
+project row out of `pending_approval` or the project is stuck looking live-pending
+forever. See `apply_on_reject`.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid as _uuid
 from typing import Any, Optional
@@ -51,10 +59,6 @@ class EffectNotAvailable(Exception):
 
 
 _NOT_APPLICABLE = {
-    "project_creation": (
-        "Approving a project-creation request cannot create the project: there is no "
-        "pending-project state for it to activate. Create the project directly instead."
-    ),
     "role_assignment": (
         "A role-assignment request closes when the role is actually assigned, from "
         "Users or from this queue — not by approving it."
@@ -101,6 +105,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_budget_increase(db, request)
     if rtype == "project_archive":
         return await _apply_project_archive(db, request)
+    if rtype == "project_creation":
+        return await _apply_project_creation(db, request)
     if rtype == "model_provider_access":
         return await _apply_model_provider_access(db, request)
     if rtype == "connector_access":
@@ -111,6 +117,22 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
     # Unreachable while REQUEST_TYPES and the branches above agree. Refusing beats
     # silently approving a type nobody wired up.
     raise EffectNotAvailable(rtype, f"No approval effect is defined for '{rtype}'.")
+
+
+async def apply_on_reject(db: AsyncSession, request: dict[str, Any]) -> Optional[str]:
+    """The consequence of REJECTING `request`, if any. Returns a short audit note.
+
+    Every other type's rejection is a bare status flip with nothing to undo —
+    nothing happened while the request was open, so there is nothing to unwind. Not
+    so for `project_creation`: the project row already exists in `pending_approval`
+    (created synchronously by POST /projects), so a rejection has to flip it to
+    `rejected` explicitly or it is stuck reading as live-pending forever. Unlike
+    `apply_on_approve`, never raises — a request can always be refused, even if the
+    project it named is somehow already gone (see `_apply_project_creation_reject`).
+    """
+    if request["type"] == "project_creation":
+        return await _apply_project_creation_reject(db, request)
+    return None
 
 
 async def _apply_budget_increase(db: AsyncSession, request: dict[str, Any]) -> str:
@@ -185,6 +207,146 @@ async def _apply_project_archive(db: AsyncSession, request: dict[str, Any]) -> s
         return "Project was already archived."
     logger.info("governance: project archived request=%s project=%s", request["id"], target)
     return "Project archived."
+
+
+async def _apply_project_creation(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Activate the project the request named, then seat the contributors it deferred.
+
+    Contributors were deliberately NOT granted at creation time — see
+    shared/routers/projects.py's create_project — because seating them on a project
+    that might still be rejected would hand out working access to something that
+    doesn't officially exist yet. `payload.contributors` carries the (user_id, role,
+    extra_agents) rows already validated and resolved at creation time — re-resolving
+    emails or re-checking grant permission here would be redundant and would let a
+    change to someone's email between creation and approval silently swap who gets
+    seated; the approver agreed to the people named at raise time, same discipline as
+    `_apply_budget_increase` reading its amount from `payload`, never the decision.
+    """
+    target = request.get("targetRef") or request.get("projectId")
+    if not target:
+        raise EffectNotAvailable("project_creation", "This request names no project.")
+    try:
+        _uuid.UUID(str(target))
+    except (ValueError, AttributeError):
+        raise EffectNotAvailable("project_creation", "This request's project id is malformed.")
+
+    row = (
+        await db.execute(
+            text(
+                "UPDATE projects SET approval_status = 'active', approval_decided_by = :by, "
+                "  approval_decided_at = now(), approval_reason = :reason, updated_at = now() "
+                "WHERE id = CAST(:p AS uuid) AND approval_status = 'pending_approval' "
+                "RETURNING display_name"
+            ),
+            {
+                "p": str(target),
+                "by": request.get("decidedBy"),
+                "reason": request.get("reason"),
+            },
+        )
+    ).first()
+    if row is None:
+        # Already active is success, not failure — same reasoning as
+        # _apply_project_archive's "already archived". Only a missing project is a
+        # real problem.
+        existing = (
+            await db.execute(
+                text("SELECT display_name FROM projects WHERE id = CAST(:p AS uuid)"),
+                {"p": str(target)},
+            )
+        ).first()
+        if existing is None:
+            raise EffectNotAvailable("project_creation", "That project no longer exists.")
+        return "Project was already active."
+    display_name = row[0]
+
+    payload = request.get("payload") or {}
+    contributors = payload.get("contributors") or []
+    seated = 0
+    if contributors:
+        from shared.authz.grant import grant_role  # noqa: PLC0415 - import cycle
+        from shared.services import notifications  # noqa: PLC0415 - import cycle
+
+        for c in contributors:
+            user_id = c.get("userId")
+            role_name = c.get("roleName")
+            if not user_id or not role_name:
+                continue
+            exists = (
+                await db.execute(
+                    text("SELECT 1 FROM users WHERE id = :u"), {"u": user_id}
+                )
+            ).first()
+            if exists is None:
+                # A since-deleted account must not block the rest of the project
+                # from going live — skip and note it in the audit log, not the row.
+                logger.warning(
+                    "governance: project_creation contributor %s no longer exists, skipped",
+                    user_id,
+                )
+                continue
+            await grant_role(
+                user_id, str(target), role_name,
+                tenant_id=request["tenantId"], scope_kind="project",
+                granted_by=request.get("decidedBy"),
+            )
+            extra_agents = c.get("extraAgents")
+            if extra_agents:
+                await db.execute(
+                    text(
+                        "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+                        "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = :p "
+                        "  AND role_name = :r"
+                    ),
+                    {"a": json.dumps(extra_agents), "u": user_id, "p": str(target), "r": role_name},
+                )
+            await notifications.emit(
+                db,
+                tenant_id=request["tenantId"],
+                kind="project_activated",
+                title=f'"{display_name}" is now live',
+                body=f"You were added as {role_name.replace('_', ' ')}.",
+                href=f"/projects/{target}",
+                recipient_user_id=user_id,
+                project_id=str(target),
+            )
+            seated += 1
+
+    logger.info(
+        "governance: project activated request=%s project=%s contributors=%d",
+        request["id"], target, seated,
+    )
+    return f"Project activated.{f' {seated} contributor(s) added.' if seated else ''}"
+
+
+async def _apply_project_creation_reject(db: AsyncSession, request: dict[str, Any]) -> Optional[str]:
+    """Flip the project out of pending on rejection. No contributor loop —
+    they were never seated (see `_apply_project_creation`), so there is nothing to
+    undo."""
+    target = request.get("targetRef") or request.get("projectId")
+    if not target:
+        return None
+    try:
+        _uuid.UUID(str(target))
+    except (ValueError, AttributeError):
+        return None
+
+    result = await db.execute(
+        text(
+            "UPDATE projects SET approval_status = 'rejected', approval_decided_by = :by, "
+            "  approval_decided_at = now(), approval_reason = :reason, updated_at = now() "
+            "WHERE id = CAST(:p AS uuid) AND approval_status = 'pending_approval'"
+        ),
+        {
+            "p": str(target),
+            "by": request.get("decidedBy"),
+            "reason": request.get("reason"),
+        },
+    )
+    if not result.rowcount:
+        return None
+    logger.info("governance: project creation rejected request=%s project=%s", request["id"], target)
+    return "Project marked rejected."
 
 
 async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]) -> str:

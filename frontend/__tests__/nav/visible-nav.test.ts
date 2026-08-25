@@ -114,4 +114,30 @@ describe("visibleNav — role and scope", () => {
   it("degrades to permission-only filtering with no context at all", () => {
     expect(hrefsFor(["admin:*"])).toEqual(hrefsFor(["admin:*"], {}));
   });
+
+  it("hides the global Model Management and Integrations pages from a Project Admin", () => {
+    // Project Admin holds model:manage and connector:manage — for their OWN
+    // projects — which the permission gate alone can't tell apart from
+    // administering the org-wide estate these two pages are. Same rule as
+    // Business Units above: administering a unit, not merely holding the
+    // permission, is what makes them theirs. Their own is the project-scoped
+    // Model Management / Integrations page, reached from inside a project.
+    const hrefs = hrefsFor(ROLE_PERMISSIONS.project_admin, {
+      role: "project_admin",
+      isOrgWide: false,
+      managedBusinessUnitIds: [],
+    });
+    expect(hrefs).not.toContain("/admin/models");
+    expect(hrefs).not.toContain("/integrations");
+  });
+
+  it("keeps the global Model Management and Integrations pages for a Business Unit Admin", () => {
+    const hrefs = hrefsFor(ROLE_PERMISSIONS.bu_admin, {
+      role: "bu_admin",
+      isOrgWide: false,
+      managedBusinessUnitIds: ["ws_platform"],
+    });
+    expect(hrefs).toContain("/admin/models");
+    expect(hrefs).toContain("/integrations");
+  });
 });

@@ -188,27 +188,76 @@ async def clear_override(
 # ── project integrations ─────────────────────────────────────────────────────
 
 
+# Mirrors frontend/lib/connectors.ts::CONNECTOR_KIND_LABEL — this project screen
+# names connectors independently of the org-level Integrations hub's own copy
+# (shared/routers/integration_access.py::_CONNECTOR_LABEL, which only covers the 8
+# kinds that page happens to render and would silently show a raw slug for the rest).
+_CONNECTOR_KIND_LABEL: dict[str, str] = {
+    "jira": "Jira",
+    "azure_devops": "Azure DevOps",
+    "github": "GitHub",
+    "azure_repos": "Azure Repos",
+    "github_actions": "GitHub Actions",
+    "slack": "Slack",
+    "ms_teams": "Microsoft Teams",
+    "sharepoint": "SharePoint",
+    "figma": "Figma",
+    "confluence": "Confluence",
+    "sonarqube": "SonarQube",
+    "sso_okta": "Okta SSO",
+    "sso_entra": "Microsoft Entra SSO",
+}
+
+
 class CredentialIn(BaseModel):
     kind: str
     targetId: str = Field(min_length=1, max_length=255)
+    label: str = Field(min_length=1, max_length=120)
     account: Optional[str] = Field(default=None, max_length=255)
     # Accepted and NEVER stored — see the handler.
     secret: Optional[str] = None
+
+
+def _credential_out(row: Any, project_id: Any) -> dict[str, Any]:
+    """One project_integration_credentials row -> the ProjectIntegrationCredential
+    shape (frontend/lib/schemas/project-integration.ts). `label` reads '' for a
+    row written before migration 0030 added the column, rather than null — the
+    frontend field is a required string, not a nullable one."""
+    return {
+        "id": str(row.id),
+        "projectId": str(project_id),
+        "ownerId": row.owner_id,
+        "kind": row.kind,
+        "targetId": row.target_id,
+        "label": row.label or "",
+        "account": row.account,
+        # The only part of a secret a UI should ever see.
+        "hasSecret": row.secret_ref is not None,
+        "updatedBy": row.owner_id,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 @project_scoped_router.get("/projects/{project_id}/integrations")
 async def list_project_integrations(
     project_id: str, request: Request, db: AsyncSession = Depends(get_db_session)
 ) -> list[dict[str, Any]]:
-    """What this project may use, and whose credential is behind each one.
+    """What this project may use, and the CALLER's own credential behind each one.
 
     The permitted set comes from the GRANT to the project's unit, not from what the
     organisation onboarded: a project can only use what its unit was given. Wiring
-    (`projects.connectors`) says which stages it reached, and the credentials say who
-    identified themselves to it.
+    (`projects.connectors`) says which stages it reached.
+
+    `credential` IS SCOPED TO THE VIEWER, not the project. A credential is keyed on
+    (project, OWNER, kind, target) — see migration 0016's docstring, "the second
+    contributor to configure Jira silently replaced the first" is exactly the bug
+    this key exists to prevent — and this page's own copy says the same thing back:
+    "You never see theirs." Returning every owner's row here would say it and then
+    not do it.
     """
     tenant_id = _tenant_id(request)
     project = await _project_or_404(db, tenant_id, project_id)
+    viewer_id = getattr(request.state, "user_id", "") or ""
 
     granted = (
         await db.execute(
@@ -220,29 +269,40 @@ async def list_project_integrations(
         )
     ).fetchall()
 
-    creds: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    mine: dict[tuple[str, str], Any] = {}
     for r in (
         await db.execute(
             text(
-                "SELECT id, owner_id, kind, target_id, account, secret_ref, updated_at "
-                "FROM project_integration_credentials WHERE project_id = :p"
+                "SELECT id, owner_id, kind, target_id, label, account, secret_ref, updated_at "
+                "FROM project_integration_credentials "
+                "WHERE project_id = :p AND owner_id = :o"
             ),
-            {"p": project.id},
+            {"p": project.id, "o": viewer_id},
         )
     ).fetchall():
-        creds.setdefault((r.kind, r.target_id), []).append(
-            {
-                "id": str(r.id),
-                "projectId": str(project.id),
-                "ownerId": r.owner_id,
-                "kind": r.kind,
-                "targetId": r.target_id,
-                "account": r.account,
-                # The only part of a secret a UI should ever see.
-                "hasSecret": r.secret_ref is not None,
-                "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
-            }
-        )
+        mine[(r.kind, r.target_id)] = r
+
+    # MCP server names/descriptions live on mcp_servers, not the grant row —
+    # one lookup for every mcp target this project may use, rather than one
+    # query per row.
+    mcp_targets = [t for k, t in granted if k == "mcp"]
+    mcp_info: dict[str, tuple[str, Optional[str]]] = {}
+    if mcp_targets:
+        try:
+            mcp_ids = [_uuid.UUID(t) for t in mcp_targets]
+        except ValueError:
+            mcp_ids = []
+        if mcp_ids:
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT id, server_name, description FROM mcp_servers "
+                        "WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": mcp_ids},
+                )
+            ).fetchall():
+                mcp_info[str(r.id)] = (r.server_name, r.description)
 
     out = []
     for kind, target in granted:
@@ -250,14 +310,24 @@ async def list_project_integrations(
         stages: list[str] = []
         if isinstance(wired, dict):
             stages = [st for st, ids in wired.items() if target in (ids or [])]
-        elif isinstance(wired, list) and target in wired:
-            stages = []
+
+        if kind == "mcp":
+            name, description = mcp_info.get(target, (target, None))
+        else:
+            name, description = _CONNECTOR_KIND_LABEL.get(target, target), None
+
+        cred_row = mine.get((kind, target))
         out.append(
             {
                 "kind": kind,
-                "targetId": target,
+                "id": target,
+                "name": name,
+                "description": description,
                 "stages": stages,
-                "credentials": creds.get((kind, target), []),
+                # Every connector authenticates as somebody; no MCP server in this
+                # catalogue does (they're service-to-service, not a personal login).
+                "needsProjectCredential": kind == "connector",
+                "credential": _credential_out(cred_row, project.id) if cred_row else None,
             }
         )
     return out
@@ -265,7 +335,17 @@ async def list_project_integrations(
 
 @project_scoped_router.put(
     "/projects/{project_id}/integrations",
-    dependencies=[Depends(require_permission("connector:manage"))],
+    # NOT connector:manage. That permission means "may onboard/disconnect a
+    # tenant-wide connection, edit the MCP catalog, or grant a Business Unit
+    # reach" (see connectors.py's install/credentials/disconnect routes,
+    # mcp_registry.py's catalog CRUD, integration_access.py's grant/revoke) — a
+    # scope decision only org_admin/bu_admin/project_admin make, and
+    # test_enterprise_rbac_catalog.py pins every other role OUT of it on purpose.
+    # This route is a different act entirely: recording THIS caller's own
+    # identity against something the project may already use (see the
+    # docstring below) — every delivery role that can see the page should be
+    # able to do it, which is exactly what connector:view already means.
+    dependencies=[Depends(require_permission("connector:view"))],
 )
 async def upsert_project_credential(
     project_id: str,
@@ -280,11 +360,14 @@ async def upsert_project_credential(
     — and keyed on the project alone the second contributor to configure Jira would
     silently replace the first, with neither able to tell.
 
-    THE SECRET IS READ AND DISCARDED. There is no secret store wired to this table
-    yet, so `secret_ref` stays null and `hasSecret` reports false. Storing the value
-    in the column instead would put it in every backup and every replica, which is
-    the outcome making the column a reference was meant to prevent — so it is not
-    stored at all until there is somewhere proper to put it.
+    THE SECRET IS ACTUALLY STORED, and actually used: `shared.authz.project_credential.resolve_project_secret`
+    is checked by every connector's `auth_adapter()` (via
+    `BaseConnector._resolve_credential_override`) ahead of the tenant-wide
+    credential, whenever the connector factory was given this project+owner (see
+    `config/connector_factory.py::get_connector_for_session`'s `owner_id` param).
+    A blank `secret` on an update leaves the existing one in place — the field is
+    write-only and never round-trips, so "didn't touch it" and "want it gone" must
+    stay distinguishable, and this endpoint offers no way to express the second.
     """
     tenant_id = _tenant_id(request)
     project = await _project_or_404(db, tenant_id, project_id)
@@ -313,22 +396,136 @@ async def upsert_project_credential(
         )
 
     owner = getattr(request.state, "user_id", "") or ""
-    await db.execute(
-        text(
-            "INSERT INTO project_integration_credentials "
-            "  (id, tenant_id, project_id, owner_id, kind, target_id, account) "
-            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :p, :o, :k, :r, :a) "
-            "ON CONFLICT (project_id, owner_id, kind, target_id) DO UPDATE "
-            "  SET account = EXCLUDED.account, updated_at = now()"
-        ),
-        {
-            "i": str(_uuid.uuid4()), "t": tenant_id, "p": project.id, "o": owner,
-            "k": body.kind, "r": body.targetId, "a": body.account,
-        },
-    )
+
+    secret_ref = None
+    if body.secret:
+        from shared.authz.project_credential import project_credential_ref  # noqa: PLC0415
+        from shared.services import secret_store  # noqa: PLC0415
+
+        secret_ref = project_credential_ref(project_id, owner, body.kind, body.targetId)
+        await secret_store.put_secret(tenant_id, secret_ref, body.secret)
+
+    row = (
+        await db.execute(
+            text(
+                "INSERT INTO project_integration_credentials "
+                "  (id, tenant_id, project_id, owner_id, kind, target_id, label, account, secret_ref) "
+                "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :p, :o, :k, :r, :l, :a, :sref) "
+                "ON CONFLICT (project_id, owner_id, kind, target_id) DO UPDATE "
+                "  SET label = EXCLUDED.label, account = EXCLUDED.account, updated_at = now(), "
+                # A blank submission (secret_ref NULL here) must not erase an
+                # existing one — only a real new secret replaces the old ref.
+                "      secret_ref = COALESCE(EXCLUDED.secret_ref, project_integration_credentials.secret_ref) "
+                "RETURNING id, owner_id, kind, target_id, label, account, secret_ref, updated_at"
+            ),
+            {
+                "i": str(_uuid.uuid4()), "t": tenant_id, "p": project.id, "o": owner,
+                "k": body.kind, "r": body.targetId, "l": body.label, "a": body.account,
+                "sref": secret_ref,
+            },
+        )
+    ).one()
     await db.flush()
-    rows = await list_project_integrations(project_id, request, db)
-    return next(r for r in rows if r["kind"] == body.kind and r["targetId"] == body.targetId)
+    # ProjectIntegrationCredential (frontend/lib/schemas/project-integration.ts) —
+    # the credential itself, not the wrapping ProjectIntegration row. The two used
+    # to be conflated: this endpoint returned a row shaped like the GET list's
+    # entries (kind/targetId/stages/credentials), which the PUT response schema
+    # (a single credential) could never have matched.
+    return _credential_out(row, project.id)
+
+
+# Connector kinds whose auth_adapter() checks BaseConnector._resolve_credential_override
+# (config/connectors/base.py) — see each connector's own "Project-scoped personal
+# override" comment. The rest (github, slack, ms_teams, sharepoint, figma) are
+# OAuth-first or share a single org app registration with no simple "one string is
+# the whole credential" shape to override per person; testing them here would
+# silently test the tenant-wide credential instead and call that a personal test.
+_PROJECT_CREDENTIAL_TESTABLE_KINDS = frozenset(
+    {"jira", "azure_devops", "confluence", "sonarqube", "github_actions"}
+)
+
+
+class CredentialTestIn(BaseModel):
+    kind: str
+    targetId: str = Field(min_length=1, max_length=255)
+    secret: str = Field(min_length=1, max_length=4000)
+
+
+@project_scoped_router.post(
+    "/projects/{project_id}/integrations/test-connection",
+    dependencies=[Depends(require_permission("connector:view"))],
+)
+async def test_project_credential(
+    project_id: str,
+    body: CredentialTestIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Try a credential BEFORE saving it — never written to secret_store.
+
+    Same shape as MCP's existing POST /mcp/registry/test-connection: the value
+    under test lives only in this request and this one connector instance's
+    `_credential_override` (config/connectors/base.py), which
+    `BaseConnector._resolve_credential_override` reads ahead of everything else.
+    A failed attempt leaves nothing behind to clean up.
+    """
+    tenant_id = _tenant_id(request)
+    await _project_or_404(db, tenant_id, project_id)
+
+    if body.kind == "mcp":
+        from shared.services import mcp_registry, mcp_client  # noqa: PLC0415
+
+        server = await mcp_registry.get_server(tenant_id, body.targetId)
+        if server is None:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        cfg = {
+            "name": server["server_name"],
+            "transport": server["transport"],
+            "url": server.get("url"),
+            "command": server.get("command"),
+            "args": server.get("args") or [],
+            "headers": {"Authorization": f"Bearer {body.secret}"},
+            "env": None,
+        }
+        result = await mcp_client.test_connection(cfg)  # type: ignore[arg-type]
+        return {
+            "ok": bool(result.get("ok")),
+            "message": "Connected." if result.get("ok") else "Couldn't connect with this credential.",
+        }
+
+    if body.kind != "connector":
+        raise HTTPException(status_code=422, detail="kind must be 'connector' or 'mcp'")
+    if body.targetId not in _PROJECT_CREDENTIAL_TESTABLE_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "not_testable",
+                "message": (
+                    f"{body.targetId} doesn't support testing a personal credential here yet — "
+                    "it authenticates a different way (OAuth or a shared org connection)."
+                ),
+            },
+        )
+
+    from config.connector_factory import get_connector_for_session  # noqa: PLC0415
+
+    connector = await get_connector_for_session(
+        kind=body.targetId, tenant_id=tenant_id, unrestricted=True,
+    )
+    connector._credential_override = body.secret  # noqa: SLF001 — this call only, never persisted
+
+    try:
+        health = await connector.health_check()
+        ok = getattr(health, "status", "") in ("healthy", "ok")
+        return {
+            "ok": ok,
+            # type(exc).__name__ only if the health check itself failed closed rather
+            # than raised — NEVER the raw exception text (credential leakage risk,
+            # the same rule every connector's own auth_adapter follows).
+            "message": "Connected." if ok else f"Couldn't connect ({getattr(health, 'status', 'unknown')}).",
+        }
+    except Exception as exc:  # noqa: BLE001 — a bad credential must read as "failed", not 500
+        return {"ok": False, "message": f"Couldn't connect ({type(exc).__name__})."}
 
 
 # ── cross-BU grants ──────────────────────────────────────────────────────────
