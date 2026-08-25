@@ -51,15 +51,22 @@ import {
   SKILL_KEY_PATTERN,
   type SkillList,
   type SkillListItem,
+  type SkillScope,
 } from "@/lib/schemas/agent-skills";
 
+import type { ScopeContext } from "./agent-editor";
 import { InstructionSlot } from "./instruction-slot";
 
 /** Brand-gradient commit button — the app's primary-commit idiom (see behavior-tab). */
 const PRIMARY_CTA =
   "from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]";
 
-const SCOPE = "workspace" as const;
+const SCOPE_TIER_LABEL: Record<string, string> = {
+  org: "Organization",
+  workspace: BUSINESS_UNIT_LABEL,
+  project: "Project",
+  user: "you",
+};
 
 /** Skills whose engine doesn't yet accept authored/custom skills in the UI. */
 const CUSTOM_SKILLS_UNSUPPORTED = new Set<string>(["testing"]);
@@ -84,32 +91,42 @@ function deriveKey(name: string): string {
 export interface SkillsTabProps {
   agentId: string;
   agentLabel: string;
-  workspaceId: string;
-  workspaceName: string;
-  canManage: boolean;
+  scopeContext: ScopeContext;
 }
 
+/** `"create"`'s `seed` is set only for an Override (a create-at-this-tier copying
+ *  an inherited item) — `fromScope` names the ancestor tier it was copied from, for
+ *  the dialog's explanatory copy. A plain "New skill" click sets `mode: "create"`
+ *  with no `seed`. */
 type EditorState =
-  | { mode: "create" }
+  | {
+      mode: "create";
+      seed?: {
+        skill_key: string;
+        display_name: string;
+        description: string;
+        when_to_use: string;
+        fromScope: string;
+      };
+    }
   | { mode: "edit"; skill: SkillListItem }
   | null;
 
 /**
- * Workspace-level skills for one agent. Two groups: locked vendor "Built-in"
- * skills (view + toggle) and authored "This workspace" custom skills (create /
- * edit / delete + toggle). Parent remounts this per agent (key=agentId), so
+ * Cascade-tier skills manager for one agent (Org/Business Unit/Project — see
+ * ScopeContext; Personal tier is sub-project 2). Two groups: locked vendor
+ * "Built-in" skills (view + toggle) and authored custom skills for the current
+ * tier OR inherited from an ancestor tier (origin_scope on each item — see
+ * list_skills_merged). Parent remounts this per agent (key=agentId), so
  * dialog/toggle state resets cleanly when switching agents.
  */
-export function SkillsTab({
-  agentId,
-  agentLabel,
-  workspaceId,
-  workspaceName,
-  canManage,
-}: SkillsTabProps) {
+export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps) {
+  const { scope, scopeId, chain, isOwner, scopeLabel } = scopeContext;
   const queryClient = useQueryClient();
-  const listKey = qk.agentSkills.list(agentId, SCOPE, workspaceId);
+  const listKey = qk.agentSkills.list(agentId, scope, scopeId);
   const authoringDisabled = CUSTOM_SKILLS_UNSUPPORTED.has(agentId);
+  const canManage = isOwner;
+  const tierNoun = SCOPE_TIER_LABEL[scope] ?? scopeLabel;
 
   const [editor, setEditor] = React.useState<EditorState>(null);
   const [viewing, setViewing] = React.useState<SkillListItem | null>(null);
@@ -117,8 +134,8 @@ export function SkillsTab({
 
   const skillsQ = useQuery({
     queryKey: listKey,
-    queryFn: () => listAgentSkills(agentId, SCOPE, workspaceId),
-    enabled: Boolean(workspaceId),
+    queryFn: () => listAgentSkills(agentId, scope, scopeId, { workspaceId: chain.workspaceId }),
+    enabled: scopeId !== null || scope === "org",
   });
 
   const invalidate = () =>
@@ -129,8 +146,8 @@ export function SkillsTab({
     mutationFn: (v: { skill: SkillListItem; enabled: boolean }) =>
       toggleAgentSkill({
         agent_id: agentId,
-        scope: SCOPE,
-        scope_id: workspaceId,
+        scope,
+        scope_id: scopeId,
         origin: v.skill.origin,
         skill_key: v.skill.skill_key,
         enabled: v.enabled,
@@ -162,12 +179,12 @@ export function SkillsTab({
 
   const deleteMut = useMutation({
     mutationFn: (skill: SkillListItem) =>
-      deleteAgentSkill(skill.skill_key, agentId, SCOPE, workspaceId),
+      deleteAgentSkill(skill.skill_key, agentId, scope, scopeId),
     onSuccess: (_r, skill) => {
       setDeleting(null);
       invalidate();
       toast.success(`Removed "${skill.display_name}"`, {
-        description: `No longer available to the ${agentLabel} agent in ${workspaceName}.`,
+        description: `No longer available to the ${agentLabel} agent in ${scopeLabel}.`,
       });
     },
     onError: (err) =>
@@ -199,8 +216,7 @@ export function SkillsTab({
       {!canManage && (
         <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
           <Lock className="size-3" aria-hidden />
-          You have read-only access. Ask a {BUSINESS_UNIT_LABEL.toLowerCase()} admin to change agent
-          skills.
+          You have read-only access to this tier.
         </p>
       )}
 
@@ -262,12 +278,12 @@ export function SkillsTab({
             )}
           </section>
 
-          {/* ── This Business Unit (custom) ── */}
+          {/* ── This tier's custom skills ── */}
           <section aria-labelledby="custom-heading" className="space-y-3">
             <div className="flex items-center justify-between gap-3">
               <GroupHeader
                 id="custom-heading"
-                title={`This ${BUSINESS_UNIT_LABEL.toLowerCase()}`}
+                title={scope === "user" ? "Your personal skills" : `This ${tierNoun}`}
                 count={customSkills.length}
               />
               {canManage && !authoringDisabled && (
@@ -281,7 +297,11 @@ export function SkillsTab({
             {customSkills.length === 0 ? (
               <EmptyState
                 icon={Boxes}
-                title={`No ${BUSINESS_UNIT_LABEL.toLowerCase()} skills yet`}
+                title={
+                  scope === "user"
+                    ? "No personal skills yet"
+                    : `No ${tierNoun.toLowerCase()} skills yet`
+                }
                 description="Create one or rely on the built-ins."
                 action={
                   canManage && !authoringDisabled ? (
@@ -294,47 +314,80 @@ export function SkillsTab({
               />
             ) : (
               <ul className="divide-line-soft border-line-soft divide-y rounded-lg border">
-                {customSkills.map((skill) => (
-                  <SkillRow
-                    key={skill.skill_key}
-                    skill={skill}
-                    control={renderSwitch(skill)}
-                    actions={
-                      canManage ? (
-                        <>
+                {customSkills.map((skill) => {
+                  const inherited = skill.origin_scope !== null && skill.origin_scope !== scope;
+                  return (
+                    <SkillRow
+                      key={skill.skill_key}
+                      skill={skill}
+                      originBadge={
+                        inherited ? (
+                          <Badge variant="outline" className="border-line-soft shrink-0 text-[10px]">
+                            From {SCOPE_TIER_LABEL[skill.origin_scope!] ?? skill.origin_scope}
+                          </Badge>
+                        ) : undefined
+                      }
+                      control={renderSwitch(skill)}
+                      actions={
+                        canManage ? (
+                          inherited ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() =>
+                                setEditor({
+                                  mode: "create",
+                                  seed: {
+                                    skill_key: skill.skill_key,
+                                    display_name: skill.display_name,
+                                    description: skill.description ?? "",
+                                    when_to_use: skill.when_to_use ?? "",
+                                    fromScope: skill.origin_scope!,
+                                  },
+                                })
+                              }
+                              aria-label={`Override ${skill.display_name} at ${scopeLabel}`}
+                            >
+                              <Pencil className="size-3.5" aria-hidden />
+                              Override
+                            </Button>
+                          ) : (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setEditor({ mode: "edit", skill })}
+                                aria-label={`Edit ${skill.display_name}`}
+                              >
+                                <Pencil className="size-3.5" aria-hidden />
+                                Edit
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground hover:text-destructive"
+                                onClick={() => setDeleting(skill)}
+                                aria-label={`Delete ${skill.display_name}`}
+                              >
+                                <Trash2 className="size-3.5" aria-hidden />
+                              </Button>
+                            </>
+                          )
+                        ) : (
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => setEditor({ mode: "edit", skill })}
-                            aria-label={`Edit ${skill.display_name}`}
+                            onClick={() => setViewing(skill)}
+                            aria-label={`View ${skill.display_name}`}
                           >
-                            <Pencil className="size-3.5" aria-hidden />
-                            Edit
+                            <Eye className="size-3.5" aria-hidden />
+                            View
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground hover:text-destructive"
-                            onClick={() => setDeleting(skill)}
-                            aria-label={`Delete ${skill.display_name}`}
-                          >
-                            <Trash2 className="size-3.5" aria-hidden />
-                          </Button>
-                        </>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setViewing(skill)}
-                          aria-label={`View ${skill.display_name}`}
-                        >
-                          <Eye className="size-3.5" aria-hidden />
-                          View
-                        </Button>
-                      )
-                    }
-                  />
-                ))}
+                        )
+                      }
+                    />
+                  );
+                })}
               </ul>
             )}
           </section>
@@ -348,8 +401,10 @@ export function SkillsTab({
           state={editor}
           agentId={agentId}
           agentLabel={agentLabel}
-          workspaceId={workspaceId}
-          workspaceName={workspaceName}
+          scope={scope}
+          scopeId={scopeId}
+          scopeLabel={scopeLabel}
+          tierNoun={tierNoun}
           onClose={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
@@ -362,7 +417,8 @@ export function SkillsTab({
       <SkillViewDialog
         skill={viewing}
         agentId={agentId}
-        workspaceId={workspaceId}
+        scope={scope}
+        scopeId={scopeId}
         onClose={() => setViewing(null)}
       />
 
@@ -375,7 +431,7 @@ export function SkillsTab({
           <DialogHeader>
             <DialogTitle>Remove skill?</DialogTitle>
             <DialogDescription>
-              Removes &quot;{deleting?.display_name}&quot; from this {BUSINESS_UNIT_LABEL.toLowerCase()}. This
+              Removes &quot;{deleting?.display_name}&quot; from this {tierNoun.toLowerCase()}. This
               can&apos;t be undone from the UI.
             </DialogDescription>
           </DialogHeader>
@@ -437,10 +493,12 @@ function EmptyRow({ children }: { children: React.ReactNode }) {
 
 function SkillRow({
   skill,
+  originBadge,
   control,
   actions,
 }: {
   skill: SkillListItem;
+  originBadge?: React.ReactNode;
   control: React.ReactNode;
   actions: React.ReactNode;
 }) {
@@ -459,6 +517,7 @@ function SkillRow({
               shell
             </Badge>
           )}
+          {originBadge}
         </div>
         {skill.description && (
           <p className="text-muted-foreground truncate text-xs">{skill.description}</p>
@@ -511,16 +570,20 @@ function SkillEditorDialog({
   state,
   agentId,
   agentLabel,
-  workspaceId,
-  workspaceName,
+  scope,
+  scopeId,
+  scopeLabel,
+  tierNoun,
   onClose,
   onSaved,
 }: {
   state: Exclude<EditorState, null>;
   agentId: string;
   agentLabel: string;
-  workspaceId: string;
-  workspaceName: string;
+  scope: SkillScope;
+  scopeId: string | null;
+  scopeLabel: string;
+  tierNoun: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -536,7 +599,9 @@ function SkillEditorDialog({
           when_to_use: state.skill.when_to_use ?? "",
           body: "",
         }
-      : EMPTY_FIELDS,
+      : state.mode === "create" && state.seed
+        ? { ...state.seed, body: "" }
+        : EMPTY_FIELDS,
   );
   const [lint, setLint] = React.useState<Record<string, LintViolation[]>>({});
   // Once the user hand-edits the key, stop auto-deriving it from the name.
@@ -548,10 +613,10 @@ function SkillEditorDialog({
       "custom",
       editKey ?? "",
       agentId,
-      SCOPE,
-      workspaceId,
+      scope,
+      scopeId,
     ),
-    queryFn: () => getAgentSkill("custom", editKey!, agentId, SCOPE, workspaceId),
+    queryFn: () => getAgentSkill("custom", editKey!, agentId, scope, scopeId),
     enabled: isEdit,
   });
 
@@ -586,8 +651,8 @@ function SkillEditorDialog({
       isEdit
         ? updateAgentSkill(editKey!, {
             agent_id: agentId,
-            scope: SCOPE,
-            scope_id: workspaceId,
+            scope,
+            scope_id: scopeId,
             display_name: fields.display_name,
             description: fields.description,
             when_to_use: fields.when_to_use,
@@ -595,8 +660,8 @@ function SkillEditorDialog({
           })
         : createAgentSkill({
             agent_id: agentId,
-            scope: SCOPE,
-            scope_id: workspaceId,
+            scope,
+            scope_id: scopeId,
             skill_key: fields.skill_key,
             display_name: fields.display_name,
             description: fields.description,
@@ -608,8 +673,8 @@ function SkillEditorDialog({
         isEdit ? `Saved "${skill.display_name}"` : `Created "${skill.display_name}"`,
         {
           description: isEdit
-            ? `Published v${skill.active_version ?? skill.version ?? ""} for the ${agentLabel} agent in ${workspaceName}.`
-            : `Available to the ${agentLabel} agent in ${workspaceName}.`,
+            ? `Published v${skill.active_version ?? skill.version ?? ""} for the ${agentLabel} agent in ${scopeLabel}.`
+            : `Available to the ${agentLabel} agent in ${scopeLabel}.`,
         },
       );
       onSaved();
@@ -656,10 +721,19 @@ function SkillEditorDialog({
           <DialogTitle>{isEdit ? "Edit skill" : "New skill"}</DialogTitle>
           <DialogDescription>
             {isEdit
-              ? `Update this skill for the ${agentLabel} agent across ${workspaceName}.`
-              : `A reusable instruction pack the ${agentLabel} agent loads on demand across ${workspaceName}.`}
+              ? `Update this skill for the ${agentLabel} agent across ${scopeLabel}.`
+              : `A reusable instruction pack the ${agentLabel} agent loads on demand across ${scopeLabel}.`}
           </DialogDescription>
         </DialogHeader>
+
+        {state.mode === "create" && state.seed && (
+          <p className="text-muted-foreground text-xs">
+            Overriding &quot;{state.seed.display_name}&quot; from{" "}
+            {SCOPE_TIER_LABEL[state.seed.fromScope] ?? "an ancestor tier"}. Its name and
+            description are copied below — re-enter the instructions body for your{" "}
+            {tierNoun.toLowerCase()}.
+          </p>
+        )}
 
         {isEdit && detailQ.isError ? (
           <ApiErrorState
@@ -865,12 +939,14 @@ function FieldViolations({ violations }: { violations?: LintViolation[] }) {
 function SkillViewDialog({
   skill,
   agentId,
-  workspaceId,
+  scope,
+  scopeId,
   onClose,
 }: {
   skill: SkillListItem | null;
   agentId: string;
-  workspaceId: string;
+  scope: SkillScope;
+  scopeId: string | null;
   onClose: () => void;
 }) {
   const open = Boolean(skill);
@@ -879,11 +955,11 @@ function SkillViewDialog({
       skill?.origin ?? "vendor",
       skill?.skill_key ?? "",
       agentId,
-      SCOPE,
-      workspaceId,
+      scope,
+      scopeId,
     ),
     queryFn: () =>
-      getAgentSkill(skill!.origin, skill!.skill_key, agentId, SCOPE, workspaceId),
+      getAgentSkill(skill!.origin, skill!.skill_key, agentId, scope, scopeId),
     enabled: open,
   });
 
