@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import {
   Archive,
   CheckCircle2,
@@ -179,13 +181,40 @@ export default function ProjectSettingsPage() {
     }
   }, [projectQ.data]);
 
+  /**
+   * Report what actually happened, not what was clicked.
+   *
+   * A Project Admin's settings edit is queued as a request for their Business
+   * Unit Admin rather than applied (see the PATCH handler in
+   * backend/shared/routers/projects.py), and the project in the response is
+   * unchanged. Saying "saved" there would be a lie the user only discovers when
+   * the page reloads with their edit missing. A BU or Org Admin's edit applies
+   * directly and reads as it always did.
+   *
+   * Mirrors the archive flow above, which already had to make this distinction.
+   */
+  const reportSaved = React.useCallback(
+    (p: { pendingApproval?: boolean; pendingApproverRole?: string | null }, saved: string) => {
+      if (p?.pendingApproval) {
+        toast.info("Sent for approval", {
+          description:
+            p.pendingApproverRole === "bu_admin"
+              ? `Your ${BUSINESS_UNIT_LABEL} Admin needs to approve this change.`
+              : "An approver needs to sign this change off before it takes effect.",
+        });
+      } else {
+        toast.success(saved);
+      }
+      queryClient.invalidateQueries({ queryKey: qk.projects.all() });
+      queryClient.invalidateQueries({ queryKey: qk.projects.detail(projectId) });
+    },
+    [projectId, queryClient],
+  );
+
   const updateMutation = useMutation({
     mutationFn: (patch: { name?: string; description?: string }) =>
       updateProject(projectId, patch),
-    onSuccess: () => {
-      toast.success("Project updated");
-      queryClient.invalidateQueries({ queryKey: qk.projects.all() });
-    },
+    onSuccess: (p) => reportSaved(p, "Project updated"),
     onError: (err) =>
       toast.error("Couldn't update", {
         description: err instanceof Error ? err.message : undefined,
@@ -215,10 +244,7 @@ export default function ProjectSettingsPage() {
         connectors: clean(connSel),
         tool_access_modes: accessModeSel,
       }),
-    onSuccess: () => {
-      toast.success("Tools updated");
-      queryClient.invalidateQueries({ queryKey: qk.projects.all() });
-    },
+    onSuccess: (p) => reportSaved(p, "Tools updated"),
     onError: (err) =>
       toast.error("Couldn't update", {
         description: err instanceof Error ? err.message : undefined,
@@ -249,11 +275,7 @@ export default function ProjectSettingsPage() {
       budgetStartDate: string | null;
       budgetEndDate: string | null;
     }) => updateProject(projectId, patch),
-    onSuccess: () => {
-      toast.success("Budget updated");
-      queryClient.invalidateQueries({ queryKey: qk.projects.detail(projectId) });
-      queryClient.invalidateQueries({ queryKey: qk.projects.all() });
-    },
+    onSuccess: (p) => reportSaved(p, "Budget updated"),
     onError: (err) =>
       toast.error("Couldn't update budget", {
         description: err instanceof Error ? err.message : undefined,
@@ -592,7 +614,7 @@ export default function ProjectSettingsPage() {
   );
 }
 
-// ───────── Monthly budget card (persisted — migration 0032) ─────────
+// ───────── Total budget card (persisted — migration 0032) ─────────
 
 function fmtUsd(n: number): string {
   return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
@@ -654,7 +676,7 @@ function ProjectBudgetCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Monthly budget</CardTitle>
+        <CardTitle className="text-base">Total budget</CardTitle>
         <CardDescription>
           Calendar-month cost cap for this project. New runs are blocked once spend reaches the cap
           (org and workspace caps also apply). Leave 0 for no project cap.

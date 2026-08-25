@@ -50,7 +50,11 @@ from shared.services.budget_alloc import (
     effective_cap,
 )
 from shared.authz.dependency import require_permission
-from shared.authz.read_scope import allowed_workspace_ids
+from shared.authz.read_scope import (
+    administered_workspace_ids,
+    allowed_workspace_ids,
+    is_org_wide,
+)
 from shared.db import get_db_session
 from shared.routers._schemas import CostBreakdownOut, CostBreakdownRow
 from shared.services.budget_store import month_key
@@ -219,7 +223,7 @@ async def get_cost_breakdown(
     # Budget signal scopes to the selected workspace's budget when filtered, else the org
     # budget (DB value authoritative; env default/override is the fallback).
     if workspace:
-        budget_usd = effective_cap("workspace", _ws_budget)
+        budget_usd = effective_cap("workspace", _ws_budget) or 0.0
     else:
         _org_budget = (await db.execute(
             text("SELECT monthly_budget_usd FROM organizations WHERE id = :t"),
@@ -389,17 +393,27 @@ async def get_budgets(request: Request, db: AsyncSession = Depends(get_db_sessio
     # read_scope.py states: a total is computed from the allowed set, not filtered after
     # the fact. An organization-wide "allocated" figure derived from every unit would
     # disclose the size of units the caller cannot open.
-    org_allocated = round(sum(effective_cap("workspace", r[2]) for r in ws_rows), 4)
+    org_allocated = round(sum(effective_cap("workspace", r[2]) or 0.0 for r in ws_rows), 4)
     ws_allocated: dict[str, float] = {}
     for r in proj_rows:
         if r[2]:
-            ws_allocated[str(r[2])] = ws_allocated.get(str(r[2]), 0.0) + effective_cap("project", r[3])
+            ws_allocated[str(r[2])] = (
+                ws_allocated.get(str(r[2]), 0.0) + (effective_cap("project", r[3]) or 0.0)
+            )
 
     return BudgetsOut(
         org=BudgetRowOut(
             scope="org", id=str(tenant_id),
             name=(org_row[0] if org_row else "Organization"),
-            monthlyBudgetUsd=effective_cap("org", org_row[1] if org_row else None),
+            # The RAW value, not effective_cap: an org with no budget set has no cap
+            # (see budget_alloc._org_cap), and reporting the $100 default here showed
+            # a ceiling the platform does not enforce. None reads as "no cap" —
+            # BudgetRowOut.monthlyBudgetUsd is already float | None and the frontend
+            # schema already accepts null (frontend/lib/api/cost.ts).
+            monthlyBudgetUsd=(
+                float(org_row[1]) if org_row and org_row[1] is not None and float(org_row[1]) > 0
+                else None
+            ),
             # The organisation's own spend for an org-wide caller; the sum of the units
             # they can see otherwise. The org's CAP stays visible either way — it is the
             # ceiling a unit admin allocates under and they cannot read their own
@@ -452,6 +466,51 @@ async def _validate_allocation(db: AsyncSession, tenant_id: str, scope: str, id_
         await assert_org_covers_workspaces(db, tenant_id, value)
 
 
+async def _assert_can_set_budget(
+    db: AsyncSession, request: Request, scope: str, id_: str, tenant_id: str
+) -> None:
+    """Refuse a budget edit aimed at a scope the caller does not administer.
+
+    `workspace:manage` says this caller may manage SOME unit; it does not say
+    which. Without this, a Business Unit Admin could set any unit's budget in the
+    tenant — including zeroing a sibling unit's — because the only other check is
+    that the row belongs to the same organization. That is the "holding the
+    permission anywhere means holding it everywhere" hole that
+    `assert_can_administer_project` closes for project writes; the budget setter
+    had no equivalent.
+
+    Deliberately NOT a governance request: a Business Unit Admin raising their own
+    unit's budget is theirs to do, and needs no approval. The rule is only that it
+    has to be *their* unit.
+    """
+    if is_org_wide(request):
+        return  # an org-wide caller administers everything in the tenant
+
+    administered = await administered_workspace_ids(db, request)
+    if administered is None:
+        return  # None means org-wide; is_org_wide already covered it, belt and braces
+
+    if scope == "org":
+        # Raising the organization's own cap is above every unit admin.
+        raise HTTPException(status_code=403, detail="Only an organization admin can set the org budget.")
+
+    target_ws = id_
+    if scope == "project":
+        row = (await db.execute(
+            text("SELECT workspace_id FROM projects WHERE id = :id AND tenant_id = :t"),
+            {"id": id_, "t": tenant_id},
+        )).first()
+        if row is None or not row[0]:
+            raise HTTPException(status_code=404, detail="project not found in this tenant")
+        target_ws = str(row[0])
+
+    if target_ws not in administered:
+        # 404, not 403: the same answer a scope in another tenant gets, so a unit
+        # the caller cannot administer is not distinguishable from one that does
+        # not exist. Mirrors assert_can_administer_project.
+        raise HTTPException(status_code=404, detail=f"{scope} not found in this tenant")
+
+
 @cost_router.put(
     "/budgets",
     status_code=204,
@@ -466,6 +525,7 @@ async def set_budget(
     """
     tenant_id = request.state.tenant_id
     value = body.monthlyBudgetUsd or None  # 0 clears
+    await _assert_can_set_budget(db, request, body.scope, body.id, str(tenant_id))
     await _validate_allocation(db, str(tenant_id), body.scope, body.id, value)
     table, id_col, tenant_col = {
         "org": ("organizations", "id", "id"),

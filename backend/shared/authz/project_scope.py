@@ -151,24 +151,27 @@ def require_project_access(param: str = "project_id"):
     return _dep
 
 
-async def assert_can_administer_project(
+async def project_admin_tier(
     db: AsyncSession, request: Request, project: Any
-) -> None:
-    """Refuse a write aimed at a project the caller does not run.
+) -> str | None:
+    """WHICH tier the caller runs this project from: "org", "unit", "project", or None.
 
-    Org-wide callers pass. Everyone else must administer the project's PARENT UNIT or
-    hold a `project_admin` binding on the project itself — the two ways someone
-    legitimately runs a project.
+    Same three tests as `assert_can_administer_project` — which delegates here, so
+    the two can never disagree about who administers a project — but it reports the
+    answer rather than only accepting or refusing it.
 
-    Promoted here from `project_members.py`, which had it as a private helper, so the
-    project settings write can enforce the same rule rather than inventing a second one.
+    The distinction matters where a write's CONSEQUENCE depends on the tier and not
+    just on permission: a Project Admin editing their own project's settings raises
+    a request for their Business Unit Admin, while that BU Admin (or an Org Admin)
+    applies the same edit directly. Both "may administer the project"; only one of
+    them is the person the request would be routed to.
     """
     if is_org_wide(request):
-        return
+        return "org"
 
     administered = await administered_workspace_ids(db, request)
     if administered is not None and str(project.workspace_id) in administered:
-        return
+        return "unit"
 
     user_id = getattr(request.state, "user_id", "") or ""
     own = (
@@ -181,5 +184,23 @@ async def assert_can_administer_project(
             {"u": user_id, "p": project.id, "now": datetime.now(tz=timezone.utc)},
         )
     ).first()
-    if own is None:
+    return "project" if own is not None else None
+
+
+async def assert_can_administer_project(
+    db: AsyncSession, request: Request, project: Any
+) -> None:
+    """Refuse a write aimed at a project the caller does not run.
+
+    Org-wide callers pass. Everyone else must administer the project's PARENT UNIT or
+    hold a `project_admin` binding on the project itself — the two ways someone
+    legitimately runs a project.
+
+    Promoted here from `project_members.py`, which had it as a private helper, so the
+    project settings write can enforce the same rule rather than inventing a second one.
+
+    404, not 403, deliberately: refusing without confirming the project exists to
+    somebody who does not run it.
+    """
+    if await project_admin_tier(db, request, project) is None:
         raise HTTPException(status_code=404, detail="not found")

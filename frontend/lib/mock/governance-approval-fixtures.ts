@@ -188,7 +188,7 @@ const GOVERNANCE_APPROVALS: GovernanceApproval[] = [
     projectName: null,
     title: "Budget increase: Payments — $12,800 → $16,000/month",
     summary:
-      "Payments is at 96% of its monthly cap with nine days left in the period. Marcus Reyes requested a $3,200 increase.",
+      "Payments is at 96% of its total cap. Marcus Reyes requested a $3,200 increase.",
     requestedBy: "Marcus Reyes",
     requestedAt: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
     decidedBy: null,

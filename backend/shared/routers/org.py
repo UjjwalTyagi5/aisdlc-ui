@@ -182,21 +182,39 @@ async def org_overview(
     db: AsyncSession = Depends(get_db_session),
 ) -> OrgOverviewOut:
     allowed = await allowed_workspace_ids(db, request)
+    tenant_id = getattr(request.state, "tenant_id", "") or ""
 
-    # Every query below runs under the tenant GUC, so RLS already confines it to
-    # this organization; `allowed` narrows it further to the caller's units. An
-    # empty list is a real answer (a user with no bindings sees zeroes), which is
-    # why it is distinguished from None rather than folded into "no filter".
+    # EVERY QUERY FILTERS BY TENANT EXPLICITLY. It used to say RLS confined these
+    # to the organization and add no clause at all for an org-wide caller — but
+    # `workspaces` has no row-level security (it is one of three tenant-scoped
+    # tables that never got a policy), so an Org Admin's dashboard counted every
+    # workspace in the database and listed other tenants' units and their budgets
+    # among their own. `projects` was right only because it happens to have RLS.
+    #
+    # `allowed` still narrows further to the caller's own units. An empty list is
+    # a real answer (a user with no bindings sees zeroes), which is why it is
+    # distinguished from None rather than folded into "no filter".
     scoped = allowed is not None
-    params: dict = {"ws": allowed or []}
+    params: dict = {"ws": allowed or [], "tenant": tenant_id}
 
-    def _ws_clause(col: str) -> str:
-        if not scoped:
-            return ""
-        return f" AND {col} = ANY(CAST(:ws AS uuid[]))"
+    def _ws_clause(col: str, *, tenant_col: str = "") -> str:
+        """The unit filter for one query.
+
+        `tenant_col` names this query's own organization_id column so the tenant
+        bound is always applied — passing it is what makes the filter independent
+        of RLS rather than a narrowing on top of it.
+        """
+        clause = f" AND {tenant_col} = CAST(:tenant AS uuid)" if tenant_col else ""
+        if scoped:
+            clause += f" AND {col} = ANY(CAST(:ws AS uuid[]))"
+        return clause
 
     business_unit_count = (await db.execute(
-        text(f"SELECT COUNT(*) FROM workspaces w WHERE true{_ws_clause('w.id')}"), params
+        text(
+            "SELECT COUNT(*) FROM workspaces w WHERE true"
+            + _ws_clause("w.id", tenant_col="w.organization_id")
+        ),
+        params,
     )).scalar() or 0
 
     project_count = (await db.execute(
@@ -241,15 +259,25 @@ async def org_overview(
         params,
     )).scalar() or 0
 
-    # Restricted to the presented catalog so the numerator and the denominator
-    # below count the same universe. Without the kind filter an enabled
-    # azure_repos or SSO row — neither of which has a tile — could push "3 of 8
-    # connected" past a total the Integrations page cannot account for.
+    # CONNECTORS THE ORGANIZATION HAS, counted from the GRANTS.
+    #
+    # This used to count enabled rows in `workspace_connectors` — the org-level
+    # onboarding table — and report them "of 10 available". That table is empty in
+    # practice: connectors reach a project by being granted to its business unit
+    # (`integration_grants`) and authenticated by a per-member credential
+    # (`project_integration_credentials`), neither of which touches it. So a
+    # tenant with ten granted kinds and eight configured credentials read "0 of 10
+    # connected", which is not a fact about anything.
+    #
+    # Distinct kinds, because the same connector granted to three units is one
+    # connector the organization has, not three.
     connector_count = (await db.execute(
         text(
-            "SELECT COUNT(*) FROM workspace_connectors wc "
-            "WHERE wc.enabled = true AND wc.kind = ANY(CAST(:catalog_kinds AS text[]))"
-            + _ws_clause("wc.workspace_id")
+            "SELECT COUNT(DISTINCT ig.target_ref) FROM integration_grants ig "
+            "WHERE ig.kind = 'connector' "
+            "  AND ig.tenant_id = CAST(:tenant AS uuid) "
+            "  AND ig.target_ref = ANY(CAST(:catalog_kinds AS text[]))"
+            + (" AND ig.workspace_id = ANY(CAST(:ws AS uuid[]))" if scoped else "")
         ),
         {**params, "catalog_kinds": sorted(_CATALOG_KINDS)},
     )).scalar() or 0
@@ -268,8 +296,9 @@ async def org_overview(
             "    WHERE p.workspace_id = w.id "
             "      AND acl.created_at >= date_trunc('month', now()) "
             "  ), 0) AS spend "
-            "FROM workspaces w WHERE true" + _ws_clause("w.id") +
-            " ORDER BY w.display_name"
+            "FROM workspaces w WHERE true"
+            + _ws_clause("w.id", tenant_col="w.organization_id")
+            + " ORDER BY w.display_name"
         ),
         params,
     )).fetchall()

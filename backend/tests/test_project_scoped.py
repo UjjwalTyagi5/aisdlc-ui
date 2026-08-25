@@ -568,3 +568,155 @@ async def test_a_contributor_cannot_aim_the_probe_at_their_own_host(org):
     assert seen[-1] == "https://sanctioned.example.com", (
         f"a contributor redirected the probe to {seen[-1]!r}"
     )
+
+
+# ── project settings changes route to the BU Admin ───────────────────────────
+
+
+async def _bind_project_admin(org: dict, user_id: str) -> None:
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, tenant_id, user_id, role_name, scope_kind, scope_id) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :u, 'project_admin', 'project', :p)"
+        ), {"i": str(_uuid.uuid4()), "t": org["org"], "u": user_id, "p": org["project"]})
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_project_admins_settings_edit_becomes_a_request(org):
+    """The edit is QUEUED, not applied — and it is addressed to the BU Admin.
+
+    Applying it and marking it pending would be the worst of both: the change live,
+    and the approver asked to sign off something already done.
+    """
+    c = TestClient(process_api.app)
+    pa = await _user(org, "projadmin")
+    await _bind_project_admin(org, pa)
+    headers = _headers(pa, org["org"], ["project:update", "artifact:view"])
+
+    r = c.patch(f"/projects/{org['project']}", headers=headers,
+                json={"name": "Renamed by the project admin"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pendingApproval"] is True
+    assert body["pendingApproverRole"] == "bu_admin"
+    # The project is UNCHANGED in the same response.
+    assert body["name"] != "Renamed by the project admin"
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        name = (await s.execute(
+            text("SELECT display_name FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).scalar()
+    assert name != "Renamed by the project admin"
+
+
+@pytest.mark.asyncio
+async def test_a_bu_admin_edit_applies_directly(org):
+    """The approver of that request does not need to raise one against themselves."""
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+
+    r = c.patch(f"/projects/{org['project']}", headers=headers,
+                json={"name": "Renamed by the org admin"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("pendingApproval") in (False, None)
+    assert body["name"] == "Renamed by the org admin"
+
+
+@pytest.mark.asyncio
+async def test_approving_the_request_applies_the_settings(org):
+    """Approval is a gate, not a note: the values land on the project."""
+    from shared.services import governance_requests as gov
+    c = TestClient(process_api.app)
+    pa = await _user(org, "projadmin")
+    bua = await _user(org, "buadmin")
+    await _bind_project_admin(org, pa)
+
+    r = c.patch(f"/projects/{org['project']}",
+                headers=_headers(pa, org["org"], ["project:update", "artifact:view"]),
+                json={"name": "Approved name", "monthlyBudgetUsd": 77})
+    req_id = r.json()["pendingRequestId"]
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await gov.decide(s, request_id=req_id, decider_id=bua, decider_name="Bua",
+                         decider_role="bu_admin", decision="approve")
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(
+            text("SELECT display_name, monthly_budget_usd FROM projects "
+                 "WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).first()
+    assert row.display_name == "Approved name"
+    assert float(row.monthly_budget_usd) == 77.0
+
+
+@pytest.mark.asyncio
+async def test_an_unsent_field_is_not_blanked(org):
+    """exclude_unset, not `is not None`.
+
+    Without it every field the client omitted arrives as None, and renaming a
+    project would read as a request to clear its budget and unwire every connector.
+    """
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+    c.patch(f"/projects/{org['project']}", headers=headers, json={"monthlyBudgetUsd": 42})
+    c.patch(f"/projects/{org['project']}", headers=headers, json={"name": "Only the name"})
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(
+            text("SELECT display_name, monthly_budget_usd FROM projects "
+                 "WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).first()
+    assert row.display_name == "Only the name"
+    assert float(row.monthly_budget_usd) == 42.0
+
+
+# ── budget window is captured at project creation (migration 0035) ───────────
+
+
+@pytest.mark.asyncio
+async def test_the_budget_window_survives_project_creation(org):
+    """THE BUG THIS CLOSES. The create dialog has sent these two dates for a long
+    time and ProjectCreateIn had no field for them, so Pydantic dropped them
+    silently — typed into a form, submitted, gone."""
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+
+    r = c.post("/projects", headers=headers, json={
+        "name": "Funded phase", "workspaceId": org["payments"],
+        "monthlyBudgetUsd": 20,
+        "budgetStartDate": "2026-01-01", "budgetEndDate": "2026-03-31",
+    })
+    assert r.status_code in (200, 201), r.text
+    body = r.json()
+    assert body["budgetStartDate"] == "2026-01-01"
+    assert body["budgetEndDate"] == "2026-03-31"
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(
+            text("SELECT budget_start_date, budget_end_date FROM projects "
+                 "WHERE id = CAST(:p AS uuid)"),
+            {"p": body["id"]},
+        )).first()
+    assert row.budget_start_date.isoformat() == "2026-01-01"
+    assert row.budget_end_date.isoformat() == "2026-03-31"
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_ends_before_it_starts_is_refused(org):
+    """It could never be active, so the project could never run — 422 naming the
+    field beats a project nobody can use and no obvious reason why."""
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    r = c.post("/projects", headers=_headers(admin, org["org"], ["admin:*"]), json={
+        "name": "Backwards window", "workspaceId": org["payments"],
+        "budgetStartDate": "2026-06-01", "budgetEndDate": "2026-01-01",
+    })
+    assert r.status_code == 422, r.text

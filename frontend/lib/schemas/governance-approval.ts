@@ -46,6 +46,13 @@ export const GovernanceApprovalType = z.enum([
   "model_credential",
   "budget_increase",
   "project_archive",
+  /**
+   * A Project Admin edited their own project's settings. Raised BY the save, not
+   * chosen from the picker: the edit is queued as a request for their Business
+   * Unit Admin and applied on approval, rather than written straight to the
+   * project. See `_queue_settings_change` in backend/shared/routers/projects.py.
+   */
+  "project_settings_change",
   "agent_default_org",
   "agent_default_workspace",
   "agent_default_project",
@@ -80,6 +87,7 @@ export const REQUEST_TYPE_LABEL: Record<GovernanceApprovalType, string> = {
   model_credential: "Model credential",
   budget_increase: "Budget headroom",
   project_archive: "Project archive",
+  project_settings_change: "Project settings change",
   agent_default_org: "Agent default — organization",
   agent_default_workspace: "Agent default — business unit",
   agent_default_project: "Agent default — project",

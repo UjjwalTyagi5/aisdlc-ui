@@ -46,7 +46,11 @@ export function BudgetHub() {
 
   if (q.isLoading) return <LoadingState variant="list" rows={4} />;
   if (!q.data) return null;
-  const { org, workspaces, projects, defaultProjectBudgetUsd } = q.data;
+  // `defaultProjectBudgetUsd` is deliberately NOT read. Projects no longer take a
+  // default: creating one requires an explicit budget, and a unit that sets none
+  // simply has no cap. The API still returns the field; nothing should present it
+  // as what a new project will get.
+  const { org, workspaces, projects } = q.data;
 
   const projByWs = new Map<string, Row[]>();
   for (const p of projects) {
@@ -64,9 +68,8 @@ export function BudgetHub() {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="font-display text-[20px] font-bold tracking-[-0.02em]">Budgets</h2>
         <p className="text-muted-foreground font-mono text-[11px]">
-          Monthly caps · org ⊇ {BUSINESS_UNIT_LABEL.toLowerCase()} ⊇ project · new projects default
-          to{" "}
-          {fmtUsd(defaultProjectBudgetUsd, 0)}
+          Total caps · org ⊇ {BUSINESS_UNIT_LABEL.toLowerCase()} ⊇ project · every project
+          sets its own; a {BUSINESS_UNIT_LABEL.toLowerCase()} with no cap bounds nothing
           {canManage ? "" : " · view only"}
         </p>
       </div>

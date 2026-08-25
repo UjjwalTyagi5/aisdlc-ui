@@ -1,12 +1,17 @@
-"""Durable + hot monthly spend accounting for the budget hierarchy.
+"""Durable + hot spend accounting for the budget hierarchy.
 
 Two writers, one authoritative reader:
   - record_usage_rollup(...)  — UPSERT the durable Postgres `usage_monthly` rollup
     for each scope in a project's chain (project → workspace → org) AND bump the fast
     Redis month counters. Called from the usage meter on every LLM completion.
-  - read_scope_spend(...)     — current calendar-month cost for one scope, read from
-    the durable rollup (authoritative; reflects all completed calls). Used by
-    budget_guard for enforcement.
+  - read_scope_spend(...)     — LIFETIME cost for one scope, summed across every
+    month of the durable rollup (authoritative; reflects all completed calls). Used
+    by budget_guard for enforcement.
+
+BUDGETS ARE TOTALS, NOT ALLOWANCES. A scope's budget is what it may spend over its
+life; it does not refill on the 1st. The rows stay keyed by month because per-month
+history is worth having for reporting, but the month is a detail of how spend is
+STORED — no reader treats it as the budget window.
 
 Scope model: org (== tenant_id) ⊇ workspace ⊇ project. A standalone/chat call with no
 project records only the org scope. Everything is best-effort — metering must never
@@ -130,7 +135,17 @@ async def record_usage_rollup(
 async def read_scope_spend(
     tenant_id: str, scope: str, scope_id: str, *, strict: bool = False
 ) -> float:
-    """Current calendar-month cost for one scope from the durable rollup (0.0 if none).
+    """LIFETIME cost for one scope from the durable rollup (0.0 if none).
+
+    SUMS EVERY MONTH, not the current one. A budget is a total the scope may spend
+    over its life, not an allowance that refills on the 1st — so the figure this
+    returns has to accumulate the same way. Reading only `month_key()` meant a
+    project that exhausted its budget was blocked until the calendar turned over,
+    and then silently free again.
+
+    `usage_monthly` is unchanged and still keyed by month: the per-month rows are
+    worth keeping for reporting, and summing them costs one aggregate. The month
+    grain is now a detail of the STORAGE, not of the budget.
 
     strict=False (reporting): swallow infra errors and return 0.0 so a spend read never
     breaks a card/endpoint. strict=True (enforcement): re-raise so budget_guard can
@@ -142,10 +157,10 @@ async def read_scope_spend(
         async with get_db_session_for_tenant(str(tenant_id)) as s:
             row = (await s.execute(
                 text(
-                    "SELECT cost_usd FROM usage_monthly "
-                    "WHERE tenant_id = :t AND scope = :scope AND scope_id = :sid AND month = :month"
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_monthly "
+                    "WHERE tenant_id = :t AND scope = :scope AND scope_id = :sid"
                 ),
-                {"t": str(tenant_id), "scope": scope, "sid": str(scope_id), "month": month_key()},
+                {"t": str(tenant_id), "scope": scope, "sid": str(scope_id)},
             )).first()
         return float(row[0]) if row and row[0] is not None else 0.0
     except Exception:  # pragma: no cover - defensive

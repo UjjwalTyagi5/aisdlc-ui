@@ -116,7 +116,7 @@ export default function ProjectCostPage() {
       <div>
         <h2 className="font-display text-lg font-semibold tracking-tight">Cost</h2>
         <p className="text-muted-foreground mt-1 max-w-2xl text-[13px]">
-          This project&apos;s spend against its cap. Spend means model tokens —
+          This project&apos;s total spend against its budget. Spend means model tokens —
           MCP tool calls land here too; connectors are billed by their own
           vendor.
         </p>
@@ -124,9 +124,9 @@ export default function ProjectCostPage() {
 
       <StatTileGrid>
         <StatTile
-          label="Spend this month"
+          label="Spend to date"
           value={usd(spend)}
-          sub={cap > 0 ? `of ${usd(cap)} cap` : "inherits the unit cap"}
+          sub={cap > 0 ? `of ${usd(cap)} total budget` : "no budget set"}
           icon={CircleDollarSign}
           progress={cap > 0 ? ratio : undefined}
           tone={budgetTone(spend, cap)}
@@ -165,13 +165,13 @@ export default function ProjectCostPage() {
           <p>
             {ratio >= 1 ? (
               <>
-                This project is over its monthly cap. The next run is stopped,
+                This project is over its total cap. The next run is stopped,
                 scoped to the cap that was hit — in-flight work is never killed.
                 Request headroom to continue; it escalates one tier at a time.
               </>
             ) : (
               <>
-                This project is at {Math.round(ratio * 100)}% of its monthly cap.
+                This project is at {Math.round(ratio * 100)}% of its total cap.
                 At the cap, the business unit&apos;s policy decides whether to
                 warn and escalate, or hard-stop the next run.
               </>
@@ -320,7 +320,7 @@ function ProjectBudgetCard({
         <div className="flex items-center gap-2">
           <Coins className="text-brand-bright size-4" aria-hidden />
           <span className="font-display text-[15px] font-bold tracking-[-0.01em]">
-            Monthly budget
+            Total budget
           </span>
         </div>
         {canSetCap && !editing && (
