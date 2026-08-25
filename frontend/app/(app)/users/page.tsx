@@ -323,15 +323,21 @@ export default function UsersPage() {
         byKey.set(key, {
           key,
           name,
-          isMine: managedBusinessUnitIds.includes(key),
+          // Business Unit Admin only. An Org Admin's access scope legitimately
+          // includes every business unit (they administer the whole
+          // organisation), so `managedBusinessUnitIds` alone can't tell "this
+          // is genuinely mine" from "I can see/manage everything" — without
+          // this guard every group read as the Org Admin's own, which is
+          // backwards: they own all of them equally, i.e. none of them
+          // specially.
+          isMine: isBuAdmin && managedBusinessUnitIds.includes(key),
           entries: [r],
         });
       }
     }
     return [...byKey.values()].sort((a, b) => {
-      // Mine first (Business Unit Admin only — an Org Admin manages none of
-      // these, so this comparison is a no-op for them and falls through to
-      // the alphabetical/sentinel ordering below).
+      // Mine first — a no-op for an Org Admin, since isMine is always false
+      // for them, so this falls through to alphabetical/sentinel ordering.
       if (a.isMine !== b.isMine) return a.isMine ? -1 : 1;
       // The two sentinel groups always sort last, in a fixed order — they
       // are not business units, so alphabetising them among real ones would
@@ -344,7 +350,7 @@ export default function UsersPage() {
       if (ra !== rb) return ra - rb;
       return a.name.localeCompare(b.name);
     });
-  }, [filtered, groupKeyFor, managedBusinessUnitIds]);
+  }, [filtered, groupKeyFor, isBuAdmin, managedBusinessUnitIds]);
 
   // Users is an administrator surface: the Organization Admin runs it, a
   // Business Unit Admin works their own unit's half of it. Builders never see
