@@ -501,6 +501,7 @@ export default function ModelProvidersPage() {
                narrowed to what this scope was granted, which is precisely the
                list the card already shows. What it needs on top is the rest. */
             catalog={catalog}
+            onAddKey={scope === "bu" ? (provider) => setAddKeyProvider(provider) : undefined}
           />
         ))}
 

@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Building2, CheckCircle2, ChevronRight, Globe, KeyRound } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { getModelAvailability } from "@/lib/api/models";
@@ -30,6 +31,7 @@ export function ModelAvailabilityCard({
    *  and go to their {BUSINESS_UNIT_LABEL} Admin for approval first. */
   audience,
   catalog = [],
+  onAddKey,
 }: {
   workspaceId: string;
   workspaceName: string;
@@ -45,6 +47,16 @@ export function ModelAvailabilityCard({
    * `rows` below.
    */
   catalog?: CatalogProvider[];
+  /**
+   * BU Admin only: opens the "Add key" dialog fixed to a row's provider.
+   * This is the "supplying a key where the organization didn't" action the
+   * docstring above promises — it used to only be reachable from a provider
+   * card that had zero connections at all, so a provider with SOME keyed
+   * models (a stale/unrelated subscription, say) but a newly-granted model
+   * still needing one had no way in. Per-row is the correct grain: whether a
+   * key is needed is a per-MODEL fact, not a per-provider one.
+   */
+  onAddKey?: (provider: string) => void;
 }) {
   const q = useQuery({
     queryKey: qk.model.availability(workspaceId),
@@ -160,6 +172,7 @@ export function ModelAvailabilityCard({
                 key={`${r.provider}::${r.model_id}::${i}`}
                 row={r}
                 audience={audience}
+                onAddKey={onAddKey}
               />
             ))}
           </ul>
@@ -223,11 +236,14 @@ export function ModelAvailabilityCard({
 function AvailabilityRow({
   row,
   audience,
+  onAddKey,
 }: {
   row: ModelAvailability;
   audience: "bu" | "project";
+  onAddKey?: (provider: string) => void;
 }) {
   const covered = row.centrallyCredentialed || row.locallyCredentialed;
+  const canAddKey = !covered && audience === "bu" && !!onAddKey;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-3">
       <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{row.model_id}</span>
@@ -249,6 +265,17 @@ function AvailabilityRow({
           tone="warning"
           label={audience === "bu" ? "Needs your credentials" : "Needs credentials"}
         />
+      )}
+      {canAddKey && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-6 shrink-0 px-2 text-[11px]"
+          onClick={() => onAddKey(row.provider)}
+        >
+          Add key
+        </Button>
       )}
       {!covered && <span className="sr-only">This model cannot run until a key is added.</span>}
     </li>
