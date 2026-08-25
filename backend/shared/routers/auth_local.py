@@ -34,7 +34,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 
 from config.auth.jwt import create_access_token
-from config.env import RESET_TOKEN_TTL_HOURS
+from config.env import RESET_TOKEN_TTL_MINUTES
 from shared.auth.denylist import add_jti_to_user_denylist
 from shared.auth.passwords import hash_password, verify_password
 from shared.authz.dependency import public
@@ -279,11 +279,11 @@ async def forgot_password(body: ForgotPasswordIn) -> dict:
             return generic
 
         token = await password_setup.issue(
-            s, user_id=row.id, purpose="reset", ttl_hours=RESET_TOKEN_TTL_HOURS
+            s, user_id=row.id, purpose="reset", ttl_minutes=RESET_TOKEN_TTL_MINUTES
         )
 
     subject, text_body, html_body = email_templates.reset_email(
-        token, RESET_TOKEN_TTL_HOURS
+        token, RESET_TOKEN_TTL_MINUTES
     )
     await send_email(email, subject, text_body, html_body)
     return generic

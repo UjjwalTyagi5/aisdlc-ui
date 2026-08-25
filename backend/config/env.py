@@ -361,8 +361,21 @@ EMAIL_FROM_NAME: str = os.environ.get("EMAIL_FROM_NAME", "SDLC Platform")
 # a link to nothing, so this is separate rather than derived.
 PUBLIC_APP_URL: str = os.environ.get("PUBLIC_APP_URL", "http://localhost:3000")
 
-# How long a set-password / reset link stays valid. Invites are longer because they are
-# sent to somebody who may not be expecting them; a reset is requested deliberately and
-# acted on within minutes.
-INVITE_TOKEN_TTL_HOURS: int = int(os.environ.get("INVITE_TOKEN_TTL_HOURS", "48"))
-RESET_TOKEN_TTL_HOURS: int = int(os.environ.get("RESET_TOKEN_TTL_HOURS", "2"))
+# How long a set-password / reset link stays valid.
+#
+# MINUTES, NOT HOURS. These were INVITE_TOKEN_TTL_HOURS=48 / RESET_TOKEN_TTL_HOURS=2, and
+# an hours-based setting cannot express a ten-minute link at all — the finest it can say
+# is "1", which is six times too long. The unit is the whole point of the knob, so it
+# moved rather than gaining a second parallel setting.
+#
+# A live token IS a credential (see shared/services/password_setup.py), so a short life is
+# the safer default and ten minutes is the usual figure for a reset: it is requested
+# deliberately and acted on straight away.
+#
+# THE INVITE IS THE ONE TO WATCH. It goes to somebody who is NOT expecting it and may not
+# be at their desk, and it is the only way into an account that has no password yet. At
+# ten minutes, any invite not opened almost immediately is dead and needs an admin to
+# resend. That is a deliberate choice here, not an oversight — and it is why this is an
+# environment variable: raising the invite alone needs no code change and no deploy.
+INVITE_TOKEN_TTL_MINUTES: int = int(os.environ.get("INVITE_TOKEN_TTL_MINUTES", "10"))
+RESET_TOKEN_TTL_MINUTES: int = int(os.environ.get("RESET_TOKEN_TTL_MINUTES", "10"))
