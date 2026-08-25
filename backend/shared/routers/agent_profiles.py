@@ -14,10 +14,14 @@ Serialization convention: snake_case in responses, matching the sibling capabili
 router (shared/routers/capabilities.py) and the resource routers. The frontend BFF reads
 these keys verbatim.
 
-RBAC (design §3.5): reads gate on the "artifact:view" floor (router-level, matching the
-capabilities router). draft/preview require "skill:edit"; publish/unpublish require
-"workspace:manage". Every route therefore carries a require_permission sentinel so the
-process_api D-05 boot scan stays green.
+RBAC (design §3.5, extended by sub-project 2): reads gate on the "artifact:view" floor
+(router-level, matching the capabilities router). draft/preview/publish/unpublish all
+now use the in-body, scope-aware `assert_can_write_agent_scope` check instead of a
+route-level Depends(): for org/workspace/project scope it requires "skill:edit"
+(draft/preview) or "workspace:manage" (publish/unpublish) exactly as before; for the
+personal ("user") scope, any role except org_admin/bu_admin may write ONLY their own
+scope_id. Every route still carries a require_permission sentinel (the router-level
+floor) so the process_api D-05 boot scan stays green.
 """
 from __future__ import annotations
 

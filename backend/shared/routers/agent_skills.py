@@ -16,10 +16,14 @@ Serialization convention: snake_case in responses, matching the sibling agent_pr
 router (whose lint style + violation shape + RBAC layering this mirrors). The frontend BFF
 reads these keys verbatim.
 
-RBAC (mirrors agent_profiles): reads gate on the "artifact:view" floor (router-level).
-create/update/toggle/delete require "skill:edit"; activate (version rollback) requires
-"workspace:manage". Every route therefore carries a require_permission sentinel so the
-process_api D-05 boot scan stays green.
+RBAC (mirrors agent_profiles, extended by sub-project 2): reads gate on the
+"artifact:view" floor (router-level). create/update/toggle/delete and activate all now
+use the in-body, scope-aware `assert_can_write_agent_scope` check (imported from
+agent_profiles) instead of a route-level Depends(): for org/workspace/project scope it
+requires "skill:edit" (create/update/toggle/delete) or "workspace:manage" (activate)
+exactly as before; for the personal ("user") scope, any role except org_admin/bu_admin
+may write ONLY their own scope_id. Every route still carries a require_permission
+sentinel (the router-level floor) so the process_api D-05 boot scan stays green.
 
 ROUTE ORDER: the literal-suffix routes (/toggle, /{skill_key}/versions,
 /{skill_key}/activate/{version}) and the single-segment authoring routes are declared BEFORE
