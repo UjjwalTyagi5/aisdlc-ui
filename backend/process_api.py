@@ -723,13 +723,29 @@ os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=FILES_DIR), name="generated")
 
 # Add CORS middleware
+#
+# METHODS AND HEADERS ARE ENUMERATED, NOT "*". With allow_credentials=True the
+# browser sends cookies and Authorization on cross-origin calls, so the wildcards
+# were describing a far larger surface than this API has: every method it
+# registers is in the list below (GET/HEAD/POST/PUT/PATCH/DELETE — counted off
+# app.routes), and the only request headers any client sends are Content-Type,
+# Accept and Authorization (frontend/lib/api/client.ts, frontend/lib/bff/client.ts).
+#
+# Low blast radius by design: the browser talks to Next.js on its own origin and
+# Next.js calls this API server-side, which CORS does not govern at all. What the
+# allowlist actually guards is the direct-to-API paths — the ngrok regex origin
+# above, and anything a future client points straight here.
+#
+# OPTIONS is present for preflight. Origins stay env-driven (AGENTIC_CORS_*) so a
+# deployment can widen them without a code change; the methods and headers should
+# only grow when the API genuinely gains one.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_allowed_origins,
     allow_origin_regex=cors_allowed_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 
