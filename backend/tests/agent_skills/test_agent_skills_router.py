@@ -437,6 +437,45 @@ async def test_toggle_custom_ok(monkeypatch, mint_token):
     store.set_skill_enabled.assert_awaited_once()
 
 
+async def test_toggle_inherited_custom_skill_found_via_ancestor_chain(monkeypatch, mint_token):
+    """Regression for the final-review finding: a custom skill toggled at workspace
+    scope may actually live at the org ancestor (surfaced there by
+    list_skills_merged) — the existence check must search the chain, not just the
+    exact requested scope, or this 404s even though the skill genuinely exists."""
+    from unittest.mock import AsyncMock
+
+    get_detail = AsyncMock(side_effect=[None, _DETAIL])  # own scope miss, org hit
+    store, _ = _install(monkeypatch, store_attrs={"get_skill_detail": get_detail})
+    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": "ws-1",
+            "origin": "custom", "skill_key": "org-skill", "enabled": False}
+    async with _client() as c:
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+    assert r.status_code == 200
+    assert get_detail.await_count == 2
+    # First call checked the requested (workspace) scope, second checked org — the
+    # ancestor `ancestor_chain("workspace", ..., None)` always resolves to.
+    first_call, second_call = get_detail.await_args_list
+    assert first_call.args[2] == "workspace"
+    assert second_call.args[2] == "org"
+    # The toggle write itself still targets the REQUESTED scope, not org — a
+    # workspace toggling an inherited org skill off never touches org's own row.
+    store.set_skill_enabled.assert_awaited_once()
+    write_args = store.set_skill_enabled.await_args
+    assert write_args.args[2] == "workspace"
+
+
+async def test_toggle_custom_skill_absent_everywhere_still_404s(monkeypatch, mint_token):
+    """The ancestor-chain fallback must not turn a genuinely-nonexistent skill into
+    a false positive — every candidate scope missing still 404s."""
+    store, _ = _install(monkeypatch, store_attrs={"get_skill_detail": _async(None)})
+    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": "ws-1",
+            "origin": "custom", "skill_key": "nowhere", "enabled": True}
+    async with _client() as c:
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+    assert r.status_code == 404
+    store.set_skill_enabled.assert_not_awaited()
+
+
 async def test_toggle_bad_origin_422(monkeypatch, mint_token):
     _install(monkeypatch)
     body = {"agent_id": "requirements", "scope": "org", "scope_id": None,

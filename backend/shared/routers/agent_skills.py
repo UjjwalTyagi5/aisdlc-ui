@@ -216,6 +216,11 @@ class ToggleIn(BaseModel):
     origin: str
     skill_key: str
     enabled: bool
+    # Ancestor-chain context (see ancestor_chain) — a custom skill toggled at this
+    # scope may actually live at an ancestor tier (an inherited skill); this lets
+    # the existence check find it there while the toggle itself still writes at
+    # `scope` (a BU toggling an org skill off for itself never touches org's row).
+    workspace_id: Optional[str] = None
 
 
 agent_skills_router = APIRouter(
@@ -304,9 +309,20 @@ async def toggle_skill(body: ToggleIn, request: Request):
     if body.origin == Origin.vendor.value:
         exists = get_vendor_skill(body.agent_id, body.skill_key) is not None
     else:
+        # A custom skill toggled here may be inherited (surfaced by list_skills_merged
+        # from an ancestor tier) rather than owned at this exact scope — search the
+        # same chain the list already walks before giving up. Existence only; the
+        # toggle write below always stays at `body.scope`.
         exists = await store.get_skill_detail(
             tenant_id, body.agent_id, body.scope, body.scope_id, "custom", body.skill_key
         ) is not None
+        if not exists:
+            for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, body.workspace_id):
+                exists = await store.get_skill_detail(
+                    tenant_id, body.agent_id, anc_scope, anc_scope_id, "custom", body.skill_key
+                ) is not None
+                if exists:
+                    break
     if not exists:
         raise HTTPException(status_code=404, detail="Not found")
 

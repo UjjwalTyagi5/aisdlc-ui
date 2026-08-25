@@ -27,6 +27,7 @@ import "@testing-library/jest-dom/vitest";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@/lib/api/agent-skills", () => ({
@@ -155,5 +156,42 @@ describe("SkillsTab cascade awareness", () => {
     await screen.findByText("Org Skill");
     expect(screen.getByText(/From Organization/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /override/i })).toBeInTheDocument();
+  });
+
+  it("keeps the skill_key locked to the inherited value when overriding, even after editing the display name", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [
+        {
+          origin: "custom",
+          skill_key: "shared-key",
+          agent_id: "requirements",
+          display_name: "Org Skill",
+          description: null,
+          when_to_use: null,
+          runtime: "llm",
+          enabled: true,
+          editable: false,
+          deletable: false,
+          version: 1,
+          active_version: 1,
+          origin_scope: "org",
+        },
+      ],
+    } satisfies SkillList);
+
+    const user = userEvent.setup();
+    renderSkillsTab(workspaceScopeContext(true));
+
+    await screen.findByText("Org Skill");
+    await user.click(screen.getByRole("button", { name: /override/i }));
+
+    const keyField = await screen.findByLabelText("Skill key");
+    expect(keyField).toHaveValue("shared-key");
+
+    const nameField = screen.getByLabelText("Display name");
+    await user.clear(nameField);
+    await user.type(nameField, "Our BU's Version");
+
+    expect(keyField).toHaveValue("shared-key");
   });
 });

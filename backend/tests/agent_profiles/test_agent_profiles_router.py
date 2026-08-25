@@ -209,9 +209,10 @@ def test_ancestor_chain_project_is_workspace_then_org():
     assert ap.ancestor_chain("project", "proj-1", "ws-1") == [("workspace", "ws-1"), ("org", None)]
 
 
-def test_ancestor_chain_project_without_workspace_id_degrades_to_none():
-    # No workspace_id supplied -> no inheritance resolution attempted, never an error.
-    assert ap.ancestor_chain("project", "proj-1", None) == []
+def test_ancestor_chain_project_without_workspace_id_still_gets_org():
+    # No workspace_id supplied -> workspace ancestor can't be resolved, but org
+    # needs no id at all, so it's still reachable (matches the workspace-scope case).
+    assert ap.ancestor_chain("project", "proj-1", None) == [("org", None)]
 
 
 # ── build_preview_layers ───────────────────────────────────────────────────────────

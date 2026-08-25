@@ -220,7 +220,14 @@ def _list_item(
     *, origin: str, skill_key: str, agent_id: str, display_name: str,
     description: str, when_to_use: str, runtime: str, enabled: bool,
     version: Optional[int], active_version: Optional[int],
+    origin_scope: Optional[str] = None, requested_scope: Optional[str] = None,
 ) -> dict:
+    """`origin_scope`: which tier this item's content actually lives at (None for
+    vendor — it has no scope of its own). `requested_scope`: the tier the caller
+    asked about, used only to decide editable/deletable — a custom item whose
+    origin_scope differs from what was asked (an INHERITED item) is not editable
+    or deletable at the asked tier, only overridable; update/delete are exact-scope
+    operations and would 404 against an ancestor's row."""
     return {
         "origin": origin,
         "skill_key": skill_key,
@@ -230,10 +237,11 @@ def _list_item(
         "when_to_use": when_to_use,
         "runtime": runtime,
         "enabled": enabled,
-        "editable": origin == "custom",
-        "deletable": origin == "custom",
+        "editable": origin == "custom" and origin_scope == requested_scope,
+        "deletable": origin == "custom" and origin_scope == requested_scope,
         "version": version,
         "active_version": active_version,
+        "origin_scope": origin_scope,
     }
 
 
@@ -304,16 +312,14 @@ async def list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None
     items: list[dict] = []
 
     for v in vendor_skills_for(str(agent_id)):
-        items.append({
-            **_list_item(
-                origin="vendor", skill_key=v.skill_key, agent_id=v.agent_id,
-                display_name=v.display_name, description=v.description,
-                when_to_use=v.when_to_use, runtime=v.runtime,
-                enabled=enabled_by_key.get(("vendor", v.skill_key), True),
-                version=None, active_version=None,
-            ),
-            "origin_scope": None,
-        })
+        items.append(_list_item(
+            origin="vendor", skill_key=v.skill_key, agent_id=v.agent_id,
+            display_name=v.display_name, description=v.description,
+            when_to_use=v.when_to_use, runtime=v.runtime,
+            enabled=enabled_by_key.get(("vendor", v.skill_key), True),
+            version=None, active_version=None,
+            origin_scope=None, requested_scope=scope,
+        ))
 
     # Own scope's active custom rows, tagged with this scope; then ancestor rows for
     # any skill_key not already claimed by the own scope (nearest-first order already
@@ -327,16 +333,14 @@ async def list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None
             active_by_key[r.skill_key] = (anc_scope, r)
 
     for skill_key, (origin_scope, r) in active_by_key.items():
-        items.append({
-            **_list_item(
-                origin="custom", skill_key=r.skill_key, agent_id=r.agent_id,
-                display_name=r.display_name or r.skill_key, description=r.description or "",
-                when_to_use=r.when_to_use or "", runtime=r.runtime or "llm",
-                enabled=enabled_by_key.get(("custom", r.skill_key), True),
-                version=r.version, active_version=r.version,
-            ),
-            "origin_scope": origin_scope,
-        })
+        items.append(_list_item(
+            origin="custom", skill_key=r.skill_key, agent_id=r.agent_id,
+            display_name=r.display_name or r.skill_key, description=r.description or "",
+            when_to_use=r.when_to_use or "", runtime=r.runtime or "llm",
+            enabled=enabled_by_key.get(("custom", r.skill_key), True),
+            version=r.version, active_version=r.version,
+            origin_scope=origin_scope, requested_scope=scope,
+        ))
 
     items.sort(key=lambda i: (i["origin"] != "custom", i["display_name"].lower()))
     return items
@@ -364,6 +368,7 @@ async def get_skill_detail(
                     display_name=v.display_name, description=v.description,
                     when_to_use=v.when_to_use, runtime=v.runtime, enabled=enabled,
                     version=None, active_version=None,
+                    origin_scope=None, requested_scope=scope,
                 )
                 item.update({"body": v.body, "created_by": None,
                              "created_at": None, "updated_at": None})
@@ -396,6 +401,12 @@ async def get_skill_detail(
         display_name=row.display_name or row.skill_key, description=row.description or "",
         when_to_use=row.when_to_use or "", runtime=row.runtime or "llm", enabled=enabled,
         version=row.version, active_version=row.version,
+        # get_skill_detail only ever resolves an exact-scope row (it never walks
+        # the ancestor chain itself — callers that need an inherited item's detail
+        # pass its own origin_scope as `scope` directly, see agent_skills.py's
+        # toggle_skill and the frontend's view/edit fetch), so a row found here
+        # always lives at exactly the scope asked for.
+        origin_scope=scope, requested_scope=scope,
     )
     item.update({
         "body": row.body or "",

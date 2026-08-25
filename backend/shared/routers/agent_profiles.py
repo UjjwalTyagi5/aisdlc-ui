@@ -54,16 +54,18 @@ SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
 def ancestor_chain(scope: str, scope_id: str | None, workspace_id: str | None) -> list[tuple[str, str | None]]:
     """Nearest-first ancestor (scope, scope_id) pairs above `scope`, for inheritance
     resolution. `workspace_id` is the project's own parent BU — required to resolve a
-    project's ancestors; omitted, a project-scope request simply gets no ancestors
-    back (degrades to no-inheritance behavior, never errors). Shared with
-    skill_store.py's list_skills_merged, which needs the identical chain shape.
+    project's WORKSPACE ancestor specifically; omitted, a project-scope request still
+    resolves its org ancestor (which needs no id at all, same as the workspace-scope
+    case below), just not its workspace ancestor. Never errors on a missing id.
+    Shared with skill_store.py's list_skills_merged, which needs the identical chain
+    shape.
     """
     if scope == "org":
         return []
     if scope == "workspace":
         return [("org", None)]
     if scope == "project":
-        return [("workspace", workspace_id), ("org", None)] if workspace_id else []
+        return [("workspace", workspace_id), ("org", None)] if workspace_id else [("org", None)]
     return []
 
 

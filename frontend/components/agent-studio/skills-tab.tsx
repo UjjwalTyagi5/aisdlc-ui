@@ -151,6 +151,7 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
         origin: v.skill.origin,
         skill_key: v.skill.skill_key,
         enabled: v.enabled,
+        workspace_id: chain.workspaceId,
       }),
     onMutate: async (v) => {
       await queryClient.cancelQueries({ queryKey: listKey });
@@ -419,6 +420,7 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
         agentId={agentId}
         scope={scope}
         scopeId={scopeId}
+        workspaceId={chain.workspaceId}
         onClose={() => setViewing(null)}
       />
 
@@ -604,8 +606,12 @@ function SkillEditorDialog({
         : EMPTY_FIELDS,
   );
   const [lint, setLint] = React.useState<Record<string, LintViolation[]>>({});
-  // Once the user hand-edits the key, stop auto-deriving it from the name.
-  const keyTouched = React.useRef(isEdit);
+  // Once the user hand-edits the key, stop auto-deriving it from the name. Locked
+  // from the start for a seeded Override too (not just Edit) — an override MUST
+  // keep the original skill_key, or editing the display name would silently
+  // re-derive a DIFFERENT key and create a second, unrelated skill instead of
+  // overriding the inherited one.
+  const keyTouched = React.useRef(isEdit || (state.mode === "create" && Boolean(state.seed)));
 
   // Edit mode needs the body, which isn't in the list row — fetch full detail.
   const detailQ = useQuery({
@@ -936,30 +942,53 @@ function FieldViolations({ violations }: { violations?: LintViolation[] }) {
 
 // ───────────────────────── Read-only view dialog ─────────────────────────
 
+/** Where a skill's content actually lives, so its detail fetch resolves there
+ *  instead of 404ing — an inherited skill's row is at its origin_scope, not
+ *  necessarily the tier currently being viewed. `origin_scope === scope` (the
+ *  common case, and the only one for vendor skills, whose origin_scope is always
+ *  null) reuses `scopeId` unchanged; "org" has no id; "workspace" needs the
+ *  chain's own workspace id. "project" can't occur here — nothing inherits FROM
+ *  project, it's the most specific tier. */
+function resolveSkillScope(
+  skill: SkillListItem | null,
+  scope: SkillScope,
+  scopeId: string | null,
+  workspaceId: string | null | undefined,
+): { scope: SkillScope; scopeId: string | null } {
+  const origin = skill?.origin_scope;
+  if (!origin || origin === scope) return { scope, scopeId };
+  if (origin === "org") return { scope: "org", scopeId: null };
+  if (origin === "workspace") return { scope: "workspace", scopeId: workspaceId ?? null };
+  return { scope, scopeId };
+}
+
 function SkillViewDialog({
   skill,
   agentId,
   scope,
   scopeId,
+  workspaceId,
   onClose,
 }: {
   skill: SkillListItem | null;
   agentId: string;
   scope: SkillScope;
   scopeId: string | null;
+  workspaceId: string | null | undefined;
   onClose: () => void;
 }) {
   const open = Boolean(skill);
+  const resolved = resolveSkillScope(skill, scope, scopeId, workspaceId);
   const detailQ = useQuery({
     queryKey: qk.agentSkills.detail(
       skill?.origin ?? "vendor",
       skill?.skill_key ?? "",
       agentId,
-      scope,
-      scopeId,
+      resolved.scope,
+      resolved.scopeId,
     ),
     queryFn: () =>
-      getAgentSkill(skill!.origin, skill!.skill_key, agentId, scope, scopeId),
+      getAgentSkill(skill!.origin, skill!.skill_key, agentId, resolved.scope, resolved.scopeId),
     enabled: open,
   });
 

@@ -64,6 +64,58 @@ async def test_no_ancestor_arg_matches_todays_behavior():
 
 
 @pytest.mark.asyncio
+async def test_get_skill_detail_includes_origin_scope():
+    """Regression for the final-review finding: _list_item gained an origin_scope
+    parameter, but get_skill_detail's own two call sites weren't updated to pass
+    it — every skill create/update/view response was missing the key entirely,
+    which the (required, if nullable) frontend Zod field turns into a hard parse
+    failure. This pins the field's actual presence on get_skill_detail's output,
+    not just list_skills_merged's."""
+    tenant = str(uuid.uuid4())
+    await _insert_skill(tenant, "requirements", "org", None, "my-skill", "My Skill")
+
+    detail = await store.get_skill_detail(tenant, "requirements", "org", None, "custom", "my-skill")
+    assert detail is not None
+    assert "origin_scope" in detail
+    assert detail["origin_scope"] == "org"
+    # Resolved at its own exact scope -> genuinely editable/deletable here.
+    assert detail["editable"] is True
+    assert detail["deletable"] is True
+
+
+@pytest.mark.asyncio
+async def test_inherited_item_in_list_is_not_editable_or_deletable():
+    """An item list_skills_merged surfaces from an ancestor tier is NOT editable
+    or deletable at the tier you asked about — update/delete are exact-scope
+    operations that would 404 against the ancestor's row; only Override (create a
+    new row at your own tier) is the correct action for such an item."""
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _insert_skill(tenant, "requirements", "org", None, "org-only", "Org Only Skill")
+
+    items = await store.list_skills_merged(
+        tenant, "requirements", "workspace", ws_id, ancestor=[("org", None)],
+    )
+    hit = next(i for i in items if i["skill_key"] == "org-only")
+    assert hit["origin_scope"] == "org"
+    assert hit["editable"] is False
+    assert hit["deletable"] is False
+
+
+@pytest.mark.asyncio
+async def test_own_scope_item_in_list_is_editable_and_deletable():
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _insert_skill(tenant, "requirements", "workspace", ws_id, "own-skill", "Own Skill")
+
+    items = await store.list_skills_merged(tenant, "requirements", "workspace", ws_id)
+    hit = next(i for i in items if i["skill_key"] == "own-skill")
+    assert hit["origin_scope"] == "workspace"
+    assert hit["editable"] is True
+    assert hit["deletable"] is True
+
+
+@pytest.mark.asyncio
 async def test_toggle_precedence_nearest_wins_across_scopes():
     tenant = str(uuid.uuid4())
     ws_id = str(uuid.uuid4())

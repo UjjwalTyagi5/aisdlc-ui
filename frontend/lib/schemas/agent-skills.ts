@@ -48,8 +48,11 @@ export const SkillListItem = z.object({
   active_version: z.number().int().nullable(),
   /** Which tier this item's content actually lives at — null for vendor skills
    *  (no scope of their own). Differs from the requested scope when the item is
-   *  inherited from an ancestor tier rather than authored at this one. */
-  origin_scope: SkillScope.nullable(),
+   *  inherited from an ancestor tier rather than authored at this one.
+   *  `.default(null)` is defensive, not load-bearing: the backend always sends
+   *  this key now, but a future regression there should degrade gracefully
+   *  rather than fail every skill request. */
+  origin_scope: SkillScope.nullable().default(null),
 });
 export type SkillListItem = z.infer<typeof SkillListItem>;
 
@@ -109,7 +112,10 @@ export const SkillUpdateInput = z.object({
 });
 export type SkillUpdateInput = z.infer<typeof SkillUpdateInput>;
 
-/** POST /agent-skills/toggle body — enable/disable a vendor or custom skill. */
+/** POST /agent-skills/toggle body — enable/disable a vendor or custom skill.
+ *  `workspace_id` lets the backend find a CUSTOM skill that's inherited from an
+ *  ancestor tier (its existence check walks the same chain list_skills_merged
+ *  does) — the toggle itself still always writes at `scope`. */
 export const SkillToggleInput = z.object({
   agent_id: z.string(),
   scope: SkillScope,
@@ -117,6 +123,7 @@ export const SkillToggleInput = z.object({
   origin: SkillOrigin,
   skill_key: z.string(),
   enabled: z.boolean(),
+  workspace_id: z.string().nullish(),
 });
 export type SkillToggleInput = z.infer<typeof SkillToggleInput>;
 

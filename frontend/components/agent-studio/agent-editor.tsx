@@ -71,9 +71,11 @@ export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
         </TabsContent>
 
         <TabsContent value="skills" className="mt-4">
-          {/* key=agentId remounts the tab so dialog/toggle state resets per agent */}
+          {/* key=agentId+scope remounts the tab so dialog/toggle state resets
+              cleanly on an agent OR tier switch (mirrors BehaviorTab's own key
+              above) */}
           <SkillsTab
-            key={summary.agent_id}
+            key={`${summary.agent_id}-${scopeContext.scope}-${scopeContext.scopeId}`}
             agentId={summary.agent_id}
             agentLabel={label}
             scopeContext={scopeContext}
