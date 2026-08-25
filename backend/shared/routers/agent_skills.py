@@ -46,6 +46,7 @@ from shared.skills.registry import get_vendor_skill
 from shared.routers.agent_profiles import (
     FORBIDDEN_PATTERNS,
     SCOPE_VALUES,
+    ancestor_chain,
 )
 
 # ── Lint rules (module-level so tests + create/update reuse them) ────────────────────
@@ -231,11 +232,13 @@ async def list_skills(
     agent_id: str,
     scope: str,
     scope_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
 ):
     tenant_id = _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
-    skills = await _store().list_skills_merged(tenant_id, agent_id, scope, scope_id)
+    ancestor = ancestor_chain(scope, scope_id, workspace_id)
+    skills = await _store().list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=ancestor)
     return {"skills": skills}
 
 

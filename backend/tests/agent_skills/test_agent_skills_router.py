@@ -519,6 +519,60 @@ async def test_activate_missing_version_404(monkeypatch, mint_token):
     assert r.status_code == 404
 
 
+# ── list_skills threads the ancestor chain through ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_skills_passes_ancestor_chain_to_store(monkeypatch, mint_token):
+    captured = {}
+
+    async def fake_list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None):
+        captured["ancestor"] = ancestor
+        return []
+
+    class FakeStore:
+        list_skills_merged = staticmethod(fake_list_skills_merged)
+
+    monkeypatch.setattr(sk, "_store", lambda: FakeStore)
+
+    from process_api import app
+    token = mint_token(user_id="u1", tenant_id=TENANT_A, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/agent-skills",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": "proj-1", "workspace_id": "ws-1"},
+            headers=headers,
+        )
+    assert resp.status_code == 200
+    assert captured["ancestor"] == [("workspace", "ws-1"), ("org", None)]
+
+
+@pytest.mark.asyncio
+async def test_list_skills_no_workspace_id_means_no_ancestors(monkeypatch, mint_token):
+    captured = {}
+
+    async def fake_list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None):
+        captured["ancestor"] = ancestor
+        return []
+
+    class FakeStore:
+        list_skills_merged = staticmethod(fake_list_skills_merged)
+
+    monkeypatch.setattr(sk, "_store", lambda: FakeStore)
+
+    from process_api import app
+    token = mint_token(user_id="u1", tenant_id=TENANT_A, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/agent-skills",
+            params={"agent_id": "requirements", "scope": "workspace", "scope_id": "ws-1"},
+            headers=headers,
+        )
+    assert resp.status_code == 200
+    assert captured["ancestor"] == [("org", None)]
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────────────
 
 def _async(return_value):
