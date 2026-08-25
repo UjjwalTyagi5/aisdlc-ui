@@ -79,6 +79,13 @@ export function AddProviderDialog({
         display_name: displayName.trim(),
         api_key: "",
         workspaceId: null,
+        // create_provider requires at least one model on any connection, even
+        // a keyless one — but which of these a BU may actually USE is decided
+        // entirely by org_model_grants (ProviderModelCurationDialog), keyed on
+        // provider+model_id directly, never on this row's own offerings. So
+        // there is no picker here: the whole catalogue for this provider goes
+        // on as "technically supported", and curation narrows it afterward.
+        enabled_models: selected!.models.map((m) => m.model_id),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model", "providers"] });
@@ -148,13 +155,18 @@ export function AddProviderDialog({
                 placeholder={selected.label}
               />
             </div>
+            {selected.models.length === 0 && (
+              <p className="text-warning text-[12px]">
+                {selected.label} has no catalogued models yet, so it can&apos;t be added.
+              </p>
+            )}
             <DialogFooter className="gap-2 sm:gap-2">
               <Button type="button" variant="outline" onClick={() => setSelected(null)}>
                 Back
               </Button>
               <Button
                 type="button"
-                disabled={!displayName.trim() || addM.isPending}
+                disabled={!displayName.trim() || selected.models.length === 0 || addM.isPending}
                 onClick={() => addM.mutate()}
               >
                 {addM.isPending && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
