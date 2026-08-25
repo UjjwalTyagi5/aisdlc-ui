@@ -263,67 +263,177 @@ def test_validate_scope_rejects_user_without_scope_id():
 
 
 # ── assert_can_write_agent_scope ────────────────────────────────────────────────────
+# The four shared-tier (org/workspace/project) tests below used to mint a permission
+# string (skill:edit / workspace:manage) matching the OLD blanket check this task
+# replaces. That mechanism is gone, but the real-world requirement each test proved —
+# "an owner can act", "a non-owner can't" — is still true; the setup below proves it
+# through a real role_bindings row instead, via `_bind_role` (defined further down,
+# same helper Task 1's resolve_actor_tier_access tests use).
 
-def test_write_check_shared_tier_draft_matches_todays_skill_edit_gate():
-    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "org", None, "u1", action="draft")
-    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "workspace", "ws-1", "u1", action="draft")
-    ap.assert_can_write_agent_scope(["skill:edit"], "developer", "project", "proj-1", "u1", action="draft")
+@pytest.mark.asyncio
+async def test_write_check_shared_tier_draft_allowed_for_tier_owner():
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+    await _bind_role(tenant, user_id, "project_admin", "project", project_id)
+    await ap.assert_can_write_agent_scope(
+        tenant, ["admin:*"], "org_admin", "org", None, user_id, action="draft",
+    )
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "bu_admin", "workspace", ws_id, user_id, action="draft",
+    )
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "project_admin", "project", project_id, user_id, action="draft",
+    )  # no raise
 
 
-def test_write_check_shared_tier_draft_denies_without_skill_edit():
-    for scope, sid in (("org", None), ("workspace", "ws-1"), ("project", "proj-1")):
+@pytest.mark.asyncio
+async def test_write_check_shared_tier_draft_denies_without_ownership_or_membership():
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    for scope, sid in (("org", None), ("workspace", str(uuid.uuid4())), ("project", str(uuid.uuid4()))):
         with pytest.raises(HTTPException) as exc:
-            ap.assert_can_write_agent_scope([], "bu_admin", scope, sid, "u1", action="draft")
+            await ap.assert_can_write_agent_scope(
+                tenant, [], "bu_admin", scope, sid, user_id, action="draft",
+            )
         assert exc.value.status_code == 403
 
 
-def test_write_check_shared_tier_publish_matches_todays_workspace_manage_gate():
-    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "org", None, "u1", action="publish")
-    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "workspace", "ws-1", "u1", action="publish")
-    ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "project", "proj-1", "u1", action="publish")
+@pytest.mark.asyncio
+async def test_write_check_shared_tier_publish_allowed_for_tier_owner():
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+    await _bind_role(tenant, user_id, "project_admin", "project", project_id)
+    await ap.assert_can_write_agent_scope(
+        tenant, ["admin:*"], "org_admin", "org", None, user_id, action="publish",
+    )
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "bu_admin", "workspace", ws_id, user_id, action="publish",
+    )
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "project_admin", "project", project_id, user_id, action="publish",
+    )  # no raise
 
 
-def test_write_check_shared_tier_publish_denies_developer_without_workspace_manage():
+@pytest.mark.asyncio
+async def test_write_check_shared_tier_publish_denied_for_non_owner():
+    # developer never held workspace:manage before this plan; must still be denied —
+    # now because they hold no bu_admin binding on this exact workspace (a developer
+    # binding on the SAME business_unit scope_id grants membership, not ownership),
+    # not because of a missing permission string.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "business_unit", ws_id)
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope(["skill:edit"], "developer", "workspace", "ws-1", "u1", action="publish")
+        await ap.assert_can_write_agent_scope(
+            tenant, [], "developer", "workspace", ws_id, user_id, action="publish",
+        )
     assert exc.value.status_code == 403
 
 
-def test_write_check_user_scope_allows_own_id_for_non_governance_role():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_allows_own_id_for_non_governance_role():
     # No perms needed at all for the personal tier — it's role + self-ownership only,
     # matching frontend canPublishAtTier's rule exactly (role !== org_admin && !== bu_admin).
-    ap.assert_can_write_agent_scope([], "developer", "user", "u1", "u1", action="draft")
-    ap.assert_can_write_agent_scope([], "contributor", "user", "u1", "u1", action="publish")
-    ap.assert_can_write_agent_scope([], "project_admin", "user", "u1", "u1", action="draft")
+    # tenant_id is a new required param but is irrelevant to this branch — it never
+    # reaches the DB, matching the "personal tier is genuinely untouched" guarantee.
+    tenant = str(uuid.uuid4())
+    await ap.assert_can_write_agent_scope(tenant, [], "developer", "user", "u1", "u1", action="draft")
+    await ap.assert_can_write_agent_scope(tenant, [], "contributor", "user", "u1", "u1", action="publish")
+    await ap.assert_can_write_agent_scope(tenant, [], "project_admin", "user", "u1", "u1", action="draft")
 
 
-def test_write_check_user_scope_denies_someone_elses_id():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_denies_someone_elses_id():
+    tenant = str(uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope([], "developer", "user", "someone-else", "u1", action="draft")
+        await ap.assert_can_write_agent_scope(tenant, [], "developer", "user", "someone-else", "u1", action="draft")
     assert exc.value.status_code == 403
 
 
-def test_write_check_user_scope_denies_org_admin():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_denies_org_admin():
+    tenant = str(uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope(["admin:*"], "org_admin", "user", "u1", "u1", action="draft")
+        await ap.assert_can_write_agent_scope(tenant, ["admin:*"], "org_admin", "user", "u1", "u1", action="draft")
     assert exc.value.status_code == 403
 
 
-def test_write_check_user_scope_denies_bu_admin():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_denies_bu_admin():
+    tenant = str(uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope(["workspace:manage"], "bu_admin", "user", "u1", "u1", action="publish")
+        await ap.assert_can_write_agent_scope(
+            tenant, ["workspace:manage"], "bu_admin", "user", "u1", "u1", action="publish",
+        )
     assert exc.value.status_code == 403
 
 
-def test_write_check_user_scope_denies_missing_scope_id():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_denies_missing_scope_id():
+    tenant = str(uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope([], "developer", "user", None, "u1", action="draft")
+        await ap.assert_can_write_agent_scope(tenant, [], "developer", "user", None, "u1", action="draft")
     assert exc.value.status_code == 403
 
 
-def test_write_check_user_scope_denies_role_none():
+@pytest.mark.asyncio
+async def test_write_check_user_scope_denies_role_none():
+    tenant = str(uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
-        ap.assert_can_write_agent_scope([], None, "user", "u1", "u1", action="draft")
+        await ap.assert_can_write_agent_scope(tenant, [], None, "user", "u1", "u1", action="draft")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_write_check_project_admin_owns_own_project():
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    # Table-driven test targets the pure-ish async function directly, bypassing
+    # HTTP — role_bindings/projects setup mirrors Task 1's helpers.
+    await _bind_role(tenant, user_id, "project_admin", "project", project_id)
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "project_admin", "project", project_id, user_id, action="draft",
+    )
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "project_admin", "project", project_id, user_id, action="publish",
+    )  # no raise
+
+
+@pytest.mark.asyncio
+async def test_write_check_project_admin_denied_on_unrelated_project():
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    other_project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "project_admin", "project", project_id)
+    with pytest.raises(HTTPException) as exc:
+        await ap.assert_can_write_agent_scope(
+            tenant, [], "project_admin", "project", other_project_id, user_id, action="draft",
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_write_check_user_scope_unaffected_by_tier_ownership_change():
+    # Regression guard: the personal-tier branch (sub-project 2) must be completely
+    # untouched by this task's changes to the shared-tier branch.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    await ap.assert_can_write_agent_scope(
+        tenant, [], "developer", "user", user_id, user_id, action="draft",
+    )  # no raise
+    with pytest.raises(HTTPException) as exc:
+        await ap.assert_can_write_agent_scope(
+            tenant, [], "org_admin", "user", user_id, user_id, action="draft",
+        )
     assert exc.value.status_code == 403
 
 

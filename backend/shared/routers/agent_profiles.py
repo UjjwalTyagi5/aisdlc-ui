@@ -52,7 +52,6 @@ from config.agent_registry import AGENT_REGISTRY
 from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
-from shared.authz.permissions import has_permission
 from shared.authz.read_scope import live_binding
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
@@ -346,7 +345,8 @@ def _same_actor(a: str | None, b: str | None) -> bool:
     return bool(a) and bool(b) and str(a) == str(b)
 
 
-def assert_can_write_agent_scope(
+async def assert_can_write_agent_scope(
+    tenant_id: str,
     perms: list[str],
     role: str | None,
     scope: str,
@@ -355,25 +355,20 @@ def assert_can_write_agent_scope(
     *,
     action: Literal["draft", "publish"],
 ) -> None:
-    """Scope-aware authorization for an Agent Studio write (Behavior draft/publish;
-    Skills create/update/delete/toggle/activate). Raises HTTPException(403) on denial.
+    """Scope-aware authorization for an Agent Studio write (Behavior draft/publish/
+    propose; Skills create/update/delete/toggle/activate/propose). Raises
+    HTTPException(403) on denial.
 
-    org/workspace/project: UNCHANGED from before this function existed — the exact
-    same permission string that used to gate the route via Depends(require_permission
-    (...)) is checked here instead, one line later, after `scope` is known. "draft"
-    needs "skill:edit" (create_draft/preview, Skills' create/update/delete/toggle);
-    "publish" needs "workspace:manage" (publish/unpublish, Skills' activate). Same
-    permission, same actors pass/fail, zero behavior change for these three tiers.
+    user: self-service, unchanged from sub-project 2 — allowed only when `role` is
+    neither "org_admin" nor "bu_admin" AND `scope_id` equals the caller's own user id.
 
-    user: self-service, mirrors propose()'s existing "a personal default is nobody
-    else's to approve" reasoning for the SAME tier (see propose()'s NOT_A_SHARED_TIER
-    guard below). Allowed only when `role` is neither "org_admin" nor "bu_admin" (PRD
-    §14.8 — governance-only roles never run an agent, so a personal default they set
-    could never take effect) AND `scope_id` equals the caller's own user id — writing
-    anyone else's personal scope is denied regardless of role. This is the
-    server-authoritative twin of `canPublishAtTier` in frontend/lib/governance.ts,
-    whose own docstring already says it's meant to be "shared by the client gate and
-    BOTH server runtimes" — this closes that gap for the personal tier specifically.
+    org/workspace/project: real tier ownership + "propose one tier up," via
+    `resolve_actor_tier_access` — NOT the old blanket permission-string check
+    (sub-project 3 replaces it deliberately; see the sub-project 3 spec's
+    "Existing state" section for why the old check was a real bug, not just
+    incomplete). "publish" requires ownership. "draft" requires ownership OR
+    propose-eligibility — a non-owner may still draft, to have something to
+    propose.
     """
     if scope == "user":
         if role is None or role in ("org_admin", "bu_admin"):
@@ -381,13 +376,14 @@ def assert_can_write_agent_scope(
         if not _same_actor(scope_id, actor_user_id):
             raise HTTPException(status_code=403, detail="Forbidden")
         return
-    if action == "draft":
-        required = "skill:edit"
-    elif action == "publish":
-        required = "workspace:manage"
-    else:
-        raise ValueError(f"assert_can_write_agent_scope: unknown action {action!r}")
-    if not has_permission(perms, required):
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, actor_user_id, perms, scope, scope_id,
+    )
+    if action == "publish":
+        if not owns:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    if not (owns or may_propose):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -596,8 +592,8 @@ async def create_draft(
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
     role = await effective_platform_role(db, request)
-    assert_can_write_agent_scope(
-        getattr(request.state, "permissions", []) or [], role,
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
         body.scope, body.scope_id, _user_id(request), action="draft",
     )
 
@@ -642,8 +638,8 @@ async def publish(
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
     role = await effective_platform_role(db, request)
-    assert_can_write_agent_scope(
-        getattr(request.state, "permissions", []) or [], role,
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
         target.scope, str(target.scope_id) if target.scope_id else None,
         _user_id(request), action="publish",
     )
@@ -688,8 +684,8 @@ async def unpublish(
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
     role = await effective_platform_role(db, request)
-    assert_can_write_agent_scope(
-        getattr(request.state, "permissions", []) or [], role,
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
         target.scope, str(target.scope_id) if target.scope_id else None,
         _user_id(request), action="publish",
     )
@@ -821,12 +817,12 @@ async def preview(
 ):
     from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
 
-    _tenant_id(request)
+    tenant_id = _tenant_id(request)
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
     role = await effective_platform_role(db, request)
-    assert_can_write_agent_scope(
-        getattr(request.state, "permissions", []) or [], role,
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
         body.scope, body.scope_id, _user_id(request), action="draft",
     )
 
