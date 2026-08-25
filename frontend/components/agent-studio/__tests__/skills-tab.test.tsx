@@ -99,6 +99,7 @@ describe("SkillsTab cascade awareness", () => {
     await waitFor(() => expect(mockedListAgentSkills).toHaveBeenCalled());
     expect(mockedListAgentSkills).toHaveBeenCalledWith("requirements", "org", null, {
       workspaceId: null,
+      projectId: null,
     });
   });
 

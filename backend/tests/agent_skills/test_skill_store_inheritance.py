@@ -141,3 +141,38 @@ async def test_toggle_precedence_nearest_wins_across_scopes():
     )
     hit = next(i for i in items if i["skill_key"] == "shared-key")
     assert hit["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_own_personal_toggle_beats_inherited_project_toggle():
+    """Final whole-branch review finding I2: _SCOPE_RANK omitted "user" entirely,
+    so it defaulted to rank 0 (tied with org, losing to workspace/project) — a
+    user's own toggle in their own personal sandbox was silently overridden by
+    an inherited project/workspace toggle. "user" must outrank every ancestor."""
+    tenant = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _insert_skill(tenant, "requirements", "project", project_id, "shared-key", "Project Version")
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO agent_skill_toggles "
+            "(id, tenant_id, agent_id, scope, scope_id, origin, skill_key, enabled, updated_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), 'requirements', 'project', "
+            " CAST(:pid AS uuid), 'custom', 'shared-key', false, 'tester')"
+        ), {"t": tenant, "pid": project_id})
+
+    user_id = str(uuid.uuid4())
+    await _insert_skill(tenant, "requirements", "user", user_id, "shared-key", "My Version")
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO agent_skill_toggles "
+            "(id, tenant_id, agent_id, scope, scope_id, origin, skill_key, enabled, updated_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), 'requirements', 'user', "
+            " CAST(:uid AS uuid), 'custom', 'shared-key', true, 'tester')"
+        ), {"t": tenant, "uid": user_id})
+
+    items = await store.list_skills_merged(
+        tenant, "requirements", "user", user_id, ancestor=[("project", project_id), ("org", None)],
+    )
+    hit = next(i for i in items if i["skill_key"] == "shared-key")
+    assert hit["enabled"] is True
+    assert hit["origin_scope"] == "user"

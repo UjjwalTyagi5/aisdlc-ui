@@ -17,13 +17,29 @@ router (whose lint style + violation shape + RBAC layering this mirrors). The fr
 reads these keys verbatim.
 
 RBAC (mirrors agent_profiles, extended by sub-project 2): reads gate on the
-"artifact:view" floor (router-level). create/update/toggle/delete and activate all now
-use the in-body, scope-aware `assert_can_write_agent_scope` check (imported from
-agent_profiles) instead of a route-level Depends(): for org/workspace/project scope it
-requires "skill:edit" (create/update/toggle/delete) or "workspace:manage" (activate)
-exactly as before; for the personal ("user") scope, any role except org_admin/bu_admin
-may write ONLY their own scope_id. Every route still carries a require_permission
-sentinel (the router-level floor) so the process_api D-05 boot scan stays green.
+"artifact:view" floor (router-level) PLUS, at the personal ("user") scope only,
+`assert_own_user_scope` (imported from agent_profiles) on `list`/detail — without it,
+`scope=user&scope_id=<anyone>` would let any authenticated caller read another user's
+personal skill catalog. create/update/toggle/delete and activate all use the in-body,
+scope-aware `assert_can_write_agent_scope` check (also imported from agent_profiles)
+instead of a route-level Depends(): for org/workspace/project scope it requires
+"skill:edit" (create/update/toggle/delete) or "workspace:manage" (activate) exactly as
+before; for the personal scope, any role except org_admin/bu_admin may write ONLY their
+own scope_id. Every route still carries a require_permission sentinel (the router-level
+floor) so the process_api D-05 boot scan stays green.
+
+Role resolution here uses `resolve_platform_role_for_user` rather than
+`effective_platform_role` (agent_profiles.py's routes all take a `db` param already;
+these routes don't, so this variant opens its own tenant-scoped session) — both
+delegate to the same `platform_role_for`, so "highest standing wins" is one
+implementation shared by both call shapes, not two that could drift.
+
+Note: like agent_profiles.py, `assert_can_write_agent_scope`/`assert_own_user_scope`
+do not emit the RBAC_DENIALS metric or an access-denied audit row the removed
+route-level Depends() gates used to on a 403 (disclosed, accepted gap). A published
+personal-tier skill is fully persisted and readable/writable per the rules above, but
+is NOT yet applied at actual agent-run time — `skill_runtime.py`'s resolver has its own
+separate cascade logic, untouched by this sub-project, tracked as follow-up work.
 
 ROUTE ORDER: the literal-suffix routes (/toggle, /{skill_key}/versions,
 /{skill_key}/activate/{version}) and the single-segment authoring routes are declared BEFORE
@@ -52,6 +68,7 @@ from shared.routers.agent_profiles import (
     SCOPE_VALUES,
     ancestor_chain,
     assert_can_write_agent_scope,
+    assert_own_user_scope,
 )
 from shared.authz.effective_role import resolve_platform_role_for_user
 
@@ -226,7 +243,11 @@ class ToggleIn(BaseModel):
     # scope may actually live at an ancestor tier (an inherited skill); this lets
     # the existence check find it there while the toggle itself still writes at
     # `scope` (a BU toggling an org skill off for itself never touches org's row).
+    # project_id is needed alongside workspace_id specifically for a personal
+    # (user) scope's ancestor chain, which is two hops deep (project, then
+    # workspace, then org) — matches list_skills' identical pair of params.
     workspace_id: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 agent_skills_router = APIRouter(
@@ -249,6 +270,7 @@ async def list_skills(
     tenant_id = _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     ancestor = ancestor_chain(scope, scope_id, workspace_id, project_id)
     skills = await _store().list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=ancestor)
     return {"skills": skills}
@@ -324,7 +346,9 @@ async def toggle_skill(body: ToggleIn, request: Request):
             tenant_id, body.agent_id, body.scope, body.scope_id, "custom", body.skill_key
         ) is not None
         if not exists:
-            for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, body.workspace_id):
+            for anc_scope, anc_scope_id in ancestor_chain(
+                body.scope, body.scope_id, body.workspace_id, body.project_id,
+            ):
                 exists = await store.get_skill_detail(
                     tenant_id, body.agent_id, anc_scope, anc_scope_id, "custom", body.skill_key
                 ) is not None
@@ -356,6 +380,7 @@ async def list_versions(
     tenant_id = _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     versions = await _store().list_custom_versions(tenant_id, agent_id, scope, scope_id, skill_key)
     return {"versions": versions}
 
@@ -459,6 +484,7 @@ async def get_skill(
     tenant_id = _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     detail = await _store().get_skill_detail(
         tenant_id, agent_id, scope, scope_id, origin.value, skill_key
     )

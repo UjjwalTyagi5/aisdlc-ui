@@ -39,6 +39,7 @@ export const listAgentSkills = (
       scope,
       scope_id: scopeId,
       workspace_id: chain?.workspaceId,
+      project_id: chain?.projectId,
     },
     schema: SkillList,
   });

@@ -33,7 +33,7 @@ from shared.skills.registry import vendor_skills_for
 
 logger = logging.getLogger(__name__)
 
-_SCOPE_RANK = {"org": 0, "workspace": 1, "project": 2}
+_SCOPE_RANK = {"org": 0, "workspace": 1, "project": 2, "user": 3}
 
 
 def _toggle_precedence(

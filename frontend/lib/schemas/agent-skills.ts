@@ -124,6 +124,7 @@ export const SkillToggleInput = z.object({
   skill_key: z.string(),
   enabled: z.boolean(),
   workspace_id: z.string().nullish(),
+  project_id: z.string().nullish(),
 });
 export type SkillToggleInput = z.infer<typeof SkillToggleInput>;
 

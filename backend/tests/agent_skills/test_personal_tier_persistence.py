@@ -71,3 +71,97 @@ async def test_someone_elses_personal_skill_write_is_denied(mint_token):
             headers=headers,
         )
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_someone_elses_personal_skill_read_is_denied(mint_token):
+    """Final whole-branch review finding C1: scope=user reads had no ownership
+    check at all — any authenticated caller could read another user's personal
+    skill catalog by supplying their scope_id. Covers list, detail, and versions."""
+    tenant = str(uuid.uuid4())
+    owner_id = str(uuid.uuid4())
+    attacker_id = str(uuid.uuid4())
+    await _bind_role(tenant, owner_id, "developer", "project", str(uuid.uuid4()))
+    await _bind_role(tenant, attacker_id, "developer", "project", str(uuid.uuid4()))
+    owner_token = mint_token(user_id=owner_id, tenant_id=tenant, permissions=["artifact:view"])
+    attacker_token = mint_token(user_id=attacker_id, tenant_id=tenant, permissions=["artifact:view"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "user", "scope_id": owner_id,
+                "skill_key": "private-notes", "display_name": "Private Notes", "body": "shh",
+            },
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert created.status_code == 200
+
+        listed = await client.get(
+            "/agent-skills", params={"agent_id": "requirements", "scope": "user", "scope_id": owner_id},
+            headers={"Authorization": f"Bearer {attacker_token}"},
+        )
+        assert listed.status_code == 403
+
+        detail = await client.get(
+            "/agent-skills/custom/private-notes",
+            params={"agent_id": "requirements", "scope": "user", "scope_id": owner_id},
+            headers={"Authorization": f"Bearer {attacker_token}"},
+        )
+        assert detail.status_code == 403
+
+        versions = await client.get(
+            "/agent-skills/private-notes/versions",
+            params={"agent_id": "requirements", "scope": "user", "scope_id": owner_id},
+            headers={"Authorization": f"Bearer {attacker_token}"},
+        )
+        assert versions.status_code == 403
+
+        # Sanity: the owner reading their own scope still works.
+        own_listed = await client.get(
+            "/agent-skills", params={"agent_id": "requirements", "scope": "user", "scope_id": owner_id},
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert own_listed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_toggle_finds_project_inherited_skill_at_personal_tier(mint_token):
+    """Final whole-branch review finding I3: toggle_skill's ancestor walk still
+    called ancestor_chain with 3 args (no project_id), so a personal tier could
+    never find a skill it inherits from its project — list_skills would show it,
+    but toggling it 404'd. ToggleIn now carries project_id, threaded through."""
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", project_id)
+    dev_token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+
+    project_admin_id = str(uuid.uuid4())
+    await _bind_role(tenant, project_admin_id, "project_admin", "project", project_id)
+    pa_token = mint_token(
+        user_id=project_admin_id, tenant_id=tenant, permissions=["artifact:view", "skill:edit"],
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "project-checklist", "display_name": "Project Checklist", "body": "check it",
+            },
+            headers={"Authorization": f"Bearer {pa_token}"},
+        )
+        assert created.status_code == 200
+
+        toggled = await client.post(
+            "/agent-skills/toggle",
+            json={
+                "agent_id": "requirements", "scope": "user", "scope_id": user_id,
+                "origin": "custom", "skill_key": "project-checklist", "enabled": False,
+                "project_id": project_id,
+            },
+            headers={"Authorization": f"Bearer {dev_token}"},
+        )
+        assert toggled.status_code == 200
+        assert toggled.json()["enabled"] is False

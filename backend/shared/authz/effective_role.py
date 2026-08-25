@@ -109,6 +109,19 @@ async def resolve_platform_role_for_user(
     Mirrors `resolve_permissions_for_user`, and for the same reason — `role_bindings`
     is FORCE RLS, so this must run under the tenant GUC or it reads nothing and every
     caller silently looks role-less.
+
+    Originally presentation-only (a login-time label), but `agent_skills.py`'s write
+    routes (sub-project 2) now also call this per-request to feed
+    `assert_can_write_agent_scope`'s role check — a genuine authorization input, not
+    just a label. That is safe specifically BECAUSE this function fails closed: any
+    exception below returns `None`, and `assert_can_write_agent_scope` treats
+    `role=None` as an automatic deny at the personal ("user") scope and as "no
+    permission held" everywhere else (`has_permission` never matches a `None`/absent
+    permission). If this fail-closed behavior is ever "improved" to fail open (e.g.
+    returning a cached/last-known role instead of `None` on error), re-audit every
+    authorization call site before doing so — the "never fail a login over a label"
+    reasoning below no longer fully applies once this return value can deny or allow
+    a write.
     """
     if not tenant_id:
         return None

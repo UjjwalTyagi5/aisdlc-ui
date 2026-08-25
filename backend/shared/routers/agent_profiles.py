@@ -15,19 +15,32 @@ router (shared/routers/capabilities.py) and the resource routers. The frontend B
 these keys verbatim.
 
 RBAC (design §3.5, extended by sub-project 2): reads gate on the "artifact:view" floor
-(router-level, matching the capabilities router). draft/preview/publish/unpublish all
-now use the in-body, scope-aware `assert_can_write_agent_scope` check instead of a
-route-level Depends(): for org/workspace/project scope it requires "skill:edit"
-(draft/preview) or "workspace:manage" (publish/unpublish) exactly as before; for the
-personal ("user") scope, any role except org_admin/bu_admin may write ONLY their own
-scope_id. Every route still carries a require_permission sentinel (the router-level
-floor) so the process_api D-05 boot scan stays green.
+(router-level, matching the capabilities router) PLUS, at the personal ("user") scope
+only, `assert_own_user_scope` — the same tenant-wide `GET .../summary`/`.../versions`
+reads that anyone can run against org/workspace/project also accept `scope=user`, and
+without this extra check any authenticated caller could read another user's personal
+default by supplying their `scope_id`. draft/preview/publish/unpublish all use the
+in-body, scope-aware `assert_can_write_agent_scope` check instead of a route-level
+Depends(): for org/workspace/project scope it requires "skill:edit" (draft/preview) or
+"workspace:manage" (publish/unpublish) exactly as before; for the personal scope, any
+role except org_admin/bu_admin may write ONLY their own scope_id. Every route still
+carries a require_permission sentinel (the router-level floor) so the process_api D-05
+boot scan stays green.
+
+Note: `assert_can_write_agent_scope`/`assert_own_user_scope` do NOT emit the
+RBAC_DENIALS metric or an access-denied audit row that the route-level
+`Depends(require_permission(...))` gates they replaced used to on a 403 — a disclosed,
+accepted gap (see the sub-project 2 final review), not an oversight. Also: a published
+personal-tier default is fully persisted and readable/writable per the rules above, but
+is NOT yet applied at actual agent-run time — `resolve_profile` in
+`agent_profile_store.py` only resolves org/workspace/project. Wiring the runtime is
+tracked as separate follow-up work, not part of this sub-project's scope.
 """
 from __future__ import annotations
 
 import re
 import uuid
-from typing import Iterable, Optional
+from typing import Iterable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -320,6 +333,17 @@ def _validate_scope(scope: str, scope_id: str | None) -> None:
         raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
 
 
+def _same_actor(a: str | None, b: str | None) -> bool:
+    """True when both ids are present and, compared as strings, identical.
+
+    Both the write-side ownership check (below) and the read-side one
+    (`assert_own_user_scope`) need the exact same "is this really you" test —
+    centralized so the two can't silently drift into different normalization
+    rules (e.g. one comparing raw strings, the other comparing parsed UUIDs).
+    """
+    return bool(a) and bool(b) and str(a) == str(b)
+
+
 def assert_can_write_agent_scope(
     perms: list[str],
     role: str | None,
@@ -327,7 +351,7 @@ def assert_can_write_agent_scope(
     scope_id: str | None,
     actor_user_id: str,
     *,
-    action: str,
+    action: Literal["draft", "publish"],
 ) -> None:
     """Scope-aware authorization for an Agent Studio write (Behavior draft/publish;
     Skills create/update/delete/toggle/activate). Raises HTTPException(403) on denial.
@@ -352,11 +376,34 @@ def assert_can_write_agent_scope(
     if scope == "user":
         if role is None or role in ("org_admin", "bu_admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
-        if not actor_user_id or not scope_id or str(scope_id) != str(actor_user_id):
+        if not _same_actor(scope_id, actor_user_id):
             raise HTTPException(status_code=403, detail="Forbidden")
         return
-    required = "skill:edit" if action == "draft" else "workspace:manage"
+    if action == "draft":
+        required = "skill:edit"
+    elif action == "publish":
+        required = "workspace:manage"
+    else:
+        raise ValueError(f"assert_can_write_agent_scope: unknown action {action!r}")
     if not has_permission(perms, required):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def assert_own_user_scope(scope: str, scope_id: str | None, actor_user_id: str) -> None:
+    """Read-side twin of `assert_can_write_agent_scope`'s personal-tier ownership rule.
+
+    The GET routes (`summary`, `versions`, and Skills' `list`/`detail`) have no
+    permission gate to piggyback on for this — only the router's blanket
+    `artifact:view` floor, which every tenant member holds. Without this check,
+    `scope=user&scope_id=<anyone>` would let any authenticated caller read another
+    user's personal Behavior/Skills content (final whole-branch review finding C1).
+    Every OTHER scope is left exactly as broadly readable as before — org/workspace/
+    project are deliberately SHARED tiers everyone in the cascade needs to see (that
+    is the entire point of the inheritance-visibility work in sub-project 1); `user`
+    is the one tier that is genuinely private to a single person, which is why it
+    alone needs this extra check.
+    """
+    if scope == "user" and not _same_actor(scope_id, actor_user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -400,6 +447,7 @@ async def get_summary(
 ):
     _tenant_id(request)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     stmt = select(AgentProfile).where(
         AgentProfile.agent_id.in_(PIPELINE_ORDER),
         *_scope_filters(scope, scope_id),
@@ -438,6 +486,7 @@ async def get_versions(
     _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     stmt = (
         select(AgentProfile)
         .where(AgentProfile.agent_id == agent_id, *_scope_filters(scope, scope_id))

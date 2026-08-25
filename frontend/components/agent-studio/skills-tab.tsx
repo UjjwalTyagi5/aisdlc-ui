@@ -134,7 +134,11 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
 
   const skillsQ = useQuery({
     queryKey: listKey,
-    queryFn: () => listAgentSkills(agentId, scope, scopeId, { workspaceId: chain.workspaceId }),
+    queryFn: () =>
+      listAgentSkills(agentId, scope, scopeId, {
+        workspaceId: chain.workspaceId,
+        projectId: chain.projectId,
+      }),
     enabled: scopeId !== null || scope === "org",
   });
 
@@ -152,6 +156,7 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
         skill_key: v.skill.skill_key,
         enabled: v.enabled,
         workspace_id: chain.workspaceId,
+        project_id: chain.projectId,
       }),
     onMutate: async (v) => {
       await queryClient.cancelQueries({ queryKey: listKey });
