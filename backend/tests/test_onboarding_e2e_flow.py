@@ -467,7 +467,7 @@ async def test_a_contributor_staffed_onto_a_project_can_see_it(org, _capture_ema
 
 @pytest.mark.asyncio
 async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_email):
-    """The other creator, and a GAP worth naming rather than asserting away.
+    """The other creator, and a gap that has since been closed.
 
     The decision taken was that a BU Admin creates directly — they run the unit, and
     routing their own request to themselves would be the self-approval the platform
@@ -475,14 +475,12 @@ async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_
     IS meaningful, and `project_creation` already exists as a governance request type
     routed to `bu_admin`.
 
-    The backend does not yet raise it: POST /projects creates the project outright for
-    any holder of `project:create`. The frontend dialog shows a "needs approval" banner
-    for a project_admin creator and sets `approvalStatus: "pending_approval"` in its
-    optimistic cache — but nothing server-side backs that, and `Project` has no column
-    to represent it.
-
-    Asserted as the CURRENT behaviour rather than the desired one, so the test tells the
-    truth and fails the day somebody implements the request without finishing it.
+    FIXED (project-creation approval flow, PR #20): POST /projects now sets
+    `approvalStatus: "pending_approval"` server-side for a project_admin creator —
+    `Project` gained the column this test's own docstring predicted it would need, and
+    the frontend's previously-optimistic-only cache value is now backed for real. This
+    test used to assert the pre-fix gap deliberately (see git history); it now asserts
+    the actual shipped behaviour.
     """
     t = org
     c = _client()
@@ -503,7 +501,7 @@ async def test_a_project_admin_can_create_a_project_in_their_unit(org, _capture_
                      json={"name": "Their Idea", "workspaceId": unit})
     assert created.status_code in (200, 201), created.text
 
-    # No server-side approval state exists yet — see the docstring.
-    assert "approvalStatus" not in created.json()
-    # And the project is live immediately, which is what the gap means in practice.
+    # Server-side approval state now exists — the project is created pending
+    # its Business Unit Admin's decision, not live outright.
+    assert created.json()["approvalStatus"] == "pending_approval"
     assert c.get(f"/projects/{created.json()['id']}", headers=pa_hdr).status_code == 200

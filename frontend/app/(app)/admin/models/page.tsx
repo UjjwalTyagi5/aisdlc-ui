@@ -3,7 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Plus, Search } from "lucide-react";
+import { toast } from "sonner";
+import { ChevronRight, Plus, Search, SlidersHorizontal } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { PageTitle } from "@/components/app/page-title";
@@ -17,6 +18,9 @@ import {
 } from "@/components/app/model-governance-summary";
 import { ModelAvailabilityCard } from "@/components/app/model-availability-card";
 import { AddModelDialog, filterCatalogToAllowed } from "@/components/app/add-model-dialog";
+import { AddProviderDialog } from "@/components/app/add-provider-dialog";
+import { ProviderModelCurationDialog } from "@/components/app/provider-model-curation-dialog";
+import { UnitAccessPicker } from "@/components/app/unit-access-picker";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
@@ -26,7 +30,9 @@ import {
   getModelCatalog,
   getModelGrantMatrix,
   listAllModelProviders,
+  listModelProviderGrants,
   listModelProviders,
+  setModelProviderGrants,
 } from "@/lib/api/models";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
@@ -35,7 +41,7 @@ import { providerLabel } from "@/lib/models/provider-labels";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
-import type { ModelAllowEntry, ModelProvider } from "@/lib/schemas/model";
+import type { CatalogProvider, ModelAllowEntry, ModelProvider } from "@/lib/schemas/model";
 
 /** Real brand logos (in public/brand), same scheme as the Integrations page. */
 const PROVIDER_LOGO: Partial<Record<string, { src: string; fit: "contain" | "cover-left" }>> = {
@@ -108,7 +114,6 @@ export default function ModelProvidersPage() {
   const scope: "org" | "bu" | "project" | null =
     role === "org_admin" ? "org" : role === "bu_admin" ? "bu" : role === "project_admin" ? "project" : null;
   const isOrg = scope === "org";
-  const needsApproval = scope === "project";
 
   // Which units this page speaks for. There is no "active" one to inherit —
   // reads union across every unit the viewer is bound to, so someone in two
@@ -174,6 +179,15 @@ export default function ModelProvidersPage() {
     [matrixQ.data],
   );
 
+  // Which business units may create their own connection to each provider —
+  // the Org Admin's grant-toggle on each card. Org Admin only: a BU/Project
+  // Admin doesn't grant, it consumes what's already granted.
+  const providerGrantsQ = useQuery({
+    queryKey: qk.model.providerGrants(),
+    queryFn: listModelProviderGrants,
+    enabled: isOrg,
+  });
+
   // What each unit was granted — the universe a BU or Project Admin may
   // credential from, per unit. An Org Admin doesn't need it: they define it.
   const allowedQueries = useQueries({
@@ -201,11 +215,66 @@ export default function ModelProvidersPage() {
     () => (allWorkspaces ?? []).filter((w) => w.status === "active"),
     [allWorkspaces],
   );
+  // UnitAccessPicker's generic {id, name} shape — the provider-grant toggle
+  // and the model-curation dialog both need it, `displayName` is what
+  // `Workspace` calls the same field.
+  const grantUnits = React.useMemo(
+    () => grantableWorkspaces.map((w) => ({ id: w.id, name: w.displayName })),
+    [grantableWorkspaces],
+  );
+
+  // providerGrantsQ's shape is provider→units; the PUT route replaces one
+  // WORKSPACE's whole provider list at a time (Task 3's contract), so toggling
+  // one provider for one workspace needs that workspace's full current list,
+  // which means inverting the shape first.
+  const grantsByWorkspace = React.useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const g of providerGrantsQ.data ?? []) {
+      for (const wsId of g.businessUnitIds) {
+        (map[wsId] ??= []).push(g.provider);
+      }
+    }
+    return map;
+  }, [providerGrantsQ.data]);
+
+  const toggleProviderGrant = async (provider: string, workspaceId: string) => {
+    const current = grantsByWorkspace[workspaceId] ?? [];
+    const next = current.includes(provider)
+      ? current.filter((p) => p !== provider)
+      : [...current, provider];
+    try {
+      await setModelProviderGrants(workspaceId, next);
+      queryClient.invalidateQueries({ queryKey: qk.model.providerGrants() });
+    } catch (err) {
+      toast.error("Couldn't update provider access", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
 
   // No edit/remove/verify state here any more. Those act on a single key and
   // now live on the provider's own screen, which is the only place that also
   // shows what each key serves.
-  const [addOpen, setAddOpen] = React.useState(false);
+  //
+  // BU Admin's "Add key" (spec §5, Task 10) is a single page-level button,
+  // same placement as Org Admin's "Add provider" — reached from ONE place
+  // rather than scattered per-model or per-tile triggers, so it's always the
+  // same flow: pick from whatever the Org Admin granted this unit (never the
+  // full catalog), name the key (so a model can hold more than one — e.g. a
+  // prod and a staging subscription for the same model), add the credential,
+  // pass Test. This used to be triggered per-row (a "Models available"
+  // entry) or per-tile (a granted-but-unkeyed provider card) instead — both
+  // removed in favor of the one consolidated entry point. There used to also
+  // be a Project Admin page-level "Add provider" button opening this same
+  // dialog with no provider preset — removed separately: it opened a real
+  // credential form whose Save always 403s server-side (POST /model/providers
+  // is BU-scoped-only), so the only thing it ever accomplished was collecting
+  // a real API key from a Project Admin right before throwing it away. Same
+  // self-service-browse-and-add pattern Task 13 already removed from
+  // project-model-selection-card.tsx.
+  const [addKeyOpen, setAddKeyOpen] = React.useState(false);
+  // Org Admin's own registration action — keyless, see AddProviderDialog.
+  const [addProviderOpen, setAddProviderOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
 
   // Prefix-invalidate: with one query per unit there is no single key to name,
@@ -256,6 +325,7 @@ export default function ModelProvidersPage() {
   // One flat list across every unit in view; each provider still knows which
   // unit it belongs to, so the cards can say so when there is more than one.
   const providers = providerQueries.flatMap((q) => q.data ?? []);
+  const catalog = catalogQ.data ?? [];
 
   /**
    * One card per PROVIDER, not per connection.
@@ -266,6 +336,20 @@ export default function ModelProvidersPage() {
    * split one vendor's models across two places for no reason a reader could
    * see. The subscriptions live on the detail screen, which already lists them
    * and is where testing, editing and removing a key belongs.
+   *
+   * The grid is connection-seeded for every scope, Org Admin included — a
+   * provider shows up here once it has been ADDED (via `AddProviderDialog`,
+   * keyless) or credentialed, never before. This was briefly catalog-seeded
+   * (every provider in the whole catalogue rendering unconditionally) to solve
+   * a brand-new tenant's bootstrap problem — Org Admin had no way to reach a
+   * provider nobody had ever connected to, since "Add provider" was removed
+   * along with the old provider+model+key dialog — but showing the entire
+   * ~40-provider catalogue by default is the wrong shape for a screen that's
+   * supposed to answer "which providers does this org actually use". The
+   * bootstrap problem is solved instead by `AddProviderDialog`: a small,
+   * genuinely keyless registration action (spec §2 amendment 5 stays intact —
+   * it never collects a credential) that puts exactly the provider you picked
+   * onto this grid.
    */
   const providerGroups = ((): [string, typeof providers][] => {
     // Plain function, not useMemo: this sits below an early return, so a hook
@@ -305,8 +389,6 @@ export default function ModelProvidersPage() {
       )
     : providerGroups;
 
-  const catalog = catalogQ.data ?? [];
-
   // Everything the viewer could credential anywhere they're bound — the union
   // across their units. The dialog narrows this again to the ONE unit being
   // onboarded into, which is the set that actually governs the save.
@@ -331,7 +413,7 @@ export default function ModelProvidersPage() {
     project: {
       eyebrow: "Configure",
       title: "Models",
-      body: `The models your business unit was granted. Onboard your own credentials for any that need them — new connections need your ${BUSINESS_UNIT_LABEL} Admin's approval before they're usable.`,
+      body: `The models your ${BUSINESS_UNIT_LABEL.toLowerCase()} was granted, and which key serves each one. There's no self-service onboarding here — your ${BUSINESS_UNIT_LABEL} Admin assigns credentials to this project; you choose which of them it actually runs on.`,
     },
   };
   const copy = HEADER_COPY[scope];
@@ -352,15 +434,33 @@ export default function ModelProvidersPage() {
           <PageTitle>{copy.title}</PageTitle>
         </div>
 
-        <Button
-          onClick={() => setAddOpen(true)}
-          disabled={effectiveCatalog.length === 0}
-          title={effectiveCatalog.length === 0 ? "No allowed models to onboard from yet" : undefined}
-          className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
-        >
-          <Plus className="size-4" aria-hidden />
-          Add provider
-        </Button>
+        {/* Org Admin no longer credentials anything here — "Add provider" is
+            purely keyless registration (AddProviderDialog), so a provider
+            can appear on the grid at all; granting it to a business unit
+            (per-card toggle below) and curating which models of it reach
+            that unit are the only other actions Org Admin has. Onboarding an
+            actual key lives entirely on each business unit / project's own
+            screen. Project Admin has no page-level trigger here at all:
+            there is no working self-service onboarding route for them — see
+            the header copy below. */}
+        {isOrg && (
+          <Button
+            onClick={() => setAddProviderOpen(true)}
+            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+          >
+            <Plus className="size-4" aria-hidden />
+            Add provider
+          </Button>
+        )}
+        {scope === "bu" && (
+          <Button
+            onClick={() => setAddKeyOpen(true)}
+            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
+          >
+            <Plus className="size-4" aria-hidden />
+            Add key
+          </Button>
+        )}
       </header>
 
       {/* The estate before the inventory: how many models exist, how far they
@@ -404,23 +504,36 @@ export default function ModelProvidersPage() {
         </p>
       )}
 
-      {providers.length === 0 ? (
+      {/* Connection-seeded for every scope. For Org Admin this fires until at
+          least one provider has been added (AddProviderDialog) — the NORMAL
+          starting state for a brand new tenant. BU scope also carries a tile
+          for every provider grant even before it's keyed (see providerGroups
+          above), so this only fires for a BU with zero provider grants at
+          all — nothing to click "Add key" on yet, hence no button here for
+          it either. Project scope has no button here either — see the
+          header comment above. */}
+      {providerGroups.length === 0 ? (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
             {isOrg
-              ? "No model provider configured yet. Agent runs are blocked until an admin adds and verifies one."
-              : scopedUnits.length === 1
-                ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
-                : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
+              ? "No model provider added yet. Add one to grant it to a business unit and curate its models."
+              : scope === "bu"
+                ? scopedUnits.length === 1
+                  ? `Your Organization Admin hasn't granted ${scopedUnits[0]!.name} a provider yet.`
+                  : `Your Organization Admin hasn't granted your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} a provider yet.`
+                : scopedUnits.length === 1
+                  ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
+                  : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
           </p>
-          <Button
-            onClick={() => setAddOpen(true)}
-            disabled={effectiveCatalog.length === 0}
-            className="from-brand-gradient-from to-brand-gradient-to mt-5 bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
-          >
-            <Plus className="size-4" aria-hidden />
-            Add provider
-          </Button>
+          {isOrg && (
+            <Button
+              onClick={() => setAddProviderOpen(true)}
+              className="from-brand-gradient-from to-brand-gradient-to mt-5 bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
+            >
+              <Plus className="size-4" aria-hidden />
+              Add provider
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -468,6 +581,13 @@ export default function ModelProvidersPage() {
                   kind={kind}
                   connections={group}
                   spendUsd={spendQ.data ? (spendByProvider.get(kind) ?? 0) : null}
+                  isOrg={isOrg}
+                  grantedUnitIds={
+                    providerGrantsQ.data?.find((g) => g.provider === kind)?.businessUnitIds ?? []
+                  }
+                  grantableWorkspaces={grantUnits}
+                  onToggleGrant={(workspaceId) => toggleProviderGrant(kind, workspaceId)}
+                  catalog={catalog}
                 />
               ))}
             </div>
@@ -475,24 +595,38 @@ export default function ModelProvidersPage() {
         </div>
       )}
 
-      <AddModelDialog
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        catalog={effectiveCatalog}
-        catalogLoading={catalogQ.isLoading || (!isOrg && allowedQueries.some((q) => q.isLoading))}
-        targetUnits={isOrg ? null : scopedUnits}
-        allowedByUnit={allowedByUnit}
-        fullCatalog={catalog}
-        needsApproval={needsApproval}
-        grantableWorkspaces={isOrg ? grantableWorkspaces : null}
-        onAdded={() => {
-          invalidateProviders();
-          // Org-wide onboarding writes grants too, and every unit's view of
-          // what it may use is derived from those.
-          queryClient.invalidateQueries({ queryKey: ["model"] });
-        }}
-      />
+      {scope === "bu" && (
+        <AddModelDialog
+          open={addKeyOpen}
+          onOpenChange={setAddKeyOpen}
+          // Unlocked: no tile or row decides the provider ahead of time
+          // any more, so the combobox is live — but it only ever offers
+          // what's actually granted, since `catalog` here is already
+          // narrowed by `filterCatalogToAllowed`, never the full catalogue.
+          catalog={effectiveCatalog}
+          catalogLoading={catalogQ.isLoading || allowedQueries.some((q) => q.isLoading)}
+          targetUnits={scopedUnits}
+          allowedByUnit={allowedByUnit}
+          fullCatalog={catalog}
+          needsApproval={false}
+          grantableWorkspaces={null}
+          initialProvider={null}
+          mode="bu-add-key"
+          onAdded={() => {
+            invalidateProviders();
+            queryClient.invalidateQueries({ queryKey: ["model"] });
+          }}
+        />
+      )}
 
+      {isOrg && (
+        <AddProviderDialog
+          open={addProviderOpen}
+          onOpenChange={setAddProviderOpen}
+          catalog={catalog}
+          existingProviderKinds={providerGroups.map(([kind]) => kind)}
+        />
+      )}
     </div>
   );
 }
@@ -518,43 +652,99 @@ export default function ModelProvidersPage() {
  * Card. A div with an onClick is invisible to a keyboard and to a screen
  * reader's link list, and cannot be middle-clicked or opened in a new tab,
  * which is exactly what people do with a grid of things to compare.
+ *
+ * FOR AN ORG ADMIN THE CARD IS NOT A DOOR. There is no per-provider detail
+ * screen for them to fall into — that screen is about a single subscription's
+ * key, and the Org Admin's flow here is keyless entirely (see spec §2
+ * amendment 5). So the card carries its own two controls directly: the
+ * `UnitAccessPicker` grants a business unit reach to the provider at all, and
+ * the title itself opens the model-curation dialog, which decides which of
+ * that provider's models a granted unit may actually use.
  */
 function ProviderCard({
   kind,
   connections,
   spendUsd,
+  isOrg,
+  grantedUnitIds,
+  grantableWorkspaces,
+  onToggleGrant,
+  catalog,
 }: {
   kind: string;
-  /** Every subscription onboarded for this provider — at least one. */
+  /** Every subscription onboarded for this provider — at least one, since
+   *  the grid is connection-seeded for every scope. */
   connections: ModelProvider[];
   /** This month's spend for the provider KIND, or null while it loads. */
   spendUsd: number | null;
+  /** Org Admin view: renders the grant-toggle and model-curation controls
+   *  instead of the detail-screen link. */
+  isOrg: boolean;
+  /** Business units currently granted this provider (Org Admin only). */
+  grantedUnitIds: string[];
+  /** Every grantable business unit — Org Admin only. */
+  grantableWorkspaces: { id: string; name: string }[];
+  /** Toggles ONE business unit's grant for this provider. */
+  onToggleGrant: (workspaceId: string) => void;
+  /** The full catalogue, for the model-curation dialog's provider models —
+   *  Org Admin only, unused otherwise. */
+  catalog: CatalogProvider[];
 }) {
   const label = providerLabel(kind);
+  const [modelsOpen, setModelsOpen] = React.useState(false);
 
   /**
-   * Models across EVERY subscription, de-duplicated.
+   * For Org Admin: the CATALOGUE's total for this provider — how many models
+   * it offers, period. This is the figure that's actually consistent and
+   * meaningful at this level: a connection's own enabled-offerings count is
+   * just an accident of when/how it was registered (a keyless registration
+   * has zero, an old one auto-seeded with the whole catalogue has all of
+   * them), which is why the SAME provider could read "0 models" one day and
+   * "55 models" another with nothing about the vendor having changed. Org
+   * Admin's question here is "how big is this vendor", not "how many models
+   * does whichever connection happens to exist right now serve".
    *
-   * A model can appear on two keys; counting it twice would claim the provider
-   * offers more models than it does — the same double-count the spend figure
-   * avoids by being keyed on the provider rather than the connection.
+   * For BU/Project: unchanged — models across EVERY subscription, de-
+   * duplicated (a model can appear on two keys; counting it twice would
+   * claim the provider offers more models than it does, the same double-
+   * count the spend figure avoids by being keyed on the provider rather than
+   * the connection). This figure IS meaningful at that level: it's asking
+   * "how many models can we actually run", which is exactly what's keyed.
    */
-  const modelCount = new Set(
-    connections.flatMap((c) => c.offerings.filter((o) => o.enabled).map((o) => o.model_id)),
-  ).size;
+  const modelCount = isOrg
+    ? (catalog.find((c) => c.provider === kind)?.models.length ?? 0)
+    : new Set(connections.flatMap((c) => c.offerings.filter((o) => o.enabled).map((o) => o.model_id)))
+        .size;
 
   return (
     <Card className="border-line-soft bg-panel-elevated focus-within:ring-ring relative flex flex-row items-center gap-3 px-4 py-3.5 shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow focus-within:ring-2 hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
       <ProviderGlyph kind={kind} label={label} />
       <div className="min-w-0 flex-1">
-        <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
-          <Link
-            href={`/admin/models/${encodeURIComponent(kind)}`}
-            className="block truncate rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
-          >
-            {label}
-          </Link>
-        </h3>
+        {isOrg ? (
+          <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
+            <button
+              type="button"
+              onClick={() => setModelsOpen(true)}
+              title="Curate which models of this provider a granted business unit may use"
+              className="hover:text-brand-gradient-from flex min-w-0 items-center gap-1 rounded-sm text-left transition-colors focus-visible:outline-none"
+            >
+              <span className="truncate">{label}</span>
+              <SlidersHorizontal
+                className="text-muted-foreground size-3 shrink-0"
+                aria-hidden
+              />
+            </button>
+          </h3>
+        ) : (
+          <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
+            <Link
+              href={`/admin/models/${encodeURIComponent(kind)}`}
+              className="block truncate rounded-sm after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+            >
+              {label}
+            </Link>
+          </h3>
+        )}
         <p className="text-muted-foreground mt-0.5 font-mono text-[11.5px] tabular-nums">
           {modelCount} {modelCount === 1 ? "model" : "models"}
           {typeof spendUsd === "number" && (
@@ -572,7 +762,26 @@ function ProviderCard({
           )}
         </p>
       </div>
-      <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
+      {isOrg ? (
+        <UnitAccessPicker
+          units={grantableWorkspaces}
+          selected={grantedUnitIds}
+          onToggle={onToggleGrant}
+        />
+      ) : (
+        <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
+      )}
+
+      {isOrg && (
+        <ProviderModelCurationDialog
+          open={modelsOpen}
+          onOpenChange={setModelsOpen}
+          kind={kind}
+          grantedUnitIds={grantedUnitIds}
+          units={grantableWorkspaces}
+          catalog={catalog}
+        />
+      )}
     </Card>
   );
 }

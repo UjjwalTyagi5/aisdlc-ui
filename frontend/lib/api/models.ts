@@ -8,7 +8,9 @@ import {
   ModelGrantMatrix,
   ModelOptions,
   ModelProvider,
+  ModelProviderGrant,
   OrgModelGrant,
+  ProbeResult,
   ProjectModelSelection,
   VerifyResult,
 } from "@/lib/schemas/model";
@@ -106,6 +108,21 @@ export const verifyModelProvider = (id: string) =>
     schema: VerifyResult,
   });
 
+/**
+ * Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+ * Task 10). Runs the same 1-token live probe as `verifyModelProvider`, but before
+ * any `model_providers` row exists, so nothing here is created, read or written.
+ * Lets Save stay disabled until the key it's about to persist is known-good,
+ * rather than only learning that after the row (and its secret) are committed.
+ */
+export const probeModelProvider = (body: {
+  provider: string;
+  api_key: string;
+  api_base?: string;
+  /** The model to probe with — normally the first one chosen in the dialog. */
+  model?: string;
+}) => api("/model/providers/probe", { method: "POST", body, schema: ProbeResult });
+
 export const updateModelProvider = (
   id: string,
   body: {
@@ -148,3 +165,42 @@ export const getModelOptions = (projectId?: string) =>
  */
 export const getModelGrantMatrix = () =>
   api("/model/grant-matrix", { schema: ModelGrantMatrix });
+
+/**
+ * Which business units may use which provider — the Org Admin's grant list.
+ * Distinct from `getOrgModelGrants`: that one governs which MODELS enter the
+ * catalogue; this one governs which units may create their own connection to
+ * a PROVIDER at all.
+ */
+export const listModelProviderGrants = () =>
+  api("/model/providers/grants", { schema: z.array(ModelProviderGrant) });
+
+/** Replace one business unit's full provider-grant set. Org Admin only. */
+export const setModelProviderGrants = (workspaceId: string, providers: string[]) =>
+  api("/model/providers/grants", {
+    method: "PUT",
+    query: { workspaceId },
+    body: { providers },
+    schema: z.array(ModelProviderGrant),
+  });
+
+/** BU Admin pushes an already-added key onto one of their projects. */
+export const assignProviderToProject = (providerId: string, projectId: string) =>
+  api(`/model/providers/${encodeURIComponent(providerId)}/assign`, {
+    method: "POST",
+    body: { projectId },
+  });
+
+/** Grant one business unit reach to a provider (Org Admin only). */
+export const grantModelProvider = (provider: string, workspaceId: string) =>
+  api("/integrations/access", {
+    method: "POST",
+    query: { kind: "model_provider", id: provider, workspaceId },
+  });
+
+/** Revoke a business unit's reach to a provider entirely (Org Admin only). */
+export const revokeModelProvider = (provider: string, workspaceId: string) =>
+  api("/integrations/access", {
+    method: "DELETE",
+    query: { kind: "model_provider", id: provider, workspaceId, level: "unit" },
+  });
