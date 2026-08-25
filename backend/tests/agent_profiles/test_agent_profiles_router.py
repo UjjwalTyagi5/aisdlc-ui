@@ -7,12 +7,17 @@ testable without Postgres, RLS, or a live app. Route wiring is asserted structur
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
 
+from process_api import app
+from shared.db import get_db_session_for_tenant
 from shared.routers import agent_profiles as ap
 
 
@@ -394,3 +399,110 @@ def test_pipeline_order_matches_registry_keys():
     from config.agent_registry import AGENT_REGISTRY
     assert set(ap.PIPELINE_ORDER) == set(AGENT_REGISTRY.keys())
     assert len(ap.PIPELINE_ORDER) == 8
+
+
+# ── create_draft / preview: scope-aware write authorization (route-level) ──────────
+
+async def _bind_role(tenant_id: str, user_id: str, role: str, scope_kind: str, scope_id: str | None) -> None:
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(text(
+            "INSERT INTO users (id, email, password_hash, tenant_id, active) "
+            "VALUES (:i, :e, 'x', CAST(:t AS uuid), true) ON CONFLICT (id) DO NOTHING"
+        ), {"i": user_id, "e": f"{user_id}@example.com", "t": tenant_id})
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, user_id, scope_kind, scope_id, role_name, tenant_id) "
+            "VALUES (gen_random_uuid(), :u, :sk, CAST(:si AS uuid), :r, CAST(:t AS uuid))"
+        ), {"u": user_id, "sk": scope_kind, "si": scope_id, "r": role, "t": tenant_id})
+
+
+@pytest.mark.asyncio
+async def test_create_draft_user_scope_own_id_succeeds(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", project_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-profiles/draft",
+            json={"agent_id": "requirements", "scope": "user", "scope_id": user_id, "prompt_prepend": "hi"},
+            headers=headers,
+        )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_create_draft_user_scope_someone_elses_id_403s(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", project_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-profiles/draft",
+            json={"agent_id": "requirements", "scope": "user", "scope_id": str(uuid.uuid4()), "prompt_prepend": "hi"},
+            headers=headers,
+        )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_draft_bu_admin_denied_user_scope(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "workspace:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-profiles/draft",
+            json={"agent_id": "requirements", "scope": "user", "scope_id": user_id, "prompt_prepend": "hi"},
+            headers=headers,
+        )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_draft_project_scope_unchanged_developer_allowed(mint_token):
+    # Regression guard: today's exact behavior for a non-user scope must survive
+    # the route-level -> in-body move unchanged.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", project_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "skill:edit"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-profiles/draft",
+            json={"agent_id": "requirements", "scope": "project", "scope_id": project_id, "prompt_prepend": "hi"},
+            headers=headers,
+        )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_create_draft_project_scope_unchanged_contributor_denied(mint_token):
+    # contributor never held skill:edit before this plan; must still be denied.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "contributor", "business_unit", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-profiles/draft",
+            json={"agent_id": "requirements", "scope": "project", "scope_id": project_id, "prompt_prepend": "hi"},
+            headers=headers,
+        )
+    assert resp.status_code == 403

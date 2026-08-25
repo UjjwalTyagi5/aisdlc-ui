@@ -431,18 +431,22 @@ async def get_versions(
     return {"versions": [_version_dict(r) for r in rows]}
 
 
-@agent_profiles_router.post(
-    "/draft",
-    dependencies=[Depends(require_permission("skill:edit"))],
-)
+@agent_profiles_router.post("/draft")
 async def create_draft(
     body: DraftIn,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415 - avoids an import cycle, matches propose()'s existing pattern
+
     tenant_id = _tenant_id(request)
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
+    role = await effective_platform_role(db, request)
+    assert_can_write_agent_scope(
+        getattr(request.state, "permissions", []) or [], role,
+        body.scope, body.scope_id, _user_id(request), action="draft",
+    )
 
     violations = lint_profile_fields(
         body.prompt_prepend, body.prompt_append, body.output_contract_extra
@@ -646,18 +650,22 @@ async def propose(
         )
 
 
-@agent_profiles_router.post(
-    "/preview",
-    dependencies=[Depends(require_permission("skill:edit"))],
-)
+@agent_profiles_router.post("/preview")
 async def preview(
     body: DraftIn,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
     _tenant_id(request)
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
+    role = await effective_platform_role(db, request)
+    assert_can_write_agent_scope(
+        getattr(request.state, "permissions", []) or [], role,
+        body.scope, body.scope_id, _user_id(request), action="draft",
+    )
 
     # Active layers from every ancestor tier the draft would stack on. `DraftIn`
     # doesn't carry workspace_id/project_id (draft-create genuinely doesn't need
