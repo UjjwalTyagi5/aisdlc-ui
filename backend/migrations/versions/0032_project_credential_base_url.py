@@ -15,14 +15,17 @@ encoding a structure into the one slot reserved for the secret itself.
 Nullable: rows written before this column existed carry no URL and fall back to
 the tenant-wide chain exactly as they did, rather than failing to load.
 
-Revision ID: 0031_project_credential_base_url
-Revises: 0030_credential_label
+Revision ID: 0032_project_credential_base_url
+Revises: 0031_merge_heads_5
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0031_project_credential_base_url"
-down_revision = "0030_credential_label"
+revision = "0032_project_credential_base_url"
+# 0031_merge_heads_5, NOT 0030_credential_label: main merged 0030 with the
+# model-provider branch while this work was in progress, so hanging off 0030
+# leaves two alembic heads and `upgrade head` refuses to run.
+down_revision = "0031_merge_heads_5"
 branch_labels = None
 depends_on = None
 

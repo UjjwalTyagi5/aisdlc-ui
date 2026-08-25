@@ -1,6 +1,6 @@
 """Move an integration's base_url off the personal credential onto the project.
 
-WHY IT MOVED. Migration 0031 put `base_url` on `project_integration_credentials`,
+WHY IT MOVED. Migration 0032 put `base_url` on `project_integration_credentials`,
 which is keyed on the OWNER — so every project member typed their own site URL,
 and any contributor could point the project's Jira, Confluence, SonarQube or
 Azure DevOps at any host they liked. The organization decided *whether* a project
@@ -27,15 +27,15 @@ already set a URL keeps it, taking the most recently updated one where members
 disagreed (they had no way to coordinate, so the freshest is the best guess and
 an admin can correct it).
 
-Revision ID: 0032_project_integration_config
-Revises: 0031_project_credential_base_url
+Revision ID: 0033_project_integration_config
+Revises: 0032_project_credential_base_url
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "0032_project_integration_config"
-down_revision = "0031_project_credential_base_url"
+revision = "0033_project_integration_config"
+down_revision = "0032_project_credential_base_url"
 branch_labels = None
 depends_on = None
 
