@@ -144,6 +144,19 @@ class SlackConnector(BaseConnector):
                 "tenant_id is required for SlackConnector.auth_adapter() — "
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
+        # A project's own bot token wins over the tenant-wide one.
+        #
+        # WORTH KNOWING WHAT THIS TOKEN IS. Unlike Jira's or GitHub's, a Slack
+        # bot token identifies an APP in a workspace, not a person — two members
+        # of a project would paste the same value rather than their own. It is
+        # stored per-member anyway because that is where this platform keeps
+        # secrets (project_integration_config holds URLs, never credentials), and
+        # a shared value stored twice is harmless. What it is NOT is per-person
+        # attribution: Slack will show the app as the author whoever configured it.
+        override = await self._resolve_credential_override(tenant_id, "slack")
+        if override and override.token:
+            return {"bot_token": override.token}
+
         bot_token = await _keyvault.load_secret("slack-bot-token", tenant_id=tenant_id)
         if not bot_token:
             bot_token = await _keyvault.load_secret("slack-bot-token")

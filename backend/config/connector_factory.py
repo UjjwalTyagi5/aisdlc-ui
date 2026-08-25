@@ -19,6 +19,10 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     "azure_devops":  "config.connectors.azure_devops.AzureDevOpsConnector",
     "jira":          "config.connectors.jira.JiraConnector",
     "github_issues": "config.connectors.github_issues.GitHubIssuesConnector",
+    # The catalogue tile is called "github" (frontend/lib/schemas/enums.ts) while
+    # the connector is named for what it drives. Without this alias every lookup
+    # for the kind the UI actually stores raised ConnectorNotAvailableError.
+    "github":        "config.connectors.github_issues.GitHubIssuesConnector",
     "azure_repos":   "config.connectors.azure_repos.AzureReposConnector",
     "slack":         "config.connectors.slack.SlackConnector",
     "github_actions": "config.connectors.github_actions.GitHubActionsConnector",

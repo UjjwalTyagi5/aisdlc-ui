@@ -30,6 +30,33 @@ import type {
  */
 const PROJECT_CREDENTIAL_KINDS = new Set(["jira", "github", "azure_devops", "github_actions"]);
 
+/**
+ * WHICH instance each project's integration talks to — mirrors the backend's
+ * `project_integration_config` (migration 0032).
+ *
+ * Deliberately NOT on the credential: two projects may point at different
+ * instances, but where an identity gets sent is the project's decision, not
+ * each member's. Keyed `${projectId}:${kind}:${targetId}`.
+ */
+const INSTANCES = new Map<string, string>([
+  ["payments-api:connector:jira", "https://payments.atlassian.net"],
+]);
+
+const instanceKey = (projectId: string, kind: string, targetId: string) =>
+  `${projectId}:${kind}:${targetId}`;
+
+/** Admin-only in the real API; the mock has no roles, so it just records it. */
+export function setProjectIntegrationInstance(
+  projectId: string,
+  input: { kind: string; targetId: string; baseUrl?: string | null },
+): { kind: string; targetId: string; baseUrl: string | null } {
+  const key = instanceKey(projectId, input.kind, input.targetId);
+  const url = (input.baseUrl ?? "").trim();
+  if (url) INSTANCES.set(key, url);
+  else INSTANCES.delete(key);
+  return { kind: input.kind, targetId: input.targetId, baseUrl: url || null };
+}
+
 let CREDENTIALS: ProjectIntegrationCredential[] = [
   {
     id: "pic_1",
@@ -195,6 +222,11 @@ export function listProjectIntegrations(
       needsProjectCredential: PROJECT_CREDENTIAL_KINDS.has(kind),
       credential:
         credentials.find((c) => c.kind === "connector" && c.targetId === kind) ?? null,
+      baseUrl: INSTANCES.get(instanceKey(projectId, "connector", kind)) ?? null,
+      // The mock has no roles to check, so it grants the authority rather than
+      // withholding it — a fixture that hid the control would make the admin
+      // path untestable, and the real gate is server-side regardless.
+      canManageInstance: true,
     });
   }
 
@@ -221,6 +253,8 @@ export function listProjectIntegrations(
       // configuration; one that declares neither runs on the connection alone.
       needsProjectCredential: server.has_env_vars || server.has_headers,
       credential: credentials.find((c) => c.kind === "mcp" && c.targetId === id) ?? null,
+      baseUrl: INSTANCES.get(instanceKey(projectId, "mcp", id)) ?? null,
+      canManageInstance: true,
     });
   }
 
