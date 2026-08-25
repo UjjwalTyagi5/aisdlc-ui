@@ -169,7 +169,7 @@ export function ModelAvailabilityCard({
           <p className="text-muted-foreground mt-3 text-[11.5px]">
             {audience === "bu"
               ? "Models keyed centrally need nothing from you. For the rest, add a provider below with your own credentials."
-              : `Models keyed centrally need nothing from you. For the rest, add a provider below — your ${BUSINESS_UNIT_LABEL} Admin approves it before it goes live.`}
+              : `Models keyed centrally need nothing from you. For the rest, ask your ${BUSINESS_UNIT_LABEL} Admin to assign this project a key.`}
           </p>
         )}
 

@@ -243,6 +243,12 @@ export const ModelProvider = z.object({
    *  unit, onboarded by its BU Admin (active immediately) or a Project Admin
    *  within it (pending_approval until the BU Admin signs off). */
   workspaceId: z.string().nullable().default(null),
+  /** set = this exact project's own key (PRD §371/§1640), distinct from BU
+   *  scoping — a project-scoped row also carries its own workspaceId (its
+   *  project's), so this is the only field that tells the two apart. Callers
+   *  that mean to show only genuinely BU-scoped keys (e.g. the BU Admin's own
+   *  credentials list) must exclude any row where this is set. */
+  projectId: z.string().nullable().default(null),
   approvalStatus: ModelApprovalStatus.default("active"),
   approvalDecidedBy: z.string().nullable().default(null),
   approvalDecidedAt: z.string().nullable().default(null),

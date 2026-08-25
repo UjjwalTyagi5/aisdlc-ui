@@ -113,7 +113,6 @@ export default function ModelProvidersPage() {
   const scope: "org" | "bu" | "project" | null =
     role === "org_admin" ? "org" : role === "bu_admin" ? "bu" : role === "project_admin" ? "project" : null;
   const isOrg = scope === "org";
-  const needsApproval = scope === "project";
 
   // Which units this page speaks for. There is no "active" one to inherit —
   // reads union across every unit the viewer is bound to, so someone in two
@@ -256,14 +255,17 @@ export default function ModelProvidersPage() {
   // now live on the provider's own screen, which is the only place that also
   // shows what each key serves.
   //
-  // `addOpen` is the Project Admin's plain "Add provider" (provider picker,
-  // pending approval) — the one call site this dialog still opens with no
-  // provider preset. `addKeyProvider` is the BU Admin's "Add key" (spec §5,
-  // Task 10): set to a provider slug by clicking THAT provider's own
-  // granted-but-unkeyed tile, never by a page-level button — there is no
-  // provider picker in that flow at all, so there is nothing for a bare
-  // button with no tile behind it to open.
-  const [addOpen, setAddOpen] = React.useState(false);
+  // `addKeyProvider` is the BU Admin's "Add key" (spec §5, Task 10): set to a
+  // provider slug by clicking THAT provider's own granted-but-unkeyed tile,
+  // never by a page-level button — there is no provider picker in that flow
+  // at all, so there is nothing for a bare button with no tile behind it to
+  // open. There used to also be a Project Admin page-level "Add provider"
+  // button opening this same dialog with no provider preset (`addOpen`) —
+  // removed: it opened a real credential form whose Save always 403s
+  // server-side (POST /model/providers is BU-scoped-only), so the only thing
+  // it ever accomplished was collecting a real API key from a Project Admin
+  // right before throwing it away. Same self-service-browse-and-add pattern
+  // Task 13 already removed from project-model-selection-card.tsx.
   const [addKeyProvider, setAddKeyProvider] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
 
@@ -456,7 +458,7 @@ export default function ModelProvidersPage() {
     project: {
       eyebrow: "Configure",
       title: "Models",
-      body: `The models your business unit was granted. Onboard your own credentials for any that need them — new connections need your ${BUSINESS_UNIT_LABEL} Admin's approval before they're usable.`,
+      body: `The models your ${BUSINESS_UNIT_LABEL.toLowerCase()} was granted, and which key serves each one. There's no self-service onboarding here — your ${BUSINESS_UNIT_LABEL} Admin assigns credentials to this project; you choose which of them it actually runs on.`,
     },
   };
   const copy = HEADER_COPY[scope];
@@ -481,22 +483,12 @@ export default function ModelProvidersPage() {
             provider to a business unit (per-card toggle below) and curate
             which models of it reach that unit; onboarding an actual key
             moved entirely to each business unit / project's own screen.
-            Project Admin keeps this page-level trigger (a provider picker,
-            pending BU Admin approval) — only the BU Admin's "Add key" moved
-            to a per-card action (spec §5, Task 10): its provider is always
-            already fixed by the tile clicked, so a bare page-level button
-            with no tile behind it would have nothing to open. */}
-        {scope === "project" && (
-          <Button
-            onClick={() => setAddOpen(true)}
-            disabled={effectiveCatalog.length === 0}
-            title={effectiveCatalog.length === 0 ? "No allowed models to onboard from yet" : undefined}
-            className="from-brand-gradient-from to-brand-gradient-to shrink-0 bg-gradient-to-br font-semibold text-white shadow-[0_6px_18px_-6px_oklch(0.6_0.2_35_/_0.65)] transition-shadow hover:shadow-[0_10px_26px_-8px_oklch(0.6_0.2_35_/_0.8)]"
-          >
-            <Plus className="size-4" aria-hidden />
-            Add provider
-          </Button>
-        )}
+            Project Admin has no page-level trigger here at all: there is no
+            working self-service onboarding route for them (see the header
+            copy below), only the BU Admin's per-card "Add key" (spec §5,
+            Task 10) — its provider is always already fixed by the tile
+            clicked, so a bare page-level button with no tile behind it would
+            have nothing to open. */}
       </header>
 
       {/* The estate before the inventory: how many models exist, how far they
@@ -549,8 +541,8 @@ export default function ModelProvidersPage() {
           above seeds a tile for every provider grant, even a totally
           unconnected one), so this now only fires for a BU with zero
           provider grants at all — nothing to click "Add key" on yet, hence
-          no button here for it either (contrast Project scope, whose plain
-          "Add provider" stays page-level). */}
+          no button here for it either. Project scope has no button here
+          either any more — see the header comment above. */}
       {providerGroups.length === 0 ? (
         <div className="border-line-soft bg-surface-1 rounded-xl border border-dashed px-6 py-10 text-center">
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
@@ -564,16 +556,6 @@ export default function ModelProvidersPage() {
                   ? `No model provider onboarded in ${scopedUnits[0]!.name} yet.`
                   : `No model provider onboarded in your ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()} yet.`}
           </p>
-          {scope === "project" && (
-            <Button
-              onClick={() => setAddOpen(true)}
-              disabled={effectiveCatalog.length === 0}
-              className="from-brand-gradient-from to-brand-gradient-to mt-5 bg-gradient-to-br font-semibold text-white shadow-[0_4px_12px_-4px_oklch(0.6_0.2_35_/_0.5)] transition-shadow hover:shadow-[0_8px_20px_-6px_oklch(0.6_0.2_35_/_0.65)]"
-            >
-              <Plus className="size-4" aria-hidden />
-              Add provider
-            </Button>
-          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -638,10 +620,9 @@ export default function ModelProvidersPage() {
       )}
 
       <AddModelDialog
-        open={addOpen || !!addKeyProvider}
+        open={!!addKeyProvider}
         onOpenChange={(v) => {
           if (!v) {
-            setAddOpen(false);
             setAddKeyProvider(null);
           }
         }}
@@ -650,7 +631,13 @@ export default function ModelProvidersPage() {
         targetUnits={isOrg ? null : scopedUnits}
         allowedByUnit={allowedByUnit}
         fullCatalog={catalog}
-        needsApproval={addKeyProvider ? false : needsApproval}
+        // The only remaining caller of this dialog on this page is the BU
+        // Admin's "Add key" (addKeyProvider, mode="bu-add-key"), which is
+        // never a pending-approval flow — the Project Admin's page-level
+        // "Add provider" that used to need this true is gone (it opened a
+        // credential form that always 403'd server-side; see the header
+        // comment above).
+        needsApproval={false}
         grantableWorkspaces={isOrg ? grantableWorkspaces : null}
         initialProvider={addKeyProvider}
         mode={addKeyProvider ? "bu-add-key" : "org"}

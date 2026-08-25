@@ -40,7 +40,9 @@ class ProjectKeyNotAllowedError(Exception):
 class ProjectOutsideUnitError(Exception):
     """assign_provider_to_project's target project belongs to a different Business
     Unit than the provider connection being pushed onto it (or the provider isn't
-    BU-scoped at all — an org-wide connection has no single unit to push from)."""
+    BU-scoped at all — an org-wide connection has no single unit to push from), or
+    the provider connection is itself project-scoped — one project's own private
+    key, never assignable to another project regardless of business unit."""
 
 
 def _grant_reaches(visibility: str, business_unit_ids: list[str], workspace_id: str) -> bool:
@@ -472,8 +474,12 @@ async def assign_provider_to_project(
     Ownership — does the caller actually administer the target project's Business Unit —
     is checked one layer up at the router (_require_scoped in model.py), matching every
     other BU/project route in this module (see module docstring). This function only
-    checks the one thing that check can't: that the PROVIDER named is actually scoped to
-    that SAME Business Unit, not just that the caller administers some unit or other.
+    checks the two things that check can't: that the PROVIDER named is actually
+    scoped to that SAME Business Unit (not just that the caller administers some unit
+    or other), and that it is not itself a project-scoped connection — a project's own
+    BYOK key (create_project_provider_route) carries its owning project's own
+    workspace_id, so without this second check it would pass the workspace-match check
+    for every sibling project in the same unit and could be pushed onto any of them.
     """
     if not mc._is_valid_uuid(provider_id):
         raise mc.ProviderNotFoundError(provider_id)
@@ -483,6 +489,19 @@ async def assign_provider_to_project(
         if row is None:
             raise mc.ProviderNotFoundError(provider_id)
         offerings = await mc._offerings_for(s, provider_id)
+
+    if row.project_id is not None:
+        # A project-scoped connection is one project's own private BYOK key
+        # (create_project_provider_route writes it with BOTH project_id AND that
+        # project's own workspace_id set — see that route's docstring). Without this
+        # check such a row would pass the workspace-match check below for EVERY
+        # sibling project in the same business unit, letting a BU Admin (or a Project
+        # Admin abusing this same route) push one project's private key onto another
+        # project. Reject it outright, independent of which project is being targeted
+        # — a project-scoped credential is never legitimately assignable via this path.
+        raise ProjectOutsideUnitError(
+            f"provider {provider_id!r} is a project's own key and cannot be assigned to another project"
+        )
 
     provider_workspace_id = str(row.workspace_id) if row.workspace_id else None
     project_workspace_id = await _project_workspace_id(tenant_id, project_id)

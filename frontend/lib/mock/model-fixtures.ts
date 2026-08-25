@@ -582,6 +582,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -604,6 +605,7 @@ const PROVIDERS: ModelProvider[] = [
     // Org-wide so the platform holds the key, but it only offers Opus — the
     // commercial terms that justify the expensive model sit on this contract.
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -627,6 +629,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -648,6 +651,7 @@ const PROVIDERS: ModelProvider[] = [
     // Lending keyed this themselves. Payments is granted gpt-5.1 too and
     // cannot run it — the inert state, made visible.
     workspaceId: "ws_lending",
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -672,6 +676,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 18 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -697,6 +702,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: null,
     created_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -720,6 +726,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: new Date(Date.now() - 8 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 11 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -743,6 +750,7 @@ const PROVIDERS: ModelProvider[] = [
     last_verified_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
     created_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
     workspaceId: null,
+    projectId: null,
     approvalStatus: "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,
@@ -851,6 +859,10 @@ export function createModelProvider(
     created_at: now,
     offerings,
     workspaceId: input.workspaceId,
+    // This mock creator only ever builds an org-wide or BU-scoped connection —
+    // CreateModelProviderInput above has no project_id input, so a project's
+    // own key is never constructed via this path.
+    projectId: null,
     approvalStatus: needsApproval ? "pending_approval" : "active",
     approvalDecidedBy: null,
     approvalDecidedAt: null,

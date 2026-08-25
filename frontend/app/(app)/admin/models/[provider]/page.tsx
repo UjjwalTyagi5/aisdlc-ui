@@ -196,12 +196,20 @@ function BuAdminProviderDetail({ providerKind }: { providerKind: string }) {
 
   /** Every connection serving this provider that the viewer may see — org-wide
    *  ones plus each of their own units'. De-duplicated: an org-wide key shows
-   *  up once per unit query above. */
+   *  up once per unit query above.
+   *
+   *  EXCLUDES project-scoped rows. `listModelProviders(workspaceId)` filters
+   *  only on `workspace_id IS NULL OR workspace_id = :w`, with no `project_id`
+   *  filter — so a project's own BYOK key (which carries its owning project's
+   *  workspace_id too, see `create_project_provider_route`) would otherwise
+   *  land here indistinguishable from a genuinely BU-scoped key, complete with
+   *  Assign/Edit/Delete controls a BU Admin has no business exercising on
+   *  another admin's project's private credential. */
   const credentials: ModelProvider[] = React.useMemo(() => {
     const byId = new Map<string, ModelProvider>();
     for (const q of unitProvidersQ) {
       for (const p of q.data ?? []) {
-        if (p.provider === providerKind) byId.set(p.id, p);
+        if (p.provider === providerKind && !p.projectId) byId.set(p.id, p);
       }
     }
     return [...byId.values()];

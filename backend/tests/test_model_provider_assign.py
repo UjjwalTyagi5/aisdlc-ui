@@ -255,6 +255,85 @@ async def test_assign_rejects_a_provider_from_a_different_business_unit(mint_tok
     assert resp.status_code == 403, resp.text
 
 
+async def _seed_sibling_project(tenant_id: str, workspace_id: str, display_name: str = "Sibling") -> str:
+    """A second project in an ALREADY-seeded workspace — `_seed_org_workspace_project`
+    only ever creates one. Needed to prove a project-scoped connection can't be pushed
+    onto a sibling project that shares the same business unit."""
+    from shared.db import get_db_session_for_tenant
+
+    proj_id = uuid.uuid4()
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(
+            text(
+                "INSERT INTO projects (id, workspace_id, tenant_id, display_name, created_at, updated_at) "
+                "VALUES (:id, :ws_id, :t, :dn, now(), now())"
+            ),
+            {"id": str(proj_id), "ws_id": workspace_id, "t": tenant_id, "dn": display_name},
+        )
+    return str(proj_id)
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix round: F1 — a project's own BYOK key could be pushed onto a
+# SIBLING project in the same business unit. create_project_provider_route writes a
+# project-scoped model_providers row with BOTH project_id AND that project's own
+# workspace_id set, and assign_provider_to_project's workspace-match check alone
+# can't tell that apart from a genuinely BU-scoped connection — it passes for every
+# project in the unit. The fix rejects any already project-scoped provider outright.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_assign_rejects_a_project_scoped_provider_even_within_the_same_bu(mint_token):
+    """A project-scoped connection (project_id set) must never be assignable to a
+    DIFFERENT project via assign_provider_to_project, even when both projects share
+    the exact same business unit — the case the plain workspace-match check alone
+    cannot catch, since a project-scoped row carries its own project's workspace_id."""
+    import httpx
+    from process_api import app
+    from shared.authz.grant import grant_role
+    from shared.services import model_config as mc
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
+    proj_a_sibling = await _seed_sibling_project(tenant, ws_a, "Sibling in Unit A")
+
+    bu_admin = f"bu-admin-{uuid.uuid4()}"
+    await grant_role(bu_admin, ws_a, "bu_admin", tenant_id=tenant, scope_kind="business_unit")
+    bu_headers = _headers(mint_token, bu_admin, tenant, ["model:manage"])
+
+    # Seed proj_a's OWN connection exactly the way create_project_provider_route
+    # does: project_id set AND workspace_id set to that project's own business unit
+    # (mirrors test_project_model_keys.py's own seeding convention for this case).
+    own_provider = await mc.create_provider(
+        tenant, provider="anthropic", display_name="Proj A's own key",
+        api_key="sk-test-123", enabled_models=["claude-sonnet-4-6"],
+        created_by="project-admin", workspace_id=ws_a, project_id=proj_a,
+    )
+    provider_id = own_provider["id"]
+    assert own_provider["project_id"] == proj_a
+    assert own_provider["workspace_id"] == ws_a
+
+    # Service layer: the direct assertion against the error the fix adds.
+    with pytest.raises(mg.ProjectOutsideUnitError):
+        await mg.assign_provider_to_project(
+            tenant, provider_id=provider_id, project_id=proj_a_sibling, actor_id=bu_admin,
+        )
+
+    # HTTP layer: a BU Admin who legitimately administers BOTH projects (same unit,
+    # so _require_scoped's ownership gate alone would let this through) still gets
+    # refused when trying to push proj_a's own key onto its sibling.
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/model/providers/{provider_id}/assign",
+            json={"projectId": proj_a_sibling},
+            headers=bu_headers,
+        )
+    assert resp.status_code == 403, resp.text
+
+
 @pytest.mark.asyncio
 async def test_assign_requires_project_id(mint_token):
     import httpx
