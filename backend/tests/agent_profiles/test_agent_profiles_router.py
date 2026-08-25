@@ -506,3 +506,78 @@ async def test_create_draft_project_scope_unchanged_contributor_denied(mint_toke
             headers=headers,
         )
     assert resp.status_code == 403
+
+
+# ── publish / unpublish: scope-aware write authorization (route-level) ─────────────
+
+async def _create_draft_row(tenant_id: str, scope: str, scope_id: str | None) -> str:
+    """Insert a draft AgentProfile row directly (bypassing the route) and return its id."""
+    async with get_db_session_for_tenant(tenant_id) as s:
+        row_id = str(uuid.uuid4())
+        await s.execute(text(
+            "INSERT INTO agent_profiles "
+            "(id, tenant_id, agent_id, scope, scope_id, version, is_active, created_by) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), 'requirements', :sc, "
+            " CAST(:sid AS uuid), 1, false, 'tester')"
+        ), {"i": row_id, "t": tenant_id, "sc": scope, "sid": scope_id})
+        return row_id
+
+
+@pytest.mark.asyncio
+async def test_publish_user_scope_own_id_succeeds(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    draft_id = await _create_draft_row(tenant, "user", user_id)
+    await _bind_role(tenant, user_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/publish", headers=headers)
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_publish_user_scope_someone_elses_id_403s(mint_token):
+    tenant = str(uuid.uuid4())
+    owner_id = str(uuid.uuid4())
+    other_id = str(uuid.uuid4())
+    draft_id = await _create_draft_row(tenant, "user", owner_id)
+    await _bind_role(tenant, other_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=other_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/publish", headers=headers)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_publish_workspace_scope_unchanged_bu_admin_allowed(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    draft_id = await _create_draft_row(tenant, "workspace", ws_id)
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "workspace:manage"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/publish", headers=headers)
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_publish_workspace_scope_unchanged_developer_denied(mint_token):
+    # developer never held workspace:manage before this plan; must still be denied.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    draft_id = await _create_draft_row(tenant, "workspace", ws_id)
+    await _bind_role(tenant, user_id, "developer", "project", str(uuid.uuid4()))
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view", "skill:edit"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/publish", headers=headers)
+    assert resp.status_code == 403

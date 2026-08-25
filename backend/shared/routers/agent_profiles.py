@@ -478,17 +478,22 @@ async def create_draft(
     return _version_dict(row)
 
 
-@agent_profiles_router.post(
-    "/{profile_id}/publish",
-    dependencies=[Depends(require_permission("workspace:manage"))],
-)
+@agent_profiles_router.post("/{profile_id}/publish")
 async def publish(
     profile_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
+    role = await effective_platform_role(db, request)
+    assert_can_write_agent_scope(
+        getattr(request.state, "permissions", []) or [], role,
+        target.scope, str(target.scope_id) if target.scope_id else None,
+        _user_id(request), action="publish",
+    )
 
     siblings = list((await db.execute(
         select(AgentProfile).where(
@@ -519,17 +524,22 @@ async def publish(
     return _version_dict(target)
 
 
-@agent_profiles_router.post(
-    "/{profile_id}/unpublish",
-    dependencies=[Depends(require_permission("workspace:manage"))],
-)
+@agent_profiles_router.post("/{profile_id}/unpublish")
 async def unpublish(
     profile_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
+    role = await effective_platform_role(db, request)
+    assert_can_write_agent_scope(
+        getattr(request.state, "permissions", []) or [], role,
+        target.scope, str(target.scope_id) if target.scope_id else None,
+        _user_id(request), action="publish",
+    )
 
     target.is_active = False
     await db.flush()
