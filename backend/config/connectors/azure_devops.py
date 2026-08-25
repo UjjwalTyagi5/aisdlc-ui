@@ -13,6 +13,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from config.ado_ingestion import (
     add_comment_to_work_item,
     create_ado_project,
@@ -92,8 +94,16 @@ class AzureDevOpsConnector(BaseConnector):
         # member set for themselves — or the ad-hoc value Test Connection is
         # validating — wins over the tenant-wide PAT below.
         override = await self._resolve_credential_override(tid, "azure_devops")
-        if override:
-            return {"org_url": self._org_url, "pat": override}
+        if override and override.token:
+            # org_url comes from the override when the member supplied one.
+            # Unlike the other fields it CANNOT be resolved in the factory:
+            # _build_connector runs before project/owner context exists, so it
+            # only ever knows the tenant-wide URL. Resolving it here is what
+            # lets two projects in one tenant point at different organizations.
+            return {
+                "org_url": (override.base_url or self._org_url or "").rstrip("/"),
+                "pat": override.token,
+            }
 
         # Resolution order: tenant secret store (Key Vault in prod, Fernet-encrypted
         # DB in local dev — the path the Integrations "Add credentials" form writes
@@ -165,10 +175,53 @@ class AzureDevOpsConnector(BaseConnector):
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health_check(self) -> ConnectorHealth:
+        """Probe the credential, not just the organization.
+
+        MUST establish WHO the PAT authenticated as. This used to call
+        `list_projects()`, which an organization with public projects answers
+        200 for anonymously — so any PAT reported healthy. The identical bug was
+        confirmed live on Jira; see JiraConnector.health_check.
+
+        _apis/connectionData is Azure DevOps' "who am I". Unlike Jira and
+        Confluence it does NOT 401 an anonymous caller: it answers 200 and
+        describes them as the anonymous identity, so the status code is not the
+        answer — `authenticatedUser.id` is, and the all-zero GUID is Azure
+        DevOps' well-known id for "nobody signed in".
+        """
+        _ANONYMOUS_ID = "00000000-0000-0000-0000-000000000000"
         start = time.time()
         try:
-            await self.list_projects()
+            auth = await self.auth_adapter()
+            org_url = (auth.get("org_url") or "").rstrip("/")
+            if not org_url:
+                return ConnectorHealth(
+                    connector_name="azure_devops",
+                    status="unhealthy",
+                    latency_ms=(time.time() - start) * 1000,
+                    error="no_org_url",
+                )
+            async with httpx.AsyncClient(timeout=30.0, auth=("", auth.get("pat") or "")) as client:
+                # 7.1-PREVIEW.1, not 7.1. connectionData has never left preview,
+                # and Azure DevOps answers a released version number on it with
+                # HTTP 400 rather than ignoring it. The mistake hides well: an
+                # unauthenticated probe 302s to a sign-in page BEFORE the version
+                # is ever validated, so testing without a working PAT makes any
+                # version look correct.
+                resp = await client.get(
+                    f"{org_url}/_apis/connectionData?api-version=7.1-preview.1"
+                )
+                resp.raise_for_status()
+                data = resp.json()
             latency_ms = (time.time() - start) * 1000
+            user = (data or {}).get("authenticatedUser") or {}
+            if str(user.get("id", "")).lower() in ("", _ANONYMOUS_ID):
+                return ConnectorHealth(
+                    connector_name="azure_devops",
+                    status="unhealthy",
+                    latency_ms=latency_ms,
+                    # 200, but nobody was signed in — the PAT was not accepted.
+                    error="not_authenticated",
+                )
             return ConnectorHealth(
                 connector_name="azure_devops",
                 status="healthy",
@@ -176,11 +229,16 @@ class AzureDevOpsConnector(BaseConnector):
             )
         except Exception as exc:
             latency_ms = (time.time() - start) * 1000
+            # NEVER str(exc) — credential leakage risk. HTTP status is safe/diagnostic:
+            # 401/203 = bad PAT, 404 = wrong organization URL.
+            err = type(exc).__name__
+            if isinstance(exc, httpx.HTTPStatusError):
+                err = f"HTTP {exc.response.status_code}"
             return ConnectorHealth(
                 connector_name="azure_devops",
                 status="unhealthy",
                 latency_ms=latency_ms,
-                error=type(exc).__name__,
+                error=err,
             )
 
     # ── Audit ─────────────────────────────────────────────────────────────

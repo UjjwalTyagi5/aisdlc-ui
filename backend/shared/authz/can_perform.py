@@ -166,7 +166,7 @@ async def resolve_scope_chain(
 
 
 async def _permissions_at(
-    session: AsyncSession, user_id: str, chain: list[tuple[str, str]]
+    session: AsyncSession, user_id: str, chain: list[tuple[str, str]], tenant_id: str
 ) -> list[tuple[str, str, str, list[str]]]:
     """Active, unexpired assignments on the chain, with the permissions each carries.
 
@@ -222,7 +222,13 @@ async def _permissions_at(
     # the same way `resolve_permissions_for_user` does is what keeps a scoped check
     # from disagreeing with the token the caller is holding — a split that presents as
     # "works on the dashboard, denied on the project page".
-    by_role = await effective_by_role(session)
+    #
+    # tenant_id is passed explicitly rather than left to RLS alone: role_permission_overrides'
+    # tenant_isolation policy only narrows a SELECT when the querying role is actually
+    # subject to RLS. A superuser/table-owner connection (as local/dev commonly uses)
+    # bypasses RLS outright, and an unfiltered query then merges every tenant's overrides
+    # into one dict — a real cross-tenant permission leak, not just a test artifact.
+    by_role = await effective_by_role(session, tenant_id)
 
     grouped: dict[tuple[str, str, str], list[str]] = {}
     for r in rows:
@@ -347,7 +353,7 @@ async def explain_can_perform(
         # different one would confirm the resource exists to someone who cannot see it.
         return Decision(False, f"{resource_kind} not found in this tenant")
 
-    matches = await _permissions_at(session, user_id, chain)
+    matches = await _permissions_at(session, user_id, chain, tenant_id)
     if not matches:
         return Decision(
             False,

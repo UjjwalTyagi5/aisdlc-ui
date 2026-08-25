@@ -150,6 +150,20 @@ export const ModelGrantMatrix = z.object({
 export type ModelGrantMatrix = z.infer<typeof ModelGrantMatrix>;
 
 /**
+ * Which business units may use one provider — the Org Admin's per-provider
+ * grant list backing GET/PUT `/model/providers/grants`. Distinct from
+ * `OrgModelGrant`: that one governs which MODELS enter the catalogue and how
+ * far each reaches; this one governs which business units may create their
+ * own connection to a PROVIDER at all (the gate a BU-scoped provider
+ * creation checks before letting a BU Admin onboard a key).
+ */
+export const ModelProviderGrant = z.object({
+  provider: ModelProviderKind,
+  businessUnitIds: z.array(z.string()),
+});
+export type ModelProviderGrant = z.infer<typeof ModelProviderGrant>;
+
+/**
  * What one project actually uses, and where its options came from.
  *
  * The org grants say what a project *may* use; this says what it
@@ -229,6 +243,12 @@ export const ModelProvider = z.object({
    *  unit, onboarded by its BU Admin (active immediately) or a Project Admin
    *  within it (pending_approval until the BU Admin signs off). */
   workspaceId: z.string().nullable().default(null),
+  /** set = this exact project's own key (PRD §371/§1640), distinct from BU
+   *  scoping — a project-scoped row also carries its own workspaceId (its
+   *  project's), so this is the only field that tells the two apart. Callers
+   *  that mean to show only genuinely BU-scoped keys (e.g. the BU Admin's own
+   *  credentials list) must exclude any row where this is set. */
+  projectId: z.string().nullable().default(null),
   approvalStatus: ModelApprovalStatus.default("active"),
   approvalDecidedBy: z.string().nullable().default(null),
   approvalDecidedAt: z.string().nullable().default(null),
@@ -237,6 +257,10 @@ export const ModelProvider = z.object({
 export type ModelProvider = z.infer<typeof ModelProvider>;
 
 export const VerifyResult = z.object({ id: z.string(), status: ModelProviderStatus });
+
+/** Stateless pre-save credential check (BU Admin's "Test" button, spec §5) — no
+ *  provider row exists yet, so there's no `id` to carry, unlike `VerifyResult`. */
+export const ProbeResult = z.object({ status: ModelProviderStatus });
 
 export const ModelOption = z.object({
   /** Stable id of the exact provider connection + model. The unit of selection. */

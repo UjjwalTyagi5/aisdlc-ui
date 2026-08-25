@@ -273,6 +273,25 @@ class FigmaConnector(BaseConnector):
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
 
+        # ── A project member's own PAT, checked BEFORE the cache ──────────────
+        # And deliberately never written to it: `_auth_cache` is keyed by TENANT,
+        # while this credential belongs to one (project, owner). Caching it would
+        # hand one person's Figma token to every other caller in the tenant until
+        # the TTL expired — a cross-project credential leak, not a stale read.
+        #
+        # `account` carries the default file (a share URL or a bare key), the same
+        # field the org-level form calls "Default file".
+        override = await self._resolve_credential_override(tid, "figma")
+        if override and override.token:
+            return {
+                "token": override.token,
+                # Always "pat": a personal access token is what this form takes.
+                # OAuth is a tenant-level connection nobody types by hand.
+                "scheme": "pat",
+                "file_key": extract_file_key(override.account or "")
+                or (extract_file_key(self._org_url) if self._org_url else ""),
+            }
+
         cached = _auth_cache.get(tid)
         if cached is not None and cached[1] > time.time():
             auth = dict(cached[0])  # a copy — callers must not mutate the cache

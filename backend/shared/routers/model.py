@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import can_perform
+from shared.authz.connector_grants import granted_target_refs
 from shared.authz.dependency import require_any_permission, require_permission
+from shared.authz.read_scope import is_org_wide
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.services import model_config as mc
@@ -189,6 +192,18 @@ class CreateProviderIn(BaseModel):
     max_cost_per_call_usd: float | None = Field(default=None, ge=0, alias="maxCostPerCallUsd")
 
 
+class ProbeProviderIn(BaseModel):
+    """Same field names as `CreateProviderIn`'s credential fields — deliberately, so a
+    frontend caller can send the same shape it already builds for onboarding without a
+    separate mapping for this pre-save check."""
+
+    provider: str = Field(min_length=1, max_length=64)
+    api_key: str = Field(min_length=1, max_length=512)
+    api_base: str | None = Field(default=None, max_length=512)
+    # The model to probe with — normally whichever the caller picked first.
+    model: str | None = Field(default=None, max_length=200)
+
+
 class UpdateProviderIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -264,16 +279,50 @@ async def get_catalog() -> list[dict]:
 
 
 @model_router.get("/providers", response_model=list[ProviderOut])
-async def list_providers_route(request: Request, scope: str | None = None, workspaceId: str | None = None) -> list[ProviderOut]:
+async def list_providers_route(
+    request: Request, scope: str | None = None, workspaceId: str | None = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> list[ProviderOut]:
     ws = workspaceId or await _active_ws(request)
-    return [
-        _to_provider_out(d)
-        for d in await mc.list_providers(_tenant_id(request), workspace_id=ws, scope=scope)
-    ]
+    rows = await mc.list_providers(_tenant_id(request), workspace_id=ws, scope=scope)
+    if ws and scope != "all":
+        # mc.list_providers only filters by OWNERSHIP (org-wide-or-mine) — never by
+        # whether this business unit was actually granted the provider. An org-wide
+        # ("centrally keyed") connection used to show up for every unit unconditionally,
+        # which is exactly backwards from "the Org Admin decides which providers a unit
+        # may reach at all" (PUT /model/providers/grants). Org Admin's own scope="all"
+        # view stays unfiltered — they define the grants, they aren't subject to them.
+        granted = await granted_target_refs(db, tenant_id=_tenant_id(request), workspace_id=ws, kind="model_provider")
+        rows = [d for d in rows if d["provider"] in granted]
+    return [_to_provider_out(d) for d in rows]
 
 
 @model_router.post("/providers", response_model=ProviderOut, status_code=201)
-async def create_provider_route(request: Request, body: CreateProviderIn) -> ProviderOut:
+async def create_provider_route(
+    request: Request, body: CreateProviderIn, db: AsyncSession = Depends(get_db_session),
+) -> ProviderOut:
+    if body.workspace_id is not None:
+        # Ownership first, same order as every other resource-scoped route in this
+        # file (see get_bu_allowed_route above): a caller who doesn't administer this
+        # business unit at all should not learn anything further about it, including
+        # whether it holds a grant.
+        await _require_scoped(
+            db, request, permission="model:manage", resource_kind="business_unit", resource_id=body.workspace_id,
+        )
+        if not (body.api_key or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="api_key is required when adding a key to a business unit's provider.",
+            )
+        granted = await granted_target_refs(
+            db, tenant_id=_tenant_id(request), workspace_id=body.workspace_id, kind="model_provider",
+        )
+        if body.provider not in granted:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your organization has not granted this business unit access to {body.provider!r}.",
+            )
+
     # Accept either rich `models` (with pricing) or back-compat bare `enabled_models`.
     models: list[dict] = [m.model_dump() for m in body.models]
     if not models and body.enabled_models:
@@ -303,6 +352,52 @@ async def create_provider_route(request: Request, body: CreateProviderIn) -> Pro
         existing = await mg.get_org_grants(_tenant_id(request))
         await mg.set_org_grants(_tenant_id(request), existing + entries, created_by=_user_id(request))
     return _to_provider_out(d)
+
+
+@model_router.post("/providers/{provider_id}/assign")
+async def assign_provider_to_project_route(
+    request: Request, provider_id: str, body: dict, db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """A BU Admin pushes a provider connection they already created (Task 4's flow) onto
+    one of their own projects — populates that project's ProjectModelSelection.selected
+    (mg.assign_provider_to_project) so the project's own admin can later pick it as their
+    default/master key (Task 12)."""
+    project_id = body.get("projectId")
+    if not project_id:
+        raise HTTPException(status_code=422, detail="projectId is required")
+    # Ownership first, same order/precedent as every other resource-scoped route in this
+    # file: a caller who doesn't administer this project's business unit at all must not
+    # be told anything further, including whether the provider exists. 404 (not 403)
+    # matches shared/routers/projects.py:get_project's precedent for project routes.
+    await _require_scoped(
+        db, request, permission="model:manage", resource_kind="project", resource_id=project_id,
+        deny_status=404,
+    )
+    try:
+        selection = await mg.assign_provider_to_project(
+            _tenant_id(request), provider_id=provider_id, project_id=project_id,
+            actor_id=_user_id(request),
+        )
+    except mc.ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    except mg.ProjectOutsideUnitError:
+        raise HTTPException(status_code=403, detail="That project is not in your business unit.")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return _camel_selection(selection)
+
+
+@model_router.post("/providers/probe")
+async def probe_provider_route(body: ProbeProviderIn) -> dict:
+    """Stateless pre-save credential check — the BU Admin's "Test" button (spec §5,
+    Task 10). Unlike POST /providers + POST /providers/{id}/verify, nothing is created,
+    read or written for any tenant or business unit here, so no `_require_scoped` call
+    is needed beyond the router's flat `model:manage` floor: there is no resource yet
+    to scope the check against."""
+    try:
+        return await mc.probe_provider(body.provider, body.api_key, body.api_base, body.model)
+    except mc.InvalidModelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @model_router.post("/providers/{provider_id}/verify")
@@ -546,3 +641,81 @@ async def delete_project_provider_route(request: Request, provider_id: str, proj
         await mc.delete_provider(_tenant_id(request), provider_id)
     except mc.ProviderNotFoundError:
         raise HTTPException(status_code=404, detail="Provider not found")
+
+
+# ---------------------------------------------------------------------------
+# Model-provider grants (which Business Unit may USE which onboarded provider) —
+# same integration_grants rows Task 2's generic POST/DELETE /integrations/access
+# routes write (kind='model_provider'), through a purpose-built shape mirroring
+# list_connector_grants/set_connector_grants in integration_access.py. Unlike
+# connectors there is no whole-policy replace mode: the Org Admin's grant UI always
+# acts per business unit for providers, so PUT always takes a workspaceId.
+# ---------------------------------------------------------------------------
+
+@model_router.get("/providers/grants")
+async def list_model_provider_grants_route(request: Request, db: AsyncSession = Depends(get_db_session)) -> list[dict]:
+    """Which providers are granted to which business units, as {provider, businessUnitIds[]}."""
+    tenant_id = _tenant_id(request)
+    rows = (
+        await db.execute(
+            text(
+                "SELECT target_ref, workspace_id FROM integration_grants "
+                "WHERE tenant_id = CAST(:t AS uuid) AND kind = 'model_provider'"
+            ),
+            {"t": tenant_id},
+        )
+    ).fetchall()
+    by_provider: dict[str, list[str]] = {}
+    for target, ws in rows:
+        by_provider.setdefault(target, []).append(str(ws))
+    return [
+        {"provider": p, "businessUnitIds": sorted(v)}
+        for p, v in sorted(by_provider.items())
+    ]
+
+
+@model_router.put("/providers/grants")
+async def set_model_provider_grants_route(
+    request: Request, workspaceId: str, body: dict, db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    """Replace one business unit's whole model-provider grant set (delete-then-insert).
+
+    Org Admin only — a Business Unit Admin holds model:manage for configuring their
+    own unit's provider connections, but a unit that could grant itself use of a
+    provider has no grant (same rule as connectors; see integration_access.py's
+    _require_org_admin).
+    """
+    if not is_org_wide(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an Organization Admin decides which providers a business unit may use.",
+        )
+    tenant_id = _tenant_id(request)
+    actor = _user_id(request)
+    # Filtered against the presented catalog, matching set_connector_grants's own
+    # _CATALOG_KINDS filter (integration_access.py) — the grantable universe must be
+    # a real provider slug, not an arbitrary string a caller happens to send.
+    catalog = {p["provider"] for p in catalog_providers()}
+    providers = [
+        p for p in (body.get("providers") or [])
+        if isinstance(p, str) and p.strip() and p in catalog
+    ]
+
+    await db.execute(
+        text(
+            "DELETE FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND kind = 'model_provider' AND workspace_id = CAST(:w AS uuid)"
+        ),
+        {"t": tenant_id, "w": workspaceId},
+    )
+    for p in providers:
+        await db.execute(
+            text(
+                "INSERT INTO integration_grants "
+                "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), :by)"
+            ),
+            {"t": tenant_id, "r": p, "w": workspaceId, "by": actor},
+        )
+    await db.flush()
+    return await list_model_provider_grants_route(request, db=db)

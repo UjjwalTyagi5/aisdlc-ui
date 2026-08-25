@@ -212,6 +212,190 @@ async def test_a_secret_is_stored_but_never_returned_in_plaintext(org):
     assert resolved == "hunter2"
 
 
+@pytest.mark.asyncio
+async def test_the_instance_is_the_projects_and_the_identity_is_the_members(org):
+    """The two halves of a connection are stored apart because they are governed apart.
+
+    base_url says WHERE the project authenticates and lives on the project;
+    account + secret say WHO is authenticating and live on the member's own
+    credential. Resolving them returns one record, so a connector still sees a
+    whole credential.
+    """
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "jira", org["payments"])
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+
+    r = c.put(f"/projects/{org['project']}/integrations/instance", headers=headers,
+              json={"kind": "connector", "targetId": "jira",
+                    "baseUrl": "https://ana-team.atlassian.net"})
+    assert r.status_code == 200, r.text
+    assert r.json()["baseUrl"] == "https://ana-team.atlassian.net"
+
+    r = c.put(f"/projects/{org['project']}/integrations", headers=headers,
+              json={"kind": "connector", "targetId": "jira", "label": "Test bot",
+                    "account": "ana@abcbank.com", "secret": "hunter2"})
+    assert r.status_code == 200, r.text
+    assert "hunter2" not in r.text  # still write-only
+
+    from shared.authz.project_credential import resolve_project_credential
+    creds = await resolve_project_credential(
+        tenant_id=org["org"], project_id=org["project"], owner_id=admin,
+        kind="connector", target_id="jira",
+    )
+    assert creds is not None
+    assert creds.base_url == "https://ana-team.atlassian.net"   # from the project
+    assert creds.account == "ana@abcbank.com"                    # from the member
+    assert creds.token == "hunter2"
+
+    listed = c.get(f"/projects/{org['project']}/integrations", headers=headers).json()
+    jira = next(i for i in listed if i["id"] == "jira")
+    assert jira["baseUrl"] == "https://ana-team.atlassian.net"
+    assert jira["canManageInstance"] is True
+    # The URL is NOT part of the credential any more.
+    assert "baseUrl" not in jira["credential"]
+
+
+@pytest.mark.asyncio
+async def test_a_contributor_cannot_repoint_the_projects_integration(org):
+    """THE GOVERNANCE RULE. A member may say who they are; only someone who runs
+    the project may say where that identity is sent.
+
+    Left on the credential, any contributor could aim the project's Jira at a
+    host of their own choosing and the platform would authenticate and read
+    there — which is why base_url moved off it (migration 0032).
+    """
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "jira", org["payments"])
+    admin = await _user(org, "orgadmin")
+    dev = await _user(org, "developer")
+    dev_headers = _headers(dev, org["org"], ["connector:view", "artifact:view"])
+
+    c.put(f"/projects/{org['project']}/integrations/instance",
+          headers=_headers(admin, org["org"], ["admin:*"]),
+          json={"kind": "connector", "targetId": "jira",
+                "baseUrl": "https://sanctioned.atlassian.net"})
+
+    # The developer may save their OWN credential …
+    r = c.put(f"/projects/{org['project']}/integrations", headers=dev_headers,
+              json={"kind": "connector", "targetId": "jira", "label": "Dev bot",
+                    "account": "dev@abcbank.com", "secret": "devtoken"})
+    assert r.status_code == 200, r.text
+
+    # … but must not be able to move the project onto a host of their choosing.
+    #
+    # 404, not 403, and deliberately so: assert_can_administer_project refuses
+    # without confirming the project exists to someone who does not run it
+    # (shared/authz/project_scope.py). What matters here is that the write did
+    # not happen — asserted below, because a refusal that still mutated would
+    # pass a status-code check and fail the point of it.
+    r = c.put(f"/projects/{org['project']}/integrations/instance", headers=dev_headers,
+              json={"kind": "connector", "targetId": "jira",
+                    "baseUrl": "https://evil.atlassian.net"})
+    assert r.status_code in (403, 404), f"a contributor repointed the integration: {r.text}"
+
+    # And the connector still resolves the sanctioned host for THAT developer.
+    from shared.authz.project_credential import resolve_project_credential
+    creds = await resolve_project_credential(
+        tenant_id=org["org"], project_id=org["project"], owner_id=dev,
+        kind="connector", target_id="jira",
+    )
+    assert creds is not None
+    assert creds.base_url == "https://sanctioned.atlassian.net"
+    assert creds.token == "devtoken"
+
+    # The list tells them they may not change it, so the UI can say so.
+    listed = c.get(f"/projects/{org['project']}/integrations", headers=dev_headers).json()
+    jira = next(i for i in listed if i["id"] == "jira")
+    assert jira["baseUrl"] == "https://sanctioned.atlassian.net"
+    assert jira["canManageInstance"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_project_secret_still_returns_a_bare_token(org):
+    """The narrow wrapper keeps working for callers with nowhere to put a URL.
+
+    shared/services/mcp_registry.py folds this straight into an Authorization
+    header; widening its return type would have broken that silently.
+    """
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "jira", org["payments"])
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+    c.put(f"/projects/{org['project']}/integrations", headers=headers,
+          json={"kind": "connector", "targetId": "jira", "label": "Test bot",
+                "baseUrl": "https://ana-team.atlassian.net", "secret": "hunter2"})
+
+    from shared.authz.project_credential import resolve_project_secret
+    assert await resolve_project_secret(
+        tenant_id=org["org"], project_id=org["project"], owner_id=admin,
+        kind="connector", target_id="jira",
+    ) == "hunter2"
+
+
+@pytest.mark.asyncio
+async def test_a_connector_authenticates_at_the_projects_own_url(org, monkeypatch):
+    """THE POINT OF ALL THIS: with no org-wide configuration of any kind, a
+    connector still resolves a working URL — the one the member typed.
+
+    Every tenant-wide tier is emptied first (env default included), so the only
+    place the URL below can have come from is the project credential.
+    """
+    import config.connectors.sonarqube as _sq
+
+    monkeypatch.setattr(_sq, "SONARQUBE_URL", "")
+    monkeypatch.setattr(_sq, "SONARQUBE_TOKEN", "")
+
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "sonarqube", org["payments"])
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+    c.put(f"/projects/{org['project']}/integrations/instance", headers=headers,
+          json={"kind": "connector", "targetId": "sonarqube",
+                "baseUrl": "https://sonar.ledger.internal"})
+    c.put(f"/projects/{org['project']}/integrations", headers=headers,
+          json={"kind": "connector", "targetId": "sonarqube", "label": "Ledger scanner",
+                "secret": "squ_abc123"})
+
+    from config.connector_factory import get_connector_for_session
+
+    connector = await get_connector_for_session(
+        kind="sonarqube", tenant_id=org["org"], project_id=org["project"],
+        owner_id=admin, unrestricted=True,
+    )
+    auth = await connector.auth_adapter(org["org"])
+    assert auth["sonarqube_url"] == "https://sonar.ledger.internal"
+    assert auth["token"] == "squ_abc123"
+
+
+@pytest.mark.asyncio
+async def test_a_credential_without_a_url_still_works(org, monkeypatch):
+    """A row written before base_url existed carries only a token, and must keep
+    authenticating against the tenant-wide URL rather than against nothing."""
+    import config.connectors.sonarqube as _sq
+
+    monkeypatch.setattr(_sq, "SONARQUBE_URL", "https://sonar.tenant-wide.internal")
+    monkeypatch.setattr(_sq, "SONARQUBE_TOKEN", "")
+
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "sonarqube", org["payments"])
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+    c.put(f"/projects/{org['project']}/integrations", headers=headers,
+          json={"kind": "connector", "targetId": "sonarqube", "label": "Ledger scanner",
+                "secret": "squ_abc123"})
+
+    from config.connector_factory import get_connector_for_session
+
+    connector = await get_connector_for_session(
+        kind="sonarqube", tenant_id=org["org"], project_id=org["project"],
+        owner_id=admin, unrestricted=True,
+    )
+    auth = await connector.auth_adapter(org["org"])
+    assert auth["sonarqube_url"] == "https://sonar.tenant-wide.internal"
+    assert auth["token"] == "squ_abc123"
+
+
 # ── cross-BU loans ───────────────────────────────────────────────────────────
 
 async def _lend(org: dict, user_id: str) -> None:
@@ -336,3 +520,51 @@ async def test_a_unit_admin_cannot_edit_the_org_wide_role(org):
                 headers=_headers(bua, org["org"], ["artifact:view", "role:manage"]),
                 json={"name": "Hijacked", "permissions": ["admin:*"]})
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_contributor_cannot_aim_the_probe_at_their_own_host(org):
+    """The test endpoint must not become the hole the instance endpoint closed.
+
+    A contributor may send any baseUrl they like; the server has to ignore it and
+    probe the project's pinned instance instead, or "Test connection" would be a
+    way to make the platform authenticate against a host of their choosing.
+    """
+    c = TestClient(process_api.app)
+    await _grant_integration(org, "connector", "sonarqube", org["payments"])
+    admin = await _user(org, "orgadmin")
+    dev = await _user(org, "developer")
+
+    c.put(f"/projects/{org['project']}/integrations/instance",
+          headers=_headers(admin, org["org"], ["admin:*"]),
+          json={"kind": "connector", "targetId": "sonarqube",
+                "baseUrl": "https://sanctioned.example.com"})
+
+    from shared.routers import project_scoped as ps
+
+    seen: list = []
+
+    async def _spy(self, tenant_id: str = ""):  # noqa: ANN001
+        seen.append(getattr(self, "_credential_override_base_url", None))
+        raise RuntimeError("stop before any network call")
+
+    import config.connectors.sonarqube as sq
+    original = sq.SonarQubeConnector.health_check
+
+    async def _fake_health(self):  # noqa: ANN001
+        seen.append(getattr(self, "_credential_override_base_url", None))
+        raise RuntimeError("stop before any network call")
+
+    sq.SonarQubeConnector.health_check = _fake_health
+    try:
+        c.post(f"/projects/{org['project']}/integrations/test-connection",
+               headers=_headers(dev, org["org"], ["connector:view", "artifact:view"]),
+               json={"kind": "connector", "targetId": "sonarqube", "secret": "x",
+                     "baseUrl": "https://attacker.example.com"})
+    finally:
+        sq.SonarQubeConnector.health_check = original
+
+    assert seen, "the probe never ran"
+    assert seen[-1] == "https://sanctioned.example.com", (
+        f"a contributor redirected the probe to {seen[-1]!r}"
+    )

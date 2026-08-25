@@ -53,6 +53,31 @@ async def _seed_provider(tenant_id: str, models: list[str], workspace_id: str | 
     )
 
 
+async def _grant_provider(tenant_id: str, workspace_id: str, provider: str = "anthropic") -> None:
+    """Same integration_grants(kind='model_provider') row PUT /model/providers/grants
+    writes — get_bu_allowed now requires this in addition to an org_model_grants row
+    (see model_grants.py's coupling fix): a model only reaches a BU when its provider
+    is ALSO currently granted, not just curated. Every test below that expects a
+    positive get_bu_allowed/get_availability/set_bu_grants result needs this.
+
+    ON CONFLICT DO NOTHING: some callers (e.g. a test that re-runs the same setup
+    helper with a different `allow_project_key` value) legitimately grant the same
+    (tenant, provider, workspace) more than once — the real PUT route this mirrors
+    is a delete-then-insert (idempotent by construction); a bare INSERT here isn't,
+    and previously raised a duplicate-key IntegrityError on the second call."""
+    from shared.db import get_db_session_for_tenant
+
+    async with get_db_session_for_tenant(tenant_id) as s:
+        await s.execute(
+            text(
+                "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), 'admin1') "
+                "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO NOTHING"
+            ),
+            {"t": tenant_id, "r": provider, "w": workspace_id},
+        )
+
+
 @pytest.mark.asyncio
 async def test_global_grant_reaches_every_bu():
     from shared.services import model_grants as mg
@@ -61,6 +86,7 @@ async def test_global_grant_reaches_every_bu():
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
     offering_id = provider["offerings"][0]["id"]
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -80,6 +106,11 @@ async def test_specific_grant_reaches_only_named_bu():
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     ws_b, _ = await _seed_org_workspace_project(tenant, "Unit B")
     provider = await _seed_provider(tenant, ["claude-opus-4-8"])
+    # Both units hold the PROVIDER grant — this test is specifically about the
+    # MODEL-level specific/named-BU distinction, so the provider layer must not
+    # be what's excluding ws_b (that would pass for the wrong reason).
+    await _grant_provider(tenant, ws_a)
+    await _grant_provider(tenant, ws_b)
 
     await mg.set_org_grants(
         tenant,
@@ -117,6 +148,7 @@ async def test_project_using_defaults_inherits_bu_set_live():
     tenant = str(uuid.uuid4())
     ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -162,6 +194,7 @@ async def test_effective_project_offerings_scoped_once_a_grant_exists():
     ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6", "claude-opus-4-8"])
     offering_ids = {o["model_id"]: o["id"] for o in provider["offerings"]}
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -211,6 +244,7 @@ async def test_set_bu_grants_noop_when_already_globally_granted():
     tenant = str(uuid.uuid4())
     ws_a, _ = await _seed_org_workspace_project(tenant, "Unit A")
     provider = await _seed_provider(tenant, ["claude-sonnet-4-6"])
+    await _grant_provider(tenant, ws_a)
 
     await mg.set_org_grants(
         tenant,
@@ -310,3 +344,82 @@ async def test_project_workspace_id_malformed_uuid_raises_value_error():
     tenant = str(uuid.uuid4())
     with pytest.raises(ValueError):
         await mg.get_project_selection(tenant, "not-a-uuid")
+
+
+# ---------------------------------------------------------------------------
+# Task 12: set_project_selection/_project_owned_offering_keys must recognize a
+# BU-scoped model_providers row (workspace_id set, project_id NULL) — the shape
+# assign_provider_to_project (Task 5) pushes onto a project — as "owned" by any
+# project inside that same workspace, not only via an exact project_id match.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_project_owned_offering_keys_accepts_bu_scoped_connection():
+    """Direct unit test on the actual query that had the gap: a model_providers
+    row scoped to the project's own workspace (project_id NULL) must show up in
+    the returned own_keys, and be flagged as bu_scoped (the second returned set)
+    rather than needing the old project_id-exact-match path."""
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
+    provider = await _seed_provider(tenant, ["claude-sonnet-4-6"], workspace_id=ws_a)
+    selected = [{"provider": "anthropic", "model_id": "claude-sonnet-4-6", "credential_id": provider["id"]}]
+
+    own_keys, bu_scoped_keys = await mg._project_owned_offering_keys(tenant, proj_a, ws_a, selected)
+
+    expected = ("anthropic", "claude-sonnet-4-6", provider["id"])
+    assert expected in own_keys
+    assert expected in bu_scoped_keys
+
+
+@pytest.mark.asyncio
+async def test_project_selection_accepts_bu_scoped_connection():
+    """End-to-end (service-level) version of the same fix: set_project_selection
+    itself must accept a `selected` entry whose credential_id is a BU-scoped
+    connection for the project's own workspace, and store it as defaultKey —
+    the exact call a Project Admin makes after their BU Admin assigns them a key
+    via assign_provider_to_project (Task 5). Before Task 12 this raised
+    NotAllowedForUnitError."""
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
+    provider = await _seed_provider(tenant, ["claude-sonnet-4-6"], workspace_id=ws_a)
+
+    result = await mg.set_project_selection(
+        tenant, proj_a,
+        selected=[{"provider": "anthropic", "model_id": "claude-sonnet-4-6", "credential_id": provider["id"]}],
+        default_key=provider["id"],
+    )
+
+    # Direct service call (bypassing the router), so the raw snake_case shape
+    # get_project_selection reads from storage — camelCase conversion only
+    # happens at the router layer (_camel_selection in shared/routers/model.py).
+    assert result["defaultKey"] == provider["id"]
+    assert any(e["credential_id"] == provider["id"] for e in result["selected"])
+
+
+@pytest.mark.asyncio
+async def test_project_selection_rejects_connection_scoped_to_different_workspace():
+    """Negative case (must NOT be weakened by the Task 12 fix): a model_providers
+    row scoped to a DIFFERENT workspace than the target project's own is still
+    rejected, even though it shares the same provider/model_id shape as a
+    legitimately-owned connection would."""
+    from shared.services import model_grants as mg
+
+    tenant = str(uuid.uuid4())
+    ws_a, proj_a = await _seed_org_workspace_project(tenant, "Unit A")
+    ws_b, _ = await _seed_org_workspace_project(tenant, "Unit B")
+    # Connection is scoped to Unit B, not Unit A (proj_a's own workspace).
+    other_ws_provider = await _seed_provider(tenant, ["claude-sonnet-4-6"], workspace_id=ws_b)
+
+    with pytest.raises(mg.NotAllowedForUnitError):
+        await mg.set_project_selection(
+            tenant, proj_a,
+            selected=[{
+                "provider": "anthropic", "model_id": "claude-sonnet-4-6",
+                "credential_id": other_ws_provider["id"],
+            }],
+            default_key=None,
+        )

@@ -217,6 +217,55 @@ async def test_connector_grants_shape_matches_the_ui_contract(org):
     assert by_kind["jira"] == [org["payments"]]
 
 
+@pytest.mark.asyncio
+async def test_granting_then_revoking_a_model_provider(org):
+    """The routes are generic over `kind` — a model-provider grant/revoke should work
+    exactly like a connector one, through the same org-admin-only gate."""
+    c = TestClient(process_api.app)
+    admin = await _user(org, "orgadmin")
+    headers = _headers(admin, org["org"], ["admin:*"])
+
+    r = c.post("/integrations/access", headers=headers,
+               params={"kind": "model_provider", "id": "anthropic",
+                       "workspaceId": org["payments"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "changed": True}
+
+    # Idempotent re-grant.
+    r2 = c.post("/integrations/access", headers=headers,
+                params={"kind": "model_provider", "id": "anthropic",
+                        "workspaceId": org["payments"]})
+    assert r2.status_code == 200, r2.text
+
+    gone = c.request("DELETE", "/integrations/access", headers=headers,
+                     params={"kind": "model_provider", "id": "anthropic",
+                             "level": "unit", "workspaceId": org["payments"]})
+    assert gone.json() == {"ok": True, "changed": True}
+    # Idempotent: revoking what is already gone satisfies the intent.
+    again = c.request("DELETE", "/integrations/access", headers=headers,
+                      params={"kind": "model_provider", "id": "anthropic",
+                              "level": "unit", "workspaceId": org["payments"]})
+    assert again.json() == {"ok": True, "changed": False}
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_grant_themselves_a_model_provider(org):
+    """The same rule as the connector case, pinned for the new kind: `connector:manage`
+    is a BU Admin's for their own unit's connections — a unit that can grant itself has
+    no grant."""
+    c = TestClient(process_api.app)
+    bua = await _user(org, "farah")
+    await grant_role(bua, org["payments"], "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+    headers = _headers(bua, org["org"], ["connector:view", "connector:manage"])
+
+    r = c.post("/integrations/access", headers=headers,
+               params={"kind": "model_provider", "id": "anthropic",
+                       "workspaceId": org["payments"]})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "forbidden"
+
+
 # The four tests that stood here pinned an invariant that no longer exists.
 #
 # They asserted that PUT /connectors/grants preserved each surviving grant's ACCESS

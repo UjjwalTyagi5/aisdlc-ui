@@ -27,12 +27,12 @@ import { qk } from "@/lib/api/query-keys";
 import {
   listProjectIntegrations,
   saveProjectCredential,
+  setProjectIntegrationInstance,
   testProjectCredential,
   type ProjectIntegration,
   type ProjectIntegrationCredentialTestResult,
 } from "@/lib/api/project-integrations";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 /**
  * Prompts, not prose.
@@ -53,11 +53,6 @@ const MCP_TEMPLATE = [
   "What our agents would call it for:",
   "Read-only, or does it need to write:",
 ].join("\n");
-import { ProjectAccessList } from "@/components/app/project-access-list";
-import { getProject } from "@/lib/api/projects";
-import { useAccessScope } from "@/hooks/use-access-scope";
-import { canManageBusinessUnit, canManageProject } from "@/lib/mock/access-scope";
-import type { ProjectId } from "@/lib/schemas/ids";
 import { PHASE_LABEL } from "@/lib/agents";
 import type { Phase } from "@/lib/schemas/enums";
 
@@ -89,21 +84,6 @@ export default function ProjectIntegrationsPage({
     queryFn: () => listProjectIntegrations(id),
   });
 
-  // BOTH ADMIN TIERS, which is why the project's unit has to be known here. A
-  // Project Admin holds a binding on the project; a Business Unit Admin holds one
-  // on the unit above it and none on the project, so a `canManageProject` check
-  // alone would hide the control from the very person who runs the unit.
-  // `assert_can_administer_project` accepts exactly this pair server-side.
-  const projectQ = useQuery({
-    queryKey: qk.projects.detail(id as ProjectId),
-    queryFn: () => getProject(id as ProjectId),
-  });
-  const { scope } = useAccessScope();
-  const canManageAccess =
-    scope !== null &&
-    (canManageProject(scope, id) ||
-      canManageBusinessUnit(scope, projectQ.data?.workspaceId ?? null));
-
   if (q.isLoading) {
     return (
       <div className="w-full p-4 md:px-10 md:py-8">
@@ -125,9 +105,24 @@ export default function ProjectIntegrationsPage({
   }
 
   const items = q.data ?? [];
-  const connectors = items.filter((i) => i.kind === "connector");
   const servers = items.filter((i) => i.kind === "mcp");
-  const missingCredentials = items.filter(
+
+  // WIRED ONLY. The API returns everything the business unit was granted, which
+  // put ten connectors on a page whose own blurb promises the ones this
+  // project's Admin wired to stages — and asked members for credentials against
+  // tools no agent run here will ever call.
+  //
+  // A credential saved against a connector that is later unwired does not
+  // disappear; it stops being shown, and reappears if the Admin wires the tool
+  // again. This page answers "what does this project use", not "what could it".
+  const wiredConnectors = items.filter(
+    (i) => i.kind === "connector" && i.stages.length > 0,
+  );
+
+  // Only what the viewer can actually act on: a credential this project's runs
+  // would really use. Counting unwired ones sent people to configure tools no
+  // stage calls.
+  const missingCredentials = [...wiredConnectors, ...servers].filter(
     (i) => i.needsProjectCredential && !i.credential,
   ).length;
 
@@ -148,37 +143,13 @@ export default function ProjectIntegrationsPage({
         </Card>
       )}
 
-      {/* THE ONE DECISION ON THIS PAGE THAT IS NOT SOMEBODY ELSE'S — and only for
-          the person who may make it. `ProjectAccessList` itself already renders
-          read-only when `canManageAccess` is false, but a contributor (BA,
-          Developer, ...) opening this page to configure their OWN credential has
-          no use for an admin narrowing control they cannot touch, badges and
-          all — it's noise in front of the one thing they came here to do. Shown
-          only to whoever `assert_can_administer_project` would let act on it
-          server-side: this project's Admin, or its Business Unit's Admin. */}
-      {canManageAccess && (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="font-display text-[15px] font-semibold">
-              What this project may do
-            </h2>
-            <p className="text-muted-foreground max-w-2xl text-[12.5px]">
-              Each integration this project&apos;s {BUSINESS_UNIT_LABEL.toLowerCase()} was
-              granted, and how much of that grant this project gets. It can be narrowed
-              here, never widened — widening is an Organization Admin&apos;s decision.
-            </p>
-          </div>
-          <ProjectAccessList projectId={id} canManage={canManageAccess} />
-        </section>
-      )}
-
       <Section
         title="Connectors"
         icon={Plug}
-        blurb={`Wired to stages by this project's Admin, from what your ${BUSINESS_UNIT_LABEL.toLowerCase()} was granted.`}
-        items={connectors}
+        blurb="Wired to stages by this project's Admin — these are what your agent runs actually call."
+        items={wiredConnectors}
         onConfigure={setEditing}
-        empty="No connector is enabled on this project yet. Your Project Admin enables them in Settings → Tools per stage."
+        empty="No connector is wired to a stage yet. Your Project Admin enables them in Settings → Tools per stage."
         action={
           <RequestAccessButton
             label="Request a connector"
@@ -323,6 +294,90 @@ function CredentialState({ integration }: { integration: ProjectIntegration }) {
   );
 }
 
+/**
+ * What each connector needs asked for, beyond the credential's own name.
+ *
+ * Mirrors exactly what the matching `auth_adapter()` reads on the backend
+ * (backend/config/connectors/*.py): asking for a field nobody consumes trains
+ * people to fill in boxes that do nothing, and omitting one the connector needs
+ * produces a credential that saves cleanly and then fails at run time.
+ *
+ * Only the kinds that support a personal credential appear here. Everything
+ * else — MCP servers, and the connectors that authenticate through a shared org
+ * app — falls back to GENERIC_FIELDS below.
+ */
+const CREDENTIAL_FIELDS: Record<
+  string,
+  {
+    baseUrl?: { label: string; placeholder: string };
+    account?: { label: string; placeholder: string; optional?: boolean };
+    secretLabel?: string;
+    hint?: string;
+  }
+> = {
+  jira: {
+    baseUrl: { label: "Site URL", placeholder: "https://your-org.atlassian.net" },
+    account: { label: "Account email", placeholder: "you@company.com" },
+    secretLabel: "API token",
+    hint: "Atlassian → Account settings → Security → Create and manage API tokens.",
+  },
+  confluence: {
+    // NO trailing /wiki — ConfluenceConnector appends /wiki/api/v2 (and
+    // /wiki/rest/api for v1) itself, so a URL that already carries it produces
+    // /wiki/wiki/... and a 404 that reads like a wrong site.
+    baseUrl: { label: "Site URL", placeholder: "https://your-org.atlassian.net" },
+    account: { label: "Account email", placeholder: "you@company.com" },
+    secretLabel: "API token",
+    hint: "The same kind of token Jira uses, configured separately here. Site URL without /wiki.",
+  },
+  azure_devops: {
+    baseUrl: { label: "Organization URL", placeholder: "https://dev.azure.com/your-org" },
+    secretLabel: "Personal Access Token",
+    hint: "One connection powers boards, repos and CI/CD.",
+  },
+  sonarqube: {
+    baseUrl: { label: "Server URL", placeholder: "https://sonar.your-company.com" },
+    secretLabel: "User token",
+    hint: "SonarQube → My Account → Security → Generate Token.",
+  },
+  slack: {
+    // No URL: slack.com/api is fixed, and the workspace is implied by the token
+    // itself. No channel either — notify_slack requires one per call by design
+    // (REQ-M6-04), so there is no default to configure here.
+    account: { label: "Workspace", placeholder: "acme-eng", optional: true },
+    secretLabel: "Bot token",
+    hint: "api.slack.com → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-).",
+  },
+  figma: {
+    // No URL: api.figma.com is fixed. `account` carries the default file — a
+    // share URL or a bare key; extract_file_key() on the backend accepts either.
+    account: {
+      label: "Default file",
+      placeholder: "https://www.figma.com/design/abc123/Product",
+      optional: true,
+    },
+    secretLabel: "Personal access token",
+    hint: "Figma → Settings → Security → Personal access tokens. Read-only: the Design agent reads your screens and never writes to them.",
+  },
+  github: {
+    // No URL: api.github.com is fixed. `account` carries owner/repo, which is
+    // what every GitHub Issues call is scoped to.
+    account: { label: "Owner / repo", placeholder: "acme/payments-api", optional: true },
+    secretLabel: "Personal Access Token",
+    hint: "Scopes: repo. Yours authenticates as you, rather than as the shared GitHub App.",
+  },
+  github_actions: {
+    account: { label: "Owner / org", placeholder: "acme", optional: true },
+    secretLabel: "Personal Access Token",
+    hint: "Scopes: repo, workflow. GitHub's API host is fixed, so there is no URL to give.",
+  },
+};
+
+/** For MCP servers and any connector with no per-kind form of its own. */
+const GENERIC_FIELDS: (typeof CREDENTIAL_FIELDS)[string] = {
+  account: { label: "Account", placeholder: "svc-payments@acme.test", optional: true },
+};
+
 function CredentialDialog({
   projectId,
   integration,
@@ -335,19 +390,34 @@ function CredentialDialog({
   const queryClient = useQueryClient();
   const [label, setLabel] = React.useState("");
   const [account, setAccount] = React.useState("");
+  const [baseUrl, setBaseUrl] = React.useState("");
   const [secret, setSecret] = React.useState("");
   const [testResult, setTestResult] = React.useState<ProjectIntegrationCredentialTestResult | null>(
     null,
   );
 
   // Reset to the integration being edited each time the dialog opens, so a
-  // second Configure never shows the previous target's values.
+  // second Configure never shows the previous target's values. baseUrl seeds
+  // from the PROJECT's pinned instance, not from the credential — it stopped
+  // being the credential's in migration 0032.
   React.useEffect(() => {
     setLabel(integration?.credential?.label ?? "");
     setAccount(integration?.credential?.account ?? "");
+    setBaseUrl(integration?.baseUrl ?? "");
     setSecret("");
     setTestResult(null);
   }, [integration]);
+
+  const spec =
+    (integration?.kind === "connector" ? CREDENTIAL_FIELDS[integration.id] : undefined) ??
+    GENERIC_FIELDS;
+
+  // Everyone SEES which instance they are authenticating against — a token
+  // typed blind against an unnamed server is how you send it to the wrong one.
+  // Only a project administrator may CHANGE it; for everyone else the field
+  // renders as read-only context.
+  const canEditInstance = Boolean(integration?.canManageInstance);
+  const instanceChanged = (integration?.baseUrl ?? "") !== baseUrl.trim();
 
   const test = useMutation({
     mutationFn: () =>
@@ -355,20 +425,37 @@ function CredentialDialog({
         kind: integration!.kind,
         targetId: integration!.id,
         secret,
+        // Only meaningful for someone who may pin the instance — the server
+        // ignores it from anyone else. Sent so first-time setup can try a URL
+        // before saving it, rather than probing the empty stored value.
+        baseUrl: canEditInstance ? baseUrl.trim() || null : null,
+        account: account.trim() || null,
       }),
     onSuccess: setTestResult,
     onError: (e: Error) => setTestResult({ ok: false, message: e.message }),
   });
 
   const save = useMutation({
-    mutationFn: () =>
-      saveProjectCredential(projectId, {
+    // Two writes, because they are two decisions with two authorities: the
+    // instance is the project's (admins only) and the credential is the
+    // caller's. The instance goes first — a credential saved against the old
+    // URL would be briefly pointing at the wrong server.
+    mutationFn: async () => {
+      if (canEditInstance && spec.baseUrl && instanceChanged) {
+        await setProjectIntegrationInstance(projectId, {
+          kind: integration!.kind,
+          targetId: integration!.id,
+          baseUrl: baseUrl.trim() || null,
+        });
+      }
+      return saveProjectCredential(projectId, {
         kind: integration!.kind,
         targetId: integration!.id,
         label: label.trim(),
         account: account.trim() || null,
         secret: secret || undefined,
-      }),
+      });
+    },
     onSuccess: () => {
       toast.success("Credential saved");
       queryClient.invalidateQueries({ queryKey: qk.projects.integrations(projectId) });
@@ -378,6 +465,14 @@ function CredentialDialog({
   });
 
   const isUpdate = Boolean(integration?.credential);
+  // An unpinned instance blocks only the people who could fix it. A contributor
+  // staring at "no instance set" needs to be told to ask an admin, not to have
+  // the Save button quietly disabled with no explanation.
+  const missingRequired =
+    !label.trim() ||
+    (Boolean(spec.baseUrl) && canEditInstance && !baseUrl.trim()) ||
+    (Boolean(spec.account) && !spec.account?.optional && !account.trim()) ||
+    (!isUpdate && !secret);
 
   return (
     <Dialog open={integration !== null} onOpenChange={(o) => !o && onClose()}>
@@ -387,8 +482,8 @@ function CredentialDialog({
             {isUpdate ? "Update" : "Configure"} {integration?.name} credential
           </DialogTitle>
           <DialogDescription>
-            How this project authenticates to {integration?.name}. The organization already
-            approved the integration; this identifies your team to it.
+            How you authenticate to {integration?.name} on this project. The organization already
+            approved the integration; this identifies you to it.
           </DialogDescription>
         </DialogHeader>
 
@@ -402,17 +497,74 @@ function CredentialDialog({
               onChange={(e) => setLabel(e.target.value)}
             />
           </div>
+
+          {spec.baseUrl && (
+            <div className="space-y-2">
+              <Label htmlFor="pic-base-url">{spec.baseUrl.label}</Label>
+              <Input
+                id="pic-base-url"
+                value={baseUrl}
+                autoComplete="off"
+                readOnly={!canEditInstance}
+                aria-readonly={!canEditInstance}
+                placeholder={
+                  canEditInstance ? spec.baseUrl.placeholder : "Not set for this project yet"
+                }
+                className={cn(!canEditInstance && "bg-muted/50 text-muted-foreground")}
+                onChange={(e) => {
+                  if (!canEditInstance) return;
+                  setBaseUrl(e.target.value);
+                  setTestResult(null);
+                }}
+              />
+              <p className="text-muted-foreground text-[11.5px]">
+                {canEditInstance ? (
+                  <>
+                    This project&apos;s instance — you set it for everyone here, and another
+                    project can point somewhere else.
+                  </>
+                ) : baseUrl ? (
+                  <>
+                    Set for this project by its Admin. Your credential authenticates you
+                    against this instance.
+                  </>
+                ) : (
+                  <>
+                    No instance set yet — ask this project&apos;s Admin to add one before
+                    your credential can be used.
+                  </>
+                )}
+              </p>
+            </div>
+          )}
+
+          {spec.account && (
+            <div className="space-y-2">
+              <Label htmlFor="pic-account">
+                {spec.account.label}
+                {spec.account.optional && (
+                  <span className="text-muted-foreground/60"> (optional)</span>
+                )}
+              </Label>
+              <Input
+                id="pic-account"
+                value={account}
+                autoComplete="off"
+                placeholder={spec.account.placeholder}
+                onChange={(e) => {
+                  setAccount(e.target.value);
+                  setTestResult(null);
+                }}
+              />
+            </div>
+          )}
+
           <div className="space-y-2">
-            <Label htmlFor="pic-account">Account</Label>
-            <Input
-              id="pic-account"
-              value={account}
-              placeholder="svc-payments@acme.test"
-              onChange={(e) => setAccount(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="pic-secret">{isUpdate ? "New secret" : "Secret"}</Label>
+            <Label htmlFor="pic-secret">
+              {isUpdate
+                ? `New ${(spec.secretLabel ?? "secret").toLowerCase()}`
+                : (spec.secretLabel ?? "Secret")}
+            </Label>
             <Input
               id="pic-secret"
               type="password"
@@ -424,6 +576,7 @@ function CredentialDialog({
                 setTestResult(null);
               }}
             />
+            {spec.hint && <p className="text-muted-foreground text-[11.5px]">{spec.hint}</p>}
             <p className="text-muted-foreground text-[11.5px]">
               Yours alone — a colleague on this project keeps their own, and never sees
               this one.
@@ -464,10 +617,7 @@ function CredentialDialog({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            onClick={() => save.mutate()}
-            disabled={!label.trim() || save.isPending || (!isUpdate && !secret)}
-          >
+          <Button onClick={() => save.mutate()} disabled={missingRequired || save.isPending}>
             {save.isPending ? "Saving…" : "Save credential"}
           </Button>
         </DialogFooter>

@@ -16,12 +16,15 @@ import type { CatalogProvider, ModelAvailability } from "@/lib/schemas/model";
  * What this Business Unit has been given, and what (if anything) it still has
  * to do about it.
  *
- * Read-only on purpose. A Business Unit Admin used to curate their own subset
- * here, which meant the answer to "what can we use?" was partly their own
- * doing — so a model missing from a project could be the Org Admin's decision
- * or their own, and the page couldn't tell you which. Now the list is
- * consequence, not choice, and the only action left on it is the one that is
- * genuinely theirs: supplying a key where the organization didn't.
+ * Read-only. A Business Unit Admin used to curate their own subset here,
+ * which meant the answer to "what can we use?" was partly their own doing —
+ * so a model missing from a project could be the Org Admin's decision or
+ * their own, and the page couldn't tell you which. Now the list is
+ * consequence, not choice. Supplying a key where the organization didn't is
+ * genuinely theirs to do, but that action lives at the page's single "Add
+ * key" button (spec §5, Task 10) rather than per row here — this card's job
+ * is answering "what's granted and what still needs a key," not launching
+ * the flow that fixes it.
  */
 export function ModelAvailabilityCard({
   workspaceId,
@@ -168,8 +171,8 @@ export function ModelAvailabilityCard({
         {rows.length > 0 && (
           <p className="text-muted-foreground mt-3 text-[11.5px]">
             {audience === "bu"
-              ? "Models keyed centrally need nothing from you. For the rest, add a provider below with your own credentials."
-              : `Models keyed centrally need nothing from you. For the rest, add a provider below — your ${BUSINESS_UNIT_LABEL} Admin approves it before it goes live.`}
+              ? "Models keyed centrally need nothing from you. For the rest, use the “Add key” button above."
+              : `Models keyed centrally need nothing from you. For the rest, ask your ${BUSINESS_UNIT_LABEL} Admin to assign this project a key.`}
           </p>
         )}
 

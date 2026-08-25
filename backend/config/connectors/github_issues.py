@@ -146,6 +146,19 @@ class GitHubIssuesConnector(BaseConnector):
         # tenant-scoped KV tier below is skipped whenever a caller relies on the
         # instance context rather than passing the tenant explicitly.
         tenant_id = tenant_id or self._tenant_id
+
+        # ── A project member's own PAT wins over the shared App installation ──
+        # Checked HERE rather than in auth_adapter because this method is the
+        # single place a token is chosen (three call sites, including
+        # health_check); putting it above them means no path can quietly keep
+        # using the org-wide App identity.
+        #
+        # A PAT and an installation token are both bearer credentials to GitHub,
+        # so nothing downstream changes — _gh_headers sends either unaltered.
+        override = await self._resolve_credential_override(tenant_id, "github")
+        if override and override.token:
+            return override.token
+
         app_id = (
             (await _keyvault.load_secret("github-app-id", tenant_id=tenant_id) if tenant_id else None)
             or await _keyvault.load_secret("github-app-id")
@@ -305,12 +318,27 @@ class GitHubIssuesConnector(BaseConnector):
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health_check(self) -> ConnectorHealth:
+        """Probe the credential, not just GitHub's availability.
+
+        MUST hit an endpoint GitHub refuses anonymously. This used to call
+        /rate_limit, which answers 200 to an ANONYMOUS caller (it just reports
+        the 60/hour unauthenticated allowance) — so `raise_for_status()` never
+        fired and any token reported healthy. The identical bug was confirmed
+        live on Jira and fixed the same way; see JiraConnector.health_check.
+
+        The endpoint that proves authentication differs by credential type: a
+        PAT belongs to a person, so /user answers it; a GitHub App installation
+        token belongs to no user at all and 403s there, so it is proved by the
+        repositories its installation can see instead.
+        """
         start = time.time()
         try:
+            override = await self._resolve_credential_override(self._tenant_id, "github")
+            probe = "/user" if (override and override.token) else "/installation/repositories"
             token = await self._get_installation_token()
             client = get_async_client(timeout=30)
             resp = await client.get(
-                f"{_GH_API_BASE}/rate_limit",
+                f"{_GH_API_BASE}{probe}",
                 headers=self._gh_headers(token),
             )
             resp.raise_for_status()
@@ -322,11 +350,16 @@ class GitHubIssuesConnector(BaseConnector):
             )
         except Exception as exc:
             latency_ms = (time.time() - start) * 1000
+            # NEVER str(exc) — credential leakage risk. HTTP status is safe and
+            # diagnostic: 401 = bad token, 403 = token lacks the scope.
+            err = type(exc).__name__
+            if isinstance(exc, httpx.HTTPStatusError):
+                err = f"HTTP {exc.response.status_code}"
             return ConnectorHealth(
                 connector_name="github_issues",
                 status="unhealthy",
                 latency_ms=latency_ms,
-                error=type(exc).__name__,  # NEVER str(exc) — credential leakage risk
+                error=err,
             )
 
     # ── Audit ─────────────────────────────────────────────────────────────
