@@ -283,7 +283,7 @@ async def create_skill(body: CreateSkillIn, request: Request):
     _validate_scope(body.scope, body.scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    assert_can_write_agent_scope(perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
 
     violations = validate_skill_key(body.skill_key) + lint_skill_fields(
         body.display_name, body.description, body.when_to_use, body.body
@@ -330,7 +330,7 @@ async def toggle_skill(body: ToggleIn, request: Request):
     _validate_scope(body.scope, body.scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    assert_can_write_agent_scope(perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
     if body.origin not in (Origin.vendor.value, Origin.custom.value):
         raise HTTPException(status_code=422, detail="origin must be one of ('vendor', 'custom')")
 
@@ -399,7 +399,7 @@ async def activate_version(
     _validate_scope(scope, scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    assert_can_write_agent_scope(perms, role, scope, scope_id, _user_id(request), action="publish")
+    await assert_can_write_agent_scope(tenant_id, perms, role, scope, scope_id, _user_id(request), action="publish")
     detail = await _store().activate_custom_version(
         tenant_id, agent_id, scope, scope_id, skill_key, version
     )
@@ -422,7 +422,7 @@ async def update_skill(skill_key: str, body: UpdateSkillIn, request: Request):
     _validate_scope(body.scope, body.scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    assert_can_write_agent_scope(perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
 
     violations = lint_skill_fields(
         body.display_name, body.description, body.when_to_use, body.body
@@ -458,7 +458,7 @@ async def delete_skill(
     _validate_scope(scope, scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    assert_can_write_agent_scope(perms, role, scope, scope_id, _user_id(request), action="draft")
+    await assert_can_write_agent_scope(tenant_id, perms, role, scope, scope_id, _user_id(request), action="draft")
     ok = await _store().soft_delete_custom_skill(tenant_id, agent_id, scope, scope_id, skill_key)
     if not ok:
         raise HTTPException(status_code=404, detail="Not found")

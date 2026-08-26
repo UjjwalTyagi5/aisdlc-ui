@@ -228,6 +228,13 @@ VIEW = ["artifact:view"]
 # constant did not follow, leaving fourteen tests red against a correct router.
 UPDATE = ["artifact:view", "skill:edit"]
 MANAGE = ["artifact:view", "workspace:manage"]
+# sub-project 3 (assert_can_write_agent_scope real-ownership rewrite): at org scope,
+# ownership is decided purely by the admin:* wildcard (see resolve_actor_tier_access's
+# org branch) — skill:edit/workspace:manage no longer carry write access there on
+# their own. Tests below that exercise an org-scope route's actual behavior (not its
+# auth denial) mint this instead of UPDATE/MANAGE so they still reach that behavior;
+# tests asserting a 403 denial keep UPDATE/MANAGE unchanged, since denial is the point.
+ORG_ADMIN = ["artifact:view", "admin:*"]
 
 
 # — list / detail (artifact:view) —
@@ -321,7 +328,7 @@ def _create_body(**over):
 async def test_create_happy(monkeypatch, mint_token):
     store, runtime = _install(monkeypatch)  # get_skill_detail default None, no vendor hit
     async with _client() as c:
-        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 200
     assert r.json()["skill_key"] == "my-skill"
     store.create_custom_skill.assert_awaited_once()
@@ -340,7 +347,7 @@ async def test_create_lint_422_empty_body(monkeypatch, mint_token):
     store, _ = _install(monkeypatch)
     async with _client() as c:
         r = await c.post(
-            "/agent-skills", json=_create_body(body=""), headers=_headers(mint_token, UPDATE)
+            "/agent-skills", json=_create_body(body=""), headers=_headers(mint_token, ORG_ADMIN)
         )
     assert r.status_code == 422
     codes = {v["code"] for v in r.json()["detail"]["violations"]}
@@ -353,7 +360,7 @@ async def test_create_invalid_key_422(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.post(
             "/agent-skills", json=_create_body(skill_key="Bad_Key"),
-            headers=_headers(mint_token, UPDATE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 422
     codes = {v["code"] for v in r.json()["detail"]["violations"]}
@@ -363,7 +370,7 @@ async def test_create_invalid_key_422(monkeypatch, mint_token):
 async def test_create_duplicate_vendor_422(monkeypatch, mint_token):
     store, _ = _install(monkeypatch, vendor_skill=object())  # vendor collision
     async with _client() as c:
-        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 422
     codes = {v["code"] for v in r.json()["detail"]["violations"]}
     assert "duplicate_key" in codes
@@ -373,7 +380,7 @@ async def test_create_duplicate_vendor_422(monkeypatch, mint_token):
 async def test_create_duplicate_custom_422(monkeypatch, mint_token):
     _install(monkeypatch, store_attrs={"get_skill_detail": _async(_DETAIL)})  # live custom exists
     async with _client() as c:
-        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills", json=_create_body(), headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 422
     assert {"duplicate_key"} <= {v["code"] for v in r.json()["detail"]["violations"]}
 
@@ -394,7 +401,7 @@ async def test_update_happy(monkeypatch, mint_token):
     store, runtime = _install(monkeypatch, store_attrs={"update_custom_skill": _async(_DETAIL)})
     async with _client() as c:
         r = await c.put(
-            "/agent-skills/my-skill", json=_update_body(), headers=_headers(mint_token, UPDATE)
+            "/agent-skills/my-skill", json=_update_body(), headers=_headers(mint_token, ORG_ADMIN)
         )
     assert r.status_code == 200
     store.update_custom_skill.assert_awaited_once()
@@ -405,7 +412,7 @@ async def test_update_404_when_absent(monkeypatch, mint_token):
     _install(monkeypatch, store_attrs={"update_custom_skill": _async(None)})
     async with _client() as c:
         r = await c.put(
-            "/agent-skills/ghost", json=_update_body(), headers=_headers(mint_token, UPDATE)
+            "/agent-skills/ghost", json=_update_body(), headers=_headers(mint_token, ORG_ADMIN)
         )
     assert r.status_code == 404
 
@@ -415,7 +422,7 @@ async def test_update_lint_422(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.put(
             "/agent-skills/my-skill", json=_update_body(body=""),
-            headers=_headers(mint_token, UPDATE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 422
     store.update_custom_skill.assert_not_awaited()
@@ -428,7 +435,7 @@ async def test_toggle_vendor_ok(monkeypatch, mint_token):
     body = {"agent_id": "requirements", "scope": "org", "scope_id": None,
             "origin": "vendor", "skill_key": "vendor-skill", "enabled": False}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 200
     assert r.json() == {"origin": "vendor", "skill_key": "vendor-skill", "enabled": False}
     store.set_skill_enabled.assert_awaited_once()
@@ -440,7 +447,7 @@ async def test_toggle_unknown_vendor_404(monkeypatch, mint_token):
     body = {"agent_id": "requirements", "scope": "org", "scope_id": None,
             "origin": "vendor", "skill_key": "ghost", "enabled": True}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 404
     store.set_skill_enabled.assert_not_awaited()
 
@@ -450,7 +457,7 @@ async def test_toggle_custom_ok(monkeypatch, mint_token):
     body = {"agent_id": "requirements", "scope": "org", "scope_id": None,
             "origin": "custom", "skill_key": "my-skill", "enabled": True}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 200
     store.set_skill_enabled.assert_awaited_once()
 
@@ -464,10 +471,20 @@ async def test_toggle_inherited_custom_skill_found_via_ancestor_chain(monkeypatc
 
     get_detail = AsyncMock(side_effect=[None, _DETAIL])  # own scope miss, org hit
     store, _ = _install(monkeypatch, store_attrs={"get_skill_detail": get_detail})
-    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": "ws-1",
+    # Workspace-scope ownership is real-role-binding-based (no permission-string
+    # shortcut, unlike org) — mint a genuine bu_admin binding on this workspace so
+    # the write authorization check (not what this test is about) passes and the
+    # ancestor-chain existence-search behavior under test is actually reached.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": ws_id,
             "origin": "custom", "skill_key": "org-skill", "enabled": False}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=headers)
     assert r.status_code == 200
     assert get_detail.await_count == 2
     # First call checked the requested (workspace) scope, second checked org — the
@@ -486,10 +503,19 @@ async def test_toggle_custom_skill_absent_everywhere_still_404s(monkeypatch, min
     """The ancestor-chain fallback must not turn a genuinely-nonexistent skill into
     a false positive — every candidate scope missing still 404s."""
     store, _ = _install(monkeypatch, store_attrs={"get_skill_detail": _async(None)})
-    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": "ws-1",
+    # Same real-role-binding setup as the sibling ancestor-chain test above — this
+    # test is about the 404 fallback behavior, not authorization, so a genuine
+    # bu_admin binding keeps the auth check out of the way.
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "bu_admin", "business_unit", ws_id)
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"agent_id": "requirements", "scope": "workspace", "scope_id": ws_id,
             "origin": "custom", "skill_key": "nowhere", "enabled": True}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=headers)
     assert r.status_code == 404
     store.set_skill_enabled.assert_not_awaited()
 
@@ -499,7 +525,7 @@ async def test_toggle_bad_origin_422(monkeypatch, mint_token):
     body = {"agent_id": "requirements", "scope": "org", "scope_id": None,
             "origin": "sideways", "skill_key": "x", "enabled": True}
     async with _client() as c:
-        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, UPDATE))
+        r = await c.post("/agent-skills/toggle", json=body, headers=_headers(mint_token, ORG_ADMIN))
     assert r.status_code == 422
 
 
@@ -510,7 +536,7 @@ async def test_delete_custom_ok(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.delete(
             "/agent-skills/my-skill?agent_id=requirements&scope=org",
-            headers=_headers(mint_token, UPDATE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 200
     assert r.json() == {"deleted": True}
@@ -522,7 +548,7 @@ async def test_delete_missing_404(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.delete(
             "/agent-skills/ghost?agent_id=requirements&scope=org",
-            headers=_headers(mint_token, UPDATE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 404
 
@@ -549,7 +575,7 @@ async def test_activate_ok(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.post(
             "/agent-skills/my-skill/activate/3?agent_id=requirements&scope=org",
-            headers=_headers(mint_token, MANAGE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 200
     store.activate_custom_version.assert_awaited_once()
@@ -571,7 +597,7 @@ async def test_activate_missing_version_404(monkeypatch, mint_token):
     async with _client() as c:
         r = await c.post(
             "/agent-skills/my-skill/activate/99?agent_id=requirements&scope=org",
-            headers=_headers(mint_token, MANAGE),
+            headers=_headers(mint_token, ORG_ADMIN),
         )
     assert r.status_code == 404
 
