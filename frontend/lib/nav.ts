@@ -7,6 +7,7 @@ import {
   Building2,
   Coins,
   FolderKanban,
+  Import,
   Inbox,
   KeyRound,
   LayoutDashboard,
@@ -279,6 +280,23 @@ export const governNav: NavItem[] = [
     requireScope: "business_unit",
     prdSection: "§34.3, §34.4",
   },
+  {
+    /**
+     * The org's approved external Skill-import sources (Agent Studio import +
+     * supply-chain screening). Read is open to any tenant member — matches
+     * the backend's `GET /agent-skills/import-sources` floor (`artifact:view`
+     * only, no Org-Admin gate) — so this stays visible at the same permission
+     * as the rest of Deliver rather than being scoped to unit administrators
+     * like its governNav siblings above. Adding to the list is Org-Admin-only
+     * (`is_org_wide` on the POST route), enforced inside the page itself —
+     * see `components/agent-studio/import-source-allowlist.tsx`.
+     */
+    label: "Import Sources",
+    href: "/admin/agent-import-sources",
+    icon: Import,
+    segment: "agent-import-sources",
+    requirePermission: "artifact:view",
+  },
 ];
 
 // ─── Observability — the evidence surface (PRD §34.8, §34.9) ──────────────────
@@ -516,6 +534,7 @@ export const segmentLabels: Record<string, string> = {
   // "Models", not "Model Management" — the segment is now shared with the
   // project-scoped page, and both screens title themselves Models anyway.
   models: "Models",
+  "agent-import-sources": "Import Sources",
   cost: "Cost & Budget",
   catalogue: "Agent Catalogue",
   activity: "Activity",
