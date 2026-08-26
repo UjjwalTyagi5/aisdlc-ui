@@ -14,18 +14,34 @@ Serialization convention: snake_case in responses, matching the sibling capabili
 router (shared/routers/capabilities.py) and the resource routers. The frontend BFF reads
 these keys verbatim.
 
-RBAC (design §3.5, extended by sub-project 2): reads gate on the "artifact:view" floor
-(router-level, matching the capabilities router) PLUS, at the personal ("user") scope
-only, `assert_own_user_scope` — the same tenant-wide `GET .../summary`/`.../versions`
-reads that anyone can run against org/workspace/project also accept `scope=user`, and
-without this extra check any authenticated caller could read another user's personal
-default by supplying their `scope_id`. draft/preview/publish/unpublish all use the
-in-body, scope-aware `assert_can_write_agent_scope` check instead of a route-level
-Depends(): for org/workspace/project scope it requires "skill:edit" (draft/preview) or
-"workspace:manage" (publish/unpublish) exactly as before; for the personal scope, any
-role except org_admin/bu_admin may write ONLY their own scope_id. Every route still
-carries a require_permission sentinel (the router-level floor) so the process_api D-05
-boot scan stays green.
+RBAC (design §3.5, extended by sub-project 2, then made real by sub-project 3): reads
+gate on the "artifact:view" floor (router-level, matching the capabilities router)
+PLUS, at the personal ("user") scope only, `assert_own_user_scope` — the same
+tenant-wide `GET .../summary`/`.../versions` reads that anyone can run against
+org/workspace/project also accept `scope=user`, and without this extra check any
+authenticated caller could read another user's personal default by supplying their
+`scope_id`. draft/preview/publish/unpublish use the in-body, scope-aware
+`assert_can_write_agent_scope` check instead of a route-level Depends(); `propose()`
+calls the `resolve_actor_tier_access` helper underneath that check directly (it has
+already ruled out scope=="user" itself, so it does not need that wrapper's personal-
+scope branch). For the personal scope, `assert_can_write_agent_scope` allows any role
+except org_admin/bu_admin to write ONLY their own scope_id; for org/workspace/project
+scope, both paths defer to `resolve_actor_tier_access` (see that function's docstring
+for the full per-scope rules) for a real per-resource tier-ownership lookup instead of
+a blanket permission string — at a high level: org is owned via the admin:* wildcard,
+workspace via a live bu_admin binding scoped to that workspace, project via a live
+project_admin binding scoped to that project, and each tier also reports "may_propose"
+for the role one tier up (bu_admin/project_admin/any project member respectively).
+"publish"/"unpublish" require ownership; "draft" and `propose()` accept ownership OR
+propose-eligibility — a non-owner may draft something and then file it via `propose()`
+for the owner to publish, using the `agent_default_org`/`agent_default_workspace`/
+`agent_default_project` governance request types and approval machinery that predate
+this sub-project (sub-project 3 only changed WHO is allowed to call `propose()`, via
+`resolve_actor_tier_access`, not the request types or approval flow it files into).
+`propose()` has no route-level "skill:edit" gate — it never did; it is, and was,
+just another scope-aware in-body caller. Every route still carries a
+require_permission sentinel (the router-level floor) so the process_api D-05 boot
+scan stays green.
 
 Note: `assert_can_write_agent_scope`/`assert_own_user_scope` do NOT emit the
 RBAC_DENIALS metric or an access-denied audit row that the route-level

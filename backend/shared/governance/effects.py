@@ -381,16 +381,34 @@ async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]
 
 
 async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Publish the proposed agent-profile version.
+    """Publish the proposed agent-profile (Behavior) OR agent-skill (Skills) version.
 
     `target_ref` is the DRAFT version's id, saved before the proposal was raised.
     Approving publishes exactly that version — which is why the proposal carries an
-    id rather than the prompt text: the approver agreed to a specific draft, and
-    re-reading the text at decision time would publish whatever it had become.
+    id rather than the prompt/skill text: the approver agreed to a specific draft,
+    and re-reading the text at decision time would publish whatever it had become.
 
-    Reuses `apply_publish_flip` so this and `POST /agent-profiles/{id}/publish`
-    cannot disagree about what "published" means (exactly one active version per
-    agent per scope).
+    `target_ref` may name either an `AgentProfile` row or an `AgentSkill` row — every
+    `agent_default_*` request (org/workspace/project) is routed here regardless of
+    which resource kind raised it, via the SAME `agent_default_org`/`_workspace`/
+    `_project` request types `AgentProfile.propose()` always used. Dispatch is a
+    plain "try one, then the other" fallback on `target_ref`, not a payload
+    discriminator: this function first looks up `target_ref` as an `AgentProfile`
+    id; a miss falls through to `_apply_agent_default_skill`, which looks it up as
+    an `AgentSkill` id. No `skill_default_*` type family was introduced for Skills
+    proposals (considered and rejected — see the sub-project 3 design doc,
+    "Considered and rejected" section): the approver-routing, self-approval rule,
+    and audit/system-raised handling in `routing.py` are IDENTICAL for both resource
+    kinds at every tier, so a type-level split would only add parallel entries to
+    5+ shared registries (backend `routing.py`, frontend `governance.ts`/`routing.ts`,
+    the Zod `GovernanceApprovalType` enum) for zero behavioral difference — only the
+    row being flipped differs, and `target_ref`'s id already tells you which one
+    that is.
+
+    Reuses `apply_publish_flip` so this and `POST /agent-profiles/{id}/publish` (or
+    `POST /agent-skills/{skill_key}/activate/{version}`) cannot disagree about what
+    "published"/"active" means (exactly one active version per agent+scope, or per
+    agent+scope+skill_key for Skills).
     """
     from shared.models.orm import AgentProfile  # noqa: PLC0415 - avoids a cycle at import
     from shared.routers.agent_profiles import apply_publish_flip  # noqa: PLC0415

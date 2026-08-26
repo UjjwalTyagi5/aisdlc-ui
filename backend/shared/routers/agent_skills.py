@@ -16,17 +16,46 @@ Serialization convention: snake_case in responses, matching the sibling agent_pr
 router (whose lint style + violation shape + RBAC layering this mirrors). The frontend BFF
 reads these keys verbatim.
 
-RBAC (mirrors agent_profiles, extended by sub-project 2): reads gate on the
-"artifact:view" floor (router-level) PLUS, at the personal ("user") scope only,
-`assert_own_user_scope` (imported from agent_profiles) on `list`/detail — without it,
-`scope=user&scope_id=<anyone>` would let any authenticated caller read another user's
-personal skill catalog. create/update/toggle/delete and activate all use the in-body,
-scope-aware `assert_can_write_agent_scope` check (also imported from agent_profiles)
-instead of a route-level Depends(): for org/workspace/project scope it requires
-"skill:edit" (create/update/toggle/delete) or "workspace:manage" (activate) exactly as
-before; for the personal scope, any role except org_admin/bu_admin may write ONLY their
-own scope_id. Every route still carries a require_permission sentinel (the router-level
-floor) so the process_api D-05 boot scan stays green.
+RBAC (mirrors agent_profiles, extended by sub-project 2, then made real by
+sub-project 3): reads gate on the "artifact:view" floor (router-level) PLUS, at the
+personal ("user") scope only, `assert_own_user_scope` (imported from agent_profiles)
+on `list`/detail — without it, `scope=user&scope_id=<anyone>` would let any
+authenticated caller read another user's personal skill catalog. create/update/
+toggle/delete/activate use the in-body, scope-aware `assert_can_write_agent_scope`
+check (also imported from agent_profiles) instead of a route-level Depends();
+`propose_skill` calls the `resolve_actor_tier_access` helper underneath that check
+directly (it has already ruled out scope=="user" itself, so it does not need that
+wrapper's personal-scope branch — same pattern as `AgentProfile.propose()`). For the
+personal scope, `assert_can_write_agent_scope` allows any role except org_admin/
+bu_admin to write ONLY their own scope_id; for org/workspace/project scope, both
+paths defer to `resolve_actor_tier_access` (also imported from agent_profiles — see
+its docstring for the full per-scope rules) for a real per-resource tier-ownership
+lookup instead of a blanket permission string. "activate" requires ownership;
+create/update/toggle/delete and `propose_skill` accept ownership OR
+propose-eligibility (action="draft" for the first four; the same owns-or-may_propose
+test inline for `propose_skill`).
+
+`create_skill`/`update_skill` activate their write CONDITIONALLY rather than always:
+each re-derives `owns` via `resolve_actor_tier_access` (short-circuited to True at the
+personal scope, which that helper does not model) and passes `activate=owns` into the
+store. This is a deliberate divergence from `AgentProfile.create_draft`, which always
+inserts `is_active=False` and requires a separate `/publish` call regardless of who
+made the draft: an owner's skill write goes live immediately (no extra publish step),
+while a non-owner's write lands as an inactive version with nothing served until an
+owner activates it directly or approves that non-owner's `propose_skill` request.
+
+`propose_skill` is the Skills counterpart to `AgentProfile.propose()` — ask the
+tier's owner to activate a non-owner's inactive draft, instead of activating it
+yourself. It reuses the exact same `agent_default_org`/`agent_default_workspace`/
+`agent_default_project` governance request types and approver-routing/self-approval/
+audit machinery Behavior's `propose()` already used; no `skill_default_*` type family
+was introduced (considered and rejected — see the sub-project 3 design doc). Skills
+has no single-row-UUID path param elsewhere in this API, so `propose_skill` resolves
+its `target_ref` via `get_latest_draft_version` (the newest inactive version of that
+skill_key at that scope) rather than a body-supplied id.
+
+Every route still carries a require_permission sentinel (the router-level floor) so
+the process_api D-05 boot scan stays green.
 
 Role resolution here uses `resolve_platform_role_for_user` rather than
 `effective_platform_role` (agent_profiles.py's routes all take a `db` param already;
