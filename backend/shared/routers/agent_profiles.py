@@ -818,6 +818,15 @@ async def propose(
     if not (owns or may_propose):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    from shared.services.eval_gate import latest_passing_evaluation  # noqa: PLC0415
+
+    passing = await latest_passing_evaluation(tenant_id, "profile", str(target.id))
+    if passing is None:
+        raise HTTPException(status_code=422, detail={
+            "code": "EVALUATION_REQUIRED",
+            "message": "Run an evaluation before proposing this change.",
+        })
+
     request_type = f"agent_default_{target.scope}"
     scope_label = {"org": "organization", "workspace": "business unit", "project": "project"}[
         target.scope
@@ -873,6 +882,46 @@ async def propose(
         raise HTTPException(
             status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)}
         )
+
+
+@agent_profiles_router.post("/{profile_id}/evaluate", status_code=201)
+async def evaluate(
+    profile_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Run the deterministic golden-task rubric against this draft and record the
+    result — a precondition for propose() (see Global Constraints and the
+    sub-project 4 spec). For scope=="org" (R3 — every workspace/project in the
+    tenant inherits from an org default), the evaluator must not be the draft's
+    own author (SELF_EVALUATION_BLOCKED) — R2 (workspace/project) may self-evaluate.
+    """
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415 - avoids an import cycle, matches propose()'s existing pattern
+    from shared.services.eval_gate import run_evaluation  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    target = await _load_or_404(db, profile_id)
+    if target.scope == "user":
+        raise HTTPException(status_code=422, detail={
+            "code": "NOT_A_SHARED_TIER",
+            "message": "A personal default has nothing to evaluate against.",
+        })
+
+    actor_id = _user_id(request)
+    if target.scope == "org" and target.created_by == actor_id:
+        raise HTTPException(status_code=403, detail={
+            "code": "SELF_EVALUATION_BLOCKED",
+            "message": "An organization-wide default must be evaluated by someone other than its author.",
+        })
+
+    role = await effective_platform_role(db, request)
+    body = "\n".join(filter(None, [target.prompt_prepend, target.prompt_append]))
+    row = await run_evaluation(
+        tenant_id=tenant_id, target_type="profile", target_id=str(target.id),
+        agent_id=target.agent_id, scope=target.scope, body=body,
+        evaluator_id=actor_id, evaluator_role=role,
+    )
+    return row
 
 
 @agent_profiles_router.post("/preview")

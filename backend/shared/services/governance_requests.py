@@ -636,6 +636,28 @@ async def decide(
     request["decidedBy"] = decider_name
     request["reason"] = reason
     effect_note: Optional[str] = None
+    if decision == "approve" and request["type"] in (
+        "agent_default_org", "agent_default_workspace", "agent_default_project",
+    ):
+        # Belt-and-suspenders re-check (spec §3.3, checkpoint 2): the draft could
+        # have been edited into a new, unevaluated version — or never evaluated at
+        # all if this request predates the gate — between propose() and the
+        # approver's decision. Covers BOTH Behavior (AgentProfile) and Skills
+        # (AgentSkill) requests, which share these three request types; the
+        # payload's `skillKey` key is the same discriminator `_apply_agent_default`
+        # effectively relies on (Behavior's payload has no `skillKey`, Skills' does).
+        from shared.services.eval_gate import latest_passing_evaluation  # noqa: PLC0415
+
+        target_type = "skill" if (request.get("payload") or {}).get("skillKey") else "profile"
+        passing = await latest_passing_evaluation(
+            request["tenantId"], target_type, request["targetRef"]
+        )
+        if passing is None:
+            raise EffectUnavailable(
+                "This proposal's evaluation is missing or no longer passing.",
+                code="EFFECT_UNAVAILABLE",
+            )
+
     if decision == "approve":
         try:
             effect_note = await apply_on_approve(db, request)

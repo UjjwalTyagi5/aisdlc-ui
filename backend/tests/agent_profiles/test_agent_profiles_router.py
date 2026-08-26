@@ -648,14 +648,20 @@ async def test_create_draft_project_scope_unchanged_contributor_denied(mint_toke
 # ── publish / unpublish: scope-aware write authorization (route-level) ─────────────
 
 async def _create_draft_row(tenant_id: str, scope: str, scope_id: str | None) -> str:
-    """Insert a draft AgentProfile row directly (bypassing the route) and return its id."""
+    """Insert a draft AgentProfile row directly (bypassing the route) and return its id.
+
+    `prompt_prepend` covers every 'requirements' rubric topic (sub-project 4's
+    evaluation gate, see test_evaluation_gate.py) so any test that needs to get
+    past that gate can evaluate this row and receive a passing result.
+    """
     async with get_db_session_for_tenant(tenant_id) as s:
         row_id = str(uuid.uuid4())
         await s.execute(text(
             "INSERT INTO agent_profiles "
-            "(id, tenant_id, agent_id, scope, scope_id, version, is_active, created_by) "
+            "(id, tenant_id, agent_id, scope, scope_id, version, is_active, prompt_prepend, created_by) "
             "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), 'requirements', :sc, "
-            " CAST(:sid AS uuid), 1, false, 'tester')"
+            " CAST(:sid AS uuid), 1, false, "
+            " 'Cover acceptance criteria, stakeholder input, scope, and user stories.', 'tester')"
         ), {"i": row_id, "t": tenant_id, "sc": scope, "sid": scope_id})
         return row_id
 
@@ -756,6 +762,9 @@ async def test_propose_allowed_for_project_member_with_no_permission_string(mint
     token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # propose() now requires a passing evaluation first (sub-project 4).
+        evaluated = await client.post(f"/agent-profiles/{draft_id}/evaluate", headers=headers)
+        assert evaluated.status_code == 201, evaluated.text
         resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
     assert resp.status_code == 201
 
@@ -813,6 +822,11 @@ async def test_propose_org_scope_with_no_active_workspace_header_does_not_crash(
     token = mint_token(user_id=bu_admin_id, tenant_id=tenant, permissions=["artifact:view"])
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # propose() now requires a passing evaluation first (sub-project 4). The
+        # draft's created_by is 'tester' (see _create_draft_row), not this bu_admin,
+        # so org-scope self-evaluation blocking does not apply here.
+        evaluated = await client.post(f"/agent-profiles/{draft_id}/evaluate", headers=headers)
+        assert evaluated.status_code == 201, evaluated.text
         # Deliberately no X-Workspace-Id header — exercises the buggy fallback branch.
         resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
     assert resp.status_code == 201
