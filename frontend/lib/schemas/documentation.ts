@@ -23,7 +23,8 @@ export type PrepareDocResult = z.infer<typeof PrepareDocResult>;
 
 export const DocType = z.enum([
   "doc_set", "overview", "sdd", "api_reference", "code_summary",
-  "changelog", "release_notes", "rtm", "run_summary", "compliance", "custom",
+  "changelog", "release_notes", "rtm", "run_summary", "compliance",
+  "runbook_update", "knowledge_article", "custom",
 ]);
 export type DocType = z.infer<typeof DocType>;
 
@@ -36,6 +37,9 @@ export const GeneratedDoc = z.object({
   path: z.string().default(""),
   contents: z.string().default(""),
   bytes: z.number().default(0),
+  diff: z.string().nullable().optional(),
+  source_ref: z.string().nullable().optional(),
+  issue_ref: z.string().nullable().optional(),
 });
 export type GeneratedDoc = z.infer<typeof GeneratedDoc>;
 
