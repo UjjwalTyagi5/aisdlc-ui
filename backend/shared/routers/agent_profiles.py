@@ -915,7 +915,9 @@ async def evaluate(
         })
 
     role = await effective_platform_role(db, request)
-    body = "\n".join(filter(None, [target.prompt_prepend, target.prompt_append]))
+    body = "\n".join(filter(None, [
+        target.prompt_prepend, target.prompt_append, target.output_contract_extra,
+    ]))
     row = await run_evaluation(
         tenant_id=tenant_id, target_type="profile", target_id=str(target.id),
         agent_id=target.agent_id, scope=target.scope, body=body,

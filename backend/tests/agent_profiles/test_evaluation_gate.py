@@ -80,6 +80,135 @@ async def test_evaluate_then_propose_succeeds(mint_token):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("purge_created_orgs")
+async def test_evaluate_propose_approve_publishes_it(mint_token):
+    """End-to-end happy path through the NEW decide() gate (governance_requests.py):
+    a developer drafts, evaluates (pass), and proposes a project-scope change; the
+    project's project_admin approves it via POST /governance-approvals/{id}/decide.
+    Mirrors tests/agent_skills/test_agent_skills_router.py::
+    test_propose_skill_then_approve_activates_it's propose-then-approve-then-verify
+    shape, the Behavior counterpart of that Skills flow. Nothing else in this suite
+    drives a real agent_default_* request through decide() -- see the sub-project 4
+    Task 4 final review, Important #2 -- so this is the only place the new belt-
+    and-suspenders check's happy path (a genuinely passing evaluation) is exercised
+    end to end, on top of propose()'s own gate.
+    """
+    tenant = str(uuid.uuid4())
+    dev_id = str(uuid.uuid4())
+    pa_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), :s, 'Evaluate Propose Approve Test') ON CONFLICT (id) DO NOTHING"
+        ), {"i": tenant, "s": f"eval-propose-approve-{tenant}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+        await s.execute(text(
+            "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": project_id, "t": tenant, "w": ws_id})
+
+    await _bind_role(tenant, dev_id, "developer", "project", project_id)
+    await _bind_role(tenant, pa_id, "project_admin", "project", project_id)
+    dev_token = mint_token(user_id=dev_id, tenant_id=tenant, permissions=["artifact:view"])
+    pa_token = mint_token(
+        user_id=pa_id, tenant_id=tenant, permissions=["artifact:view", "governance:decide"]
+    )
+    dev_headers = {"Authorization": f"Bearer {dev_token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        draft_id = await _create_draft(client, dev_headers, "project", project_id)
+        version = (await client.get(
+            "/agent-profiles/versions",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers=dev_headers,
+        )).json()["versions"][0]["version"]
+
+        evaluated = await client.post(f"/agent-profiles/{draft_id}/evaluate", headers=dev_headers)
+        assert evaluated.status_code == 201, evaluated.text
+        assert evaluated.json()["result"] == "pass"
+
+        proposed = await client.post(f"/agent-profiles/{draft_id}/propose", headers=dev_headers)
+        assert proposed.status_code == 201, proposed.text
+        request_id = proposed.json()["id"]
+
+        decided = await client.post(
+            f"/governance-approvals/{request_id}/decide",
+            json={"decision": "approve"},
+            headers={"Authorization": f"Bearer {pa_token}"},
+        )
+        assert decided.status_code == 200, decided.text
+
+        versions = (await client.get(
+            "/agent-profiles/versions",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers=dev_headers,
+        )).json()["versions"]
+    published = next(v for v in versions if v["version"] == version)
+    assert published["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_decide_belt_and_suspenders_blocks_an_unevaluated_target(mint_token):
+    """The re-check added to `decide()`'s approve path is not merely redundant
+    with `propose()`'s own gate: a request whose target draft was NEVER evaluated
+    (here, one filed directly through the service layer rather than through
+    `propose()`, which itself always enforces the gate -- standing in for a
+    request that predates this feature, or one filed by some other path) must
+    still be refused when an approver tries to act on it."""
+    from shared.services import governance_requests as governance_service
+
+    tenant = str(uuid.uuid4())
+    initiator_id = str(uuid.uuid4())
+    pa_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, pa_id, "project_admin", "project", project_id)
+    pa_token = mint_token(
+        user_id=pa_id, tenant_id=tenant, permissions=["artifact:view", "governance:decide"]
+    )
+
+    async with get_db_session_for_tenant(tenant) as s:
+        draft_id = str(uuid.uuid4())
+        await s.execute(text(
+            "INSERT INTO agent_profiles "
+            "(id, tenant_id, agent_id, scope, scope_id, version, is_active, created_by) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), 'requirements', 'project', "
+            " CAST(:p AS uuid), 1, false, 'tester')"
+        ), {"i": draft_id, "t": tenant, "p": project_id})
+
+        request = await governance_service.create_request(
+            s,
+            tenant_id=tenant,
+            initiator_id=initiator_id,
+            initiator_name="Someone",
+            initiator_role="developer",
+            request_type="agent_default_project",
+            title="requirements default change (project)",
+            description="never evaluated",
+            workspace_id=ws_id,
+            project_id=project_id,
+            target_ref=draft_id,
+            payload={"agentId": "requirements", "scope": "project", "version": 1},
+            system_raised=True,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        decided = await client.post(
+            f"/governance-approvals/{request['id']}/decide",
+            json={"decision": "approve"},
+            headers={"Authorization": f"Bearer {pa_token}"},
+        )
+    assert decided.status_code == 422
+    assert decided.json()["detail"]["code"] == "EFFECT_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 async def test_propose_refused_without_a_passing_evaluation(mint_token):
     tenant = str(uuid.uuid4())
     dev_id = str(uuid.uuid4())
