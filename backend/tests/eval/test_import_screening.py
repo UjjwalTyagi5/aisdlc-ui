@@ -15,6 +15,21 @@ def test_bearer_token_detected():
     assert hits
 
 
+def test_password_assignment_detected():
+    hits = scan_for_credentials("password=supersecret123")
+    assert hits
+
+
+def test_api_key_detected():
+    hits = scan_for_credentials("key: sk-abcdefghijklmnopqrstuvwxyz0123456789")
+    assert hits
+
+
+def test_url_credentials_detected():
+    hits = scan_for_credentials("https://user:tokentokentoken@github.com/org/repo.git")
+    assert hits
+
+
 def test_never_echoes_the_matched_secret():
     hits = scan_for_credentials("token: ghp_abcdefghijklmnopqrstuvwxyz0123456789")
     joined = " ".join(hits)
