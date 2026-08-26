@@ -38,6 +38,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -58,6 +65,7 @@ import {
   updateAgentSkill,
 } from "@/lib/api/agent-skills";
 import { getLintViolations } from "@/lib/api/agent-profiles";
+import { listWorkspaces } from "@/lib/api/workspaces";
 import { qk } from "@/lib/api/query-keys";
 import type { LintViolation } from "@/lib/schemas/agent-profiles";
 import type { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
@@ -1218,6 +1226,23 @@ function SkillImportDialog({
   const [sourceWorkspaceId, setSourceWorkspaceId] = React.useState("");
   const [sourceUrl, setSourceUrl] = React.useState("");
 
+  // Populates the same-BU source picker below. Deliberately the plain "which
+  // workspaces can I SEE" list (GET /workspaces → allowed_workspace_ids), not
+  // "which do I ADMINISTER" — there's no dedicated endpoint for the latter, so
+  // the real provenance check (administered_workspace_ids) stays server-side
+  // in importAgentSkill. A caller can therefore pick a workspace here it can
+  // see but doesn't administer; the import then correctly 422s as
+  // SOURCE_NOT_ALLOWED. That's an accepted UX rough edge, not a gap: this
+  // dropdown only replaces free-typing a raw UUID (which nobody could ever
+  // discover in the UI before) with a real, valid workspace_id — it was never
+  // meant to pre-filter the security boundary itself.
+  const workspacesQ = useQuery({
+    queryKey: qk.workspaces.list(),
+    queryFn: listWorkspaces,
+    enabled: sourceKind === "same_tenant_bu",
+    staleTime: 60_000,
+  });
+
   const setField = (key: keyof EditorFields, value: string) => {
     setFields((f) => ({ ...f, [key]: value }));
     setLint((l) => (l[key] ? { ...l, [key]: [] } : l));
@@ -1340,17 +1365,44 @@ function SkillImportDialog({
             {sourceKind === "same_tenant_bu" ? (
               <div className="space-y-1.5 pt-1">
                 <Label htmlFor="import-source-workspace-id" className="text-sm font-medium">
-                  Workspace ID
+                  {BUSINESS_UNIT_LABEL}
                 </Label>
-                <Input
-                  id="import-source-workspace-id"
-                  value={sourceWorkspaceId}
-                  onChange={(e) => setSourceWorkspaceId(e.target.value)}
-                  placeholder="ws-1234"
-                />
+                {workspacesQ.isError ? (
+                  <ApiErrorState
+                    title={`Couldn't load ${BUSINESS_UNIT_LABEL.toLowerCase()}s`}
+                    description={
+                      workspacesQ.error instanceof Error ? workspacesQ.error.message : undefined
+                    }
+                    onRetry={() => workspacesQ.refetch()}
+                  />
+                ) : (
+                  <Select
+                    value={sourceWorkspaceId}
+                    onValueChange={setSourceWorkspaceId}
+                    disabled={workspacesQ.isLoading}
+                  >
+                    <SelectTrigger id="import-source-workspace-id">
+                      <SelectValue
+                        placeholder={
+                          workspacesQ.isLoading
+                            ? "Loading…"
+                            : `Choose a ${BUSINESS_UNIT_LABEL.toLowerCase()}…`
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(workspacesQ.data ?? []).map((ws) => (
+                        <SelectItem key={ws.id} value={ws.id}>
+                          {ws.displayName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
                 <p className="text-muted-foreground text-xs">
-                  The {BUSINESS_UNIT_LABEL} that owns the skill — you must administer
-                  it for the import to succeed.
+                  The {BUSINESS_UNIT_LABEL.toLowerCase()} that owns the skill — you must
+                  administer it for the import to succeed. You may see units here you can
+                  view but don&apos;t administer; picking one of those will be refused.
                 </p>
               </div>
             ) : (

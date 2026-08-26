@@ -31,6 +31,24 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+// jsdom implements neither of these, and Radix's Select (used by the Import
+// dialog's same-BU workspace picker below) calls them on pointer interaction
+// — without these no-op stubs, opening/selecting throws
+// "target.hasPointerCapture is not a function" instead of exercising the
+// picker.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {};
+}
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 vi.mock("@/lib/api/agent-skills", () => ({
   listAgentSkills: vi.fn(),
   getAgentSkill: vi.fn(),
@@ -42,6 +60,13 @@ vi.mock("@/lib/api/agent-skills", () => ({
   proposeAgentSkill: vi.fn(),
   evaluateAgentSkill: vi.fn(),
   importAgentSkill: vi.fn(),
+}));
+// Populates the Import dialog's same-BU source picker (final whole-branch
+// review, sub-project 5: the field used to be a free-text UUID input with no
+// way to discover a real workspace id — see the "Import (creates a new
+// custom skill…" describe block below).
+vi.mock("@/lib/api/workspaces", () => ({
+  listWorkspaces: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
@@ -63,8 +88,11 @@ import {
   proposeAgentSkill,
   updateAgentSkill,
 } from "@/lib/api/agent-skills";
+import { listWorkspaces } from "@/lib/api/workspaces";
 import { ApiRequestError } from "@/lib/api/client";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
+import type { Workspace } from "@/lib/schemas/workspace";
 
 import { SkillsTab } from "../skills-tab";
 import type { ScopeContext } from "../agent-editor";
@@ -457,10 +485,37 @@ describe("SkillsTab import action", () => {
     updated_at: null,
   } satisfies SkillDetail;
 
+  const mockedListWorkspaces = vi.mocked(listWorkspaces);
+
+  function makeWorkspace(id: string, displayName: string) {
+    return {
+      id,
+      organizationId: "org-1",
+      slug: id,
+      displayName,
+      businessUnit: null,
+      costCenter: null,
+      status: "active",
+      isActive: true,
+      memberCount: 1,
+      projectCount: 1,
+      monthlySpendUsd: 0,
+      monthlyBudgetUsd: null,
+      budgetStartDate: null,
+      budgetEndDate: null,
+      buAdminName: null,
+      createdAt: null,
+    };
+  }
+
   it("shows an Import action for a manager, and calls the API with the declared same-BU source on submit", async () => {
     mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
     const mockedImport = vi.mocked(importAgentSkill);
     mockedImport.mockResolvedValue(importedSkill);
+    mockedListWorkspaces.mockResolvedValue([
+      makeWorkspace("11111111-1111-4111-8111-111111111111", "Acme BU"),
+      makeWorkspace("22222222-2222-4222-8222-222222222222", "Widgets BU"),
+    ] as unknown as Workspace[]);
 
     const user = userEvent.setup();
     renderSkillsTab(projectScopeContext(true));
@@ -468,11 +523,22 @@ describe("SkillsTab import action", () => {
     await screen.findByText("Existing Skill");
     await user.click(screen.getByRole("button", { name: /^import$/i }));
 
-    // Source picker defaults to "same_tenant_bu" — the Workspace ID field is
-    // visible without switching the radio.
+    // Source picker defaults to "same_tenant_bu" — the workspace dropdown is
+    // visible without switching the radio. It is a real <select>-style
+    // dropdown (Radix Select combobox), not a free-text UUID input (final
+    // whole-branch review, sub-project 5, Important finding): it's populated
+    // from listWorkspaces() and shows each workspace's display name, but the
+    // value submitted as source.workspace_id is the real UUID `id`, never the
+    // display name or a placeholder.
     await user.type(await screen.findByLabelText("Display name"), "Imported");
     await user.type(screen.getByLabelText(/instructions/i), "x");
-    await user.type(screen.getByLabelText("Workspace ID"), "ws-2");
+
+    const workspaceTrigger = await screen.findByRole("combobox", { name: BUSINESS_UNIT_LABEL });
+    expect(
+      screen.queryByPlaceholderText("ws-1234"),
+    ).not.toBeInTheDocument();
+    await user.click(workspaceTrigger);
+    await user.click(await screen.findByRole("option", { name: "Widgets BU" }));
 
     await user.click(screen.getByRole("button", { name: /^import skill$/i }));
 
@@ -486,7 +552,10 @@ describe("SkillsTab import action", () => {
       description: "",
       when_to_use: "",
       body: "x",
-      source: { kind: "same_tenant_bu", workspace_id: "ws-2" },
+      source: {
+        kind: "same_tenant_bu",
+        workspace_id: "22222222-2222-4222-8222-222222222222",
+      },
     });
   });
 
