@@ -589,6 +589,68 @@ async def import_skill(body: ImportSkillIn, request: Request):
     return detail
 
 
+class ImportSourceCreateIn(BaseModel):
+    source_pattern: str
+    label: str
+
+
+@agent_skills_router.get("/import-sources")
+async def list_import_sources(request: Request):
+    """Open read access — router-floor `artifact:view` only. A BU Admin needs
+    to see the approved list to know what they may declare as an import
+    source (sub-project 5 spec); only adding to it is Org-Admin-gated below.
+    """
+    from sqlalchemy import select as _select  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.models.orm import ImportSourceAllowlist  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    async with get_db_session_for_tenant(tenant_id) as session:
+        rows = (await session.execute(
+            _select(ImportSourceAllowlist).where(
+                ImportSourceAllowlist.tenant_id == tenant_id,
+            ).order_by(ImportSourceAllowlist.label)
+        )).scalars().all()
+    return {"sources": [
+        {"id": str(r.id), "source_pattern": r.source_pattern, "label": r.label,
+         "created_by": r.created_by, "created_at": r.created_at.isoformat() if r.created_at else None}
+        for r in rows
+    ]}
+
+
+@agent_skills_router.post("/import-sources", status_code=201)
+async def create_import_source(body: ImportSourceCreateIn, request: Request):
+    """Org-Admin-only write onto the allowlist `import_skill` screens against
+    (mirrors OrgModelGrant's "the Org Admin governs the catalogue" doctrine —
+    see ImportSourceAllowlist's docstring). `source_pattern` is rejected here
+    when empty/whitespace-only (422) rather than relying solely on Task 3's
+    downstream filter at CHECK time — this closes the root cause: an admin
+    typo that inserts a blank pattern must never reach the table at all, since
+    `"".startswith("")` would otherwise silently wildcard the entire external-
+    source screen for the whole tenant.
+    """
+    from shared.authz.read_scope import is_org_wide  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.models.orm import ImportSourceAllowlist  # noqa: PLC0415
+
+    if not is_org_wide(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    tenant_id = _tenant_id(request)
+    pattern = body.source_pattern.strip()
+    if not pattern:
+        raise HTTPException(status_code=422, detail="source_pattern must not be empty")
+
+    async with get_db_session_for_tenant(tenant_id) as session:
+        row = ImportSourceAllowlist(
+            tenant_id=tenant_id, source_pattern=pattern, label=body.label,
+            created_by=_user_id(request) or "system",
+        )
+        session.add(row)
+        await session.flush()
+        return {"id": str(row.id), "source_pattern": row.source_pattern, "label": row.label}
+
+
 @agent_skills_router.post("/toggle")
 async def toggle_skill(body: ToggleIn, request: Request):
     tenant_id = _tenant_id(request)
