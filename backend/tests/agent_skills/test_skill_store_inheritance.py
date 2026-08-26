@@ -176,3 +176,54 @@ async def test_own_personal_toggle_beats_inherited_project_toggle():
     hit = next(i for i in items if i["skill_key"] == "shared-key")
     assert hit["enabled"] is True
     assert hit["origin_scope"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_create_custom_skill_activate_false_inserts_inactive():
+    """Sub-project 3 primitive: activate=False inserts the row but never goes
+    live. get_skill_detail only ever resolves the currently ACTIVE row (see its
+    is_active.is_(True) filter), so when the sole version is inactive it finds
+    nothing at all -- that None is the live-DB proof the row itself is inactive,
+    not merely that some merged-list "enabled" toggle is off."""
+    tenant = str(uuid.uuid4())
+    scope_id = str(uuid.uuid4())
+    detail = await store.create_custom_skill(
+        tenant, "requirements", "project", scope_id, "draft-skill",
+        "Draft Skill", "d", "w", "body", "tester", activate=False,
+    )
+    assert detail is not None
+    assert detail["skill_key"] == "draft-skill"
+
+    row = await store.get_skill_detail(tenant, "requirements", "project", scope_id, "custom", "draft-skill")
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_update_custom_skill_activate_false_leaves_prior_version_active():
+    """activate=False on update inserts v2 inactive and leaves v1 (and its
+    is_active flag) completely untouched -- the runtime/list view still
+    surfaces v1's content until a later governance step activates v2."""
+    tenant = str(uuid.uuid4())
+    scope_id = str(uuid.uuid4())
+    await store.create_custom_skill(
+        tenant, "requirements", "project", scope_id, "k", "V1", "d", "w", "body v1", "tester",
+    )  # default activate=True, matches every existing caller
+    updated = await store.update_custom_skill(
+        tenant, "requirements", "project", scope_id, "k", "V2 (proposed)", "d", "w", "body v2",
+        "tester", activate=False,
+    )
+    assert updated is not None
+
+    # The ACTIVE version the runtime/list would surface is still v1's content --
+    # v2 exists as an inactive row, not yet live.
+    active = await store.get_skill_detail(tenant, "requirements", "project", scope_id, "custom", "k")
+    assert active is not None
+    assert active["display_name"] == "V1"
+    assert active["version"] == 1
+
+    versions = await store.list_custom_versions(tenant, "requirements", "project", scope_id, "k")
+    assert len(versions) == 2
+    v1 = next(v for v in versions if v["version"] == 1)
+    v2 = next(v for v in versions if v["version"] == 2)
+    assert v1["is_active"] is True
+    assert v2["is_active"] is False

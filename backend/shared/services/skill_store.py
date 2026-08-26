@@ -464,9 +464,11 @@ async def _fetch_toggle(session, agent_id, scope, scope_id, origin, skill_key):
 
 async def create_custom_skill(
     tenant_id, agent_id, scope, scope_id, skill_key, display_name,
-    description, when_to_use, body, created_by,
+    description, when_to_use, body, created_by, activate: bool = True,
 ) -> dict:
-    """Insert a v1 active custom skill. Raises ValueError if one already exists."""
+    """Insert a v1 custom skill. Active immediately unless `activate=False` (a
+    non-owner's proposed draft, per sub-project 3 — stays inactive until a
+    governance approval flips it). Raises ValueError if one already exists."""
     sid = _as_uuid(scope_id) if scope != "org" else None
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         existing = (await session.execute(
@@ -487,7 +489,7 @@ async def create_custom_skill(
             scope_id=sid,
             skill_key=skill_key,
             version=1,
-            is_active=True,
+            is_active=activate,
             display_name=display_name or skill_key,
             description=description,
             when_to_use=when_to_use,
@@ -505,9 +507,13 @@ async def create_custom_skill(
 
 async def update_custom_skill(
     tenant_id, agent_id, scope, scope_id, skill_key, display_name,
-    description, when_to_use, body, created_by,
+    description, when_to_use, body, created_by, activate: bool = True,
 ) -> Optional[dict]:
-    """Insert v(n+1) and atomically flip the active flag. None when no existing skill."""
+    """Insert v(n+1). Activates it (and deactivates prior versions) immediately
+    unless `activate=False`, in which case the new row is inserted inactive and
+    every existing version — including the currently active one — is left
+    untouched (a non-owner's proposed draft; publish/governance-approval flips
+    it later). None when no existing skill."""
     sid = _as_uuid(scope_id) if scope != "org" else None
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         rows = list((await session.execute(
@@ -522,9 +528,10 @@ async def update_custom_skill(
         if not rows:
             return None
         next_version = rows[0].version + 1
-        for r in rows:
-            if r.is_active:
-                r.is_active = False
+        if activate:
+            for r in rows:
+                if r.is_active:
+                    r.is_active = False
         new_row = AgentSkill(
             tenant_id=_as_uuid(tenant_id),
             agent_id=str(agent_id),
@@ -532,7 +539,7 @@ async def update_custom_skill(
             scope_id=sid,
             skill_key=skill_key,
             version=next_version,
-            is_active=True,
+            is_active=activate,
             display_name=display_name or skill_key,
             description=description,
             when_to_use=when_to_use,
