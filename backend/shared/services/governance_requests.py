@@ -665,8 +665,14 @@ async def decide(
             request["tenantId"], target_type, request["targetRef"]
         )
         if passing is None:
+            # "no longer passing" would overclaim: evaluations are append-only and
+            # immutable (final whole-branch review, sub-project 4, Minor #2) — this
+            # can only mean "never evaluated" or "the draft moved on to a newer,
+            # unevaluated version since propose()", never "was scored again and
+            # failed."
             raise EffectUnavailable(
-                "This proposal's evaluation is missing or no longer passing.",
+                "This proposal's draft was never evaluated, or has since been "
+                "superseded by a newer, unevaluated version.",
                 code="EFFECT_UNAVAILABLE",
             )
 

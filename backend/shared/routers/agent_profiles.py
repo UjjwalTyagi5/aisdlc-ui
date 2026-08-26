@@ -55,13 +55,21 @@ re-opens the gate. Missing or failing, `propose()` refuses with 422
 `EVALUATION_REQUIRED` before it ever reaches the governance-request filing.
 `evaluate()` (POST .../evaluate) is the only way to close that gate: it runs the
 deterministic, no-LLM `evaluate_agent_default` rubric
-(shared/eval/agent_studio_scoring.py) against the draft's stacked prompt slots and
-records a PASS/FAIL row via `run_evaluation`. scope=="user" is rejected outright
-(422 `NOT_A_SHARED_TIER`) — a personal draft is never proposed, so it is never
-evaluated either. For scope=="org" specifically (R3 — every workspace/project in the
-tenant inherits from an org default, the highest-blast-radius tier), the evaluator
-may not be the draft's own author (403 `SELF_EVALUATION_BLOCKED`); workspace/project
-scope (R2) has no such restriction and may self-evaluate. The owner's direct
+(shared/eval/agent_studio_scoring.py) against the draft row's OWN three prompt
+slots (prompt_prepend/prompt_append/output_contract_extra — not composed with any
+ancestor tier's content; see that module's own docstring for why that is a real,
+disclosed limitation) and records a PASS/FAIL row via `run_evaluation`. It also
+requires the same `owns or may_propose` tier standing `propose()` itself requires
+(via `resolve_actor_tier_access`) — router-level `artifact:view` alone would let
+any tenant member evaluate any draft regardless of standing at that tier, which
+would let literally anyone supply R3's "someone other than the author" blessing
+(final whole-branch review, sub-project 4, Important #1, fixed). scope=="user" is
+rejected outright (422 `NOT_A_SHARED_TIER`) — a personal draft is never proposed,
+so it is never evaluated either. For scope=="org" specifically (R3 — every
+workspace/project in the tenant inherits from an org default, the highest-blast-
+radius tier), the evaluator may not be the draft's own author (403
+`SELF_EVALUATION_BLOCKED`); workspace/project scope (R2) has no such restriction
+and may self-evaluate. The owner's direct
 `publish()`/rollback path is deliberately NOT gated by any of this — only the
 propose-to-approval path a non-owner uses is; an owner publishing their own work was
 never routed through evaluation and sub-project 4 did not add that restriction.

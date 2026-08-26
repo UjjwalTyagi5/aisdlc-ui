@@ -6,6 +6,28 @@ no network — CI must run this offline) but a genuinely different question: sco
 compares an agent RUN's output artifact against a known-good `expected` value; a
 prompt/skill DRAFT has no such expected text to diff against (the draft IS the new
 content). This scores draft body text directly against a fixed per-agent topic rubric.
+
+KNOWN LIMITATIONS, DISCLOSED (final whole-branch review, sub-project 4, Important #2)
+---------------------------------------------------------------------------------------
+1. GAMEABLE: a case-insensitive-substring rubric can be satisfied by pasting the
+   topic keywords into otherwise-meaningless text (e.g. "acceptance criteria,
+   stakeholder, scope, user stories" with nothing else scores 1.0). Accepted as an
+   inherent limitation of a first-cut, deterministic, no-LLM rubric — the same
+   tradeoff score_output() itself already makes (token-overlap scoring is no more
+   robust to gaming). Not treated as blocking; a live-execution "golden task" runner
+   is the documented, larger follow-up that would close this (see the sub-project 4
+   spec §4/§6), not something this module can fix on its own.
+2. NOT COMPOSED WITH ANCESTORS: `evaluate()`/`evaluate_skill()` score ONLY the draft
+   row's own content (its own prompt/skill slots), never the org->workspace->project
+   cascade `preview()`/`build_preview_layers` already know how to stack. A narrow,
+   legitimate one-line delta on top of an already-good ancestor default therefore
+   scores against the delta ALONE and can permanently fail the gate — the only way
+   through today is padding the draft with topic keywords that add no real content,
+   which is the opposite of what an evaluation gate should reward. This is a real
+   gap, not merely a first-cut tradeoff like #1: fixing it means composing the same
+   ancestor-context (`ancestor_chain`, `workspace_id`/`project_id`) `preview()`
+   already receives into `evaluate()`/`evaluate_skill()`'s request shape, which
+   neither route currently accepts — a genuine follow-up task, not a one-line patch.
 """
 from __future__ import annotations
 

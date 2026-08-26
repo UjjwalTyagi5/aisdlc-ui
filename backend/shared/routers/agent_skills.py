@@ -83,6 +83,30 @@ its own actor id explicitly, preserving sub-project 3's Critical #4 fix that a
 non-owner's proposal must only ever target their own draft. The owner's direct
 `activate_version` path is deliberately NOT gated by any of this, same as
 `publish()` in agent_profiles — only the propose-to-approval path is.
+`evaluate_skill()`'s callers all need router-level standing too, not just
+`artifact:view` — it defers to `resolve_actor_tier_access` and requires
+`owns or may_propose` at the target scope, same as `propose_skill`, so a bare
+tenant member with no standing at that tier cannot supply R3's "someone other
+than the author" blessing for a draft they have no relationship to (final
+whole-branch review, sub-project 4, Important #1, fixed).
+
+KNOWN LIMITATION, DISCLOSED (final whole-branch review, sub-project 4,
+Important #3): `evaluate_skill()`'s unfiltered `get_latest_draft_version` lookup
+and `propose_skill()`'s caller-filtered one can resolve DIFFERENT rows when
+more than one non-owner has a pending draft of the SAME skill_key at the SAME
+scope simultaneously — evaluate_skill() always finds the highest-versioned
+pending draft tenant-wide (by design, for R3), while propose_skill() finds only
+the caller's own. A proposer in that collision could see their Evaluate call
+report PASS (because it silently evaluated a DIFFERENT contributor's draft) yet
+have their own Propose call still 422 with EVALUATION_REQUIRED. Not a security
+issue — propose_skill()'s own-draft filter is untouched, so nobody can ever
+propose a draft they didn't write, and the failure is a confusing dead end, not
+a silent wrong action — but it is a real correctness gap for the multi-
+contributor case this propose flow exists to serve. Closing it needs either the
+evaluate response to name the specific draft it targeted so the client can
+reason about a mismatch, or `propose_skill()` accepting the evaluated draft's
+own resolution — a genuine design question, not a one-line fix, left as
+follow-up rather than silently unaddressed.
 
 Role resolution here uses `resolve_platform_role_for_user` rather than
 `effective_platform_role` (agent_profiles.py's routes all take a `db` param already;
