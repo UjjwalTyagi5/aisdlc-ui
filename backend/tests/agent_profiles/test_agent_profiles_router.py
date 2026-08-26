@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from process_api import app
-from shared.db import get_db_session_for_tenant
+from shared.db import get_db_session_for_tenant, get_db_session_superuser
 from shared.routers import agent_profiles as ap
 
 
@@ -749,3 +749,47 @@ async def test_propose_denied_for_non_member(mint_token):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("purge_created_orgs")
+async def test_propose_org_scope_with_no_active_workspace_header_does_not_crash(mint_token):
+    """Regression: `workspace_id = ... else await active_workspace_for_request(...)`
+    (the org-scope fallback, reached only when target.scope_id is falsy) called that
+    helper with its arguments swapped (`db` where `request` is expected, `request`
+    where `tenant_id` is expected) — an `AttributeError`/500 waiting to happen for
+    any org-scope proposal filed with no X-Workspace-Id header. Never exercised by
+    any prior test (project/workspace-scope proposals always have a truthy
+    scope_id and never reach this branch), found while building Skills' propose()
+    in sub-project 3, which mirrors this exact line. Real bootstrapped org +
+    workspace rows are required since active_workspace_for_request's fallback path
+    queries the `workspaces` table for this tenant (org)."""
+    tenant = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), :s, 'Propose Org Scope Test') ON CONFLICT (id) DO NOTHING"
+        ), {"i": tenant, "s": f"propose-org-scope-{tenant}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+
+    draft_id = await _create_draft_row(tenant, "org", None)
+    # A bu_admin proposes (owns=False, may_propose=True for org scope, so this
+    # genuinely reaches the buggy fallback branch); a real org_admin binding must
+    # also exist so governance routing has someone to assign the request to
+    # (otherwise it 422s with NO_APPROVER for an unrelated reason).
+    bu_admin_id = str(uuid.uuid4())
+    org_admin_id = str(uuid.uuid4())
+    await _bind_role(tenant, bu_admin_id, "bu_admin", "business_unit", ws_id)
+    await _bind_role(tenant, org_admin_id, "org_admin", "organization", tenant)
+
+    token = mint_token(user_id=bu_admin_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # Deliberately no X-Workspace-Id header — exercises the buggy fallback branch.
+        resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
+    assert resp.status_code == 201

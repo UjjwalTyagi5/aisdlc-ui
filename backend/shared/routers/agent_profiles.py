@@ -776,7 +776,7 @@ async def propose(
     # workspace of its own, so it is filed against the caller's active unit — the
     # request still has to belong somewhere for the queue's scope filter to work.
     workspace_id = str(target.scope_id) if target.scope_id else await active_workspace_for_request(
-        db, request
+        request, tenant_id
     )
     if not workspace_id:
         raise HTTPException(
