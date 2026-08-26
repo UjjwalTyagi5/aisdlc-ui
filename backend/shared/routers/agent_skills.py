@@ -438,6 +438,134 @@ async def create_skill(body: CreateSkillIn, request: Request):
 
 # ── Literal-suffix routes (declared BEFORE {origin}/{skill_key}) ─────────────────────────
 
+class ImportSourceIn(BaseModel):
+    kind: str  # "same_tenant_bu" | "external"
+    workspace_id: Optional[str] = None
+    url: Optional[str] = None
+
+
+class ImportSkillIn(BaseModel):
+    agent_id: str
+    scope: str
+    scope_id: Optional[str] = None
+    skill_key: str
+    display_name: str
+    description: Optional[str] = None
+    when_to_use: Optional[str] = None
+    body: str
+    source: ImportSourceIn
+
+
+@agent_skills_router.post("/import")
+async def import_skill(body: ImportSkillIn, request: Request):
+    """Bring in Skill content from another BU the caller administers, or a
+    declared external source, through three screens before it lands via the
+    SAME create_custom_skill path an ordinary create already uses — import is
+    a different front door onto the existing write path, not a parallel one
+    (sub-project 5 spec §3.1). See create_skill for the sequence this mirrors.
+    """
+    from shared.authz.read_scope import administered_workspace_ids  # noqa: PLC0415
+    from shared.eval.import_screening import scan_for_credentials  # noqa: PLC0415
+    from sqlalchemy import select as _select  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.models.orm import ImportSourceAllowlist  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    _validate_agent(body.agent_id)
+    _validate_scope(body.scope, body.scope_id)
+    perms = getattr(request.state, "permissions", []) or []
+    role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
+    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    if body.scope == "user":
+        owns = True
+    else:
+        owns, _ = await resolve_actor_tier_access(tenant_id, _user_id(request), perms, body.scope, body.scope_id)
+
+    # ── Screen 3: provenance ──────────────────────────────────────────────
+    if body.source.kind == "same_tenant_bu":
+        if not body.source.workspace_id:
+            raise HTTPException(status_code=422, detail={
+                "code": "SOURCE_NOT_ALLOWED",
+                "message": "A same-BU import must name the source workspace.",
+            })
+        async with get_db_session_for_tenant(tenant_id) as session:
+            administered = await administered_workspace_ids(session, request)
+        if administered is not None and body.source.workspace_id not in administered:
+            raise HTTPException(status_code=422, detail={
+                "code": "SOURCE_NOT_ALLOWED",
+                "message": "You do not administer the source business unit.",
+            })
+    elif body.source.kind == "external":
+        url = (body.source.url or "").strip()
+        if not url:
+            raise HTTPException(status_code=422, detail={
+                "code": "SOURCE_NOT_ALLOWED",
+                "message": "An external import must declare a source URL.",
+            })
+        async with get_db_session_for_tenant(tenant_id) as session:
+            rows = (await session.execute(
+                _select(ImportSourceAllowlist.source_pattern).where(
+                    ImportSourceAllowlist.tenant_id == tenant_id,
+                )
+            )).scalars().all()
+        if not any(url.startswith(p) for p in rows):
+            raise HTTPException(status_code=422, detail={
+                "code": "SOURCE_NOT_ALLOWED",
+                "message": "This source is not on the organization's approved import list.",
+            })
+    else:
+        raise HTTPException(status_code=422, detail={
+            "code": "SOURCE_NOT_ALLOWED",
+            "message": "source.kind must be 'same_tenant_bu' or 'external'.",
+        })
+
+    # ── Screen 2: credential leakage ──────────────────────────────────────
+    credential_hits = scan_for_credentials(
+        "\n".join(filter(None, [body.display_name, body.description, body.when_to_use, body.body]))
+    )
+    if credential_hits:
+        raise HTTPException(status_code=422, detail={
+            "code": "CREDENTIAL_DETECTED",
+            "message": f"Possible credential detected ({', '.join(credential_hits)}); remove it before importing.",
+        })
+
+    # ── Screen 1: prompt-injection (same lint create_skill already runs) ──
+    violations = validate_skill_key(body.skill_key) + lint_skill_fields(
+        body.display_name, body.description, body.when_to_use, body.body
+    )
+    if violations:
+        raise HTTPException(status_code=422, detail={"violations": violations})
+
+    store = _store()
+    vendor_hit = get_vendor_skill(body.agent_id, body.skill_key) is not None
+    custom_hit = await store.get_skill_detail(
+        tenant_id, body.agent_id, body.scope, body.scope_id, "custom", body.skill_key
+    ) is not None
+    if vendor_hit or custom_hit:
+        raise HTTPException(status_code=422, detail={"violations": [{
+            "field": "skill_key", "code": "duplicate_key",
+            "message": f"skill_key '{body.skill_key}' already exists for this agent.",
+        }]})
+
+    try:
+        detail = await store.create_custom_skill(
+            tenant_id, body.agent_id, body.scope, body.scope_id, body.skill_key,
+            body.display_name, body.description, body.when_to_use, body.body,
+            _user_id(request) or "system", activate=owns,
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"violations": [{
+            "field": "skill_key", "code": "duplicate_key",
+            "message": f"skill_key '{body.skill_key}' already exists for this agent.",
+        }]})
+    _runtime().invalidate_skills_cache(tenant_id, body.agent_id)
+    await _emit(request, tenant_id, "skill.imported", body.skill_key, {
+        "agent_id": body.agent_id, "scope": body.scope, "scope_id": body.scope_id,
+        "skill_key": body.skill_key, "origin": "custom", "source_kind": body.source.kind,
+    })
+    return detail
+
+
 @agent_skills_router.post("/toggle")
 async def toggle_skill(body: ToggleIn, request: Request):
     tenant_id = _tenant_id(request)
