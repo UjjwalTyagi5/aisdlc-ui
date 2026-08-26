@@ -9,7 +9,7 @@ role_assignment on someone's behalf. Each of those would need its own copy of th
 self-approval rule, and the copy that gets forgotten is the hole.
 
 FIVE RULES, AND THE ORDER THEY ARE CHECKED IN
-----------------------------------------------
+---------------------------------------------
 1. SELF-APPROVAL IS BLOCKED. Checked before "already decided", so a second attempt by
    the initiator is still reported as self-approval — the more specific and more
    actionable of the two answers.
