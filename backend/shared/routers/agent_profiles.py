@@ -439,20 +439,37 @@ async def resolve_actor_tier_access(
     a live bu_admin binding ANYWHERE in the tenant — org is the tenant's one
     instance, so "one tier up from workspace" needs no specific workspace id.
 
-    workspace: owns via a live bu_admin binding scoped to this exact workspace.
-    may_propose via a live project_admin binding on ANY project whose
-    workspace_id is this workspace (one tier up from "some project in this BU").
+    workspace: owns via the admin:* wildcard (an org_admin owns every tier — see
+    below) OR a live bu_admin binding scoped to this exact workspace. may_propose
+    via a live project_admin binding on ANY project whose workspace_id is this
+    workspace (one tier up from "some project in this BU").
 
-    project: owns via a live project_admin binding scoped to this exact project.
-    may_propose via ANY live role_binding scoped to this exact project, excluding
-    role_name='contributor' — contributor is documented elsewhere as "not enough
-    to open an agent"; membership alone earns propose access for every other role.
+    project: owns via the admin:* wildcard OR a live project_admin binding scoped
+    to this exact project. may_propose via ANY live role_binding scoped to this
+    exact project, excluding role_name='contributor' (via `grants_scope()`,
+    read_scope.py's canonical "confers reach, not merely membership" predicate —
+    NOT a bare `!=`, which drops every custom role: `role_name` is NULL for one,
+    and `NULL != 'contributor'` is NULL, not true) — contributor is documented
+    elsewhere as "not enough to open an agent"; membership alone earns propose
+    access for every other role.
+
+    The admin:* shortcut at every tier (not just org) is deliberate, not an
+    oversight: an org_admin's role_bindings row is written at
+    scope_kind='organization', which never matches the workspace/project
+    branches' own scope_kind predicates — omitting the shortcut here would 403 an
+    org_admin on every workspace/project-tier write, contradicting this sub-
+    project's own spec ("Org Admin: unaffected — wildcard already covered every
+    case") and silently revoking access `has_permission`'s wildcard shortcut used
+    to grant everywhere before this function existed (final whole-branch review,
+    sub-project 3, Critical #1).
     """
-    from shared.authz.permissions import has_permission as _has_perm  # noqa: PLC0415 - already imported at module scope, kept local for symmetry with other lazy imports here
+    from shared.authz.permissions import has_permission as _has_perm  # noqa: PLC0415 - kept local for symmetry with other lazy imports here (the module-level import this comment used to describe was removed by sub-project 3 Task 2)
+    from shared.authz.read_scope import grants_scope  # noqa: PLC0415
     from shared.db import get_db_session_for_tenant  # noqa: PLC0415
 
+    is_org_admin = _has_perm(perms, "admin:*")
+
     if scope == "org":
-        owns = _has_perm(perms, "admin:*")
         async with get_db_session_for_tenant(tenant_id) as session:
             hit = (await session.execute(
                 text(
@@ -461,7 +478,7 @@ async def resolve_actor_tier_access(
                 ),
                 {"u": actor_user_id, "now": datetime.now(tz=timezone.utc)},
             )).first()
-        return owns, hit is not None
+        return is_org_admin, hit is not None
 
     if scope == "workspace":
         async with get_db_session_for_tenant(tenant_id) as session:
@@ -482,7 +499,8 @@ async def resolve_actor_tier_access(
                 ),
                 {"u": actor_user_id, "w": scope_id, "now": datetime.now(tz=timezone.utc)},
             )).first()
-        return owns_hit is not None, propose_hit is not None
+        owns = is_org_admin or owns_hit is not None
+        return owns, owns or propose_hit is not None
 
     if scope == "project":
         async with get_db_session_for_tenant(tenant_id) as session:
@@ -498,13 +516,32 @@ async def resolve_actor_tier_access(
                 text(
                     f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
                     f"AND rb.scope_kind = 'project' AND rb.scope_id = :p "
-                    f"AND rb.role_name != 'contributor' LIMIT 1"
+                    f"AND {grants_scope()} LIMIT 1"
                 ),
                 {"u": actor_user_id, "p": scope_id, "now": datetime.now(tz=timezone.utc)},
             )).first()
-        return owns_hit is not None, propose_hit is not None
+        owns = is_org_admin or owns_hit is not None
+        return owns, owns or propose_hit is not None
 
     return False, False
+
+
+async def _project_workspace_id(tenant_id: str, project_id: str) -> Optional[str]:
+    """The workspace a project belongs to — for filing a project-scope proposal
+    against the RIGHT unit. `target.scope_id`/`body.scope_id` at project scope is
+    the PROJECT id, not the workspace id; using it directly as `workspace_id`
+    (the bug this fixes) files the request under an id that is never a real
+    workspace, so `allowed_workspace_ids`' `IN (:allowed)` filter never matches it
+    — the request becomes invisible in every approver's queue except the
+    initiator's own (final whole-branch review, sub-project 3, Important #5)."""
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as session:
+        row = (await session.execute(
+            text("SELECT workspace_id FROM projects WHERE id = :p"),
+            {"p": project_id},
+        )).first()
+    return str(row[0]) if row else None
 
 
 def _validate_agent(agent_id: str) -> None:
@@ -791,9 +828,15 @@ async def propose(
     # The unit the proposal is filed against. An org-scoped profile has no
     # workspace of its own, so it is filed against the caller's active unit — the
     # request still has to belong somewhere for the queue's scope filter to work.
-    workspace_id = str(target.scope_id) if target.scope_id else await active_workspace_for_request(
-        request, tenant_id
-    )
+    # A project-scoped profile's scope_id is the PROJECT id, not a workspace id —
+    # it must be resolved through the project row, not used as-is (see
+    # _project_workspace_id's docstring).
+    if target.scope == "project":
+        workspace_id = await _project_workspace_id(tenant_id, str(target.scope_id))
+    elif target.scope_id:
+        workspace_id = str(target.scope_id)
+    else:
+        workspace_id = await active_workspace_for_request(request, tenant_id)
     if not workspace_id:
         raise HTTPException(
             status_code=422,

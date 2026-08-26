@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from process_api import app
-from shared.db import get_db_session_for_tenant
+from shared.db import get_db_session_for_tenant, get_db_session_superuser
 from shared.routers import agent_skills as sk
 
 TENANT_A = "00000000-0000-0000-0000-000000000001"
@@ -819,11 +819,153 @@ async def test_create_skill_by_non_owner_inserts_inactive(mint_token):
 
 
 @pytest.mark.asyncio
+async def test_delete_skill_denied_for_non_owner_member(mint_token):
+    """Regression: delete takes effect immediately (soft-deletes every live
+    version, no draft/approval form) — action="publish" now requires actual
+    ownership, not merely propose-eligibility. A plain project member used to
+    pass the old action="draft" check and could delete outright (final
+    whole-branch review, sub-project 3, Critical #3)."""
+    tenant = str(uuid.uuid4())
+    owner_id = str(uuid.uuid4())
+    member_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, owner_id, "project_admin", "project", project_id)
+    await _bind_role(tenant, member_id, "developer", "project", project_id)
+    owner_token = mint_token(user_id=owner_id, tenant_id=tenant, permissions=["artifact:view"])
+    member_token = mint_token(user_id=member_id, tenant_id=tenant, permissions=["artifact:view"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "owner-skill", "display_name": "Owner Skill", "body": "x",
+            },
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert created.status_code == 200
+
+        resp = await client.delete(
+            "/agent-skills/owner-skill",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers={"Authorization": f"Bearer {member_token}"},
+        )
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_toggle_skill_denied_for_non_owner_member(mint_token):
+    """Regression: toggle takes effect immediately (no draft/approval form) —
+    same action="publish" fix as delete above (final whole-branch review,
+    sub-project 3, Critical #3)."""
+    tenant = str(uuid.uuid4())
+    owner_id = str(uuid.uuid4())
+    member_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, owner_id, "project_admin", "project", project_id)
+    await _bind_role(tenant, member_id, "developer", "project", project_id)
+    owner_token = mint_token(user_id=owner_id, tenant_id=tenant, permissions=["artifact:view"])
+    member_token = mint_token(user_id=member_id, tenant_id=tenant, permissions=["artifact:view"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "toggle-skill", "display_name": "Toggle Skill", "body": "x",
+            },
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert created.status_code == 200
+
+        resp = await client.post(
+            "/agent-skills/toggle",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "origin": "custom", "skill_key": "toggle-skill", "enabled": False,
+            },
+            headers={"Authorization": f"Bearer {member_token}"},
+        )
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_propose_skill_404s_when_actor_has_no_draft_of_their_own(mint_token):
+    """Regression: `get_latest_draft_version` used to resolve to the newest
+    INACTIVE row for the key regardless of who wrote it — after a normal owner
+    edit, that is the version JUST DEACTIVATED (the prior active one), not a
+    proposal. A non-owner with no draft of their own would then have propose()
+    silently target that stale row, and approving it would roll the skill back
+    (final whole-branch review, sub-project 3, Critical #4)."""
+    tenant = str(uuid.uuid4())
+    owner_id = str(uuid.uuid4())
+    outsider_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, owner_id, "project_admin", "project", project_id)
+    await _bind_role(tenant, outsider_id, "developer", "project", project_id)
+    owner_token = mint_token(user_id=owner_id, tenant_id=tenant, permissions=["artifact:view"])
+    outsider_token = mint_token(user_id=outsider_id, tenant_id=tenant, permissions=["artifact:view"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "stable-skill", "display_name": "Stable Skill v1", "body": "v1",
+            },
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert created.status_code == 200
+
+        updated = await client.put(
+            "/agent-skills/stable-skill",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "display_name": "Stable Skill v2", "body": "v2",
+            },
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert updated.status_code == 200
+        # v1 is now inactive (deactivated by the owner's own v2 publish) — an
+        # outsider with no draft of their own must NOT be able to target it.
+
+        proposed = await client.post(
+            "/agent-skills/stable-skill/propose",
+            json={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers={"Authorization": f"Bearer {outsider_token}"},
+        )
+        assert proposed.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("purge_created_orgs")
 async def test_propose_skill_then_approve_activates_it(mint_token):
+    """A real organizations/workspaces/projects row is required: propose_skill's
+    project-scope branch resolves the governance request's workspace_id via
+    `_project_workspace_id`, which queries the `projects` table for the given
+    project id rather than (as it used to) treating that id as a workspace id
+    directly — see the sub-project 3 final whole-branch review, Important #5."""
     tenant = str(uuid.uuid4())
     dev_id = str(uuid.uuid4())
     pa_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
     project_id = str(uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), :s, 'Propose Skill Test') ON CONFLICT (id) DO NOTHING"
+        ), {"i": tenant, "s": f"propose-skill-{tenant}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+        await s.execute(text(
+            "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": project_id, "t": tenant, "w": ws_id})
+
     await _bind_role(tenant, dev_id, "developer", "project", project_id)
     await _bind_role(tenant, pa_id, "project_admin", "project", project_id)
     dev_token = mint_token(user_id=dev_id, tenant_id=tenant, permissions=["artifact:view"])

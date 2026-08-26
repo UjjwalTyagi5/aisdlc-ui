@@ -467,8 +467,18 @@ async def _apply_agent_default_skill(db: AsyncSession, request: dict[str, Any], 
     from shared.models.orm import AgentSkill  # noqa: PLC0415
     from shared.routers.agent_profiles import apply_publish_flip  # noqa: PLC0415
 
+    # deleted_at IS NULL on both queries below: without it, approving a proposal
+    # against a skill that was soft-deleted after the proposal was filed silently
+    # resurrects it (deleted rows aren't purged, only flagged) — the target lookup
+    # would find the deleted draft, and the sibling flip would reactivate it right
+    # alongside its still-deleted siblings (final whole-branch review, sub-project
+    # 3, Important #4).
     row = (
-        await db.execute(select(AgentSkill).where(AgentSkill.id == target_uuid))
+        await db.execute(
+            select(AgentSkill).where(
+                AgentSkill.id == target_uuid, AgentSkill.deleted_at.is_(None)
+            )
+        )
     ).scalar_one_or_none()
     if row is None:
         raise EffectNotAvailable(request["type"], "That draft version no longer exists.")
@@ -481,6 +491,7 @@ async def _apply_agent_default_skill(db: AsyncSession, request: dict[str, Any], 
                     AgentSkill.scope == row.scope,
                     AgentSkill.scope_id == row.scope_id,
                     AgentSkill.skill_key == row.skill_key,
+                    AgentSkill.deleted_at.is_(None),
                 )
             )
         )

@@ -723,10 +723,33 @@ async def test_publish_workspace_scope_unchanged_developer_denied(mint_token):
 # ── propose: scope-aware write authorization (route-level) ─────────────────────────
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("purge_created_orgs")
 async def test_propose_allowed_for_project_member_with_no_permission_string(mint_token):
+    """A real organizations/workspaces/projects row is required: propose()'s
+    project-scope branch resolves the governance request's workspace_id via
+    `_project_workspace_id`, which queries the `projects` table for the given
+    project id rather than (as it used to) treating that id as a workspace id
+    directly — see the sub-project 3 final whole-branch review, Important #5."""
     tenant = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
     project_id = str(uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), :s, 'Propose Project Scope Test') ON CONFLICT (id) DO NOTHING"
+        ), {"i": tenant, "s": f"propose-project-scope-{tenant}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+        await s.execute(text(
+            "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": project_id, "t": tenant, "w": ws_id})
+
     await _bind_role(tenant, user_id, "qa", "project", project_id)  # QA held no permission before this plan
     draft_id = await _create_draft_row(tenant, "project", project_id)  # reuse sub-project 2's helper
 

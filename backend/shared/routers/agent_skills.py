@@ -95,6 +95,7 @@ from shared.skills.registry import get_vendor_skill
 from shared.routers.agent_profiles import (
     FORBIDDEN_PATTERNS,
     SCOPE_VALUES,
+    _project_workspace_id,
     ancestor_chain,
     assert_can_write_agent_scope,
     assert_own_user_scope,
@@ -353,11 +354,23 @@ async def create_skill(body: CreateSkillIn, request: Request):
             ),
         }]})
 
-    detail = await store.create_custom_skill(
-        tenant_id, body.agent_id, body.scope, body.scope_id, body.skill_key,
-        body.display_name, body.description, body.when_to_use, body.body,
-        _user_id(request) or "system", activate=owns,
-    )
+    try:
+        detail = await store.create_custom_skill(
+            tenant_id, body.agent_id, body.scope, body.scope_id, body.skill_key,
+            body.display_name, body.description, body.when_to_use, body.body,
+            _user_id(request) or "system", activate=owns,
+        )
+    except ValueError:
+        # The pre-check above only sees ACTIVE rows (via get_skill_detail); the
+        # store's own guard matches any non-deleted row regardless of active
+        # state, so a second create against a key that already has an inactive
+        # draft (e.g. from an earlier non-owner proposal) reaches here instead —
+        # translate to the same duplicate_key shape rather than letting it 500.
+        raise HTTPException(status_code=422, detail={"violations": [{
+            "field": "skill_key",
+            "code": "duplicate_key",
+            "message": f"skill_key '{body.skill_key}' already exists for this agent.",
+        }]})
     _runtime().invalidate_skills_cache(tenant_id, body.agent_id)
     await _emit(request, tenant_id, "skill.created", body.skill_key, {
         "agent_id": body.agent_id, "scope": body.scope, "scope_id": body.scope_id,
@@ -375,7 +388,11 @@ async def toggle_skill(body: ToggleIn, request: Request):
     _validate_scope(body.scope, body.scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    # action="publish", not "draft": a toggle takes effect immediately (there is
+    # no inactive/pending form of a toggle to propose), so it requires actual
+    # ownership, not merely propose-eligibility — matching activate_version below
+    # (final whole-branch review, sub-project 3, Critical #3).
+    await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="publish")
     if body.origin not in (Origin.vendor.value, Origin.custom.value):
         raise HTTPException(status_code=422, detail="origin must be one of ('vendor', 'custom')")
 
@@ -443,6 +460,7 @@ async def propose_skill(skill_key: str, body: ProposeSkillIn, request: Request):
 
     draft = await _store().get_latest_draft_version(
         tenant_id, body.agent_id, body.scope, body.scope_id, skill_key,
+        created_by=_user_id(request),
     )
     if draft is None:
         raise HTTPException(status_code=404, detail="Nothing to propose")
@@ -458,7 +476,15 @@ async def propose_skill(skill_key: str, body: ProposeSkillIn, request: Request):
     async with get_db_session_for_tenant(tenant_id) as db:
         role = await effective_platform_role(db, request)
         name = await actor_display_name(db, request)
-        workspace_id = body.scope_id if body.scope_id else await active_workspace_for_request(request, tenant_id)
+        # A project-scope's scope_id is the PROJECT id, not a workspace id — must
+        # be resolved through the project row (see _project_workspace_id's
+        # docstring; mirrors the identical fix in AgentProfile.propose()).
+        if body.scope == "project":
+            workspace_id = await _project_workspace_id(tenant_id, str(body.scope_id))
+        elif body.scope_id:
+            workspace_id = body.scope_id
+        else:
+            workspace_id = await active_workspace_for_request(request, tenant_id)
         if not workspace_id:
             raise HTTPException(status_code=422, detail={
                 "code": "NO_WORKSPACE",
@@ -577,7 +603,10 @@ async def delete_skill(
     _validate_scope(scope, scope_id)
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
-    await assert_can_write_agent_scope(tenant_id, perms, role, scope, scope_id, _user_id(request), action="draft")
+    # action="publish", not "draft": a delete takes effect immediately and has no
+    # draft/approval form — requires actual ownership (see the matching comment
+    # in toggle_skill; final whole-branch review, sub-project 3, Critical #3).
+    await assert_can_write_agent_scope(tenant_id, perms, role, scope, scope_id, _user_id(request), action="publish")
     ok = await _store().soft_delete_custom_skill(tenant_id, agent_id, scope, scope_id, skill_key)
     if not ok:
         raise HTTPException(status_code=404, detail="Not found")

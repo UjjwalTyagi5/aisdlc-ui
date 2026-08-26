@@ -71,6 +71,29 @@ async def test_org_owns_via_admin_wildcard_only():
 
 
 @pytest.mark.asyncio
+async def test_org_admin_owns_workspace_and_project_tiers_too():
+    """Regression: the admin:* wildcard used to be consulted ONLY in the org
+    branch — an org_admin's role_bindings row is scope_kind='organization',
+    which never matches the workspace/project branches' own scope_kind
+    predicates, so an org_admin was silently 403'd on every workspace/project
+    write. Contradicts the spec's own "Org Admin: unaffected — wildcard already
+    covered every case" (final whole-branch review, sub-project 3, Critical #1).
+    No binding of any kind is created here — admin:* alone must be enough."""
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+
+    owns, may_propose = await ap.resolve_actor_tier_access(tenant, user_id, ["admin:*"], "workspace", ws_id)
+    assert owns is True
+    assert may_propose is True
+
+    owns, may_propose = await ap.resolve_actor_tier_access(tenant, user_id, ["admin:*"], "project", project_id)
+    assert owns is True
+    assert may_propose is True
+
+
+@pytest.mark.asyncio
 async def test_org_may_propose_for_bu_admin_anywhere():
     tenant = str(uuid.uuid4())
     user_id = str(uuid.uuid4())

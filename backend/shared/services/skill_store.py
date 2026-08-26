@@ -417,6 +417,67 @@ async def get_skill_detail(
     return item
 
 
+async def get_skill_detail_by_version(
+    tenant_id, agent_id, scope, scope_id, skill_key, version,
+) -> Optional[dict]:
+    """Full detail for one skill at a SPECIFIC version, regardless of active state.
+
+    `get_skill_detail` filters to the active row only, which is wrong right after
+    a non-owner's create/update (activate=False): the new version isn't active, so
+    that lookup returns the OLD active row on update (the caller sees their
+    pre-edit content and concludes nothing saved) or None on create (a 422/404-
+    shaped stub instead of the row that was just written) — the response also
+    fails `SkillDetail` schema validation client-side on create, since the
+    fallback stub is missing required fields (final whole-branch review,
+    sub-project 3, Important #2). Used by create_custom_skill/update_custom_skill
+    right after insert, which always know the exact version they just wrote."""
+    sid = _as_uuid(scope_id) if scope != "org" else None
+    try:
+        async with get_db_session_for_tenant(str(tenant_id)) as session:
+            row = (await session.execute(
+                select(AgentSkill).where(
+                    AgentSkill.agent_id == str(agent_id),
+                    AgentSkill.scope == scope,
+                    AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+                    AgentSkill.skill_key == skill_key,
+                    AgentSkill.version == version,
+                    AgentSkill.deleted_at.is_(None),
+                )
+            )).scalars().first()
+            if row is None:
+                return None
+            active_version = (await session.execute(
+                select(AgentSkill.version).where(
+                    AgentSkill.agent_id == str(agent_id),
+                    AgentSkill.scope == scope,
+                    AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+                    AgentSkill.skill_key == skill_key,
+                    AgentSkill.is_active.is_(True),
+                    AgentSkill.deleted_at.is_(None),
+                )
+            )).scalar_one_or_none()
+            t = await _fetch_toggle(session, agent_id, scope, scope_id, "custom", skill_key)
+            enabled = bool(t.enabled) if t is not None else True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_skill_detail_by_version(%s/%s) failed: %s", tenant_id, agent_id, exc)
+        return None
+
+    item = _list_item(
+        origin="custom", skill_key=row.skill_key, agent_id=row.agent_id,
+        display_name=row.display_name or row.skill_key, description=row.description or "",
+        when_to_use=row.when_to_use or "", runtime=row.runtime or "llm", enabled=enabled,
+        version=row.version, active_version=active_version,
+        origin_scope=scope, requested_scope=scope,
+    )
+    item.update({
+        "body": row.body or "",
+        "created_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    })
+    return item
+
+
 async def list_custom_versions(tenant_id, agent_id, scope, scope_id, skill_key) -> list[dict]:
     """All non-deleted versions of a custom skill at one scope, newest first."""
     if not tenant_id:
@@ -501,7 +562,7 @@ async def create_custom_skill(
         session.add(row)
         await session.flush()
         version = row.version
-    detail = await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
+    detail = await get_skill_detail_by_version(tenant_id, agent_id, scope, scope_id, skill_key, version)
     return detail or {"skill_key": skill_key, "version": version, "origin": "custom"}
 
 
@@ -550,7 +611,7 @@ async def update_custom_skill(
         )
         session.add(new_row)
         await session.flush()
-    return await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
+    return await get_skill_detail_by_version(tenant_id, agent_id, scope, scope_id, skill_key, next_version)
 
 
 async def soft_delete_custom_skill(tenant_id, agent_id, scope, scope_id, skill_key) -> bool:
@@ -601,12 +662,21 @@ async def activate_custom_version(
 
 
 async def get_latest_draft_version(
-    tenant_id, agent_id, scope, scope_id, skill_key,
+    tenant_id, agent_id, scope, scope_id, skill_key, created_by,
 ) -> Optional[dict]:
-    """The newest INACTIVE version of this skill_key at this scope, if any — the
-    row a non-owner's create/update (activate=False) just inserted. Used by
-    propose_skill to resolve its target server-side, never from client input
-    (mirrors AgentProfile's propose(), which resolves target_ref the same way)."""
+    """The newest INACTIVE version of this skill_key at this scope THAT `created_by`
+    AUTHORED, if any — the row that actor's own non-owner create/update
+    (activate=False) just inserted. Used by propose_skill to resolve its target
+    server-side, never from client input (mirrors AgentProfile's propose(), which
+    resolves target_ref the same way).
+
+    Filtered by `created_by` deliberately: without it, this resolves to the
+    highest-versioned inactive row for the key AT ALL — which, after any normal
+    owner edit, is the version that was JUST DEACTIVATED (the prior active one),
+    not a proposal at all. A non-owner with no draft of their own would then have
+    their propose() silently target that stale row, and an approver clicking
+    "approve" would roll the skill back to it (final whole-branch review,
+    sub-project 3, Critical #4)."""
     sid = _as_uuid(scope_id) if scope != "org" else None
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         rows = list((await session.execute(
@@ -617,6 +687,7 @@ async def get_latest_draft_version(
                 AgentSkill.skill_key == skill_key,
                 AgentSkill.deleted_at.is_(None),
                 AgentSkill.is_active.is_(False),
+                AgentSkill.created_by == (created_by or "system"),
             ).order_by(AgentSkill.version.desc())
         )).scalars().all())
         if not rows:

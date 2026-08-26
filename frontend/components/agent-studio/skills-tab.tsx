@@ -123,11 +123,22 @@ type EditorState =
  * dialog/toggle state resets cleanly when switching agents.
  */
 export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps) {
-  const { scope, scopeId, chain, isOwner, scopeLabel, ownerRoleLabel } = scopeContext;
+  const { scope, scopeId, chain, isOwner, canPropose, scopeLabel, ownerRoleLabel } = scopeContext;
   const queryClient = useQueryClient();
   const listKey = qk.agentSkills.list(agentId, scope, scopeId);
   const authoringDisabled = CUSTOM_SKILLS_UNSUPPORTED.has(agentId);
   const canManage = isOwner;
+  // A non-owner with propose-eligibility may author an update to an EXISTING,
+  // non-inherited custom skill (it lands inactive server-side — see
+  // agent_skills.py's update_skill `activate=owns`) and then send it for the
+  // owner's approval via Propose. Deliberately NOT extended to creating a
+  // brand-new skill_key here: list_skills_merged only surfaces a key's ACTIVE
+  // row, so a non-owner's brand-new inactive draft would have no visible row to
+  // attach a Propose action to after creating it — a real gap, left for
+  // follow-up rather than shipping a "create it, then it vanishes" UX. Delete/
+  // toggle stay owner-only below: both take effect immediately server-side, with
+  // no draft/propose form of either (Critical #3 fix in agent_skills.py).
+  const canProposeChange = !canManage && canPropose;
   const tierNoun = SCOPE_TIER_LABEL[scope] ?? scopeLabel;
 
   const [editor, setEditor] = React.useState<EditorState>(null);
@@ -402,42 +413,50 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
                               </Button>
                             </>
                           )
-                        ) : (
+                        ) : canProposeChange && !inherited ? (
                           <>
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => setViewing(skill)}
-                              aria-label={`View ${skill.display_name}`}
+                              onClick={() => setEditor({ mode: "edit", skill })}
+                              aria-label={`Edit ${skill.display_name}`}
                             >
-                              <Eye className="size-3.5" aria-hidden />
-                              View
+                              <Pencil className="size-3.5" aria-hidden />
+                              Edit
                             </Button>
-                            {!inherited && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => proposeMut.mutate(skill)}
-                                disabled={
-                                  proposeMut.isPending &&
-                                  proposeMut.variables?.skill_key === skill.skill_key
-                                }
-                                aria-busy={
-                                  proposeMut.isPending &&
-                                  proposeMut.variables?.skill_key === skill.skill_key
-                                }
-                                aria-label={`Propose ${skill.display_name}`}
-                              >
-                                {proposeMut.isPending &&
-                                proposeMut.variables?.skill_key === skill.skill_key ? (
-                                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                                ) : (
-                                  <Send className="size-3.5" aria-hidden />
-                                )}
-                                Propose
-                              </Button>
-                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => proposeMut.mutate(skill)}
+                              disabled={
+                                proposeMut.isPending &&
+                                proposeMut.variables?.skill_key === skill.skill_key
+                              }
+                              aria-busy={
+                                proposeMut.isPending &&
+                                proposeMut.variables?.skill_key === skill.skill_key
+                              }
+                              aria-label={`Propose ${skill.display_name}`}
+                            >
+                              {proposeMut.isPending &&
+                              proposeMut.variables?.skill_key === skill.skill_key ? (
+                                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                              ) : (
+                                <Send className="size-3.5" aria-hidden />
+                              )}
+                              Propose
+                            </Button>
                           </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setViewing(skill)}
+                            aria-label={`View ${skill.display_name}`}
+                          >
+                            <Eye className="size-3.5" aria-hidden />
+                            View
+                          </Button>
                         )
                       }
                     />
