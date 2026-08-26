@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
+  FlaskConical,
   Loader2,
   Lock,
   RotateCcw,
@@ -25,8 +26,10 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
+import { useRawSession } from "@/components/auth/session-provider";
 import {
   createAgentProfileDraft,
+  evaluateAgentProfile,
   getLintViolations,
   listAgentProfileVersions,
   previewAgentProfile,
@@ -41,6 +44,7 @@ import type {
   LintViolation,
   ProfileScope,
 } from "@/lib/schemas/agent-profiles";
+import type { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
 
 import type { ScopeContext } from "./agent-editor";
 import {
@@ -102,6 +106,11 @@ export function BehaviorTab({
   const queryClient = useQueryClient();
   const disabled = CUSTOM_INSTRUCTIONS_UNSUPPORTED.has(agentId);
   const editable = (isOwner || canPropose) && !disabled;
+  // Signed-in viewer's own id — same idiom agent-studio.tsx (one level up)
+  // already uses to resolve `session?.user.id`. Only consumed here for the
+  // R3 self-block UI hint below; not threaded through ScopeContext today.
+  const session = useRawSession();
+  const viewerId = session?.user.id ?? null;
 
   const [fields, setFields] = React.useState<Fields>(() => fieldsFrom(summary));
   const baseline = React.useRef<Fields>(fieldsFrom(summary));
@@ -114,6 +123,12 @@ export function BehaviorTab({
   const [publishTarget, setPublishTarget] =
     React.useState<AgentProfileVersion | null>(null);
   const [resetOpen, setResetOpen] = React.useState(false);
+  // Keyed by draft version id (not a single flat slot) so a fresh `Save
+  // draft` producing a new version — or switching between drafts — never
+  // shows a stale PASS carried over from a now-superseded draft.
+  const [evaluationState, setEvaluationState] = React.useState<
+    Record<string, EvaluationResult>
+  >({});
 
   const dirty =
     fields.prompt_prepend !== baseline.current.prompt_prepend ||
@@ -270,6 +285,26 @@ export function BehaviorTab({
       }),
   });
 
+  const evaluateMut = useMutation({
+    mutationFn: (id: string) => evaluateAgentProfile(id),
+    onSuccess: (result, id) => {
+      setEvaluationState((s) => ({ ...s, [id]: result }));
+      if (result.result === "pass") {
+        toast.success("Evaluation passed", {
+          description: `Score ${result.score.toFixed(2)}. You can propose this draft now.`,
+        });
+      } else {
+        toast.error("Evaluation didn't pass", {
+          description: `Score ${result.score.toFixed(2)}. Address the gaps and evaluate again.`,
+        });
+      }
+    },
+    onError: (err) =>
+      toast.error("Couldn't run evaluation", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  });
+
   const unpublishMut = useMutation({
     mutationFn: (id: string) => unpublishAgentProfile(id),
     onSuccess: () => {
@@ -293,6 +328,19 @@ export function BehaviorTab({
     publishTarget &&
     activeVersion &&
     publishTarget.version < activeVersion.version;
+
+  // R3 (evaluation-gated promotion): propose() 422s EVALUATION_REQUIRED
+  // without a passing evaluation for the draft's EXACT version — gates only
+  // the non-owner Propose path below, never Publish (see AGENT_DEFAULT_OWNER
+  // _ROLE's direct-publish escape hatch, lib/governance.ts).
+  const topDraftEvaluation = topDraft ? evaluationState[topDraft.id] : undefined;
+  const topDraftEvaluationPassed = topDraftEvaluation?.result === "pass";
+  // R3 self-block: an org-wide default's author can't be its own evaluator.
+  // UI hint only — the backend is the source of truth for this rule; if this
+  // component ever gains a path to publishTarget !== topDraft's author info
+  // some other way, that check still governs server-side.
+  const evaluationSelfBlocked =
+    scope === "org" && Boolean(viewerId) && topDraft?.created_by === viewerId;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
@@ -405,9 +453,46 @@ export function BehaviorTab({
                 Save draft
               </Button>
 
+              {!isOwner && (
+                <Button
+                  variant="outline"
+                  className="border-line-soft"
+                  disabled={!topDraft || evaluateMut.isPending || evaluationSelfBlocked}
+                  title={
+                    evaluationSelfBlocked
+                      ? "An organization-wide default must be evaluated by someone other than its author."
+                      : undefined
+                  }
+                  onClick={() => topDraft && evaluateMut.mutate(topDraft.id)}
+                  aria-busy={evaluateMut.isPending}
+                >
+                  {evaluateMut.isPending ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : (
+                    <FlaskConical className="size-4" aria-hidden />
+                  )}
+                  Evaluate
+                </Button>
+              )}
+
+              {!isOwner && topDraftEvaluation && (
+                <span
+                  className={
+                    topDraftEvaluationPassed
+                      ? "text-xs font-medium text-emerald-600 dark:text-emerald-400"
+                      : "text-destructive text-xs font-medium"
+                  }
+                >
+                  {topDraftEvaluationPassed ? "Pass" : "Fail"} · score{" "}
+                  {topDraftEvaluation.score.toFixed(2)}
+                </span>
+              )}
+
               <Button
                 className={PRIMARY_CTA}
-                disabled={!topDraft || committing}
+                disabled={
+                  !topDraft || committing || (!isOwner && !topDraftEvaluationPassed)
+                }
                 onClick={() => topDraft && setPublishTarget(topDraft)}
               >
                 {isOwner ? (
@@ -433,7 +518,9 @@ export function BehaviorTab({
               {topDraft
                 ? isOwner
                   ? `Draft v${topDraft.version} is ready. Publishing applies it to ${scopeLabel} for the ${agentLabel} agent, on new turns within about a minute.`
-                  : `Draft v${topDraft.version} is ready. Proposing sends it to ${ownerRoleLabel ?? "the owner"} for approval.`
+                  : topDraftEvaluationPassed
+                    ? `Draft v${topDraft.version} is ready. Proposing sends it to ${ownerRoleLabel ?? "the owner"} for approval.`
+                    : `Draft v${topDraft.version} needs a passing evaluation before it can be proposed.`
                 : `Save a draft to review it, then ${isOwner ? "publish to apply it" : "propose it for approval"}.`}
             </p>
           </>
@@ -515,7 +602,11 @@ export function BehaviorTab({
                   ? publishMut.mutate(publishTarget.id)
                   : proposeMut.mutate(publishTarget.id))
               }
-              disabled={committing}
+              disabled={
+                committing ||
+                (!isOwner &&
+                  evaluationState[publishTarget?.id ?? ""]?.result !== "pass")
+              }
               aria-busy={committing}
             >
               {committing ? (
