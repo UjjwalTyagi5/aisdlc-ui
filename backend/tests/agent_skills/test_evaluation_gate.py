@@ -127,19 +127,26 @@ async def test_evaluate_skill_by_a_different_actor_than_the_author_succeeds(mint
     await _bind_role(tenant, evaluator_id, "bu_admin", "business_unit", str(uuid.uuid4()))
     author_token = mint_token(user_id=author_id, tenant_id=tenant, permissions=["artifact:view"])
     evaluator_token = mint_token(user_id=evaluator_id, tenant_id=tenant, permissions=["artifact:view"])
+    # Random per-run key (final whole-branch review, sub-project 4, Minor #4):
+    # this test's tenant is a fresh UUID with no organizations row to scope a
+    # cleanup fixture to, so a literal skill_key here would collide with
+    # leftover residue from a prior local run against a persistent dev DB
+    # whose app-role session bypasses RLS. A random key makes the test
+    # order-independent regardless of environment.
+    skill_key = f"org-skill-{uuid.uuid4().hex[:8]}"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post(
             "/agent-skills",
             json={
                 "agent_id": "requirements", "scope": "org", "scope_id": None,
-                "skill_key": "org-skill", "display_name": "Org Skill", "body": "x",
+                "skill_key": skill_key, "display_name": "Org Skill", "body": "x",
             },
             headers={"Authorization": f"Bearer {author_token}"},
         )
         assert created.status_code == 200, created.text
 
         evaluated = await client.post(
-            "/agent-skills/org-skill/evaluate",
+            f"/agent-skills/{skill_key}/evaluate",
             json={"agent_id": "requirements", "scope": "org", "scope_id": None},
             headers={"Authorization": f"Bearer {evaluator_token}"},
         )
@@ -156,19 +163,22 @@ async def test_org_scope_self_evaluation_blocked(mint_token):
     ws_id = str(uuid.uuid4())
     await _bind_role(tenant, author_id, "bu_admin", "business_unit", ws_id)
     author_token = mint_token(user_id=author_id, tenant_id=tenant, permissions=["artifact:view"])
+    # Random per-run key — see the matching comment in
+    # test_evaluate_skill_by_a_different_actor_than_the_author_succeeds above.
+    skill_key = f"org-skill-self-{uuid.uuid4().hex[:8]}"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post(
             "/agent-skills",
             json={
                 "agent_id": "requirements", "scope": "org", "scope_id": None,
-                "skill_key": "org-skill-self", "display_name": "Org Skill Self", "body": "x",
+                "skill_key": skill_key, "display_name": "Org Skill Self", "body": "x",
             },
             headers={"Authorization": f"Bearer {author_token}"},
         )
         assert created.status_code == 200, created.text
 
         evaluated = await client.post(
-            "/agent-skills/org-skill-self/evaluate",
+            f"/agent-skills/{skill_key}/evaluate",
             json={"agent_id": "requirements", "scope": "org", "scope_id": None},
             headers={"Authorization": f"Bearer {author_token}"},
         )

@@ -48,6 +48,7 @@ import {
   evaluateAgentSkill,
   getAgentSkill,
   listAgentSkills,
+  listAgentSkillVersions,
   proposeAgentSkill,
   toggleAgentSkill,
   updateAgentSkill,
@@ -668,12 +669,16 @@ function SkillRow({
  * Edit/Evaluate/Propose actions for a non-owner's own (non-inherited) custom
  * skill row. Split out from SkillsTab's row-rendering `.map` so it can run its
  * own `useQuery` (Rules of Hooks forbid that inside a bare map callback) — a
- * skill detail fetch is needed ONLY at org scope, to read `created_by` for the
- * R3 self-block check (SkillListItem, unlike Behavior's version-list rows,
- * doesn't carry `created_by` — see the sub-project 4 Task 8 brief). Scoped to
- * org rows specifically (not fetched for every visible custom skill) since R3
- * self-evaluation-blocked only applies at org scope in the first place (R2:
- * self-evaluation is always allowed at workspace/project).
+ * version-history fetch is needed ONLY at org scope, to read the PENDING
+ * draft's `created_by` for the R3 self-block check. Deliberately NOT
+ * `getAgentSkill` (which resolves only the ACTIVE row): evaluate_skill()
+ * evaluates the newest INACTIVE version, and its author can differ from the
+ * currently-published version's author — reading the active row's created_by
+ * here would self-block (or fail to self-block) based on the wrong row's
+ * authorship (final whole-branch review, sub-project 4, Important #4).
+ * Scoped to org rows specifically (not fetched for every visible custom
+ * skill) since R3 self-evaluation-blocked only applies at org scope in the
+ * first place (R2: self-evaluation is always allowed at workspace/project).
  */
 function SkillProposeActions({
   skill,
@@ -696,14 +701,18 @@ function SkillProposeActions({
   proposeMut: UseMutationResult<GovernanceApproval, unknown, SkillListItem>;
   onEdit: () => void;
 }) {
-  const authorQ = useQuery({
-    queryKey: qk.agentSkills.detail("custom", skill.skill_key, agentId, scope, scopeId),
-    queryFn: () => getAgentSkill("custom", skill.skill_key, agentId, scope, scopeId),
+  const versionsQ = useQuery({
+    queryKey: qk.agentSkills.versions(skill.skill_key, agentId, scope, scopeId),
+    queryFn: () => listAgentSkillVersions(skill.skill_key, agentId, scope, scopeId),
     enabled: scope === "org",
     staleTime: 60_000,
   });
+  // Newest-first: the pending draft is the first INACTIVE entry, which is what
+  // evaluate_skill() actually resolves and evaluates (see the docstring above).
+  const pendingDraftAuthor =
+    versionsQ.data?.versions.find((v) => !v.is_active)?.created_by ?? null;
   const evaluationSelfBlocked =
-    scope === "org" && Boolean(viewerId) && authorQ.data?.created_by === viewerId;
+    scope === "org" && Boolean(viewerId) && pendingDraftAuthor === viewerId;
 
   const evaluationPassed = evaluation?.result === "pass";
   const evaluating =

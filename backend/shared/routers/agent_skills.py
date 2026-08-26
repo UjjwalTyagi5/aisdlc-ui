@@ -571,13 +571,24 @@ async def evaluate_skill(skill_key: str, body: EvaluateSkillIn, request: Request
             "message": "A personal skill has nothing to evaluate against.",
         })
 
+    actor_id = _user_id(request)
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, actor_id, perms, body.scope, body.scope_id,
+    )
+    # Router-level artifact:view alone would let ANY tenant member evaluate ANY
+    # draft, including one they have no standing on at all — see the identical
+    # comment in agent_profiles.py's evaluate() (final whole-branch review,
+    # sub-project 4, Important #1).
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     draft = await _store().get_latest_draft_version(
         tenant_id, body.agent_id, body.scope, body.scope_id, skill_key,
     )
     if draft is None:
         raise HTTPException(status_code=404, detail="Nothing to evaluate")
 
-    actor_id = _user_id(request)
     if body.scope == "org" and draft.get("created_by") == actor_id:
         raise HTTPException(status_code=403, detail={
             "code": "SELF_EVALUATION_BLOCKED",
@@ -587,7 +598,6 @@ async def evaluate_skill(skill_key: str, body: EvaluateSkillIn, request: Request
     detail = await _store().get_skill_detail_by_version(
         tenant_id, body.agent_id, body.scope, body.scope_id, skill_key, draft["version"],
     )
-    perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(actor_id, tenant_id, perms)
     row = await run_evaluation(
         tenant_id=tenant_id, target_type="skill", target_id=draft["id"],

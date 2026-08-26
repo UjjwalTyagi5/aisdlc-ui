@@ -56,6 +56,7 @@ import {
   evaluateAgentSkill,
   getAgentSkill,
   listAgentSkills,
+  listAgentSkillVersions,
   proposeAgentSkill,
   updateAgentSkill,
 } from "@/lib/api/agent-skills";
@@ -344,24 +345,29 @@ describe("SkillsTab cascade awareness", () => {
     expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
   });
 
-  it("R3: disables Evaluate with a tooltip when the org-scope skill's author is the signed-in viewer", async () => {
+  it("R3: disables Evaluate with a tooltip when the PENDING DRAFT's author (not the active row's) is the signed-in viewer", async () => {
+    // Regression: the self-block check must read the PENDING (inactive)
+    // draft's author, not the currently-active version's — evaluate_skill()
+    // evaluates the newest inactive version, which can have a different
+    // author than the published one (final whole-branch review, sub-project
+    // 4, Important #4). The active version here is authored by someone else
+    // ("prior-owner") to prove the check isn't accidentally reading that row.
     mockSession = { user: { id: "author-1" } };
     mockedListAgentSkills.mockResolvedValue({
       skills: [{
         origin: "custom", skill_key: "org-skill", agent_id: "requirements",
         display_name: "Org Skill", description: null, when_to_use: null,
         runtime: "llm", enabled: true, editable: false, deletable: false,
-        version: 1, active_version: null, origin_scope: "org",
+        version: 1, active_version: 1, origin_scope: "org",
       }],
     } satisfies SkillList);
-    const mockedGetSkill = vi.mocked(getAgentSkill);
-    mockedGetSkill.mockResolvedValue({
-      origin: "custom", skill_key: "org-skill", agent_id: "requirements",
-      display_name: "Org Skill", description: null, when_to_use: null,
-      runtime: "llm", enabled: true, editable: false, deletable: false,
-      version: 1, active_version: null, origin_scope: "org",
-      body: "body", created_by: "author-1", created_at: null, updated_at: null,
-    } satisfies SkillDetail);
+    const mockedListVersions = vi.mocked(listAgentSkillVersions);
+    mockedListVersions.mockResolvedValue({
+      versions: [
+        { version: 2, is_active: false, display_name: "Org Skill", created_by: "author-1", created_at: null },
+        { version: 1, is_active: true, display_name: "Org Skill", created_by: "prior-owner", created_at: null },
+      ],
+    });
 
     renderSkillsTab(orgScopeContext(false));
 
@@ -375,29 +381,28 @@ describe("SkillsTab cascade awareness", () => {
     expect(vi.mocked(evaluateAgentSkill)).not.toHaveBeenCalled();
   });
 
-  it("R3: does not block Evaluate for a different viewer than the skill's author at org scope", async () => {
+  it("R3: does not block Evaluate for a different viewer than the pending draft's author at org scope", async () => {
     mockSession = { user: { id: "reviewer-2" } };
     mockedListAgentSkills.mockResolvedValue({
       skills: [{
         origin: "custom", skill_key: "org-skill", agent_id: "requirements",
         display_name: "Org Skill", description: null, when_to_use: null,
         runtime: "llm", enabled: true, editable: false, deletable: false,
-        version: 1, active_version: null, origin_scope: "org",
+        version: 1, active_version: 1, origin_scope: "org",
       }],
     } satisfies SkillList);
-    const mockedGetSkill = vi.mocked(getAgentSkill);
-    mockedGetSkill.mockResolvedValue({
-      origin: "custom", skill_key: "org-skill", agent_id: "requirements",
-      display_name: "Org Skill", description: null, when_to_use: null,
-      runtime: "llm", enabled: true, editable: false, deletable: false,
-      version: 1, active_version: null, origin_scope: "org",
-      body: "body", created_by: "author-1", created_at: null, updated_at: null,
-    } satisfies SkillDetail);
+    const mockedListVersions = vi.mocked(listAgentSkillVersions);
+    mockedListVersions.mockResolvedValue({
+      versions: [
+        { version: 2, is_active: false, display_name: "Org Skill", created_by: "author-1", created_at: null },
+        { version: 1, is_active: true, display_name: "Org Skill", created_by: "author-1", created_at: null },
+      ],
+    });
 
     renderSkillsTab(orgScopeContext(false));
 
     await screen.findByText("Org Skill");
-    await waitFor(() => expect(mockedGetSkill).toHaveBeenCalled());
+    await waitFor(() => expect(mockedListVersions).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: /evaluate/i })).toBeEnabled();
   });
 });

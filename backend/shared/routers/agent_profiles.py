@@ -931,6 +931,21 @@ async def evaluate(
         })
 
     actor_id = _user_id(request)
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, actor_id, perms, target.scope, str(target.scope_id) if target.scope_id else None,
+    )
+    # Router-level artifact:view alone would let ANY tenant member evaluate ANY
+    # draft, including one they have no standing on at all — that would make
+    # R3's "someone other than the author" requirement satisfiable by literally
+    # any other logged-in account in the tenant, degrading its only real human
+    # control to a formality. Requiring the same owns-or-may_propose standing
+    # propose()/propose_skill() already require keeps the evaluator someone who
+    # could plausibly have written or proposed at this tier (final whole-branch
+    # review, sub-project 4, Important #1).
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     if target.scope == "org" and target.created_by == actor_id:
         raise HTTPException(status_code=403, detail={
             "code": "SELF_EVALUATION_BLOCKED",
