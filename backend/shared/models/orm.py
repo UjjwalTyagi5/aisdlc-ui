@@ -645,6 +645,33 @@ class AgentSkill(Base):
     )
 
 
+class AgentDefaultEvaluation(Base):
+    """Durable PASS/FAIL record for one evaluation run against one specific
+    AgentProfile or AgentSkill draft VERSION (Phase 4 skills platform,
+    sub-project 4). Append-only — an evaluation is never edited, only superseded
+    by a fresh run (e.g. after the draft is edited into a new version, which gets
+    its own row here). Tenant-scoped under FORCE RLS, mirroring AgentSkill.
+    """
+    __tablename__ = "agent_default_evaluations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # 'profile' -> AgentProfile.id, 'skill' -> AgentSkill.id — mirrors effects.py's
+    # existing target_ref dual-resolution convention rather than a new one.
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)  # org | workspace | project
+    result: Mapped[str] = mapped_column(String(8), nullable=False)  # pass | fail
+    # Numeric(5,4), not Float — same "0.0000-1.0000 quality score, Float would
+    # drift" reasoning already documented on EvalRecord.score in this same file.
+    score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
+    signals: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    evaluator_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    evaluator_role: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AgentSkillToggle(Base):
     """Per-scope enable/disable state for a skill (vendor or custom origin).
 
