@@ -672,6 +672,26 @@ class AgentDefaultEvaluation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ImportSourceAllowlist(Base):
+    """Org-Admin-governed allowlist of approved external import sources
+    (Agent Studio sub-project 5). A declared import source matches if it starts
+    with one of these patterns (plain prefix match, never a regex — an
+    admin-typed pattern must never become a regex-injection surface). Mirrors
+    OrgModelGrant's "the Org Admin governs the catalogue" doctrine: a BU Admin
+    cannot self-approve their own import source, the same way they cannot
+    self-grant a model. Tenant-scoped under FORCE RLS, mirroring
+    AgentDefaultEvaluation.
+    """
+    __tablename__ = "import_source_allowlist"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    source_pattern: Mapped[str] = mapped_column(String(500), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AgentSkillToggle(Base):
     """Per-scope enable/disable state for a skill (vendor or custom origin).
 
