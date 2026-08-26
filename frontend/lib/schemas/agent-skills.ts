@@ -136,6 +136,17 @@ export const SkillToggleResult = z.object({
 });
 export type SkillToggleResult = z.infer<typeof SkillToggleResult>;
 
+// No target_ref/version here — the backend resolves its own target server-side
+// (the newest inactive version at this scope), mirroring Behavior's propose(),
+// which likewise never accepts a client-suppliable target. See the sub-project 3
+// spec for why: a client-suppliable target could be pointed at an arbitrary row.
+export const SkillProposeInput = z.object({
+  agent_id: z.string(),
+  scope: SkillScope,
+  scope_id: z.string().nullish(),
+});
+export type SkillProposeInput = z.infer<typeof SkillProposeInput>;
+
 /** DELETE /agent-skills/{skill_key} response — soft delete (custom only). */
 export const SkillDeleteResult = z.object({
   deleted: z.literal(true),

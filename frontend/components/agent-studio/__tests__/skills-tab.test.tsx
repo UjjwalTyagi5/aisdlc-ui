@@ -38,12 +38,13 @@ vi.mock("@/lib/api/agent-skills", () => ({
   toggleAgentSkill: vi.fn(),
   deleteAgentSkill: vi.fn(),
   listAgentSkillVersions: vi.fn(),
+  proposeAgentSkill: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-import { listAgentSkills } from "@/lib/api/agent-skills";
+import { listAgentSkills, proposeAgentSkill } from "@/lib/api/agent-skills";
 import type { SkillList } from "@/lib/schemas/agent-skills";
 
 import { SkillsTab } from "../skills-tab";
@@ -76,6 +77,22 @@ function workspaceScopeContext(isOwner: boolean): ScopeContext {
     ownerRoleLabel: "Business Unit Admin",
     workspaceId: "ws-1",
     workspaceName: "Acme BU",
+  };
+}
+
+function projectScopeContext(isOwner: boolean): ScopeContext {
+  return {
+    scope: "project",
+    scopeId: "proj-1",
+    scopeLabel: "Payments",
+    chain: { workspaceId: "ws-1", projectId: "proj-1", userId: null },
+    isOwner,
+    canPropose: !isOwner,
+    ownerRoleLabel: "Project Admin",
+    workspaceId: "ws-1",
+    workspaceName: "Acme BU",
+    projectId: "proj-1",
+    projectName: "Payments",
   };
 }
 
@@ -194,5 +211,26 @@ describe("SkillsTab cascade awareness", () => {
     await user.type(nameField, "Our BU's Version");
 
     expect(keyField).toHaveValue("shared-key");
+  });
+
+  it("shows a Propose action for a non-owner viewing their own (non-inherited) custom skill, and calls the API on click", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "team-skill", agent_id: "requirements",
+        display_name: "Team Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "project",
+      }],
+    } satisfies SkillList);
+    const mockedPropose = vi.mocked(proposeAgentSkill);
+    mockedPropose.mockResolvedValue({ id: "req-1" } as any);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await screen.findByText("Team Skill");
+    await user.click(screen.getByRole("button", { name: /propose/i }));
+
+    await waitFor(() => expect(mockedPropose).toHaveBeenCalled());
   });
 });

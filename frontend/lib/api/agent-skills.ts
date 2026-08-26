@@ -4,12 +4,14 @@ import {
   SkillDetail,
   SkillList,
   type SkillOrigin,
+  type SkillProposeInput,
   type SkillScope,
   SkillToggleResult,
   type SkillToggleInput,
   type SkillUpdateInput,
   SkillVersionList,
 } from "@/lib/schemas/agent-skills";
+import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
 import { api } from "./client";
 
@@ -90,6 +92,19 @@ export const toggleAgentSkill = (input: SkillToggleInput) =>
     method: "POST",
     body: input,
     schema: SkillToggleResult,
+  });
+
+/**
+ * Propose a change to a custom skill at a tier the viewer doesn't own —
+ * creates a GovernanceApproval routed to that tier's owner instead of writing
+ * directly. The backend resolves its own target version server-side (the
+ * newest inactive version at this scope); the client cannot name one.
+ */
+export const proposeAgentSkill = (skillKey: string, input: SkillProposeInput) =>
+  api(`/agent-skills/${encodeURIComponent(skillKey)}/propose`, {
+    method: "POST",
+    body: input,
+    schema: GovernanceApproval,
   });
 
 /** Soft-delete a custom skill (custom only). */

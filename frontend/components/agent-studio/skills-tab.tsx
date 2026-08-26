@@ -13,6 +13,7 @@ import {
   Pencil,
   Plus,
   Save,
+  Send,
   Trash2,
 } from "lucide-react";
 
@@ -39,6 +40,7 @@ import {
   deleteAgentSkill,
   getAgentSkill,
   listAgentSkills,
+  proposeAgentSkill,
   toggleAgentSkill,
   updateAgentSkill,
 } from "@/lib/api/agent-skills";
@@ -121,7 +123,7 @@ type EditorState =
  * dialog/toggle state resets cleanly when switching agents.
  */
 export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps) {
-  const { scope, scopeId, chain, isOwner, scopeLabel } = scopeContext;
+  const { scope, scopeId, chain, isOwner, scopeLabel, ownerRoleLabel } = scopeContext;
   const queryClient = useQueryClient();
   const listKey = qk.agentSkills.list(agentId, scope, scopeId);
   const authoringDisabled = CUSTOM_SKILLS_UNSUPPORTED.has(agentId);
@@ -181,6 +183,27 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
       });
     },
     onSettled: () => invalidate(),
+  });
+
+  // ── Propose (non-owner filing a change for the owner's approval) ──────────
+  // No optimistic update: proposing files a governance request, it doesn't
+  // change the skill's visible state, so there's nothing to reconcile.
+  const proposeMut = useMutation({
+    mutationFn: (skill: SkillListItem) =>
+      proposeAgentSkill(skill.skill_key, {
+        agent_id: agentId,
+        scope,
+        scope_id: scopeId,
+      }),
+    onSuccess: (_r, skill) => {
+      toast.success("Sent for approval", {
+        description: `${ownerRoleLabel ?? "The owner"} needs to approve this change to "${skill.display_name}" at ${scopeLabel}.`,
+      });
+    },
+    onError: (err) =>
+      toast.error("Couldn't send for approval", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
   });
 
   const deleteMut = useMutation({
@@ -380,15 +403,41 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
                             </>
                           )
                         ) : (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setViewing(skill)}
-                            aria-label={`View ${skill.display_name}`}
-                          >
-                            <Eye className="size-3.5" aria-hidden />
-                            View
-                          </Button>
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setViewing(skill)}
+                              aria-label={`View ${skill.display_name}`}
+                            >
+                              <Eye className="size-3.5" aria-hidden />
+                              View
+                            </Button>
+                            {!inherited && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => proposeMut.mutate(skill)}
+                                disabled={
+                                  proposeMut.isPending &&
+                                  proposeMut.variables?.skill_key === skill.skill_key
+                                }
+                                aria-busy={
+                                  proposeMut.isPending &&
+                                  proposeMut.variables?.skill_key === skill.skill_key
+                                }
+                                aria-label={`Propose ${skill.display_name}`}
+                              >
+                                {proposeMut.isPending &&
+                                proposeMut.variables?.skill_key === skill.skill_key ? (
+                                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <Send className="size-3.5" aria-hidden />
+                                )}
+                                Propose
+                              </Button>
+                            )}
+                          </>
                         )
                       }
                     />
