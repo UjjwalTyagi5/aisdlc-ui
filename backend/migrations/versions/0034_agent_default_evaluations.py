@@ -69,8 +69,11 @@ def upgrade() -> None:
         DO $$
         BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sdlc_app') THEN
-                GRANT SELECT, INSERT, UPDATE, DELETE
-                    ON agent_default_evaluations TO sdlc_app;
+                -- Append-only, mirroring governance_request_events: INSERT and
+                -- SELECT only, so a row cannot be rewritten or removed even by
+                -- a bug in the service layer.
+                GRANT SELECT, INSERT ON agent_default_evaluations TO sdlc_app;
+                REVOKE UPDATE, DELETE ON agent_default_evaluations FROM sdlc_app;
             END IF;
         END
         $$;
