@@ -16,11 +16,15 @@ it, and the request is the record that they were asked and said yes. Wiring a si
 effect onto those would mean this module performing grants it has no business
 performing.
 
-Two types have an effect the backend cannot perform yet; each raises
+One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
   role_assignment       closed by ASSIGNING a role, not by approving; the write lives in
                         `PATCH /workspaces/{id}/members/{userId}`.
-  cross_bu_assignment   there is no cross-BU grant table, so a loan cannot be recorded.
+
+`cross_bu_assignment` used to be a second: this comment once read "there is no
+cross-BU grant table, so a loan cannot be recorded" — stale even when the request
+lane shipped, since `cross_bu_grants` has existed since migration 0016. See
+`_apply_cross_bu_assignment` below.
 
 `project_creation` used to be a third: `POST /projects` created the project directly,
 so approval had nothing to flip. Migration 0028 gave it a pending state
@@ -62,10 +66,6 @@ _NOT_APPLICABLE = {
     "role_assignment": (
         "A role-assignment request closes when the role is actually assigned, from "
         "Users or from this queue — not by approving it."
-    ),
-    "cross_bu_assignment": (
-        "Lending a contributor across business units is not implemented: there is "
-        "nowhere to record the grant."
     ),
 }
 
@@ -113,6 +113,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_model_provider_access(db, request)
     if rtype == "connector_access":
         return await _apply_connector_access(db, request)
+    if rtype == "cross_bu_assignment":
+        return await _apply_cross_bu_assignment(db, request)
     if rtype.startswith("agent_default_"):
         return await _apply_agent_default(db, request)
 
@@ -780,3 +782,69 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
         project_id, kind, target_ref, access,
     )
     return f"{target_ref} set to {label(access)} for this project."
+
+
+async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Record the loan and seat the borrowed contributor on the project.
+
+    Two writes, not one, because they answer different questions later:
+    `cross_bu_grants` is the loan itself — whose person, lent from where,
+    approved by whom — and is what `GET/DELETE /admin/cross-bu-grants`
+    (shared/routers/project_scoped.py) reads and ends. `role_bindings` is the
+    actual access, granted exactly like any other project member (the same
+    `grant_role` call `add_project_member` makes) — without it the loan would
+    be on record and the person still could not open the project.
+
+    ON CONFLICT DO UPDATE rather than DO NOTHING: re-approving the same
+    person for the same project (a role change, a second request after the
+    first was later ended) is still one seat, not a duplicate — the table's
+    own `uq_cross_bu_grant (user_id, project_id)` constraint says so.
+
+    Everything comes from the payload recorded when the request was RAISED
+    (`request_cross_bu_member` in shared/routers/project_members.py), not
+    from the decision — the approver agreed to a role they could read.
+    """
+    payload = request.get("payload") or {}
+    user_id = request.get("targetRef")
+    role_name = (payload.get("roleName") or "").strip()
+    project_id = request.get("projectId")
+    parent_workspace_id = request.get("workspaceId")
+
+    if not user_id or not project_id:
+        raise EffectNotAvailable(
+            "cross_bu_assignment", "This request names no person or no project to seat them on."
+        )
+    if not role_name:
+        raise EffectNotAvailable("cross_bu_assignment", "This request records no role to grant.")
+
+    from shared.authz.grant import TierConflictError, grant_role  # noqa: PLC0415 - avoids an import cycle
+
+    try:
+        await grant_role(
+            user_id, project_id, role_name,
+            tenant_id=request["tenantId"], scope_kind="project",
+            granted_by=request.get("decidedBy"),
+        )
+    except (ValueError, TierConflictError) as exc:
+        raise EffectNotAvailable("cross_bu_assignment", str(exc))
+
+    await db.execute(
+        text(
+            "INSERT INTO cross_bu_grants "
+            "  (id, tenant_id, user_id, parent_workspace_id, project_id, role, approved_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), :u, CAST(:pw AS uuid), "
+            "        CAST(:p AS uuid), :r, :ab) "
+            "ON CONFLICT (user_id, project_id) DO UPDATE "
+            "  SET role = EXCLUDED.role, approved_by = EXCLUDED.approved_by, approved_at = now()"
+        ),
+        {
+            "t": request["tenantId"], "u": user_id, "pw": parent_workspace_id,
+            "p": project_id, "r": role_name, "ab": request.get("decidedBy"),
+        },
+    )
+    email = payload.get("email") or user_id
+    logger.info(
+        "cross_bu_assignment approved: user %s -> project %s as %s (lent from %s)",
+        user_id, project_id, role_name, parent_workspace_id,
+    )
+    return f"{email} joined as {role_name}, on loan from their business unit."
