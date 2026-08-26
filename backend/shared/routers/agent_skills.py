@@ -456,6 +456,25 @@ class ImportSkillIn(BaseModel):
     source: ImportSourceIn
 
 
+def _matches_import_source(url: str, pattern: str) -> bool:
+    """Boundary-aware allowlist match — plain `startswith` is a subdomain-
+    confusion bypass: `https://trusted.example.com` (no trailing slash) would
+    also match `https://trusted.example.com.evil.com/...` since the latter
+    literally starts with the former's characters. A match requires either an
+    exact equal, or a prefix match where the very next character in `url`
+    lands on a real boundary (`/`) rather than mid-label — a pattern that
+    itself already ends in `/` is already inside that boundary, so any
+    continuation after it is fine.
+    """
+    if url == pattern:
+        return True
+    if not url.startswith(pattern):
+        return False
+    if pattern.endswith("/"):
+        return True
+    return len(url) > len(pattern) and url[len(pattern)] == "/"
+
+
 @agent_skills_router.post("/import")
 async def import_skill(body: ImportSkillIn, request: Request):
     """Bring in Skill content from another BU the caller administers, or a
@@ -508,7 +527,11 @@ async def import_skill(body: ImportSkillIn, request: Request):
                     ImportSourceAllowlist.tenant_id == tenant_id,
                 )
             )).scalars().all()
-        if not any(url.startswith(p) for p in rows):
+        # A stray empty/whitespace-only pattern row must never be treated as a
+        # wildcard: url.startswith("") is always True in Python, which would
+        # silently disable this screen tenant-wide.
+        rows = [p for p in rows if p and p.strip()]
+        if not any(_matches_import_source(url, p) for p in rows):
             raise HTTPException(status_code=422, detail={
                 "code": "SOURCE_NOT_ALLOWED",
                 "message": "This source is not on the organization's approved import list.",

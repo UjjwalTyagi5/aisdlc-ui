@@ -141,3 +141,95 @@ async def test_import_from_allowlisted_external_source_succeeds(mint_token):
             headers=headers,
         )
         assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_import_external_subdomain_confusion_refused(mint_token):
+    """A no-trailing-slash allowlist pattern must not match a URL where the
+    pattern's characters are merely a substring prefix of a longer, different
+    host (e.g. trusted.example.com.evil.com) — plain startswith() would wrongly
+    allow this."""
+    tenant = str(uuid.uuid4())
+    admin_id = str(uuid.uuid4())
+    ws = str(uuid.uuid4())
+    await _bind_role(tenant, admin_id, "bu_admin", "business_unit", ws)
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO import_source_allowlist (id, tenant_id, source_pattern, label, created_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), :p, 'Trusted', 'org-admin-1')"
+        ), {"t": tenant, "p": "https://trusted.example.com"})
+    token = mint_token(user_id=admin_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills/import",
+            json={
+                "agent_id": "requirements", "scope": "workspace", "scope_id": ws,
+                "skill_key": "ext-skill-3", "display_name": "External Confusable",
+                "description": "d", "when_to_use": "w", "body": "x",
+                "source": {"kind": "external", "url": "https://trusted.example.com.evil.com/payload"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "SOURCE_NOT_ALLOWED"
+
+
+@pytest.mark.asyncio
+async def test_import_external_no_trailing_slash_pattern_still_allows_subpaths(mint_token):
+    """The boundary fix must not over-correct: a bare-domain pattern with no
+    trailing slash should still allow a real subpath under that domain."""
+    tenant = str(uuid.uuid4())
+    admin_id = str(uuid.uuid4())
+    ws = str(uuid.uuid4())
+    await _bind_role(tenant, admin_id, "bu_admin", "business_unit", ws)
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO import_source_allowlist (id, tenant_id, source_pattern, label, created_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), :p, 'Trusted', 'org-admin-1')"
+        ), {"t": tenant, "p": "https://trusted.example.com"})
+    token = mint_token(user_id=admin_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills/import",
+            json={
+                "agent_id": "requirements", "scope": "workspace", "scope_id": ws,
+                "skill_key": "ext-skill-4", "display_name": "External Subpath",
+                "description": "d", "when_to_use": "w", "body": "x",
+                "source": {"kind": "external", "url": "https://trusted.example.com/anything"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_import_external_empty_allowlist_pattern_does_not_wildcard(mint_token):
+    """A stray empty-string source_pattern row must not act as a wildcard that
+    lets every external URL through (Python's ''.startswith("") is always
+    True, so this must be filtered before the match check)."""
+    tenant = str(uuid.uuid4())
+    admin_id = str(uuid.uuid4())
+    ws = str(uuid.uuid4())
+    await _bind_role(tenant, admin_id, "bu_admin", "business_unit", ws)
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO import_source_allowlist (id, tenant_id, source_pattern, label, created_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), :p, 'Empty', 'org-admin-1')"
+        ), {"t": tenant, "p": ""})
+    token = mint_token(user_id=admin_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/agent-skills/import",
+            json={
+                "agent_id": "requirements", "scope": "workspace", "scope_id": ws,
+                "skill_key": "ext-skill-5", "display_name": "External Unlisted",
+                "description": "d", "when_to_use": "w", "body": "x",
+                "source": {"kind": "external", "url": "https://untrusted.example.com/skill.md"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "SOURCE_NOT_ALLOWED"
