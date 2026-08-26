@@ -57,6 +57,33 @@ skill_key at that scope) rather than a body-supplied id.
 Every route still carries a require_permission sentinel (the router-level floor) so
 the process_api D-05 boot scan stays green.
 
+EVALUATION GATE (sub-project 4, mirrors agent_profiles above): the same second,
+independent axis layered ALONGSIDE the tier-ownership RBAC above — authorization
+answers "may this actor act here at all"; evaluation answers "has this specific
+draft passed a quality gate" — applied here to Skills' propose-to-approval path.
+`propose_skill()` requires a PASSING `AgentDefaultEvaluation` row for the EXACT
+draft version it resolves via `get_latest_draft_version`, checked via
+`latest_passing_evaluation(tenant_id, "skill", draft["id"])`
+(shared/services/eval_gate.py); missing or failing, it refuses with 422
+`EVALUATION_REQUIRED` before filing the governance request. `evaluate_skill()`
+(POST .../evaluate) is the only way to close that gate: it runs the same
+deterministic, no-LLM `evaluate_agent_default` rubric
+(shared/eval/agent_studio_scoring.py — identical scoring logic to Behavior's
+`evaluate()`) via `run_evaluation` and records a PASS/FAIL row. scope=="user" is
+rejected outright (422 `NOT_A_SHARED_TIER`) — a personal draft is never proposed,
+so it is never evaluated. For scope=="org" (R3 — every workspace/project in the
+tenant inherits from an org default), the evaluator may not be the draft's own
+author (403 `SELF_EVALUATION_BLOCKED`); workspace/project scope (R2) has no such
+restriction and may self-evaluate. Because R3 requires a DIFFERENT evaluator than
+the author, `get_latest_draft_version`'s `created_by` filter (skill_store.py) is now
+OPTIONAL — default `None`, meaning no filter on that column at all: `evaluate_skill`
+passes none, so it can find ANY pending draft at that scope+key, not just the
+caller's own. `propose_skill`'s existing call is UNCHANGED — it still always passes
+its own actor id explicitly, preserving sub-project 3's Critical #4 fix that a
+non-owner's proposal must only ever target their own draft. The owner's direct
+`activate_version` path is deliberately NOT gated by any of this, same as
+`publish()` in agent_profiles — only the propose-to-approval path is.
+
 Role resolution here uses `resolve_platform_role_for_user` rather than
 `effective_platform_role` (agent_profiles.py's routes all take a `db` param already;
 these routes don't, so this variant opens its own tenant-scoped session) — both

@@ -43,6 +43,29 @@ just another scope-aware in-body caller. Every route still carries a
 require_permission sentinel (the router-level floor) so the process_api D-05 boot
 scan stays green.
 
+EVALUATION GATE (sub-project 4, spec §3.3): a second, independent axis layered
+ALONGSIDE the tier-ownership RBAC above, not a replacement for it — authorization
+answers "may this actor act here at all"; evaluation answers "has this specific
+draft passed a quality gate". `propose()` now requires a PASSING
+`AgentDefaultEvaluation` row for the EXACT draft version being proposed, checked via
+`latest_passing_evaluation(tenant_id, "profile", target.id)`
+(shared/services/eval_gate.py) — it matches on the draft's own id, never "this
+profile has ever passed at some point", so re-editing a previously-passing draft
+re-opens the gate. Missing or failing, `propose()` refuses with 422
+`EVALUATION_REQUIRED` before it ever reaches the governance-request filing.
+`evaluate()` (POST .../evaluate) is the only way to close that gate: it runs the
+deterministic, no-LLM `evaluate_agent_default` rubric
+(shared/eval/agent_studio_scoring.py) against the draft's stacked prompt slots and
+records a PASS/FAIL row via `run_evaluation`. scope=="user" is rejected outright
+(422 `NOT_A_SHARED_TIER`) — a personal draft is never proposed, so it is never
+evaluated either. For scope=="org" specifically (R3 — every workspace/project in the
+tenant inherits from an org default, the highest-blast-radius tier), the evaluator
+may not be the draft's own author (403 `SELF_EVALUATION_BLOCKED`); workspace/project
+scope (R2) has no such restriction and may self-evaluate. The owner's direct
+`publish()`/rollback path is deliberately NOT gated by any of this — only the
+propose-to-approval path a non-owner uses is; an owner publishing their own work was
+never routed through evaluation and sub-project 4 did not add that restriction.
+
 Note: `assert_can_write_agent_scope`/`assert_own_user_scope` do NOT emit the
 RBAC_DENIALS metric or an access-denied audit row that the route-level
 `Depends(require_permission(...))` gates they replaced used to on a 403 — a disclosed,
