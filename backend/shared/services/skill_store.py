@@ -600,6 +600,30 @@ async def activate_custom_version(
     return await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
 
 
+async def get_latest_draft_version(
+    tenant_id, agent_id, scope, scope_id, skill_key,
+) -> Optional[dict]:
+    """The newest INACTIVE version of this skill_key at this scope, if any — the
+    row a non-owner's create/update (activate=False) just inserted. Used by
+    propose_skill to resolve its target server-side, never from client input
+    (mirrors AgentProfile's propose(), which resolves target_ref the same way)."""
+    sid = _as_uuid(scope_id) if scope != "org" else None
+    async with get_db_session_for_tenant(str(tenant_id)) as session:
+        rows = list((await session.execute(
+            select(AgentSkill).where(
+                AgentSkill.agent_id == str(agent_id),
+                AgentSkill.scope == scope,
+                AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+                AgentSkill.skill_key == skill_key,
+                AgentSkill.deleted_at.is_(None),
+                AgentSkill.is_active.is_(False),
+            ).order_by(AgentSkill.version.desc())
+        )).scalars().all())
+        if not rows:
+            return None
+        return {"id": str(rows[0].id), "version": rows[0].version}
+
+
 async def set_skill_enabled(
     tenant_id, agent_id, scope, scope_id, origin, skill_key, enabled, updated_by
 ) -> None:

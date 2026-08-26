@@ -783,3 +783,83 @@ async def test_activate_version_workspace_scope_unchanged_developer_denied(monke
             headers=headers,
         )
     assert resp.status_code == 403
+
+
+# ── create/update activate=owns; propose() ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_skill_by_non_owner_inserts_inactive(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "developer", "project", project_id)  # member, not owner
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "proposed-skill", "display_name": "Proposed Skill", "body": "x",
+            },
+            headers=headers,
+        )
+        assert created.status_code == 200
+        detail = created.json()
+
+        listed = await client.get(
+            "/agent-skills",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers=headers,
+        )
+        # An inactive skill has no active version to surface in the merged list —
+        # confirms the write went in inactive, not immediately live.
+        assert not any(s["skill_key"] == "proposed-skill" for s in listed.json()["skills"])
+
+
+@pytest.mark.asyncio
+async def test_propose_skill_then_approve_activates_it(mint_token):
+    tenant = str(uuid.uuid4())
+    dev_id = str(uuid.uuid4())
+    pa_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, dev_id, "developer", "project", project_id)
+    await _bind_role(tenant, pa_id, "project_admin", "project", project_id)
+    dev_token = mint_token(user_id=dev_id, tenant_id=tenant, permissions=["artifact:view"])
+    pa_token = mint_token(user_id=pa_id, tenant_id=tenant, permissions=["artifact:view", "governance:decide"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "project", "scope_id": project_id,
+                "skill_key": "team-checklist", "display_name": "Team Checklist", "body": "check it",
+            },
+            headers={"Authorization": f"Bearer {dev_token}"},
+        )
+        assert created.status_code == 200
+        version = created.json()["version"]
+
+        proposed = await client.post(
+            "/agent-skills/team-checklist/propose",
+            json={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers={"Authorization": f"Bearer {dev_token}"},
+        )
+        assert proposed.status_code == 201
+        request_id = proposed.json()["id"]
+
+        decided = await client.post(
+            f"/governance-approvals/{request_id}/decide",
+            json={"decision": "approve"},
+            headers={"Authorization": f"Bearer {pa_token}"},
+        )
+        assert decided.status_code == 200
+
+        listed = await client.get(
+            "/agent-skills",
+            params={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers={"Authorization": f"Bearer {dev_token}"},
+        )
+        hit = next(s for s in listed.json()["skills"] if s["skill_key"] == "team-checklist")
+        assert hit["enabled"] is True

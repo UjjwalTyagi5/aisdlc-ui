@@ -69,6 +69,7 @@ from shared.routers.agent_profiles import (
     ancestor_chain,
     assert_can_write_agent_scope,
     assert_own_user_scope,
+    resolve_actor_tier_access,
 )
 from shared.authz.effective_role import resolve_platform_role_for_user
 
@@ -250,6 +251,12 @@ class ToggleIn(BaseModel):
     project_id: Optional[str] = None
 
 
+class ProposeSkillIn(BaseModel):
+    agent_id: str
+    scope: str
+    scope_id: Optional[str] = None
+
+
 agent_skills_router = APIRouter(
     prefix="/agent-skills",
     dependencies=[Depends(require_permission("artifact:view"))],
@@ -284,6 +291,15 @@ async def create_skill(body: CreateSkillIn, request: Request):
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
     await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    # resolve_actor_tier_access only knows org/workspace/project (it returns
+    # (False, False) for any other scope); assert_can_write_agent_scope above
+    # already proved a personal-scope write is the caller's own scope_id — that
+    # IS ownership of a personal tier, so it is short-circuited here rather than
+    # asking a function that would answer "no" for a scope it doesn't model.
+    if body.scope == "user":
+        owns = True
+    else:
+        owns, _ = await resolve_actor_tier_access(tenant_id, _user_id(request), perms, body.scope, body.scope_id)
 
     violations = validate_skill_key(body.skill_key) + lint_skill_fields(
         body.display_name, body.description, body.when_to_use, body.body
@@ -311,7 +327,7 @@ async def create_skill(body: CreateSkillIn, request: Request):
     detail = await store.create_custom_skill(
         tenant_id, body.agent_id, body.scope, body.scope_id, body.skill_key,
         body.display_name, body.description, body.when_to_use, body.body,
-        _user_id(request) or "system",
+        _user_id(request) or "system", activate=owns,
     )
     _runtime().invalidate_skills_cache(tenant_id, body.agent_id)
     await _emit(request, tenant_id, "skill.created", body.skill_key, {
@@ -369,6 +385,73 @@ async def toggle_skill(body: ToggleIn, request: Request):
     return {"origin": body.origin, "skill_key": body.skill_key, "enabled": body.enabled}
 
 
+@agent_skills_router.post("/{skill_key}/propose", status_code=201)
+async def propose_skill(skill_key: str, body: ProposeSkillIn, request: Request):
+    """Ask the tier's owner to activate a non-owner's inactive draft, instead of
+    activating it yourself. The Skills counterpart to `AgentProfile.propose()` —
+    see that function's docstring for why the target must be resolved server-side
+    rather than accepted from the request body: `target_ref` is what approving
+    activates, so a client that could name it could point a proposal at any skill
+    row in the tenant. Skills has no single-row-UUID path param anywhere else in
+    this API, so the target is resolved here via `get_latest_draft_version` — the
+    newest INACTIVE version of this skill_key at this scope, i.e. exactly the row
+    a preceding non-owner create/update just inserted.
+    """
+    tenant_id = _tenant_id(request)
+    _validate_agent(body.agent_id)
+    _validate_scope(body.scope, body.scope_id)
+    if body.scope == "user":
+        raise HTTPException(status_code=422, detail={
+            "code": "NOT_A_SHARED_TIER",
+            "message": "A personal default is yours alone; there is nobody to propose it to.",
+        })
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, _user_id(request), perms, body.scope, body.scope_id,
+    )
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    draft = await _store().get_latest_draft_version(
+        tenant_id, body.agent_id, body.scope, body.scope_id, skill_key,
+    )
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Nothing to propose")
+
+    from shared.authz.effective_role import effective_platform_role, actor_display_name  # noqa: PLC0415
+    from shared.authz.workspace import active_workspace_for_request  # noqa: PLC0415
+    from shared.services import governance_requests as governance_service  # noqa: PLC0415
+    from shared.services.governance_requests import GovernanceError  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    scope_label = {"org": "organization", "workspace": "business unit", "project": "project"}[body.scope]
+    request_type = f"agent_default_{body.scope}"
+    async with get_db_session_for_tenant(tenant_id) as db:
+        role = await effective_platform_role(db, request)
+        name = await actor_display_name(db, request)
+        workspace_id = body.scope_id if body.scope_id else await active_workspace_for_request(request, tenant_id)
+        if not workspace_id:
+            raise HTTPException(status_code=422, detail={
+                "code": "NO_WORKSPACE",
+                "message": "Choose a business unit before proposing an organization default.",
+            })
+        try:
+            return await governance_service.create_request(
+                db, tenant_id=tenant_id, initiator_id=_user_id(request), initiator_name=name,
+                initiator_role=role, request_type=request_type,
+                title=f"{body.agent_id} skill '{skill_key}' change ({scope_label})",
+                description=f"{name} proposed a change to the '{skill_key}' skill for the {body.agent_id} agent ({scope_label} default), version {draft['version']}.",
+                workspace_id=workspace_id, project_id=body.scope_id if body.scope == "project" else None,
+                target_ref=draft["id"], payload={
+                    "agentId": body.agent_id, "skillKey": skill_key, "scope": body.scope,
+                    "version": draft["version"],
+                },
+                system_raised=True,
+            )
+        except GovernanceError as exc:
+            raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)})
+
+
 @agent_skills_router.get("/{skill_key}/versions")
 async def list_versions(
     request: Request,
@@ -423,6 +506,13 @@ async def update_skill(skill_key: str, body: UpdateSkillIn, request: Request):
     perms = getattr(request.state, "permissions", []) or []
     role = await resolve_platform_role_for_user(_user_id(request), tenant_id, perms)
     await assert_can_write_agent_scope(tenant_id, perms, role, body.scope, body.scope_id, _user_id(request), action="draft")
+    # See the matching comment in create_skill: resolve_actor_tier_access does not
+    # model the personal scope, and assert_can_write_agent_scope above already
+    # proved a personal-scope write is the caller's own — that is ownership.
+    if body.scope == "user":
+        owns = True
+    else:
+        owns, _ = await resolve_actor_tier_access(tenant_id, _user_id(request), perms, body.scope, body.scope_id)
 
     violations = lint_skill_fields(
         body.display_name, body.description, body.when_to_use, body.body
@@ -433,7 +523,7 @@ async def update_skill(skill_key: str, body: UpdateSkillIn, request: Request):
     detail = await _store().update_custom_skill(
         tenant_id, body.agent_id, body.scope, body.scope_id, skill_key,
         body.display_name, body.description, body.when_to_use, body.body,
-        _user_id(request) or "system",
+        _user_id(request) or "system", activate=owns,
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Not found")
