@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { Boxes, Globe, Loader2, Plug, ShieldCheck } from "lucide-react";
+import { Boxes, Globe, Loader2, Plug, ShieldCheck, Terminal } from "lucide-react";
 import { z } from "zod";
 
 import { cn } from "@/lib/utils";
@@ -33,11 +33,14 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { BudgetWindowFieldsInput } from "@/components/app/budget-window-fields";
 import { listConnectorGrants, setBuConnectorGrants } from "@/lib/api/connectors";
+import { listOrgMembers } from "@/lib/api/access";
+import { grantIntegrationAccess } from "@/lib/api/integration-access";
+import { listMcpServers } from "@/lib/api/mcp";
 import { getOrgModelGrants, setBuModelGrants } from "@/lib/api/models";
 import { onboardPerson } from "@/lib/api/onboarding";
 import { qk } from "@/lib/api/query-keys";
 import { createWorkspace } from "@/lib/api/workspaces";
-import { CONNECTOR_KIND_LABEL } from "@/lib/connectors";
+import { CONNECTOR_CATALOG_KINDS, CONNECTOR_KIND_LABEL } from "@/lib/connectors";
 import { WorkspaceCreateInput } from "@/lib/schemas/workspace";
 import type { ConnectorKind } from "@/lib/schemas/enums";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
@@ -52,7 +55,7 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 // addWorkspaceMember — an email always resolves via findOrCreateIdentity,
 // whether the person already exists in the org or not.
 //
-// The monthly cap is a *string* in the form and a `number | null` on the wire:
+// The total cap is a *string* in the form and a `number | null` on the wire:
 // an empty box has to mean "no cap set" (null — the unit's own Admin sets one
 // later), which a numeric field can't express without conflating it with 0.
 const FormSchema = WorkspaceCreateInput.omit({
@@ -62,7 +65,6 @@ const FormSchema = WorkspaceCreateInput.omit({
 })
   .extend({
     buAdminEmail: z.string().email("Enter a valid email"),
-    buAdminName: z.string().optional(),
     monthlyBudgetUsd: z
       .string()
       .refine((v) => v.trim() === "" || (Number.isFinite(Number(v)) && Number(v) >= 0), {
@@ -192,37 +194,76 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
     queryFn: () => listConnectorGrants(),
     enabled: open,
   });
+  // MCP servers were absent from this dialog entirely: a unit could be given
+  // models and connectors at creation but never a tool server, so its MCP access
+  // had to be set afterwards from somewhere else — easy to forget, and invisible
+  // here in a section titled "Access".
+  //
+  // Unlike connectors, the list is genuinely dynamic and has to be: a connector
+  // kind is a fixed catalogue this platform ships, while an MCP server exists only
+  // because somebody registered one. There is nothing to offer but what is there.
+  // The org's existing people, so the admin's email can be picked rather than
+  // recalled and retyped. Typing an address that belongs to nobody is still
+  // allowed — `onboardPerson` creates the account — but getting an existing
+  // colleague's address subtly wrong creates a SECOND account for the same
+  // person, which is the failure a plain text box invites and a suggestion list
+  // removes.
+  const orgMembersQ = useQuery({
+    queryKey: qk.access.orgMembers(),
+    queryFn: listOrgMembers,
+    enabled: open,
+  });
+
+  const mcpServersQ = useQuery({
+    queryKey: qk.mcp.list(),
+    queryFn: () => listMcpServers(true),
+    enabled: open,
+  });
 
   const restrictedModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "specific");
   const globalModels = (modelGrantsQ.data ?? []).filter((g) => g.visibility === "global");
   /**
-   * EVERY connector kind is offered, not only the already-granted ones.
+   * Every GRANTABLE connector kind, annotated with who already holds it.
    *
-   * This dialog is where a unit's connector access is decided, and with
-   * global/specific gone there is no set of kinds a new unit gets
-   * automatically. Offering only kinds some other unit already holds would
-   * make the first unit to want something unable to ask for it here.
+   * Offering all of them is deliberate: this dialog is where a unit's connector
+   * access is decided, and with global/specific gone there is no set a new unit
+   * gets automatically — listing only kinds some other unit already holds would
+   * leave the first unit to want something unable to ask for it here.
+   *
+   * CONNECTOR_CATALOG_KINDS, not Object.keys(CONNECTOR_KIND_LABEL). The label map
+   * covers every ConnectorKind including `azure_repos` and the two SSO kinds,
+   * which `_CATALOG_KINDS` on the backend does not accept as grants — so three of
+   * the thirteen options offered here were ones the server would refuse. A picker
+   * must not offer what create rejects.
+   *
+   * The grants query is what makes the list say something real rather than being
+   * a static catalogue: each kind carries the number of units already holding it,
+   * which is the context somebody deciding a new unit's access actually wants.
+   * Its result used to be fetched and thrown away — only `isLoading` was read.
    */
-  const restrictedConnectors = (Object.keys(CONNECTOR_KIND_LABEL) as ConnectorKind[]).map(
-    (kind) => ({ kind, businessUnitIds: [] as string[] }),
+  const grantsByKind = new Map(
+    (connectorGrantsQ.data ?? []).map((g) => [g.kind, g.businessUnitIds.length]),
   );
+  const restrictedConnectors = CONNECTOR_CATALOG_KINDS.map((kind) => ({
+    kind,
+    heldBy: grantsByKind.get(kind) ?? 0,
+  }));
   const globalConnectors: { kind: ConnectorKind }[] = [];
 
   const [grantedModels, setGrantedModels] = React.useState<string[]>([]);
   const [grantedConnectors, setGrantedConnectors] = React.useState<string[]>([]);
+  const [grantedMcp, setGrantedMcp] = React.useState<string[]>([]);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
     defaultValues: {
       displayName: "",
-      businessUnit: "",
       costCenter: "",
       monthlyBudgetUsd: "",
       budgetStartDate: "",
       budgetEndDate: "",
       isActive: true,
       buAdminEmail: "",
-      buAdminName: "",
     },
   });
 
@@ -230,17 +271,16 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
     if (open) {
       form.reset({
         displayName: "",
-        businessUnit: "",
         costCenter: "",
         monthlyBudgetUsd: "",
         budgetStartDate: "",
         budgetEndDate: "",
         isActive: true,
         buAdminEmail: "",
-        buAdminName: "",
       });
       setGrantedModels([]);
       setGrantedConnectors([]);
+      setGrantedMcp([]);
     }
   }, [open, form]);
 
@@ -248,7 +288,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
     mutationFn: async (values: FormValues) => {
       const ws = await createWorkspace({
         displayName: values.displayName,
-        businessUnit: values.businessUnit || undefined,
         costCenter: values.costCenter || undefined,
         // Blank → null, never 0: "no cap set" and "capped at zero" are
         // different states, and only the first lets the BU Admin set one.
@@ -260,7 +299,9 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
       });
       const admin = await onboardPerson({
         email: values.buAdminEmail,
-        displayName: values.buAdminName || undefined,
+        // No display name: the dialog no longer asks for one. Onboarding derives it from
+        // the address, and the person can set their own on first sign-in.
+        displayName: undefined,
         workspaceId: ws.id,
         role: "bu_admin",
       });
@@ -278,6 +319,18 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
       }
       if (grantedConnectors.length > 0) {
         await setBuConnectorGrants(ws.id, grantedConnectors as ConnectorKind[]);
+      }
+      // One call per server: `grantIntegrationAccess` grants a single target, and
+      // there is no bulk MCP equivalent of setBuConnectorGrants. Sequential rather
+      // than parallel so a failure part-way leaves a knowable state — the ones
+      // before it are granted, and the unit's page shows exactly that.
+      for (const id of grantedMcp) {
+        await grantIntegrationAccess({
+          kind: "mcp",
+          id,
+          workspaceId: ws.id,
+          unitName: ws.displayName,
+        });
       }
       return { ws, admin };
     },
@@ -345,28 +398,7 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
               )}
             />
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="businessUnit"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                      Business unit{" "}
-                      <span className="normal-case opacity-60">(optional)</span>
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Payments"
-                        autoComplete="off"
-                        className="border-line-soft bg-surface-1"
-                        {...field}
-                      />
-                    </FormControl>
-                  </FormItem>
-                )}
-              />
-              <FormField
+            <FormField
                 control={form.control}
                 name="costCenter"
                 render={({ field }) => (
@@ -386,7 +418,6 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                   </FormItem>
                 )}
               />
-            </div>
 
             <FormField
               control={form.control}
@@ -394,7 +425,7 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
               render={({ field }) => (
                 <FormItem>
                   <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                    Monthly budget <span className="normal-case opacity-60">(optional)</span>
+                    Total budget <span className="normal-case opacity-60">(optional)</span>
                   </FormLabel>
                   <FormControl>
                     <div className="relative">
@@ -503,12 +534,32 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                 options={restrictedConnectors.map((g) => ({
                   value: g.kind,
                   label: CONNECTOR_KIND_LABEL[g.kind],
+                  hint:
+                    g.heldBy > 0
+                      ? `${g.heldBy} ${g.heldBy === 1 ? "unit has" : "units have"} it`
+                      : undefined,
                 }))}
                 selected={grantedConnectors}
                 onToggle={setGrantedConnectors}
                 idPrefix="new-bu-connector"
                 emptyHint={`No restricted connectors — everything permitted reaches every ${BUSINESS_UNIT_LABEL.toLowerCase()}.`}
                 loading={connectorGrantsQ.isLoading}
+              />
+
+              <GrantPicker
+                icon={Terminal}
+                title="MCP servers"
+                globals={[]}
+                options={(mcpServersQ.data ?? []).map((m) => ({
+                  value: m.id,
+                  label: m.server_name,
+                  hint: m.description ?? undefined,
+                }))}
+                selected={grantedMcp}
+                onToggle={setGrantedMcp}
+                idPrefix="new-bu-mcp"
+                emptyHint="No MCP server is registered yet — an Organization Admin adds them from Integrations."
+                loading={mcpServersQ.isLoading}
               />
 
               <p className="text-muted-foreground text-[11px]">
@@ -536,30 +587,23 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: CreateWorkspaceDia
                         type="email"
                         placeholder="name@company.com"
                         autoComplete="off"
+                        list="new-bu-admin-emails"
                         className="border-line-soft bg-surface-1"
                         {...field}
                       />
                     </FormControl>
+                    <datalist id="new-bu-admin-emails">
+                      {(orgMembersQ.data ?? [])
+                        .filter((m) => m.email)
+                        .map((m) => (
+                          <option key={m.userId} value={m.email!} />
+                        ))}
+                    </datalist>
+                    <FormDescription className="text-[11px]">
+                      Start typing to pick someone who already has an account, or
+                      enter a new address to invite them.
+                    </FormDescription>
                     <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="buAdminName"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                      Name <span className="normal-case opacity-60">(optional)</span>
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Jane Doe"
-                        autoComplete="off"
-                        className="border-line-soft bg-surface-1"
-                        {...field}
-                      />
-                    </FormControl>
                   </FormItem>
                 )}
               />

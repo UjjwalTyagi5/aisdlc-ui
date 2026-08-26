@@ -119,10 +119,23 @@ async def role_history(
     ).fetchall()
 
     # Unit names, so the history reads in the words the UI uses everywhere else.
+    #
+    # FILTERED BY TENANT. `workspaces` carries no row-level security, so an
+    # unqualified SELECT here loaded every unit in the database — every other
+    # organization's included — to build a lookup that only ever needed this
+    # tenant's. Nothing leaked into the response because the history rows it is
+    # keyed against are themselves scoped, but the query had no business reading
+    # them and would have leaked the moment a caller could influence the keys.
     unit_names: dict[str, str] = {
         str(r.id): r.display_name
         for r in (
-            await db.execute(text("SELECT id, display_name FROM workspaces"))
+            await db.execute(
+                text(
+                    "SELECT id, display_name FROM workspaces "
+                    "WHERE organization_id = CAST(:t AS uuid)"
+                ),
+                {"t": tenant_id},
+            )
         ).fetchall()
     }
 

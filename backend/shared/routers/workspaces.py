@@ -325,9 +325,11 @@ async def create_workspace(
 
     # Default budget + hierarchical guard: a new workspace must fit under the org's
     # remaining budget, else 409 "Budget low" (blocks creation until the org cap is raised).
-    from config.env import DEFAULT_WORKSPACE_BUDGET_USD  # noqa: PLC0415
     from shared.services.budget_alloc import assert_workspace_fits  # noqa: PLC0415
-    ws_budget = body.monthlyBudgetUsd if body.monthlyBudgetUsd is not None else DEFAULT_WORKSPACE_BUDGET_USD
+    # NO DEFAULT. A business unit's budget is optional, and omitting it means the
+    # unit has no cap — not that it silently acquires DEFAULT_WORKSPACE_BUDGET_USD,
+    # which is a ceiling nobody chose and which then bounds every project under it.
+    ws_budget = body.monthlyBudgetUsd if body.monthlyBudgetUsd else None
     await assert_workspace_fits(db, tenant_id, ws_budget, on_create=True)
 
     ws = Workspace(

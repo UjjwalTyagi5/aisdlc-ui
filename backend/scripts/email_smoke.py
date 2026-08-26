@@ -23,7 +23,7 @@ import sys
 from config.env import (
     EMAIL_FROM,
     EMAIL_FROM_NAME,
-    INVITE_TOKEN_TTL_HOURS,
+    INVITE_TOKEN_TTL_MINUTES,
     PUBLIC_APP_URL,
     SMTP_HOST,
     SMTP_PASSWORD,
@@ -79,7 +79,7 @@ async def main() -> None:
 
     print(f"-> Sending the real invite template to {recipient} ...")
     subject, text_body, html_body = email_templates.invite_email(
-        "smoke-test-token-not-valid", INVITE_TOKEN_TTL_HOURS
+        "smoke-test-token-not-valid", INVITE_TOKEN_TTL_MINUTES
     )
     ok = await send_email(recipient, f"[smoke test] {subject}", text_body, html_body)
 

@@ -118,6 +118,17 @@ export const Project = z.object({
   approvalStatus: ProjectApprovalStatus.default("active"),
   /** Human-set delivery state — see ProjectDeliveryStatus above. */
   deliveryStatus: ProjectDeliveryStatus.default("not_started"),
+  /**
+   * Set when a settings edit was QUEUED rather than applied.
+   *
+   * A Project Admin editing their own project raises a request their Business
+   * Unit Admin decides, so the project in that response is UNCHANGED and the UI
+   * must say "sent for approval" rather than "saved". Absent on every other
+   * response, including a BU/Org Admin's edit, which applies directly.
+   */
+  pendingApproval: z.boolean().optional(),
+  pendingRequestId: z.string().nullable().optional(),
+  pendingApproverRole: z.string().nullable().optional(),
   approvalDecidedBy: z.string().nullable().optional(),
   approvalDecidedAt: Timestamp.nullable().optional(),
   approvalReason: z.string().nullable().optional(),

@@ -35,7 +35,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.env import INVITE_TOKEN_TTL_HOURS
+from config.env import INVITE_TOKEN_TTL_MINUTES
 from shared.authz.dependency import require_permission
 from shared.authz.grant import UnitAlreadyAdministeredError, grant_role
 from shared.authz.grant_guard import assert_can_grant_role
@@ -190,7 +190,7 @@ async def onboard(
         if created:
             invite_token = await password_setup.issue(
                 s, user_id=user_id, purpose="invite",
-                ttl_hours=INVITE_TOKEN_TTL_HOURS,
+                ttl_minutes=INVITE_TOKEN_TTL_MINUTES,
             )
 
     # ── 2. the placement ─────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ async def onboard(
     invited = False
     if invite_token:
         subject, text_body, html_body = email_templates.invite_email(
-            invite_token, INVITE_TOKEN_TTL_HOURS
+            invite_token, INVITE_TOKEN_TTL_MINUTES
         )
         invited = await send_email(email, subject, text_body, html_body)
         if not invited:

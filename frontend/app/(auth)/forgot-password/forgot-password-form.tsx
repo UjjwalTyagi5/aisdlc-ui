@@ -54,7 +54,7 @@ export function ForgotPasswordForm() {
         <CheckCircle2 />
         <AlertDescription>
           If an account exists for that address, a link to choose a new password is on
-          its way. It can be used once and expires in a couple of hours.
+          its way. It can be used once and expires shortly, so open it straight away.
           <br />
           <span className="text-muted-foreground mt-2 inline-block">
             Nothing arrived? Check spam, then ask your administrator — they can send a
