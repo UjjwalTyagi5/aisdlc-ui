@@ -976,12 +976,20 @@ async def test_propose_skill_then_approve_activates_it(mint_token):
             "/agent-skills",
             json={
                 "agent_id": "requirements", "scope": "project", "scope_id": project_id,
-                "skill_key": "team-checklist", "display_name": "Team Checklist", "body": "check it",
+                "skill_key": "team-checklist", "display_name": "Team Checklist",
+                "body": "Cover acceptance criteria, stakeholder input, scope, and user stories.",
             },
             headers={"Authorization": f"Bearer {dev_token}"},
         )
         assert created.status_code == 200
         version = created.json()["version"]
+
+        evaluated = await client.post(
+            "/agent-skills/team-checklist/evaluate",
+            json={"agent_id": "requirements", "scope": "project", "scope_id": project_id},
+            headers={"Authorization": f"Bearer {dev_token}"},
+        )
+        assert evaluated.status_code == 201, evaluated.text
 
         proposed = await client.post(
             "/agent-skills/team-checklist/propose",

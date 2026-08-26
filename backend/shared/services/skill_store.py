@@ -662,7 +662,7 @@ async def activate_custom_version(
 
 
 async def get_latest_draft_version(
-    tenant_id, agent_id, scope, scope_id, skill_key, created_by,
+    tenant_id, agent_id, scope, scope_id, skill_key, created_by=None,
 ) -> Optional[dict]:
     """The newest INACTIVE version of this skill_key at this scope THAT `created_by`
     AUTHORED, if any — the row that actor's own non-owner create/update
@@ -676,23 +676,39 @@ async def get_latest_draft_version(
     not a proposal at all. A non-owner with no draft of their own would then have
     their propose() silently target that stale row, and an approver clicking
     "approve" would roll the skill back to it (final whole-branch review,
-    sub-project 3, Critical #4)."""
+    sub-project 3, Critical #4).
+
+    `created_by` is now OPTIONAL (default `None`, meaning no filter on that
+    column at all — not "system"). `propose_skill` (sub-project 3, unchanged)
+    always passes its own actor id explicitly, so its target resolution keeps
+    the exact Critical #4 protection above: it only ever finds a draft IT wrote.
+    `evaluate_skill` (sub-project 4) calls this with no `created_by`, because R3
+    specifically requires the evaluator to be a DIFFERENT person than the
+    draft's author — an author-filtered lookup would find nothing for anyone
+    but the author, defeating the point. That route instead reads the
+    `created_by` this now returns and self-blocks explicitly when it matches
+    the caller (see evaluate_skill's SELF_EVALUATION_BLOCKED check)."""
     sid = _as_uuid(scope_id) if scope != "org" else None
+    filters = [
+        AgentSkill.agent_id == str(agent_id),
+        AgentSkill.scope == scope,
+        AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+        AgentSkill.skill_key == skill_key,
+        AgentSkill.deleted_at.is_(None),
+        AgentSkill.is_active.is_(False),
+    ]
+    if created_by is not None:
+        filters.append(AgentSkill.created_by == created_by)
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         rows = list((await session.execute(
-            select(AgentSkill).where(
-                AgentSkill.agent_id == str(agent_id),
-                AgentSkill.scope == scope,
-                AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
-                AgentSkill.skill_key == skill_key,
-                AgentSkill.deleted_at.is_(None),
-                AgentSkill.is_active.is_(False),
-                AgentSkill.created_by == (created_by or "system"),
-            ).order_by(AgentSkill.version.desc())
+            select(AgentSkill).where(*filters).order_by(AgentSkill.version.desc())
         )).scalars().all())
         if not rows:
             return None
-        return {"id": str(rows[0].id), "version": rows[0].version}
+        return {
+            "id": str(rows[0].id), "version": rows[0].version,
+            "created_by": rows[0].created_by,
+        }
 
 
 async def set_skill_enabled(

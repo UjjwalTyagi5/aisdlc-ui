@@ -287,6 +287,12 @@ class ProposeSkillIn(BaseModel):
     scope_id: Optional[str] = None
 
 
+class EvaluateSkillIn(BaseModel):
+    agent_id: str
+    scope: str
+    scope_id: Optional[str] = None
+
+
 agent_skills_router = APIRouter(
     prefix="/agent-skills",
     dependencies=[Depends(require_permission("artifact:view"))],
@@ -465,6 +471,15 @@ async def propose_skill(skill_key: str, body: ProposeSkillIn, request: Request):
     if draft is None:
         raise HTTPException(status_code=404, detail="Nothing to propose")
 
+    from shared.services.eval_gate import latest_passing_evaluation  # noqa: PLC0415
+
+    passing = await latest_passing_evaluation(tenant_id, "skill", draft["id"])
+    if passing is None:
+        raise HTTPException(status_code=422, detail={
+            "code": "EVALUATION_REQUIRED",
+            "message": "Run an evaluation before proposing this change.",
+        })
+
     from shared.authz.effective_role import effective_platform_role, actor_display_name  # noqa: PLC0415
     from shared.authz.workspace import active_workspace_for_request  # noqa: PLC0415
     from shared.services import governance_requests as governance_service  # noqa: PLC0415
@@ -505,6 +520,54 @@ async def propose_skill(skill_key: str, body: ProposeSkillIn, request: Request):
             )
         except GovernanceError as exc:
             raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)})
+
+
+@agent_skills_router.post("/{skill_key}/evaluate", status_code=201)
+async def evaluate_skill(skill_key: str, body: EvaluateSkillIn, request: Request):
+    """Run the deterministic golden-task rubric against the newest pending draft
+    of this skill_key at this scope and record the result — a precondition for
+    propose_skill() (see the sub-project 4 spec). Unlike propose_skill, this is NOT
+    restricted to the caller's own draft: for scope=="org" (R3), the evaluator must
+    be someone OTHER than the draft's author, so this must be able to find and
+    evaluate ANY pending draft at this scope+key — it calls get_latest_draft_version
+    with no `created_by`, i.e. unfiltered by author (see that function's docstring).
+    """
+    from shared.services.eval_gate import run_evaluation  # noqa: PLC0415
+    from shared.authz.effective_role import resolve_platform_role_for_user  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    _validate_agent(body.agent_id)
+    _validate_scope(body.scope, body.scope_id)
+    if body.scope == "user":
+        raise HTTPException(status_code=422, detail={
+            "code": "NOT_A_SHARED_TIER",
+            "message": "A personal skill has nothing to evaluate against.",
+        })
+
+    draft = await _store().get_latest_draft_version(
+        tenant_id, body.agent_id, body.scope, body.scope_id, skill_key,
+    )
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Nothing to evaluate")
+
+    actor_id = _user_id(request)
+    if body.scope == "org" and draft.get("created_by") == actor_id:
+        raise HTTPException(status_code=403, detail={
+            "code": "SELF_EVALUATION_BLOCKED",
+            "message": "An organization-wide skill must be evaluated by someone other than its author.",
+        })
+
+    detail = await _store().get_skill_detail_by_version(
+        tenant_id, body.agent_id, body.scope, body.scope_id, skill_key, draft["version"],
+    )
+    perms = getattr(request.state, "permissions", []) or []
+    role = await resolve_platform_role_for_user(actor_id, tenant_id, perms)
+    row = await run_evaluation(
+        tenant_id=tenant_id, target_type="skill", target_id=draft["id"],
+        agent_id=body.agent_id, scope=body.scope, body=(detail or {}).get("body") or "",
+        evaluator_id=actor_id, evaluator_role=role,
+    )
+    return row
 
 
 @agent_skills_router.get("/{skill_key}/versions")
