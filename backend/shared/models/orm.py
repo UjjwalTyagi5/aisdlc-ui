@@ -674,8 +674,13 @@ class AgentDefaultEvaluation(Base):
 
 class ImportSourceAllowlist(Base):
     """Org-Admin-governed allowlist of approved external import sources
-    (Agent Studio sub-project 5). A declared import source matches if it starts
-    with one of these patterns (plain prefix match, never a regex — an
+    (Agent Studio sub-project 5). A declared import source matches a pattern
+    via `agent_skills.py`'s `_matches_import_source` — a BOUNDARY-AWARE prefix
+    match (exact equality, or a prefix match landing on a real `/` boundary),
+    never a bare `str.startswith()` (that was a real subdomain-confusion
+    bypass, found and fixed during review — a no-trailing-slash pattern like
+    `https://trusted.example.com` would otherwise also match
+    `https://trusted.example.com.evil.com/...`) and never a regex (an
     admin-typed pattern must never become a regex-injection surface). Mirrors
     OrgModelGrant's "the Org Admin governs the catalogue" doctrine: a BU Admin
     cannot self-approve their own import source, the same way they cannot

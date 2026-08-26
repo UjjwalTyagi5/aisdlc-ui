@@ -40,6 +40,29 @@ async def test_org_admin_can_add_an_allowlist_entry(mint_token):
 
 
 @pytest.mark.asyncio
+async def test_org_admin_cannot_add_a_degenerate_pattern_that_would_wildcard_the_screen(mint_token):
+    """Regression: `_matches_import_source`'s boundary rule means a pattern
+    with no real host (e.g. "https:", no "//") matches ANY url of that scheme
+    ("https://evil.com/x" starts with "https:", and the next character is
+    "/") -- silently wildcarding the whole external-source screen tenant-wide.
+    Write-time validation must refuse this before it ever reaches the table
+    (final whole-branch review, sub-project 5, Important #2)."""
+    tenant = str(uuid.uuid4())
+    org_admin_id = str(uuid.uuid4())
+    token = mint_token(user_id=org_admin_id, tenant_id=tenant, permissions=["artifact:view", "admin:*"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for degenerate in ("https:", "http:", "ftp://x.com/", "https://x"):
+            resp = await client.post(
+                "/agent-skills/import-sources",
+                json={"source_pattern": degenerate, "label": "Too broad"},
+                headers=headers,
+            )
+            assert resp.status_code == 422, f"{degenerate!r} should have been refused: {resp.text}"
+            assert resp.json()["detail"]["code"] == "INVALID_SOURCE_PATTERN"
+
+
+@pytest.mark.asyncio
 async def test_non_org_admin_cannot_add_an_allowlist_entry(mint_token):
     tenant = str(uuid.uuid4())
     bu_admin_id = str(uuid.uuid4())

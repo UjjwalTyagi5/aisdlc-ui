@@ -558,7 +558,7 @@ async def import_skill(body: ImportSkillIn, request: Request):
     else:
         owns, _ = await resolve_actor_tier_access(tenant_id, _user_id(request), perms, body.scope, body.scope_id)
 
-    # ── Screen 3: provenance ──────────────────────────────────────────────
+    # ── Screen 1: provenance ──────────────────────────────────────────────
     if body.source.kind == "same_tenant_bu":
         if not body.source.workspace_id:
             raise HTTPException(status_code=422, detail={
@@ -587,8 +587,9 @@ async def import_skill(body: ImportSkillIn, request: Request):
             )).scalars().all()
         # A stray empty/whitespace-only pattern row must never be treated as a
         # wildcard: url.startswith("") is always True in Python, which would
-        # silently disable this screen tenant-wide.
-        rows = [p for p in rows if p and p.strip()]
+        # silently disable this screen tenant-wide. Match against the stripped
+        # value too, matching what create_import_source actually persists.
+        rows = [p.strip() for p in rows if p and p.strip()]
         if not any(_matches_import_source(url, p) for p in rows):
             raise HTTPException(status_code=422, detail={
                 "code": "SOURCE_NOT_ALLOWED",
@@ -601,6 +602,11 @@ async def import_skill(body: ImportSkillIn, request: Request):
         })
 
     # ── Screen 2: credential leakage ──────────────────────────────────────
+    # NOTE: this screen is bypassable via plain POST /agent-skills (create_skill),
+    # which shares the identical authorization check (assert_can_write_agent_scope
+    # action="draft") but runs no credential scan — it is a safety net specific
+    # to the import front door, not a tenant-wide content control (final
+    # whole-branch review, sub-project 5, Important #4).
     credential_hits = scan_for_credentials(
         "\n".join(filter(None, [body.display_name, body.description, body.when_to_use, body.body]))
     )
@@ -610,7 +616,7 @@ async def import_skill(body: ImportSkillIn, request: Request):
             "message": f"Possible credential detected ({', '.join(credential_hits)}); remove it before importing.",
         })
 
-    # ── Screen 1: prompt-injection (same lint create_skill already runs) ──
+    # ── Screen 3: prompt-injection (same lint create_skill already runs) ──
     violations = validate_skill_key(body.skill_key) + lint_skill_fields(
         body.display_name, body.description, body.when_to_use, body.body
     )
@@ -640,9 +646,14 @@ async def import_skill(body: ImportSkillIn, request: Request):
             "message": f"skill_key '{body.skill_key}' already exists for this agent.",
         }]})
     _runtime().invalidate_skills_cache(tenant_id, body.agent_id)
+    # Record WHICH source, not just what kind — without this, the platform can
+    # say a skill arrived via "external" but never answer "from where," so a
+    # later-compromised allowlist entry has no way to find what it produced
+    # (final whole-branch review, sub-project 5, Important #1).
     await _emit(request, tenant_id, "skill.imported", body.skill_key, {
         "agent_id": body.agent_id, "scope": body.scope, "scope_id": body.scope_id,
         "skill_key": body.skill_key, "origin": "custom", "source_kind": body.source.kind,
+        "source_workspace_id": body.source.workspace_id, "source_url": body.source.url,
     })
     return detail
 
@@ -698,6 +709,18 @@ async def create_import_source(body: ImportSourceCreateIn, request: Request):
     pattern = body.source_pattern.strip()
     if not pattern:
         raise HTTPException(status_code=422, detail="source_pattern must not be empty")
+    # A degenerate pattern (e.g. "https:" — no "//", no real host) would match
+    # via _matches_import_source's boundary rule against ANY url of that scheme
+    # ("https://evil.com/x" starts with "https:" and the next char is "/"),
+    # silently wildcarding the whole external-source screen tenant-wide. Require
+    # a real scheme + non-trivial host portion (final whole-branch review,
+    # sub-project 5, Important #2).
+    scheme, sep, rest = pattern.partition("://")
+    if not sep or scheme not in ("http", "https") or len(rest) < 4:
+        raise HTTPException(status_code=422, detail={
+            "code": "INVALID_SOURCE_PATTERN",
+            "message": "Pattern must be a full URL prefix, e.g. https://github.com/my-org/",
+        })
 
     async with get_db_session_for_tenant(tenant_id) as session:
         row = ImportSourceAllowlist(
@@ -706,6 +729,14 @@ async def create_import_source(body: ImportSourceCreateIn, request: Request):
         )
         session.add(row)
         await session.flush()
+        # Widening the org's import trust boundary is the single most
+        # security-sensitive write in this sub-project — every other write in
+        # this router already emits (skill.created/.imported/.toggled/.deleted/
+        # .activated); this one hadn't (final whole-branch review, sub-project
+        # 5, Important #5).
+        await _emit(request, tenant_id, "import_source.added", str(row.id), {
+            "source_pattern": row.source_pattern, "label": row.label,
+        })
         return {"id": str(row.id), "source_pattern": row.source_pattern, "label": row.label}
 
 

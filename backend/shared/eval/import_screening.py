@@ -22,6 +22,16 @@ _CATEGORY_LABELS: list[str] = [
     "credentials embedded in a URL",
 ]
 
+# zip() below silently truncates to the shorter list -- a future _SECRET_PATTERNS
+# entry added in sandbox_policy.py (an unrelated module, by someone with no reason
+# to know this file exists) would otherwise go unscanned with no error anywhere
+# (final whole-branch review, sub-project 5, Important #3). Fail loudly at import
+# time instead of silently under-scanning at request time.
+assert len(_SECRET_PATTERNS) == len(_CATEGORY_LABELS), (
+    f"_CATEGORY_LABELS ({len(_CATEGORY_LABELS)}) must have exactly one entry per "
+    f"_SECRET_PATTERNS entry ({len(_SECRET_PATTERNS)}) -- update both together."
+)
+
 
 def scan_for_credentials(text: str) -> list[str]:
     """Category names of every _SECRET_PATTERNS entry that matches `text`, in
