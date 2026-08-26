@@ -13,6 +13,7 @@ import {
   Boxes,
   Eye,
   FlaskConical,
+  Import,
   Info,
   Loader2,
   Lock,
@@ -36,17 +37,20 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { MarkdownMessage } from "@/components/app/markdown-message";
 import { useRawSession } from "@/components/auth/session-provider";
+import { ApiRequestError } from "@/lib/api/client";
 import {
   createAgentSkill,
   deleteAgentSkill,
   evaluateAgentSkill,
   getAgentSkill,
+  importAgentSkill,
   listAgentSkills,
   listAgentSkillVersions,
   proposeAgentSkill,
@@ -62,6 +66,7 @@ import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import {
   SKILL_CAPS,
   SKILL_KEY_PATTERN,
+  type ImportSourceInput,
   type SkillList,
   type SkillListItem,
   type SkillScope,
@@ -170,6 +175,7 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
   const viewerId = session?.user.id ?? null;
 
   const [editor, setEditor] = React.useState<EditorState>(null);
+  const [importing, setImporting] = React.useState(false);
   const [viewing, setViewing] = React.useState<SkillListItem | null>(null);
   const [deleting, setDeleting] = React.useState<SkillListItem | null>(null);
   // Keyed by evalKey(skill) (skill_key + version) so evaluating one skill
@@ -409,10 +415,26 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
                 count={customSkills.length}
               />
               {canManage && !authoringDisabled && (
-                <Button size="sm" onClick={() => setEditor({ mode: "create" })}>
-                  <Plus className="size-3.5" aria-hidden />
-                  New skill
-                </Button>
+                <div className="flex items-center gap-2">
+                  {/* Import lands via the same activate=owns store call create_skill
+                   *  uses, so it inherits create's owner-only gate — see
+                   *  canProposeChange's comment above for why a non-owner creating a
+                   *  brand-new skill_key (which Import always does) is deliberately
+                   *  out of scope rather than extended to canPropose here. */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-line-soft"
+                    onClick={() => setImporting(true)}
+                  >
+                    <Import className="size-3.5" aria-hidden />
+                    Import
+                  </Button>
+                  <Button size="sm" onClick={() => setEditor({ mode: "create" })}>
+                    <Plus className="size-3.5" aria-hidden />
+                    New skill
+                  </Button>
+                </div>
               )}
             </div>
 
@@ -430,6 +452,19 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
                     <Button size="sm" onClick={() => setEditor({ mode: "create" })}>
                       <Plus className="size-3.5" aria-hidden />
                       New skill
+                    </Button>
+                  ) : undefined
+                }
+                secondaryAction={
+                  canManage && !authoringDisabled ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-line-soft"
+                      onClick={() => setImporting(true)}
+                    >
+                      <Import className="size-3.5" aria-hidden />
+                      Import
                     </Button>
                   ) : undefined
                 }
@@ -542,6 +577,23 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
           onClose={() => setEditor(null)}
           onSaved={(skillKey) => {
             setEditor(null);
+            invalidate();
+            clearSkillEvaluations(skillKey);
+          }}
+        />
+      )}
+
+      {/* Import (creates a new custom skill from another BU or an external source) */}
+      {importing && (
+        <SkillImportDialog
+          agentId={agentId}
+          agentLabel={agentLabel}
+          scope={scope}
+          scopeId={scopeId}
+          scopeLabel={scopeLabel}
+          onClose={() => setImporting(false)}
+          onSaved={(skillKey) => {
+            setImporting(false);
             invalidate();
             clearSkillEvaluations(skillKey);
           }}
@@ -1113,6 +1165,311 @@ function SkillEditorDialog({
               <Save className="size-4" aria-hidden />
             )}
             {isEdit ? "Save changes" : "Create skill"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ───────────────────────── Import dialog ─────────────────────────
+
+/** Source-kind toggle value — mirrors ImportSourceInput's `kind` enum. */
+type ImportSourceKind = ImportSourceInput["kind"];
+
+/**
+ * Imports a Skill from another Business Unit the caller administers, or a
+ * declared external source, through the backend's prompt-injection/
+ * credential/provenance screens (importAgentSkill). Always produces a
+ * BRAND-NEW skill_key — there's no "import to update an existing skill" path
+ * — so it reuses SkillEditorDialog's create-mode field components directly
+ * (SkillTextField/InstructionSlot/EditorFields/EMPTY_FIELDS) rather than
+ * re-declaring a parallel form, and lands via the same `activate=owns` store
+ * call create_skill uses (owner-only — see the canProposeChange comment in
+ * SkillsTab for why that's not extended to a non-owner's Propose flow here).
+ */
+function SkillImportDialog({
+  agentId,
+  agentLabel,
+  scope,
+  scopeId,
+  scopeLabel,
+  onClose,
+  onSaved,
+}: {
+  agentId: string;
+  agentLabel: string;
+  scope: SkillScope;
+  scopeId: string | null;
+  scopeLabel: string;
+  onClose: () => void;
+  /** Called with the imported skill's skill_key so the caller can invalidate
+   *  any cached evaluation result for it — mirrors SkillEditorDialog's onSaved. */
+  onSaved: (skillKey: string) => void;
+}) {
+  const [fields, setFields] = React.useState<EditorFields>(EMPTY_FIELDS);
+  const [lint, setLint] = React.useState<Record<string, LintViolation[]>>({});
+  // Import always creates a brand-new skill_key, so (unlike SkillEditorDialog's
+  // edit/override cases) the key is never pre-locked — it just stops
+  // auto-deriving from the name once the caller hand-edits it.
+  const keyTouched = React.useRef(false);
+
+  const [sourceKind, setSourceKind] = React.useState<ImportSourceKind>("same_tenant_bu");
+  const [sourceWorkspaceId, setSourceWorkspaceId] = React.useState("");
+  const [sourceUrl, setSourceUrl] = React.useState("");
+
+  const setField = (key: keyof EditorFields, value: string) => {
+    setFields((f) => ({ ...f, [key]: value }));
+    setLint((l) => (l[key] ? { ...l, [key]: [] } : l));
+  };
+
+  const onNameChange = (value: string) => {
+    setFields((f) => ({
+      ...f,
+      display_name: value,
+      skill_key: keyTouched.current ? f.skill_key : deriveKey(value),
+    }));
+    setLint((l) => (l.display_name ? { ...l, display_name: [] } : l));
+  };
+
+  const importMut = useMutation({
+    mutationFn: () => {
+      const source: ImportSourceInput =
+        sourceKind === "same_tenant_bu"
+          ? { kind: "same_tenant_bu", workspace_id: sourceWorkspaceId.trim() }
+          : { kind: "external", url: sourceUrl.trim() };
+      return importAgentSkill({
+        agent_id: agentId,
+        scope,
+        scope_id: scopeId,
+        skill_key: fields.skill_key,
+        display_name: fields.display_name,
+        description: fields.description,
+        when_to_use: fields.when_to_use,
+        body: fields.body,
+        source,
+      });
+    },
+    onSuccess: (skill) => {
+      toast.success(`Imported "${skill.display_name}"`, {
+        description: `Available to the ${agentLabel} agent in ${scopeLabel}.`,
+      });
+      onSaved(skill.skill_key);
+    },
+    onError: (err) => {
+      const violations = getLintViolations(err);
+      if (violations) {
+        setLint(groupViolations(violations));
+        toast.error("Skill has issues to fix", {
+          description: "See the highlighted fields below.",
+        });
+        return;
+      }
+      // A rejected screen (CREDENTIAL_DETECTED / SOURCE_NOT_ALLOWED) carries a
+      // named code and an already-specific, actionable message from the
+      // backend — surface that directly instead of a generic "Couldn't
+      // import"; the whole point of a named error code is a specific message.
+      if (
+        err instanceof ApiRequestError &&
+        (err.code === "CREDENTIAL_DETECTED" || err.code === "SOURCE_NOT_ALLOWED")
+      ) {
+        toast.error(
+          err.code === "CREDENTIAL_DETECTED" ? "Credential detected" : "Source not allowed",
+          { description: err.message },
+        );
+        return;
+      }
+      toast.error("Couldn't import skill", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    },
+  });
+
+  const keyValid = SKILL_KEY_PATTERN.test(fields.skill_key);
+  const overCap =
+    fields.display_name.length > SKILL_CAPS.display_name ||
+    fields.description.length > SKILL_CAPS.description ||
+    fields.when_to_use.length > SKILL_CAPS.when_to_use ||
+    fields.body.length > SKILL_CAPS.body;
+  const sourceValid =
+    sourceKind === "same_tenant_bu"
+      ? sourceWorkspaceId.trim().length > 0
+      : sourceUrl.trim().length > 0;
+  const canSave =
+    fields.display_name.trim().length > 0 &&
+    fields.body.trim().length > 0 &&
+    keyValid &&
+    !overCap &&
+    sourceValid;
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && !importMut.isPending && onClose()}>
+      <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Import skill</DialogTitle>
+          <DialogDescription>
+            Bring in a skill from another {BUSINESS_UNIT_LABEL} you administer, or a
+            declared external source, for the {agentLabel} agent in {scopeLabel}.
+            Content passes through prompt-injection, credential, and provenance
+            screens before it lands.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-sm font-medium">Source</Label>
+            <RadioGroup
+              value={sourceKind}
+              onValueChange={(v) => setSourceKind(v as ImportSourceKind)}
+              className="gap-2"
+            >
+              <div className="flex items-center gap-2">
+                <RadioGroupItem value="same_tenant_bu" id="import-source-bu" />
+                <Label htmlFor="import-source-bu" className="text-sm font-normal">
+                  Another {BUSINESS_UNIT_LABEL}
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <RadioGroupItem value="external" id="import-source-external" />
+                <Label htmlFor="import-source-external" className="text-sm font-normal">
+                  External source
+                </Label>
+              </div>
+            </RadioGroup>
+
+            {sourceKind === "same_tenant_bu" ? (
+              <div className="space-y-1.5 pt-1">
+                <Label htmlFor="import-source-workspace-id" className="text-sm font-medium">
+                  Workspace ID
+                </Label>
+                <Input
+                  id="import-source-workspace-id"
+                  value={sourceWorkspaceId}
+                  onChange={(e) => setSourceWorkspaceId(e.target.value)}
+                  placeholder="ws-1234"
+                />
+                <p className="text-muted-foreground text-xs">
+                  The {BUSINESS_UNIT_LABEL} that owns the skill — you must administer
+                  it for the import to succeed.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                <Label htmlFor="import-source-url" className="text-sm font-medium">
+                  Source URL
+                </Label>
+                <Input
+                  id="import-source-url"
+                  value={sourceUrl}
+                  onChange={(e) => setSourceUrl(e.target.value)}
+                  placeholder="https://example.com/skills/story-splitting"
+                />
+                <p className="text-muted-foreground text-xs">
+                  Checked against the organization&apos;s approved import-source
+                  allowlist.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <SkillTextField
+            id="skill-import-display-name"
+            label="Display name"
+            value={fields.display_name}
+            cap={SKILL_CAPS.display_name}
+            placeholder="Story splitting"
+            onChange={onNameChange}
+            violations={lint.display_name}
+          />
+
+          <div className="space-y-1.5">
+            <div className="flex items-baseline justify-between gap-3">
+              <Label htmlFor="skill-import-key" className="text-sm font-medium">
+                Skill key
+              </Label>
+              {!keyValid && fields.skill_key.length > 0 && (
+                <span className="text-destructive text-[11px]">
+                  a–z, 0–9, hyphens · 2–64 chars
+                </span>
+              )}
+            </div>
+            <Input
+              id="skill-import-key"
+              value={fields.skill_key}
+              onChange={(e) => {
+                keyTouched.current = true;
+                setField("skill_key", e.target.value);
+              }}
+              aria-invalid={fields.skill_key.length > 0 && !keyValid}
+              className={cn(
+                "font-mono",
+                fields.skill_key.length > 0 &&
+                  !keyValid &&
+                  "border-destructive focus-visible:ring-destructive/40",
+              )}
+            />
+            <p className="text-muted-foreground text-xs">
+              Auto-derived from the display name; edit it if you like. Lowercase
+              letters, numbers and hyphens.
+            </p>
+            <FieldViolations violations={lint.skill_key} />
+          </div>
+
+          <InstructionSlot
+            id="skill-import-description"
+            label="Description"
+            helper="A one-line summary shown in the skills list."
+            value={fields.description}
+            cap={SKILL_CAPS.description}
+            onChange={(v) => setField("description", v)}
+            violations={lint.description}
+            rows={2}
+          />
+
+          <InstructionSlot
+            id="skill-import-when-to-use"
+            label="When to use"
+            helper="Tells the agent when to reach for this skill."
+            value={fields.when_to_use}
+            cap={SKILL_CAPS.when_to_use}
+            onChange={(v) => setField("when_to_use", v)}
+            violations={lint.when_to_use}
+            rows={2}
+          />
+
+          <InstructionSlot
+            id="skill-import-body"
+            label="Instructions"
+            helper="The skill body — markdown. Loaded into context when the agent uses this skill."
+            value={fields.body}
+            cap={SKILL_CAPS.body}
+            onChange={(v) => setField("body", v)}
+            violations={lint.body}
+            rows={10}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            className="border-line-soft"
+            onClick={onClose}
+            disabled={importMut.isPending}
+          >
+            Cancel
+          </Button>
+          <Button
+            className={PRIMARY_CTA}
+            onClick={() => importMut.mutate()}
+            disabled={!canSave || importMut.isPending}
+            aria-busy={importMut.isPending}
+          >
+            {importMut.isPending ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+            ) : (
+              <Import className="size-4" aria-hidden />
+            )}
+            Import skill
           </Button>
         </DialogFooter>
       </DialogContent>

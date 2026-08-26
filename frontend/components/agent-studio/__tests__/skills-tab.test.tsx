@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 vi.mock("@/lib/api/agent-skills", () => ({
   listAgentSkills: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("@/lib/api/agent-skills", () => ({
   listAgentSkillVersions: vi.fn(),
   proposeAgentSkill: vi.fn(),
   evaluateAgentSkill: vi.fn(),
+  importAgentSkill: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
@@ -55,11 +57,13 @@ vi.mock("@/components/auth/session-provider", () => ({
 import {
   evaluateAgentSkill,
   getAgentSkill,
+  importAgentSkill,
   listAgentSkills,
   listAgentSkillVersions,
   proposeAgentSkill,
   updateAgentSkill,
 } from "@/lib/api/agent-skills";
+import { ApiRequestError } from "@/lib/api/client";
 import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
 
 import { SkillsTab } from "../skills-tab";
@@ -255,6 +259,12 @@ describe("SkillsTab cascade awareness", () => {
 
     await screen.findByText("Team Skill");
     expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+    // Import (like "New skill") is gated canManage-only, deliberately NOT
+    // extended to canPropose — see the comment beside the button in
+    // skills-tab.tsx: Import always creates a brand-new skill_key, which
+    // lands invisibly for a non-owner the same way a brand-new custom skill
+    // would (list_skills_merged only ever surfaces the ACTIVE row).
+    expect(screen.queryByRole("button", { name: /^import$/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /evaluate/i }));
     await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
@@ -404,5 +414,140 @@ describe("SkillsTab cascade awareness", () => {
     await screen.findByText("Org Skill");
     await waitFor(() => expect(mockedListVersions).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: /evaluate/i })).toBeEnabled();
+  });
+});
+
+describe("SkillsTab import action", () => {
+  // A non-empty list keeps the empty-state's own "Import" button out of the
+  // DOM, so `getByRole(..., { name: /^import$/i })` matches only the header
+  // instance — see skills-tab.tsx, where both instances share the gate.
+  const existingSkill = {
+    origin: "custom" as const,
+    skill_key: "existing",
+    agent_id: "requirements",
+    display_name: "Existing Skill",
+    description: null,
+    when_to_use: null,
+    runtime: "llm" as const,
+    enabled: true,
+    editable: true,
+    deletable: true,
+    version: 1,
+    active_version: 1,
+    origin_scope: "project" as const,
+  };
+
+  const importedSkill = {
+    origin: "custom" as const,
+    skill_key: "imported",
+    agent_id: "requirements",
+    display_name: "Imported",
+    description: null,
+    when_to_use: null,
+    runtime: "llm" as const,
+    enabled: true,
+    editable: true,
+    deletable: true,
+    version: 1,
+    active_version: 1,
+    origin_scope: "project" as const,
+    body: "x",
+    created_by: "user-1",
+    created_at: null,
+    updated_at: null,
+  } satisfies SkillDetail;
+
+  it("shows an Import action for a manager, and calls the API with the declared same-BU source on submit", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockResolvedValue(importedSkill);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    // Source picker defaults to "same_tenant_bu" — the Workspace ID field is
+    // visible without switching the radio.
+    await user.type(await screen.findByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+    await user.type(screen.getByLabelText("Workspace ID"), "ws-2");
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    expect(mockedImport).toHaveBeenCalledWith({
+      agent_id: "requirements",
+      scope: "project",
+      scope_id: "proj-1",
+      skill_key: "imported",
+      display_name: "Imported",
+      description: "",
+      when_to_use: "",
+      body: "x",
+      source: { kind: "same_tenant_bu", workspace_id: "ws-2" },
+    });
+  });
+
+  it("switches to an external source and submits a URL instead of a workspace id", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockResolvedValue(importedSkill);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    await user.click(await screen.findByRole("radio", { name: /external source/i }));
+    await user.type(screen.getByLabelText("Source URL"), "https://example.com/skill.md");
+    await user.type(screen.getByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    expect(mockedImport.mock.calls[0]![0]!.source).toEqual({
+      kind: "external",
+      url: "https://example.com/skill.md",
+    });
+  });
+
+  it("surfaces a SOURCE_NOT_ALLOWED screening rejection as its own message, not a generic error", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockRejectedValue(
+      new ApiRequestError(422, {
+        detail: {
+          code: "SOURCE_NOT_ALLOWED",
+          message: "That source isn't on the org's approved allowlist.",
+        },
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    await user.click(await screen.findByRole("radio", { name: /external source/i }));
+    await user.type(screen.getByLabelText("Source URL"), "https://not-allowed.example.com/skill.md");
+    await user.type(screen.getByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        "Source not allowed",
+        expect.objectContaining({
+          description: "That source isn't on the org's approved allowlist.",
+        }),
+      ),
+    );
   });
 });
