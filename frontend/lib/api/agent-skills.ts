@@ -11,6 +11,7 @@ import {
   type SkillUpdateInput,
   SkillVersionList,
 } from "@/lib/schemas/agent-skills";
+import { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
 import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
 import { api } from "./client";
@@ -105,6 +106,20 @@ export const proposeAgentSkill = (skillKey: string, input: SkillProposeInput) =>
     method: "POST",
     body: input,
     schema: GovernanceApproval,
+  });
+
+/** Run the deterministic golden-task rubric against the newest pending draft of
+ *  this skill_key at this scope — a precondition for proposeAgentSkill(). Unlike
+ *  proposeAgentSkill, NOT restricted to the caller's own draft (see the sub-project
+ *  4 spec's R3 self-evaluation-blocked rule). */
+export const evaluateAgentSkill = (
+  skillKey: string,
+  input: { agent_id: string; scope: SkillScope; scope_id?: string | null },
+) =>
+  api(`/agent-skills/${encodeURIComponent(skillKey)}/evaluate`, {
+    method: "POST",
+    body: input,
+    schema: EvaluationResult,
   });
 
 /** Soft-delete a custom skill (custom only). */
