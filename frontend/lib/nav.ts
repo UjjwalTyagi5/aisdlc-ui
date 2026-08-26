@@ -283,11 +283,18 @@ export const governNav: NavItem[] = [
   {
     /**
      * The org's approved external Skill-import sources (Agent Studio import +
-     * supply-chain screening). Read is open to any tenant member — matches
-     * the backend's `GET /agent-skills/import-sources` floor (`artifact:view`
-     * only, no Org-Admin gate) — so this stays visible at the same permission
-     * as the rest of Deliver rather than being scoped to unit administrators
-     * like its governNav siblings above. Adding to the list is Org-Admin-only
+     * supply-chain screening). The PAGE's own read is open to any tenant
+     * member — matches the backend's `GET /agent-skills/import-sources` floor
+     * (`artifact:view` only, no Org-Admin gate) — but the SIDEBAR entry still
+     * carries `requireScope: "business_unit"`, same as every governNav
+     * sibling above (Business Units, Users, Roles & Access, Model Management,
+     * Integrations). `artifact:view` alone is held by every platform role
+     * (developer, QA, architect, BA, …), so gating the link on it with no
+     * scope would surface a Control-plane entry to every contributor, not
+     * just the tier that actually administers the allowlist. Someone without
+     * a governNav-worthy scope can still reach the page directly (e.g. a
+     * future link from the Skills tab's Import dialog) — this only controls
+     * sidebar discoverability. Adding to the list is Org-Admin-only
      * (`is_org_wide` on the POST route), enforced inside the page itself —
      * see `components/agent-studio/import-source-allowlist.tsx`.
      */
@@ -296,6 +303,7 @@ export const governNav: NavItem[] = [
     icon: Import,
     segment: "agent-import-sources",
     requirePermission: "artifact:view",
+    requireScope: "business_unit",
   },
 ];
 

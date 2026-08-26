@@ -140,4 +140,46 @@ describe("visibleNav — role and scope", () => {
     expect(hrefs).toContain("/admin/models");
     expect(hrefs).toContain("/integrations");
   });
+
+  it("hides Import Sources from a bare artifact:view holder administering no unit", () => {
+    // Import Sources requires `artifact:view` — which every platform role
+    // holds — AND `requireScope: "business_unit"`, same as its governNav
+    // siblings (Business Units, Users, Roles & Access, Model Management,
+    // Integrations). A "stakeholder"-shaped viewer (artifact:view only, no
+    // unit administered) must not see the Control-plane entry just because
+    // the permission floor is the read-only one everyone holds.
+    const hrefs = hrefsFor(["artifact:view"], {
+      role: "custom",
+      isOrgWide: false,
+      managedBusinessUnitIds: [],
+    });
+    expect(hrefs).not.toContain("/admin/agent-import-sources");
+  });
+
+  it("hides Import Sources from a Project Admin (holds artifact:view but administers no unit)", () => {
+    const hrefs = hrefsFor(ROLE_PERMISSIONS.project_admin, {
+      role: "project_admin",
+      isOrgWide: false,
+      managedBusinessUnitIds: [],
+    });
+    expect(hrefs).not.toContain("/admin/agent-import-sources");
+  });
+
+  it("keeps Import Sources for the Organization Admin", () => {
+    const hrefs = hrefsFor(ROLE_PERMISSIONS.org_admin, {
+      role: "org_admin",
+      isOrgWide: true,
+      managedBusinessUnitIds: [],
+    });
+    expect(hrefs).toContain("/admin/agent-import-sources");
+  });
+
+  it("keeps Import Sources for a single-unit Business Unit Admin", () => {
+    const hrefs = hrefsFor(ROLE_PERMISSIONS.bu_admin, {
+      role: "bu_admin",
+      isOrgWide: false,
+      managedBusinessUnitIds: ["ws_platform"],
+    });
+    expect(hrefs).toContain("/admin/agent-import-sources");
+  });
 });
