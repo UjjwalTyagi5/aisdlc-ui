@@ -144,3 +144,33 @@ async def test_evaluate_skill_by_a_different_actor_than_the_author_succeeds(mint
             headers={"Authorization": f"Bearer {evaluator_token}"},
         )
         assert evaluated.status_code == 201, evaluated.text
+
+
+@pytest.mark.asyncio
+async def test_org_scope_self_evaluation_blocked(mint_token):
+    """The mirror negative case of test_evaluate_skill_by_a_different_actor_than_
+    the_author_succeeds: an org-scope skill's own author must be refused when they
+    call /evaluate on their own draft (R3) — SELF_EVALUATION_BLOCKED, not a pass."""
+    tenant = str(uuid.uuid4())
+    author_id = str(uuid.uuid4())
+    ws_id = str(uuid.uuid4())
+    await _bind_role(tenant, author_id, "bu_admin", "business_unit", ws_id)
+    author_token = mint_token(user_id=author_id, tenant_id=tenant, permissions=["artifact:view"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/agent-skills",
+            json={
+                "agent_id": "requirements", "scope": "org", "scope_id": None,
+                "skill_key": "org-skill-self", "display_name": "Org Skill Self", "body": "x",
+            },
+            headers={"Authorization": f"Bearer {author_token}"},
+        )
+        assert created.status_code == 200, created.text
+
+        evaluated = await client.post(
+            "/agent-skills/org-skill-self/evaluate",
+            json={"agent_id": "requirements", "scope": "org", "scope_id": None},
+            headers={"Authorization": f"Bearer {author_token}"},
+        )
+        assert evaluated.status_code == 403, evaluated.text
+        assert evaluated.json()["detail"]["code"] == "SELF_EVALUATION_BLOCKED"
