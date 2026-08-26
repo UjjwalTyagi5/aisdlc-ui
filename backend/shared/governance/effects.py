@@ -407,7 +407,7 @@ async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str
         await db.execute(select(AgentProfile).where(AgentProfile.id == target_uuid))
     ).scalar_one_or_none()
     if row is None:
-        raise EffectNotAvailable(request["type"], "That draft version no longer exists.")
+        return await _apply_agent_default_skill(db, request, target_uuid)
 
     siblings = list(
         (
@@ -439,6 +439,51 @@ async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str
         request["id"], row.id, row.agent_id, row.version,
     )
     return f"Published {row.agent_id} v{row.version} at {row.scope} scope."
+
+
+async def _apply_agent_default_skill(db: AsyncSession, request: dict[str, Any], target_uuid) -> str:
+    """AgentSkill counterpart to the AgentProfile path above — same target_ref
+    convention, same apply_publish_flip reuse, different ORM model. A proposal's
+    target_ref may name either kind of row; this is the fallback once the
+    AgentProfile lookup comes up empty."""
+    from shared.models.orm import AgentSkill  # noqa: PLC0415
+    from shared.routers.agent_profiles import apply_publish_flip  # noqa: PLC0415
+
+    row = (
+        await db.execute(select(AgentSkill).where(AgentSkill.id == target_uuid))
+    ).scalar_one_or_none()
+    if row is None:
+        raise EffectNotAvailable(request["type"], "That draft version no longer exists.")
+
+    siblings = list(
+        (
+            await db.execute(
+                select(AgentSkill).where(
+                    AgentSkill.agent_id == row.agent_id,
+                    AgentSkill.scope == row.scope,
+                    AgentSkill.scope_id == row.scope_id,
+                    AgentSkill.skill_key == row.skill_key,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    apply_publish_flip(siblings, row.id)
+    await db.flush()
+
+    try:
+        from shared.services.skill_runtime import invalidate_skills_cache  # noqa: PLC0415
+
+        invalidate_skills_cache(str(request["tenantId"]), row.agent_id)
+    except Exception:  # pragma: no cover - cache is best-effort, the write is not
+        logger.warning("governance: skill cache invalidation failed for %s", row.agent_id)
+
+    logger.info(
+        "governance: skill published request=%s skill=%s agent=%s key=%s v%s",
+        request["id"], row.id, row.agent_id, row.skill_key, row.version,
+    )
+    return f"Published skill '{row.skill_key}' v{row.version} at {row.scope} scope."
 
 
 async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> str:
