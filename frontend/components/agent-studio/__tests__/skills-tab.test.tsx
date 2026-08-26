@@ -57,6 +57,7 @@ import {
   getAgentSkill,
   listAgentSkills,
   proposeAgentSkill,
+  updateAgentSkill,
 } from "@/lib/api/agent-skills";
 import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
 
@@ -283,6 +284,63 @@ describe("SkillsTab cascade awareness", () => {
     await user.click(await screen.findByRole("button", { name: /evaluate/i }));
     await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
     expect(await screen.findByText(/fail/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+  });
+
+  it("clears a cached PASS evaluation after a non-owner edits the skill again, so Propose goes back to disabled", async () => {
+    // A visible custom-skill row's `version` is always its ACTIVE version
+    // (list_skills_merged only ever surfaces active rows) — it does NOT
+    // change across a non-owner's successive inactive-draft edits. So this
+    // fixture intentionally returns the SAME version (1) from updateAgentSkill
+    // as the original list row: if the fix didn't explicitly clear the
+    // evaluation cache on save, the evalKey (skill_key + version) would stay
+    // identical across the edit and the stale PASS would silently survive.
+    const skillRow = {
+      origin: "custom" as const, skill_key: "team-skill", agent_id: "requirements",
+      display_name: "Team Skill", description: null, when_to_use: null,
+      runtime: "llm" as const, enabled: true, editable: false, deletable: false,
+      version: 1, active_version: null, origin_scope: "project" as const,
+    };
+    mockedListAgentSkills.mockResolvedValue({ skills: [skillRow] } satisfies SkillList);
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-1", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "pass", score: 0.9, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
+    const mockedGetSkill = vi.mocked(getAgentSkill);
+    mockedGetSkill.mockResolvedValue({
+      ...skillRow,
+      body: "Some instructions",
+      created_by: "other-1",
+      created_at: null,
+      updated_at: null,
+    } satisfies SkillDetail);
+    const mockedUpdate = vi.mocked(updateAgentSkill);
+    mockedUpdate.mockResolvedValue({
+      ...skillRow,
+      body: "Updated instructions",
+      created_by: "other-1",
+      created_at: null,
+      updated_at: null,
+    } satisfies SkillDetail);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await screen.findByText("Team Skill");
+    await user.click(screen.getByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /propose/i })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: /^edit team skill$/i }));
+    await screen.findByLabelText("Display name");
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+
+    // Dialog closes and the list re-renders after the save — Propose must be
+    // disabled again until Evaluate is re-run against the new draft.
+    await screen.findByText("Team Skill");
     expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
   });
 

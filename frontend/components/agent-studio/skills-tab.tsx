@@ -100,12 +100,14 @@ function deriveKey(name: string): string {
     .slice(0, 64);
 }
 
-/** Key for the per-skill evaluation-result cache — skill_key alone isn't enough:
- *  it must also fold in the row's own `version` so a fresh non-owner edit (which
- *  bumps `version` without changing `active_version` — see updateAgentSkill)
- *  never shows a stale PASS carried over from a now-superseded draft, mirroring
- *  how Behavior keys its evaluation cache by draft id rather than skill_key
- *  alone. */
+/** Key for the per-skill evaluation-result cache. NOTE: a visible custom-skill
+ *  row's `version` is always its ACTIVE version (list_skills_merged only ever
+ *  surfaces active rows) — it does NOT change across a non-owner's successive
+ *  inactive-draft edits, so this key alone can't distinguish "the draft that
+ *  was PASSed" from "a newer, unevaluated draft of the same skill." That gap
+ *  is closed separately: SkillsTab's clearSkillEvaluations() clears any cached
+ *  result for a skill_key on every successful save, so an edit always
+ *  invalidates a stale PASS regardless of what this key computes. */
 function evalKey(skill: SkillListItem): string {
   return `${skill.skill_key}:${skill.version ?? 0}`;
 }
@@ -169,9 +171,11 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
   const [editor, setEditor] = React.useState<EditorState>(null);
   const [viewing, setViewing] = React.useState<SkillListItem | null>(null);
   const [deleting, setDeleting] = React.useState<SkillListItem | null>(null);
-  // Keyed by evalKey(skill) (skill_key + version), not just skill_key, so
-  // evaluating one skill's draft doesn't wrongly enable Propose for another
-  // skill, or for a stale, now-superseded version of the same one.
+  // Keyed by evalKey(skill) (skill_key + version) so evaluating one skill
+  // doesn't wrongly enable Propose for another. A visible row's `version` is
+  // always the ACTIVE version though (see clearSkillEvaluations below), so
+  // the key alone can't detect a newer unevaluated draft superseding a PASSed
+  // one — clearSkillEvaluations handles that by clearing on every save.
   const [evaluationBySkillKey, setEvaluationBySkillKey] = React.useState<
     Record<string, EvaluationResult>
   >({});
@@ -188,6 +192,26 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: listKey });
+
+  // A visible custom-skill row's `version` is always its ACTIVE version
+  // (list_skills_merged only ever surfaces active rows) — it does NOT change
+  // across successive non-owner edits, which each land as a new INACTIVE
+  // draft. So evalKey(skill) alone can't detect "this skill has a newer,
+  // unevaluated draft than the one that was PASSed." The invariant that
+  // actually matters instead: any successful save invalidates whatever
+  // evaluation was cached for that skill_key, full stop — called from
+  // SkillEditorDialog's onSaved below, right after a create/update succeeds.
+  // evalKey's format ("skill_key:version") lets this filter by prefix rather
+  // than needing to know the exact stale key.
+  const clearSkillEvaluations = (skillKey: string) =>
+    setEvaluationBySkillKey((s) => {
+      const prefix = `${skillKey}:`;
+      const next: typeof s = {};
+      for (const [key, value] of Object.entries(s)) {
+        if (!key.startsWith(prefix)) next[key] = value;
+      }
+      return next;
+    });
 
   // ── Optimistic enable/disable toggle ───────────────────────────────────────
   const toggleMut = useMutation({
@@ -515,9 +539,10 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
           scopeLabel={scopeLabel}
           tierNoun={tierNoun}
           onClose={() => setEditor(null)}
-          onSaved={() => {
+          onSaved={(skillKey) => {
             setEditor(null);
             invalidate();
+            clearSkillEvaluations(skillKey);
           }}
         />
       )}
@@ -798,7 +823,9 @@ function SkillEditorDialog({
   scopeLabel: string;
   tierNoun: string;
   onClose: () => void;
-  onSaved: () => void;
+  /** Called with the saved skill's skill_key so the caller can invalidate any
+   *  cached evaluation result for it — see onSuccess below. */
+  onSaved: (skillKey: string) => void;
 }) {
   const isEdit = state.mode === "edit";
   const editKey = isEdit ? state.skill.skill_key : null;
@@ -894,7 +921,7 @@ function SkillEditorDialog({
             : `Available to the ${agentLabel} agent in ${scopeLabel}.`,
         },
       );
-      onSaved();
+      onSaved(skill.skill_key);
     },
     onError: (err) => {
       const violations = getLintViolations(err);
