@@ -718,3 +718,34 @@ async def test_publish_workspace_scope_unchanged_developer_denied(mint_token):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/agent-profiles/{draft_id}/publish", headers=headers)
     assert resp.status_code == 403
+
+
+# ── propose: scope-aware write authorization (route-level) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_propose_allowed_for_project_member_with_no_permission_string(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    await _bind_role(tenant, user_id, "qa", "project", project_id)  # QA held no permission before this plan
+    draft_id = await _create_draft_row(tenant, "project", project_id)  # reuse sub-project 2's helper
+
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
+    assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_propose_denied_for_non_member(mint_token):
+    tenant = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
+    draft_id = await _create_draft_row(tenant, "project", project_id)
+    # user_id has NO binding anywhere in this tenant.
+    token = mint_token(user_id=user_id, tenant_id=tenant, permissions=["artifact:view"])
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/agent-profiles/{draft_id}/propose", headers=headers)
+    assert resp.status_code == 403

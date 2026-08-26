@@ -714,7 +714,6 @@ async def unpublish(
 @agent_profiles_router.post(
     "/{profile_id}/propose",
     status_code=201,
-    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def propose(
     profile_id: str,
@@ -757,6 +756,14 @@ async def propose(
                 "message": "A personal default is yours alone; there is nobody to propose it to.",
             },
         )
+
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, _user_id(request), perms, target.scope,
+        str(target.scope_id) if target.scope_id else None,
+    )
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     request_type = f"agent_default_{target.scope}"
     scope_label = {"org": "organization", "workspace": "business unit", "project": "project"}[
