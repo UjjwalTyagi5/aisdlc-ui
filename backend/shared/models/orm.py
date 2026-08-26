@@ -6,9 +6,9 @@ Do NOT import from shared.db here â€” models are pure schema definitions wi
 Do NOT import from config.env â€” no connection strings belong in model definitions.
 """
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -89,8 +89,15 @@ class Project(Base):
     # (migration 0024). THE access decision for connectors — see
     # shared/authz/connector_grants.py. NULL / a missing key means "both".
     tool_access_modes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    # Monthly USD cost budget (0032). NULL = inherit workspace / unlimited.
+    # TOTAL USD cost budget (0032). NULL = inherit workspace / unlimited. The name is
+    # historical: spend accumulates over the project's life and never resets (see
+    # shared/services/budget_store.py).
     monthly_budget_usd: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # How long that total is authorised for (0035). Either end may be NULL — a start
+    # with no end and an end with no start are both meaningful. Outside the window a
+    # project with a budget cannot spend: see budget_guard._window_state.
+    budget_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    budget_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

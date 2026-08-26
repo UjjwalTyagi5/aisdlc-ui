@@ -56,7 +56,15 @@ const TYPE_ROUTED = new Set<GovernanceApprovalType>([
   // contributor's "can I use Opus on this project" to a tier that would have
   // to ask the Project Admin anyway. Tier routing lands both cases correctly;
   // the escalation still climbs if the first rung cannot grant it.
-  "budget_increase",
+  //
+  // `budget_increase` is NO LONGER type-routed either, for the same reason.
+  // Pinned to `org_admin` it sent a Project Admin asking for their own
+  // project's headroom straight past the Business Unit Admin — who owns the
+  // unit's cap and is the one with the context to answer it. Tier-routed:
+  //
+  //   contributor    → Project Admin
+  //   Project Admin  → Business Unit Admin
+  //   BU Admin       → Org Admin (a peer is no use for their own unit's cap)
   "project_archive",
   "agent_default_org",
   "agent_default_workspace",

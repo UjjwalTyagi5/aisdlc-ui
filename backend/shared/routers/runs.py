@@ -93,10 +93,16 @@ async def create_run(
 
     # Hierarchical budget gate (org ⊇ workspace ⊇ project): reject a new run at dispatch
     # when any scope's monthly spend is already at/over its budget (409 with the scope).
-    from shared.services.budget_guard import BudgetExceededError, check_budgets
+    from shared.services.budget_guard import (
+        BudgetExceededError,
+        BudgetWindowClosedError,
+        check_budgets,
+    )
     try:
         await check_budgets(tenant_id, str(body.project_id) if body.project_id else None)
-    except BudgetExceededError as e:
+    except (BudgetExceededError, BudgetWindowClosedError) as e:
+        # Same 409 for both: the run is refused on budget grounds either way, and the
+        # message says which — spent out, or outside the period it was funded for.
         raise HTTPException(status_code=409, detail=str(e))
 
     # `active_agents` picks which agents this run actually exercises (build_execution_
@@ -129,7 +135,7 @@ async def create_run(
             raise HTTPException(status_code=422, detail="Selected model is not enabled for your organization")
         except NoModelConfiguredError:
             raise HTTPException(status_code=409, detail="No model provider configured for your organization")
-        except BudgetExceededError as e:
+        except (BudgetExceededError, BudgetWindowClosedError) as e:
             raise HTTPException(status_code=409, detail=str(e))
         resolved_model_id = resolved.model
         resolved_offering_id = resolved.offering_id

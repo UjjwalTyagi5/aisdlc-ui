@@ -78,7 +78,7 @@ const formSchema = z
      */
     monthlyBudgetUsd: z
       .string()
-      .min(1, "Set a monthly budget for this project")
+      .min(1, "Set a total budget for this project")
       .refine((v) => Number.isFinite(Number(v)) && Number(v) > 0, {
         message: "Enter an amount greater than zero",
       }),
@@ -543,7 +543,7 @@ export function CreateProjectDialog({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-                    Monthly budget
+                    Total budget
                   </FormLabel>
                   <FormControl>
                     <div className="relative">

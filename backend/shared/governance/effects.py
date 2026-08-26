@@ -107,6 +107,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_project_archive(db, request)
     if rtype == "project_creation":
         return await _apply_project_creation(db, request)
+    if rtype == "project_settings_change":
+        return await _apply_project_settings_change(db, request)
     if rtype == "model_provider_access":
         return await _apply_model_provider_access(db, request)
     if rtype == "connector_access":
@@ -136,7 +138,14 @@ async def apply_on_reject(db: AsyncSession, request: dict[str, Any]) -> Optional
 
 
 async def _apply_budget_increase(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Move the unit's monthly cap to the amount that was asked for.
+    """Move the cap to the amount that was asked for.
+
+    THE TARGET IS WHICHEVER SCOPE THE REQUEST NAMES. A Project Admin whose project
+    has exhausted its total budget raises this against their PROJECT; a Business
+    Unit Admin raises it against their unit. Applying it to `workspaceId`
+    unconditionally moved the unit's cap for a request that was never about the
+    unit — raising it for every project at once, and leaving the one that actually
+    ran out still blocked.
 
     The amount comes from `payload.requestedAmountUsd` — the figure recorded when
     the request was raised, NOT one supplied at decision time. The approver agreed
@@ -156,20 +165,124 @@ async def _apply_budget_increase(db: AsyncSession, request: dict[str, Any]) -> s
     if amount < 0:
         raise EffectNotAvailable("budget_increase", "The requested amount is negative.")
 
+    project_id = request.get("projectId")
+    if project_id:
+        result = await db.execute(
+            text(
+                "UPDATE projects SET monthly_budget_usd = :amt, updated_at = now() "
+                "WHERE id = CAST(:p AS uuid)"
+            ),
+            {"amt": amount, "p": project_id},
+        )
+        if not result.rowcount:
+            raise EffectNotAvailable("budget_increase", "That project no longer exists.")
+        target, target_id, label = "project", project_id, "Project"
+    else:
+        result = await db.execute(
+            text(
+                "UPDATE workspaces SET monthly_budget_usd = :amt, updated_at = now() "
+                "WHERE id = CAST(:w AS uuid)"
+            ),
+            {"amt": amount, "w": request["workspaceId"]},
+        )
+        if not result.rowcount:
+            raise EffectNotAvailable("budget_increase", "That business unit no longer exists.")
+        target, target_id, label = "workspace", request["workspaceId"], "Business unit"
+
+    # The cap is enforced against LIFETIME spend (shared/services/budget_store.py),
+    # so raising it is what unblocks a scope that has already spent its total —
+    # nothing resets on its own at the end of the month.
+    from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415
+    clear_budget_cache()
+
+    logger.info(
+        "governance: budget_increase applied request=%s %s=%s amount=%s",
+        request["id"], target, target_id, amount,
+    )
+    return f"{label} total cap set to {amount:.2f} USD."
+
+
+# The project columns a settings request may write, mapped to the payload key the
+# request carries. NOT derived from the PATCH body at apply time: an approver agreed
+# to the fields shown on the request, and a mapping computed later could apply
+# something they never saw. Anything absent from here is not applicable through this
+# route no matter what the payload contains.
+_SETTINGS_FIELDS: dict[str, str] = {
+    "name": "display_name",
+    "description": "description",
+    "monthlyBudgetUsd": "monthly_budget_usd",
+    "connectors": "connectors",
+    "mcpServers": "mcp_servers",
+    "toolAccessModes": "tool_access_modes",
+}
+
+# The JSONB ones, which have to be bound as JSON text rather than a dict.
+_SETTINGS_JSON_FIELDS = frozenset({"connectors", "mcp_servers", "tool_access_modes"})
+
+
+async def _apply_project_settings_change(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Write the settings edit its Project Admin proposed.
+
+    The values come from `payload.changes` — recorded when the edit was submitted,
+    never supplied at decision time. Same rule as budget_increase: the approver
+    agreed to the values they could read, and letting the decision carry its own
+    would mean approving one thing and applying another.
+
+    A field the project no longer has, or one absent from _SETTINGS_FIELDS, is
+    ignored rather than fatal: a request can outlive a schema, and refusing the
+    whole edit because one key went stale would strand the rest of it.
+    """
+    payload = request.get("payload") or {}
+    changes = payload.get("changes") or {}
+    if not isinstance(changes, dict) or not changes:
+        raise EffectNotAvailable(
+            "project_settings_change", "This request records no settings to apply."
+        )
+    project_id = request.get("projectId") or request.get("targetRef")
+    if not project_id:
+        raise EffectNotAvailable(
+            "project_settings_change", "This request names no project to apply to."
+        )
+
+    sets, params = [], {"p": str(project_id)}
+    applied: list[str] = []
+    for key, value in changes.items():
+        column = _SETTINGS_FIELDS.get(key)
+        if column is None:
+            continue
+        bind = f"v_{column}"
+        if column in _SETTINGS_JSON_FIELDS:
+            sets.append(f"{column} = CAST(:{bind} AS jsonb)")
+            params[bind] = json.dumps(value) if value else None
+        else:
+            sets.append(f"{column} = :{bind}")
+            params[bind] = value
+        applied.append(key)
+
+    if not sets:
+        raise EffectNotAvailable(
+            "project_settings_change", "None of the requested settings can be applied."
+        )
+
     result = await db.execute(
         text(
-            "UPDATE workspaces SET monthly_budget_usd = :amt, updated_at = now() "
-            "WHERE id = CAST(:w AS uuid)"
+            f"UPDATE projects SET {', '.join(sets)}, updated_at = now() "
+            "WHERE id = CAST(:p AS uuid)"
         ),
-        {"amt": amount, "w": request["workspaceId"]},
+        params,
     )
     if not result.rowcount:
-        raise EffectNotAvailable("budget_increase", "That business unit no longer exists.")
+        raise EffectNotAvailable("project_settings_change", "That project no longer exists.")
+
+    # A budget among the changes moves an enforced cap, and the guard caches them.
+    from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415
+    clear_budget_cache()
+
     logger.info(
-        "governance: budget_increase applied request=%s workspace=%s amount=%s",
-        request["id"], request["workspaceId"], amount,
+        "governance: project_settings_change applied request=%s project=%s fields=%s",
+        request["id"], project_id, ",".join(applied),
     )
-    return f"Monthly cap set to {amount:.2f} USD."
+    return f"Applied {len(applied)} setting{'' if len(applied) == 1 else 's'}: {', '.join(applied)}."
 
 
 async def _apply_project_archive(db: AsyncSession, request: dict[str, Any]) -> str:

@@ -28,7 +28,6 @@ import {
 import {
   StatTile,
   StatTileGrid,
-  budgetTone,
   usd,
 } from "@/components/app/stat-tile";
 import { ScopeChip } from "@/components/app/scope-indicator";
@@ -174,16 +173,13 @@ export default function DashboardPage() {
 
   // ── Roll-ups ───────────────────────────────────────────────────────────────
   const unitSpend = units.reduce((n, w) => n + w.monthlySpendUsd, 0);
-  const unitBudget = units.reduce((n, w) => n + (w.monthlyBudgetUsd ?? 0), 0);
 
   const projectSpend = projects.reduce((n, p) => n + (p.monthlySpendUsd ?? 0), 0);
-  const projectBudget = projects.reduce((n, p) => n + (p.monthlyBudgetUsd ?? 0), 0);
 
-  // Governance variants answer for their units' caps; delivery variants for
-  // their own projects'. Both are already scope-filtered above.
+  // Governance variants total their units' spend; delivery variants their own
+  // projects'. Both are already scope-filtered above.
   const governanceView = isOrg || variant === "business_unit";
   const spend = governanceView ? unitSpend : projectSpend;
-  const budget = governanceView ? unitBudget : projectBudget;
 
   // ── Scope labels ───────────────────────────────────────────────────────────
   const soleUnit =
@@ -250,7 +246,7 @@ export default function DashboardPage() {
           id: `budget-${w.id}`,
           kind: ratio >= 1 ? "budget_over_cap" : "budget_near_cap",
           title: w.displayName,
-          detail: `${usd(w.monthlySpendUsd)} of ${usd(cap)} monthly cap`,
+          detail: `${usd(w.monthlySpendUsd)} of ${usd(cap)} total cap`,
           href: "/cost",
           meta: `${Math.round(ratio * 100)}%`,
         });
@@ -265,7 +261,7 @@ export default function DashboardPage() {
           id: `budget-${p.id}`,
           kind: ratio >= 1 ? "budget_over_cap" : "budget_near_cap",
           title: p.name,
-          detail: `${usd(p.monthlySpendUsd ?? 0)} of ${usd(cap)} monthly cap`,
+          detail: `${usd(p.monthlySpendUsd ?? 0)} of ${usd(cap)} total cap`,
           href: `/projects/${p.id}`,
           meta: `${Math.round(ratio * 100)}%`,
         });
@@ -403,12 +399,14 @@ export default function DashboardPage() {
             />
 
             <StatTile
-              label="Spend this month"
+              label="Spend to date"
               value={usd(spend)}
-              sub={budget > 0 ? `of ${usd(budget)} cap` : "no cap set"}
+              sub={
+                governanceView
+                  ? `across ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`
+                  : "across your projects"
+              }
               icon={CircleDollarSign}
-              progress={budget > 0 ? spend / budget : undefined}
-              tone={budgetTone(spend, budget)}
               href="/cost"
             />
 
@@ -422,25 +420,21 @@ export default function DashboardPage() {
                 <StatTile
                   label="Model providers"
                   value={overview ? String(overview.modelProviderCount) : "—"}
-                  sub="org-wide and unit-scoped"
+                  sub="configured"
                   icon={BrainCircuit}
                   href="/admin/models"
                 />
                 <StatTile
                   label="Connectors"
                   value={overview ? String(overview.connectorCount) : "—"}
-                  sub={
-                    overview
-                      ? `of ${overview.connectorTotalCount} available, connected`
-                      : "connected"
-                  }
+                  sub={`granted to ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`}
                   icon={Plug}
                   href="/integrations"
                 />
                 <StatTile
                   label="Users"
                   value={overview ? String(overview.userCount) : "—"}
-                  sub="across every business unit"
+                  sub="across the platform"
                   icon={Users}
                   href="/users"
                 />

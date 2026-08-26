@@ -156,7 +156,7 @@ export function ProjectCostPanel({
         <span className="text-muted-foreground font-mono text-[11px]">
           {monthlyBudgetUsd && monthlyBudgetUsd > 0
             ? `of ${usd(monthlyBudgetUsd)} cap${ratio !== null ? ` · ${Math.round(ratio * 100)}%` : ""}`
-            : "inherits the business unit's cap"}
+            : "no cap set"}
         </span>
         <div className="ml-auto flex items-center gap-3">
           <Link

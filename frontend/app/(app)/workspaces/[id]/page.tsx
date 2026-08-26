@@ -498,7 +498,7 @@ function BudgetCard({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Coins className="text-brand-bright size-4" aria-hidden />
-          <span className="font-display text-[15px] font-bold tracking-[-0.01em]">Monthly budget</span>
+          <span className="font-display text-[15px] font-bold tracking-[-0.01em]">Total budget</span>
           {over && (
             <Badge variant="destructive" className="text-[10px]">Over budget</Badge>
           )}
@@ -579,7 +579,7 @@ function BudgetCard({
               step="1"
               value={requestValue}
               onChange={(e) => setRequestValue(e.target.value)}
-              placeholder="New monthly cap"
+              placeholder="New total cap"
               className="border-line-soft h-8 w-40 font-mono text-[12px]"
               autoFocus
             />

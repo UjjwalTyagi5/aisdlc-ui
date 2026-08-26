@@ -11,15 +11,24 @@ import { z } from "zod";
  *
  * Both ends are independently optional, and all four combinations are
  * meaningful:
- *   - neither  → the cap is open-ended (the default, and the common case)
- *   - start    → the cap takes effect then; before that there is no cap
- *   - end      → the cap lapses after that date
+ *   - neither  → the budget is open-ended (the default, and the common case)
+ *   - start    → the budget is authorised from then; before that, nothing runs
+ *   - end      → the budget expires after that date; after it, nothing runs
  *   - both     → a closed window, e.g. a funded phase of work
  *
- * A lapsed window does NOT zero the cap or stop anything — like everything
- * else in the budget model here, it is reported rather than enforced (see
- * `budgetWindowState` below, and the warn-don't-block rule in
- * components/app/budget-hub.tsx).
+ * THE WINDOW IS ENFORCED, and it blocks rather than lifting the cap. Outside it a
+ * project with a budget cannot spend at all — `budget_guard.check_budgets`
+ * refuses the run with a 409, the same answer an exhausted budget gives, and the
+ * message says which of the two it was.
+ *
+ * This is the opposite of what this file used to say. The window was documented
+ * as permissive ("before that there is no cap", "the cap lapses"), which made an
+ * expired budget MORE permissive than a live one — and it was moot anyway,
+ * because the backend had no columns and silently discarded both dates.
+ * Migration 0035 gave them somewhere to live.
+ *
+ * The window QUALIFIES a budget, so it only bites where there is one: a project
+ * with no cap has no funding period to expire.
  */
 export const BudgetWindowFields = {
   /** Inclusive first day the cap applies, `YYYY-MM-DD`. Null = no start bound. */

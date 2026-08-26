@@ -21,6 +21,10 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   // a BU Admin archiving a project they don't own needs the Org Admin's
   // sign-off — same escalation shape as budget_increase.
   project_archive: "org_admin",
+  // Tier-routed rather than type-routed (see lib/requests/routing.ts), so this
+  // entry is inert for routing and kept only to keep the Record exhaustive: a
+  // Project Admin's settings edit goes to their Business Unit Admin.
+  project_settings_change: "bu_admin",
   // Agent Studio's cascade — see AGENT_DEFAULT_OWNER_ROLE below, which this
   // mirrors for the three tiers that need governance approval.
   agent_default_org: "org_admin",

@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Literal, Optional
+from datetime import date
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +41,7 @@ from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.connector_access import TOOL_ACCESS_MODES, level_from_mode
 from shared.authz.connector_capabilities import unsupported_reason
 from shared.authz.dependency import require_permission
-from shared.authz.project_scope import assert_can_administer_project
+from shared.authz.project_scope import assert_can_administer_project, project_admin_tier
 from shared.authz.effective_role import actor_display_name, effective_platform_role
 from shared.authz.workspace import assert_workspace_in_tenant
 from shared.db import get_db_session
@@ -136,7 +137,18 @@ class ProjectCreateIn(BaseModel):
     # below, because an unrecognised mode resolves to NO access at runtime and a
     # typo would otherwise present as a dead connector rather than a 422.
     tool_access_modes: Optional[dict[str, str]] = None
-    monthlyBudgetUsd: Optional[float] = None
+    # REQUIRED. A project is where spend actually happens, so the person creating one
+    # says what it may cost — there is no default to fall back on and no silent
+    # inheritance. A business unit's budget stays optional by contrast: a unit that
+    # caps nothing is a normal thing to want.
+    monthlyBudgetUsd: float = Field(gt=0)
+    # How long that budget is authorised for. The create dialog has collected these
+    # since before the backend had anywhere to put them, so they arrived and were
+    # silently dropped — two dates typed into a form and lost (migration 0035).
+    #
+    # Either end may be omitted; both omitted is the ordinary "no window" case.
+    budgetStartDate: Optional[date] = None
+    budgetEndDate: Optional[date] = None
     # Who OWNS the project — bound as `project_admin` at project scope on creation.
     #
     # A project with no owner is the state this field exists to prevent: the Project
@@ -157,6 +169,23 @@ class ProjectCreateIn(BaseModel):
     @classmethod
     def _check_modes(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
         return _validated_modes(v)
+
+    @model_validator(mode="after")
+    def _check_window(self):
+        """Mirrors budgetWindowError in frontend/lib/schemas/budget-window.ts.
+
+        Duplicated deliberately: the dialog's check is a hint, this one is the rule.
+        A window that ends before it starts can never be active, so a project created
+        with one could never run — a 422 naming the field beats a project nobody can
+        use and no obvious reason why.
+        """
+        if (
+            self.budgetStartDate is not None
+            and self.budgetEndDate is not None
+            and self.budgetEndDate < self.budgetStartDate
+        ):
+            raise ValueError("budgetEndDate must be on or after budgetStartDate")
+        return self
 
 
 class ProjectPatchIn(BaseModel):
@@ -333,9 +362,12 @@ async def create_project(
     # Default budget + hierarchical guard (0032): a new project defaults to the project
     # budget and must fit under its workspace's remaining budget, else 409 "Budget low"
     # (blocks creation until the workspace cap is raised).
-    from config.env import DEFAULT_PROJECT_BUDGET_USD  # noqa: PLC0415
     from shared.services.budget_alloc import assert_project_fits  # noqa: PLC0415
-    _proj_budget = body.monthlyBudgetUsd if body.monthlyBudgetUsd is not None else DEFAULT_PROJECT_BUDGET_USD
+    # NO DEFAULT, and unlike a business unit this one is REQUIRED — see
+    # ProjectCreateIn.monthlyBudgetUsd. Whoever creates a project states what it may
+    # spend; falling back to DEFAULT_PROJECT_BUDGET_USD gave it a cap nobody picked
+    # and no reason to trust.
+    _proj_budget = float(body.monthlyBudgetUsd)
     await assert_project_fits(db, tenant_id, str(ws_id), _proj_budget, on_create=True)
 
     project = Project(
@@ -348,6 +380,8 @@ async def create_project(
         connectors=body.connectors or None,
         tool_access_modes=body.tool_access_modes or None,
         monthly_budget_usd=_proj_budget,
+        budget_start_date=body.budgetStartDate,
+        budget_end_date=body.budgetEndDate,
         approval_status="pending_approval" if pending else "active",
     )
     db.add(project)
@@ -784,6 +818,83 @@ async def restore_project(
     return ProjectOut.from_orm_project(project)
 
 
+# Payload keys the settings request carries, mapped from the PATCH body's field
+# names. Mirrors _SETTINGS_FIELDS in shared/governance/effects.py, which does the
+# writing — the request stores what was ASKED FOR in the API's own vocabulary so an
+# approver's queue and the applied change describe the same thing.
+_SETTINGS_PAYLOAD_KEYS: dict[str, str] = {
+    "name": "name",
+    "description": "description",
+    "monthlyBudgetUsd": "monthlyBudgetUsd",
+    "connectors": "connectors",
+    "mcp_servers": "mcpServers",
+    "tool_access_modes": "toolAccessModes",
+}
+
+_SETTINGS_FIELD_LABEL: dict[str, str] = {
+    "name": "name",
+    "description": "description",
+    "monthlyBudgetUsd": "budget",
+    "connectors": "connectors",
+    "mcp_servers": "MCP servers",
+    "tool_access_modes": "tool access",
+}
+
+
+async def _queue_settings_change(
+    db: AsyncSession, request: Request, project: Any, changes: dict[str, Any]
+):
+    """Turn a Project Admin's settings edit into a request for their BU Admin.
+
+    NOTHING IS WRITTEN TO THE PROJECT HERE. The response carries the project as it
+    still is, plus `pendingApproval`, so the client says "sent for approval" rather
+    than showing an edit that has not happened. Applying it and marking it pending
+    would be the worst of both — the change live, and the approver asked about
+    something already done.
+
+    Raised with `system_raised=True`: it is filed by saving the form, not chosen
+    from the request picker, so `can_raise_type` is not the gate (see
+    shared/governance/routing.py::SYSTEM_RAISED).
+    """
+    from shared.services import governance_requests as gov  # noqa: PLC0415
+
+    payload_changes = {
+        _SETTINGS_PAYLOAD_KEYS[k]: v
+        for k, v in changes.items()
+        if k in _SETTINGS_PAYLOAD_KEYS
+    }
+    if not payload_changes:
+        await db.refresh(project)
+        return ProjectOut.from_orm_project(project)
+
+    edited = ", ".join(
+        _SETTINGS_FIELD_LABEL.get(k, k) for k in changes if k in _SETTINGS_PAYLOAD_KEYS
+    )
+    user_id = getattr(request.state, "user_id", "") or ""
+    req = await gov.create_request(
+        db,
+        tenant_id=str(request.state.tenant_id),
+        initiator_id=user_id,
+        initiator_name=getattr(request.state, "user_name", "") or user_id,
+        initiator_role="project_admin",
+        request_type="project_settings_change",
+        title=f"Settings change for {project.display_name}",
+        description=f"Requested changes to: {edited}.",
+        workspace_id=str(project.workspace_id) if project.workspace_id else None,
+        project_id=str(project.id),
+        target_ref=str(project.id),
+        payload={"changes": payload_changes},
+        system_raised=True,
+    )
+
+    await db.refresh(project)
+    out = ProjectOut.from_orm_project(project)
+    out.pendingApproval = True
+    out.pendingRequestId = str(req["id"])
+    out.pendingApproverRole = req.get("currentApproverRole")
+    return out
+
+
 @projects_router.patch(
     "/{project_id}",
     response_model=ProjectOut,
@@ -807,9 +918,30 @@ async def patch_project(
     """
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
-    await assert_can_administer_project(db, request, project)
+
+    # WHICH TIER is administering, not merely whether they may. A Business Unit
+    # Admin or an Org Admin applies the edit; the project's OWN admin proposes it,
+    # and their Business Unit Admin decides. `project_admin_tier` returns None for
+    # anyone else, which is the same refusal assert_can_administer_project makes.
+    tier = await project_admin_tier(db, request, project)
+    if tier is None:
+        raise HTTPException(status_code=404, detail="not found")
+
+    # Only what was actually sent. `exclude_unset` matters: without it every
+    # unspecified field arrives as None and an edit to the name would read as a
+    # request to blank the budget and unwire every connector.
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        await db.refresh(project)
+        return ProjectOut.from_orm_project(project)
+
+    if tier == "project":
+        return await _queue_settings_change(db, request, project, changes)
+
     if body.name is not None:
         project.display_name = body.name
+    if body.description is not None:
+        project.description = body.description
     if body.mcp_servers is not None:
         project.mcp_servers = body.mcp_servers or None
     if body.tool_access_modes is not None:

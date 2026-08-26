@@ -122,12 +122,22 @@ def test_a_type_routed_request_ignores_who_raised_it():
 
 
 def test_nobody_decides_their_own_tiers_ask():
-    """The bump. A BU Admin's budget request must not land back with a BU Admin.
-
-    `budget_increase` is type-routed to org_admin already, so the case that proves
-    the bump is `project_creation` — routed to bu_admin, raised BY a bu_admin.
-    """
+    """The bump. A BU Admin's own ask must not land back with a BU Admin."""
     assert routing.initial_approver_role("project_creation", "bu_admin") == "org_admin"
+    # budget_increase is tier-routed now, so it proves the same thing directly:
+    # a BU Admin asking for their unit's headroom climbs past their own tier.
+    assert routing.initial_approver_role("budget_increase", "bu_admin") == "org_admin"
+
+
+def test_a_project_admins_budget_ask_stops_at_their_bu_admin():
+    """Headroom for one project is the unit admin's call, not the Org Admin's.
+
+    Pinned to org_admin (it used to be TYPE_ROUTED), a Project Admin whose project
+    had spent its total budget had to reach the top of the organisation to get it
+    raised, past the person who owns the unit's cap.
+    """
+    assert routing.initial_approver_role("budget_increase", "project_admin") == "bu_admin"
+    assert routing.initial_approver_role("budget_increase", "developer") == "project_admin"
 
 
 def test_cross_bu_assignment_is_not_bumped():
@@ -514,12 +524,12 @@ async def test_approving_a_budget_increase_moves_the_cap(org):
             title="Payments needs $16,000", description="96% of cap with nine days left",
             workspace_id=org["bu"], payload={"requestedAmountUsd": 16000},
         )
-    assert req["currentApproverRole"] == "org_admin"
+    assert req["currentApproverRole"] == "bu_admin"
 
     async with get_db_session_for_tenant(org["org"]) as s:
         out = await svc.decide(
             s, request_id=req["id"], decider_id=ozzy, decider_name="Ozzy",
-            decider_role="org_admin", decision="approve",
+            decider_role="bu_admin", decision="approve",
         )
     assert out["status"] == "approved"
 
@@ -543,7 +553,7 @@ async def test_rejecting_a_budget_increase_leaves_the_cap_alone(org):
     async with get_db_session_for_tenant(org["org"]) as s:
         await svc.decide(
             s, request_id=req["id"], decider_id=ozzy, decider_name="Ozzy",
-            decider_role="org_admin", decision="reject", reason="Not this quarter",
+            decider_role="bu_admin", decision="reject", reason="Not this quarter",
         )
     async with get_db_session_superuser() as s:
         cap = (await s.execute(
@@ -595,7 +605,7 @@ async def test_an_approval_that_cannot_take_effect_is_refused_not_recorded(org):
         with pytest.raises(EffectUnavailable):
             await svc.decide(
                 s, request_id=req["id"], decider_id=ozzy, decider_name="Ozzy",
-                decider_role="org_admin", decision="approve",
+                decider_role="bu_admin", decision="approve",
             )
     async with get_db_session_for_tenant(org["org"]) as s:
         assert (await svc.get_request(s, req["id"]))["status"] == "submitted"
@@ -737,7 +747,7 @@ async def test_self_approval_blocked_over_http(org):
     # The initiator and their role come from the session, so neither can be spoofed.
     assert body["requestedById"] == alice
     assert body["requestedByRole"] == "project_admin"
-    assert body["currentApproverRole"] == "org_admin"
+    assert body["currentApproverRole"] == "bu_admin"
 
     r = c.post(f"/governance-approvals/{body['id']}/decide", headers=headers,
                json={"decision": "approve"})

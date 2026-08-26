@@ -139,7 +139,7 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         id: "project:update",
         label: "Edit project settings",
         grants:
-          "Change a project's name, wiring and monthly budget. Held by the Business Unit Admin and by the project's own admin — who is the person asked to set the budget at creation.",
+          "Change a project's name, wiring and total budget. Held by the Business Unit Admin and by the project's own admin — who is the person asked to set the budget at creation.",
         legacy: true,
       },
       {
