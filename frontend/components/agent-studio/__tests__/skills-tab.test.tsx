@@ -39,29 +39,46 @@ vi.mock("@/lib/api/agent-skills", () => ({
   deleteAgentSkill: vi.fn(),
   listAgentSkillVersions: vi.fn(),
   proposeAgentSkill: vi.fn(),
+  evaluateAgentSkill: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-import { listAgentSkills, proposeAgentSkill } from "@/lib/api/agent-skills";
-import type { SkillList } from "@/lib/schemas/agent-skills";
+// Signed-in viewer's own id — mocked per-test, matching behavior-tab.test.tsx's
+// convention (session-provider isn't wired in component tests).
+let mockSession: { user: { id: string } } | null = null;
+vi.mock("@/components/auth/session-provider", () => ({
+  useRawSession: () => mockSession,
+}));
+
+import {
+  evaluateAgentSkill,
+  getAgentSkill,
+  listAgentSkills,
+  proposeAgentSkill,
+} from "@/lib/api/agent-skills";
+import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
 
 import { SkillsTab } from "../skills-tab";
 import type { ScopeContext } from "../agent-editor";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  mockSession = null;
+  vi.clearAllMocks();
+});
 
 const mockedListAgentSkills = vi.mocked(listAgentSkills);
 
-function orgScopeContext(): ScopeContext {
+function orgScopeContext(isOwner = true): ScopeContext {
   return {
     scope: "org",
     scopeId: null,
     scopeLabel: "Organization",
     chain: { workspaceId: null, projectId: null, userId: null },
-    isOwner: true,
-    canPropose: false,
+    isOwner,
+    canPropose: !isOwner,
     ownerRoleLabel: "Organization Admin",
   };
 }
@@ -213,7 +230,7 @@ describe("SkillsTab cascade awareness", () => {
     expect(keyField).toHaveValue("shared-key");
   });
 
-  it("shows a Propose action for a non-owner viewing their own (non-inherited) custom skill, and calls the API on click", async () => {
+  it("shows a Propose action for a non-owner viewing their own (non-inherited) custom skill, gated on a passing evaluation, and calls the API on click", async () => {
     mockedListAgentSkills.mockResolvedValue({
       skills: [{
         origin: "custom", skill_key: "team-skill", agent_id: "requirements",
@@ -224,13 +241,105 @@ describe("SkillsTab cascade awareness", () => {
     } satisfies SkillList);
     const mockedPropose = vi.mocked(proposeAgentSkill);
     mockedPropose.mockResolvedValue({ id: "req-1" } as any);
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-1", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "pass", score: 0.9, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
 
     const user = userEvent.setup();
     renderSkillsTab(projectScopeContext(false));
 
     await screen.findByText("Team Skill");
-    await user.click(screen.getByRole("button", { name: /propose/i }));
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
 
+    await user.click(screen.getByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: /propose/i }));
     await waitFor(() => expect(mockedPropose).toHaveBeenCalled());
+  });
+
+  it("keeps Propose disabled when Evaluate returns fail", async () => {
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-2", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "fail", score: 0.1, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "team-skill", agent_id: "requirements",
+        display_name: "Team Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "project",
+      }],
+    } satisfies SkillList);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await user.click(await screen.findByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+    expect(await screen.findByText(/fail/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+  });
+
+  it("R3: disables Evaluate with a tooltip when the org-scope skill's author is the signed-in viewer", async () => {
+    mockSession = { user: { id: "author-1" } };
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+        display_name: "Org Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "org",
+      }],
+    } satisfies SkillList);
+    const mockedGetSkill = vi.mocked(getAgentSkill);
+    mockedGetSkill.mockResolvedValue({
+      origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+      display_name: "Org Skill", description: null, when_to_use: null,
+      runtime: "llm", enabled: true, editable: false, deletable: false,
+      version: 1, active_version: null, origin_scope: "org",
+      body: "body", created_by: "author-1", created_at: null, updated_at: null,
+    } satisfies SkillDetail);
+
+    renderSkillsTab(orgScopeContext(false));
+
+    await screen.findByText("Org Skill");
+    const evaluateButton = await screen.findByRole("button", { name: /evaluate/i });
+    await waitFor(() => expect(evaluateButton).toBeDisabled());
+    expect(evaluateButton).toHaveAttribute(
+      "title",
+      "An organization-wide default must be evaluated by someone other than its author.",
+    );
+    expect(vi.mocked(evaluateAgentSkill)).not.toHaveBeenCalled();
+  });
+
+  it("R3: does not block Evaluate for a different viewer than the skill's author at org scope", async () => {
+    mockSession = { user: { id: "reviewer-2" } };
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+        display_name: "Org Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "org",
+      }],
+    } satisfies SkillList);
+    const mockedGetSkill = vi.mocked(getAgentSkill);
+    mockedGetSkill.mockResolvedValue({
+      origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+      display_name: "Org Skill", description: null, when_to_use: null,
+      runtime: "llm", enabled: true, editable: false, deletable: false,
+      version: 1, active_version: null, origin_scope: "org",
+      body: "body", created_by: "author-1", created_at: null, updated_at: null,
+    } satisfies SkillDetail);
+
+    renderSkillsTab(orgScopeContext(false));
+
+    await screen.findByText("Org Skill");
+    await waitFor(() => expect(mockedGetSkill).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: /evaluate/i })).toBeEnabled();
   });
 });

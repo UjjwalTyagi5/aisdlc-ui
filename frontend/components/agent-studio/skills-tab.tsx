@@ -1,12 +1,18 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type UseMutationResult,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   AlertCircle,
   Boxes,
   Eye,
+  FlaskConical,
   Info,
   Loader2,
   Lock,
@@ -35,9 +41,11 @@ import { Switch } from "@/components/ui/switch";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { MarkdownMessage } from "@/components/app/markdown-message";
+import { useRawSession } from "@/components/auth/session-provider";
 import {
   createAgentSkill,
   deleteAgentSkill,
+  evaluateAgentSkill,
   getAgentSkill,
   listAgentSkills,
   proposeAgentSkill,
@@ -47,6 +55,8 @@ import {
 import { getLintViolations } from "@/lib/api/agent-profiles";
 import { qk } from "@/lib/api/query-keys";
 import type { LintViolation } from "@/lib/schemas/agent-profiles";
+import type { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
+import type { GovernanceApproval } from "@/lib/schemas/governance-approval";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import {
   SKILL_CAPS,
@@ -88,6 +98,16 @@ function deriveKey(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
+}
+
+/** Key for the per-skill evaluation-result cache — skill_key alone isn't enough:
+ *  it must also fold in the row's own `version` so a fresh non-owner edit (which
+ *  bumps `version` without changing `active_version` — see updateAgentSkill)
+ *  never shows a stale PASS carried over from a now-superseded draft, mirroring
+ *  how Behavior keys its evaluation cache by draft id rather than skill_key
+ *  alone. */
+function evalKey(skill: SkillListItem): string {
+  return `${skill.skill_key}:${skill.version ?? 0}`;
 }
 
 export interface SkillsTabProps {
@@ -141,9 +161,20 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
   const canProposeChange = !canManage && canPropose;
   const tierNoun = SCOPE_TIER_LABEL[scope] ?? scopeLabel;
 
+  // Signed-in viewer's own id — same idiom behavior-tab.tsx uses, only
+  // consumed here for the R3 self-block UI hint below.
+  const session = useRawSession();
+  const viewerId = session?.user.id ?? null;
+
   const [editor, setEditor] = React.useState<EditorState>(null);
   const [viewing, setViewing] = React.useState<SkillListItem | null>(null);
   const [deleting, setDeleting] = React.useState<SkillListItem | null>(null);
+  // Keyed by evalKey(skill) (skill_key + version), not just skill_key, so
+  // evaluating one skill's draft doesn't wrongly enable Propose for another
+  // skill, or for a stale, now-superseded version of the same one.
+  const [evaluationBySkillKey, setEvaluationBySkillKey] = React.useState<
+    Record<string, EvaluationResult>
+  >({});
 
   const skillsQ = useQuery({
     queryKey: listKey,
@@ -213,6 +244,32 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
     },
     onError: (err) =>
       toast.error("Couldn't send for approval", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  });
+
+  // ── Evaluate (precondition for Propose — see R3, sub-project 4 spec) ──────
+  const evaluateMut = useMutation({
+    mutationFn: (skill: SkillListItem) =>
+      evaluateAgentSkill(skill.skill_key, {
+        agent_id: agentId,
+        scope,
+        scope_id: scopeId,
+      }),
+    onSuccess: (result, skill) => {
+      setEvaluationBySkillKey((s) => ({ ...s, [evalKey(skill)]: result }));
+      if (result.result === "pass") {
+        toast.success("Evaluation passed", {
+          description: `Score ${result.score.toFixed(2)}. You can propose this change now.`,
+        });
+      } else {
+        toast.error("Evaluation didn't pass", {
+          description: `Score ${result.score.toFixed(2)}. Address the gaps and evaluate again.`,
+        });
+      }
+    },
+    onError: (err) =>
+      toast.error("Couldn't run evaluation", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -414,39 +471,17 @@ export function SkillsTab({ agentId, agentLabel, scopeContext }: SkillsTabProps)
                             </>
                           )
                         ) : canProposeChange && !inherited ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => setEditor({ mode: "edit", skill })}
-                              aria-label={`Edit ${skill.display_name}`}
-                            >
-                              <Pencil className="size-3.5" aria-hidden />
-                              Edit
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => proposeMut.mutate(skill)}
-                              disabled={
-                                proposeMut.isPending &&
-                                proposeMut.variables?.skill_key === skill.skill_key
-                              }
-                              aria-busy={
-                                proposeMut.isPending &&
-                                proposeMut.variables?.skill_key === skill.skill_key
-                              }
-                              aria-label={`Propose ${skill.display_name}`}
-                            >
-                              {proposeMut.isPending &&
-                              proposeMut.variables?.skill_key === skill.skill_key ? (
-                                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                              ) : (
-                                <Send className="size-3.5" aria-hidden />
-                              )}
-                              Propose
-                            </Button>
-                          </>
+                          <SkillProposeActions
+                            skill={skill}
+                            agentId={agentId}
+                            scope={scope}
+                            scopeId={scopeId}
+                            viewerId={viewerId}
+                            evaluation={evaluationBySkillKey[evalKey(skill)]}
+                            evaluateMut={evaluateMut}
+                            proposeMut={proposeMut}
+                            onEdit={() => setEditor({ mode: "edit", skill })}
+                          />
                         ) : (
                           <Button
                             variant="ghost"
@@ -601,6 +636,109 @@ function SkillRow({
       <div className="flex shrink-0 items-center gap-1">{actions}</div>
       <div className="shrink-0 pl-1">{control}</div>
     </li>
+  );
+}
+
+/**
+ * Edit/Evaluate/Propose actions for a non-owner's own (non-inherited) custom
+ * skill row. Split out from SkillsTab's row-rendering `.map` so it can run its
+ * own `useQuery` (Rules of Hooks forbid that inside a bare map callback) — a
+ * skill detail fetch is needed ONLY at org scope, to read `created_by` for the
+ * R3 self-block check (SkillListItem, unlike Behavior's version-list rows,
+ * doesn't carry `created_by` — see the sub-project 4 Task 8 brief). Scoped to
+ * org rows specifically (not fetched for every visible custom skill) since R3
+ * self-evaluation-blocked only applies at org scope in the first place (R2:
+ * self-evaluation is always allowed at workspace/project).
+ */
+function SkillProposeActions({
+  skill,
+  agentId,
+  scope,
+  scopeId,
+  viewerId,
+  evaluation,
+  evaluateMut,
+  proposeMut,
+  onEdit,
+}: {
+  skill: SkillListItem;
+  agentId: string;
+  scope: SkillScope;
+  scopeId: string | null;
+  viewerId: string | null;
+  evaluation: EvaluationResult | undefined;
+  evaluateMut: UseMutationResult<EvaluationResult, unknown, SkillListItem>;
+  proposeMut: UseMutationResult<GovernanceApproval, unknown, SkillListItem>;
+  onEdit: () => void;
+}) {
+  const authorQ = useQuery({
+    queryKey: qk.agentSkills.detail("custom", skill.skill_key, agentId, scope, scopeId),
+    queryFn: () => getAgentSkill("custom", skill.skill_key, agentId, scope, scopeId),
+    enabled: scope === "org",
+    staleTime: 60_000,
+  });
+  const evaluationSelfBlocked =
+    scope === "org" && Boolean(viewerId) && authorQ.data?.created_by === viewerId;
+
+  const evaluationPassed = evaluation?.result === "pass";
+  const evaluating =
+    evaluateMut.isPending && evaluateMut.variables?.skill_key === skill.skill_key;
+  const proposing =
+    proposeMut.isPending && proposeMut.variables?.skill_key === skill.skill_key;
+
+  return (
+    <>
+      <Button variant="ghost" size="sm" onClick={onEdit} aria-label={`Edit ${skill.display_name}`}>
+        <Pencil className="size-3.5" aria-hidden />
+        Edit
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => evaluateMut.mutate(skill)}
+        disabled={evaluating || evaluationSelfBlocked}
+        title={
+          evaluationSelfBlocked
+            ? "An organization-wide default must be evaluated by someone other than its author."
+            : undefined
+        }
+        aria-busy={evaluating}
+        aria-label={`Evaluate ${skill.display_name}`}
+      >
+        {evaluating ? (
+          <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        ) : (
+          <FlaskConical className="size-3.5" aria-hidden />
+        )}
+        Evaluate
+      </Button>
+      {evaluation && (
+        <span
+          className={
+            evaluationPassed
+              ? "text-xs font-medium text-emerald-600 dark:text-emerald-400"
+              : "text-destructive text-xs font-medium"
+          }
+        >
+          {evaluationPassed ? "Pass" : "Fail"} · {evaluation.score.toFixed(2)}
+        </span>
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => proposeMut.mutate(skill)}
+        disabled={proposing || !evaluationPassed}
+        aria-busy={proposing}
+        aria-label={`Propose ${skill.display_name}`}
+      >
+        {proposing ? (
+          <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        ) : (
+          <Send className="size-3.5" aria-hidden />
+        )}
+        Propose
+      </Button>
+    </>
   );
 }
 
