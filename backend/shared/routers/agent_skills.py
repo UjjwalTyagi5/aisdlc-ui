@@ -108,6 +108,64 @@ reason about a mismatch, or `propose_skill()` accepting the evaluated draft's
 own resolution — a genuine design question, not a one-line fix, left as
 follow-up rather than silently unaddressed.
 
+IMPORT + SUPPLY-CHAIN SCREENING (sub-project 5, a third axis alongside the RBAC and
+EVALUATION GATE axes above): `import_skill()` (POST .../import) is a different front
+door onto the SAME write path `create_skill` already uses, not a parallel one. It
+mirrors `create_skill`'s authorization exactly — the same `assert_can_write_agent_scope(
+..., action="draft")` call, and the same `owns` short-circuit to True at scope=="user",
+`resolve_actor_tier_access` otherwise — and its write sequence exactly — lint, then the
+duplicate-key check, then `create_custom_skill(activate=owns)` — with three screens
+inserted before that existing lint call, each refusing outright with a 422 before any
+write happens (no quarantine state; a refused import is simply never persisted):
+
+  1. provenance (checked first) — `body.source.kind` is either `same_tenant_bu` or
+     `external`. `same_tenant_bu` is checked via `administered_workspace_ids`: `None`
+     means the caller is org-wide and is unrestricted (an org_admin's same-BU import
+     always passes this leg regardless of which workspace is named); otherwise the
+     named workspace_id must appear in the list of workspaces the caller genuinely
+     administers. `external` is checked against the tenant's `import_source_allowlist`
+     rows via `_matches_import_source(url, pattern)` — a BOUNDARY-AWARE prefix match,
+     not a plain `str.startswith()`. A task review caught a real subdomain-confusion
+     bypass in the original plain-startswith version: a no-trailing-slash pattern like
+     `https://trusted.example.com` would also match `https://trusted.example.com.evil.com/...`,
+     since the latter literally starts with the former's characters. The fix requires
+     either exact equality or a real `/` boundary landing immediately after the matched
+     prefix (a pattern that already ends in `/` is already inside that boundary, so any
+     continuation past it is fine). Rows are also filtered to drop empty/whitespace-only
+     patterns before checking, since `"".startswith("")` is always True in Python and a
+     stray blank row would otherwise wildcard-match every external URL tenant-wide. Both
+     kinds refuse with the same 422 `SOURCE_NOT_ALLOWED` code.
+  2. credential leakage (checked second) — `scan_for_credentials` (shared/eval/
+     import_screening.py) reuses only the DETECTION half of sandbox_policy.py's
+     `_SECRET_PATTERNS` (the same regexes that redact agent tool output elsewhere),
+     never its redaction: it returns category labels only ("Bearer token", "API key
+     (OpenAI/Anthropic-shaped)", etc.), never the matched secret text itself, so a
+     422 `CREDENTIAL_DETECTED` response can never itself leak what it caught.
+  3. prompt-injection (checked third, unchanged) — the same `validate_skill_key` +
+     `lint_skill_fields` (`FORBIDDEN_PATTERNS`-backed) call every ordinary create/update
+     already runs.
+
+No new governance request type: a non-owner's import lands with `activate=owns` False,
+same as a non-owner's manual `create_skill`, and becomes proposable through the
+existing, unmodified `propose_skill` route above — import touches zero lines of
+governance_requests.py/effects.py/routing.py.
+
+The `import_source_allowlist` table itself (GET/POST .../import-sources, declared
+alongside `/import` in the literal-suffix routes section below) splits read/write:
+listing is open to any tenant member at the router-floor `artifact:view` (a BU Admin
+needs to see the list to know what they may declare, even though only an Org Admin can
+add to it); writing requires `is_org_wide()` — the SAME `ORG_WIDE_PERMISSIONS`
+(`admin:*`/`settings:manage`) wildcard primitive used elsewhere for org-wide governance
+checks, not a new permission string. The write route also rejects an empty/whitespace-
+only `source_pattern` with 422 at insert time — closing the same root cause the
+check-time filter above defends against, from the other side: a typo'd blank pattern
+must never even reach the table.
+
+Explicit scope boundary, by design: no live external fetching anywhere in this system —
+"external source" means the importer pastes content and declares a URL that is checked
+against the allowlist; there is no crawler, no API client, no OAuth integration. Skills-
+only (no Behavior import).
+
 Role resolution here uses `resolve_platform_role_for_user` rather than
 `effective_platform_role` (agent_profiles.py's routes all take a `db` param already;
 these routes don't, so this variant opens its own tenant-scoped session) — both
