@@ -1,4 +1,7 @@
 import {
+  type ImportSkillInput,
+  ImportSourceEntry,
+  ImportSourceList,
   type SkillCreateInput,
   SkillDeleteResult,
   SkillDetail,
@@ -145,4 +148,29 @@ export const listAgentSkillVersions = (
   api(`/agent-skills/${encodeURIComponent(skillKey)}/versions`, {
     query: { agent_id: agentId, scope, scope_id: scopeId },
     schema: SkillVersionList,
+  });
+
+/**
+ * Import a Skill from another BU the caller administers, or a declared
+ * external source, through the backend's prompt-injection/credential/
+ * provenance screens before it lands via the same path a create would. Same
+ * 422 lint-violation passthrough as create — read via getLintViolations on
+ * the caught error. A rejected screen (CREDENTIAL_DETECTED, SOURCE_NOT_ALLOWED)
+ * also surfaces as a 422/403 with its own named code — read err.rawBody.
+ */
+export const importAgentSkill = (input: ImportSkillInput) =>
+  api("/agent-skills/import", { method: "POST", body: input, schema: SkillDetail });
+
+/** The org's approved external import sources — readable by anyone, writable
+ *  only by an Org Admin (POST). */
+export const listImportSources = () =>
+  api("/agent-skills/import-sources", { schema: ImportSourceList });
+
+/** Add an entry to the org's approved external import-source allowlist
+ *  (Org Admin only). */
+export const createImportSource = (input: { source_pattern: string; label: string }) =>
+  api("/agent-skills/import-sources", {
+    method: "POST",
+    body: input,
+    schema: ImportSourceEntry.pick({ id: true, source_pattern: true, label: true }),
   });

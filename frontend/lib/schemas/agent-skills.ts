@@ -100,6 +100,49 @@ export const SkillCreateInput = z.object({
 });
 export type SkillCreateInput = z.infer<typeof SkillCreateInput>;
 
+/** Where an imported skill's content comes from — a BU the caller administers
+ *  within the same tenant, or a declared external source (checked against the
+ *  org's import-source allowlist). */
+export const ImportSourceInput = z.object({
+  kind: z.enum(["same_tenant_bu", "external"]),
+  workspace_id: z.string().nullish(),
+  url: z.string().nullish(),
+});
+export type ImportSourceInput = z.infer<typeof ImportSourceInput>;
+
+/** POST /agent-skills/import body — import a Skill through the backend's
+ *  prompt-injection/credential/provenance screens before it lands via the
+ *  same path a create would. */
+export const ImportSkillInput = z.object({
+  agent_id: z.string(),
+  scope: SkillScope,
+  scope_id: z.string().nullish(),
+  skill_key: z.string(),
+  display_name: z.string(),
+  description: z.string().optional(),
+  when_to_use: z.string().optional(),
+  body: z.string(),
+  source: ImportSourceInput,
+});
+export type ImportSkillInput = z.infer<typeof ImportSkillInput>;
+
+/** One row in the org's approved external import-source allowlist
+ *  (GET /agent-skills/import-sources item shape). */
+export const ImportSourceEntry = z.object({
+  id: z.string(),
+  source_pattern: z.string(),
+  label: z.string(),
+  created_by: z.string().nullable(),
+  created_at: z.string().nullable(),
+});
+export type ImportSourceEntry = z.infer<typeof ImportSourceEntry>;
+
+/** GET /agent-skills/import-sources response. */
+export const ImportSourceList = z.object({
+  sources: z.array(ImportSourceEntry),
+});
+export type ImportSourceList = z.infer<typeof ImportSourceList>;
+
 /** PUT /agent-skills/{skill_key} body — publish a new active version. */
 export const SkillUpdateInput = z.object({
   agent_id: z.string(),
