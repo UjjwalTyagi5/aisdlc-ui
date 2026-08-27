@@ -264,11 +264,23 @@ async def list_project_integrations(
     project = await _project_or_404(db, tenant_id, project_id)
     viewer_id = getattr(request.state, "user_id", "") or ""
 
+    # CONNECTORS AND MCP SERVERS ONLY. `integration_grants` also carries
+    # `model_provider`, which is not one of the two things this endpoint is
+    # about: a model is granted per project on its own screen
+    # (/projects/[id]/models, org_model_grants) and has no stage wiring and no
+    # per-member credential of this shape. Unfiltered, those rows arrived here
+    # and were then read through the wrong maps — the `else` below checks them
+    # against `projects.mcp_servers`, and the label lookup runs them through
+    # _CONNECTOR_KIND_LABEL, which is why one surfaced as a bare "gemini". The
+    # client rejects the payload outright (ProjectIntegrationKind is
+    # connector|mcp), so the whole screen failed for any unit that had been
+    # granted a provider.
     granted = (
         await db.execute(
             text(
                 "SELECT kind, target_ref FROM integration_grants "
-                "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = :w"
+                "WHERE tenant_id = CAST(:t AS uuid) AND workspace_id = :w "
+                "  AND kind IN ('connector', 'mcp')"
             ),
             {"t": tenant_id, "w": project.workspace_id},
         )
