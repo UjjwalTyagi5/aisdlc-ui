@@ -26,7 +26,13 @@ export function LoginDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-line-soft/50 bg-panel-elevated/60 flex flex-col gap-5 p-8 shadow-2xl backdrop-blur-2xl sm:max-w-md sm:p-10">
+      <DialogContent className="border-line-soft/50 bg-panel-elevated/60 flex flex-col gap-5 rounded-2xl p-8 shadow-2xl backdrop-blur-2xl sm:max-w-lg sm:rounded-2xl sm:p-10">
+        {/* Ambient brand-glow, same surface language as /login — the popup was
+            a flat translucent box with nothing behind it, which is what read
+            as plain next to the full page's mesh glow. Contained to the
+            dialog's own box: a fixed-position ancestor is a containing block,
+            so this never bleeds past the rounded corners. */}
+        <div aria-hidden className="bg-mesh pointer-events-none absolute inset-0 -z-10 rounded-2xl opacity-80" />
         <div className="flex items-center justify-center gap-3">
           <PwcMark size={40} />
           <span className="font-display text-sm font-bold tracking-tight">SDLC Platform</span>

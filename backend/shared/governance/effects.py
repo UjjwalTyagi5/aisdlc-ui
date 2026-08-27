@@ -16,11 +16,15 @@ it, and the request is the record that they were asked and said yes. Wiring a si
 effect onto those would mean this module performing grants it has no business
 performing.
 
-Two types have an effect the backend cannot perform yet; each raises
+One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
   role_assignment       closed by ASSIGNING a role, not by approving; the write lives in
                         `PATCH /workspaces/{id}/members/{userId}`.
-  cross_bu_assignment   there is no cross-BU grant table, so a loan cannot be recorded.
+
+`cross_bu_assignment` used to be a second: this comment once read "there is no
+cross-BU grant table, so a loan cannot be recorded" — stale even when the request
+lane shipped, since `cross_bu_grants` has existed since migration 0016. See
+`_apply_cross_bu_assignment` below.
 
 `project_creation` used to be a third: `POST /projects` created the project directly,
 so approval had nothing to flip. Migration 0028 gave it a pending state
@@ -62,10 +66,6 @@ _NOT_APPLICABLE = {
     "role_assignment": (
         "A role-assignment request closes when the role is actually assigned, from "
         "Users or from this queue — not by approving it."
-    ),
-    "cross_bu_assignment": (
-        "Lending a contributor across business units is not implemented: there is "
-        "nowhere to record the grant."
     ),
 }
 
@@ -113,6 +113,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_model_provider_access(db, request)
     if rtype == "connector_access":
         return await _apply_connector_access(db, request)
+    if rtype == "cross_bu_assignment":
+        return await _apply_cross_bu_assignment(db, request)
     if rtype.startswith("agent_default_"):
         return await _apply_agent_default(db, request)
 
@@ -494,16 +496,34 @@ async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]
 
 
 async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Publish the proposed agent-profile version.
+    """Publish the proposed agent-profile (Behavior) OR agent-skill (Skills) version.
 
     `target_ref` is the DRAFT version's id, saved before the proposal was raised.
     Approving publishes exactly that version — which is why the proposal carries an
-    id rather than the prompt text: the approver agreed to a specific draft, and
-    re-reading the text at decision time would publish whatever it had become.
+    id rather than the prompt/skill text: the approver agreed to a specific draft,
+    and re-reading the text at decision time would publish whatever it had become.
 
-    Reuses `apply_publish_flip` so this and `POST /agent-profiles/{id}/publish`
-    cannot disagree about what "published" means (exactly one active version per
-    agent per scope).
+    `target_ref` may name either an `AgentProfile` row or an `AgentSkill` row — every
+    `agent_default_*` request (org/workspace/project) is routed here regardless of
+    which resource kind raised it, via the SAME `agent_default_org`/`_workspace`/
+    `_project` request types `AgentProfile.propose()` always used. Dispatch is a
+    plain "try one, then the other" fallback on `target_ref`, not a payload
+    discriminator: this function first looks up `target_ref` as an `AgentProfile`
+    id; a miss falls through to `_apply_agent_default_skill`, which looks it up as
+    an `AgentSkill` id. No `skill_default_*` type family was introduced for Skills
+    proposals (considered and rejected — see the sub-project 3 design doc,
+    "Considered and rejected" section): the approver-routing, self-approval rule,
+    and audit/system-raised handling in `routing.py` are IDENTICAL for both resource
+    kinds at every tier, so a type-level split would only add parallel entries to
+    5+ shared registries (backend `routing.py`, frontend `governance.ts`/`routing.ts`,
+    the Zod `GovernanceApprovalType` enum) for zero behavioral difference — only the
+    row being flipped differs, and `target_ref`'s id already tells you which one
+    that is.
+
+    Reuses `apply_publish_flip` so this and `POST /agent-profiles/{id}/publish` (or
+    `POST /agent-skills/{skill_key}/activate/{version}`) cannot disagree about what
+    "published"/"active" means (exactly one active version per agent+scope, or per
+    agent+scope+skill_key for Skills).
     """
     from shared.models.orm import AgentProfile  # noqa: PLC0415 - avoids a cycle at import
     from shared.routers.agent_profiles import apply_publish_flip  # noqa: PLC0415
@@ -520,7 +540,7 @@ async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str
         await db.execute(select(AgentProfile).where(AgentProfile.id == target_uuid))
     ).scalar_one_or_none()
     if row is None:
-        raise EffectNotAvailable(request["type"], "That draft version no longer exists.")
+        return await _apply_agent_default_skill(db, request, target_uuid)
 
     siblings = list(
         (
@@ -552,6 +572,62 @@ async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str
         request["id"], row.id, row.agent_id, row.version,
     )
     return f"Published {row.agent_id} v{row.version} at {row.scope} scope."
+
+
+async def _apply_agent_default_skill(db: AsyncSession, request: dict[str, Any], target_uuid) -> str:
+    """AgentSkill counterpart to the AgentProfile path above — same target_ref
+    convention, same apply_publish_flip reuse, different ORM model. A proposal's
+    target_ref may name either kind of row; this is the fallback once the
+    AgentProfile lookup comes up empty."""
+    from shared.models.orm import AgentSkill  # noqa: PLC0415
+    from shared.routers.agent_profiles import apply_publish_flip  # noqa: PLC0415
+
+    # deleted_at IS NULL on both queries below: without it, approving a proposal
+    # against a skill that was soft-deleted after the proposal was filed silently
+    # resurrects it (deleted rows aren't purged, only flagged) — the target lookup
+    # would find the deleted draft, and the sibling flip would reactivate it right
+    # alongside its still-deleted siblings (final whole-branch review, sub-project
+    # 3, Important #4).
+    row = (
+        await db.execute(
+            select(AgentSkill).where(
+                AgentSkill.id == target_uuid, AgentSkill.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise EffectNotAvailable(request["type"], "That draft version no longer exists.")
+
+    siblings = list(
+        (
+            await db.execute(
+                select(AgentSkill).where(
+                    AgentSkill.agent_id == row.agent_id,
+                    AgentSkill.scope == row.scope,
+                    AgentSkill.scope_id == row.scope_id,
+                    AgentSkill.skill_key == row.skill_key,
+                    AgentSkill.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    apply_publish_flip(siblings, row.id)
+    await db.flush()
+
+    try:
+        from shared.services.skill_runtime import invalidate_skills_cache  # noqa: PLC0415
+
+        invalidate_skills_cache(str(request["tenantId"]), row.agent_id)
+    except Exception:  # pragma: no cover - cache is best-effort, the write is not
+        logger.warning("governance: skill cache invalidation failed for %s", row.agent_id)
+
+    logger.info(
+        "governance: skill published request=%s skill=%s agent=%s key=%s v%s",
+        request["id"], row.id, row.agent_id, row.skill_key, row.version,
+    )
+    return f"Published skill '{row.skill_key}' v{row.version} at {row.scope} scope."
 
 
 async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> str:
@@ -706,3 +782,69 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
         project_id, kind, target_ref, access,
     )
     return f"{target_ref} set to {label(access)} for this project."
+
+
+async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Record the loan and seat the borrowed contributor on the project.
+
+    Two writes, not one, because they answer different questions later:
+    `cross_bu_grants` is the loan itself — whose person, lent from where,
+    approved by whom — and is what `GET/DELETE /admin/cross-bu-grants`
+    (shared/routers/project_scoped.py) reads and ends. `role_bindings` is the
+    actual access, granted exactly like any other project member (the same
+    `grant_role` call `add_project_member` makes) — without it the loan would
+    be on record and the person still could not open the project.
+
+    ON CONFLICT DO UPDATE rather than DO NOTHING: re-approving the same
+    person for the same project (a role change, a second request after the
+    first was later ended) is still one seat, not a duplicate — the table's
+    own `uq_cross_bu_grant (user_id, project_id)` constraint says so.
+
+    Everything comes from the payload recorded when the request was RAISED
+    (`request_cross_bu_member` in shared/routers/project_members.py), not
+    from the decision — the approver agreed to a role they could read.
+    """
+    payload = request.get("payload") or {}
+    user_id = request.get("targetRef")
+    role_name = (payload.get("roleName") or "").strip()
+    project_id = request.get("projectId")
+    parent_workspace_id = request.get("workspaceId")
+
+    if not user_id or not project_id:
+        raise EffectNotAvailable(
+            "cross_bu_assignment", "This request names no person or no project to seat them on."
+        )
+    if not role_name:
+        raise EffectNotAvailable("cross_bu_assignment", "This request records no role to grant.")
+
+    from shared.authz.grant import TierConflictError, grant_role  # noqa: PLC0415 - avoids an import cycle
+
+    try:
+        await grant_role(
+            user_id, project_id, role_name,
+            tenant_id=request["tenantId"], scope_kind="project",
+            granted_by=request.get("decidedBy"),
+        )
+    except (ValueError, TierConflictError) as exc:
+        raise EffectNotAvailable("cross_bu_assignment", str(exc))
+
+    await db.execute(
+        text(
+            "INSERT INTO cross_bu_grants "
+            "  (id, tenant_id, user_id, parent_workspace_id, project_id, role, approved_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), :u, CAST(:pw AS uuid), "
+            "        CAST(:p AS uuid), :r, :ab) "
+            "ON CONFLICT (user_id, project_id) DO UPDATE "
+            "  SET role = EXCLUDED.role, approved_by = EXCLUDED.approved_by, approved_at = now()"
+        ),
+        {
+            "t": request["tenantId"], "u": user_id, "pw": parent_workspace_id,
+            "p": project_id, "r": role_name, "ab": request.get("decidedBy"),
+        },
+    )
+    email = payload.get("email") or user_id
+    logger.info(
+        "cross_bu_assignment approved: user %s -> project %s as %s (lent from %s)",
+        user_id, project_id, role_name, parent_workspace_id,
+    )
+    return f"{email} joined as {role_name}, on loan from their business unit."

@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   BookText, Boxes, Download, FileText, GitBranch, GitPullRequest, History,
-  ListChecks, MessageSquare, Notebook, ScrollText, Sparkles,
+  ListChecks, MessageSquare, Notebook, ScrollText, Sparkles, BookOpen,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -29,7 +29,8 @@ import type { ProjectId } from "@/lib/schemas";
 const TYPE_LABEL: Record<string, string> = {
   doc_set: "Doc set", overview: "Overview", sdd: "Design", api_reference: "API",
   code_summary: "Code", changelog: "Changelog", release_notes: "Release notes",
-  rtm: "RTM", run_summary: "Run summary", compliance: "Compliance", custom: "Doc",
+  rtm: "RTM", run_summary: "Run summary", compliance: "Compliance",
+  runbook_update: "Runbook update", knowledge_article: "Knowledge article", custom: "Doc",
 };
 
 interface QuickAction { key: string; label: string; icon: React.ComponentType<{ className?: string }>; prompt: string; }
@@ -40,6 +41,8 @@ const QUICK_ACTIONS: QuickAction[] = [
   { key: "rtm", label: "Traceability matrix", icon: ListChecks, prompt: "Generate a Requirements Traceability Matrix (requirement → design → code → test → finding) from the upstream artifacts and repo, and save it." },
   { key: "run_summary", label: "Run summary", icon: FileText, prompt: "Generate an executive run summary (scope delivered, quality posture, outstanding risks) and save it." },
   { key: "compliance", label: "Compliance pack", icon: Boxes, prompt: "Generate a SOC 2 / ISO 27001 compliance evidence pack from the available gate decisions, sign-offs, SBOM, and audit trail, and save it." },
+  { key: "runbook_update", label: "Runbook update", icon: ScrollText, prompt: "Read the existing runbook for this system from the connected Azure DevOps Wiki or SharePoint, diff it against what changed on this branch/PR, and save a runbook update covering the sections that need to change and their updated content." },
+  { key: "knowledge_article", label: "Knowledge article", icon: BookOpen, prompt: "Check whether a knowledge article already exists for the issue fixed on this branch/PR. If one exists, propose an update to it; if not, generate a new knowledge article from the standard template. Save it." },
 ];
 
 export default function DocumentationPage() {

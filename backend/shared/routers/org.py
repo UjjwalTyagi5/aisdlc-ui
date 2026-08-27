@@ -248,9 +248,28 @@ async def org_overview(
 
     # workspace_id NULL = org-shared provider, visible to every unit, so it counts
     # for a unit-scoped viewer too.
+    #
+    # DISTINCT ON `mp.provider`, not a row count: this tile sits next to the
+    # Models page's own "Providers" stat (ModelGovernanceSummary /
+    # `providerGroups.length` in app/admin/models/page.tsx), which counts
+    # distinct VENDORS — one card per provider kind, no matter how many
+    # subscriptions/keys that vendor has. Counting rows here answered a
+    # different question ("how many connections exist") and could read higher
+    # than the vendor count the moment a business unit adds its own key
+    # alongside an org-wide registration of the same provider.
+    #
+    # THE TENANT FILTER IS NOT OPTIONAL HERE, unlike the `_ws_clause` queries
+    # above: `model_providers` carries no RLS session guarantee this route can
+    # rely on alone (see shared/db.py's superuser/app-role split), so a bare
+    # `WHERE true` counted every tenant's connections in the whole database —
+    # thousands of rows from leftover test tenants — instead of this org's own
+    # handful. Every other count in this function either filters by a real FK
+    # back to `workspaces`/`organizations` or names its own `tenant_id` column
+    # explicitly (see `connector_count` below); this one named neither.
     model_provider_count = (await db.execute(
         text(
-            "SELECT COUNT(*) FROM model_providers mp WHERE true"
+            "SELECT COUNT(DISTINCT mp.provider) FROM model_providers mp "
+            "WHERE mp.tenant_id = CAST(:tenant AS uuid)"
             + (
                 " AND (mp.workspace_id IS NULL OR mp.workspace_id = ANY(CAST(:ws AS uuid[])))"
                 if scoped else ""

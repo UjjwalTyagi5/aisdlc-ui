@@ -1,29 +1,52 @@
 import {
+  type ImportSkillInput,
+  ImportSourceEntry,
+  ImportSourceList,
   type SkillCreateInput,
   SkillDeleteResult,
   SkillDetail,
   SkillList,
   type SkillOrigin,
+  type SkillProposeInput,
   type SkillScope,
   SkillToggleResult,
   type SkillToggleInput,
   type SkillUpdateInput,
   SkillVersionList,
 } from "@/lib/schemas/agent-skills";
+import { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
+import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
 import { api } from "./client";
 
+/** Chain ids so the cascade can resolve inheritance past the requested tier —
+ *  mirrors ProfileChainIds in lib/api/agent-profiles.ts. */
+export interface SkillChainIds {
+  workspaceId?: string | null;
+  projectId?: string | null;
+}
+
 /**
- * Merged vendor + custom skills for an agent at a scope. `scopeId` is required
- * for "workspace"/"project" scope, omit (or pass null) for "org".
+ * Merged vendor + custom skills for an agent at a scope, including any inherited
+ * from an ancestor tier (see origin_scope on each item). `scopeId` is required for
+ * "workspace"/"project" scope, omit (or pass null) for "org". `chain` supplies the
+ * ancestor ids needed to resolve inheritance — omit to get today's exact-scope-only
+ * behavior.
  */
 export const listAgentSkills = (
   agentId: string,
   scope: SkillScope,
   scopeId?: string | null,
+  chain?: SkillChainIds,
 ) =>
   api("/agent-skills", {
-    query: { agent_id: agentId, scope, scope_id: scopeId },
+    query: {
+      agent_id: agentId,
+      scope,
+      scope_id: scopeId,
+      workspace_id: chain?.workspaceId,
+      project_id: chain?.projectId,
+    },
     schema: SkillList,
   });
 
@@ -75,6 +98,33 @@ export const toggleAgentSkill = (input: SkillToggleInput) =>
     schema: SkillToggleResult,
   });
 
+/**
+ * Propose a change to a custom skill at a tier the viewer doesn't own —
+ * creates a GovernanceApproval routed to that tier's owner instead of writing
+ * directly. The backend resolves its own target version server-side (the
+ * newest inactive version at this scope); the client cannot name one.
+ */
+export const proposeAgentSkill = (skillKey: string, input: SkillProposeInput) =>
+  api(`/agent-skills/${encodeURIComponent(skillKey)}/propose`, {
+    method: "POST",
+    body: input,
+    schema: GovernanceApproval,
+  });
+
+/** Run the deterministic golden-task rubric against the newest pending draft of
+ *  this skill_key at this scope — a precondition for proposeAgentSkill(). Unlike
+ *  proposeAgentSkill, NOT restricted to the caller's own draft (see the sub-project
+ *  4 spec's R3 self-evaluation-blocked rule). */
+export const evaluateAgentSkill = (
+  skillKey: string,
+  input: { agent_id: string; scope: SkillScope; scope_id?: string | null },
+) =>
+  api(`/agent-skills/${encodeURIComponent(skillKey)}/evaluate`, {
+    method: "POST",
+    body: input,
+    schema: EvaluationResult,
+  });
+
 /** Soft-delete a custom skill (custom only). */
 export const deleteAgentSkill = (
   skillKey: string,
@@ -98,4 +148,29 @@ export const listAgentSkillVersions = (
   api(`/agent-skills/${encodeURIComponent(skillKey)}/versions`, {
     query: { agent_id: agentId, scope, scope_id: scopeId },
     schema: SkillVersionList,
+  });
+
+/**
+ * Import a Skill from another BU the caller administers, or a declared
+ * external source, through the backend's prompt-injection/credential/
+ * provenance screens before it lands via the same path a create would. Same
+ * 422 lint-violation passthrough as create — read via getLintViolations on
+ * the caught error. A rejected screen (CREDENTIAL_DETECTED, SOURCE_NOT_ALLOWED)
+ * also surfaces as a 422/403 with its own named code — read err.rawBody.
+ */
+export const importAgentSkill = (input: ImportSkillInput) =>
+  api("/agent-skills/import", { method: "POST", body: input, schema: SkillDetail });
+
+/** The org's approved external import sources — readable by anyone, writable
+ *  only by an Org Admin (POST). */
+export const listImportSources = () =>
+  api("/agent-skills/import-sources", { schema: ImportSourceList });
+
+/** Add an entry to the org's approved external import-source allowlist
+ *  (Org Admin only). */
+export const createImportSource = (input: { source_pattern: string; label: string }) =>
+  api("/agent-skills/import-sources", {
+    method: "POST",
+    body: input,
+    schema: ImportSourceEntry.pick({ id: true, source_pattern: true, label: true }),
   });

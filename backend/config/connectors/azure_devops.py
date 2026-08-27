@@ -22,11 +22,14 @@ from config.ado_ingestion import (
     delete_work_item,
     fetch_hierarchy_tree,
     fetch_work_item,
+    get_wiki_page,
     list_all_work_items,
     list_projects,
     list_states,
     list_stories_by_state,
     list_teams,
+    list_wiki_pages,
+    list_wikis,
     normalize_work_item,
     update_work_item_fields,
     update_work_item_state,
@@ -141,6 +144,9 @@ class AzureDevOpsConnector(BaseConnector):
                 "list_all_items": CapabilityEntry(status="implemented"),
                 "fetch_item_detail": CapabilityEntry(status="implemented"),
                 "fetch_hierarchy": CapabilityEntry(status="implemented"),
+                "list_wikis": CapabilityEntry(status="implemented"),
+                "get_wiki_page": CapabilityEntry(status="implemented"),
+                "list_wiki_pages": CapabilityEntry(status="implemented"),
             },
             write_capabilities={
                 "create_item": CapabilityEntry(status="implemented"),
@@ -268,6 +274,9 @@ class AzureDevOpsConnector(BaseConnector):
             "list_all_items": self.list_all_items,
             "fetch_item_detail": self.fetch_item_detail,
             "fetch_hierarchy": self.fetch_hierarchy,
+            "list_wikis": self.list_wikis,
+            "get_wiki_page": self.get_wiki_page,
+            "list_wiki_pages": self.list_wiki_pages,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -393,6 +402,23 @@ class AzureDevOpsConnector(BaseConnector):
         auth = await self.auth_adapter()
         return await fetch_hierarchy_tree(
             org_url=auth["org_url"], project=project, pat=auth["pat"]
+        )
+
+    async def list_wikis(self, project: str) -> List[Dict[str, Any]]:
+        auth = await self.auth_adapter()
+        return await list_wikis(org_url=auth["org_url"], project=project, pat=auth["pat"])
+
+    async def get_wiki_page(self, project: str, wiki_id: str, path: str = "") -> Dict[str, Any]:
+        auth = await self.auth_adapter()
+        return await get_wiki_page(
+            org_url=auth["org_url"], project=project, wiki_id=wiki_id, path=path, pat=auth["pat"],
+        )
+
+    async def list_wiki_pages(self, project: str, wiki_id: str, path_prefix: str = "") -> List[Dict[str, str]]:
+        auth = await self.auth_adapter()
+        return await list_wiki_pages(
+            org_url=auth["org_url"], project=project, wiki_id=wiki_id,
+            path_prefix=path_prefix, pat=auth["pat"],
         )
 
     async def create_item(

@@ -1,8 +1,8 @@
 """Resolve where a tenant's notifications and documents actually go.
 
-A connector answers "can we reach Teams / Slack / SharePoint / Confluence at all".
-This module answers the separate question "and which channel, library, or space",
-which is routing configuration rather than a credential.
+A connector answers "can we reach Teams / Slack / SharePoint / Confluence / Azure
+DevOps Wiki at all". This module answers the separate question "and which channel,
+library, space, or wiki", which is routing configuration rather than a credential.
 
 WHY THESE LIVE IN THE SECRET STORE, not a new column:
 
@@ -95,6 +95,24 @@ async def sharepoint_target(tenant_id: str) -> Optional[Dict[str, str]]:
         "site_id": await _get(tenant_id, "sharepoint-site-id"),
         "drive_id": drive_id,
         "folder": await _get(tenant_id, "sharepoint-folder-path") or DEFAULT_SHAREPOINT_FOLDER,
+    }
+
+
+async def ado_wiki_target(tenant_id: str) -> Optional[Dict[str, str]]:
+    """Which Azure DevOps wiki this tenant's runbooks/knowledge articles live in.
+
+    Returns {"project", "wiki_id", "runbook_path", "kb_path"} or None. `wiki_id` is the
+    operative value — every wiki-pages call addresses a wiki by id — so a configuration
+    without one is treated as unconfigured, same contract as sharepoint_target above.
+    """
+    wiki_id = await _get(tenant_id, "ado-wiki-id")
+    if not wiki_id:
+        return None
+    return {
+        "project": await _get(tenant_id, "ado-wiki-project"),
+        "wiki_id": wiki_id,
+        "runbook_path": await _get(tenant_id, "ado-wiki-runbook-path") or "/Runbooks",
+        "kb_path": await _get(tenant_id, "ado-wiki-kb-path") or "/Knowledge Base",
     }
 
 

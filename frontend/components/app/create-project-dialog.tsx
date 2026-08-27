@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { Boxes, Check, ChevronDown, Loader2, Plus, ShieldAlert, Trash2, UserPlus, Wrench } from "lucide-react";
+import { Boxes, Check, ChevronDown, Loader2, Plus, ShieldAlert, ShieldCheck, Trash2, UserPlus, Wrench } from "lucide-react";
 import { z } from "zod";
 
 import { cn } from "@/lib/utils";
@@ -155,6 +155,14 @@ export function CreateProjectDialog({
   const [contribExtraAgents, setContribExtraAgents] = React.useState<Phase[]>([]);
   const [contributorsOpen, setContributorsOpen] = React.useState(false);
 
+  // Who owns the project — bound as `project_admin` at project scope the
+  // moment it's created. Picked from people the BU has already tagged
+  // `project_admin` (the same badge the Users page shows), not typed in:
+  // ownership is a real access grant, not a label, so it comes from the
+  // roster the same way a Contributor does. "" means unset — the backend
+  // then falls back to the creator (see POST /projects).
+  const [ownerId, setOwnerId] = React.useState<string>("");
+
   // Extras are chosen against a ROLE, so they can't outlive a change of role —
   // ticking Deployment for a Developer and then switching to Architect (who
   // already reaches it) would otherwise leave a meaningless extra behind.
@@ -208,6 +216,7 @@ export function CreateProjectDialog({
       setContributors([]);
       setContribEmail("");
       setContributorsOpen(false);
+      setOwnerId("");
       setModelsOpen(false);
       setModelMode("inherit");
       setModelSel([]);
@@ -226,11 +235,25 @@ export function CreateProjectDialog({
   const membersQ = useQuery({
     queryKey: qk.workspaces.members(selectedWorkspaceId),
     queryFn: () => listWorkspaceMembers(selectedWorkspaceId),
-    enabled: open && contributorsOpen && !!selectedWorkspaceId,
+    // Fetched whenever a unit is chosen, not only once Contributors is
+    // expanded: the owner picker below needs this roster too, and it's the
+    // same lightweight roster call either section triggers first.
+    enabled: open && !!selectedWorkspaceId,
   });
   const existingMembers = (membersQ.data ?? []).filter(
     (m): m is typeof m & { email: string } => !!m.email,
   );
+  // People this Business Unit has already tagged `project_admin` — the same
+  // badge the Users page roster shows. That tag is what "existing Project
+  // Admin in this unit" means on the platform; it does not require them to
+  // already own a project here.
+  const existingProjectAdmins = existingMembers.filter((m) => m.roleName === "project_admin");
+
+  // The BU changed mid-dialog: an owner picked from the old unit's roster
+  // is not a member of this one.
+  React.useEffect(() => {
+    setOwnerId("");
+  }, [selectedWorkspaceId]);
 
   // What the chosen Business Unit was granted, with credential status — a
   // project can never be given a model its unit doesn't have, so this list IS
@@ -414,6 +437,7 @@ export function CreateProjectDialog({
       template: DEFAULT_TEMPLATE,
       description: values.description || undefined,
       workspaceId: values.workspaceId,
+      ownerId: ownerId || undefined,
       monthlyBudgetUsd: Number(values.monthlyBudgetUsd),
       budgetStartDate: values.budgetStartDate || null,
       budgetEndDate: values.budgetEndDate || null,
@@ -663,6 +687,53 @@ export function CreateProjectDialog({
                 </FormItem>
               )}
             />
+
+            {/* Project Admin — owns this project the moment it's created,
+                bound at project scope (ProjectCreateIn.ownerId). Picked from
+                people this Business Unit has already tagged `project_admin`;
+                left unset, the creator becomes owner if they cannot already
+                reach the project (see POST /projects). */}
+            <div className="rounded-xl border border-line-soft bg-surface-1 p-3">
+              <div className="mb-2 flex items-center gap-2">
+                <ShieldCheck className="size-4 text-muted-foreground" aria-hidden />
+                <span className="text-sm font-medium">Project Admin</span>
+                <span className="text-[12px] text-muted-foreground">
+                  Optional — owns this project&apos;s members and integrations
+                </span>
+              </div>
+              <Select
+                value={ownerId}
+                onValueChange={(v) => setOwnerId(v === "__none__" ? "" : v)}
+                disabled={!selectedWorkspaceId || membersQ.isLoading}
+              >
+                <SelectTrigger className="border-line-soft bg-panel-elevated w-full">
+                  <SelectValue
+                    placeholder={
+                      !selectedWorkspaceId
+                        ? `Choose a ${BUSINESS_UNIT_LABEL.toLowerCase()} first`
+                        : membersQ.isLoading
+                          ? "Loading project admins…"
+                          : `You'll own it, unless you name someone`
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">You&apos;ll own it, unless you name someone</SelectItem>
+                  {existingProjectAdmins.map((m) => (
+                    <SelectItem key={m.userId} value={m.userId}>
+                      {m.displayName ?? m.email} <span className="text-muted-foreground">· {m.email}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedWorkspaceId && !membersQ.isLoading && existingProjectAdmins.length === 0 && (
+                <p className="mt-1.5 text-[12px] text-muted-foreground">
+                  Nobody in this {BUSINESS_UNIT_LABEL.toLowerCase()} is tagged Project Admin yet —
+                  the {BUSINESS_UNIT_LABEL.toLowerCase()}&apos;s Admin can assign that from the Users
+                  page. Leaving this unset makes you the owner.
+                </p>
+              )}
+            </div>
 
             {/* Contributors — assigned at creation time; each gets that role's
                 agent access on this project automatically. */}
