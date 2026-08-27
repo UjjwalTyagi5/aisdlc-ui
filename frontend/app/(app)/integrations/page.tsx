@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Info,
   Loader2,
   Search,
   Unplug,
@@ -26,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { listIntegrationAccess } from "@/lib/api/integration-access";
 import { AddMcpServerDialog } from "@/components/app/add-mcp-server-dialog";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -566,6 +568,22 @@ export default function IntegrationsPage() {
                 glyph={<GenericGlyph mark={r.name.slice(0, 2).toUpperCase()} />}
                 access={accessByKind.get(`mcp:${r.id}`)}
                 showUnitCount={isOrgAdmin}
+                // Same test the connector tiles use, asked of the row's own
+                // grant count rather than a catalogue of kinds — an MCP server
+                // has no kind to look up. Without this every tile rendered as
+                // granted, so a Business Unit Admin saw servers their unit was
+                // never given as though they held them.
+                //
+                // `grantedUnitCount` is already scoped server-side to the units
+                // this viewer can see, so "0" means "not to any unit of mine".
+                // An Org Admin governs the whole estate and holds everything.
+                granted={isOrgAdmin || r.grantedUnitCount > 0}
+                requestPrefill={{
+                  type: "mcp_server",
+                  title: `${r.name} access`,
+                  description: `Requesting the ${r.name} MCP server for our work. It isn't granted to us today.`,
+                }}
+                tools={r.tools}
               />
             ))}
           </ul>
@@ -640,6 +658,7 @@ function IntegrationCard({
   granted = true,
   requestPrefill,
   showUnitCount = false,
+  tools,
 }: {
   href: string;
   label: string;
@@ -650,6 +669,13 @@ function IntegrationCard({
   granted?: boolean;
   /** Seeds the request raised from an ungranted tile. */
   requestPrefill?: RaiseRequestPrefill;
+  /**
+   * MCP only — what the server answered with when it was last probed. Given
+   * (even empty) this renders the info button; omitted entirely, no button.
+   * That distinction is the point: `[]` means "asked, and it listed nothing
+   * yet", `undefined` means this integration has no tool list to speak of.
+   */
+  tools?: { name: string; description?: string }[];
   /**
    * Show the "N business units" clause. Only worth stating for someone who
    * oversees more than one — an Org Admin, comparing units against each
@@ -675,9 +701,14 @@ function IntegrationCard({
       >
         <div className="flex items-start justify-between gap-2">
           {glyph}
-          <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
-            {category}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
+              {category}
+            </span>
+            {/* Above the stretched link (z-10), or the card would swallow the
+                click and navigate instead of opening the list. */}
+            {tools && <ToolsInfoButton label={label} tools={tools} />}
+          </div>
         </div>
 
         <div className="min-w-0 flex-1">
@@ -734,6 +765,72 @@ function IntegrationCard({
             offered a step that belongs to somebody else. */}
       </Card>
     </li>
+  );
+}
+
+// ───────── Tools an MCP server offers ─────────
+
+/**
+ * What this server actually gives an agent, on the card rather than a click in.
+ *
+ * The reason to open an MCP server's page is to govern its reach; the reason to
+ * ask what tools it has is to decide whether to bother — a different question,
+ * asked while scanning, and one that shouldn't cost a navigation. So it is a
+ * popover on the tile.
+ *
+ * The list is the last PROBE's answer, not a live call: a grid of eight cards
+ * must not open eight MCP sessions to render. An empty snapshot therefore says
+ * "not probed yet", which is a different fact from "this server has no tools"
+ * and is reported as such.
+ */
+function ToolsInfoButton({
+  label,
+  tools,
+}: {
+  label: string;
+  tools: { name: string; description?: string }[];
+}) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Tools ${label} offers`}
+          className="text-muted-foreground/60 hover:text-brand-bright hover:border-brand-bright/40 border-line-soft focus-visible:ring-ring relative z-10 grid size-5 shrink-0 place-items-center rounded-full border transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <Info className="size-3" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 p-0">
+        <div className="border-line-soft border-b px-3 py-2">
+          <p className="text-[12.5px] font-semibold">{label}</p>
+          <p className="text-muted-foreground text-[11px]">
+            {tools.length === 0
+              ? "No tools recorded yet"
+              : `${tools.length} ${tools.length === 1 ? "tool" : "tools"} at last check`}
+          </p>
+        </div>
+        {tools.length === 0 ? (
+          <p className="text-muted-foreground px-3 py-2.5 text-[11.5px]">
+            Nobody has connected to this server since it was registered, so what it offers
+            isn&apos;t known yet. Testing it from its own screen records the list.
+          </p>
+        ) : (
+          <ul className="max-h-64 space-y-1.5 overflow-y-auto px-3 py-2.5">
+            {tools.map((t) => (
+              <li key={t.name}>
+                <p className="font-mono text-[11.5px] break-words">{t.name}</p>
+                {t.description && (
+                  <p className="text-muted-foreground text-[11px] break-words">{t.description}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 

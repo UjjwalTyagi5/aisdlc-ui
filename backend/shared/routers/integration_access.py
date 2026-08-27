@@ -113,10 +113,15 @@ async def list_integration_access(
         ).fetchall()
     }
 
+    # `tools_snapshot` rides along because this is the only grant-aware read of an
+    # MCP server anyone but its creator can make: GET /mcp/registry/{id} is
+    # creator-scoped, so a Business Unit Admin holding a server an Org Admin
+    # registered can never fetch it there. Without this, "what does this server
+    # actually give my agents" was answerable only by the person who typed the URL.
     servers = (
         await db.execute(
             text(
-                "SELECT id, server_name, description FROM mcp_servers "
+                "SELECT id, server_name, description, tools_snapshot FROM mcp_servers "
                 "WHERE tenant_id = CAST(:t AS uuid) ORDER BY server_name"
             ),
             {"t": tenant_id},
@@ -173,7 +178,14 @@ async def list_integration_access(
             )
         return by_unit
 
-    def _row(kind: str, target: str, name: str, description: Optional[str], onboarded: bool):
+    def _row(
+        kind: str,
+        target: str,
+        name: str,
+        description: Optional[str],
+        onboarded: bool,
+        tools: Optional[list] = None,
+    ):
         granted = grants.get((kind, target), set())
         usage = _usage(kind, target)
         entries = [
@@ -201,6 +213,10 @@ async def list_integration_access(
             # is their own rather than a number they cannot account for.
             "grantedUnitCount": len(granted & unit_ids),
             "projectCount": sum(len(v) for k, v in usage.items() if k in unit_ids),
+            # The tools the server answered with at its last probe. Empty until
+            # one has run — which is "not asked yet", not "offers nothing", and
+            # the UI must say so rather than reporting zero tools.
+            "tools": tools or [],
         }
 
     out = [
@@ -211,7 +227,8 @@ async def list_integration_access(
         for k in sorted(_CATALOG_KINDS)
     ]
     out += [
-        _row("mcp", str(s.id), s.server_name, s.description, True) for s in servers
+        _row("mcp", str(s.id), s.server_name, s.description, True, s.tools_snapshot)
+        for s in servers
     ]
     return out
 

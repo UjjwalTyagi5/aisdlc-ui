@@ -70,6 +70,18 @@ export const IntegrationAccessRow = z.object({
   /** How many of them actually hold it. `units.length` counts candidates. */
   grantedUnitCount: z.number().int().nonnegative(),
   projectCount: z.number().int().nonnegative(),
+  /**
+   * MCP only — the tools the server answered with at its last probe, so a card
+   * can say what it actually gives an agent. Empty means NOT PROBED YET as
+   * readily as it means none, and the two must not be reported alike.
+   *
+   * Carried here rather than fetched per server because `GET /mcp/registry/{id}`
+   * is creator-scoped: a Business Unit Admin holding a server the Org Admin
+   * registered gets a 404 from it. This endpoint is the grant-aware read.
+   */
+  tools: z
+    .array(z.object({ name: z.string(), description: z.string().optional().default("") }))
+    .default([]),
 });
 export type IntegrationAccessRow = z.infer<typeof IntegrationAccessRow>;
 
