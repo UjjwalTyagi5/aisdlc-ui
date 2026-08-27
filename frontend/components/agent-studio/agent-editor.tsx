@@ -3,10 +3,7 @@
 import * as React from "react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useRawSession } from "@/components/auth/session-provider";
-import { can } from "@/lib/auth/capabilities";
 import type { AgentProfileSummaryEntry, ProfileScope } from "@/lib/schemas/agent-profiles";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 import { agentLabel } from "./agents";
 import { BehaviorTab } from "./behavior-tab";
@@ -45,11 +42,7 @@ export interface AgentEditorProps {
 }
 
 export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
-  const session = useRawSession();
   const label = agentLabel(summary.agent_id);
-  // Skills tab is a separate, BU-scoped system (out of scope for the
-  // cascade) — keeps its own pre-existing permission check.
-  const skillsCanManage = session ? can(session.role, "project:update") : false;
 
   return (
     <div className="space-y-4">
@@ -78,14 +71,14 @@ export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
         </TabsContent>
 
         <TabsContent value="skills" className="mt-4">
-          {/* key=agentId remounts the tab so dialog/toggle state resets per agent */}
+          {/* key=agentId+scope remounts the tab so dialog/toggle state resets
+              cleanly on an agent OR tier switch (mirrors BehaviorTab's own key
+              above) */}
           <SkillsTab
-            key={summary.agent_id}
+            key={`${summary.agent_id}-${scopeContext.scope}-${scopeContext.scopeId}`}
             agentId={summary.agent_id}
             agentLabel={label}
-            workspaceId={scopeContext.workspaceId ?? ""}
-            workspaceName={scopeContext.workspaceName ?? BUSINESS_UNIT_LABEL}
-            canManage={skillsCanManage}
+            scopeContext={scopeContext}
           />
         </TabsContent>
       </Tabs>

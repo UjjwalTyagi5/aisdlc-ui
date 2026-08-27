@@ -97,6 +97,63 @@ async def list_states(
         ]
 
 
+async def list_wikis(*, org_url: str, project: str, pat: str) -> List[Dict[str, Any]]:
+    org_url = org_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(f"{org_url}/{project}/_apis/wiki/wikis?api-version=7.1")
+        r.raise_for_status()
+        return [
+            {"id": w["id"], "name": w.get("name", ""), "type": w.get("type", "")}
+            for w in r.json().get("value", [])
+        ]
+
+
+async def get_wiki_page(
+    *, org_url: str, project: str, wiki_id: str, path: str, pat: str
+) -> Dict[str, Any]:
+    """Fetch one wiki page's content. `path` is the wiki page path, e.g. "/Runbooks/Payments"."""
+    org_url = org_url.rstrip("/")
+    encoded_path = httpx.QueryParams({"path": path or "/"})
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(
+            f"{org_url}/{project}/_apis/wiki/wikis/{wiki_id}/pages"
+            f"?{encoded_path}&includeContent=true&api-version=7.1"
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "path": data.get("path", path),
+            "content": data.get("content", ""),
+            "version": str(data.get("id", "")),
+            "url": data.get("remoteUrl") or data.get("url", ""),
+        }
+
+
+async def list_wiki_pages(
+    *, org_url: str, project: str, wiki_id: str, path_prefix: str, pat: str
+) -> List[Dict[str, str]]:
+    """List page paths under `path_prefix` (recursively), without content bodies."""
+    org_url = org_url.rstrip("/")
+    encoded_path = httpx.QueryParams({"path": path_prefix or "/"})
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(
+            f"{org_url}/{project}/_apis/wiki/wikis/{wiki_id}/pages"
+            f"?{encoded_path}&recursionLevel=Full&api-version=7.1"
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    def _walk(node: Dict[str, Any], out: List[Dict[str, str]]) -> None:
+        if node.get("path"):
+            out.append({"path": node["path"], "url": node.get("remoteUrl") or node.get("url", "")})
+        for child in node.get("subPages", []) or []:
+            _walk(child, out)
+
+    pages: List[Dict[str, str]] = []
+    _walk(data, pages)
+    return pages
+
+
 async def create_work_item(
     *,
     org_url: str,

@@ -10,6 +10,7 @@ import {
   ProfilePreview,
   type ProfileScope,
 } from "@/lib/schemas/agent-profiles";
+import { EvaluationResult } from "@/lib/schemas/agent-studio-eval";
 import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
 import { api, ApiRequestError } from "./client";
@@ -77,6 +78,14 @@ export const unpublishAgentProfile = (id: string) =>
   api(`/agent-profiles/${encodeURIComponent(id)}/unpublish`, {
     method: "POST",
     schema: AgentProfileVersion,
+  });
+
+/** Run the deterministic golden-task rubric against a draft — a precondition for
+ *  propose(). See EvaluationResult's docstring. */
+export const evaluateAgentProfile = (id: string) =>
+  api(`/agent-profiles/${encodeURIComponent(id)}/evaluate`, {
+    method: "POST",
+    schema: EvaluationResult,
   });
 
 /** Resolve the full layer stack (vendor..draft) for a not-yet-saved draft body. */

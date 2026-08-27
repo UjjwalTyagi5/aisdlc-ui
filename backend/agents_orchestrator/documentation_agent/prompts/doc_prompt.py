@@ -21,6 +21,11 @@ clarifying question instead of guessing.
 - publish_to_sharepoint(filename, folder): GATED — file the saved documents into the business's SharePoint document library. Only call this when the user explicitly asks to publish/file documents to SharePoint. It is a separate destination from the docs PR, not a replacement for it.
 - list_sharepoint_documents(folder): list what is already filed in the SharePoint library.
 - ingest_sharepoint_document(item_id): read an existing SharePoint document (a spec, standard, or template) into the session as reference material before writing new documentation.
+- read_wiki_page(page_path): read one page from the project's Azure DevOps wiki (e.g. the current runbook). Empty path uses the tenant's configured default runbook path.
+- list_wiki_pages(path_prefix): list page paths under a wiki subtree — use to locate the runbook or search for an existing knowledge article.
+- diff_markdown_sections(existing_content, proposed_content): compute a real unified diff plus a per-section changed/added/removed breakdown. ALWAYS use this to produce a diff — never hand-write one.
+- save_runbook_update(title, filename, source_ref, unified_diff, changed_sections_summary, updated_sections_markdown): SAVE a runbook_update deliverable, built from diff_markdown_sections output.
+- save_knowledge_article(title, filename, mode, markdown_contents, issue_ref, source_ref): SAVE a knowledge_article deliverable — mode="update" when an existing article was found, "new" otherwise.
 - publish_to_confluence(space, filename, parent_id): GATED — file the saved documents into a Confluence space as pages. Only call this when the user explicitly asks to publish/file documents to Confluence. Republishing an already-published document updates that same page instead of duplicating it.
 - list_confluence_pages(space): list what is already filed in a Confluence space.
 - ingest_confluence_page(page_id): read an existing Confluence page (a spec, standard, or runbook) into the session as reference material before writing new documentation.
@@ -53,6 +58,15 @@ clarifying question instead of guessing.
   do not force an inferred match that isn't there.
 - **run_summary**: a per-run executive summary (scope delivered, quality posture, risks). Best-effort from artifacts + repo.
 - **compliance**: SOC2/ISO27001 evidence pack (gate approvals, signoffs, SBOM, audit trail). Only meaningful when upstream artifacts/audit exist; if absent, generate the pack STRUCTURE and mark each control "N/A — no pipeline run for this branch".
+- **runbook_update** (Track 2 — Enhancement & Support): update the existing runbook for the system being changed.
+  1. Read the current runbook — read_wiki_page (Azure DevOps Wiki) or list_sharepoint_documents + ingest_sharepoint_document (SharePoint), whichever is connected.
+  2. Draft the proposed updated content for the affected sections, grounded in what actually changed on this branch/PR (inspect_repo / generate_changelog / read_repo_file).
+  3. Call diff_markdown_sections(existing_content, proposed_content) to get the real unified diff and the list of changed sections. Do not skip this step or invent the diff.
+  4. Call save_runbook_update with that diff and the updated section content.
+- **knowledge_article** (Track 2 — Enhancement & Support): document the fixed issue.
+  1. Search for an existing article about this issue — list_wiki_pages(kb path) and/or list_sharepoint_documents(the KB folder) — and ingest a likely match to confirm.
+  2. If a matching article exists, draft the update and call save_knowledge_article(mode="update", issue_ref=..., source_ref=<the article's path/id>).
+  3. If none exists, call save_knowledge_article(mode="new", issue_ref=...) with the standard template: Symptom, Root cause, Resolution steps, Related links.
 
 ## Rules
 - Ground every claim in the repo or an upstream artifact. NEVER fabricate version numbers, coverage %, endpoints, or findings. If something isn't knowable from the inputs, say so explicitly in the doc.

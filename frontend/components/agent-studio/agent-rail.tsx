@@ -6,8 +6,15 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AgentProfileSummaryEntry } from "@/lib/schemas/agent-profiles";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 import { agentLabel } from "./agents";
+
+const INHERITED_LABEL: Record<string, string> = {
+  org: "Inherited from Org",
+  workspace: `Inherited from ${BUSINESS_UNIT_LABEL}`,
+  project: "Inherited from Project",
+};
 
 export interface AgentRailProps {
   agents: AgentProfileSummaryEntry[];
@@ -51,6 +58,10 @@ export function AgentRail({ agents, selectedId, onSelect }: AgentRailProps) {
               >
                 v{agent.active_version}
               </Badge>
+            ) : agent.inherited_from ? (
+              <span className="text-muted-foreground/70 shrink-0 text-[11px]">
+                {INHERITED_LABEL[agent.inherited_from] ?? "Inherited"}
+              </span>
             ) : hasDraft ? null : (
               <span className="text-muted-foreground/70 shrink-0 text-[11px]">
                 default

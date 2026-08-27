@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronRight, Plus, Search, SlidersHorizontal } from "lucide-react";
+import { ChevronRight, Plus, Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { PageTitle } from "@/components/app/page-title";
@@ -49,6 +49,7 @@ const PROVIDER_LOGO: Partial<Record<string, { src: string; fit: "contain" | "cov
   google: { src: "/brand/google.svg", fit: "contain" },
   vertex_ai: { src: "/brand/google.svg", fit: "contain" },
   azure: { src: "/brand/azure.png", fit: "contain" },
+  gemini: { src: "/brand/gemini.svg", fit: "contain" },
 };
 
 /** Brand-colored monogram for a provider with no logo file on hand. */
@@ -467,7 +468,17 @@ export default function ModelProvidersPage() {
           reach, and how many are inert. Above the search deliberately — these
           describe everything, not the filtered view, and a count that moved
           when you typed would read as a filtered total. */}
-      {isOrg && matrixQ.data && <ModelGovernanceSummary counts={governance} />}
+      {/* `governance.providers` counts distinct providers with an ONBOARDED
+          (keyed) model in the grant matrix — a materially different question
+          from "how many provider cards render below", since most org-wide
+          providers are added keyless (spec §2 amendment 5) and only pick up a
+          key later, per business unit. Overriding with `providerGroups.length`
+          here so this tile counts the same thing the grid underneath it does —
+          two numbers on one screen disagreeing about "how many providers" is
+          confusing regardless of which one is more technically precise. */}
+      {isOrg && matrixQ.data && (
+        <ModelGovernanceSummary counts={{ ...governance, providers: providerGroups.length }} />
+      )}
 
       {/* One card per unit the viewer is bound to. Someone in two units gets
           two, each named — no arbitrary winner, and no hidden second unit. */}
@@ -717,23 +728,40 @@ function ProviderCard({
         .size;
 
   return (
-    <Card className="border-line-soft bg-panel-elevated focus-within:ring-ring relative flex flex-row items-center gap-3 px-4 py-3.5 shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-shadow focus-within:ring-2 hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]">
+    <Card
+      className={cn(
+        "border-line-soft bg-panel-elevated focus-within:ring-ring relative flex flex-row items-center gap-3 px-4 py-3.5 shadow-[0_1px_0_oklch(1_0_0_/_0.04)_inset,0_4px_14px_-6px_oklch(0_0_0_/_0.35)] transition-all focus-within:ring-2 hover:shadow-[0_6px_20px_-8px_oklch(0_0_0_/_0.45)]",
+        // Org Admin: the whole card is the trigger (below), so the whole
+        // card gets the hover treatment — not just the small button the
+        // title used to be. A brand-tinted glow rather than a plain shadow
+        // bump, so hovering anywhere on the tile reads as "this opens
+        // something" the way the title-only hover never could.
+        isOrg &&
+          "group cursor-pointer hover:-translate-y-px hover:border-brand-gradient-from/50 hover:shadow-[0_0_0_1px_oklch(0.65_0.2_35_/_0.3),0_10px_28px_-10px_oklch(0.6_0.2_35_/_0.5)]",
+      )}
+      {...(isOrg
+        ? {
+            role: "button",
+            tabIndex: 0,
+            onClick: () => setModelsOpen(true),
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setModelsOpen(true);
+              }
+            },
+            "aria-label": `Curate ${label}'s models`,
+          }
+        : {})}
+    >
       <ProviderGlyph kind={kind} label={label} />
       <div className="min-w-0 flex-1">
         {isOrg ? (
-          <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
-            <button
-              type="button"
-              onClick={() => setModelsOpen(true)}
-              title="Curate which models of this provider a granted business unit may use"
-              className="hover:text-brand-gradient-from flex min-w-0 items-center gap-1 rounded-sm text-left transition-colors focus-visible:outline-none"
-            >
-              <span className="truncate">{label}</span>
-              <SlidersHorizontal
-                className="text-muted-foreground size-3 shrink-0"
-                aria-hidden
-              />
-            </button>
+          <h3
+            className="font-display group-hover:text-brand-gradient-from min-w-0 truncate text-[15px] font-bold tracking-[-0.01em] transition-colors"
+            title="Curate which models of this provider a granted business unit may use"
+          >
+            {label}
           </h3>
         ) : (
           <h3 className="font-display text-[15px] font-bold tracking-[-0.01em]">
@@ -763,11 +791,16 @@ function ProviderCard({
         </p>
       </div>
       {isOrg ? (
-        <UnitAccessPicker
-          units={grantableWorkspaces}
-          selected={grantedUnitIds}
-          onToggle={onToggleGrant}
-        />
+        // The card itself is now the click target for the models dialog —
+        // this control needs its own clicks to stop there, or every toggle
+        // would also pop the dialog open behind it.
+        <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+          <UnitAccessPicker
+            units={grantableWorkspaces}
+            selected={grantedUnitIds}
+            onToggle={onToggleGrant}
+          />
+        </div>
       ) : (
         <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
       )}

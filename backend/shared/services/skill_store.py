@@ -33,7 +33,27 @@ from shared.skills.registry import vendor_skills_for
 
 logger = logging.getLogger(__name__)
 
-_SCOPE_RANK = {"org": 0, "workspace": 1, "project": 2}
+_SCOPE_RANK = {"org": 0, "workspace": 1, "project": 2, "user": 3}
+
+
+def _toggle_precedence(
+    toggle_rows_with_rank: list[tuple[int, "AgentSkillToggle"]],
+) -> dict[tuple[str, str], bool]:
+    """(origin, skill_key) -> effective enabled, nearest scope (highest rank) wins.
+    Shared shape with resolve_active_skills' own nearest-wins toggle logic, but kept
+    as a separate small helper here rather than refactored to share code with that
+    function — resolve_active_skills is on the RUNTIME path (every agent turn) and
+    has no test coverage of its own yet; extending its signature to serve this
+    management-list use case is a bigger, riskier change than this feature needs.
+    """
+    best: dict[tuple[str, str], tuple[int, bool]] = {}
+    for rank, t in toggle_rows_with_rank:
+        k = (t.origin, t.skill_key)
+        cur = best.get(k)
+        if cur is None or rank > cur[0]:
+            best[k] = (rank, bool(t.enabled))
+    return {k: v[1] for k, v in best.items()}
+
 
 _INDEX_HEADER = (
     "AVAILABLE SKILLS — call load_skill(\"<key>\") to load full instructions "
@@ -200,7 +220,14 @@ def _list_item(
     *, origin: str, skill_key: str, agent_id: str, display_name: str,
     description: str, when_to_use: str, runtime: str, enabled: bool,
     version: Optional[int], active_version: Optional[int],
+    origin_scope: Optional[str] = None, requested_scope: Optional[str] = None,
 ) -> dict:
+    """`origin_scope`: which tier this item's content actually lives at (None for
+    vendor — it has no scope of its own). `requested_scope`: the tier the caller
+    asked about, used only to decide editable/deletable — a custom item whose
+    origin_scope differs from what was asked (an INHERITED item) is not editable
+    or deletable at the asked tier, only overridable; update/delete are exact-scope
+    operations and would 404 against an ancestor's row."""
     return {
         "origin": origin,
         "skill_key": skill_key,
@@ -210,18 +237,27 @@ def _list_item(
         "when_to_use": when_to_use,
         "runtime": runtime,
         "enabled": enabled,
-        "editable": origin == "custom",
-        "deletable": origin == "custom",
+        "editable": origin == "custom" and origin_scope == requested_scope,
+        "deletable": origin == "custom" and origin_scope == requested_scope,
         "version": version,
         "active_version": active_version,
+        "origin_scope": origin_scope,
     }
 
 
-async def list_skills_merged(tenant_id, agent_id, scope, scope_id) -> list[dict]:
-    """Management list for one scope: vendor skills + custom skills authored here,
-    each with its effective enabled flag at this scope. Fail-soft to []."""
+async def list_skills_merged(tenant_id, agent_id, scope, scope_id, ancestor=None) -> list[dict]:
+    """Management list for one scope: vendor skills + custom skills authored here OR
+    inherited from an ancestor tier (nearest wins per skill_key), each with its
+    effective enabled flag (nearest applicable toggle wins, own scope included).
+    Fail-soft to [].
+
+    `ancestor`: nearest-first [(scope, scope_id), ...] above `scope` — see
+    shared.routers.agent_profiles.ancestor_chain. None/[] (default) matches today's
+    exact behavior: no ancestor tiers are consulted at all.
+    """
     if not tenant_id:
         return []
+    ancestor = ancestor or []
     sid = _as_uuid(scope_id) if scope != "org" else None
     try:
         async with get_db_session_for_tenant(str(tenant_id)) as session:
@@ -240,11 +276,39 @@ async def list_skills_merged(tenant_id, agent_id, scope, scope_id) -> list[dict]
                     AgentSkillToggle.scope_id.is_(None) if sid is None else AgentSkillToggle.scope_id == sid,
                 )
             )).scalars().all())
+
+            ancestor_custom: list[tuple[str, AgentSkill]] = []
+            ancestor_toggle_rows: list[tuple[str, AgentSkillToggle]] = []
+            for anc_scope, anc_scope_id in ancestor:
+                anc_sid = _as_uuid(anc_scope_id) if anc_scope != "org" else None
+                anc_custom_rows = list((await session.execute(
+                    select(AgentSkill).where(
+                        AgentSkill.agent_id == str(agent_id),
+                        AgentSkill.scope == anc_scope,
+                        AgentSkill.scope_id.is_(None) if anc_sid is None else AgentSkill.scope_id == anc_sid,
+                        AgentSkill.deleted_at.is_(None),
+                        AgentSkill.is_active.is_(True),
+                    )
+                )).scalars().all())
+                ancestor_custom.extend((anc_scope, r) for r in anc_custom_rows)
+                anc_toggle_rows = list((await session.execute(
+                    select(AgentSkillToggle).where(
+                        AgentSkillToggle.agent_id == str(agent_id),
+                        AgentSkillToggle.scope == anc_scope,
+                        AgentSkillToggle.scope_id.is_(None) if anc_sid is None else AgentSkillToggle.scope_id == anc_sid,
+                    )
+                )).scalars().all())
+                ancestor_toggle_rows.extend((anc_scope, t) for t in anc_toggle_rows)
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_skills_merged(%s/%s) failed: %s", tenant_id, agent_id, exc)
         return []
 
-    toggles = {(t.origin, t.skill_key): bool(t.enabled) for t in toggle_rows}
+    own_rank = _SCOPE_RANK.get(scope, 0)
+    toggle_ranked = [(own_rank, t) for t in toggle_rows] + [
+        (_SCOPE_RANK.get(anc_scope, -1), t) for anc_scope, t in ancestor_toggle_rows
+    ]
+    enabled_by_key = _toggle_precedence(toggle_ranked)
+
     items: list[dict] = []
 
     for v in vendor_skills_for(str(agent_id)):
@@ -252,22 +316,30 @@ async def list_skills_merged(tenant_id, agent_id, scope, scope_id) -> list[dict]
             origin="vendor", skill_key=v.skill_key, agent_id=v.agent_id,
             display_name=v.display_name, description=v.description,
             when_to_use=v.when_to_use, runtime=v.runtime,
-            enabled=toggles.get(("vendor", v.skill_key), True),
+            enabled=enabled_by_key.get(("vendor", v.skill_key), True),
             version=None, active_version=None,
+            origin_scope=None, requested_scope=scope,
         ))
 
-    # For custom skills only the active version is surfaced in the list.
-    active_by_key: dict[str, AgentSkill] = {}
+    # Own scope's active custom rows, tagged with this scope; then ancestor rows for
+    # any skill_key not already claimed by the own scope (nearest-first order already
+    # guaranteed by the caller's `ancestor` argument, so first-inserted-per-key wins).
+    active_by_key: dict[str, tuple[str, AgentSkill]] = {}
     for r in custom_rows:
         if r.is_active:
-            active_by_key[r.skill_key] = r
-    for skill_key, r in active_by_key.items():
+            active_by_key[r.skill_key] = (scope, r)
+    for anc_scope, r in ancestor_custom:
+        if r.skill_key not in active_by_key:
+            active_by_key[r.skill_key] = (anc_scope, r)
+
+    for skill_key, (origin_scope, r) in active_by_key.items():
         items.append(_list_item(
             origin="custom", skill_key=r.skill_key, agent_id=r.agent_id,
             display_name=r.display_name or r.skill_key, description=r.description or "",
             when_to_use=r.when_to_use or "", runtime=r.runtime or "llm",
-            enabled=toggles.get(("custom", r.skill_key), True),
+            enabled=enabled_by_key.get(("custom", r.skill_key), True),
             version=r.version, active_version=r.version,
+            origin_scope=origin_scope, requested_scope=scope,
         ))
 
     items.sort(key=lambda i: (i["origin"] != "custom", i["display_name"].lower()))
@@ -296,6 +368,7 @@ async def get_skill_detail(
                     display_name=v.display_name, description=v.description,
                     when_to_use=v.when_to_use, runtime=v.runtime, enabled=enabled,
                     version=None, active_version=None,
+                    origin_scope=None, requested_scope=scope,
                 )
                 item.update({"body": v.body, "created_by": None,
                              "created_at": None, "updated_at": None})
@@ -328,6 +401,73 @@ async def get_skill_detail(
         display_name=row.display_name or row.skill_key, description=row.description or "",
         when_to_use=row.when_to_use or "", runtime=row.runtime or "llm", enabled=enabled,
         version=row.version, active_version=row.version,
+        # get_skill_detail only ever resolves an exact-scope row (it never walks
+        # the ancestor chain itself — callers that need an inherited item's detail
+        # pass its own origin_scope as `scope` directly, see agent_skills.py's
+        # toggle_skill and the frontend's view/edit fetch), so a row found here
+        # always lives at exactly the scope asked for.
+        origin_scope=scope, requested_scope=scope,
+    )
+    item.update({
+        "body": row.body or "",
+        "created_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    })
+    return item
+
+
+async def get_skill_detail_by_version(
+    tenant_id, agent_id, scope, scope_id, skill_key, version,
+) -> Optional[dict]:
+    """Full detail for one skill at a SPECIFIC version, regardless of active state.
+
+    `get_skill_detail` filters to the active row only, which is wrong right after
+    a non-owner's create/update (activate=False): the new version isn't active, so
+    that lookup returns the OLD active row on update (the caller sees their
+    pre-edit content and concludes nothing saved) or None on create (a 422/404-
+    shaped stub instead of the row that was just written) — the response also
+    fails `SkillDetail` schema validation client-side on create, since the
+    fallback stub is missing required fields (final whole-branch review,
+    sub-project 3, Important #2). Used by create_custom_skill/update_custom_skill
+    right after insert, which always know the exact version they just wrote."""
+    sid = _as_uuid(scope_id) if scope != "org" else None
+    try:
+        async with get_db_session_for_tenant(str(tenant_id)) as session:
+            row = (await session.execute(
+                select(AgentSkill).where(
+                    AgentSkill.agent_id == str(agent_id),
+                    AgentSkill.scope == scope,
+                    AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+                    AgentSkill.skill_key == skill_key,
+                    AgentSkill.version == version,
+                    AgentSkill.deleted_at.is_(None),
+                )
+            )).scalars().first()
+            if row is None:
+                return None
+            active_version = (await session.execute(
+                select(AgentSkill.version).where(
+                    AgentSkill.agent_id == str(agent_id),
+                    AgentSkill.scope == scope,
+                    AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+                    AgentSkill.skill_key == skill_key,
+                    AgentSkill.is_active.is_(True),
+                    AgentSkill.deleted_at.is_(None),
+                )
+            )).scalar_one_or_none()
+            t = await _fetch_toggle(session, agent_id, scope, scope_id, "custom", skill_key)
+            enabled = bool(t.enabled) if t is not None else True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_skill_detail_by_version(%s/%s) failed: %s", tenant_id, agent_id, exc)
+        return None
+
+    item = _list_item(
+        origin="custom", skill_key=row.skill_key, agent_id=row.agent_id,
+        display_name=row.display_name or row.skill_key, description=row.description or "",
+        when_to_use=row.when_to_use or "", runtime=row.runtime or "llm", enabled=enabled,
+        version=row.version, active_version=active_version,
+        origin_scope=scope, requested_scope=scope,
     )
     item.update({
         "body": row.body or "",
@@ -385,9 +525,11 @@ async def _fetch_toggle(session, agent_id, scope, scope_id, origin, skill_key):
 
 async def create_custom_skill(
     tenant_id, agent_id, scope, scope_id, skill_key, display_name,
-    description, when_to_use, body, created_by,
+    description, when_to_use, body, created_by, activate: bool = True,
 ) -> dict:
-    """Insert a v1 active custom skill. Raises ValueError if one already exists."""
+    """Insert a v1 custom skill. Active immediately unless `activate=False` (a
+    non-owner's proposed draft, per sub-project 3 — stays inactive until a
+    governance approval flips it). Raises ValueError if one already exists."""
     sid = _as_uuid(scope_id) if scope != "org" else None
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         existing = (await session.execute(
@@ -408,7 +550,7 @@ async def create_custom_skill(
             scope_id=sid,
             skill_key=skill_key,
             version=1,
-            is_active=True,
+            is_active=activate,
             display_name=display_name or skill_key,
             description=description,
             when_to_use=when_to_use,
@@ -420,15 +562,19 @@ async def create_custom_skill(
         session.add(row)
         await session.flush()
         version = row.version
-    detail = await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
+    detail = await get_skill_detail_by_version(tenant_id, agent_id, scope, scope_id, skill_key, version)
     return detail or {"skill_key": skill_key, "version": version, "origin": "custom"}
 
 
 async def update_custom_skill(
     tenant_id, agent_id, scope, scope_id, skill_key, display_name,
-    description, when_to_use, body, created_by,
+    description, when_to_use, body, created_by, activate: bool = True,
 ) -> Optional[dict]:
-    """Insert v(n+1) and atomically flip the active flag. None when no existing skill."""
+    """Insert v(n+1). Activates it (and deactivates prior versions) immediately
+    unless `activate=False`, in which case the new row is inserted inactive and
+    every existing version — including the currently active one — is left
+    untouched (a non-owner's proposed draft; publish/governance-approval flips
+    it later). None when no existing skill."""
     sid = _as_uuid(scope_id) if scope != "org" else None
     async with get_db_session_for_tenant(str(tenant_id)) as session:
         rows = list((await session.execute(
@@ -443,9 +589,10 @@ async def update_custom_skill(
         if not rows:
             return None
         next_version = rows[0].version + 1
-        for r in rows:
-            if r.is_active:
-                r.is_active = False
+        if activate:
+            for r in rows:
+                if r.is_active:
+                    r.is_active = False
         new_row = AgentSkill(
             tenant_id=_as_uuid(tenant_id),
             agent_id=str(agent_id),
@@ -453,7 +600,7 @@ async def update_custom_skill(
             scope_id=sid,
             skill_key=skill_key,
             version=next_version,
-            is_active=True,
+            is_active=activate,
             display_name=display_name or skill_key,
             description=description,
             when_to_use=when_to_use,
@@ -464,7 +611,7 @@ async def update_custom_skill(
         )
         session.add(new_row)
         await session.flush()
-    return await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
+    return await get_skill_detail_by_version(tenant_id, agent_id, scope, scope_id, skill_key, next_version)
 
 
 async def soft_delete_custom_skill(tenant_id, agent_id, scope, scope_id, skill_key) -> bool:
@@ -512,6 +659,56 @@ async def activate_custom_version(
             r.is_active = (r.version == int(version))
         await session.flush()
     return await get_skill_detail(tenant_id, agent_id, scope, scope_id, "custom", skill_key)
+
+
+async def get_latest_draft_version(
+    tenant_id, agent_id, scope, scope_id, skill_key, created_by=None,
+) -> Optional[dict]:
+    """The newest INACTIVE version of this skill_key at this scope THAT `created_by`
+    AUTHORED, if any — the row that actor's own non-owner create/update
+    (activate=False) just inserted. Used by propose_skill to resolve its target
+    server-side, never from client input (mirrors AgentProfile's propose(), which
+    resolves target_ref the same way).
+
+    Filtered by `created_by` deliberately: without it, this resolves to the
+    highest-versioned inactive row for the key AT ALL — which, after any normal
+    owner edit, is the version that was JUST DEACTIVATED (the prior active one),
+    not a proposal at all. A non-owner with no draft of their own would then have
+    their propose() silently target that stale row, and an approver clicking
+    "approve" would roll the skill back to it (final whole-branch review,
+    sub-project 3, Critical #4).
+
+    `created_by` is now OPTIONAL (default `None`, meaning no filter on that
+    column at all — not "system"). `propose_skill` (sub-project 3, unchanged)
+    always passes its own actor id explicitly, so its target resolution keeps
+    the exact Critical #4 protection above: it only ever finds a draft IT wrote.
+    `evaluate_skill` (sub-project 4) calls this with no `created_by`, because R3
+    specifically requires the evaluator to be a DIFFERENT person than the
+    draft's author — an author-filtered lookup would find nothing for anyone
+    but the author, defeating the point. That route instead reads the
+    `created_by` this now returns and self-blocks explicitly when it matches
+    the caller (see evaluate_skill's SELF_EVALUATION_BLOCKED check)."""
+    sid = _as_uuid(scope_id) if scope != "org" else None
+    filters = [
+        AgentSkill.agent_id == str(agent_id),
+        AgentSkill.scope == scope,
+        AgentSkill.scope_id.is_(None) if sid is None else AgentSkill.scope_id == sid,
+        AgentSkill.skill_key == skill_key,
+        AgentSkill.deleted_at.is_(None),
+        AgentSkill.is_active.is_(False),
+    ]
+    if created_by is not None:
+        filters.append(AgentSkill.created_by == created_by)
+    async with get_db_session_for_tenant(str(tenant_id)) as session:
+        rows = list((await session.execute(
+            select(AgentSkill).where(*filters).order_by(AgentSkill.version.desc())
+        )).scalars().all())
+        if not rows:
+            return None
+        return {
+            "id": str(rows[0].id), "version": rows[0].version,
+            "created_by": rows[0].created_by,
+        }
 
 
 async def set_skill_enabled(
