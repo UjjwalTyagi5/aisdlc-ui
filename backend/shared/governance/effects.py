@@ -474,34 +474,60 @@ async def _apply_project_creation_reject(db: AsyncSession, request: dict[str, An
 
 
 async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Activate the model provider the request was raised about.
+    """Activate the org-wide model provider connection the request named.
 
-    The provider row is created when the credential is onboarded and sits inactive
-    until an Org Admin agrees to it — this is the agreement.
+    THE REQUEST NAMES A PROVIDER KIND, NEVER A CONNECTION ROW — the UI that
+    raises this (model-availability-card.tsx) only ever has a (provider,
+    model_id) catalog pair in scope; a specific model_providers row id is
+    knowable only from Model Management's admin view, which this request's
+    raiser (a Business Unit Admin) is not looking at. This resolves the real
+    row itself: an inactive, org-wide (workspace_id IS NULL) connection for
+    the named provider kind. Exactly one match activates cleanly; zero or
+    more than one refuses rather than guessing — a silent pick of either row
+    when two exist would activate a connection nobody specifically agreed to.
     """
-    target = request.get("targetRef")
-    if not target:
+    payload = request.get("payload") or {}
+    provider = (payload.get("providerModel") or {}).get("provider")
+    if not provider:
         raise EffectNotAvailable("model_provider_access", "This request names no provider.")
-    try:
-        _uuid.UUID(str(target))
-    except (ValueError, AttributeError):
-        raise EffectNotAvailable(
-            "model_provider_access", "This request's provider id is malformed."
+
+    candidates = (
+        await db.execute(
+            text(
+                "SELECT id FROM model_providers WHERE tenant_id = CAST(:t AS uuid) "
+                "  AND provider = :p AND workspace_id IS NULL AND status <> 'active'"
+            ),
+            {"t": request["tenantId"], "p": provider},
         )
+    ).fetchall()
+    if not candidates:
+        raise EffectNotAvailable(
+            "model_provider_access",
+            f"No inactive {provider} connection exists yet — an Organization Admin "
+            "needs to onboard one from Model Management before this can be granted.",
+        )
+    if len(candidates) > 1:
+        raise EffectNotAvailable(
+            "model_provider_access",
+            f"{len(candidates)} inactive {provider} connections exist — approve this "
+            "directly from Model Management instead, where the right one can be picked.",
+        )
+    target = str(candidates[0].id)
 
     result = await db.execute(
         text(
             "UPDATE model_providers SET status = 'active', updated_at = now() "
             "WHERE id = CAST(:p AS uuid)"
         ),
-        {"p": str(target)},
+        {"p": target},
     )
     if not result.rowcount:
         raise EffectNotAvailable("model_provider_access", "That provider no longer exists.")
     logger.info(
-        "governance: model provider activated request=%s provider=%s", request["id"], target
+        "governance: model provider activated request=%s provider=%s id=%s",
+        request["id"], provider, target,
     )
-    return "Model provider activated."
+    return f"{provider} activated."
 
 
 async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str:

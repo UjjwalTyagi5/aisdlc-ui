@@ -860,3 +860,157 @@ async def test_model_provider_access_request_carries_provider_kind(org):
     )
     assert r.status_code == 201, r.text
     assert r.json()["payload"]["providerModel"]["provider"] == "anthropic"
+
+
+# ── the gate: connector_access and model_provider_access actually apply ─────
+
+@pytest.mark.asyncio
+async def test_connector_access_request_grants_on_approval(org):
+    """The exact bug this plan fixes: raised with a real targetId, approved,
+    and the grant must actually land in project_connector_access.
+
+    connector_access is TIER-ROUTED (absent from routing.TYPE_ROUTED), so a
+    Developer's request lands on their Project Admin, not the Org Admin —
+    confirm this against routing.py before changing the shape below. With
+    `projectId` set, `_apply_connector_access` takes its PROJECT branch,
+    which requires the connector already granted to the business unit
+    (`integration_grants`) — seeded directly here rather than through a
+    second request, since that grant is a precondition of this test, not
+    what it's testing.
+    """
+    dev = f"dev-{_uuid.uuid4()}"
+    await _bind(org, dev, "developer", scope_kind="project", scope_id=org["project"])
+    project_admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id) "
+            "VALUES (CAST(:t AS uuid), 'connector', 'slack', CAST(:w AS uuid))"
+        ), {"t": org["org"], "w": org["bu"]})
+
+    c = TestClient(process_api.app)
+    dev_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=dev, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=dev_headers,
+        json={
+            "type": "connector_access", "title": "Slack access", "description": "For releases.",
+            "priority": "normal", "workspaceId": org["bu"], "projectId": org["project"],
+            # Slack has no read capabilities (see connector_capabilities.py's own
+            # docstring) — "write" is the level it can actually honour, and the
+            # brief's original "read" trips the manifest check this same effect
+            # enforces, for reasons that have nothing to do with the bug under test.
+            "targetId": "slack", "accessLevel": "write",
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "project_admin"
+
+    pa_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=project_admin, tenant_id=org["org"],
+        permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=pa_headers,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT 1 FROM project_connector_access WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND project_id = CAST(:p AS uuid) AND kind = 'connector' AND target_ref = 'slack'"
+        ), {"t": org["org"], "p": org["project"]})).first()
+    assert row is not None, "connector_access approval did not grant project_connector_access"
+
+
+async def _seed_inactive_anthropic_provider(org):
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO model_providers (id, tenant_id, workspace_id, provider, display_name, "
+            "  secret_ref, status, created_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), NULL, 'anthropic', 'Anthropic', "
+            "  '', 'unverified', 'seed')"
+        ), {"t": org["org"]})
+
+
+@pytest.mark.asyncio
+async def test_model_provider_access_request_activates_on_approval(org):
+    """Raise with a (provider, model_id) pair, no row id — the effect must
+    find the matching inactive org-wide connection itself and activate it.
+    model_provider_access IS type-routed straight to org_admin
+    (routing.GOVERNANCE_APPROVER_ROLE), so a single decide call suffices —
+    no escalation needed."""
+    await _seed_inactive_anthropic_provider(org)
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    org_admin = f"org-{_uuid.uuid4()}"
+    await _bind(org, org_admin, "org_admin", scope_kind="organization", scope_id=org["org"])
+
+    c = TestClient(process_api.app)
+    bu_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "model:manage"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=bu_headers,
+        json={
+            "type": "model_provider_access", "title": "Onboard Anthropic",
+            "description": "Need Claude for the security agent.", "priority": "normal",
+            "workspaceId": org["bu"], "providerModel": {"provider": "anthropic", "modelId": "claude-sonnet-5"},
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "org_admin"
+
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=org_headers,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT status FROM model_providers WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND provider = 'anthropic' AND workspace_id IS NULL"
+        ), {"t": org["org"]})).first()
+    assert row is not None and row.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_access_refuses_when_ambiguous(org):
+    """Two inactive anthropic connections exist for this tenant: the effect
+    must refuse rather than guess which one the requester meant."""
+    await _seed_inactive_anthropic_provider(org)
+    await _seed_inactive_anthropic_provider(org)
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    org_admin = f"org-{_uuid.uuid4()}"
+    await _bind(org, org_admin, "org_admin", scope_kind="organization", scope_id=org["org"])
+
+    c = TestClient(process_api.app)
+    bu_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "model:manage"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=bu_headers,
+        json={
+            "type": "model_provider_access", "title": "Onboard Anthropic",
+            "description": "Need Claude for the security agent.", "priority": "normal",
+            "workspaceId": org["bu"], "providerModel": {"provider": "anthropic", "modelId": "claude-sonnet-5"},
+        },
+    )
+    assert raised.status_code == 201, raised.text
+
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=org_headers,
+        json={"decision": "approve"},
+    )
+    assert 400 <= decided.status_code < 500, decided.text
+    body = decided.json()
+    assert body["detail"]["code"] == "EFFECT_UNAVAILABLE", body
+    assert "anthropic" in body["detail"]["message"].lower()
