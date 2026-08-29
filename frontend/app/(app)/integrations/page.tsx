@@ -510,6 +510,12 @@ export default function IntegrationsPage() {
                   type: "connector_access",
                   title: `${KIND_LABEL[c.kind]} access`,
                   description: `Requesting ${KIND_LABEL[c.kind]} for our work. It isn't granted to us today.`,
+                  targetId: c.kind,
+                  // Least privilege for a fresh ask — matches DEFAULT_ACCESS in
+                  // backend/shared/authz/connector_access.py. The picker this
+                  // seeds has no level control of its own yet (Task 7 applies
+                  // the effect), so a sensible default beats leaving it unset.
+                  accessLevel: "read",
                 }}
               />
             ))}
@@ -547,6 +553,10 @@ export default function IntegrationsPage() {
                 title: "New MCP server",
                 description:
                   "Which server, where it runs, and what our agents would call it for:",
+                // Deliberately no targetId: there is no server in view yet to
+                // name one — this is "stand one up", not a pick from a list.
+                // The effect that applies this request must handle a
+                // no-target mcp_server request gracefully.
               }}
             />
           )}
@@ -582,6 +592,7 @@ export default function IntegrationsPage() {
                   type: "mcp_server",
                   title: `${r.name} access`,
                   description: `Requesting the ${r.name} MCP server for our work. It isn't granted to us today.`,
+                  targetId: r.id,
                 }}
                 tools={r.tools}
               />
