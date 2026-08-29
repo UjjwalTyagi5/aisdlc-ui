@@ -211,6 +211,11 @@ export function ModelAvailabilityCard({
                           ? `Requesting ${m.label} (${m.providerLabel}) for ${workspaceName}. It isn't granted to us today.`
                           : `Requesting ${m.label} (${m.providerLabel}) for our project. ${workspaceName} doesn't hold it today.`,
                       workspaceId,
+                      // Neither this component nor its caller ever holds a
+                      // specific `model_providers` row id — only the catalog
+                      // pair — so the provider/model pair IS the target, for
+                      // both request types raised from this shared row.
+                      providerModel: { provider: m.provider, modelId: m.model_id },
                     }}
                   />
                 </li>
