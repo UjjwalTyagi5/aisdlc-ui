@@ -1014,3 +1014,69 @@ async def test_model_provider_access_refuses_when_ambiguous(org):
     body = decided.json()
     assert body["detail"]["code"] == "EFFECT_UNAVAILABLE", body
     assert "anthropic" in body["detail"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_model_credential_request_selects_model_for_project(org):
+    """Approving must add the requested (provider, model_id) to the project's
+    selection — the same write set_project_selection already performs by hand.
+    Requires the model already reachable to the project's BU (get_bu_allowed) —
+    see model_grants.py's NotAllowedForUnitError for why. Seeded directly as a
+    GLOBAL org_model_grants row (reaches every unit, including this one) —
+    the simplest real precondition, matching set_org_grants's own INSERT
+    shape rather than going through set_bu_grants's specific-visibility path,
+    which this test has no need to exercise.
+
+    model_credential is TIER-ROUTED (absent from routing.TYPE_ROUTED), so a
+    Developer's request lands on their Project Admin directly — one decide
+    call, no escalation.
+
+    A `global` org_model_grants row alone is not enough to make the model
+    reachable: get_bu_allowed (model_grants.py) requires BOTH the curation
+    row AND the provider itself currently granted to the BU via
+    `integration_grants(kind='model_provider')` — the same coupling
+    test_model_grants.py's `_grant_provider` helper exists for. Without this
+    second row the effect correctly refuses with NotAllowedForUnitError,
+    which is not what this test is exercising."""
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO org_model_grants "
+            "  (id, tenant_id, provider, model_id, credential_id, visibility, business_unit_ids, created_by) "
+            "VALUES (gen_random_uuid(), CAST(:t AS uuid), 'openai', 'gpt-4.1', NULL, 'global', '[]', 'seed')"
+        ), {"t": org["org"]})
+        await s.execute(text(
+            "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), 'model_provider', 'openai', CAST(:w AS uuid), 'seed') "
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO NOTHING"
+        ), {"t": org["org"], "w": org["bu"]})
+    dev = f"dev-{_uuid.uuid4()}"
+    await _bind(org, dev, "developer", scope_kind="project", scope_id=org["project"])
+    project_admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    dev_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=dev, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=dev_headers,
+        json={
+            "type": "model_credential", "title": "Need GPT-4.1", "description": "For the design agent.",
+            "priority": "normal", "workspaceId": org["bu"], "projectId": org["project"],
+            "providerModel": {"provider": "openai", "modelId": "gpt-4.1"},
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "project_admin"
+
+    pa_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=project_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=pa_headers,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    from shared.services.model_grants import get_project_selection
+    selection = await get_project_selection(org["org"], org["project"])
+    assert any(e["provider"] == "openai" and e["model_id"] == "gpt-4.1" for e in selection["selected"])

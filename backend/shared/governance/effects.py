@@ -81,7 +81,6 @@ _DECISION_IS_THE_OUTCOME = frozenset(
         "mcp_server",
         "user_onboarding",
         "agent_access",
-        "model_credential",
         "other",
     }
 )
@@ -111,6 +110,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_project_settings_change(db, request)
     if rtype == "model_provider_access":
         return await _apply_model_provider_access(db, request)
+    if rtype == "model_credential":
+        return await _apply_model_credential(db, request)
     if rtype == "connector_access":
         return await _apply_connector_access(db, request)
     if rtype == "cross_bu_assignment":
@@ -528,6 +529,55 @@ async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]
         request["id"], provider, target,
     )
     return f"{provider} activated."
+
+
+async def _apply_model_credential(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Add the requested (provider, model_id) to the project's selection —
+    the exact write set_project_selection already performs when a Project
+    Admin does this by hand (Model Management). Reuses that function rather
+    than reimplementing its reachability checks (NotAllowedForUnitError etc.):
+    a request approved for a model the project's BU never made reachable
+    should fail the same way the manual path does, not silently succeed
+    through a second, looser route.
+    """
+    from shared.services.model_grants import (
+        NotAllowedForUnitError,
+        get_project_selection,
+        set_project_selection,
+    )
+
+    payload = request.get("payload") or {}
+    pm = payload.get("providerModel") or {}
+    provider, model_id = pm.get("provider"), pm.get("modelId")
+    project_id = request.get("projectId")
+
+    if not project_id:
+        raise EffectNotAvailable("model_credential", "This request names no project.")
+    if not provider or not model_id:
+        raise EffectNotAvailable(
+            "model_credential", "This request names no provider or model to select."
+        )
+
+    current = await get_project_selection(request["tenantId"], project_id)
+    already = any(
+        e["provider"] == provider and e["model_id"] == model_id for e in current["selected"]
+    )
+    if already:
+        return f"{provider}/{model_id} was already selected for this project."
+
+    next_selection = [*current["selected"], {"provider": provider, "model_id": model_id}]
+    try:
+        await set_project_selection(
+            request["tenantId"], project_id, next_selection, current.get("defaultKey")
+        )
+    except NotAllowedForUnitError as exc:
+        raise EffectNotAvailable("model_credential", str(exc))
+
+    logger.info(
+        "governance: model_credential applied request=%s project=%s model=%s/%s",
+        request["id"], project_id, provider, model_id,
+    )
+    return f"{provider}/{model_id} selected for this project."
 
 
 async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str:
