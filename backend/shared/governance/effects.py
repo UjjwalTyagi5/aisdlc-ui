@@ -10,11 +10,10 @@ can half-succeed give you a request marked approved over a budget that never mov
 no way to tell from either row which of the two is wrong.
 
 NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request`,
-`connector_access`, `mcp_server`, `user_onboarding`, `agent_access` and `other`, the
-DECISION IS THE OUTCOME — the approver then does the thing by hand on the page that owns
-it, and the request is the record that they were asked and said yes. Wiring a side
-effect onto those would mean this module performing grants it has no business
-performing.
+`user_onboarding`, `agent_access` and `other`, the DECISION IS THE OUTCOME — the
+approver then does the thing by hand on the page that owns it, and the request is the
+record that they were asked and said yes. Wiring a side effect onto those would mean
+this module performing grants it has no business performing.
 
 One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
@@ -74,11 +73,11 @@ _NOT_APPLICABLE = {
 _DECISION_IS_THE_OUTCOME = frozenset(
     {
         "access_request",
-        # `connector_access` used to live here — approving it recorded agreement and
-        # changed nothing, so the requester still had to go and set the grant by hand
-        # and an approved request granted no access at all. It now has a real effect
-        # below, which is what makes approval a gate rather than a note.
-        "mcp_server",
+        # `connector_access` and `mcp_server` used to live here — approving either
+        # recorded agreement and changed nothing, so the requester still had to go and
+        # set the grant by hand and an approved request granted no access at all. Both
+        # now have a real effect below, which is what makes approval a gate rather
+        # than a note.
         "user_onboarding",
         "agent_access",
         "other",
@@ -114,6 +113,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_model_credential(db, request)
     if rtype == "connector_access":
         return await _apply_connector_access(db, request)
+    if rtype == "mcp_server":
+        return await _apply_mcp_server(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
     if rtype.startswith("agent_default_"):
@@ -867,6 +868,87 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
         project_id, kind, target_ref, access,
     )
     return f"{target_ref} set to {label(access)} for this project."
+
+
+async def _apply_mcp_server(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant the MCP server that was asked for to the business unit named on the
+    request — the same write `POST /integrations/access` performs for kind='mcp'
+    (shared/routers/integration_access.py's `grant_integration_access`), found by
+    reading that manual path first (557a86db's own commit message describes MCP
+    servers as "governed identically — granted to units, consumed by projects" to
+    connectors, and confirms it never merged the `mcp_server` request TYPE into
+    `connector_access`; the two stay genuinely distinct end to end — separate
+    `TYPE_ROUTED`/raisable-list entries in routing.py, untouched by that commit here
+    and in governance_requests.py). NOT a thin wrapper around `_apply_connector_access`
+    — the two request types are kept apart at every other layer, and a wrapper here
+    would be the one place they secretly weren't.
+
+    UNIT-LEVEL ONLY, unlike connector_access's two shapes. mcp_server's payload never
+    carries an access level — `governance_requests.create_request` merges `access`
+    into the payload for `connector_access` alone (see its own comment: "connector_
+    access alone also carries an access level"), because there is no per-stage read/
+    write question for an MCP server the way there is for a connector; a project
+    wiring an MCP server to a stage is a `project_settings_change` (the direct
+    `mcpServers` picker on Settings), not this request type. So there is no
+    project_connector_access-shaped second branch to mirror here — a reach grant to
+    the unit is the whole effect.
+
+    ORG-ADMIN GATE, restated here for the same reason `_apply_connector_access`
+    restates it: an approval is a second door into the same write, and
+    `grant_integration_access`'s `_require_org_admin` has no kind-specific carve-out
+    — 'mcp' is checked exactly like 'connector'. Skipping this check would let a
+    request tier-routed to a lower approver (mcp_server is absent from TYPE_ROUTED,
+    same as connector_access) grant a unit something only an Organization Admin may.
+    """
+    payload = request.get("payload") or {}
+    target_ref = (payload.get("targetId") or "").strip()
+    if not target_ref:
+        raise EffectNotAvailable(
+            "mcp_server",
+            "This request doesn't yet name which server — ask the requester to specify "
+            "one, or register it directly.",
+        )
+
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable("mcp_server", "This request names no business unit.")
+
+    decided_by_tier = request.get("currentApproverRole") or ""
+    if decided_by_tier != "org_admin":
+        raise EffectNotAvailable(
+            "mcp_server",
+            "Only an Organization Admin can give a business unit an MCP server. "
+            "Escalate this request rather than approving it here.",
+        )
+
+    tenant_id = request["tenantId"]
+    exists = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM mcp_servers WHERE id = CAST(:s AS uuid) "
+                "  AND tenant_id = CAST(:t AS uuid)"
+            ),
+            {"s": target_ref, "t": tenant_id},
+        )
+    ).first()
+    if exists is None:
+        raise EffectNotAvailable("mcp_server", "That MCP server no longer exists.")
+
+    await db.execute(
+        text(
+            "INSERT INTO integration_grants "
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), 'mcp', :r, CAST(:w AS uuid), :by) "
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+            "  SET granted_by = EXCLUDED.granted_by"
+        ),
+        {
+            "t": tenant_id, "r": target_ref, "w": str(workspace_id),
+            "by": request.get("decidedBy"),
+        },
+    )
+    logger.info("mcp_server approved: unit %s -> mcp %s", workspace_id, target_ref)
+    return "MCP server granted to the business unit."
 
 
 async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) -> str:

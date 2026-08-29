@@ -989,6 +989,67 @@ async def test_connector_access_request_grants_on_approval(org):
     assert row is not None, "connector_access approval did not grant project_connector_access"
 
 
+@pytest.mark.asyncio
+async def test_mcp_server_request_grants_on_approval(org):
+    """Same shape as connector_access's test above: approving must actually grant the
+    server to the business unit, not just record agreement.
+
+    mcp_server's payload never carries an access level — `governance_requests.
+    create_request` merges `access` only for `connector_access` (see its own comment
+    there). And the manual write path this mirrors (`POST /integrations/access`,
+    shared/routers/integration_access.py's `grant_integration_access`) requires an
+    Organization Admin for EVERY kind it accepts, `mcp` included — `_require_org_admin`
+    has no kind-specific carve-out, so an approval taking the same door has to hold to
+    the same rule. That means mcp_server's effect has only the "unit" shape
+    connector_access's effect has two of, and unlike connector_access's dev ->
+    project_admin test above, the approver here has to actually BE org_admin for the
+    grant to apply — raising as a bu_admin lands the approver there directly via tier
+    routing (mcp_server is absent from routing.TYPE_ROUTED, same as connector_access;
+    confirmed in routing.py), with no escalation call needed.
+    """
+    server_id = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO mcp_servers (id, tenant_id, server_name, transport, url, created_by) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), 'Internal Docs', 'streamable_http', "
+            "  'https://mcp.internal.example/docs', 'seed')"
+        ), {"i": server_id, "t": org["org"]})
+
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    org_admin = f"org-{_uuid.uuid4()}"
+    await _bind(org, org_admin, "org_admin", scope_kind="organization", scope_id=org["org"])
+
+    c = TestClient(process_api.app)
+    bu_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=bu_headers,
+        json={
+            "type": "mcp_server", "title": "Internal Docs access", "description": "For runbooks.",
+            "priority": "normal", "workspaceId": org["bu"], "targetId": server_id,
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "org_admin"
+
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=org_headers,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT 1 FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND kind = 'mcp' AND target_ref = :r AND workspace_id = CAST(:w AS uuid)"
+        ), {"t": org["org"], "r": server_id, "w": org["bu"]})).first()
+    assert row is not None, "mcp_server approval did not grant integration_grants"
+
+
 async def _seed_inactive_anthropic_provider(org):
     async with get_db_session_superuser() as s:
         await s.execute(text(
