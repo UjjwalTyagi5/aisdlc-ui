@@ -352,6 +352,56 @@ async def test_a_closed_request_cannot_be_decided_again(org):
 
 
 @pytest.mark.asyncio
+async def test_approval_flips_status_before_applying_the_effect(org, monkeypatch):
+    """The guarded status UPDATE (the one `AlreadyClosed` above depends on) must run
+    BEFORE `apply_on_approve`, not after.
+
+    Most effects write through the same `db` session `decide()` already holds, so
+    statement order within that one transaction cannot change what they persist —
+    nothing commits until the session's own final commit regardless. But
+    `_apply_model_credential` (backend/shared/governance/effects.py) calls
+    `set_project_selection`/`get_project_selection`, which open their OWN session
+    via `get_db_session_for_tenant` and commit independently, right away. If that
+    effect ran BEFORE the guarded UPDATE, a request closed by a second, concurrent
+    `decide()` call could still let this call's model-selection write through even
+    though this call's own status flip loses the race and raises AlreadyClosed —
+    an "effect applied, request never marked approved" half-succeed.
+
+    Proven here without needing genuine concurrency: `apply_on_approve` is spied on
+    to read `governance_requests.status` for this request, in the SAME (still
+    uncommitted) session, right as it is called. That read can only see 'approved'
+    if the guarded UPDATE already ran in this transaction — which is exactly the
+    ordering this test locks in."""
+    alice, bob = f"alice-{_uuid.uuid4()}", f"bob-{_uuid.uuid4()}"
+    req = await _raise(org, initiator=alice, role="developer")
+
+    from shared.services import governance_requests as svc_module
+
+    seen_status_when_effect_ran: list[str | None] = []
+    real_apply_on_approve = svc_module.apply_on_approve
+
+    async def spy_apply_on_approve(db, request):
+        row = (
+            await db.execute(
+                text("SELECT status FROM governance_requests WHERE id = CAST(:i AS uuid)"),
+                {"i": request["id"]},
+            )
+        ).first()
+        seen_status_when_effect_ran.append(row.status if row else None)
+        return await real_apply_on_approve(db, request)
+
+    monkeypatch.setattr(svc_module, "apply_on_approve", spy_apply_on_approve)
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        out = await svc.decide(
+            s, request_id=req["id"], decider_id=bob, decider_name="Bob",
+            decider_role="project_admin", decision="approve",
+        )
+    assert out["status"] == "approved"
+    assert seen_status_when_effect_ran == ["approved"]
+
+
+@pytest.mark.asyncio
 async def test_an_org_admin_cannot_raise_a_request(org):
     async with get_db_session_for_tenant(org["org"]) as s:
         with pytest.raises(GovernanceError) as ei:
@@ -625,6 +675,21 @@ async def test_an_approval_that_cannot_take_effect_is_refused_not_recorded(org):
 
     Recording it would leave the request looking settled while nothing changed, and
     the person who approved it has no reason to go and check.
+
+    `pytest.raises` wraps the WHOLE `async with get_db_session_for_tenant(...)`
+    block here, deliberately — not just the `decide()` call. `decide()`'s guarded
+    status UPDATE now runs before `apply_on_approve` (see the ordering comment in
+    governance_requests.py), so by the time the effect raises EffectUnavailable for
+    this budget request, the UPDATE has already executed, uncommitted, in this same
+    transaction. The only thing that undoes it is the session's own except-rollback
+    in `get_db_session_for_tenant` — which fires only if the exception actually
+    propagates OUT of the `async with` block, exactly as it does through the real
+    FastAPI route (`shared/routers/governance_requests.py`'s `except GovernanceError
+    as exc: raise _http(exc)` re-raises into the `Depends(get_db_session)` generator).
+    Catching the exception INSIDE the `async with` (the previous shape of this test)
+    would let `pytest.raises` swallow it before the session ever sees a failure,
+    so the block would exit normally and COMMIT the status flip the effect never
+    approved — silently defeating the exact guarantee this test's docstring claims.
     """
     pa, ozzy = f"pa-{_uuid.uuid4()}", f"ozzy-{_uuid.uuid4()}"
     async with get_db_session_for_tenant(org["org"]) as s:
@@ -634,8 +699,8 @@ async def test_an_approval_that_cannot_take_effect_is_refused_not_recorded(org):
             title="More headroom please", description="No figure attached",
             workspace_id=org["bu"],
         )
-    async with get_db_session_for_tenant(org["org"]) as s:
-        with pytest.raises(EffectUnavailable):
+    with pytest.raises(EffectUnavailable):
+        async with get_db_session_for_tenant(org["org"]) as s:
             await svc.decide(
                 s, request_id=req["id"], decider_id=ozzy, decider_name="Ozzy",
                 decider_role="bu_admin", decision="approve",

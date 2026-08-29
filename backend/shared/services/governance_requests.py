@@ -704,18 +704,23 @@ async def decide(
                 code="EFFECT_UNAVAILABLE",
             )
 
-    if decision == "approve":
-        try:
-            effect_note = await apply_on_approve(db, request)
-        except EffectNotAvailable as exc:
-            raise EffectUnavailable(exc.detail, code="EFFECT_UNAVAILABLE")
-    else:
-        effect_note = await apply_on_reject(db, request)
-
     status = "approved" if decision == "approve" else "rejected"
     # Guarded on status in the UPDATE as well as checked above: two approvers
     # acting at the same instant both pass the read, and only one should win. The
     # row count tells us which.
+    #
+    # THIS RUNS BEFORE apply_on_approve/apply_on_reject, DELIBERATELY. Most effects
+    # write through this same `db` session and so are atomic with this UPDATE
+    # regardless of statement order (nothing commits until the outer session's
+    # final commit). But some effects — model_credential's `_apply_model_credential`
+    # is the first — call into services (`shared/services/model_grants.py`) that open
+    # their OWN session and commit independently of this transaction. For those, if
+    # the effect ran BEFORE this guarded UPDATE, a request already closed by a
+    # concurrent decide() would still let the effect's independent commit through
+    # even though this decision's own status flip gets rejected by AlreadyClosed
+    # below — an "effect applied, request never marked approved" half-succeed.
+    # Running the guard first closes that race: AlreadyClosed fires before any
+    # effect — independently-committing or not — ever runs.
     result = await db.execute(
         text(
             "UPDATE governance_requests SET status = :s, decided_by = :by, decided_at = :at, "
@@ -733,6 +738,19 @@ async def decide(
     )
     if not result.rowcount:
         raise AlreadyClosed("This request was decided by someone else first.")
+
+    # A failed effect must still leave the request untouched: this UPDATE has run
+    # but not committed (one transaction, per get_db_session), so an exception
+    # raised out of decide() from here rolls it back along with everything else —
+    # see get_db_session's except-rollback. Do not move this UPDATE outside the
+    # transaction the effect runs in, and do not commit early.
+    if decision == "approve":
+        try:
+            effect_note = await apply_on_approve(db, request)
+        except EffectNotAvailable as exc:
+            raise EffectUnavailable(exc.detail, code="EFFECT_UNAVAILABLE")
+    else:
+        effect_note = await apply_on_reject(db, request)
 
     await _emit(
         db,
