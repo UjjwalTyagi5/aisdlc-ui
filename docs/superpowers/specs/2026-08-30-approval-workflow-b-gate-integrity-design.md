@@ -91,27 +91,55 @@ async def decider_covers_scope(
     if role == "org_admin":
         return True
     if role == "bu_admin":
-        scope_kind, scope_id = "business_unit", request.get("workspaceId")
-    else:
-        # project_admin, or any AGENT_OWNER_ROLE delivery role deciding agent_access
-        # stage two — every non-bu_admin, non-org_admin approver role this system has
-        # is project-scoped.
-        scope_kind, scope_id = "project", request.get("projectId")
-    if not scope_id:
+        row = (
+            await db.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    "  AND rb.role_name = 'bu_admin' AND rb.scope_kind = 'business_unit' "
+                    "  AND rb.scope_id = CAST(:sid AS uuid)"
+                ),
+                {"u": decider_id, "sid": request.get("workspaceId"), "now": datetime.now(tz=timezone.utc)},
+            )
+        ).first()
+        return row is not None
+    # project_admin, or any AGENT_OWNER_ROLE delivery role deciding agent_access
+    # stage two — every non-bu_admin, non-org_admin approver role this system has
+    # is project-scoped, EXCEPT when the request itself names no project at all.
+    # `user_onboarding` is the one type that reaches this: create_request() requires
+    # workspace_id but leaves project_id genuinely optional, and a Developer-raised
+    # user_onboarding request (raisable per _CONTRIBUTOR_RAISABLE) tier-routes to
+    # project_admin first with no project named — onboarding doesn't need one.
+    # A hard "no project_id -> refuse" rule would make that request permanently
+    # undecidable, a real regression this fix must not cause. Falls back to ANY
+    # project_admin binding within the request's own business unit instead — still
+    # strictly narrower than today's fully-unscoped check (rules out every OTHER
+    # business unit), and the closest available proxy for "administratively close to
+    # this request" when no single project is named.
+    project_id = request.get("projectId")
+    if project_id:
+        row = (
+            await db.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    "  AND rb.role_name = :role AND rb.scope_kind = 'project' "
+                    "  AND rb.scope_id = CAST(:sid AS uuid)"
+                ),
+                {"u": decider_id, "role": role, "sid": project_id, "now": datetime.now(tz=timezone.utc)},
+            )
+        ).first()
+        return row is not None
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
         return False
     row = (
         await db.execute(
             text(
-                f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
-                "  AND rb.role_name = :role AND rb.scope_kind = :sk AND rb.scope_id = CAST(:sid AS uuid)"
+                f"SELECT 1 FROM role_bindings rb "
+                "  JOIN projects p ON p.id = rb.scope_id AND rb.scope_kind = 'project' "
+                f"WHERE {live_binding()} AND rb.role_name = :role "
+                "  AND p.workspace_id = CAST(:wid AS uuid)"
             ),
-            {
-                "u": decider_id,
-                "role": role,
-                "sk": scope_kind,
-                "sid": scope_id,
-                "now": datetime.now(tz=timezone.utc),
-            },
+            {"u": decider_id, "role": role, "wid": workspace_id, "now": datetime.now(tz=timezone.utc)},
         )
     ).first()
     return row is not None
@@ -168,6 +196,11 @@ here.
   legitimate decisions.
 - A test confirming `org_admin` remains unscoped (an org_admin with no specific project/
   workspace binding at all can still decide anything routed to `org_admin`).
+- A test covering the project-less fallback: a `user_onboarding` request raised by a
+  contributor/developer with no `projectId` (tier-routed to `project_admin` first) is
+  decidable by a project_admin bound to SOME project inside the request's own business
+  unit, and still refused for a project_admin bound only to projects in a DIFFERENT
+  business unit — proving the fallback is genuinely scoped, not a silent pass-through.
 
 **Out of scope, explicitly:**
 - The `_STANDING`/"highest standing wins" collapsing behavior in `effective_platform_role()`
@@ -191,5 +224,12 @@ The new check can only make `decide()` MORE restrictive than today — it adds a
 `AND`-ed condition on top of the existing role-name check, never grants access the current
 code refuses. The only failure mode to guard against in testing is a false negative: a
 genuinely correct decider (the request's own project's Project Admin, its own workspace's
-BU Admin, org_admin) being wrongly refused. Section 7's third bullet test exists
+BU Admin, org_admin) being wrongly refused. Section 7's third and fifth bullets exist
 specifically to catch this before it ships.
+
+The project-less fallback (§4) is coarser than the exact-project match — "any
+project_admin in this business unit" rather than "this one project's admin" — because no
+single project exists to name. This is a deliberate, narrower-than-today middle ground
+for the one case (a project-less `user_onboarding` reaching `project_admin`) that genuinely
+has no more specific scope available, not a general escape hatch: every other case still
+gets the exact-project match.
