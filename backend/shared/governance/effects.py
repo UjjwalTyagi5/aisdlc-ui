@@ -9,11 +9,17 @@ APPLIED IN THE SAME TRANSACTION as the status change, deliberately. Two statemen
 can half-succeed give you a request marked approved over a budget that never moved, and
 no way to tell from either row which of the two is wrong.
 
-NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request`,
-`user_onboarding` and `other`, the DECISION IS THE OUTCOME — the approver then does
-the thing by hand on the page that owns it, and the request is the record that they
-were asked and said yes. Wiring a side effect onto those would mean this module
-performing grants it has no business performing.
+NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request` and
+`other`, the DECISION IS THE OUTCOME — the approver then does the thing by hand on
+the page that owns it, and the request is the record that they were asked and said
+yes. Wiring a side effect onto those would mean this module performing grants it
+has no business performing.
+
+`user_onboarding` used to be a third: approving recorded agreement and admitted
+nobody, so an Organization Admin who approved a request still had to go and
+onboard the person by hand from Users. See `_apply_user_onboarding` below — it
+reuses `_onboard_person` (shared/routers/onboarding.py), the exact three-act body
+`POST /onboarding` already performs, rather than a second copy of it.
 
 `agent_access` used to be a fourth: approving recorded agreement and granted nothing,
 so the requester still had to be given the extra agent by hand. See
@@ -78,12 +84,11 @@ _NOT_APPLICABLE = {
 _DECISION_IS_THE_OUTCOME = frozenset(
     {
         "access_request",
-        # `connector_access` and `mcp_server` used to live here — approving either
-        # recorded agreement and changed nothing, so the requester still had to go and
-        # set the grant by hand and an approved request granted no access at all. Both
-        # now have a real effect below, which is what makes approval a gate rather
-        # than a note.
-        "user_onboarding",
+        # `connector_access`, `mcp_server` and `user_onboarding` used to live here —
+        # approving each recorded agreement and changed nothing, so the requester
+        # still had to go and set the grant by hand and an approved request granted
+        # no access at all. All three now have a real effect below, which is what
+        # makes approval a gate rather than a note.
         "other",
     }
 )
@@ -123,6 +128,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_agent_access(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
+    if rtype == "user_onboarding":
+        return await _apply_user_onboarding(db, request)
     if rtype.startswith("agent_default_"):
         return await _apply_agent_default(db, request)
 
@@ -1079,3 +1086,70 @@ async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) 
         user_id, project_id, role_name, parent_workspace_id,
     )
     return f"{email} joined as {role_name}, on loan from their business unit."
+
+
+async def _apply_user_onboarding(db: AsyncSession, request: dict[str, Any]) -> str | None:
+    """Onboard the person the request named — the exact three acts
+    `POST /onboarding` already performs (idempotent account, business-unit
+    placement, a `role_assignment` sub-request for the unit's admin), reused
+    via `_onboard_person` (shared/routers/onboarding.py) rather than
+    duplicated.
+
+    ORG-ADMIN ONLY, regardless of who technically holds `currentApproverRole`
+    at this decision — `onboarding.py`'s own module docstring is explicit that
+    `POST /onboarding` is "the Organization Admin's half of the handover", and
+    a Project or BU Admin approver genuinely lacks the standing to create an
+    account. `user_onboarding` is tier-routed rather than type-routed (absent
+    from `routing.TYPE_ROUTED`), so a request raised below `org_admin` is
+    decided by a Project Admin or BU Admin first and CAN close there without
+    ever reaching this tier. Same shape as `_apply_connector_access` and
+    `_apply_mcp_server`'s identical unit-tier guards: below `org_admin` this
+    records agreement only (as it always did, before this type had an effect)
+    until the request actually escalates that far.
+
+    Always onboards as `contributor` into `request["workspaceId"]` — never a
+    caller-supplied role. `user_onboarding`'s payload only ever carries an
+    email (see `RaiseRequestPrefill.onboardEmail`, `RequestCreateInput`); the
+    two-answer choice `POST /onboarding` itself offers (Business Unit Admin or
+    Contributor) is deliberately not something a requester picks for someone
+    else — an Organization Admin who wants to appoint a co-admin still does
+    that directly, from Users.
+
+    NOT authorization-checked the way `POST /onboarding` is: `_onboard_person`
+    performs no `is_org_wide`/`assert_can_grant_role` call (both read a live
+    HTTP request's session, which a governance decision has none of). This
+    effect's own `currentApproverRole == "org_admin"` check IS this path's
+    standing check, the same way `_apply_connector_access`'s and
+    `_apply_mcp_server`'s `decided_by_tier` checks are theirs.
+    """
+    payload = request.get("payload") or {}
+    email = payload.get("onboardEmail")
+    if not email:
+        raise EffectNotAvailable("user_onboarding", "This request names no email to onboard.")
+
+    if request.get("currentApproverRole") != "org_admin":
+        # Decision-is-the-outcome until the request reaches the tier that can
+        # actually admit someone — see the docstring above.
+        return None
+
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable(
+            "user_onboarding", "This request names no business unit to place them in."
+        )
+
+    from shared.routers.onboarding import _onboard_person  # noqa: PLC0415
+
+    result = await _onboard_person(
+        db,
+        tenant_id=request["tenantId"],
+        email=email,
+        display_name=None,
+        workspace_id=workspace_id,
+        role="contributor",
+        actor_id=request.get("decidedBy"),
+    )
+    logger.info(
+        "governance: user_onboarding applied request=%s email=%s", request["id"], email
+    )
+    return f"{result['email']} onboarded to this business unit."

@@ -1281,3 +1281,44 @@ async def test_model_credential_request_selects_model_for_project(org):
     from shared.services.model_grants import get_project_selection
     selection = await get_project_selection(org["org"], org["project"])
     assert any(e["provider"] == "openai" and e["model_id"] == "gpt-4.1" for e in selection["selected"])
+
+
+@pytest.mark.asyncio
+async def test_user_onboarding_request_onboards_on_org_admin_approval(org):
+    """A BU Admin's ask routes DIRECTLY to Org Admin — user_onboarding is
+    tier-routed (absent from routing.TYPE_ROUTED), and next_approver_role for
+    a bu_admin requester is org_admin, one hop, no escalation needed. Chosen
+    over a Developer/Contributor raiser specifically to keep this test to a
+    single decide call; a lower-tier raiser's multi-hop path to org_admin is
+    covered by Task 1's live baseline trace instead, not duplicated here."""
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    org_admin = f"org-{_uuid.uuid4()}"
+    await _bind(org, org_admin, "org_admin", scope_kind="organization", scope_id=org["org"])
+
+    c = TestClient(process_api.app)
+    bu_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "member:manage"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=bu_headers,
+        json={
+            "type": "user_onboarding", "title": "Onboard a new contributor",
+            "description": "We need another QA on this project.", "priority": "normal",
+            "workspaceId": org["bu"], "onboardEmail": "new.qa@example.com",
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "org_admin"
+
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=org_headers,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text("SELECT id FROM users WHERE email = 'new.qa@example.com'"))).first()
+    assert row is not None

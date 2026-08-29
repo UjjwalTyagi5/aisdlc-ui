@@ -125,35 +125,81 @@ async def onboard(
     # confer a Business Unit Admin's permissions without holding them.
     await assert_can_grant_role(db, request, body.role)
 
+    return await _onboard_person(
+        db,
+        tenant_id=tenant_id,
+        email=str(body.email),
+        display_name=body.displayName,
+        workspace_id=body.workspaceId,
+        role=body.role,
+        actor_id=getattr(request.state, "user_id", None),
+    )
+
+
+async def _onboard_person(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    email: str,
+    display_name: Optional[str],
+    workspace_id: Optional[str],
+    role: str,
+    actor_id: Optional[str],
+) -> dict[str, Any]:
+    """The three acts the module docstring's "THREE ACTS, ONE TRANSACTION" describes
+    — extracted so a second caller (the `user_onboarding` governance effect,
+    approved by an Organization Admin) can perform the exact same admission
+    rather than a second, looser copy of it.
+
+    NOT the authority check. `is_org_wide` and `assert_can_grant_role` stay in
+    `onboard()` above, because both read the live caller's session
+    (`request.state`) and have no meaning for a governance decision, whose
+    "caller" is whoever approved the request — that decision's own standing is
+    verified by the effect that calls this (`currentApproverRole == "org_admin"`,
+    the same standing this route requires via `is_org_wide`), not by re-deriving
+    a permission set here. `role not in ORG_ASSIGNABLE` also stays in the route:
+    it is what keeps an Organization Admin's own picker to two answers, and the
+    effect's only caller (`_apply_user_onboarding`) never passes anything else.
+
+    THREE SEPARATE TRANSACTION BOUNDARIES, preserved exactly as they already were
+    in `onboard()` before this extraction — not a new atomicity concern this
+    function introduces. Act 1 uses `get_db_session_superuser()` because `users`
+    is a global, non-RLS table; act 2's `grant_role()` opens its own independent
+    session internally; only act 3 (the `role_assignment` sub-request and its
+    notification) runs on the passed-in `db`. A real Organization Admin onboarding
+    someone directly already had this shape — a failure between acts already left
+    the same partial states it always could — and reaching the same body through
+    one more entry point does not change that.
+    """
     # A contributor with no unit belongs to nobody: no admin is prompted for their
     # role, so they would sit with no access and nothing to explain why.
-    if body.role == "contributor" and not body.workspaceId:
+    if role == "contributor" and not workspace_id:
         raise _invalid(
             "invalid_input",
             "A Contributor needs a business unit — its admin is who gives them a role.",
         )
 
     workspace = None
-    if body.workspaceId:
+    if workspace_id:
         workspace = (
             await db.execute(
                 text(
                     "SELECT id, display_name FROM workspaces "
                     "WHERE id = CAST(:w AS uuid) AND organization_id = CAST(:t AS uuid)"
                 ),
-                {"w": body.workspaceId, "t": tenant_id},
+                {"w": workspace_id, "t": tenant_id},
             )
         ).first()
         if workspace is None:
             raise HTTPException(status_code=404, detail="not found")
 
-    email = str(body.email).lower()
+    email = email.lower()
     # The name the dialog shows in its confirmation toast. Taken from what the admin
     # typed when they typed one, derived from the local part otherwise — deriving it
     # here rather than in the client keeps one answer to "what is this person called"
     # for the toast, the roster and the notification body.
-    display_name = (body.displayName or "").strip() or _name_from_email(email)
-    initials = _initials(display_name)
+    resolved_name = (display_name or "").strip() or _name_from_email(email)
+    initials = _initials(resolved_name)
 
     # ── 1. the account ───────────────────────────────────────────────────────
     # `users` is a global table with no RLS, so it is written on the superuser
@@ -197,9 +243,9 @@ async def onboard(
     if workspace is not None:
         try:
             await grant_role(
-                user_id, str(workspace.id), body.role,
+                user_id, str(workspace.id), role,
                 tenant_id=tenant_id, scope_kind="business_unit",
-                granted_by=getattr(request.state, "user_id", None),
+                granted_by=actor_id,
             )
         except UnitAlreadyAdministeredError as exc:
             # 409, not 422: the request is well-formed and would be valid against a unit
@@ -217,13 +263,13 @@ async def onboard(
     # this very act; a Contributor was given a home and still needs one.
     request_id = None
     notified_bu_admin = False
-    if body.role == "contributor" and workspace is not None:
-        name = display_name
+    if role == "contributor" and workspace is not None:
+        name = resolved_name
         try:
             raised = await governance.create_request(
                 db,
                 tenant_id=tenant_id,
-                initiator_id=getattr(request.state, "user_id", "") or "",
+                initiator_id=actor_id or "",
                 initiator_name="Organization Admin",
                 initiator_role="org_admin",
                 request_type="role_assignment",
@@ -306,7 +352,7 @@ async def onboard(
 
     logger.info(
         "onboarded %s as %s into %s (created=%s, invited=%s)",
-        email, body.role, body.workspaceId, created, invited,
+        email, role, workspace_id, created, invited,
     )
     # THE KEYS ARE THE FRONTEND'S, not this router's. `OnboardingResult` in
     # frontend/lib/schemas/onboarding.ts was written against the mock and never matched
@@ -321,10 +367,10 @@ async def onboard(
     return {
         "identityId": user_id,
         "email": email,
-        "displayName": display_name,
+        "displayName": resolved_name,
         "initials": initials,
         "workspaceId": str(workspace.id) if workspace is not None else None,
-        "role": body.role,
+        "role": role,
         # Null with no unit: there is no membership to have a status, and saying
         # "invited" would name one that does not exist.
         "membershipStatus": "invited" if workspace is not None else None,
