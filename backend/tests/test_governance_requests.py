@@ -805,3 +805,58 @@ async def test_raisable_types_matches_what_create_will_accept(org):
     assert r.json()["canRaise"] is True
     assert "budget_increase" not in r.json()["types"]
     assert "agent_access" in r.json()["types"]
+
+
+@pytest.mark.asyncio
+async def test_connector_access_request_carries_target_id(org):
+    """A client-raised connector_access request must record WHICH connector
+    it's about — without this, _apply_connector_access can never find a
+    target to grant (the bug this plan exists to fix)."""
+    dev = f"dev-{_uuid.uuid4()}"
+    await _bind(org, dev, "developer", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=dev, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    r = c.post(
+        "/governance-approvals", headers=headers,
+        json={
+            "type": "connector_access", "title": "Slack access",
+            "description": "Need it for the release channel.", "priority": "normal",
+            "workspaceId": org["bu"], "projectId": org["project"],
+            "targetId": "slack",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["payload"]["targetId"] == "slack"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_access_request_carries_provider_kind(org):
+    """A client-raised model_provider_access request must record WHICH
+    provider kind it's about. NOTE: this type does NOT carry a specific
+    model_providers row id — the UI that raises it (model-availability-card.tsx)
+    only ever has a (provider, model_id) pair in scope, never a connection's
+    row id (that id is knowable only from Model Management's admin view, which
+    a BU Admin raising this request is not looking at). The effect (Task 5)
+    resolves the real row server-side, by provider kind, at decide time —
+    this is a genuine design correction from the plan's first draft, which
+    incorrectly assumed a row id was available here."""
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+
+    c = TestClient(process_api.app)
+    headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "model:manage"],
+    )}
+    r = c.post(
+        "/governance-approvals", headers=headers,
+        json={
+            "type": "model_provider_access", "title": "Onboard Anthropic",
+            "description": "Need Claude for the security agent.", "priority": "normal",
+            "workspaceId": org["bu"], "providerModel": {"provider": "anthropic", "modelId": "claude-sonnet-5"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["payload"]["providerModel"]["provider"] == "anthropic"

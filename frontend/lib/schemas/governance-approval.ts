@@ -303,6 +303,20 @@ export const RequestCreateInput = z.object({
    * docblock above guards; a client naming its own ask is just the ask.
    */
   phase: Phase.optional(),
+  /**
+   * WHAT is being asked for, when the type needs one — a connector kind, an
+   * MCP server row id, or a model provider id. Same content-not-routing rule
+   * as `phase`.
+   */
+  targetId: z.string().max(255).optional(),
+  /** connector_access's access level (read/write/read_write) — only
+   *  meaningful alongside targetId for this one type. */
+  accessLevel: z.string().max(16).optional(),
+  /** model_credential's target: a project's ask needs both a provider and a
+   *  model id. */
+  providerModel: z.object({ provider: z.string(), modelId: z.string() }).optional(),
+  /** user_onboarding's target: who is being asked about. */
+  onboardEmail: z.string().email().optional(),
 });
 export type RequestCreateInput = z.infer<typeof RequestCreateInput>;
 

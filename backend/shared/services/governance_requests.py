@@ -316,6 +316,14 @@ async def create_request(
     target_ref: Optional[str] = None,
     payload: Optional[dict[str, Any]] = None,
     system_raised: bool = False,
+    # New: the client-supplied target, for the types that need one. Distinct
+    # from `target_ref` above (which system-raised callers pass directly) —
+    # this is the client-facing counterpart, folded into target_ref/payload
+    # below exactly like `phase` already is.
+    target_id: Optional[str] = None,
+    access_level: Optional[str] = None,
+    provider_model: Optional[dict[str, str]] = None,
+    onboard_email: Optional[str] = None,
 ) -> dict[str, Any]:
     """Raise a request and route it.
 
@@ -379,6 +387,26 @@ async def create_request(
         stage = "project_admin"
         approver = routing.agent_access_approver(stage, phase or "")
         payload = {**(payload or {}), "phase": phase} if phase else payload
+
+    # connector_access and mcp_server read payload.targetId (see
+    # _apply_connector_access) — merged the same way phase is, never a raw
+    # passthrough.
+    if target_id and request_type in ("connector_access", "mcp_server"):
+        payload = {**(payload or {}), "targetId": target_id}
+    # connector_access alone also carries an access level — _apply_
+    # connector_access's project-tier branch reads payload["access"].
+    if access_level and request_type == "connector_access":
+        payload = {**(payload or {}), "access": access_level}
+    # model_credential AND model_provider_access both carry a (provider,
+    # model_id) pair — never a model_providers row id. Neither the project
+    # Model Management view nor the BU availability card ever has a specific
+    # connection's row id in scope (see plan Task 3's corrected design note);
+    # model_provider_access's effect resolves the real row server-side, by
+    # provider kind, at decide time.
+    if provider_model and request_type in ("model_credential", "model_provider_access"):
+        payload = {**(payload or {}), "providerModel": provider_model}
+    if onboard_email and request_type == "user_onboarding":
+        payload = {**(payload or {}), "onboardEmail": onboard_email}
 
     if approver is None:
         raise GovernanceError(

@@ -90,6 +90,14 @@ export interface RaiseRequestPrefill {
   description?: string;
   workspaceId?: string;
   projectId?: string;
+  /** connector_access / mcp_server: which connector or server this is about. */
+  targetId?: string;
+  /** connector_access: the access level being asked for. */
+  accessLevel?: string;
+  /** model_credential / model_provider_access: the (provider, model) pair. */
+  providerModel?: { provider: string; modelId: string };
+  /** user_onboarding: who is being asked about. */
+  onboardEmail?: string;
 }
 
 export function RaiseRequestDialog({
@@ -127,6 +135,15 @@ export function RaiseRequestDialog({
   const [workspaceId, setWorkspaceId] = React.useState<string>("");
   const [projectId, setProjectId] = React.useState<string>("none");
   const [attachments, setAttachments] = React.useState<RequestAttachment[]>([]);
+  // WHAT the request is about, when the seeded type needs one. There is no
+  // form control for these yet (that's tasks 3-4) — they only ever arrive
+  // via `prefill`, seeded below alongside workspaceId/projectId.
+  const [targetId, setTargetId] = React.useState<string | undefined>(undefined);
+  const [accessLevel, setAccessLevel] = React.useState<string | undefined>(undefined);
+  const [providerModel, setProviderModel] = React.useState<
+    { provider: string; modelId: string } | undefined
+  >(undefined);
+  const [onboardEmail, setOnboardEmail] = React.useState<string | undefined>(undefined);
   const [error, setError] = React.useState<string | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
@@ -148,6 +165,10 @@ export function RaiseRequestDialog({
     setDescription(seeded.description ?? "");
     if (seeded.workspaceId) setWorkspaceId(seeded.workspaceId);
     if (seeded.projectId) setProjectId(seeded.projectId);
+    if (seeded.targetId) setTargetId(seeded.targetId);
+    if (seeded.accessLevel) setAccessLevel(seeded.accessLevel);
+    if (seeded.providerModel) setProviderModel(seeded.providerModel);
+    if (seeded.onboardEmail) setOnboardEmail(seeded.onboardEmail);
     // Keyed on the prefill's identity so reopening for a different subject
     // reseeds, while typing inside an open dialog is never overwritten.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -168,6 +189,10 @@ export function RaiseRequestDialog({
     setPriority("normal");
     setProjectId("none");
     setAttachments([]);
+    setTargetId(undefined);
+    setAccessLevel(undefined);
+    setProviderModel(undefined);
+    setOnboardEmail(undefined);
     setError(null);
     // Intentionally keyed on `open` alone: this resets a CLOSED dialog, and
     // adding `raisable` would re-run it mid-edit whenever the memo re-created
@@ -201,6 +226,10 @@ export function RaiseRequestDialog({
         workspaceId,
         projectId: projectId === "none" ? null : projectId,
         attachments,
+        targetId,
+        accessLevel,
+        providerModel,
+        onboardEmail,
       }),
     onSuccess: (created) => {
       toast.success("Request raised", {
@@ -224,6 +253,10 @@ export function RaiseRequestDialog({
       workspaceId,
       projectId: projectId === "none" ? null : projectId,
       attachments,
+      targetId,
+      accessLevel,
+      providerModel,
+      onboardEmail,
     });
     // Validate against the same schema the endpoint uses, so the message a
     // person sees is the one the server would have produced.
