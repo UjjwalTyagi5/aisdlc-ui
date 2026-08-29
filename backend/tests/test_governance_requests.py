@@ -905,6 +905,40 @@ async def test_connector_access_request_carries_target_id(org):
 
 
 @pytest.mark.asyncio
+async def test_connector_access_defaults_to_the_connectors_real_access_level(org):
+    """Final whole-branch review, Important #1: the Integrations page used to
+    hardcode `accessLevel: "read"` on every request, which made Slack and MS
+    Teams — write-only connectors — permanently un-approvable: the raise
+    succeeded, but _apply_connector_access's manifest check refused "read" at
+    decide time, an approved-looking request that could never actually take
+    effect (this plan's exact thesis failure, through a new door).
+
+    The frontend now sends no accessLevel at all for a fresh ask (matching
+    this test); create_request must fill in the connector's own real default
+    via default_access_for, not a flat "read"."""
+    dev = f"dev-{_uuid.uuid4()}"
+    await _bind(org, dev, "developer", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=dev, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    r = c.post(
+        "/governance-approvals", headers=headers,
+        json={
+            "type": "connector_access", "title": "Slack access",
+            "description": "Need it for the release channel.", "priority": "normal",
+            "workspaceId": org["bu"], "projectId": org["project"],
+            "targetId": "slack",
+        },
+    )
+    assert r.status_code == 201, r.text
+    # Slack declares write-only capabilities (connector_capabilities.py) — a flat
+    # "read" default is exactly the bug this test guards against.
+    assert r.json()["payload"]["access"] == "write"
+
+
+@pytest.mark.asyncio
 async def test_model_provider_access_request_carries_provider_kind(org):
     """A client-raised model_provider_access request must record WHICH
     provider kind it's about. NOTE: this type does NOT carry a specific

@@ -511,11 +511,13 @@ export default function IntegrationsPage() {
                   title: `${KIND_LABEL[c.kind]} access`,
                   description: `Requesting ${KIND_LABEL[c.kind]} for our work. It isn't granted to us today.`,
                   targetId: c.kind,
-                  // Least privilege for a fresh ask — matches DEFAULT_ACCESS in
-                  // backend/shared/authz/connector_access.py. The picker this
-                  // seeds has no level control of its own yet (Task 7 applies
-                  // the effect), so a sensible default beats leaving it unset.
-                  accessLevel: "read",
+                  // No level picker here yet, and NOT hardcoded to "read" — Slack
+                  // and MS Teams are write-only, so a flat "read" default made
+                  // their requests un-approvable (the manifest check in
+                  // _apply_connector_access refuses a level the connector can't
+                  // honour). Omitted deliberately: the backend fills in the
+                  // connector's own real default via default_access_for(kind) at
+                  // raise time, in shared/services/governance_requests.py.
                 }}
               />
             ))}

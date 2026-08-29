@@ -115,8 +115,17 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # an agent_access request on that phase. Scoped by decide()'s own
         # decider_role != currentApproverRole check — routing.py never routes any
         # OTHER request type's currentApproverRole to a delivery role, so this does
-        # not let ba decide anything beyond its own agent's stage-two requests.
+        # not let ba decide anything OTHER THAN an agent_access stage-two request.
         # See test_agent_access_stage_two_owner_roles_hold_governance_decide.
+        #
+        # NOT project-scoped, though: decide()'s check compares role NAMES only
+        # (`decider_role != request["currentApproverRole"]`), with no comparison
+        # against the request's projectId. Any `ba` bound anywhere in the tenant
+        # can decide any requirements-phase agent_access stage two, including on a
+        # project they hold nothing on — the same class of gap as
+        # cross_bu_assignment's wrong-unit-admin bypass (see
+        # backend/.superpowers-findings/2026-08-29-request-type-baseline-audit.md,
+        # Finding 5), parked for sub-project B ("gate integrity hardening").
         "governance:decide",
     ],
     "architect": [

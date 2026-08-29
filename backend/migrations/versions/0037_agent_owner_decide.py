@@ -24,10 +24,22 @@ SAFE TO GRANT BROADLY, not a platform-wide widening: `agent_access` stage two is
 the ONLY place any of these six roles is ever `currentApproverRole` —
 `GOVERNANCE_APPROVER_ROLE`/`REQUEST_ESCALATION_CHAIN` are exhaustively
 {project_admin, bu_admin, org_admin} for every other request type. decide()'s
-existing role-match check narrows the grant to exactly the requests actually
-routed to each role, so holding `governance:decide` does not let a delivery role
-decide anyone else's request. See
+existing role-match check narrows the grant to exactly the requests of the type
+actually routed to each role — a `bu_admin` holding this permission cannot use it
+to decide a `budget_increase` or any other type. See
 tests/test_enterprise_rbac_catalog.py::test_agent_access_stage_two_owner_roles_hold_governance_decide.
+
+NOT project-scoped, though (final whole-branch review, sub-project A, Important
+#2): decide()'s check (`decider_role != request["currentApproverRole"]`) compares
+role NAMES only, with no comparison against the request's `projectId`. Any
+`architect` bound anywhere in the tenant can decide any design/development/
+review-phase stage two, including on a project they hold nothing on — not
+"anyone else's request" in the narrow type sense this migration closes, but a
+real cross-project authorization gap in the wider sense. Same shape as
+`cross_bu_assignment`'s wrong-unit-admin bypass (already parked, see
+backend/.superpowers-findings/2026-08-29-request-type-baseline-audit.md,
+Finding 5); this migration adds a second lane through the same underlying gap
+and both are parked for sub-project B ("gate integrity hardening").
 
 WHY A MIGRATION. Same reasoning as 0019: `role_permissions` is code-owned and
 reconciled from `_ROLE_PERMISSIONS` on boot, but `assert_rbac_catalog` verifies

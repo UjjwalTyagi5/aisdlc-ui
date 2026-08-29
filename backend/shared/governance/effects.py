@@ -7,7 +7,27 @@ the failure mode most likely to go unnoticed: everyone believes it was handled.
 
 APPLIED IN THE SAME TRANSACTION as the status change, deliberately. Two statements that
 can half-succeed give you a request marked approved over a budget that never moved, and
-no way to tell from either row which of the two is wrong.
+no way to tell from either row which of the two is wrong. `decide()` also runs its
+status UPDATE (with its own AlreadyClosed optimistic-concurrency guard) BEFORE calling
+into this module, so a request a concurrent decision already closed never reaches an
+effect at all — closing the most likely way to hit the half-succeed above.
+
+TWO EFFECTS ARE A DOCUMENTED EXCEPTION to "same transaction": `_apply_model_credential`
+and `_apply_user_onboarding` both call into pre-existing service functions
+(`model_grants.py`'s `set_project_selection`/`get_project_selection`;
+`onboarding.py`'s `_onboard_person`) that open and commit their own independent
+sessions rather than using the `db` passed into the effect. This was a real Critical
+finding for the first of the two (`_apply_model_credential` was new code introduced
+here); for the second, `_onboard_person`'s multi-session shape is pre-existing,
+already-shipped behavior on the direct `POST /onboarding` route, not something this
+effect introduces. The `decide()` reorder above still closes the concurrent-decision
+race for both. The residual, accepted risk it does NOT close: an exception raised
+AFTER one of these two effects' independent commit but before the outer transaction's
+own commit (e.g. a failure in the notification/audit code that runs after
+`apply_on_approve` returns) can leave the effect's write durably applied while the
+request's own status change rolls back. Any NEW effect added to this file should write
+only through the passed-in `db` session — do not add a third exception without a
+reason as carefully argued as these two.
 
 NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request` and
 `other`, the DECISION IS THE OUTCOME — the approver then does the thing by hand on
@@ -15,16 +35,25 @@ the page that owns it, and the request is the record that they were asked and sa
 yes. Wiring a side effect onto those would mean this module performing grants it
 has no business performing.
 
-`user_onboarding` used to be a third: approving recorded agreement and admitted
-nobody, so an Organization Admin who approved a request still had to go and
-onboard the person by hand from Users. See `_apply_user_onboarding` below — it
-reuses `_onboard_person` (shared/routers/onboarding.py), the exact three-act body
-`POST /onboarding` already performs, rather than a second copy of it.
+FOUR MORE TYPES USED TO LIVE IN `_DECISION_IS_THE_OUTCOME` and now have real effects
+below — each approving-recorded-agreement-and-changing-nothing, until now:
+  connector_access    granted no access; `_apply_connector_access` writes the real
+                      `integration_grants`/`project_connector_access` row.
+  model_credential    selected no model; `_apply_model_credential` adds it to the
+                      project's `set_project_selection`.
+  mcp_server          granted no server; `_apply_mcp_server` writes `integration_grants`.
+  user_onboarding     onboarded nobody, so an Organization Admin who approved a
+                      request still had to go and onboard the person by hand from
+                      Users. `_apply_user_onboarding` reuses `_onboard_person`
+                      (shared/routers/onboarding.py), the exact three-act body
+                      `POST /onboarding` already performs, rather than a second copy.
 
-`agent_access` used to be a fourth: approving recorded agreement and granted nothing,
+`agent_access` used to be a fifth: approving recorded agreement and granted nothing,
 so the requester still had to be given the extra agent by hand. See
 `_apply_agent_access` below — it is the same `role_bindings.extra_agents` write the
 manual "grant extra agent access" admin action already performs (PRD §43.2 step 3).
+Only reachable for a phase whose owner holds `governance:decide` — see the migration
+`0037_agent_owner_decide` and its docstring for the reachability fix this needed.
 
 One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
@@ -84,11 +113,10 @@ _NOT_APPLICABLE = {
 _DECISION_IS_THE_OUTCOME = frozenset(
     {
         "access_request",
-        # `connector_access`, `mcp_server` and `user_onboarding` used to live here —
-        # approving each recorded agreement and changed nothing, so the requester
-        # still had to go and set the grant by hand and an approved request granted
-        # no access at all. All three now have a real effect below, which is what
-        # makes approval a gate rather than a note.
+        # `model_credential`, `mcp_server`, `user_onboarding` and `agent_access` all
+        # used to live here too — see the module docstring above for what each one's
+        # real effect now does and why. `connector_access` left this set before this
+        # plan started (its own effect predates the work here).
         "other",
     }
 )

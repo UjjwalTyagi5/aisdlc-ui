@@ -84,7 +84,15 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // for an agent_access request on that phase. Scoped by the backend decide()'s
     // own decider_role != currentApproverRole check — no OTHER request type ever
     // routes its currentApproverRole to a delivery role, so this does not let `ba`
-    // decide anything beyond its own agent's stage-two requests.
+    // decide anything OTHER THAN an agent_access stage-two request.
+    //
+    // NOT project-scoped, though — decide()'s check is a role-name comparison
+    // only, with no comparison against the request's projectId. Any `ba` bound
+    // anywhere in the tenant can decide any requirements-phase stage two, not
+    // just one on a project they're actually on. Same class of gap as
+    // cross_bu_assignment's wrong-unit-admin bypass; parked for sub-project B
+    // ("gate integrity hardening"). See the mirrored comment in
+    // backend/shared/authz/permissions.py.
     "governance:decide",
   ],
   architect: [

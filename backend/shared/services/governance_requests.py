@@ -395,8 +395,18 @@ async def create_request(
         payload = {**(payload or {}), "targetId": target_id}
     # connector_access alone also carries an access level — _apply_
     # connector_access's project-tier branch reads payload["access"].
-    if access_level and request_type == "connector_access":
-        payload = {**(payload or {}), "access": access_level}
+    #
+    # Falls back to default_access_for(target_id) when the caller sends none — the
+    # UI that raises this (Integrations page) has no level picker of its own yet and
+    # used to hardcode "read", which the effect's capability-manifest check then
+    # refused for Slack/MS Teams (write-only connectors): an approved-looking
+    # request that could never actually be granted, discovered only at decide time.
+    # default_access_for reads the connector's own real capabilities, so a
+    # write-only connector gets "write" instead of a level nothing can honour.
+    if request_type == "connector_access" and target_id:
+        from shared.authz.connector_capabilities import default_access_for  # noqa: PLC0415
+
+        payload = {**(payload or {}), "access": access_level or default_access_for(target_id)}
     # model_credential AND model_provider_access both carry a (provider,
     # model_id) pair — never a model_providers row id. Neither the project
     # Model Management view nor the BU availability card ever has a specific
