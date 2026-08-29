@@ -107,7 +107,12 @@ function lastOpenedPrefill() {
 }
 
 describe("integrations page — request prefill", () => {
-  it("connector tile's Request access button carries targetId=kind and a read accessLevel", async () => {
+  it("connector tile's Request access button carries targetId=kind and NO accessLevel — the backend fills in the connector's own real default", async () => {
+    // A flat "read" default made Slack/MS Teams (write-only connectors) permanently
+    // un-approvable: the manifest check in _apply_connector_access refused a level
+    // they can't honour. The page has no level picker of its own yet, so it sends
+    // none — default_access_for(kind) in shared/services/governance_requests.py
+    // picks the connector's own real default at raise time instead.
     renderPage();
 
     const jiraHeading = await screen.findByText("Jira");
@@ -121,8 +126,8 @@ describe("integrations page — request prefill", () => {
     expect(prefill).toMatchObject({
       type: "connector_access",
       targetId: "jira",
-      accessLevel: "read",
     });
+    expect(prefill).not.toHaveProperty("accessLevel");
   });
 
   it("MCP server row's Request access button carries targetId=the row's id", async () => {
