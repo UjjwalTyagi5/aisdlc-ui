@@ -141,4 +141,20 @@ describe("integrations page — request prefill", () => {
       targetId: "mcp-postgres",
     });
   });
+
+  it("section-level 'Request an MCP server' button carries NO targetId or accessLevel — there is no server in view yet", async () => {
+    renderPage();
+
+    // Distinct label from the per-row tiles' default "Request access", so this
+    // targets the section-level button specifically, not a row's own tile.
+    const button = await screen.findByRole("button", { name: /request an mcp server/i });
+    await userEvent.click(button);
+
+    const prefill = lastOpenedPrefill();
+    expect(prefill).toMatchObject({ type: "mcp_server" });
+    // Task 7's effect must handle this no-target case gracefully — a future
+    // "fix" that seeds a targetId here would silently break that assumption.
+    expect(prefill).not.toHaveProperty("targetId");
+    expect(prefill).not.toHaveProperty("accessLevel");
+  });
 });
