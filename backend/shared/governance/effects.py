@@ -10,10 +10,15 @@ can half-succeed give you a request marked approved over a budget that never mov
 no way to tell from either row which of the two is wrong.
 
 NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request`,
-`user_onboarding`, `agent_access` and `other`, the DECISION IS THE OUTCOME — the
-approver then does the thing by hand on the page that owns it, and the request is the
-record that they were asked and said yes. Wiring a side effect onto those would mean
-this module performing grants it has no business performing.
+`user_onboarding` and `other`, the DECISION IS THE OUTCOME — the approver then does
+the thing by hand on the page that owns it, and the request is the record that they
+were asked and said yes. Wiring a side effect onto those would mean this module
+performing grants it has no business performing.
+
+`agent_access` used to be a fourth: approving recorded agreement and granted nothing,
+so the requester still had to be given the extra agent by hand. See
+`_apply_agent_access` below — it is the same `role_bindings.extra_agents` write the
+manual "grant extra agent access" admin action already performs (PRD §43.2 step 3).
 
 One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
@@ -79,7 +84,6 @@ _DECISION_IS_THE_OUTCOME = frozenset(
         # now have a real effect below, which is what makes approval a gate rather
         # than a note.
         "user_onboarding",
-        "agent_access",
         "other",
     }
 )
@@ -115,6 +119,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_connector_access(db, request)
     if rtype == "mcp_server":
         return await _apply_mcp_server(db, request)
+    if rtype == "agent_access":
+        return await _apply_agent_access(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
     if rtype.startswith("agent_default_"):
@@ -949,6 +955,64 @@ async def _apply_mcp_server(db: AsyncSession, request: dict[str, Any]) -> str:
     )
     logger.info("mcp_server approved: unit %s -> mcp %s", workspace_id, target_ref)
     return "MCP server granted to the business unit."
+
+
+async def _apply_agent_access(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant the requester the extra agent access their final approver just
+    signed off on — the same field the manual 'grant extra agent access'
+    admin action already writes (PRD §43.2 step 3), just reached through the
+    two-stage request instead of an admin acting directly.
+
+    Only reached at the FINAL decision. `decide()`'s two-stage block
+    (shared/services/governance_requests.py, ~610-667) returns early — before
+    apply_on_approve is ever called — whenever stage one's approval advances
+    to a stage two (routing.next_agent_access_stage returns non-None). This
+    function therefore only ever runs for a genuinely final approval: stage
+    two itself, or stage one alone when there is no stage two (the
+    `documentation` phase, whose owner IS project_admin).
+    """
+    payload = request.get("payload") or {}
+    phase = payload.get("phase")
+    user_id = request.get("requestedById")
+    project_id = request.get("projectId")
+
+    if not phase:
+        raise EffectNotAvailable("agent_access", "This request names no agent.")
+    if not user_id or not project_id:
+        raise EffectNotAvailable(
+            "agent_access", "This request names no person or project to grant access on."
+        )
+
+    row = (
+        await db.execute(
+            text(
+                "SELECT extra_agents FROM role_bindings WHERE user_id = :u "
+                "  AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+            ),
+            {"u": user_id, "p": project_id},
+        )
+    ).first()
+    if row is None:
+        raise EffectNotAvailable(
+            "agent_access", "This person no longer holds a role on this project."
+        )
+    current = list(row.extra_agents or [])
+    if phase in current:
+        return f"{phase} was already granted."
+    current.append(phase)
+
+    await db.execute(
+        text(
+            "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+            "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+        ),
+        {"a": json.dumps(current), "u": user_id, "p": project_id},
+    )
+    logger.info(
+        "governance: agent_access granted request=%s user=%s project=%s phase=%s",
+        request["id"], user_id, project_id, phase,
+    )
+    return f"Granted access to the {phase} agent."
 
 
 async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) -> str:

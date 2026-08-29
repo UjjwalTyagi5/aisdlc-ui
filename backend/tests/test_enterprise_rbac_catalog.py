@@ -38,6 +38,37 @@ def test_all_new_permissions_present():
     assert NEW_PERMISSIONS.issubset(set(ALL_PERMISSIONS))
 
 
+def test_agent_access_stage_two_owner_roles_hold_governance_decide():
+    """Task 8: `agent_access` stage two routes to whichever delivery role owns the
+    phase (routing.AGENT_OWNER_ROLE), and `POST /governance-approvals/{id}/decide` is
+    gated on `governance:decide`. Without this permission the six delivery owner
+    roles could never pass that floor to decide their own agent's stage-two request —
+    a flat 403 before decide()'s own role-match check (`decider_role !=
+    request["currentApproverRole"]`) is ever reached, making the effect wired up in
+    `shared/governance/effects.py::_apply_agent_access` unreachable for every phase
+    but `documentation` (owned by project_admin, which already holds the permission).
+
+    Safe to grant broadly, not a platform-wide widening: `agent_access` stage two is
+    the ONLY place any of these six roles is ever `currentApproverRole` —
+    `GOVERNANCE_APPROVER_ROLE`/`REQUEST_ESCALATION_CHAIN` are exhaustively
+    {project_admin, bu_admin, org_admin} for every other request type — so decide()'s
+    existing role-match check narrows the grant to exactly the requests actually
+    routed to each role. Holding `governance:decide` does not let a delivery role
+    decide anyone else's request.
+    """
+    from shared.governance import routing
+
+    owner_roles = set(routing.AGENT_OWNER_ROLE.values()) - {"project_admin"}
+    assert owner_roles == {
+        "ba", "architect", "qa", "devops_engineer", "security_engineer", "data_engineer",
+    }
+    for role in owner_roles:
+        assert "governance:decide" in _ROLE_PERMISSIONS[role], (
+            f"{role} owns an agent_access stage-two phase but cannot pass the "
+            "governance:decide permission floor to decide it"
+        )
+
+
 def test_security_engineer_is_oversight_not_author():
     perms = _ROLE_PERMISSIONS["security_engineer"]
     assert "audit:view" in perms and "cost:view" in perms and "trace:view" in perms

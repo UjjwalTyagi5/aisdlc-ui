@@ -80,6 +80,12 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "approve",
     "artifact:approve_requirements",
     "connector:view",
+    // AGENT_OWNER_ROLE.requirements is `ba`, so this role is stage two's approver
+    // for an agent_access request on that phase. Scoped by the backend decide()'s
+    // own decider_role != currentApproverRole check — no OTHER request type ever
+    // routes its currentApproverRole to a delivery role, so this does not let `ba`
+    // decide anything beyond its own agent's stage-two requests.
+    "governance:decide",
   ],
   architect: [
     "run:create",
@@ -95,6 +101,11 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // `admin:*` holder could — a sign-off with nobody behind it.
     "artifact:approve_code_review",
     "connector:view",
+    // AGENT_OWNER_ROLE names `architect` as owner of design/development/review/
+    // discovery/strategy/migration_mapping — stage two's approver for an
+    // agent_access request on any of those phases. Same scoping note as `ba`'s
+    // grant above.
+    "governance:decide",
   ],
   developer: [
     "run:create",
@@ -113,6 +124,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "approve",
     "artifact:approve_testing",
     "connector:view",
+    // AGENT_OWNER_ROLE names `qa` as owner of testing/validation — stage two's
+    // approver for an agent_access request on either phase. Same scoping note as
+    // `ba`'s grant above.
+    "governance:decide",
   ],
   security_engineer: [
     "run:view",
@@ -129,6 +144,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "audit:view",
     "cost:view",
     "trace:view",
+    // AGENT_OWNER_ROLE.security is `security_engineer` — stage two's approver for
+    // an agent_access request on that phase. Same scoping note as `ba`'s grant
+    // above.
+    "governance:decide",
   ],
   devops_engineer: [
     "run:view",
@@ -138,6 +157,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "approve",
     "artifact:approve_deployment",
     "connector:view",
+    // AGENT_OWNER_ROLE.deployment is `devops_engineer` — stage two's approver for
+    // an agent_access request on that phase. Same scoping note as `ba`'s grant
+    // above.
+    "governance:decide",
   ],
   data_engineer: [
     "run:create",
@@ -147,6 +170,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "agent:invoke",
     "approve",
     "connector:view",
+    // AGENT_OWNER_ROLE.data_engineering is `data_engineer` — stage two's approver
+    // for an agent_access request on that phase. Same scoping note as `ba`'s grant
+    // above.
+    "governance:decide",
   ],
   scrum_master: ["run:view", "artifact:view", "artifact:export", "agent:invoke", "connector:view"],
   custom: ["artifact:view"],

@@ -514,9 +514,16 @@ async def test_only_the_initiator_withdraws(org):
 @pytest.mark.asyncio
 async def test_agent_access_is_answered_twice(org):
     alice, pa, sec = (f"{n}-{_uuid.uuid4()}" for n in ("alice", "pa", "sec"))
+    # A real project role binding: _apply_agent_access's stage-two effect writes
+    # role_bindings.extra_agents for this exact (user, project) pair, and a real
+    # raise (RequestAgentAccessDialog) always carries a projectId — matching that
+    # here is what lets this test reach the effect instead of stopping short at
+    # EffectNotAvailable("This request names no person or project...").
+    await _bind(org, alice, "developer", scope_kind="project", scope_id=org["project"])
     req = await _raise(
         org, initiator=alice, role="developer", rtype="agent_access", phase="security",
         title="Need the security agent", description="To clear the SCA exemption",
+        project_id=org["project"],
     )
     assert req["approvalStage"] == "project_admin"
     assert req["currentApproverRole"] == "project_admin"
@@ -1048,6 +1055,74 @@ async def test_mcp_server_request_grants_on_approval(org):
             "  AND kind = 'mcp' AND target_ref = :r AND workspace_id = CAST(:w AS uuid)"
         ), {"t": org["org"], "r": server_id, "w": org["bu"]})).first()
     assert row is not None, "mcp_server approval did not grant integration_grants"
+
+
+@pytest.mark.asyncio
+async def test_agent_access_request_grants_extra_agent_on_final_approval(org):
+    """Two-stage: Project Admin approves stage one (no grant yet — the ask
+    isn't decided), the agent's owner approves stage two (the real grant
+    lands in role_bindings.extra_agents).
+
+    The agent's owner for `design` is `architect` (routing.AGENT_OWNER_ROLE),
+    a delivery role — this is also the exact reachability gap Task 8 closed:
+    without `governance:decide` on the six delivery owner roles, this
+    architect's decide() call 403s before it ever reaches the role-match
+    check, and stage two can never be answered for any phase but
+    documentation.
+    """
+    ba = f"ba-{_uuid.uuid4()}"
+    await _bind(org, ba, "ba", scope_kind="project", scope_id=org["project"])
+    project_admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    architect = f"arch-{_uuid.uuid4()}"
+    await _bind(org, architect, "architect", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    ba_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=ba, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=ba_headers,
+        json={
+            "type": "agent_access", "title": "Access to the Design agent", "description": "Covering while Architect is out.",
+            "priority": "normal", "workspaceId": org["bu"], "projectId": org["project"], "phase": "design",
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    req_id = raised.json()["id"]
+
+    pa_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=project_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    stage_one = c.post(
+        f"/governance-approvals/{req_id}/decide", headers=pa_headers,
+        json={"decision": "approve"},
+    )
+    assert stage_one.status_code == 200, stage_one.text
+    # confirm no grant yet
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT extra_agents FROM role_bindings WHERE user_id = :u AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+        ), {"u": ba, "p": org["project"]})).first()
+    assert not row.extra_agents
+
+    # The permission floor this exercises: an architect token minted with the
+    # role's REAL shipped permission set (governance:decide included, per the
+    # Task 8 fix in shared/authz/permissions.py) must be able to reach
+    # decide() at all, not just pass its own role-match check.
+    arch_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=architect, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    stage_two = c.post(
+        f"/governance-approvals/{req_id}/decide", headers=arch_headers,
+        json={"decision": "approve"},
+    )
+    assert stage_two.status_code == 200, stage_two.text
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT extra_agents FROM role_bindings WHERE user_id = :u AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+        ), {"u": ba, "p": org["project"]})).first()
+    assert row.extra_agents and "design" in row.extra_agents
 
 
 async def _seed_inactive_anthropic_provider(org):
