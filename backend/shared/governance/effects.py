@@ -209,9 +209,18 @@ async def _apply_budget_increase(db: AsyncSession, request: dict[str, Any]) -> s
 # to the fields shown on the request, and a mapping computed later could apply
 # something they never saw. Anything absent from here is not applicable through this
 # route no matter what the payload contains.
+#
+# `description` is DELIBERATELY ABSENT: `projects` has no such column (confirmed via
+# the live baseline audit, 2026-08-29 — approving a queued description edit crashed
+# with a raw 500 `UndefinedColumnError` on `UPDATE projects SET description = ...`,
+# and the request was left permanently stuck open since the crash rolled back the
+# status flip too). Leaving the key out is exactly the escape hatch this function's
+# own docstring already documents ("a request can outlive a schema"; see `applied`
+# below) — it makes a description edit a silent no-op on approval rather than a
+# crash, matching `patch_project`'s direct-write branch (shared/routers/projects.py),
+# where the same dead column already makes a direct edit a no-op instead of an error.
 _SETTINGS_FIELDS: dict[str, str] = {
     "name": "display_name",
-    "description": "description",
     "monthlyBudgetUsd": "monthly_budget_usd",
     "connectors": "connectors",
     "mcpServers": "mcp_servers",

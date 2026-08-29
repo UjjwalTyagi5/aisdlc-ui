@@ -822,9 +822,15 @@ async def restore_project(
 # names. Mirrors _SETTINGS_FIELDS in shared/governance/effects.py, which does the
 # writing — the request stores what was ASKED FOR in the API's own vocabulary so an
 # approver's queue and the applied change describe the same thing.
+#
+# `description` is DELIBERATELY ABSENT, mirroring _SETTINGS_FIELDS: `projects` has no
+# such column, so queuing it here only bought a request that crashed with a 500 on
+# approval and never got a chance to close (live baseline audit, 2026-08-29). Leaving
+# a description edit off the queued payload entirely makes it consistent with the
+# direct-write branch below, where the same dead column already makes an edit a
+# silent no-op rather than an error.
 _SETTINGS_PAYLOAD_KEYS: dict[str, str] = {
     "name": "name",
-    "description": "description",
     "monthlyBudgetUsd": "monthlyBudgetUsd",
     "connectors": "connectors",
     "mcp_servers": "mcpServers",
@@ -833,7 +839,6 @@ _SETTINGS_PAYLOAD_KEYS: dict[str, str] = {
 
 _SETTINGS_FIELD_LABEL: dict[str, str] = {
     "name": "name",
-    "description": "description",
     "monthlyBudgetUsd": "budget",
     "connectors": "connectors",
     "mcp_servers": "MCP servers",

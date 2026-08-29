@@ -587,6 +587,39 @@ async def test_approving_an_archive_request_archives_the_project(org):
 
 
 @pytest.mark.asyncio
+async def test_approving_a_settings_change_with_a_dead_description_field_does_not_crash(org):
+    """`description` is not a real `projects` column (live baseline audit,
+    2026-08-29): approving a queued settings change whose payload included it used
+    to crash with a raw 500 `UndefinedColumnError` on `UPDATE projects SET
+    description = ...`, leaving the request stuck open forever (the crash rolled
+    back the status flip too). It must now be silently ignored, same as any other
+    field the project no longer has — the real field alongside it still applies.
+    """
+    pa, bua = f"pa-{_uuid.uuid4()}", f"bua-{_uuid.uuid4()}"
+    async with get_db_session_for_tenant(org["org"]) as s:
+        req = await svc.create_request(
+            s, tenant_id=org["org"], initiator_id=pa, initiator_name="Pa",
+            initiator_role="project_admin", request_type="project_settings_change",
+            title="Settings change for Core ledger",
+            description="Requested changes to: name, description.",
+            workspace_id=org["bu"], project_id=org["project"], target_ref=org["project"],
+            payload={"changes": {"name": "Renamed Ledger", "description": "New blurb"}},
+            system_raised=True,
+        )
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await svc.decide(
+            s, request_id=req["id"], decider_id=bua, decider_name="Bua",
+            decider_role="bu_admin", decision="approve",
+        )
+    async with get_db_session_for_tenant(org["org"]) as s:
+        name = (await s.execute(
+            text("SELECT display_name FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).scalar()
+    assert name == "Renamed Ledger"
+
+
+@pytest.mark.asyncio
 async def test_an_approval_that_cannot_take_effect_is_refused_not_recorded(org):
     """A budget request with no amount has nothing to apply, so it is not approved.
 
