@@ -1607,20 +1607,10 @@ export const handlers = [
     return HttpResponse.json(c);
   }),
 
-  http.post("/api/connectors/:kind/install", async ({ params, cookies }) => {
-    await lag();
-    const c = CONNECTORS.find((x) => x.kind === params.kind);
-    if (!c) {
-      return HttpResponse.json({ code: "not_found", message: "not found" }, { status: 404 });
-    }
-    if (!kindIsPermitted(scopeFromCookies(cookies), String(params.kind))) {
-      return HttpResponse.json({ code: "forbidden", message: NOT_PERMITTED }, { status: 403 });
-    }
-    c.installed = true;
-    c.health = "healthy";
-    c.lastCheckedAt = new Date().toISOString();
-    return HttpResponse.json(c);
-  }),
+  // REMOVED: the /api/connectors/:kind/install mock. That BFF route is gone with the
+  // OAuth flow — a connector is connected by pasting a credential, which the
+  // /credentials handler below mocks. A mock for a route that no longer exists is
+  // worse than none: it answers 200 to a call the real app can only 404.
 
   // Pasted credentials (ADO PAT, Jira token, GH Actions PAT). Mirrors
   // app/api/connectors/[kind]/credentials/route.ts.
