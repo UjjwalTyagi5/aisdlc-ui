@@ -47,8 +47,7 @@ from shared.authz.workspace import assert_workspace_in_tenant
 from shared.db import get_db_session
 from shared.models.orm import Project, Run, Workspace
 from shared.services import governance_requests as governance_service
-from shared.routers._schemas import Paginated, Pagination, ProjectOut, _slugify
-from shared.routers.workspaces import BudgetIncreaseIn
+from shared.routers._schemas import BudgetIncreaseIn, Paginated, Pagination, ProjectOut, _slugify
 
 logger = logging.getLogger(__name__)
 
@@ -572,7 +571,7 @@ async def create_project(
 async def request_project_budget_increase(
     project_id: str,
     request: Request,
-    body: BudgetIncreaseIn,  # reuse workspaces.py's model — same shape, no new schema needed
+    body: BudgetIncreaseIn,  # shared with workspaces.py's own budget-increase-request route
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """The Project Admin's half of the budget cascade (mirrors
@@ -596,7 +595,6 @@ async def request_project_budget_increase(
     ):
         raise HTTPException(status_code=404, detail="Project not found")
 
-    from shared.services import governance_requests as governance_service  # noqa: PLC0415
     from shared.services.governance_requests import GovernanceError  # noqa: PLC0415
 
     amount = body.requestedAmountUsd

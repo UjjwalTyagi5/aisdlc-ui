@@ -419,6 +419,40 @@ async def create_request(
     if onboard_email and request_type == "user_onboarding":
         payload = {**(payload or {}), "onboardEmail": onboard_email}
 
+    # A project names its own business unit — trust that over whatever `workspace_id`
+    # the client sent, never the other way round. A caller not currently a member of
+    # the target project (raising an access_request, or Orchestrator's "not a member"
+    # banner) has no reason to know that project's real unit, so its own client-side
+    # default — the caller's OWN unit — is exactly what `workspace_id` holds. Without
+    # this, the row is stored under the WRONG unit's queue: `list_requests` scopes
+    # visibility on `workspace_id` alone (never `project_id`), so the request becomes
+    # invisible to the one unit whose Project Admin `decider_covers_scope` will accept,
+    # while every Project Admin who CAN see it is refused — undecidable by anyone, the
+    # same failure class the model-availability-card fix closed for model_credential.
+    #
+    # cross_bu_assignment is the deliberate exception: its `workspace_id` NAMES A
+    # DIFFERENT UNIT ON PURPOSE — the "lending" unit being asked to loan a contributor
+    # to a project that lives in some OTHER unit (see request_cross_bu_member's own
+    # "THE WORKSPACE ON THE REQUEST IS THE TARGET'S HOME UNIT, NOT THE CALLER'S", and
+    # its `same_unit` guard, which refuses to raise this exact request when the two
+    # would coincide). Overriding it here would make that request impossible to raise
+    # at all.
+    if project_id and request_type != "cross_bu_assignment":
+        resolved_workspace = (
+            await db.execute(
+                text(
+                    "SELECT workspace_id FROM projects "
+                    "WHERE id = CAST(:p AS uuid) AND tenant_id = CAST(:t AS uuid)"
+                ),
+                {"p": project_id, "t": tenant_id},
+            )
+        ).scalar()
+        if resolved_workspace is None:
+            raise GovernanceError(
+                "That project doesn't exist.", code="PROJECT_NOT_FOUND", http_status=404
+            )
+        workspace_id = str(resolved_workspace)
+
     if approver is None:
         raise GovernanceError(
             "This request has nobody above it to decide it.",

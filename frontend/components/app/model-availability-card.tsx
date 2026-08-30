@@ -81,8 +81,13 @@ export function ModelAvailabilityCard({
    * `projects/[id]/models/page.tsx`, the correct, already-working,
    * already-project-scoped entry point for this exact ask, instead of
    * rendering a button that would raise a request nobody can ever approve.
+   *
+   * Both `RequestAccessButton` sites below sit inside `audience !== "project"`
+   * branches, so `audience` is always `"bu"` wherever `requestType` is
+   * actually read — the `model_credential` arm the ternary used to carry is
+   * unreachable now, kept only as a record of the tier mapping.
    */
-  const requestType = audience === "bu" ? "model_provider_access" : "model_credential";
+  const requestType = "model_provider_access";
 
   const ungranted = React.useMemo(() => {
     const held = new Set(rows.map((r) => `${r.provider}::${r.model_id}`));

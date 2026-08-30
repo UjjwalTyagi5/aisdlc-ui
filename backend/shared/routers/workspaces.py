@@ -29,6 +29,7 @@ from shared.authz.permissions import ROLE_TIER
 from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Project, Role, RoleBinding, UsageMonthly, User, Workspace
+from shared.routers._schemas import BudgetIncreaseIn
 from shared.services.governance_requests import complete_role_assignment
 
 workspaces_router = APIRouter()
@@ -422,11 +423,6 @@ async def archive_workspace(
     await db.commit()
     projects, members = await _counts(db, tenant_uuid)
     return _to_out(ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0))
-
-
-class BudgetIncreaseIn(BaseModel):
-    requestedAmountUsd: float = Field(gt=0)
-    reason: Optional[str] = Field(default=None, max_length=2000)
 
 
 @workspaces_router.post("/{workspace_id}/budget-increase-request", status_code=201)
