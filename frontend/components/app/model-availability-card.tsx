@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Building2, CheckCircle2, ChevronRight, Globe, KeyRound } from "lucide-react";
 
@@ -69,6 +70,17 @@ export function ModelAvailabilityCard({
    *              lack is an org-wide grant; a project-scoped credential
    *              request would be answered by themselves.
    *   project  → `model_credential`, decided by the BU Admin above them.
+   *
+   * That `project` case only ever applies when this card is rendered with
+   * genuine per-project state (`projects/[id]/models/page.tsx`). On
+   * `admin/models` there is no per-project state for any role — its `scope`
+   * derivation is entirely business-unit-based (`useScopedBusinessUnits`) —
+   * so a request raised from here can never carry the `project_id`
+   * `_apply_model_credential` requires to actually apply. Below, the
+   * `audience === "project"` branch is therefore redirected to
+   * `projects/[id]/models/page.tsx`, the correct, already-working,
+   * already-project-scoped entry point for this exact ask, instead of
+   * rendering a button that would raise a request nobody can ever approve.
    */
   const requestType = audience === "bu" ? "model_provider_access" : "model_credential";
 
@@ -138,17 +150,25 @@ export function ModelAvailabilityCard({
               any models yet. Nothing can be onboarded or run until they do
               {ungranted.length > 0 && " — the catalogue below is what you could ask for"}.
             </p>
-            {ungranted.length === 0 && (
-              <RequestAccessButton
-                label="Request model access"
-                prefill={{
-                  type: requestType,
-                  title: "Model access",
-                  description: `${workspaceName} holds no models. Which we need, and what for:`,
-                  workspaceId,
-                }}
-              />
-            )}
+            {ungranted.length === 0 &&
+              (audience === "project" ? (
+                <Link
+                  href="/projects"
+                  className="text-brand-bright text-[11.5px] underline underline-offset-2"
+                >
+                  Open your project&apos;s own Models page to request this
+                </Link>
+              ) : (
+                <RequestAccessButton
+                  label="Request model access"
+                  prefill={{
+                    type: requestType,
+                    title: "Model access",
+                    description: `${workspaceName} holds no models. Which we need, and what for:`,
+                    workspaceId,
+                  }}
+                />
+              ))}
           </div>
         ) : (
           <ul className="divide-line-soft border-line-soft divide-y rounded-xl border">
@@ -202,22 +222,27 @@ export function ModelAvailabilityCard({
                   <span className="text-muted-foreground shrink-0 font-mono text-[10.5px]">
                     {m.providerLabel}
                   </span>
-                  <RequestAccessButton
-                    prefill={{
-                      type: requestType,
-                      title: `${m.label} access`,
-                      description:
-                        audience === "bu"
-                          ? `Requesting ${m.label} (${m.providerLabel}) for ${workspaceName}. It isn't granted to us today.`
-                          : `Requesting ${m.label} (${m.providerLabel}) for our project. ${workspaceName} doesn't hold it today.`,
-                      workspaceId,
-                      // Neither this component nor its caller ever holds a
-                      // specific `model_providers` row id — only the catalog
-                      // pair — so the provider/model pair IS the target, for
-                      // both request types raised from this shared row.
-                      providerModel: { provider: m.provider, modelId: m.model_id },
-                    }}
-                  />
+                  {audience === "project" ? (
+                    <Link
+                      href="/projects"
+                      className="text-brand-bright shrink-0 text-[11px] underline underline-offset-2"
+                    >
+                      Request from your project&apos;s Models page
+                    </Link>
+                  ) : (
+                    <RequestAccessButton
+                      prefill={{
+                        type: requestType,
+                        title: `${m.label} access`,
+                        description: `Requesting ${m.label} (${m.providerLabel}) for ${workspaceName}. It isn't granted to us today.`,
+                        workspaceId,
+                        // Neither this component nor its caller ever holds a
+                        // specific `model_providers` row id — only the catalog
+                        // pair — so the provider/model pair IS the target.
+                        providerModel: { provider: m.provider, modelId: m.model_id },
+                      }}
+                    />
+                  )}
                 </li>
               ))}
             </ul>
