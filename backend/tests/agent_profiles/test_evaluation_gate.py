@@ -60,6 +60,7 @@ async def test_evaluate_then_propose_succeeds(mint_token):
             "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
             "ON CONFLICT (id) DO NOTHING"
         ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+    async with get_db_session_for_tenant(tenant) as s:
         await s.execute(text(
             "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
             "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
@@ -108,6 +109,7 @@ async def test_evaluate_propose_approve_publishes_it(mint_token):
             "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
             "ON CONFLICT (id) DO NOTHING"
         ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+    async with get_db_session_for_tenant(tenant) as s:
         await s.execute(text(
             "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
             "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
@@ -168,6 +170,26 @@ async def test_decide_belt_and_suspenders_blocks_an_unevaluated_target(mint_toke
     pa_id = str(uuid.uuid4())
     ws_id = str(uuid.uuid4())
     project_id = str(uuid.uuid4())
+    # create_request now validates project_id against a real row (see
+    # governance_requests.py's PROJECT_NOT_FOUND check) — a real project is
+    # required for the request this test raises below to be accepted at all.
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), :s, 'Belt And Suspenders Test') ON CONFLICT (id) DO NOTHING"
+        ), {"i": tenant, "s": f"belt-suspenders-{tenant}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+    async with get_db_session_for_tenant(tenant) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"i": project_id, "t": tenant, "w": ws_id})
+
     await _bind_role(tenant, pa_id, "project_admin", "project", project_id)
     pa_token = mint_token(
         user_id=pa_id, tenant_id=tenant, permissions=["artifact:view", "governance:decide"]

@@ -45,6 +45,7 @@ async def test_evaluate_then_propose_skill_succeeds(mint_token):
             "VALUES (CAST(:i AS uuid), CAST(:o AS uuid), :s, 'Test Workspace') "
             "ON CONFLICT (id) DO NOTHING"
         ), {"i": ws_id, "o": tenant, "s": f"ws-{ws_id}"})
+    async with get_db_session_for_tenant(tenant) as s:
         await s.execute(text(
             "INSERT INTO projects (id, tenant_id, workspace_id, display_name) "
             "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), CAST(:w AS uuid), 'Test Project') "
