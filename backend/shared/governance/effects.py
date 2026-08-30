@@ -517,60 +517,79 @@ async def _apply_project_creation_reject(db: AsyncSession, request: dict[str, An
 
 
 async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Activate the org-wide model provider connection the request named.
+    """Grant the requesting Business Unit reach to the provider named — the same
+    write `PUT /model/providers/grants` performs by hand (shared/routers/model.py's
+    `set_model_provider_grants_route`, Org-Admin-only, delete-then-insert into
+    `integration_grants` for the target unit) and the same `integration_grants`
+    table `_apply_mcp_server` above writes for `kind='mcp'`. NOT a `model_providers`
+    row: migration `0028_model_provider_grant_kind`'s own docstring is explicit that
+    "a model_provider grant means 'this Business Unit may use provider X' — no
+    model, no key, exactly like a connector grant" — `model_providers.status` is an
+    unrelated enum (`unverified | valid | invalid`, frontend `ModelProviderStatus`)
+    written only by a real API-key verify probe and read only by model-dispatch
+    code that gates usability on `status = 'valid'`. An earlier version of this
+    function wrote `status = 'active'` there directly — not a legal value —
+    corrupting a live connection row into a shape the frontend's own schema
+    rejects outright. This function must never touch `model_providers` at all.
 
-    THE REQUEST NAMES A PROVIDER KIND, NEVER A CONNECTION ROW — the UI that
-    raises this (model-availability-card.tsx) only ever has a (provider,
-    model_id) catalog pair in scope; a specific model_providers row id is
-    knowable only from Model Management's admin view, which this request's
-    raiser (a Business Unit Admin) is not looking at. This resolves the real
-    row itself: an inactive, org-wide (workspace_id IS NULL) connection for
-    the named provider kind. Exactly one match activates cleanly; zero or
-    more than one refuses rather than guessing — a silent pick of either row
-    when two exist would activate a connection nobody specifically agreed to.
+    Validated against `catalog_providers()`, the same check the manual route
+    performs, so a stale or hand-crafted provider slug refuses cleanly rather
+    than granting a name the catalog does not recognize. `ON CONFLICT ... DO
+    UPDATE` mirrors `_apply_mcp_server`'s idempotency: `integration_grants`'s
+    primary key IS `(tenant_id, kind, target_ref, workspace_id)`
+    (migration `0015_integration_grants`), so granting the same provider to the
+    same unit twice — a re-approval, two separate requests — is a no-op-shaped
+    upsert, never a duplicate-row error.
+
+    NO org_admin re-check here, unlike `_apply_mcp_server`'s. That one is real
+    defense-in-depth because `mcp_server` is tier-routed (absent from
+    `routing.TYPE_ROUTED`) and can in principle reach a lower tier before
+    escalating. `model_provider_access` is TYPE_ROUTED with a FIXED approver —
+    `routing.GOVERNANCE_APPROVER_ROLE["model_provider_access"] = "org_admin"` —
+    so `initial_approver_role` sets `current_approver_role = "org_admin"` at
+    creation and it never changes (escalation is refused: `can_escalate` sees
+    the request already at its ceiling). `decide()`'s own "is it yours to
+    answer?" gate (`decider_role != request["currentApproverRole"]`) therefore
+    already guarantees org_admin by the time this effect runs; re-checking here
+    would be a redundant copy of a guarantee the routing layer, not this
+    function, is responsible for keeping true.
     """
+    from shared.services.model_catalog import list_providers as catalog_providers  # noqa: PLC0415
+
     payload = request.get("payload") or {}
     provider = (payload.get("providerModel") or {}).get("provider")
     if not provider:
         raise EffectNotAvailable("model_provider_access", "This request names no provider.")
 
-    candidates = (
-        await db.execute(
-            text(
-                "SELECT id FROM model_providers WHERE tenant_id = CAST(:t AS uuid) "
-                "  AND provider = :p AND workspace_id IS NULL AND status <> 'active'"
-            ),
-            {"t": request["tenantId"], "p": provider},
-        )
-    ).fetchall()
-    if not candidates:
+    catalog = {p["provider"] for p in catalog_providers()}
+    if provider not in catalog:
         raise EffectNotAvailable(
-            "model_provider_access",
-            f"No inactive {provider} connection exists yet — an Organization Admin "
-            "needs to onboard one from Model Management before this can be granted.",
+            "model_provider_access", f"{provider!r} is not a recognized model provider."
         )
-    if len(candidates) > 1:
-        raise EffectNotAvailable(
-            "model_provider_access",
-            f"{len(candidates)} inactive {provider} connections exist — approve this "
-            "directly from Model Management instead, where the right one can be picked.",
-        )
-    target = str(candidates[0].id)
 
-    result = await db.execute(
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable(
+            "model_provider_access", "This request names no business unit."
+        )
+
+    await db.execute(
         text(
-            "UPDATE model_providers SET status = 'active', updated_at = now() "
-            "WHERE id = CAST(:p AS uuid)"
+            "INSERT INTO integration_grants "
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), :by) "
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+            "  SET granted_by = EXCLUDED.granted_by"
         ),
-        {"p": target},
+        {
+            "t": request["tenantId"], "r": provider, "w": str(workspace_id),
+            "by": request.get("decidedBy"),
+        },
     )
-    if not result.rowcount:
-        raise EffectNotAvailable("model_provider_access", "That provider no longer exists.")
     logger.info(
-        "governance: model provider activated request=%s provider=%s id=%s",
-        request["id"], provider, target,
+        "model_provider_access approved: unit %s -> provider %s", workspace_id, provider,
     )
-    return f"{provider} activated."
+    return f"{provider} granted to this business unit."
 
 
 async def _apply_model_credential(db: AsyncSession, request: dict[str, Any]) -> str:

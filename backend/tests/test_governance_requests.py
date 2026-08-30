@@ -1066,10 +1066,12 @@ async def test_model_provider_access_request_carries_provider_kind(org):
     model_providers row id — the UI that raises it (model-availability-card.tsx)
     only ever has a (provider, model_id) pair in scope, never a connection's
     row id (that id is knowable only from Model Management's admin view, which
-    a BU Admin raising this request is not looking at). The effect (Task 5)
-    resolves the real row server-side, by provider kind, at decide time —
-    this is a genuine design correction from the plan's first draft, which
-    incorrectly assumed a row id was available here."""
+    a BU Admin raising this request is not looking at). The effect
+    (`_apply_model_provider_access`, backend/shared/governance/effects.py)
+    grants the requesting business unit reach to the provider kind itself via
+    `integration_grants(kind='model_provider')` at decide time — it never
+    reads or resolves a `model_providers` row at all, so the provider kind
+    recorded here is the whole of what the effect needs."""
     bu_admin = f"bu-{_uuid.uuid4()}"
     await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
 
@@ -1280,24 +1282,29 @@ async def test_agent_access_request_grants_extra_agent_on_final_approval(org):
     assert row.extra_agents and "design" in row.extra_agents
 
 
-async def _seed_inactive_anthropic_provider(org):
+@pytest.mark.asyncio
+async def test_model_provider_access_request_activates_on_approval(org):
+    """Approving must grant the requesting business unit reach to the provider
+    via `integration_grants(kind='model_provider')` — the same write
+    `PUT /model/providers/grants` performs by hand — never touch
+    `model_providers.status` (see the effect's own docstring for why that
+    table is the wrong mechanism entirely). model_provider_access IS
+    type-routed straight to org_admin (routing.GOVERNANCE_APPROVER_ROLE), so a
+    single decide call suffices — no escalation needed.
+
+    A `model_providers` row is seeded anyway, deliberately untouched by this
+    test's own assertions, as a non-regression check: this is exactly the
+    table (and exactly the shape of row) the old, buggy effect corrupted by
+    writing an invalid `status = 'active'` enum value into it."""
+    provider_row_id = str(_uuid.uuid4())
     async with get_db_session_superuser() as s:
         await s.execute(text(
             "INSERT INTO model_providers (id, tenant_id, workspace_id, provider, display_name, "
             "  secret_ref, status, created_by) "
-            "VALUES (gen_random_uuid(), CAST(:t AS uuid), NULL, 'anthropic', 'Anthropic', "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), NULL, 'anthropic', 'Anthropic', "
             "  '', 'unverified', 'seed')"
-        ), {"t": org["org"]})
+        ), {"i": provider_row_id, "t": org["org"]})
 
-
-@pytest.mark.asyncio
-async def test_model_provider_access_request_activates_on_approval(org):
-    """Raise with a (provider, model_id) pair, no row id — the effect must
-    find the matching inactive org-wide connection itself and activate it.
-    model_provider_access IS type-routed straight to org_admin
-    (routing.GOVERNANCE_APPROVER_ROLE), so a single decide call suffices —
-    no escalation needed."""
-    await _seed_inactive_anthropic_provider(org)
     bu_admin = f"bu-{_uuid.uuid4()}"
     await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     org_admin = f"org-{_uuid.uuid4()}"
@@ -1328,18 +1335,25 @@ async def test_model_provider_access_request_activates_on_approval(org):
     assert decided.status_code == 200, decided.text
     async with get_db_session_for_tenant(org["org"]) as s:
         row = (await s.execute(text(
-            "SELECT status FROM model_providers WHERE tenant_id = CAST(:t AS uuid) "
-            "  AND provider = 'anthropic' AND workspace_id IS NULL"
-        ), {"t": org["org"]})).first()
-    assert row is not None and row.status == "active"
+            "SELECT 1 FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND kind = 'model_provider' AND target_ref = 'anthropic' "
+            "  AND workspace_id = CAST(:w AS uuid)"
+        ), {"t": org["org"], "w": org["bu"]})).first()
+        assert row is not None, "model_provider_access approval did not grant integration_grants"
+
+        untouched = (await s.execute(text(
+            "SELECT status FROM model_providers WHERE id = CAST(:i AS uuid)"
+        ), {"i": provider_row_id})).first()
+        assert untouched is not None and untouched.status == "unverified", (
+            "the effect must never write to model_providers.status"
+        )
 
 
 @pytest.mark.asyncio
-async def test_model_provider_access_refuses_when_ambiguous(org):
-    """Two inactive anthropic connections exist for this tenant: the effect
-    must refuse rather than guess which one the requester meant."""
-    await _seed_inactive_anthropic_provider(org)
-    await _seed_inactive_anthropic_provider(org)
+async def test_model_provider_access_refuses_unrecognized_provider(org):
+    """A provider slug the catalog doesn't recognize refuses cleanly via
+    EffectNotAvailable/EFFECT_UNAVAILABLE, the same validation
+    `PUT /model/providers/grants` performs against `catalog_providers()`."""
     bu_admin = f"bu-{_uuid.uuid4()}"
     await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     org_admin = f"org-{_uuid.uuid4()}"
@@ -1352,9 +1366,10 @@ async def test_model_provider_access_refuses_when_ambiguous(org):
     raised = c.post(
         "/governance-approvals", headers=bu_headers,
         json={
-            "type": "model_provider_access", "title": "Onboard Anthropic",
-            "description": "Need Claude for the security agent.", "priority": "normal",
-            "workspaceId": org["bu"], "providerModel": {"provider": "anthropic", "modelId": "claude-sonnet-5"},
+            "type": "model_provider_access", "title": "Onboard a made-up provider",
+            "description": "Not a real catalog slug.", "priority": "normal",
+            "workspaceId": org["bu"],
+            "providerModel": {"provider": "not-a-real-provider", "modelId": "whatever"},
         },
     )
     assert raised.status_code == 201, raised.text
@@ -1369,7 +1384,53 @@ async def test_model_provider_access_refuses_when_ambiguous(org):
     assert 400 <= decided.status_code < 500, decided.text
     body = decided.json()
     assert body["detail"]["code"] == "EFFECT_UNAVAILABLE", body
-    assert "anthropic" in body["detail"]["message"].lower()
+    assert "not-a-real-provider" in body["detail"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_model_provider_access_grant_is_idempotent(org):
+    """Two separate requests granting the same provider to the same business
+    unit both succeed — the `ON CONFLICT (tenant_id, kind, target_ref,
+    workspace_id) DO UPDATE` makes the second approval a no-op-equivalent
+    success rather than a duplicate-row error, exactly like `_apply_mcp_
+    server`'s identical idempotency guarantee."""
+    bu_admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, bu_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    org_admin = f"org-{_uuid.uuid4()}"
+    await _bind(org, org_admin, "org_admin", scope_kind="organization", scope_id=org["org"])
+
+    c = TestClient(process_api.app)
+    bu_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=bu_admin, tenant_id=org["org"], permissions=["artifact:view", "model:manage"],
+    )}
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+
+    for _ in range(2):
+        raised = c.post(
+            "/governance-approvals", headers=bu_headers,
+            json={
+                "type": "model_provider_access", "title": "Onboard Anthropic",
+                "description": "Need Claude for the security agent.", "priority": "normal",
+                "workspaceId": org["bu"],
+                "providerModel": {"provider": "anthropic", "modelId": "claude-sonnet-5"},
+            },
+        )
+        assert raised.status_code == 201, raised.text
+        decided = c.post(
+            f"/governance-approvals/{raised.json()['id']}/decide", headers=org_headers,
+            json={"decision": "approve"},
+        )
+        assert decided.status_code == 200, decided.text
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        rows = (await s.execute(text(
+            "SELECT 1 FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
+            "  AND kind = 'model_provider' AND target_ref = 'anthropic' "
+            "  AND workspace_id = CAST(:w AS uuid)"
+        ), {"t": org["org"], "w": org["bu"]})).fetchall()
+    assert len(rows) == 1, "re-granting the same provider must upsert, not duplicate"
 
 
 @pytest.mark.asyncio
