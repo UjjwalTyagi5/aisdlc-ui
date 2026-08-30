@@ -32,7 +32,7 @@ _MAX_MESSAGE_LENGTH = 4000  # Slack message limit; connector must enforce this
 @pytest.mark.unit
 async def test_notify_slack_raises_on_over_length_message():
     """notify_slack raises ValueError when message exceeds maximum length."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     long_message = "A" * (_MAX_MESSAGE_LENGTH + 1)
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="#general", message=long_message)
@@ -41,7 +41,7 @@ async def test_notify_slack_raises_on_over_length_message():
 @pytest.mark.unit
 async def test_notify_slack_raises_on_anthropic_api_key_in_message():
     """notify_slack raises ValueError when message contains 'ANTHROPIC_API_KEY' pattern."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     secret_message = "Config dump: ANTHROPIC_API_KEY=sk-ant-api03-secretvalue12345"
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="#general", message=secret_message)
@@ -50,7 +50,7 @@ async def test_notify_slack_raises_on_anthropic_api_key_in_message():
 @pytest.mark.unit
 async def test_notify_slack_raises_on_secret_key_patterns():
     """notify_slack raises ValueError for common secret-like patterns in message."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     # Test multiple secret patterns
     secret_patterns = [
         "API_KEY=some_secret_value",
@@ -65,7 +65,7 @@ async def test_notify_slack_raises_on_secret_key_patterns():
 @pytest.mark.unit
 async def test_notify_slack_accepts_normal_message():
     """notify_slack accepts a normal, clean message without raising."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     mock_response = MagicMock()
 
     with patch(
@@ -113,7 +113,7 @@ def test_webhook_payload_redaction_removes_sensitive_fields():
 @pytest.mark.unit
 async def test_notify_slack_channel_must_be_explicit():
     """notify_slack requires an explicit channel — no default fallback channel."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     # Empty channel must raise
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="", message="Test message")
@@ -122,7 +122,7 @@ async def test_notify_slack_channel_must_be_explicit():
 @pytest.mark.unit
 async def test_normal_message_below_max_length_does_not_raise():
     """Messages at or below max length do not trigger ValueError for length."""
-    connector = SlackConnector(bot_token="xoxb-test-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     safe_message = "Build succeeded: " + "X" * 100  # Well under limit
 
     mock_response = MagicMock()

@@ -22,19 +22,19 @@ import sys
 import httpx
 
 from config.connectors.jira import JiraConnector
-from config.env import JIRA_URL
 
 
 async def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: m6_jira_transition_smoke.py <PROJECT_KEY>")
+    if len(sys.argv) < 3:
+        print("Usage: m6_jira_transition_smoke.py <TENANT_ID> <PROJECT_KEY>")
+        print("  Credentials are per-tenant, so the tenant id is required.")
         print("  A writable project key is required to create + transition an issue.")
         sys.exit(2)
-    project = sys.argv[1]
-    conn = JiraConnector(org_url=JIRA_URL)
+    tenant_id, project = sys.argv[1], sys.argv[2]
+    conn = JiraConnector(org_url="", tenant_id=tenant_id)
 
-    print("→ Resolving Jira credentials (Key Vault → env fallback)...")
-    auth = await conn.auth_adapter()
+    print(f"→ Resolving Jira credentials for tenant {tenant_id}...")
+    auth = await conn.auth_adapter(tenant_id)
     print(f"  ✓ url={auth['jira_url']}  email={auth['email']}  token_len={len(auth['token'])}")
 
     print("\n→ create_item (Task) to transition...")

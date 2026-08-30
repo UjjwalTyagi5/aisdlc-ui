@@ -8,13 +8,18 @@ POSTing signed payloads directly at the locally-running FastAPI webhook router:
   SC-02  dedup gate:       100 identical deliveries (same delivery id) ->
                            exactly 1 "accepted", 99 "duplicate".
 
-Reads the webhook secrets from config.env so they MATCH whatever the running
-app loaded from .env (single source of truth — no cross-process drift).
+Reads the webhook secrets FOR THE TEST TENANT from that tenant's secret store —
+the same two rungs webhooks/router.py:_tenant_webhook_secret uses, so the signature
+this script computes is the one the router will check. They used to come from
+config.env, one value shared by every tenant; that is gone, because a single secret
+verified a delivery to every tenant's URL.
 
 Prereqs:
   - docker compose up -d redis (the router dedup uses app.state.redis_pool)
   - app running:  PYTHONPATH=. uvicorn process_api:app --port 8001
-  - .env has GITHUB_WEBHOOK_SECRET, JIRA_WEBHOOK_SECRET, ENABLE_WEBHOOK_TRIGGERS=true
+  - ENABLE_WEBHOOK_TRIGGERS=true, and TEST_TENANT_ID's secret store holds
+    github-webhook-secret and jira-webhook-secret (add them on the Integrations
+    page, or via shared.services.secret_store.put_secret)
 
 Run from agentic_app/:
   PYTHONPATH=. PYTHONIOENCODING=utf-8 ../.venv/Scripts/python.exe scripts/m6_webhook_local_smoke.py
@@ -33,14 +38,22 @@ import uuid
 
 import httpx
 
-from config.env import (
-    GITHUB_WEBHOOK_SECRET,
-    JIRA_WEBHOOK_SECRET,
-)
-
 # Local target only — NOT config.env.AGENTIC_BASE_URL (that is the prod URL).
 BASE = os.environ.get("SMOKE_BASE_URL", "http://localhost:8001").rstrip("/")
 TENANT = os.environ.get("TEST_TENANT_ID") or "11111111-1111-1111-1111-111111111111"
+
+# Resolved once at startup from THIS TENANT's store, mirroring the router.
+GITHUB_WEBHOOK_SECRET = ""
+JIRA_WEBHOOK_SECRET = ""
+
+
+async def _load_tenant_secrets() -> None:
+    """Populate the module-level secrets from the tenant store, router-style."""
+    global GITHUB_WEBHOOK_SECRET, JIRA_WEBHOOK_SECRET
+    from webhooks.router import _tenant_webhook_secret
+
+    GITHUB_WEBHOOK_SECRET = await _tenant_webhook_secret(TENANT, "github-webhook-secret")
+    JIRA_WEBHOOK_SECRET = await _tenant_webhook_secret(TENANT, "jira-webhook-secret")
 
 
 def _sign(secret: str, body: bytes) -> str:
@@ -205,6 +218,7 @@ async def sc06_roundtrip_visible_in_runs() -> bool:
 
 async def main() -> None:
     print(f"Target: {BASE}   tenant={TENANT}")
+    await _load_tenant_secrets()
     r1 = await sc01_github_signature_gate()
     r2 = await sc02_dedup_stress()
     r3 = await sc06_roundtrip_visible_in_runs()

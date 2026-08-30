@@ -7,27 +7,25 @@ Symbol name: connectors_resource_router (not connectors_router — avoids collis
 with the existing health router imported from config.connectors.router).
 
 Routes (absolute paths — registered without a router prefix):
-  GET   /connectors             — list all connectors (reshaped from health cache)
-  GET   /connectors/{kind}      — single connector by kind
-  POST  /connectors/{kind}/install         — OAuth start (returns {redirect_url}), connector:manage-gated
-  POST  /connectors/{kind}/disconnect      — disconnect + delete tenant KV secret(s)
-  GET   /connectors/{kind}/oauth/callback  — OAuth callback: verify CSRF state, exchange code, write KV
+  GET   /connectors                    — list all connectors (reshaped from health cache)
+  GET   /connectors/{kind}             — single connector by kind
+  POST  /connectors/{kind}/credentials — paste a credential, verify it, store per tenant
+  POST  /connectors/{kind}/disconnect  — disconnect + delete tenant KV secret(s)
 
 All routes are JWT-protected (NOT in _EXEMPT_PATHS): the connector list may reveal
 connector configuration / org URLs, so authenticated callers only (T-M4-04).
 
-Wave C changes (REQ-M7-20/21/22):
-- install_connector: returns {redirect_url} pointing to provider OAuth authorize URL
-- oauth_callback: verifies CSRF state, exchanges code, writes tokens to tenant KV
-- disconnect_connector: deletes tenant KV secret(s) for the connector kind
-- All connector CRUD calls now pass request.state.tenant_id (M7.1 follow-on fix)
-- connector:manage required on install, callback, and disconnect (T-7.4-21)
+REMOVED: /connectors/{kind}/install (OAuth start) and /connectors/{kind}/oauth/callback.
+Both existed to run a 3LO flow against ONE OAuth app registered by the platform, whose
+client_id and client_secret therefore had to live in process configuration and be held
+on every tenant's behalf. Every provider they covered — Jira, GitHub, Slack, Figma,
+Azure Repos — is reachable with a credential the tenant pastes itself and which is
+stored only in that tenant's secret store. Deleting the flow removes the last reason
+for the platform to hold a connector credential at all.
 
-T-7.4-16/17: CSRF state is HMAC-SHA256 bound to tenant_id; verify_oauth_state
-raises ValueError → 400 on tamper or tenant-mismatch.
-T-7.4-19: Tokens stored via store_secret (KV only; never ORM tables).
-T-7.4-21: require_permission("connector:manage") on install + callback + disconnect.
-T-7.4-22: OAuth Bearer token resolved ephemerally; never logged.
+T-7.4-19: credentials stored via store_secret (KV only; never ORM tables).
+T-7.4-21: require_permission("connector:manage") on credentials + disconnect.
+T-7.4-22: credentials resolved ephemerally; never logged.
 """
 from __future__ import annotations
 
@@ -43,21 +41,13 @@ import uuid as _uuid
 
 from config.env import (
     AGENTIC_BASE_URL,
-    JIRA_OAUTH_CLIENT_ID,
-    JIRA_OAUTH_CLIENT_SECRET,
-    SLACK_CLIENT_ID,
-    SLACK_CLIENT_SECRET,
-    GITHUB_APP_ID,
-    GITHUB_OAUTH_CLIENT_SECRET,
 )
-from shared.auth.oauth_state import verify_oauth_state
 from shared.authz.connector_grants import granted_target_refs
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.keyvault import load_secret, store_secret
 from shared.models.orm import WorkspaceConnector
 from shared.routers._schemas import ConnectorOut
-from shared.services.oauth_service import build_oauth_start_url
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,20 +171,6 @@ _KIND_PRIMARY_CREDENTIAL: Dict[str, str] = {
     "figma": "figma-connected",
 }
 
-# Atlassian token exchange endpoint
-_JIRA_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
-_JIRA_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
-
-# GitHub token exchange endpoint
-_GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
-
-# Slack token exchange endpoint
-_SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
-
-# Figma token exchange endpoint
-_FIGMA_TOKEN_URL = "https://api.figma.com/v1/oauth/token"
-
-
 def _build_connector_list(
     health_cache: dict, tenant_id: str
 ) -> List[ConnectorOut]:
@@ -250,10 +226,11 @@ async def _overlay_tenant_credentials(
             secret = await secret_store.get_secret(tenant_id, secret_ref)
         except Exception:  # noqa: BLE001
             secret = None
-        # The per-tenant secret is AUTHORITATIVE for credential connectors — it
-        # overrides the tenant-blind global env probe (which would otherwise mark
-        # azure_devops "installed/healthy" for every tenant whenever ADO_PAT env is
-        # set, and keep a connector showing connected after disconnect).
+        # The per-tenant secret is AUTHORITATIVE for credential connectors. It used
+        # to also have to override a tenant-blind env probe that marked azure_devops
+        # "installed/healthy" for every tenant whenever a platform PAT was set; that
+        # env rung is gone now, but this still keeps a connector from showing
+        # connected after a disconnect.
         connected = bool(secret) and secret != secret_store.DISCONNECTED_MARKER
         existing = by_kind.get(kind)
 
@@ -460,42 +437,20 @@ async def get_connector(kind: str, request: Request, db: AsyncSession = Depends(
     return connector
 
 
-# ── OAuth start ───────────────────────────────────────────────────────────────
-
-
-@connectors_resource_router.post(
-    "/connectors/{kind}/install",
-    dependencies=[Depends(require_permission("connector:manage"))],
-)
-async def install_connector(kind: str, request: Request):
-    """OAuth start — returns {redirect_url} pointing to the provider OAuth authorize URL.
-
-    The browser should redirect to redirect_url to begin the OAuth consent flow.
-    CSRF state is HMAC-SHA256 bound to the tenant_id (T-7.4-16/17).
-    Returns 400 when tenant_id is absent from auth context (JWT middleware not wired).
-    Returns 400 for unsupported connector kinds.
-    """
-    tenant_id = getattr(request.state, "tenant_id", "")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id missing from auth context")
-
-    try:
-        redirect_url = build_oauth_start_url(kind, tenant_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    logger.info("OAuth install started: kind=%r tenant=%r", kind, tenant_id)
-    return {"redirect_url": redirect_url}
-
-
 # ── Direct credential entry (PAT / API token) ─────────────────────────────────
 # For providers where the user pastes a credential rather than running OAuth
 # (Azure DevOps PAT, Jira email + API token). Credentials are written to the
 # tenant secret store (Key Vault in prod, Fernet-encrypted DB in dev) and a live
 # probe verifies them. The secret is never echoed back.
 
+# `github` and `slack` are new entries here, and they had to be. Both used to be
+# connectable tenant-wide ONLY through the OAuth flow, so deleting that flow would
+# otherwise have left them with no tenant-wide path at all — a project member could
+# still paste a personal credential (see _PERSONAL_CREDENTIAL_KINDS in
+# project_scoped.py), but an admin could not connect the tenant.
 _CREDENTIAL_KINDS = {
-    "azure_devops", "jira", "confluence", "sonarqube", "github_actions", "ms_teams", "sharepoint", "figma",
+    "azure_devops", "jira", "confluence", "sonarqube", "github_actions", "ms_teams",
+    "sharepoint", "figma", "github", "slack",
 }
 
 
@@ -531,10 +486,32 @@ class SetCredentialsIn(BaseModel):
     # Confluence default space (optional convenience — see notification_targets.confluence_target).
     space_key: Optional[str] = None
     # Figma. `pat` is reused for the Personal Access Token shape; figma_access_token
-    # is the OAuth shape, normally written by the callback rather than pasted here.
+    # is a Figma OAuth access token, which a tenant may still hold and paste even
+    # though this platform no longer runs the OAuth flow that used to mint one.
     # file_url is an optional default file (URL or bare key), not a credential.
     figma_access_token: Optional[str] = None
     file_url: Optional[str] = None
+    # INBOUND webhook signing secret for this connector, per tenant.
+    #
+    # This is the value the tenant sets when it creates the webhook in its own GitHub
+    # org / Jira site / Slack app, and it is what webhooks/router.py verifies inbound
+    # deliveries against. It used to be one process-wide env var per provider, which
+    # meant a single secret verified a delivery to EVERY tenant's
+    # /webhooks/{connector}/{tenant_id} URL — see _tenant_webhook_secret there.
+    #
+    # Optional: a tenant that only makes outbound calls never receives a webhook and
+    # has nothing to set. Without it, inbound deliveries for that tenant are rejected,
+    # which is the correct fail-closed answer rather than a shared key.
+    webhook_secret: Optional[str] = None
+    # Azure DevOps service hooks carry no HMAC — they authenticate with HTTP Basic, so
+    # ADO needs a username alongside the password in `webhook_secret`.
+    webhook_user: Optional[str] = None
+    # GitHub App, registered by the TENANT in its own org. app_id and installation_id
+    # are identifiers, not secrets; the private key is the credential that signs the
+    # RS256 JWT github_issues exchanges for an installation token.
+    github_app_id: Optional[str] = None
+    github_app_private_key: Optional[str] = None
+    github_app_installation_id: Optional[str] = None
 
 
 async def _store_msgraph_app(tenant_id: str, body: SetCredentialsIn, secret_store) -> bool:
@@ -778,7 +755,34 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
     from shared.services import secret_store
     from config.connector_factory import get_connector_for_session
 
+    # The inbound webhook secret is stored under the ref webhooks/router.py reads, and
+    # is orthogonal to the outbound credential below: a tenant may set either, both or
+    # neither. Kinds absent from this map have no inbound webhook at all.
+    _WEBHOOK_SECRET_REF = {
+        "azure_devops": "ado-webhook-password",
+        "jira": "jira-webhook-secret",
+        "github": "github-webhook-secret",
+        "github_actions": "gha-webhook-secret",
+        "slack": "slack-signing-secret",
+        "ms_teams": "msgraph-webhook-client-state",
+        "sharepoint": "msgraph-webhook-client-state",
+    }
+
     try:
+        webhook_secret = (body.webhook_secret or "").strip()
+        if webhook_secret:
+            ref = _WEBHOOK_SECRET_REF.get(kind)
+            if not ref:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Connector '{kind}' does not receive inbound webhooks.",
+                )
+            await secret_store.put_secret(tenant_id, ref, webhook_secret)
+            if kind == "azure_devops" and (body.webhook_user or "").strip():
+                await secret_store.put_secret(
+                    tenant_id, "ado-webhook-user", body.webhook_user.strip()
+                )
+
         if kind == "azure_devops":
             org_url = (body.org_url or "").strip()
             pat = (body.pat or "").strip()
@@ -806,6 +810,35 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             if owner:
                 await secret_store.put_secret(tenant_id, "gha-owner", owner)
             account = owner or None
+        elif kind == "slack":
+            bot_token = (body.pat or "").strip()
+            if not bot_token:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Slack requires 'pat' (a bot token, xoxb-...).",
+                )
+            await secret_store.put_secret(tenant_id, "slack-bot-token", bot_token)
+            account = None
+        elif kind == "github":
+            # A GitHub App registered by THIS tenant in its own org. The platform used
+            # to register one App for everybody and hold its private key in env; that
+            # key signs as the App across every installation it has, so it is now the
+            # tenant's to hold. installation_id selects the tenant's own installation.
+            app_id = (body.github_app_id or "").strip()
+            private_key = (body.github_app_private_key or "").strip()
+            installation_id = (body.github_app_installation_id or "").strip()
+            if not app_id or not private_key or not installation_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="GitHub requires 'github_app_id', 'github_app_private_key' "
+                    "and 'github_app_installation_id'.",
+                )
+            await secret_store.put_secret(tenant_id, "github-app-id", app_id)
+            await secret_store.put_secret(tenant_id, "github-app-private-key", private_key)
+            await secret_store.put_secret(
+                tenant_id, "github-app-installation-id", installation_id
+            )
+            account = app_id
         elif kind == "ms_teams":
             account = await _store_ms_teams_credentials(tenant_id, body, secret_store)
         elif kind == "sharepoint":
@@ -889,70 +922,6 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
 
     logger.info("connector credentials set: kind=%r tenant=%r status=%r error=%r", kind, tenant_id, status, error)
     return {"kind": kind, "status": status, "account": account, "error": error}
-
-
-# ── OAuth callbacks ───────────────────────────────────────────────────────────
-
-
-@connectors_resource_router.get(
-    "/connectors/{kind}/oauth/callback",
-    dependencies=[Depends(require_permission("connector:manage"))],
-)
-async def oauth_callback(
-    kind: str,
-    request: Request,
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """OAuth callback: verify CSRF state, exchange code, write tokens to tenant KV.
-
-    T-7.4-17: verify_oauth_state raises ValueError on tenant mismatch → 400.
-    T-7.4-16: HMAC-SHA256 signature verified before any token exchange.
-    T-7.4-19: Tokens written to KV only; never to ORM tables.
-    T-7.4-21: connector:manage required.
-    T-7.4-22: Tokens never logged.
-    """
-    tenant_id = getattr(request.state, "tenant_id", "")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id missing from auth context")
-
-    # Verify CSRF state before touching the authorization code (T-7.4-16/17)
-    try:
-        verify_oauth_state(state, tenant_id)
-    except ValueError as exc:
-        logger.warning("OAuth callback CSRF state invalid: kind=%r %s", kind, type(exc).__name__)
-        raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF")
-
-    try:
-        if kind == "jira":
-            await _jira_oauth_exchange(code, state, tenant_id)
-        elif kind == "github":
-            await _github_oauth_exchange(code, state, tenant_id)
-        elif kind == "slack":
-            await _slack_oauth_exchange(code, state, tenant_id)
-        elif kind == "azure_repos":
-            await _azure_repos_oauth_exchange(code, state, tenant_id)
-        elif kind == "figma":
-            await _figma_oauth_exchange(code, state, tenant_id)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported connector kind: {kind!r}")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("OAuth callback failed: kind=%r error=%s", kind, type(exc).__name__)
-        raise HTTPException(status_code=502, detail="OAuth exchange failed")
-
-    # Enable connector for the active workspace
-    workspace_id = request.headers.get("x-workspace-id", "")
-    if workspace_id:
-        try:
-            await _upsert_workspace_connector(workspace_id, tenant_id, kind, db)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("oauth_callback: failed to upsert workspace connector row: %s", exc)
-
-    logger.info("OAuth callback complete: kind=%r tenant=%r", kind, tenant_id)
-    return {"status": "connected", "kind": kind}
 
 
 # ── Disconnect ────────────────────────────────────────────────────────────────
@@ -1088,195 +1057,18 @@ async def _maybe_purge_shared_graph_secrets(tenant_id: str, kind: str) -> None:
         )
 
 
-# ── Internal exchange helpers ─────────────────────────────────────────────────
-
-
-async def _jira_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
-    """Exchange Jira authorization code for tokens; write to tenant KV.
-
-    Also fetches cloud_id from accessible-resources (Pitfall 6 — OAuth 3LO
-    tokens must use api.atlassian.com/ex/jira/{cloud_id}, not the tenant URL).
-    T-7.4-22: Token values never logged.
-    """
-    # Re-verify state here for callers that bypass the HTTP route (e.g. tests)
-    verify_oauth_state(state, tenant_id)
-
-    tokens = await _jira_token_exchange(code, tenant_id)
-    access_token = tokens.get("access_token", "")
-    refresh_token = tokens.get("refresh_token", "")
-
-    cloud_id = await _jira_fetch_cloud_id(access_token)
-
-    # Write to tenant-namespaced KV (T-7.4-19)
-    await store_secret("jira-access-token", access_token, tenant_id=tenant_id)
-    await store_secret("jira-refresh-token", refresh_token, tenant_id=tenant_id)
-    await store_secret("jira-cloud-id", cloud_id, tenant_id=tenant_id)
-
-
-async def _jira_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
-    """POST to Atlassian token endpoint; return {access_token, refresh_token}."""
-    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/jira/oauth/callback"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            _JIRA_TOKEN_URL,
-            json={
-                "grant_type": "authorization_code",
-                "client_id": JIRA_OAUTH_CLIENT_ID,
-                "client_secret": JIRA_OAUTH_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": callback,
-            },
-            headers={"Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _jira_fetch_cloud_id(access_token: str) -> str:
-    """Fetch the Atlassian cloud_id from accessible-resources.
-
-    Required for OAuth 3LO API calls — must use
-    api.atlassian.com/ex/jira/{cloud_id} as the base URL (Pitfall 6).
-    T-7.4-22: access_token never logged.
-    """
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            _JIRA_RESOURCES_URL,
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        resources = resp.json()
-    if not resources:
-        raise ValueError("No accessible Atlassian resources for this token")
-    return resources[0]["id"]
-
-
-async def _github_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
-    """Exchange GitHub authorization code for an access token; write to tenant KV."""
-    verify_oauth_state(state, tenant_id)
-
-    tokens = await _github_token_exchange(code, tenant_id)
-    access_token = tokens.get("access_token", "")
-    await store_secret("github-access-token", access_token, tenant_id=tenant_id)
-
-
-async def _github_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
-    """POST to GitHub token endpoint; return {access_token}."""
-    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/github/oauth/callback"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            _GITHUB_TOKEN_URL,
-            data={
-                "client_id": GITHUB_APP_ID,
-                "client_secret": GITHUB_OAUTH_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": callback,
-            },
-            headers={"Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _slack_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
-    """Exchange Slack authorization code for a bot token; write to tenant KV."""
-    verify_oauth_state(state, tenant_id)
-
-    tokens = await _slack_token_exchange(code, tenant_id)
-    bot_token = (tokens.get("access_token") or "")
-    await store_secret("slack-bot-token", bot_token, tenant_id=tenant_id)
-
-
-async def _slack_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
-    """POST to Slack oauth.v2.access endpoint; return token response."""
-    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/slack/oauth/callback"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            _SLACK_TOKEN_URL,
-            data={
-                "client_id": SLACK_CLIENT_ID,
-                "client_secret": SLACK_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": callback,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _figma_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
-    """Exchange a Figma authorization code for an access token; store it per tenant.
-
-    Writes THREE things, and all three matter:
-      - `figma-access-token` to Key Vault, so the connector's OAuth tier resolves it.
-      - the same value to the tenant secret store, because that is the tier
-        FigmaConnector.auth_adapter reads FIRST and the one _overlay_tenant_credentials
-        checks; a KV-only write would leave the catalogue showing "not connected"
-        immediately after a successful consent.
-      - the `figma-connected` marker, which is what the catalogue and disconnect key
-        off for this kind.
-
-    Any previously pasted PAT is cleared: a tenant that has just completed consent
-    should be using the token they consented with, not one left over from before.
-    T-7.4-22: token values never logged.
-    """
-    verify_oauth_state(state, tenant_id)
-
-    tokens = await _figma_token_exchange(code, tenant_id)
-    access_token = tokens.get("access_token", "")
-    if not access_token:
-        raise HTTPException(status_code=502, detail="Figma returned no access token")
-
-    await store_secret("figma-access-token", access_token, tenant_id=tenant_id)
-
-    from shared.services import secret_store
-
-    await secret_store.put_secret(tenant_id, "figma-access-token", access_token)
-    try:
-        await secret_store.delete_secret(tenant_id, "figma-pat")
-    except Exception as exc:  # noqa: BLE001 — a stale PAT must not fail the connect
-        logger.warning("figma oauth: could not clear stale PAT: %s", type(exc).__name__)
-    await secret_store.put_secret(tenant_id, "figma-connected", "OAuth")
-    _clear_figma_auth_cache(tenant_id)
-
-
-async def _figma_token_exchange(code: str, tenant_id: str) -> Dict[str, Any]:
-    """POST to Figma's token endpoint; return {access_token, refresh_token, expires_in}.
-
-    NOTE: Figma access tokens EXPIRE (90 days) and this platform does NOT refresh them —
-    the refresh_token is stored but nothing consumes it yet, so a long-lived tenant
-    eventually falls back to "connect again". Refresh is a named follow-on, deliberately
-    not half-built; the PAT shape has no such expiry and remains the lower-maintenance
-    option.
-    """
-    from config.env import FIGMA_OAUTH_CLIENT_ID, FIGMA_OAUTH_CLIENT_SECRET
-
-    callback = f"{AGENTIC_BASE_URL.rstrip('/')}/connectors/figma/oauth/callback"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            _FIGMA_TOKEN_URL,
-            data={
-                "client_id": FIGMA_OAUTH_CLIENT_ID,
-                "client_secret": FIGMA_OAUTH_CLIENT_SECRET,
-                "redirect_uri": callback,
-                "code": code,
-                "grant_type": "authorization_code",
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _azure_repos_oauth_exchange(code: str, state: str, tenant_id: str) -> None:
-    """Exchange Azure Repos OAuth code for a PAT-equivalent token; write to tenant KV.
-
-    [ASSUMED] A3 — exact implementation not verified against live Azure AD.
-    Built + live-deferred per D-M7-02.
-    """
-    verify_oauth_state(state, tenant_id)
-    # Store code as PAT placeholder; real implementation requires Azure AD token exchange
-    # and a PAT creation API call. Live-deferred per D-M7-02.
-    await store_secret("ado-pat", code, tenant_id=tenant_id)
+# ── Internal helpers ─────────────────────────────────────────────────
+#
+# REMOVED: the five OAuth code-for-token exchanges (_jira/_github/_slack/_figma/
+# _azure_repos) and their token-endpoint helpers. Each one POSTed the PLATFORM's
+# client_id + client_secret to the provider, which is what made those credentials
+# process configuration in the first place.
+#
+# Every provider they served is reachable with a credential the tenant already pastes
+# on the Integrations page — Jira email + API token, a GitHub PAT, a Slack bot token,
+# a Figma PAT, an ADO PAT — all stored per tenant in that tenant's secret store. The
+# OAuth path was a second way to obtain the same access that additionally required the
+# platform to hold a credential on every tenant's behalf.
 
 
 async def _delete_kv_secret(secret_name: str, tenant_id: str) -> None:

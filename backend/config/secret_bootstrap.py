@@ -57,9 +57,7 @@ PLATFORM_SECRETS: tuple[str, ...] = (
     "REDIS_URL",
     # Model providers.
     "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
     "GOOGLE_API_KEY",
-    "AZURE_OPENAI_API_KEY",
     "LITELLM_API_KEY",
     # Observability.
     "LANGFUSE_PUBLIC_KEY",
@@ -67,25 +65,15 @@ PLATFORM_SECRETS: tuple[str, ...] = (
     # Outbound email.
     "SMTP_USERNAME",
     "SMTP_PASSWORD",
-    # Connectors — tokens, OAuth client secrets and webhook shared secrets.
-    "JIRA_API_TOKEN",
-    "JIRA_OAUTH_CLIENT_SECRET",
-    "JIRA_WEBHOOK_SECRET",
-    "CONFLUENCE_API_TOKEN",
-    "ADO_PAT",
-    "ADO_WEBHOOK_PASSWORD",
-    "GHA_PAT",
-    "GHA_WEBHOOK_SECRET",
-    "GITHUB_APP_PRIVATE_KEY",
-    "GITHUB_OAUTH_CLIENT_SECRET",
-    "GITHUB_WEBHOOK_SECRET",
-    "FIGMA_PAT",
-    "FIGMA_OAUTH_CLIENT_SECRET",
-    "SONARQUBE_TOKEN",
-    "SLACK_BOT_TOKEN",
-    "SLACK_CLIENT_SECRET",
-    "SLACK_SIGNING_SECRET",
-    "MSGRAPH_CLIENT_SECRET",
+    # NO CONNECTOR SECRETS. Not one — not a connector credential, not an OAuth client
+    # secret, not a webhook signing secret. Everything a connector needs is per-tenant
+    # and lives in that tenant's secret store, so hydrating any of it into os.environ
+    # would recreate the platform-wide fallback the connectors had removed.
+    #
+    # The ten that used to be listed here (the OAuth client secrets, the GitHub App
+    # private key and the webhook signing secrets) were removed along with the flows
+    # that read them. See the long note in config/env.py for why neither group was the
+    # platform-level exception it claimed to be.
 )
 
 # How long the whole hydration may take before the process gives up and refuses to boot.

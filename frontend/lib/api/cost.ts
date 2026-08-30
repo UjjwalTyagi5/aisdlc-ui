@@ -76,7 +76,6 @@ export const Budgets = z.object({
   org: BudgetRow,
   workspaces: z.array(BudgetRow),
   projects: z.array(BudgetRow),
-  defaultProjectBudgetUsd: z.number().nonnegative(),
   generatedAt: Timestamp,
 });
 export type Budgets = z.infer<typeof Budgets>;

@@ -38,11 +38,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import (
-    MSGRAPH_CLIENT_ID,
-    MSGRAPH_CLIENT_SECRET,
-    MSGRAPH_TENANT_ID,
-)
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -77,7 +72,7 @@ class GraphCredentialsMissing(RuntimeError):
     """No usable Entra app registration is configured for this tenant."""
 
 
-async def _resolve_ref(tenant_id: str, ref: str, env_fallback: str) -> Tuple[Optional[str], bool]:
+async def _resolve_ref(tenant_id: str, ref: str) -> Tuple[Optional[str], bool]:
     """Resolve one credential ref through the standard connector ladder.
 
     Returns (value, disconnected). `disconnected` True means the tenant explicitly
@@ -93,14 +88,10 @@ async def _resolve_ref(tenant_id: str, ref: str, env_fallback: str) -> Tuple[Opt
             if stored == secret_store.DISCONNECTED_MARKER:
                 return None, True
             value = stored
-        except Exception:  # noqa: BLE001 — degrade to the KV/env tiers
+        except Exception:  # noqa: BLE001 — degrade to the tenant KV tier
             value = None
     if not value and tenant_id:
         value = await _keyvault.load_secret(ref, tenant_id=tenant_id)
-    if not value:
-        value = await _keyvault.load_secret(ref)
-    if not value:
-        value = env_fallback
     return value, False
 
 
@@ -120,9 +111,9 @@ async def resolve_graph_credentials(tenant_id: str) -> dict[str, str]:
             "connector credentials are per-tenant (REQ-M7-01)."
         )
 
-    entra_tenant_id, disc_a = await _resolve_ref(tenant_id, REF_ENTRA_TENANT_ID, MSGRAPH_TENANT_ID)
-    client_id, disc_b = await _resolve_ref(tenant_id, REF_CLIENT_ID, MSGRAPH_CLIENT_ID)
-    client_secret, disc_c = await _resolve_ref(tenant_id, REF_CLIENT_SECRET, MSGRAPH_CLIENT_SECRET)
+    entra_tenant_id, disc_a = await _resolve_ref(tenant_id, REF_ENTRA_TENANT_ID)
+    client_id, disc_b = await _resolve_ref(tenant_id, REF_CLIENT_ID)
+    client_secret, disc_c = await _resolve_ref(tenant_id, REF_CLIENT_SECRET)
 
     if disc_a or disc_b or disc_c:
         raise GraphCredentialsMissing("Microsoft Graph is disconnected for this tenant.")

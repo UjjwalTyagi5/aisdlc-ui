@@ -35,33 +35,33 @@ def test_resolve_model_tries_byok_first_and_returns_it_on_success():
     assert call_kwargs["offering_id"] == "off-1"
 
 
-def test_resolve_model_falls_back_to_raw_chat_anthropic_when_byok_raises():
+def test_resolve_model_propagates_a_resolution_failure():
+    """A failed model resolution must surface, NOT fall back to the platform key.
+
+    This test previously asserted the opposite. That fallback was the bug: the same
+    catch-all swallowed the ImportError from `resolve_chat_model`, which did not exist
+    in model_resolver at all, so every security scan for every tenant silently ran on
+    the platform's ANTHROPIC_API_KEY — skipping budgets, model grants, rate limits and
+    the no-training call kwargs.
+
+    Whether a local-dev fallback is permitted is now resolve_chat_model's single
+    decision, gated on AGENT_RUNTIME_MODE. See tests/test_byok_no_platform_fallback.py.
+    """
     from agents_orchestrator.security_agent.agents.scanner import _resolve_model
     import sys
 
-    fake_bound_model = MagicMock(name="fallback_model")
-    fake_anthropic_instance = MagicMock()
-    fake_anthropic_instance.bind_tools.return_value = fake_bound_model
-
-    # Mock resolve_chat_model to raise, so we test the fallback path
     mock_model_resolver = MagicMock()
     mock_model_resolver.resolve_chat_model = MagicMock(
         side_effect=RuntimeError("no provider configured")
     )
 
     with patch.dict(sys.modules, {"shared.services.model_resolver": mock_model_resolver}), patch(
-        "langchain_anthropic.ChatAnthropic",
-        return_value=fake_anthropic_instance,
+        "langchain_anthropic.ChatAnthropic"
     ) as mock_chat_anthropic:
-        result = _resolve_model(
-            {"model_id": "claude-caller-requested-model", "offering_id": None}
-        )
+        with pytest.raises(RuntimeError, match="no provider configured"):
+            _resolve_model({"model_id": "claude-caller-requested-model", "offering_id": None})
 
-    assert result is fake_bound_model
-    mock_chat_anthropic.assert_called_once()
-    # The fallback must still honour the caller's requested model, not silently
-    # downgrade to the .env default.
-    assert mock_chat_anthropic.call_args.kwargs["model"] == "claude-caller-requested-model"
+    mock_chat_anthropic.assert_not_called()
 
 
 def _fake_semgrep_completed_process(stdout_obj):

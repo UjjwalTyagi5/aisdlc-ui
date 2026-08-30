@@ -35,14 +35,14 @@ async def _default_project_from_connector() -> str:
     """If the ADO connector exposes exactly one project, return its name.
     Otherwise return '' so callers can prompt the user to disambiguate.
     Best-effort; any error returns ''."""
-    try:
-        from config.connector_client import get_connector
-        creds = get_connector("azure_devops")
-    except Exception:
+    from shared.services.ado_repos import resolve_auth
+
+    org_url, pat = await resolve_auth()
+    if not (org_url and pat):
         return ""
     try:
-        async with httpx.AsyncClient(timeout=10, auth=("", creds["pat"])) as client:
-            url = f"{creds['org_url'].rstrip('/')}/_apis/projects?api-version=7.1&$top=10"
+        async with httpx.AsyncClient(timeout=10, auth=("", pat)) as client:
+            url = f"{org_url.rstrip('/')}/_apis/projects?api-version=7.1&$top=10"
             r = await client.get(url)
             r.raise_for_status()
             projects = r.json().get("value", [])
@@ -124,30 +124,20 @@ async def trigger_and_poll(state: SuperAgentState):
         )
         return {}
 
-    # Lazy imports — keep this node optional in unit-test envs.
-    try:
-        from config.connector_client import get_connector, ConnectorNotInstalledError
-    except ImportError as exc:
-        logger.warning(f"B.2: connector_client unavailable ({exc}) — skipping pipeline node")
-        return {}
+    from shared.services.ado_repos import resolve_auth
 
-    # Post-MVP Phase 1 — narrow from `except Exception` to the specific connector
-    # error so real bugs (network, auth) propagate as 500 instead of being
-    # silently swallowed. Friendly message for the connector-missing case.
-    try:
-        creds = get_connector("azure_devops")
-    except ConnectorNotInstalledError as exc:
-        logger.error(f"B.2: ADO connector not installed ({exc}) — cannot trigger pipeline")
+    org_url, pat = await resolve_auth(state.get("tenant_id") or "")
+    if not (org_url and pat):
+        logger.error("B.2: ADO not connected for this tenant — cannot trigger pipeline")
         blog(
-            f"Cannot trigger pipeline — **Azure DevOps connector is not configured**.\n\n"
-            f"Install it on the Connectors page or set ADO_ORG_URL + ADO_PAT in `.env` "
-            f"and restart FastAPI.\n\nUnderlying error: {exc}",
+            "Cannot trigger pipeline — **Azure DevOps is not connected** for your "
+            "organization.\n\nOpen the **Integrations** page and connect Azure DevOps "
+            "with your PAT, then run again.",
             level="ERROR",
         )
         return {}
 
-    org_url = creds["org_url"].rstrip("/")
-    pat = creds["pat"]
+    org_url = org_url.rstrip("/")
 
     blog(f"Triggering ADO pipeline {pipeline_id} on branch {branch}...")
     started_at = datetime.now(timezone.utc).isoformat()

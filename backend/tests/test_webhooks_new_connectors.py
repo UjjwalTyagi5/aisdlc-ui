@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from contextlib import contextmanager
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -49,14 +52,36 @@ class _FakeRedis:
         return 1
 
 
+# Webhook secrets are per-tenant now, so the fixture seeds a STORE keyed by
+# (tenant_id, ref) rather than the single app.state value each used to be. Everything
+# here belongs to _TENANT; _OTHER_TENANT deliberately has nothing, which is what
+# test_a_secret_does_not_verify_another_tenants_delivery relies on.
+_OTHER_TENANT = "00000000-0000-0000-0000-0000000000ff"
+_SECRETS = {
+    (_TENANT, "gha-webhook-secret"): _GHA_SECRET,
+    (_TENANT, "msgraph-webhook-client-state"): _CLIENT_STATE,
+}
+
+
+@contextmanager
+def _patch_secrets(store=None):
+    """Stand in for the tenant secret store that _tenant_webhook_secret reads."""
+    table = _SECRETS if store is None else store
+
+    async def _fake(tenant_id: str, ref: str) -> str:
+        return table.get((tenant_id, ref), "")
+
+    with patch("webhooks.router._tenant_webhook_secret", _fake):
+        yield
+
+
 @pytest.fixture
 def client():
     app = FastAPI()
     app.include_router(webhooks_router)
-    app.state.gha_webhook_secret = _GHA_SECRET
-    app.state.msgraph_client_state = _CLIENT_STATE
     app.state.redis_pool = _FakeRedis()
-    return TestClient(app), app
+    with _patch_secrets():
+        yield TestClient(app), app
 
 
 def _workflow_run_body(run_id=42):
@@ -241,11 +266,58 @@ def test_unconfigured_client_state_fails_closed():
     """With nothing to authenticate against, anyone could inject change events."""
     app = FastAPI()
     app.include_router(webhooks_router)
-    app.state.msgraph_client_state = ""
     app.state.redis_pool = _FakeRedis()
-    c = TestClient(app)
-    r = c.post(f"/webhooks/msgraph/{_TENANT}", json={"value": [_notification()]})
+    with _patch_secrets({}):  # nothing configured for any tenant
+        c = TestClient(app)
+        r = c.post(f"/webhooks/msgraph/{_TENANT}", json={"value": [_notification()]})
     assert r.status_code == 400
+
+
+@pytest.mark.unit
+def test_a_secret_does_not_verify_another_tenants_delivery(client):
+    """The point of the whole per-tenant change.
+
+    _TENANT's GitHub Actions secret signs this body correctly. Posting it to
+    _OTHER_TENANT's URL must still be rejected — under the old process-wide secret it
+    was accepted, because one value verified every tenant's path and the tenant
+    segment was decoration. That is cross-tenant event injection: anyone holding the
+    shared secret could push work items into any other tenant's pipeline, correctly
+    signed and indistinguishable from a real delivery.
+    """
+    c, app = client
+    body = _workflow_run_body()
+    r = c.post(
+        f"/webhooks/github_actions/{_OTHER_TENANT}",
+        content=body,
+        headers=_signed(body, "cross-tenant-1"),
+    )
+    assert r.status_code == 400
+    assert "webhooks:github_actions" not in app.state.redis_pool.streams
+
+
+@pytest.mark.unit
+def test_an_unconfigured_tenant_cannot_be_forged_with_an_empty_secret(client):
+    """A tenant with no secret must reject, not verify against "".
+
+    With secret="" every HMAC verifier computes hmac.new(b"", body) — a value the
+    caller can compute too. The old code passed app.state's "" default straight to
+    the verifier, so an unconfigured tenant accepted anything correctly signed with
+    the empty key. Fail-closed is what makes that unreachable.
+    """
+    c, app = client
+    body = _workflow_run_body(run_id=99)
+    sig = "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest()
+    r = c.post(
+        f"/webhooks/github_actions/{_OTHER_TENANT}",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": sig,
+            "X-GitHub-Delivery": "empty-key-1",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 400
+    assert "webhooks:github_actions" not in app.state.redis_pool.streams
 
 
 @pytest.mark.unit

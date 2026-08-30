@@ -95,8 +95,6 @@ Generated from a static scan: 229 backend routes, 151 frontend handlers.
 - /connectors/[kind]
 - /connectors/[kind]/credentials
 - /connectors/[kind]/disconnect
-- /connectors/[kind]/install
-- /connectors/[kind]/oauth/callback
 - /conversations
 - /conversations/[id]
 - /conversations/[id]/attachments

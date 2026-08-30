@@ -52,13 +52,6 @@ from config.env import (
     ENABLE_WORKER_POOL,
     ENABLE_WEBHOOK_TRIGGERS,
     ENABLE_CONNECTOR_HEALTH_PROBES,
-    GITHUB_WEBHOOK_SECRET,
-    SLACK_SIGNING_SECRET,
-    JIRA_WEBHOOK_SECRET,
-    ADO_WEBHOOK_USER,
-    ADO_WEBHOOK_PASSWORD,
-    GHA_WEBHOOK_SECRET,
-    MSGRAPH_WEBHOOK_CLIENT_STATE,
     ENABLE_OIDC,
     ENABLE_SCIM,
     RBAC_CATALOG_AUTOREPAIR,
@@ -343,20 +336,23 @@ def _build_connectors_for_health_probe():
     from config.connectors.figma import FigmaConnector
     from config.connectors.confluence import ConfluenceConnector
     from config.connectors.sonarqube import SonarQubeConnector
-    from config.env import ADO_ORG_URL, JIRA_URL, CONFLUENCE_URL, SONARQUBE_URL
 
+    # No URLs here: the health probe is not a tenant, so it has no tenant site URL
+    # to probe with. Each connector reports "not configured" rather than probing the
+    # platform's own instance and reporting it healthy for everyone (the bug noted in
+    # shared/routers/connectors.py).
     return [
-        AzureDevOpsConnector(ADO_ORG_URL),
-        JiraConnector(JIRA_URL),
+        AzureDevOpsConnector(""),
+        JiraConnector(""),
         GitHubIssuesConnector(),
-        AzureReposConnector(ADO_ORG_URL),
+        AzureReposConnector(""),
         SlackConnector(),
         GitHubActionsConnector(),
         MSTeamsConnector(),
         SharePointConnector(),
         FigmaConnector(),
-        ConfluenceConnector(CONFLUENCE_URL),
-        SonarQubeConnector(SONARQUBE_URL),
+        ConfluenceConnector(""),
+        SonarQubeConnector(""),
     ]
 
 
@@ -460,26 +456,17 @@ async def lifespan(app: FastAPI):
     # This mirrors the infra _probe_postgres pattern used for the /health endpoint.
     app.state.connector_health_cache = await _probe_all_connectors()
 
-    # Webhook signature secrets (REQ-M6-06) — read by webhooks/router.py at request
-    # time to verify inbound signatures BEFORE any processing. Loaded Key-Vault-first
-    # with env-var fallback, mirroring the connector auth_adapter() pattern. Set
-    # unconditionally (independent of ENABLE_WEBHOOK_TRIGGERS, which only gates
-    # downstream run-creation — signature verification must run on every
-    # inbound webhook regardless). ADO uses HTTP Basic Auth (no HMAC), so its pair
-    # is a username/password rather than a signing key.
-    app.state.github_webhook_secret = await load_secret("github-webhook-secret") or GITHUB_WEBHOOK_SECRET
-    app.state.slack_signing_secret = await load_secret("slack-signing-secret") or SLACK_SIGNING_SECRET
-    app.state.jira_webhook_secret = await load_secret("jira-webhook-secret") or JIRA_WEBHOOK_SECRET
-    app.state.ado_webhook_user = await load_secret("ado-webhook-user") or ADO_WEBHOOK_USER
-    app.state.ado_webhook_password = await load_secret("ado-webhook-password") or ADO_WEBHOOK_PASSWORD
-    # GitHub Actions uses the same HMAC scheme as GitHub Issues but its own secret, so
-    # the CI webhook can be rotated independently.
-    app.state.gha_webhook_secret = await load_secret("gha-webhook-secret") or GHA_WEBHOOK_SECRET
-    # Microsoft Graph sends NO signature — clientState is the only authentication, so
-    # the /webhooks/msgraph route fails closed when this is unset.
-    app.state.msgraph_client_state = (
-        await load_secret("msgraph-webhook-client-state") or MSGRAPH_WEBHOOK_CLIENT_STATE
-    )
+    # REMOVED: the seven process-wide webhook secrets that used to be cached on
+    # app.state here (github/gha/slack/jira signing secrets, the ADO Basic-Auth pair,
+    # and the Graph clientState). Each was read with an untenanted
+    # load_secret("github-webhook-secret") and an env var behind it — one value shared
+    # by every tenant, which meant a delivery signed with it verified against EVERY
+    # tenant's /webhooks/{connector}/{tenant_id} URL.
+    #
+    # webhooks/router.py now resolves each secret from the tenant named in the path,
+    # at request time, through the tenant secret store. See _tenant_webhook_secret
+    # there for why the tenant was always available and the shared value never needed
+    # to exist.
 
     # Redis connection pool for the worker pool (REQ-M3-01). Only created when
     # the feature flag is on — ENABLE_WORKER_POOL=false keeps local dev Redis-free.

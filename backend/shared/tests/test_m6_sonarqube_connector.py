@@ -50,12 +50,10 @@ _QUALITY_GATES_LIST_FIXTURE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _isolate_sonarqube_env(monkeypatch):
-    """Keep these tests hermetic regardless of a developer's local .env."""
-    import config.connectors.sonarqube as _sq_mod
-    monkeypatch.setattr(_sq_mod, "SONARQUBE_URL", "")
-    monkeypatch.setattr(_sq_mod, "SONARQUBE_TOKEN", "")
+# These tests used to need an autouse fixture blanking SONARQUBE_URL/TOKEN, because a
+# developer's populated .env would redirect requests off the respx mock and onto a real
+# host. The connector no longer reads either name — credentials are tenant-scoped only —
+# so the leak it guarded against cannot happen and the fixture is gone.
 
 
 def _make_connector() -> SonarQubeConnector:
@@ -277,9 +275,14 @@ async def test_auth_uses_token_as_basic_username_with_empty_password(monkeypatch
         return_value=httpx.Response(200, json=_PROJECT_FIXTURE)
     )
     import config.connectors.sonarqube as _sq_mod
-    # __health_probe__ tenant skips the tenant secret store; env fallback supplies the token.
-    monkeypatch.setattr(_sq_mod, "SONARQUBE_TOKEN", "my-token")
-    connector = SonarQubeConnector(SONAR_BASE, tenant_id="__health_probe__")
+
+    # The token now has exactly one source: this tenant's own Key Vault secret.
+    # (The secret-store rung above it degrades to None with no DB in a unit test.)
+    async def _fake_load_secret(ref, tenant_id=None):
+        return "my-token" if ref == "sonarqube-token" and tenant_id else None
+
+    monkeypatch.setattr(_sq_mod._keyvault, "load_secret", _fake_load_secret)
+    connector = SonarQubeConnector(SONAR_BASE, tenant_id="tenant-a")
     await connector.list_projects()
     sent_auth = route.calls.last.request.headers["Authorization"]
     import base64

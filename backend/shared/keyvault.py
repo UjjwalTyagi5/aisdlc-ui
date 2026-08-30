@@ -2,6 +2,14 @@
 
 load_secret() is called at FastAPI startup via lifespan. Non-blocking: returns
 None on failure so local dev without Azure continues normally.
+
+Two vaults, split by what the app is allowed to DO with the contents:
+  - AZURE_KEY_VAULT_URL        platform secrets, read-only for the app (the default)
+  - AZURE_TENANT_VAULT_URL     per-tenant credentials the app also writes
+
+Every function takes an optional `vault_url` and defaults to the platform vault, so
+existing callers are unchanged. shared/services/secret_store.py is the only module
+that passes the tenant vault — see its docstring.
 """
 import asyncio
 import logging
@@ -10,7 +18,7 @@ from typing import Optional
 from azure.core.exceptions import ResourceNotFoundError
 from azure.keyvault.secrets.aio import SecretClient
 
-from config.env import AZURE_KEY_VAULT_URL
+from config.env import AZURE_KEY_VAULT_URL, AZURE_TENANT_VAULT_URL  # noqa: F401 — re-exported for monkeypatch
 from shared.azure_credential import get_azure_credential
 
 logger = logging.getLogger(__name__)
@@ -18,7 +26,20 @@ logger = logging.getLogger(__name__)
 _KEYVAULT_TIMEOUT_SECONDS = 15
 
 
-async def load_secret(secret_name: str, tenant_id: str | None = None) -> Optional[str]:
+def _vault(vault_url: Optional[str]) -> str:
+    """Resolve the vault to address, defaulting to the platform vault.
+
+    Read through globals() so monkeypatching the module-level names in tests takes
+    effect (same contract secret_store.py documents for its own constants).
+    """
+    if vault_url:
+        return vault_url
+    import shared.keyvault as _self
+    return _self.AZURE_KEY_VAULT_URL
+
+
+async def load_secret(secret_name: str, tenant_id: str | None = None, *,
+                      vault_url: Optional[str] = None) -> Optional[str]:
     """Read a secret from Key Vault. Returns None on failure. Non-blocking — safe to call at startup.
 
     When tenant_id is provided the resolved secret name is '{tenant_id}-{secret_name}'.
@@ -28,13 +49,14 @@ async def load_secret(secret_name: str, tenant_id: str | None = None) -> Optiona
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
 
-    if not AZURE_KEY_VAULT_URL:
-        logger.debug("AZURE_KEY_VAULT_URL not set — skipping Key Vault read")
+    _url = _vault(vault_url)
+    if not _url:
+        logger.debug("No Key Vault URL configured — skipping Key Vault read")
         return None
 
     credential = get_azure_credential()  # shared, do not close
     try:
-        async with SecretClient(vault_url=AZURE_KEY_VAULT_URL, credential=credential) as client:
+        async with SecretClient(vault_url=_url, credential=credential) as client:
             secret = await asyncio.wait_for(
                 client.get_secret(resolved_name),
                 timeout=_KEYVAULT_TIMEOUT_SECONDS,
@@ -58,7 +80,7 @@ async def load_secret(secret_name: str, tenant_id: str | None = None) -> Optiona
         return None
 
 
-def load_secret_sync(secret_name: str) -> Optional[str]:
+def load_secret_sync(secret_name: str, *, vault_url: Optional[str] = None) -> Optional[str]:
     """Synchronous Key Vault read for import-time resolution.
 
     Used by the rare at-import secret reads where async is unavailable: the DB engine
@@ -66,7 +88,8 @@ def load_secret_sync(secret_name: str) -> Optional[str]:
     (migrations/env.py). Returns None on any failure so callers fall back to env.
     Runtime request code should use the async load_secret() instead.
     """
-    if not AZURE_KEY_VAULT_URL:
+    _url = _vault(vault_url)
+    if not _url:
         return None
     try:
         import shared.azure_credential  # noqa: F401 — quiets Azure SDK logging
@@ -75,7 +98,7 @@ def load_secret_sync(secret_name: str) -> Optional[str]:
 
         credential = DefaultAzureCredential()
         try:
-            client = SyncSecretClient(vault_url=AZURE_KEY_VAULT_URL, credential=credential)
+            client = SyncSecretClient(vault_url=_url, credential=credential)
             try:
                 return client.get_secret(secret_name).value
             finally:
@@ -92,7 +115,8 @@ def load_secret_sync(secret_name: str) -> Optional[str]:
         return None
 
 
-async def delete_secret(secret_name: str, tenant_id: str | None = None) -> bool:
+async def delete_secret(secret_name: str, tenant_id: str | None = None, *,
+                        vault_url: Optional[str] = None) -> bool:
     """Begin-delete a Key Vault secret. Returns True on success, False if KV is
     unconfigured or the call fails (caller treats absence as already-deleted).
 
@@ -101,13 +125,14 @@ async def delete_secret(secret_name: str, tenant_id: str | None = None) -> bool:
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
 
-    if not AZURE_KEY_VAULT_URL:
-        logger.debug("AZURE_KEY_VAULT_URL not set — skipping Key Vault delete for '%s'", resolved_name)
+    _url = _vault(vault_url)
+    if not _url:
+        logger.debug("No Key Vault URL configured — skipping Key Vault delete for '%s'", resolved_name)
         return False
 
     credential = get_azure_credential()  # shared, do not close
     try:
-        async with SecretClient(vault_url=AZURE_KEY_VAULT_URL, credential=credential) as client:
+        async with SecretClient(vault_url=_url, credential=credential) as client:
             # NOTE: the ASYNC SecretClient exposes `delete_secret` (a coroutine), NOT the
             # sync client's `begin_delete_secret` poller. Calling the latter raised
             # AttributeError that the broad except below swallowed — so every secret
@@ -138,7 +163,8 @@ async def delete_secret(secret_name: str, tenant_id: str | None = None) -> bool:
         return False
 
 
-async def store_secret(secret_name: str, value: str, tenant_id: str | None = None) -> bool:
+async def store_secret(secret_name: str, value: str, tenant_id: str | None = None, *,
+                       vault_url: Optional[str] = None) -> bool:
     """Write a secret to Key Vault. Returns True on success, False on failure.
 
     When tenant_id is provided the resolved secret name is '{tenant_id}-{secret_name}'.
@@ -147,13 +173,14 @@ async def store_secret(secret_name: str, value: str, tenant_id: str | None = Non
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
 
-    if not AZURE_KEY_VAULT_URL:
-        logger.debug("AZURE_KEY_VAULT_URL not set — skipping Key Vault write for '%s'", resolved_name)
+    _url = _vault(vault_url)
+    if not _url:
+        logger.debug("No Key Vault URL configured — skipping Key Vault write for '%s'", resolved_name)
         return False
 
     credential = get_azure_credential()  # shared, do not close
     try:
-        async with SecretClient(vault_url=AZURE_KEY_VAULT_URL, credential=credential) as client:
+        async with SecretClient(vault_url=_url, credential=credential) as client:
             await asyncio.wait_for(
                 client.set_secret(resolved_name, value),
                 timeout=_KEYVAULT_TIMEOUT_SECONDS,

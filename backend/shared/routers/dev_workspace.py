@@ -11,7 +11,7 @@ Routes (mounted under the '/dev' prefix in process_api):
 
 {project_id} is the platform project UUID.
 Credentials resolve from the Azure DevOps connector (Integrations page) per tenant,
-falling back to env (ADO_ORG_URL / ADO_PAT).
+resolved per tenant (secret store "ado-org-url" / "ado-pat"); no env fallback.
 All routes are gated by the artifact:view floor applied at include_router() time.
 """
 from __future__ import annotations

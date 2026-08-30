@@ -1470,14 +1470,24 @@ async def open_tests_pr(session_id: str, request: Request):
 
 # ── Phase B.1 — Azure Repos endpoints (ported from legacy testing_agent_api) ──
 import httpx as _httpx
-from config.connector_client import get_connector, ConnectorNotInstalledError
 
 
-def _get_ado_creds() -> dict:
-    try:
-        return get_connector("azure_devops")
-    except ConnectorNotInstalledError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+async def _get_ado_creds() -> dict:
+    """This tenant's ADO credentials, or a 400 telling them to connect it.
+
+    Async because the credentials live in the tenant secret store, not in process
+    configuration — there is no platform-wide PAT to read synchronously.
+    """
+    from shared.services.ado_repos import resolve_auth
+
+    org_url, pat = await resolve_auth()
+    if not (org_url and pat):
+        raise HTTPException(
+            status_code=400,
+            detail="Azure DevOps is not connected for your organization. "
+                   "Connect it on the Integrations page.",
+        )
+    return {"org_url": org_url, "pat": pat}
 
 
 @testing_router_orchestrator.get("/repos/list")
@@ -1485,7 +1495,7 @@ async def list_repos(project: str):
     """List all git repos in an ADO project."""
     if not project.strip():
         raise HTTPException(status_code=400, detail="project is required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = f"{creds['org_url'].rstrip('/')}/{project}/_apis/git/repositories?api-version=7.1"
     try:
         async with _httpx.AsyncClient(timeout=30, auth=("", creds["pat"])) as client:
@@ -1505,7 +1515,7 @@ async def list_branches(project: str, repo: str):
     """List branches for a repository."""
     if not project.strip() or not repo.strip():
         raise HTTPException(status_code=400, detail="project and repo are required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = f"{creds['org_url'].rstrip('/')}/{project}/_apis/git/repositories/{repo}/refs?filter=heads/&api-version=7.1"
     try:
         async with _httpx.AsyncClient(timeout=30, auth=("", creds["pat"])) as client:
@@ -1525,7 +1535,7 @@ async def list_pull_requests(project: str, repo: str, status: str = "active"):
     """List pull requests for a repository."""
     if not project.strip() or not repo.strip():
         raise HTTPException(status_code=400, detail="project and repo are required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = (
         f"{creds['org_url'].rstrip('/')}/{project}/_apis/git/repositories/{repo}"
         f"/pullrequests?searchCriteria.status={status}&api-version=7.1"
@@ -1557,7 +1567,7 @@ async def list_pipelines(project: str):
     """List all pipelines in the given ADO project."""
     if not project.strip():
         raise HTTPException(status_code=400, detail="project is required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = f"{creds['org_url'].rstrip('/')}/{project}/_apis/pipelines?api-version=7.1"
     try:
         async with _httpx.AsyncClient(timeout=30, auth=("", creds["pat"])) as client:
@@ -1577,7 +1587,7 @@ async def trigger_pipeline(project: str, pipeline_id: int, branch: str = "main")
     """Trigger a pipeline run on the given branch."""
     if not project.strip():
         raise HTTPException(status_code=400, detail="project is required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = f"{creds['org_url'].rstrip('/')}/{project}/_apis/pipelines/{pipeline_id}/runs?api-version=7.1"
     body = {"resources": {"repositories": {"self": {"refName": f"refs/heads/{branch}"}}}}
     try:
@@ -1599,7 +1609,7 @@ async def pipeline_run_status(project: str, pipeline_id: int, run_id: int):
     """Get the current status of a pipeline run."""
     if not project.strip():
         raise HTTPException(status_code=400, detail="project is required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     url = f"{creds['org_url'].rstrip('/')}/{project}/_apis/pipelines/{pipeline_id}/runs/{run_id}?api-version=7.1"
     try:
         async with _httpx.AsyncClient(timeout=30, auth=("", creds["pat"])) as client:
@@ -1622,7 +1632,7 @@ async def generate_test_scripts(project: str, repo: str, branch: str = "main", w
     Optionally link to a work item for context."""
     if not project.strip() or not repo.strip():
         raise HTTPException(status_code=400, detail="project and repo are required.")
-    creds = _get_ado_creds()
+    creds = await _get_ado_creds()
     org_url = creds["org_url"].rstrip("/")
     pat = creds["pat"]
 

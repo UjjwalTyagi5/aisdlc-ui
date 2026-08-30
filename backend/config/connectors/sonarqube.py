@@ -21,6 +21,7 @@ exponential backoff otherwise, same as every other connector in this package.
 """
 from __future__ import annotations
 
+
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -41,7 +42,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import SONARQUBE_TOKEN, SONARQUBE_URL
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -104,8 +104,6 @@ class SonarQubeConnector(BaseConnector):
         server_url = await _tenant_secret("sonarqube-url")
         if not server_url:
             server_url = await _keyvault.load_secret("sonarqube-url", tenant_id=tenant_id)
-        if not server_url:
-            server_url = await _keyvault.load_secret("sonarqube-url")
 
         # Project-scoped personal override, checked first: a credential this project
         # member set for themselves — or the ad-hoc value Test Connection is
@@ -113,10 +111,10 @@ class SonarQubeConnector(BaseConnector):
         override = await self._resolve_credential_override(tenant_id, "sonarqube")
         if override and override.token:
             # Their own server URL wins; blank falls back to the tenant-wide one
-            # resolved above, then to the env default further down.
+            # resolved above, then to the org_url this connector was built with.
             return {
                 "sonarqube_url": _normalize_base_url(
-                    override.base_url or server_url or SONARQUBE_URL or self._org_url
+                    override.base_url or server_url or self._org_url
                 ),
                 "token": override.token,
             }
@@ -128,14 +126,6 @@ class SonarQubeConnector(BaseConnector):
         if not disconnected:
             if not token:
                 token = await _keyvault.load_secret("sonarqube-token", tenant_id=tenant_id)
-            if not token:
-                token = await _keyvault.load_secret("sonarqube-token")
-
-        # Env-var fallbacks for local development — never use in production.
-        if not server_url:
-            server_url = SONARQUBE_URL or self._org_url
-        if not token and not disconnected:
-            token = SONARQUBE_TOKEN
 
         return {
             "sonarqube_url": _normalize_base_url(server_url or self._org_url),

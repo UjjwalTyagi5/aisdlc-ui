@@ -27,6 +27,7 @@ same as JiraConnector.
 """
 from __future__ import annotations
 
+
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -47,7 +48,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import CONFLUENCE_API_TOKEN, CONFLUENCE_EMAIL, CONFLUENCE_URL
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -111,14 +111,10 @@ class ConfluenceConnector(BaseConnector):
         site_url = await _tenant_secret("confluence-url")
         if not site_url:
             site_url = await _keyvault.load_secret("confluence-url", tenant_id=tenant_id)
-        if not site_url:
-            site_url = await _keyvault.load_secret("confluence-url")
 
         email = await _tenant_secret("confluence-email")
         if not email:
             email = await _keyvault.load_secret("confluence-email", tenant_id=tenant_id)
-        if not email:
-            email = await _keyvault.load_secret("confluence-email")
 
         # Project-scoped personal override, checked first: a credential this project
         # member set for themselves — or the ad-hoc value Test Connection is
@@ -144,16 +140,6 @@ class ConfluenceConnector(BaseConnector):
         if not disconnected:
             if not token:
                 token = await _keyvault.load_secret("confluence-api-token", tenant_id=tenant_id)
-            if not token:
-                token = await _keyvault.load_secret("confluence-api-token")
-
-        # Env-var fallbacks for local development — never use in production.
-        if not site_url:
-            site_url = CONFLUENCE_URL or self._org_url
-        if not email:
-            email = CONFLUENCE_EMAIL
-        if not token and not disconnected:
-            token = CONFLUENCE_API_TOKEN
 
         return {
             "confluence_url": _normalize_base_url(site_url or self._org_url),

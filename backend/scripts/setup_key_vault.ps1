@@ -6,6 +6,16 @@
 #   cd C:\pwc_work\frontend\backend
 #   .\scripts\setup_key_vault.ps1
 #   .\scripts\setup_key_vault.ps1 -Env prod -AppId <managed-identity-or-app-client-id>
+#   .\scripts\setup_key_vault.ps1 -Env prod -AppId <id> -TenantVault
+#
+# TWO VAULTS, SPLIT BY TRUST. Run this twice:
+#   without -TenantVault  the PLATFORM vault (sdlc-kv-<env>). Secrets the app only READS:
+#                         jwt-secret-key, redis-url, webhook secrets. App gets read-only.
+#   with    -TenantVault  the TENANT vault (sdlc-kv-tenant-<env>). Per-tenant credentials
+#                         the app also WRITES: BYOK model keys, connector tokens. App gets
+#                         "Key Vault Secrets Officer".
+# The split exists so granting write on tenant credentials does not also grant write on
+# jwt-secret-key. Set AZURE_TENANT_VAULT_URL on the host to the second vault.
 #
 # Cost: Key Vault standard tier is about $0.03 per 10,000 operations, with no standing
 # charge for the vault itself. Startup reads ~30 secrets once per process. This is
@@ -29,8 +39,24 @@ param(
 
     [string]$ResourceGroup = "rg-sdlc-secrets",
     [string]$Location = "eastus",
-    [string]$VaultName = "sdlc-kv"
+    [string]$VaultName = "sdlc-kv",
+
+    # Provision the TENANT credential vault instead of the platform vault. Changes the
+    # default vault name to sdlc-kv-tenant and, critically, grants the application
+    # "Key Vault Secrets Officer" (write) instead of "Key Vault Secrets User" (read).
+    [switch]$TenantVault
 )
+
+# The tenant vault is a different resource with a different grant; give it its own
+# default name so the two cannot collide in the same resource group.
+if ($TenantVault -and $VaultName -eq "sdlc-kv") { $VaultName = "sdlc-kv-tenant" }
+
+# The application's role. Read-only for the platform vault; write for the tenant vault,
+# because create/rotate/delete of a BYOK key and every connector OAuth callback calls
+# store_secret/delete_secret. Granting only "Secrets User" there makes Azure return 403,
+# which shared/keyvault.py catches and reports as False - the credential is then silently
+# lost while the API reports success.
+$AppRole = if ($TenantVault) { "Key Vault Secrets Officer" } else { "Key Vault Secrets User" }
 
 $ErrorActionPreference = "Stop"
 
@@ -102,21 +128,23 @@ Write-Host "    confirmed"
 
 # -- 4. the application's read access -----------------------------------------
 if ($AppId) {
-    Step 4 "Granting the application 'Key Vault Secrets User' (read only)"
-    # READ ONLY, deliberately. The running app only ever calls get_secret; an app that
-    # can also WRITE to the vault turns any code-execution bug into credential
-    # replacement, which is a much longer outage than credential theft.
+    Step 4 "Granting the application '$AppRole'"
+    # Platform vault: READ ONLY, deliberately. An app that can WRITE platform secrets
+    # turns any code-execution bug into credential REPLACEMENT, a much longer outage
+    # than credential theft.
+    # Tenant vault: WRITE is required - the app creates, rotates and deletes per-tenant
+    # credentials. Confining that grant to this vault is the entire point of the split.
     az role assignment create --assignee $AppId `
-        --role "Key Vault Secrets User" --scope $scope --only-show-errors | Out-Null
+        --role $AppRole --scope $scope --only-show-errors | Out-Null
     $appOk = az role assignment list --assignee $AppId --scope $scope `
-        --query "[?roleDefinitionName=='Key Vault Secrets User'] | length(@)" --output tsv
+        --query "[?roleDefinitionName=='$AppRole'] | length(@)" --output tsv
     if ($appOk -lt 1) { throw "App role assignment did not take." }
     Write-Host "    confirmed for $AppId"
 } else {
-    Step 4 "No -AppId given - skipping the application's read grant"
+    Step 4 "No -AppId given - skipping the application's grant"
     Write-Host "    The deployed app will get 403 until you run:" -ForegroundColor Yellow
     Write-Host "      az role assignment create --assignee <object-id> ``"
-    Write-Host "        --role 'Key Vault Secrets User' --scope $scope"
+    Write-Host "        --role '$AppRole' --scope $scope"
 }
 
 # -- 5. hand off --------------------------------------------------------------

@@ -1,21 +1,21 @@
 /**
- * Unit tests for the Wave C integrations page behaviors (REQ-M7-22).
+ * Unit tests for the integrations page behaviors.
  *
- * Covers:
- * 1. Install redirect — the `ConnectorInstallResponse` union correctly
- *    parses the `{redirectUrl}` shape and the branch logic that calls
- *    `window.location.assign(data.redirectUrl)` is exercised.
- * 2. connector:manage permission gate — `hasPermission` correctly blocks
- *    users lacking both `connector:manage` and `connector:install`, while
- *    granting access to those with `connector:manage` or `admin:*`.
+ * Covers the connector:manage permission gate — `hasPermission` blocks users
+ * lacking `connector:manage`, and grants it to holders of `connector:manage`
+ * or `admin:*`.
  *
- * These are pure-logic unit tests (environment: "node") — React rendering
- * is not required to verify the behavioral contracts of the install-redirect
- * branch and the defense-in-depth permission gate.
+ * REMOVED: the ConnectorInstallResponse and install-redirect suites. They covered
+ * the `{redirectUrl}` branch that sent the browser to an OAuth authorize URL, and
+ * both the schema and the flow are gone — connecting a provider is now a pasted
+ * credential stored per tenant, with no redirect and no platform OAuth app.
+ *
+ * These are pure-logic unit tests (environment: "node") — React rendering is not
+ * required to verify the defense-in-depth permission gate.
  */
 import { describe, it, expect } from "vitest";
 
-import { ConnectorInstallResponse, Connector } from "@/lib/schemas/connector";
+import { Connector } from "@/lib/schemas/connector";
 import { hasPermission } from "@/lib/auth/permissions";
 import type { Session } from "@/lib/auth/types";
 
@@ -31,8 +31,6 @@ function buildSession(permissions: string[], role: "admin" | "member" | "viewer"
   };
 }
 
-const REDIRECT_PAYLOAD = { redirectUrl: "https://auth.atlassian.com/authorize?state=abc" };
-
 const CONNECTOR_PAYLOAD = {
   id: "conn_1" as `conn_${string}`,
   tenantId: "ws_1" as `ws_${string}`,
@@ -43,63 +41,6 @@ const CONNECTOR_PAYLOAD = {
   capabilities: [],
   lastCheckedAt: null,
 };
-
-// ───────── ConnectorInstallResponse schema ─────────
-
-describe("ConnectorInstallResponse schema (install-redirect branch)", () => {
-  it("parses a {redirectUrl} response and retains the redirectUrl field", () => {
-    const parsed = ConnectorInstallResponse.parse(REDIRECT_PAYLOAD);
-    expect("redirectUrl" in parsed).toBe(true);
-    if ("redirectUrl" in parsed) {
-      expect(parsed.redirectUrl).toBe("https://auth.atlassian.com/authorize?state=abc");
-    }
-  });
-
-  it("parses a full Connector record (non-OAuth / backward-compat path)", () => {
-    const parsed = ConnectorInstallResponse.parse(CONNECTOR_PAYLOAD);
-    // If the union parsed as a Connector, it will have an `id` field
-    expect("id" in parsed).toBe(true);
-    expect("redirectUrl" in parsed).toBe(false);
-  });
-
-  it("rejects an empty object that matches neither union member", () => {
-    expect(() => ConnectorInstallResponse.parse({})).toThrow();
-  });
-
-  it("rejects a {redirectUrl} with a non-string value", () => {
-    expect(() => ConnectorInstallResponse.parse({ redirectUrl: 42 })).toThrow();
-  });
-});
-
-// ───────── install-redirect branch logic ─────────
-
-describe("install-redirect branch logic (Connect Flow step 2)", () => {
-  it("fires window.location.assign when data has redirectUrl", () => {
-    // Simulate the onSuccess handler logic from IntegrationsPage.installMutation
-    const assignCalls: string[] = [];
-    const fakeAssign = (url: string) => { assignCalls.push(url); };
-
-    const data = ConnectorInstallResponse.parse(REDIRECT_PAYLOAD);
-    if ("redirectUrl" in data && typeof data.redirectUrl === "string") {
-      fakeAssign(data.redirectUrl);
-    }
-
-    expect(assignCalls).toHaveLength(1);
-    expect(assignCalls[0]).toBe("https://auth.atlassian.com/authorize?state=abc");
-  });
-
-  it("does NOT fire window.location.assign when data is a Connector (direct-install path)", () => {
-    const assignCalls: string[] = [];
-    const fakeAssign = (url: string) => { assignCalls.push(url); };
-
-    const data = ConnectorInstallResponse.parse(CONNECTOR_PAYLOAD);
-    if ("redirectUrl" in data && typeof data.redirectUrl === "string") {
-      fakeAssign(data.redirectUrl);
-    }
-
-    expect(assignCalls).toHaveLength(0);
-  });
-});
 
 // ───────── connector:manage permission gate ─────────
 

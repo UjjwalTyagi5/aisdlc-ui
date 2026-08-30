@@ -1,4 +1,4 @@
-from config.env import AGENTIC_BASE_URL, ADO_ORG_URL, ADO_PAT
+from config.env import AGENTIC_BASE_URL
 import base64
 import json
 import os
@@ -1004,12 +1004,9 @@ async def resolve_ado_target(state: PipelineState) -> PipelineState:
         branch = "main"
 
     if not repo_url and project and repo:
-        try:
-            from config.connector_client import get_connector
-            _creds = get_connector("azure_devops")
-            org = _creds.get("org_url", ADO_ORG_URL or "").rstrip("/").split("/")[-1]
-        except Exception:
-            org = (ADO_ORG_URL or "").rstrip("/").split("/")[-1]
+        from shared.services.ado_repos import resolve_auth
+        _org_url, _ = await resolve_auth(state.get("tenant_id", ""))
+        org = _org_url.rstrip("/").split("/")[-1]
         if org:
             repo_url = f"https://dev.azure.com/{org}/{project}/_git/{repo}"
 
@@ -1058,18 +1055,14 @@ async def clone_azure_repo(state: PipelineState) -> PipelineState:
         state.setdefault("errors", []).append(state["block_reason"])
         return state
 
-    try:
-        from config.connector_client import get_connector
-        _creds = get_connector("azure_devops")
-        _pat = _creds.get("pat") or ADO_PAT
-    except Exception:
-        _pat = ADO_PAT
+    from shared.services.ado_repos import resolve_auth
+    _, _pat = await resolve_auth(state.get("tenant_id", ""))
 
     if not _pat:
         state["status"] = "blocked"
         state["block_reason"] = (
-            "Azure DevOps PAT not configured. Open the Connectors page and "
-            "install Azure DevOps with your PAT, or set `ADO_PAT` in `.env`."
+            "Azure DevOps is not connected for your organization. Open the "
+            "Integrations page and connect Azure DevOps with your PAT."
         )
         state.setdefault("errors", []).append(state["block_reason"])
         return state
@@ -1865,17 +1858,12 @@ async def trigger_azure_pipeline(state: PipelineState) -> PipelineState:
         state.setdefault("errors", []).append("Missing ADO project/repo — cannot trigger pipeline")
         state["pipeline_trigger_status"] = "failed"
         return state
-    try:
-        from config.connector_client import get_connector
-        _creds = get_connector("azure_devops")
-        _pat = _creds.get("pat") or ADO_PAT
-        _org_url = (_creds.get("org_url") or ADO_ORG_URL or "").rstrip("/")
-    except Exception:
-        _pat = ADO_PAT
-        _org_url = (ADO_ORG_URL or "").rstrip("/")
+    from shared.services.ado_repos import resolve_auth
+    _org_url, _pat = await resolve_auth(state.get("tenant_id", ""))
 
     if not _pat or not _org_url:
-        state.setdefault("errors", []).append("ADO PAT or org URL not configured — set them in Connectors or ADO_PAT/ADO_ORG_URL env vars")
+        state.setdefault("errors", []).append(
+            "Azure DevOps is not connected for your organization — connect it on the Integrations page")
         state["pipeline_trigger_status"] = "failed"
         return state
 

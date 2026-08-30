@@ -46,10 +46,9 @@ export function BudgetHub() {
 
   if (q.isLoading) return <LoadingState variant="list" rows={4} />;
   if (!q.data) return null;
-  // `defaultProjectBudgetUsd` is deliberately NOT read. Projects no longer take a
-  // default: creating one requires an explicit budget, and a unit that sets none
-  // simply has no cap. The API still returns the field; nothing should present it
-  // as what a new project will get.
+  // Projects take no default budget: creating one requires an explicit budget, and
+  // a unit that sets none simply has no cap. The API used to return an unused
+  // `defaultProjectBudgetUsd`; it was removed along with the backend constant.
   const { org, workspaces, projects } = q.data;
 
   const projByWs = new Map<string, Row[]>();

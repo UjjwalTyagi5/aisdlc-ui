@@ -51,12 +51,11 @@ _tools = [
 
 
 def _resolve_model(state: AgentState):
-    """Resolve the LLM model for this invocation — tries the caller's in-app
-    BYOK-configured provider first, falls back to the raw .env key on any failure
-    (no provider configured, provider disabled, etc). Mirrors
-    code_review_agent/agents/reviewer.py's _resolve_model exactly, so Security gains
-    BYOK support the same way Code Review already has it."""
-    from config.env import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+    """Resolve the LLM model for this invocation from the run's BYOK-resolved model.
+
+    Fails CLOSED in enterprise: a tenant with no configured provider gets an error,
+    never the platform's key. Mirrors code_review_agent/agents/reviewer.py exactly."""
+    from config.env import ANTHROPIC_MODEL
 
     model_id = state.get("model_id") or ANTHROPIC_MODEL
     offering_id = state.get("offering_id")
@@ -75,25 +74,18 @@ def _resolve_model(state: AgentState):
     # Per-workspace agent-profile override (contextvar), falls back to the baked prompt.
     base = get_prompt_override("security") or SECURITY_SYSTEM_PROMPT
 
-    try:
-        from shared.services.model_resolver import resolve_chat_model
-        return resolve_chat_model(
-            model_id=model_id,
-            offering_id=offering_id,
-            tools=tools,
-            system_prompt=base,
-        )
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).debug(
-            "BYOK model resolution failed, falling back to .env key: %s", exc
-        )
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(
-            model=model_id,
-            api_key=ANTHROPIC_API_KEY,
-            max_tokens=8192,
-        ).bind_tools(tools)
+    # resolve_chat_model fails CLOSED in enterprise and falls back to ANTHROPIC_API_KEY
+    # only in local dev. Do NOT wrap this in a bare `except Exception` — doing so used
+    # to swallow the ImportError from a resolver symbol that did not exist, so every
+    # run silently billed the PLATFORM key and skipped budgets, grants and rate limits.
+    from shared.services.model_resolver import resolve_chat_model
+
+    return resolve_chat_model(
+        model_id=model_id,
+        offering_id=offering_id,
+        tools=tools,
+        system_prompt=base,
+    )
 
 
 async def agent_node(state: AgentState) -> dict:

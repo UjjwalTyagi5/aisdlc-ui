@@ -47,18 +47,9 @@ _TRANSITIONS_FIXTURE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _isolate_jira_env(monkeypatch):
-    """Keep these tests hermetic regardless of a developer's local .env.
-
-    auth_adapter() prefers the env JIRA_URL/EMAIL/TOKEN over the constructor's
-    org_url, so a populated .env would redirect requests off the respx mock and
-    onto the real Jira host. Blank them so the connector uses JIRA_BASE.
-    """
-    import config.connectors.jira as _jira_mod
-    monkeypatch.setattr(_jira_mod, "JIRA_URL", "")
-    monkeypatch.setattr(_jira_mod, "JIRA_EMAIL", "")
-    monkeypatch.setattr(_jira_mod, "JIRA_API_TOKEN", "")
+# The autouse fixture that blanked JIRA_URL/EMAIL/API_TOKEN is gone: auth_adapter no
+# longer reads them, so a populated .env can no longer redirect these requests onto the
+# real Jira host.
 
 
 def _make_connector() -> JiraConnector:
