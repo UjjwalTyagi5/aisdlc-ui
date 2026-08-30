@@ -76,8 +76,64 @@ async def _purge_tenants(conn, org_ids: set[str]) -> None:
         await conn.execute("DELETE FROM organizations WHERE id = ANY($1::uuid[])", ids)
 
 
+@pytest.fixture(scope="session")
+async def _cleanup_conn():
+    """ONE asyncpg connection, reused by every purge_created_orgs teardown.
+
+    WHY THIS EXISTS. purge_created_orgs used to open a fresh connection to snapshot
+    the org ids and a second one to purge — two connects per test, across 570 tests in
+    114 modules, so 1,140 connections per full run. Against this project's local
+    Postgres `asyncpg.connect` + close measures ~132 ms, where a local connect is
+    normally 5-15 ms; the rest is Windows loopback plus scram-sha-256.
+
+    MEASURED SAVING: 113.7 ms per test, from an A/B over 7 modules / 96 tests, two
+    runs each arm, nothing else touching the database — 102.85s before, 91.93s after.
+    That is ~65s off a ~21 minute suite, about 5%.
+
+    Worth stating because the estimate that motivated this was ~2.7 minutes, built by
+    assuming the whole ~290 ms fixture floor would vanish. It did not: inside a real
+    run some of the connect cost overlaps with work the test is doing anyway, so a
+    tight-loop microbenchmark overstated it by roughly 2.5x. The suite is DB-bound
+    (~56.6k transactions through one backend at ~49% CPU) and connection setup was
+    never the largest part of that — moving it further needs fewer queries or
+    pytest-xdist with per-worker databases, not more connection tuning.
+
+    Session-scoped is safe here because pytest.ini sets
+    `asyncio_default_fixture_loop_scope = session`: every fixture body — including the
+    function-scoped one below — runs on the session event loop, so the connection is
+    always awaited from the loop that created it. That is the same constraint
+    shared/db.py documents for NullPool and config/connectors/http_client.py for its
+    per-loop client cache; get it wrong and asyncpg raises from a foreign loop.
+
+    Yields a callable rather than the connection itself so a teardown that finds the
+    socket dead — a test that restarted the server, or an idle timeout — reconnects
+    instead of failing the run. Cleanup must never be the thing that breaks a suite.
+    """
+    dsn = _migrations_dsn()
+    if dsn is None:
+        yield None
+        return
+
+    import asyncpg
+
+    holder: dict = {"conn": None}
+
+    async def _conn():
+        c = holder["conn"]
+        if c is None or c.is_closed():
+            c = holder["conn"] = await asyncpg.connect(dsn)
+        return c
+
+    try:
+        yield _conn
+    finally:
+        c = holder["conn"]
+        if c is not None and not c.is_closed():
+            await c.close()
+
+
 @pytest.fixture
-async def purge_created_orgs():
+async def purge_created_orgs(_cleanup_conn):
     """Remove any organization a test creates, however it creates it.
 
     Snapshot-and-diff rather than a registry: these suites call
@@ -92,37 +148,35 @@ async def purge_created_orgs():
     Skips silently without POSTGRES_MIGRATIONS_CONN_STRING — the suites that use it
     already skip without a database, and cleanup must never be the thing that fails.
     """
-    dsn = _migrations_dsn()
-    if dsn is None:
+    if _cleanup_conn is None:
         yield
         return
 
-    import asyncpg
-
-    conn = await asyncpg.connect(dsn)
-    try:
-        before = await _org_ids(conn)
-    finally:
-        await conn.close()
+    conn = await _cleanup_conn()
+    before = await _org_ids(conn)
 
     yield
 
-    conn = await asyncpg.connect(dsn)
-    try:
-        created = await _org_ids(conn) - before
-        await _purge_tenants(conn, created)
-        # `grant_role` upserts a users row with a NULL email, so a throwaway tenant
-        # leaves users behind pointing at an organization that no longer exists.
-        # They are invisible to the org diff above and accumulate silently.
-        await conn.execute(
-            """
-            DELETE FROM users u
-             WHERE u.tenant_id IS NOT NULL
-               AND NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = u.tenant_id)
-            """
-        )
-    finally:
-        await conn.close()
+    conn = await _cleanup_conn()  # reconnects if the socket died during the test
+    created = await _org_ids(conn) - before
+    if not created:
+        # Nothing to undo. The orphan-users DELETE below used to run unconditionally,
+        # costing ~23 ms of every teardown to delete nothing: an orphan is a users row
+        # whose organization was purged, so one cannot appear unless this test created
+        # an organization in the first place.
+        return
+
+    await _purge_tenants(conn, created)
+    # `grant_role` upserts a users row with a NULL email, so a throwaway tenant
+    # leaves users behind pointing at an organization that no longer exists.
+    # They are invisible to the org diff above and accumulate silently.
+    await conn.execute(
+        """
+        DELETE FROM users u
+         WHERE u.tenant_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = u.tenant_id)
+        """
+    )
 
 
 @pytest.fixture
