@@ -598,19 +598,32 @@ async def decider_covers_scope(
     FAILS CLOSED for anything ROLE_SCOPE does not resolve to organization/
     business_unit/project (defensive only — `currentApproverRole` is always
     org_admin, bu_admin, project_admin, or an AGENT_OWNER_ROLE delivery role in
-    practice, never "custom" or "scrum_master").
+    practice, never "custom" or "scrum_master"). This also means a role bound at
+    a NON-NATURAL scope_kind (e.g. a project_admin granted at business_unit
+    scope — `ROLE_SCOPE` documents this as an advisory default, not an
+    enforced one, and `grant_role`'s callers can override it) will not match
+    the exact-scope branches below and, absent a project in view, falls to the
+    same business-unit fallback as everyone else — consistent with
+    `read_scope.governs_unit()`'s established rule that a role bound above its
+    natural level does not thereby reach what a role bound AT that level does.
 
     project_admin (and every delivery role — AGENT_OWNER_ROLE names one for
     agent_access stage two) falls back to ANY live binding of `role` within the
     request's own business unit when the request names no specific project at
-    all. `user_onboarding` is the one type that reaches this today: it is
-    raisable by a contributor/developer, tier-routes to project_admin first, and
-    genuinely carries no projectId — onboarding is a business-unit-level act.
-    Refusing outright here would make that request permanently undecidable by
-    anyone, a real regression this function must not cause. The fallback is
-    still strictly narrower than the unscoped check it replaces (rules out every
-    OTHER business unit), just not narrowed to one project when no single
-    project exists to narrow to.
+    all. `create_request()` never REQUIRES `projectId` for any type — it is
+    only ever conventionally supplied by the raising UI — so more than one type
+    can reach this in practice, not just the one the design was originally
+    built for: `user_onboarding` (raisable by a contributor/developer,
+    tier-routes to project_admin first, and genuinely carries no projectId by
+    design — onboarding is a business-unit-level act) and `agent_access`
+    (`create_request` enforces nothing here either, though its own dedicated
+    raise dialog always supplies one in practice — see
+    `test_a_stage_one_rejection_ends_it` for a project-less case still exercised
+    in this suite). Refusing outright here would make such a request
+    permanently undecidable by anyone, a real regression this function must
+    not cause. The fallback is still strictly narrower than the unscoped check
+    it replaces (rules out every OTHER business unit), just not narrowed to
+    one project when no single project exists to narrow to.
     """
     scope_kind = ROLE_SCOPE.get(role)
     if scope_kind == "organization":

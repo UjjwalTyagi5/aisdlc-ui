@@ -1487,6 +1487,9 @@ async def test_cross_bu_assignment_refuses_the_wrong_units_bu_admin(org):
     """Finding 5 (sub-project A's baseline audit), closed: a bu_admin of a
     DIFFERENT business unit than the one the request names must not be able to
     decide it, even though the role NAME matches."""
+    # other_bu is the LENDING unit — the request's own workspace_id (see below), so
+    # right_admin is bound there, not to org["bu"] (the requesting project's own unit,
+    # which is the WRONG unit for this specific request — hence wrong_admin there).
     other_bu = str(_uuid.uuid4())
     async with get_db_session_superuser() as s:
         await s.execute(text(
@@ -1630,7 +1633,9 @@ async def test_connector_access_refuses_a_project_admin_from_another_project(org
         f"/governance-approvals/{raised.json()['id']}/decide", headers=wrong_headers,
         json={"decision": "approve"},
     )
-    assert wrong_decide.status_code >= 400, wrong_decide.text
+    # 403, not just "some 4xx" — NotYourQueue's actual mapped status; a looser
+    # bound would also pass on an unrelated 422/500 and mask a real regression.
+    assert wrong_decide.status_code == 403, wrong_decide.text
 
     right_headers = {"Authorization": "Bearer " + create_access_token(
         user_id=right_pa, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],

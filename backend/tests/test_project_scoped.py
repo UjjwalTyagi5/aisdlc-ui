@@ -582,6 +582,15 @@ async def _bind_project_admin(org: dict, user_id: str) -> None:
         await s.commit()
 
 
+async def _bind_bu_admin(org: dict, user_id: str) -> None:
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, tenant_id, user_id, role_name, scope_kind, scope_id) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :u, 'bu_admin', 'business_unit', :w)"
+        ), {"i": str(_uuid.uuid4()), "t": org["org"], "u": user_id, "w": org["payments"]})
+        await s.commit()
+
+
 @pytest.mark.asyncio
 async def test_a_project_admins_settings_edit_becomes_a_request(org):
     """The edit is QUEUED, not applied — and it is addressed to the BU Admin.
@@ -634,6 +643,10 @@ async def test_approving_the_request_applies_the_settings(org):
     pa = await _user(org, "projadmin")
     bua = await _user(org, "buadmin")
     await _bind_project_admin(org, pa)
+    # decide()'s gate-integrity check (sub-project B) now verifies the decider's own
+    # role_bindings row covers the request's scope, not just their role name — bua needs
+    # a real bu_admin binding on this project's business unit to be able to approve.
+    await _bind_bu_admin(org, bua)
 
     r = c.patch(f"/projects/{org['project']}",
                 headers=_headers(pa, org["org"], ["project:update", "artifact:view"]),
