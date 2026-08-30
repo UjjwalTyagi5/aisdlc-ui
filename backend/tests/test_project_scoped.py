@@ -690,6 +690,46 @@ async def test_an_unsent_field_is_not_blanked(org):
     assert float(row.monthly_budget_usd) == 42.0
 
 
+# ── a Project Admin can ask for more budget on their own project ─────────────
+
+
+@pytest.mark.asyncio
+async def test_project_budget_increase_request_reaches_the_bu_admin_and_applies(org):
+    """The exact bug sub-project A's Task 1 parked: _apply_budget_increase's project_id
+    branch (effects.py) has been dead code since it shipped — nothing has ever called
+    create_request with request_type="budget_increase" and a real project_id. This
+    proves the new endpoint makes that branch genuinely reachable end to end."""
+    pa = await _user(org, "projadmin")
+    bua = await _user(org, "buadmin")
+    await _bind_project_admin(org, pa)
+    await _bind_bu_admin(org, bua)
+
+    c = TestClient(process_api.app)
+    r = c.post(
+        f"/projects/{org['project']}/budget-increase-request",
+        headers=_headers(pa, org["org"], ["cost:view", "artifact:view"]),
+        json={"requestedAmountUsd": 500, "reason": "Ran out mid-sprint."},
+    )
+    assert r.status_code == 201, r.text
+    req_id = r.json()["id"]
+    # Tier-routed (budget_increase is absent from routing.TYPE_ROUTED): a Project
+    # Admin's raise climbs to their BU Admin, exactly as the cost page's own copy
+    # already promises ("it escalates one tier at a time").
+    assert r.json()["currentApproverRole"] == "bu_admin"
+
+    from shared.services import governance_requests as gov
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await gov.decide(s, request_id=req_id, decider_id=bua, decider_name="Bua",
+                         decider_role="bu_admin", decision="approve")
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(
+            text("SELECT monthly_budget_usd FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).first()
+    assert float(row.monthly_budget_usd) == 500.0
+
+
 # ── budget window is captured at project creation (migration 0035) ───────────
 
 
