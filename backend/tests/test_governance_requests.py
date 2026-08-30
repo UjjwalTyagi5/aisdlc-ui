@@ -263,6 +263,116 @@ async def test_only_the_current_approver_decides(org):
     assert out["currentApproverRole"] is None
 
 
+async def _open_session(org: dict):
+    async with get_db_session_for_tenant(org["org"]) as s:
+        return s
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_org_admin_always_true(org):
+    """org_admin is tenant-wide by design — no binding needed at all."""
+    assert await svc.decider_covers_scope(
+        await _open_session(org), decider_id="anyone", role="org_admin",
+        request={"workspaceId": org["bu"], "projectId": org["project"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_bu_admin_matches_own_unit(org):
+    admin = f"bu-{_uuid.uuid4()}"
+    await _bind(org, admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert await svc.decider_covers_scope(
+            s, decider_id=admin, role="bu_admin",
+            request={"workspaceId": org["bu"]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_bu_admin_refuses_other_unit(org):
+    """The exact bug this plan fixes for cross_bu_assignment: a bu_admin bound to
+    a DIFFERENT business unit must not cover this request."""
+    admin = f"bu-{_uuid.uuid4()}"
+    other_bu = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+    await _bind(org, admin, "bu_admin", scope_kind="business_unit", scope_id=other_bu)
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert not await svc.decider_covers_scope(
+            s, decider_id=admin, role="bu_admin",
+            request={"workspaceId": org["bu"]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_project_admin_matches_own_project(org):
+    admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert await svc.decider_covers_scope(
+            s, decider_id=admin, role="project_admin",
+            request={"workspaceId": org["bu"], "projectId": org["project"]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_project_admin_refuses_other_project(org):
+    """The exact bug this plan fixes for agent_access stage two: a project_admin
+    (or delivery role) bound to a DIFFERENT project must not cover this request."""
+    admin = f"pa-{_uuid.uuid4()}"
+    other_project = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind) "
+            "VALUES (:i, :w, :t, 'Other project', 'github')"
+        ), {"i": other_project, "w": org["bu"], "t": org["org"]})
+    await _bind(org, admin, "project_admin", scope_kind="project", scope_id=other_project)
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert not await svc.decider_covers_scope(
+            s, decider_id=admin, role="project_admin",
+            request={"workspaceId": org["bu"], "projectId": org["project"]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_project_less_falls_back_to_own_business_unit(org):
+    """user_onboarding's shape: no projectId, project_admin deciding. Falls back
+    to any project_admin binding within the request's own business unit."""
+    admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert await svc.decider_covers_scope(
+            s, decider_id=admin, role="project_admin",
+            request={"workspaceId": org["bu"]},  # no projectId
+        )
+
+
+@pytest.mark.asyncio
+async def test_decider_covers_scope_project_less_fallback_refuses_other_business_unit(org):
+    """The fallback must still be scoped — not a blanket pass for project_admin."""
+    admin = f"pa-{_uuid.uuid4()}"
+    other_bu, other_project = str(_uuid.uuid4()), str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind) "
+            "VALUES (:i, :w, :t, 'Other unit project', 'github')"
+        ), {"i": other_project, "w": other_bu, "t": org["org"]})
+    await _bind(org, admin, "project_admin", scope_kind="project", scope_id=other_project)
+    async with get_db_session_for_tenant(org["org"]) as s:
+        assert not await svc.decider_covers_scope(
+            s, decider_id=admin, role="project_admin",
+            request={"workspaceId": org["bu"]},  # no projectId, and admin is in a DIFFERENT unit
+        )
+
+
 @pytest.mark.asyncio
 async def test_role_assignment_closes_when_the_role_is_actually_assigned(org):
     """The onboarding.py contract: a role_assignment request closes because the

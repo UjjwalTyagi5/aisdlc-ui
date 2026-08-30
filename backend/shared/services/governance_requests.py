@@ -57,6 +57,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.permissions import ROLE_SCOPE
+from shared.authz.read_scope import live_binding
 from shared.governance import routing
 from shared.governance.effects import EffectNotAvailable, apply_on_approve, apply_on_reject
 from shared.services import notifications
@@ -572,6 +573,94 @@ async def list_requests(
 
 
 # ── deciding ─────────────────────────────────────────────────────────────────
+
+
+async def decider_covers_scope(
+    db: AsyncSession, *, decider_id: str, role: str, request: dict[str, Any]
+) -> bool:
+    """Does `decider_id`'s own `role` binding actually cover THIS request's scope?
+
+    `decide()`'s existing check (`decider_role != request["currentApproverRole"]`)
+    only confirms the decider holds the right role NAME somewhere in the tenant —
+    `effective_platform_role()` collapses every binding a person holds into one
+    "highest standing wins" string with no project/workspace information at all.
+    This is the second half: does the decider hold THAT role at a binding that
+    actually covers the project or business unit this request names, queried
+    directly against role_bindings (never derived from the already-collapsed
+    platform-role string, which has thrown that information away by the time it
+    reaches here).
+
+    Keyed off ROLE_SCOPE (shared/authz/permissions.py) — the natural scope_kind
+    each role is normally bound at — rather than a second, hand-rolled mapping.
+    org_admin's natural scope is "organization": tenant-wide by design, always
+    covers everything, no query needed.
+
+    FAILS CLOSED for anything ROLE_SCOPE does not resolve to organization/
+    business_unit/project (defensive only — `currentApproverRole` is always
+    org_admin, bu_admin, project_admin, or an AGENT_OWNER_ROLE delivery role in
+    practice, never "custom" or "scrum_master").
+
+    project_admin (and every delivery role — AGENT_OWNER_ROLE names one for
+    agent_access stage two) falls back to ANY live binding of `role` within the
+    request's own business unit when the request names no specific project at
+    all. `user_onboarding` is the one type that reaches this today: it is
+    raisable by a contributor/developer, tier-routes to project_admin first, and
+    genuinely carries no projectId — onboarding is a business-unit-level act.
+    Refusing outright here would make that request permanently undecidable by
+    anyone, a real regression this function must not cause. The fallback is
+    still strictly narrower than the unscoped check it replaces (rules out every
+    OTHER business unit), just not narrowed to one project when no single
+    project exists to narrow to.
+    """
+    scope_kind = ROLE_SCOPE.get(role)
+    if scope_kind == "organization":
+        return True
+    now = datetime.now(tz=timezone.utc)
+    if scope_kind == "business_unit":
+        workspace_id = request.get("workspaceId")
+        if not workspace_id:
+            return False
+        row = (
+            await db.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    "  AND rb.role_name = :role AND rb.scope_kind = 'business_unit' "
+                    "  AND rb.scope_id = CAST(:sid AS uuid)"
+                ),
+                {"u": decider_id, "role": role, "sid": workspace_id, "now": now},
+            )
+        ).first()
+        return row is not None
+    if scope_kind == "project":
+        project_id = request.get("projectId")
+        if project_id:
+            row = (
+                await db.execute(
+                    text(
+                        f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                        "  AND rb.role_name = :role AND rb.scope_kind = 'project' "
+                        "  AND rb.scope_id = CAST(:sid AS uuid)"
+                    ),
+                    {"u": decider_id, "role": role, "sid": project_id, "now": now},
+                )
+            ).first()
+            return row is not None
+        workspace_id = request.get("workspaceId")
+        if not workspace_id:
+            return False
+        row = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM role_bindings rb "
+                    "  JOIN projects p ON p.id = rb.scope_id AND rb.scope_kind = 'project' "
+                    f"WHERE {live_binding()} AND rb.role_name = :role "
+                    "  AND p.workspace_id = CAST(:wid AS uuid)"
+                ),
+                {"u": decider_id, "role": role, "wid": workspace_id, "now": now},
+            )
+        ).first()
+        return row is not None
+    return False
 
 
 async def decide(
