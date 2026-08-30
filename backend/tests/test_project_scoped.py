@@ -704,6 +704,19 @@ async def test_project_budget_increase_request_reaches_the_bu_admin_and_applies(
     await _bind_project_admin(org, pa)
     await _bind_bu_admin(org, bua)
 
+    # A sibling project in the SAME workspace, seeded with its own budget. The
+    # whole point of the project-scoped branch is that it targets the row named
+    # in the request, not something workspace-wide — so this decoy has to come
+    # back untouched, or the endpoint is silently doing a workspace-wide update.
+    decoy = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind, "
+            "monthly_budget_usd) VALUES (CAST(:i AS uuid), CAST(:w AS uuid), CAST(:t AS uuid), "
+            "'Decoy project', 'github', 250)"
+        ), {"i": decoy, "w": org["payments"], "t": org["org"]})
+        await s.commit()
+
     c = TestClient(process_api.app)
     r = c.post(
         f"/projects/{org['project']}/budget-increase-request",
@@ -727,7 +740,15 @@ async def test_project_budget_increase_request_reaches_the_bu_admin_and_applies(
             text("SELECT monthly_budget_usd FROM projects WHERE id = CAST(:p AS uuid)"),
             {"p": org["project"]},
         )).first()
+        decoy_row = (await s.execute(
+            text("SELECT monthly_budget_usd FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": decoy},
+        )).first()
     assert float(row.monthly_budget_usd) == 500.0
+    # THE ROW THAT MUST NOT MOVE. If _apply_budget_increase ever regressed to the
+    # old workspace-wide UPDATE, this would silently jump to 500 right alongside
+    # the target project — this assertion is what tells the difference.
+    assert float(decoy_row.monthly_budget_usd) == 250.0
 
 
 # ── budget window is captured at project creation (migration 0035) ───────────
