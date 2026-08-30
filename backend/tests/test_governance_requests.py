@@ -1582,3 +1582,175 @@ async def test_agent_access_stage_two_refuses_the_wrong_projects_owner(org):
             decider_role="architect", decision="approve",
         )
     assert decided["status"] == "approved"
+
+
+# ── the fix generalizes: a third type, the project-less fallback, org_admin ──
+# Task 3 closed the two already-known bugs (cross_bu_assignment, agent_access).
+# These three close the rest of spec §7's required coverage.
+
+@pytest.mark.asyncio
+async def test_connector_access_refuses_a_project_admin_from_another_project(org):
+    """A THIRD type, not one of the two already-known bugs — proves the fix is
+    genuinely general, not narrowly patching cross_bu_assignment and agent_access."""
+    other_project = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind) "
+            "VALUES (:i, :w, :t, 'Other project', 'github')"
+        ), {"i": other_project, "w": org["bu"], "t": org["org"]})
+        await s.execute(text(
+            "INSERT INTO integration_grants (tenant_id, kind, target_ref, workspace_id) "
+            "VALUES (CAST(:t AS uuid), 'connector', 'slack', CAST(:w AS uuid))"
+        ), {"t": org["org"], "w": org["bu"]})
+    dev = f"dev-{_uuid.uuid4()}"
+    wrong_pa = f"wrong-pa-{_uuid.uuid4()}"
+    right_pa = f"right-pa-{_uuid.uuid4()}"
+    await _bind(org, dev, "developer", scope_kind="project", scope_id=org["project"])
+    await _bind(org, wrong_pa, "project_admin", scope_kind="project", scope_id=other_project)
+    await _bind(org, right_pa, "project_admin", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    dev_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=dev, tenant_id=org["org"], permissions=["artifact:view", "run:create"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=dev_headers,
+        json={
+            "type": "connector_access", "title": "Slack access", "description": "For releases.",
+            "priority": "normal", "workspaceId": org["bu"], "projectId": org["project"],
+            "targetId": "slack", "accessLevel": "write",
+        },
+    )
+    assert raised.status_code == 201, raised.text
+
+    wrong_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=wrong_pa, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    wrong_decide = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=wrong_headers,
+        json={"decision": "approve"},
+    )
+    assert wrong_decide.status_code >= 400, wrong_decide.text
+
+    right_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=right_pa, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    right_decide = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=right_headers,
+        json={"decision": "approve"},
+    )
+    assert right_decide.status_code == 200, right_decide.text
+
+
+@pytest.mark.asyncio
+async def test_user_onboarding_project_less_decision_falls_back_to_the_business_unit(org):
+    """Closes spec §7's project-less-fallback requirement. Approving at ANY tier
+    is a TERMINAL decision for a plain tier-routed type (unlike agent_access's
+    special-cased two-stage auto-advance) — this test decides the request once,
+    at project_admin, and checks only that the decision itself was authorized."""
+    contributor = f"contrib-{_uuid.uuid4()}"
+    await _bind(org, contributor, "contributor", scope_kind="business_unit", scope_id=org["bu"])
+    same_unit_pa = f"pa-{_uuid.uuid4()}"
+    await _bind(org, same_unit_pa, "project_admin", scope_kind="project", scope_id=org["project"])
+
+    c = TestClient(process_api.app)
+    contrib_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=contributor, tenant_id=org["org"], permissions=["artifact:view", "member:manage"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=contrib_headers,
+        json={
+            "type": "user_onboarding", "title": "Onboard someone", "description": "New QA hire.",
+            "priority": "normal", "workspaceId": org["bu"], "onboardEmail": "gate-b-verify@example.invalid",
+            # deliberately NO projectId — a contributor raising user_onboarding never has
+            # one, matching Task 1's audited shape.
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "project_admin"
+
+    pa_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=same_unit_pa, tenant_id=org["org"], permissions=["artifact:view", "governance:decide"],
+    )}
+    decided = c.post(
+        f"/governance-approvals/{raised.json()['id']}/decide", headers=pa_headers,
+        json={"decision": "approve"},
+    )
+    # The project-less fallback: same_unit_pa holds no binding on ANY specific
+    # project named by this request (there isn't one), but IS a project_admin
+    # somewhere inside the request's own business unit — must succeed. (The
+    # effect itself is a no-op below org_admin tier — _apply_user_onboarding's
+    # own, unrelated, pre-existing design — so this only asserts the DECISION
+    # was authorized, not that anyone got onboarded.)
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_user_onboarding_reaches_org_admin_who_needs_no_scope_binding(org):
+    """Closes spec §7's org_admin-unscoped requirement, via a REAL climb up the
+    tier ladder — escalate (not decide) advances a plain tier-routed type, since
+    only agent_access auto-advances on approval. The initiator may escalate their
+    own request (governance_requests.py's own router comment: "open to the
+    initiator too") — used here rather than adding a second project_admin/bu_admin
+    just to escalate their own already-covered tiers.
+
+    Confirmed against the CURRENT routing.py (per the brief's own instruction to
+    verify this before trusting the escalation shape verbatim) — `user_onboarding`
+    is absent from `TYPE_ROUTED`: its `GOVERNANCE_APPROVER_ROLE["user_onboarding"]
+    = "project_admin"` entry is INERT (routing.py's own comment: "kept for
+    exhaustiveness, not consulted"). It is genuinely tier-routed — one rung above
+    whoever raised it, same as any ordinary type — so no single initiator sees a
+    literal project_admin -> bu_admin -> org_admin walk:
+      * an off-ladder raiser (contributor/developer) lands at project_admin, and
+        `escalation_ceiling_for` caps THEM there too — that is the OTHER new
+        test's scenario (the project-less fallback deciding it, terminally, with
+        no escalation possible at all).
+      * a bu_admin raiser lands straight at org_admin (next rung up from
+        bu_admin) — zero hops available to actually exercise escalate().
+      * a project_admin raiser is the one case that both starts below the
+        ceiling AND has a ceiling of org_admin: `initial_approver_role` bumps
+        past project_admin (raising your own tier always climbs one further) to
+        land at bu_admin, and `escalation_ceiling_for("project_admin")` is
+        org_admin — so ONE real escalate() call climbs bu_admin -> org_admin.
+    That is the real, reachable climb this test exercises; its final `/decide`
+    at org_admin is the behavior actually under test."""
+    project_admin_initiator = f"pa-init-{_uuid.uuid4()}"
+    await _bind(
+        org, project_admin_initiator, "project_admin",
+        scope_kind="project", scope_id=org["project"],
+    )
+
+    c = TestClient(process_api.app)
+    initiator_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=project_admin_initiator, tenant_id=org["org"],
+        permissions=["artifact:view", "member:manage", "governance:decide"],
+    )}
+    raised = c.post(
+        "/governance-approvals", headers=initiator_headers,
+        json={
+            "type": "user_onboarding", "title": "Onboard someone", "description": "New QA hire.",
+            "priority": "normal", "workspaceId": org["bu"], "projectId": org["project"],
+            "onboardEmail": "gate-b-verify-2@example.invalid",
+        },
+    )
+    assert raised.status_code == 201, raised.text
+    assert raised.json()["currentApproverRole"] == "bu_admin"
+    req_id = raised.json()["id"]
+
+    escalated = c.post(f"/governance-approvals/{req_id}/escalate", headers=initiator_headers, json={})
+    assert escalated.status_code == 200, escalated.text
+    assert escalated.json()["currentApproverRole"] == "org_admin"
+
+    # org_admin: no role_bindings row at all needed beyond what create_access_token
+    # already grants via ORG_WIDE_PERMISSIONS — this is the unscoped case, entirely
+    # unaffected by this plan's fix.
+    org_admin = f"org-{_uuid.uuid4()}"
+    org_headers = {"Authorization": "Bearer " + create_access_token(
+        user_id=org_admin, tenant_id=org["org"], permissions=["admin:*"],
+    )}
+    final_decide = c.post(
+        f"/governance-approvals/{req_id}/decide", headers=org_headers,
+        json={"decision": "approve"},
+    )
+    assert final_decide.status_code == 200, final_decide.text
