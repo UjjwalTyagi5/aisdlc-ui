@@ -703,6 +703,16 @@ async def decide(
             "This request is waiting on the "
             f"{(request['currentApproverRole'] or 'nobody').replace('_', ' ')}."
         )
+    # 3b ── AND does your OWN binding actually cover it, not just your role name?
+    # Same exception, same message: from the caller's point of view this is a
+    # stricter form of "not your queue," not a new error class to learn.
+    if not await decider_covers_scope(
+        db, decider_id=decider_id, role=decider_role, request=request
+    ):
+        raise NotYourQueue(
+            "This request is waiting on the "
+            f"{(request['currentApproverRole'] or 'nobody').replace('_', ' ')}."
+        )
 
     now = datetime.now(tz=timezone.utc)
 

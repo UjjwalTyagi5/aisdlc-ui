@@ -251,6 +251,7 @@ async def test_only_the_current_approver_decides(org):
                 decider_role="bu_admin", decision="approve",
             )
 
+    await _bind(org, bob, "project_admin", scope_kind="project", scope_id=org["project"])
     async with get_db_session_for_tenant(org["org"]) as s:
         out = await svc.decide(
             s, request_id=req["id"], decider_id=bob, decider_name="Bob",
@@ -431,6 +432,7 @@ async def test_self_approval_is_reported_ahead_of_already_closed(org):
     """The more specific answer wins: 'you raised this' beats 'this is closed'."""
     alice, bob = f"alice-{_uuid.uuid4()}", f"bob-{_uuid.uuid4()}"
     req = await _raise(org, initiator=alice, role="developer")
+    await _bind(org, bob, "project_admin", scope_kind="project", scope_id=org["project"])
     async with get_db_session_for_tenant(org["org"]) as s:
         await svc.decide(
             s, request_id=req["id"], decider_id=bob, decider_name="Bob",
@@ -448,6 +450,7 @@ async def test_self_approval_is_reported_ahead_of_already_closed(org):
 async def test_a_closed_request_cannot_be_decided_again(org):
     alice, bob, carol = (f"{n}-{_uuid.uuid4()}" for n in ("alice", "bob", "carol"))
     req = await _raise(org, initiator=alice, role="developer")
+    await _bind(org, bob, "project_admin", scope_kind="project", scope_id=org["project"])
     async with get_db_session_for_tenant(org["org"]) as s:
         await svc.decide(
             s, request_id=req["id"], decider_id=bob, decider_name="Bob",
@@ -484,6 +487,7 @@ async def test_approval_flips_status_before_applying_the_effect(org, monkeypatch
     ordering this test locks in."""
     alice, bob = f"alice-{_uuid.uuid4()}", f"bob-{_uuid.uuid4()}"
     req = await _raise(org, initiator=alice, role="developer")
+    await _bind(org, bob, "project_admin", scope_kind="project", scope_id=org["project"])
 
     from shared.services import governance_requests as svc_module
 
@@ -630,6 +634,8 @@ async def test_agent_access_is_answered_twice(org):
     # here is what lets this test reach the effect instead of stopping short at
     # EffectNotAvailable("This request names no person or project...").
     await _bind(org, alice, "developer", scope_kind="project", scope_id=org["project"])
+    await _bind(org, pa, "project_admin", scope_kind="project", scope_id=org["project"])
+    await _bind(org, sec, "security_engineer", scope_kind="project", scope_id=org["project"])
     req = await _raise(
         org, initiator=alice, role="developer", rtype="agent_access", phase="security",
         title="Need the security agent", description="To clear the SCA exemption",
@@ -666,6 +672,7 @@ async def test_agent_access_is_answered_twice(org):
 async def test_a_stage_one_rejection_ends_it(org):
     """A no at stage one saves the agent's owner a decision entirely."""
     alice, pa = f"alice-{_uuid.uuid4()}", f"pa-{_uuid.uuid4()}"
+    await _bind(org, pa, "project_admin", scope_kind="project", scope_id=org["project"])
     req = await _raise(
         org, initiator=alice, role="developer", rtype="agent_access", phase="security",
         title="Need the security agent", description="To clear the SCA exemption",
@@ -684,6 +691,7 @@ async def test_a_stage_one_rejection_ends_it(org):
 @pytest.mark.asyncio
 async def test_approving_a_budget_increase_moves_the_cap(org):
     pa, ozzy = f"pa-{_uuid.uuid4()}", f"ozzy-{_uuid.uuid4()}"
+    await _bind(org, ozzy, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     async with get_db_session_for_tenant(org["org"]) as s:
         req = await svc.create_request(
             s, tenant_id=org["org"], initiator_id=pa, initiator_name="Pa",
@@ -710,6 +718,7 @@ async def test_approving_a_budget_increase_moves_the_cap(org):
 @pytest.mark.asyncio
 async def test_rejecting_a_budget_increase_leaves_the_cap_alone(org):
     pa, ozzy = f"pa-{_uuid.uuid4()}", f"ozzy-{_uuid.uuid4()}"
+    await _bind(org, ozzy, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     async with get_db_session_for_tenant(org["org"]) as s:
         req = await svc.create_request(
             s, tenant_id=org["org"], initiator_id=pa, initiator_name="Pa",
@@ -763,6 +772,7 @@ async def test_approving_a_settings_change_with_a_dead_description_field_does_no
     field the project no longer has — the real field alongside it still applies.
     """
     pa, bua = f"pa-{_uuid.uuid4()}", f"bua-{_uuid.uuid4()}"
+    await _bind(org, bua, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     async with get_db_session_for_tenant(org["org"]) as s:
         req = await svc.create_request(
             s, tenant_id=org["org"], initiator_id=pa, initiator_name="Pa",
@@ -809,6 +819,7 @@ async def test_an_approval_that_cannot_take_effect_is_refused_not_recorded(org):
     approved — silently defeating the exact guarantee this test's docstring claims.
     """
     pa, ozzy = f"pa-{_uuid.uuid4()}", f"ozzy-{_uuid.uuid4()}"
+    await _bind(org, ozzy, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
     async with get_db_session_for_tenant(org["org"]) as s:
         req = await svc.create_request(
             s, tenant_id=org["org"], initiator_id=pa, initiator_name="Pa",
@@ -1466,3 +1477,108 @@ async def test_user_onboarding_request_onboards_on_org_admin_approval(org):
     async with get_db_session_for_tenant(org["org"]) as s:
         row = (await s.execute(text("SELECT id FROM users WHERE email = 'new.qa@example.com'"))).first()
     assert row is not None
+
+
+# ── decide() checks the decider's OWN binding covers the request's scope ────
+# Not just that they hold the right role name anywhere in the tenant.
+
+@pytest.mark.asyncio
+async def test_cross_bu_assignment_refuses_the_wrong_units_bu_admin(org):
+    """Finding 5 (sub-project A's baseline audit), closed: a bu_admin of a
+    DIFFERENT business unit than the one the request names must not be able to
+    decide it, even though the role NAME matches."""
+    other_bu = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+    wrong_admin = f"wrong-bu-{_uuid.uuid4()}"
+    right_admin = f"right-bu-{_uuid.uuid4()}"
+    await _bind(org, wrong_admin, "bu_admin", scope_kind="business_unit", scope_id=org["bu"])
+    await _bind(org, right_admin, "bu_admin", scope_kind="business_unit", scope_id=other_bu)
+    project_admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+
+    # project_id + payload.roleName are both required for the approval EFFECT
+    # (_apply_cross_bu_assignment in shared/governance/effects.py) to succeed —
+    # the brief's illustrative call omitted them; confirmed against the real
+    # caller, request_cross_bu_member in shared/routers/project_members.py,
+    # which always supplies both.
+    async with get_db_session_for_tenant(org["org"]) as s:
+        raised = await svc.create_request(
+            s, tenant_id=org["org"], initiator_id=project_admin,
+            initiator_name="PA", initiator_role="project_admin", request_type="cross_bu_assignment",
+            title="Borrow a Lending contributor", description="Need help for a sprint.",
+            workspace_id=other_bu, project_id=org["project"], target_ref="someone",
+            payload={"userId": "someone", "email": "someone@example.com", "roleName": "developer"},
+            system_raised=True,
+        )
+    request_id = raised["id"]
+
+    # wrong_admin (the REQUESTING project's own unit's admin, not the LENDING
+    # unit's) must be refused even though their role name is bu_admin and the
+    # role-name check alone would have let them through before this task.
+    async with get_db_session_for_tenant(org["org"]) as s:
+        with pytest.raises(NotYourQueue):
+            await svc.decide(
+                s, request_id=request_id, decider_id=wrong_admin, decider_name="Wrong",
+                decider_role="bu_admin", decision="approve",
+            )
+
+    # right_admin (Lending's own bu_admin, the unit actually named by workspace_id)
+    # must still be able to decide it — the false-negative safety net.
+    async with get_db_session_for_tenant(org["org"]) as s:
+        decided = await svc.decide(
+            s, request_id=request_id, decider_id=right_admin, decider_name="Right",
+            decider_role="bu_admin", decision="approve",
+        )
+    assert decided["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_agent_access_stage_two_refuses_the_wrong_projects_owner(org):
+    """Finding 4 / Task 8's own scoping gap (sub-project A), closed: an architect
+    bound to a DIFFERENT project than the request names must not be able to
+    decide its design-phase stage two, even though the role name matches."""
+    other_project = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind) "
+            "VALUES (:i, :w, :t, 'Other project', 'github')"
+        ), {"i": other_project, "w": org["bu"], "t": org["org"]})
+    ba = f"ba-{_uuid.uuid4()}"
+    project_admin = f"pa-{_uuid.uuid4()}"
+    wrong_architect = f"wrong-arch-{_uuid.uuid4()}"
+    right_architect = f"right-arch-{_uuid.uuid4()}"
+    await _bind(org, ba, "ba", scope_kind="project", scope_id=org["project"])
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    await _bind(org, wrong_architect, "architect", scope_kind="project", scope_id=other_project)
+    await _bind(org, right_architect, "architect", scope_kind="project", scope_id=org["project"])
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        raised = await svc.create_request(
+            s, tenant_id=org["org"], initiator_id=ba,
+            initiator_name="BA", initiator_role="ba", request_type="agent_access",
+            title="Design agent access", description="Covering while Architect is out.",
+            workspace_id=org["bu"], project_id=org["project"], phase="design",
+        )
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await svc.decide(
+            s, request_id=raised["id"], decider_id=project_admin, decider_name="PA",
+            decider_role="project_admin", decision="approve",
+        )
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        with pytest.raises(NotYourQueue):
+            await svc.decide(
+                s, request_id=raised["id"], decider_id=wrong_architect, decider_name="Wrong",
+                decider_role="architect", decision="approve",
+            )
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        decided = await svc.decide(
+            s, request_id=raised["id"], decider_id=right_architect, decider_name="Right",
+            decider_role="architect", decision="approve",
+        )
+    assert decided["status"] == "approved"
