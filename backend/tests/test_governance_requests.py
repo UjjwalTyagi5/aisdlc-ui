@@ -1601,6 +1601,67 @@ async def test_cross_bu_assignment_refuses_the_wrong_units_bu_admin(org):
 
 
 @pytest.mark.asyncio
+async def test_create_request_resolves_workspace_id_from_the_named_project(org):
+    """A caller not currently a member of the target project (raising an
+    access_request from Orchestrator's "not a member" banner, say) has no way
+    to know that project's real business unit, so its client-side default is
+    its OWN unit — which can genuinely differ from the project's. Without
+    resolving against the project's own real workspace_id, the row lands in
+    the WRONG unit's queue: invisible to the only Project Admin
+    decider_covers_scope will accept, refused for every Project Admin who
+    CAN see it. This proves the override actually fires for a real mismatch,
+    not just that the cross_bu_assignment carve-out (tested above) is safe."""
+    other_bu = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other_bu, "o": org["org"]})
+
+    developer = f"dev-{_uuid.uuid4()}"
+    async with get_db_session_for_tenant(org["org"]) as s:
+        raised = await svc.create_request(
+            s, tenant_id=org["org"], initiator_id=developer,
+            initiator_name="Dev", initiator_role="developer", request_type="access_request",
+            title="Access to Core ledger", description="Picking up a ticket there.",
+            # The client-side default: the requester's OWN unit (Lending), which is
+            # NOT the target project's real unit (org["bu"], Payments).
+            workspace_id=other_bu, project_id=org["project"],
+        )
+    assert raised["workspaceId"] == org["bu"], (
+        "the request must be stored under the PROJECT's real unit, not whatever "
+        "the client happened to send"
+    )
+
+    # And it is now genuinely visible to — and decidable by — Payments' own
+    # Project Admin, not Lending's.
+    project_admin = f"pa-{_uuid.uuid4()}"
+    await _bind(org, project_admin, "project_admin", scope_kind="project", scope_id=org["project"])
+    async with get_db_session_for_tenant(org["org"]) as s:
+        queue = await svc.list_requests(
+            s, viewer_id=project_admin, allowed_workspace_ids=[org["bu"]],
+            workspace_id=None, status=None,
+        )
+    assert any(r["id"] == raised["id"] for r in queue)
+
+
+@pytest.mark.asyncio
+async def test_create_request_refuses_an_unknown_project(org):
+    """A projectId naming no real project in this tenant must refuse cleanly
+    rather than silently storing whatever workspace_id the client sent — the
+    project no longer exists to confirm it, so there's nothing to trust."""
+    with pytest.raises(GovernanceError) as exc_info:
+        async with get_db_session_for_tenant(org["org"]) as s:
+            await svc.create_request(
+                s, tenant_id=org["org"], initiator_id=f"dev-{_uuid.uuid4()}",
+                initiator_name="Dev", initiator_role="developer", request_type="access_request",
+                title="Access to a ghost project", description="—",
+                workspace_id=org["bu"], project_id=str(_uuid.uuid4()),
+            )
+    assert exc_info.value.code == "PROJECT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
 async def test_agent_access_stage_two_refuses_the_wrong_projects_owner(org):
     """Finding 4 / Task 8's own scoping gap (sub-project A), closed: an architect
     bound to a DIFFERENT project than the request names must not be able to
