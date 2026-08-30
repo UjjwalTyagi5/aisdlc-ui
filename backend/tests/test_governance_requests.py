@@ -1297,7 +1297,7 @@ async def test_model_provider_access_request_activates_on_approval(org):
     table (and exactly the shape of row) the old, buggy effect corrupted by
     writing an invalid `status = 'active'` enum value into it."""
     provider_row_id = str(_uuid.uuid4())
-    async with get_db_session_superuser() as s:
+    async with get_db_session_for_tenant(org["org"]) as s:
         await s.execute(text(
             "INSERT INTO model_providers (id, tenant_id, workspace_id, provider, display_name, "
             "  secret_ref, status, created_by) "
