@@ -582,6 +582,15 @@ async def _bind_project_admin(org: dict, user_id: str) -> None:
         await s.commit()
 
 
+async def _bind_bu_admin(org: dict, user_id: str) -> None:
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO role_bindings (id, tenant_id, user_id, role_name, scope_kind, scope_id) "
+            "VALUES (CAST(:i AS uuid), CAST(:t AS uuid), :u, 'bu_admin', 'business_unit', :w)"
+        ), {"i": str(_uuid.uuid4()), "t": org["org"], "u": user_id, "w": org["payments"]})
+        await s.commit()
+
+
 @pytest.mark.asyncio
 async def test_a_project_admins_settings_edit_becomes_a_request(org):
     """The edit is QUEUED, not applied — and it is addressed to the BU Admin.
@@ -634,6 +643,10 @@ async def test_approving_the_request_applies_the_settings(org):
     pa = await _user(org, "projadmin")
     bua = await _user(org, "buadmin")
     await _bind_project_admin(org, pa)
+    # decide()'s gate-integrity check (sub-project B) now verifies the decider's own
+    # role_bindings row covers the request's scope, not just their role name — bua needs
+    # a real bu_admin binding on this project's business unit to be able to approve.
+    await _bind_bu_admin(org, bua)
 
     r = c.patch(f"/projects/{org['project']}",
                 headers=_headers(pa, org["org"], ["project:update", "artifact:view"]),
@@ -675,6 +688,67 @@ async def test_an_unsent_field_is_not_blanked(org):
         )).first()
     assert row.display_name == "Only the name"
     assert float(row.monthly_budget_usd) == 42.0
+
+
+# ── a Project Admin can ask for more budget on their own project ─────────────
+
+
+@pytest.mark.asyncio
+async def test_project_budget_increase_request_reaches_the_bu_admin_and_applies(org):
+    """The exact bug sub-project A's Task 1 parked: _apply_budget_increase's project_id
+    branch (effects.py) has been dead code since it shipped — nothing has ever called
+    create_request with request_type="budget_increase" and a real project_id. This
+    proves the new endpoint makes that branch genuinely reachable end to end."""
+    pa = await _user(org, "projadmin")
+    bua = await _user(org, "buadmin")
+    await _bind_project_admin(org, pa)
+    await _bind_bu_admin(org, bua)
+
+    # A sibling project in the SAME workspace, seeded with its own budget. The
+    # whole point of the project-scoped branch is that it targets the row named
+    # in the request, not something workspace-wide — so this decoy has to come
+    # back untouched, or the endpoint is silently doing a workspace-wide update.
+    decoy = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name, provider_kind, "
+            "monthly_budget_usd) VALUES (CAST(:i AS uuid), CAST(:w AS uuid), CAST(:t AS uuid), "
+            "'Decoy project', 'github', 250)"
+        ), {"i": decoy, "w": org["payments"], "t": org["org"]})
+        await s.commit()
+
+    c = TestClient(process_api.app)
+    r = c.post(
+        f"/projects/{org['project']}/budget-increase-request",
+        headers=_headers(pa, org["org"], ["cost:view", "artifact:view"]),
+        json={"requestedAmountUsd": 500, "reason": "Ran out mid-sprint."},
+    )
+    assert r.status_code == 201, r.text
+    req_id = r.json()["id"]
+    # Tier-routed (budget_increase is absent from routing.TYPE_ROUTED): a Project
+    # Admin's raise climbs to their BU Admin, exactly as the cost page's own copy
+    # already promises ("it escalates one tier at a time").
+    assert r.json()["currentApproverRole"] == "bu_admin"
+
+    from shared.services import governance_requests as gov
+    async with get_db_session_for_tenant(org["org"]) as s:
+        await gov.decide(s, request_id=req_id, decider_id=bua, decider_name="Bua",
+                         decider_role="bu_admin", decision="approve")
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        row = (await s.execute(
+            text("SELECT monthly_budget_usd FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": org["project"]},
+        )).first()
+        decoy_row = (await s.execute(
+            text("SELECT monthly_budget_usd FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": decoy},
+        )).first()
+    assert float(row.monthly_budget_usd) == 500.0
+    # THE ROW THAT MUST NOT MOVE. If _apply_budget_increase ever regressed to the
+    # old workspace-wide UPDATE, this would silently jump to 500 right alongside
+    # the target project — this assertion is what tells the difference.
+    assert float(decoy_row.monthly_budget_usd) == 250.0
 
 
 # ── budget window is captured at project creation (migration 0035) ───────────

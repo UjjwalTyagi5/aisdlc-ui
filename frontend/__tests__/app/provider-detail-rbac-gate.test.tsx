@@ -82,7 +82,16 @@ describe("provider detail page — role gate", () => {
     renderPage();
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/access restricted/i);
+    // RestrictedAccess now forces ApiErrorState's `forbidden` branch (a sub-
+    // project-C fix: it previously passed only title/description with no
+    // `error`, so `forbidden` was permanently false there, silently skipping
+    // the documented Lock-icon/no-retry treatment and — the reason it had to
+    // be fixed now — making the new `action` prop, gated on `forbidden`,
+    // permanently dead). That branch's heading is a fixed "You don't have
+    // access" (ApiErrorState ignores `title` once forbidden), so this page's
+    // own identifying copy is asserted via its `description` text instead.
+    expect(alert).toHaveTextContent(/you don't have access/i);
+    expect(alert).toHaveTextContent(/provider detail is being rebuilt/i);
 
     // The exact regression: Org Admin must never see the credential-adding
     // control that used to live on this page's org-wide view.
@@ -95,7 +104,7 @@ describe("provider detail page — role gate", () => {
       role: "project_admin",
     } as ReturnType<typeof useAccessScope>);
     renderPage();
-    expect(screen.getByRole("alert")).toHaveTextContent(/access restricted/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/provider detail is being rebuilt/i);
   });
 
   it("gives bu_admin real content, not RestrictedAccess", () => {

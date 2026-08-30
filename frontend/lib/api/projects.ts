@@ -8,6 +8,7 @@ import {
   type ToolAccessMode,
   paginated,
 } from "@/lib/schemas";
+import { GovernanceApproval } from "@/lib/schemas/governance-approval";
 
 import { api } from "./client";
 
@@ -90,4 +91,17 @@ export const updateProject = (id: ProjectId, patch: ProjectUpdatePatch) =>
     method: "PATCH",
     body: patch,
     schema: Project,
+  });
+
+/** A Project Admin can't set their own cap above what governance allows — this
+ *  sends the Business Unit Admin above them a governance approval instead
+ *  (lib/governance.ts), mirroring `requestBudgetIncrease` in lib/api/workspaces.ts. */
+export const requestProjectBudgetIncrease = (
+  id: string,
+  body: { requestedAmountUsd: number; reason?: string },
+) =>
+  api(`/projects/${encodeURIComponent(id)}/budget-increase-request`, {
+    method: "POST",
+    body,
+    schema: GovernanceApproval,
   });

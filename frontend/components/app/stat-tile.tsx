@@ -67,7 +67,7 @@ export function StatTile({
           {label}
         </span>
         {Icon ? (
-          <Icon className="text-muted-foreground/50 size-4 shrink-0" aria-hidden />
+          <Icon className="text-primary/70 size-4 shrink-0" aria-hidden />
         ) : href ? (
           <ArrowUpRight
             className="text-muted-foreground/40 group-hover:text-brand-bright size-4 shrink-0 transition-colors"
@@ -106,7 +106,11 @@ export function StatTile({
   );
 
   const shell = cn(
-    "border-line-soft bg-panel-elevated rounded-xl border p-4",
+    // PwC-branded KPI tile: a faint orange wash top-down over the usual
+    // elevated panel, plus a top accent bar — reads as "brand" without
+    // competing with the value/tone colors printed on top of it.
+    "border-primary/15 from-primary/[0.07] to-panel-elevated relative overflow-hidden rounded-xl border bg-gradient-to-b p-4",
+    "before:bg-primary/60 before:absolute before:inset-x-0 before:top-0 before:h-[3px] before:content-['']",
     href &&
       "group hover:border-primary/40 focus-visible:ring-ring block transition-colors focus-visible:ring-2 focus-visible:outline-none",
     className,

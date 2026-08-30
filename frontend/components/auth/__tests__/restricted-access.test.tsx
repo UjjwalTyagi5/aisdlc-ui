@@ -16,13 +16,42 @@ import * as React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { RequirePermission } from "../restricted-access";
+import { RequirePermission, RestrictedAccess } from "../restricted-access";
 
 vi.mock("@/hooks/use-session", () => ({
   useSession: () => ({ permissions: ["cost:view"] }),
 }));
 
 afterEach(cleanup);
+
+describe("RestrictedAccess", () => {
+  it("renders the description and, when given, the action slot", () => {
+    render(
+      <RestrictedAccess
+        description="Cost visibility requires the cost:view permission."
+        action={<button type="button">Request access</button>}
+      />,
+    );
+    expect(
+      screen.getByText("Cost visibility requires the cost:view permission."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request access" })).toBeInTheDocument();
+  });
+
+  it("renders no action when none is given", () => {
+    render(<RestrictedAccess description="Cost visibility requires the cost:view permission." />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("uses the forbidden (Lock) treatment, not the generic error one", () => {
+    // ApiErrorState's "You don't have access" heading only renders on the
+    // forbidden branch — this is the regression this task's fix targets:
+    // RestrictedAccess used to pass only title/description with no `error`,
+    // which left ApiErrorState's `forbidden` flag permanently false.
+    render(<RestrictedAccess description="Cost visibility requires the cost:view permission." />);
+    expect(screen.getByText("You don't have access")).toBeInTheDocument();
+  });
+});
 
 describe("RequirePermission", () => {
   it("renders children when permission present", () => {

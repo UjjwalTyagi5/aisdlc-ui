@@ -57,6 +57,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.permissions import ROLE_SCOPE
+from shared.authz.read_scope import live_binding
 from shared.governance import routing
 from shared.governance.effects import EffectNotAvailable, apply_on_approve, apply_on_reject
 from shared.services import notifications
@@ -316,6 +317,14 @@ async def create_request(
     target_ref: Optional[str] = None,
     payload: Optional[dict[str, Any]] = None,
     system_raised: bool = False,
+    # New: the client-supplied target, for the types that need one. Distinct
+    # from `target_ref` above (which system-raised callers pass directly) —
+    # this is the client-facing counterpart, folded into target_ref/payload
+    # below exactly like `phase` already is.
+    target_id: Optional[str] = None,
+    access_level: Optional[str] = None,
+    provider_model: Optional[dict[str, str]] = None,
+    onboard_email: Optional[str] = None,
 ) -> dict[str, Any]:
     """Raise a request and route it.
 
@@ -379,6 +388,92 @@ async def create_request(
         stage = "project_admin"
         approver = routing.agent_access_approver(stage, phase or "")
         payload = {**(payload or {}), "phase": phase} if phase else payload
+
+    # connector_access and mcp_server read payload.targetId (see
+    # _apply_connector_access) — merged the same way phase is, never a raw
+    # passthrough.
+    if target_id and request_type in ("connector_access", "mcp_server"):
+        payload = {**(payload or {}), "targetId": target_id}
+    # connector_access alone also carries an access level — _apply_
+    # connector_access's project-tier branch reads payload["access"].
+    #
+    # Falls back to default_access_for(target_id) when the caller sends none — the
+    # UI that raises this (Integrations page) has no level picker of its own yet and
+    # used to hardcode "read", which the effect's capability-manifest check then
+    # refused for Slack/MS Teams (write-only connectors): an approved-looking
+    # request that could never actually be granted, discovered only at decide time.
+    # default_access_for reads the connector's own real capabilities, so a
+    # write-only connector gets "write" instead of a level nothing can honour.
+    if request_type == "connector_access" and target_id:
+        from shared.authz.connector_capabilities import default_access_for  # noqa: PLC0415
+
+        payload = {**(payload or {}), "access": access_level or default_access_for(target_id)}
+    # model_credential AND model_provider_access both carry a (provider,
+    # model_id) pair — never a model_providers row id. Neither the project
+    # Model Management view nor the BU availability card ever has a specific
+    # connection's row id in scope (see plan Task 3's corrected design note);
+    # model_provider_access's effect resolves the real row server-side, by
+    # provider kind, at decide time.
+    if provider_model and request_type in ("model_credential", "model_provider_access"):
+        payload = {**(payload or {}), "providerModel": provider_model}
+    if onboard_email and request_type == "user_onboarding":
+        payload = {**(payload or {}), "onboardEmail": onboard_email}
+
+    # A project names its own business unit — trust that over whatever `workspace_id`
+    # the client sent, never the other way round. A caller not currently a member of
+    # the target project (raising an access_request, or Orchestrator's "not a member"
+    # banner) has no reason to know that project's real unit, so its own client-side
+    # default — the caller's OWN unit — is exactly what `workspace_id` holds. Without
+    # this, the row is stored under the WRONG unit's queue: `list_requests` scopes
+    # visibility on `workspace_id` alone (never `project_id`), so the request becomes
+    # invisible to the one unit whose Project Admin `decider_covers_scope` will accept,
+    # while every Project Admin who CAN see it is refused — undecidable by anyone, the
+    # same failure class the model-availability-card fix closed for model_credential.
+    #
+    # cross_bu_assignment is the deliberate exception: its `workspace_id` NAMES A
+    # DIFFERENT UNIT ON PURPOSE — the "lending" unit being asked to loan a contributor
+    # to a project that lives in some OTHER unit (see request_cross_bu_member's own
+    # "THE WORKSPACE ON THE REQUEST IS THE TARGET'S HOME UNIT, NOT THE CALLER'S", and
+    # its `same_unit` guard, which refuses to raise this exact request when the two
+    # would coincide). Overriding it here would make that request impossible to raise
+    # at all.
+    if project_id and request_type != "cross_bu_assignment":
+        resolved_workspace = (
+            await db.execute(
+                text(
+                    "SELECT workspace_id FROM projects "
+                    "WHERE id = CAST(:p AS uuid) AND tenant_id = CAST(:t AS uuid)"
+                ),
+                {"p": project_id, "t": tenant_id},
+            )
+        ).scalar()
+        if resolved_workspace is None:
+            raise GovernanceError(
+                "That project doesn't exist.", code="PROJECT_NOT_FOUND", http_status=404
+            )
+        workspace_id = str(resolved_workspace)
+    else:
+        # Not resolved from a real project above (a project's own workspace_id is
+        # already guaranteed real via its FK) — every request still names SOME unit,
+        # and unlike project_id this one is never optional, so a bogus value here is
+        # the more exposed case. An unvalidated workspace_id that names no real row
+        # stores a request no `decider_covers_scope` fallback can ever match — visible
+        # to nobody, undecidable by anyone, forever, with no error at raise time to
+        # warn the caller. Same failure shape as the project_id case above, just
+        # unguarded until now.
+        workspace_exists = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM workspaces "
+                    "WHERE id = CAST(:w AS uuid) AND organization_id = CAST(:t AS uuid)"
+                ),
+                {"w": workspace_id, "t": tenant_id},
+            )
+        ).first()
+        if workspace_exists is None:
+            raise GovernanceError(
+                "That business unit doesn't exist.", code="WORKSPACE_NOT_FOUND", http_status=404
+            )
 
     if approver is None:
         raise GovernanceError(
@@ -536,6 +631,107 @@ async def list_requests(
 # ── deciding ─────────────────────────────────────────────────────────────────
 
 
+async def decider_covers_scope(
+    db: AsyncSession, *, decider_id: str, role: str, request: dict[str, Any]
+) -> bool:
+    """Does `decider_id`'s own `role` binding actually cover THIS request's scope?
+
+    `decide()`'s existing check (`decider_role != request["currentApproverRole"]`)
+    only confirms the decider holds the right role NAME somewhere in the tenant —
+    `effective_platform_role()` collapses every binding a person holds into one
+    "highest standing wins" string with no project/workspace information at all.
+    This is the second half: does the decider hold THAT role at a binding that
+    actually covers the project or business unit this request names, queried
+    directly against role_bindings (never derived from the already-collapsed
+    platform-role string, which has thrown that information away by the time it
+    reaches here).
+
+    Keyed off ROLE_SCOPE (shared/authz/permissions.py) — the natural scope_kind
+    each role is normally bound at — rather than a second, hand-rolled mapping.
+    org_admin's natural scope is "organization": tenant-wide by design, always
+    covers everything, no query needed.
+
+    FAILS CLOSED for anything ROLE_SCOPE does not resolve to organization/
+    business_unit/project (defensive only — `currentApproverRole` is always
+    org_admin, bu_admin, project_admin, or an AGENT_OWNER_ROLE delivery role in
+    practice, never "custom" or "scrum_master"). This also means a role bound at
+    a NON-NATURAL scope_kind (e.g. a project_admin granted at business_unit
+    scope — `ROLE_SCOPE` documents this as an advisory default, not an
+    enforced one, and `grant_role`'s callers can override it) will not match
+    the exact-scope branches below and, absent a project in view, falls to the
+    same business-unit fallback as everyone else — consistent with
+    `read_scope.governs_unit()`'s established rule that a role bound above its
+    natural level does not thereby reach what a role bound AT that level does.
+
+    project_admin (and every delivery role — AGENT_OWNER_ROLE names one for
+    agent_access stage two) falls back to ANY live binding of `role` within the
+    request's own business unit when the request names no specific project at
+    all. `create_request()` never REQUIRES `projectId` for any type — it is
+    only ever conventionally supplied by the raising UI — so more than one type
+    can reach this in practice, not just the one the design was originally
+    built for: `user_onboarding` (raisable by a contributor/developer,
+    tier-routes to project_admin first, and genuinely carries no projectId by
+    design — onboarding is a business-unit-level act) and `agent_access`
+    (`create_request` enforces nothing here either, though its own dedicated
+    raise dialog always supplies one in practice — see
+    `test_a_stage_one_rejection_ends_it` for a project-less case still exercised
+    in this suite). Refusing outright here would make such a request
+    permanently undecidable by anyone, a real regression this function must
+    not cause. The fallback is still strictly narrower than the unscoped check
+    it replaces (rules out every OTHER business unit), just not narrowed to
+    one project when no single project exists to narrow to.
+    """
+    scope_kind = ROLE_SCOPE.get(role)
+    if scope_kind == "organization":
+        return True
+    now = datetime.now(tz=timezone.utc)
+    if scope_kind == "business_unit":
+        workspace_id = request.get("workspaceId")
+        if not workspace_id:
+            return False
+        row = (
+            await db.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    "  AND rb.role_name = :role AND rb.scope_kind = 'business_unit' "
+                    "  AND rb.scope_id = CAST(:sid AS uuid)"
+                ),
+                {"u": decider_id, "role": role, "sid": workspace_id, "now": now},
+            )
+        ).first()
+        return row is not None
+    if scope_kind == "project":
+        project_id = request.get("projectId")
+        if project_id:
+            row = (
+                await db.execute(
+                    text(
+                        f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                        "  AND rb.role_name = :role AND rb.scope_kind = 'project' "
+                        "  AND rb.scope_id = CAST(:sid AS uuid)"
+                    ),
+                    {"u": decider_id, "role": role, "sid": project_id, "now": now},
+                )
+            ).first()
+            return row is not None
+        workspace_id = request.get("workspaceId")
+        if not workspace_id:
+            return False
+        row = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM role_bindings rb "
+                    "  JOIN projects p ON p.id = rb.scope_id AND rb.scope_kind = 'project' "
+                    f"WHERE {live_binding()} AND rb.role_name = :role "
+                    "  AND p.workspace_id = CAST(:wid AS uuid)"
+                ),
+                {"u": decider_id, "role": role, "wid": workspace_id, "now": now},
+            )
+        ).first()
+        return row is not None
+    return False
+
+
 async def decide(
     db: AsyncSession,
     *,
@@ -572,6 +768,16 @@ async def decide(
 
     # 3 ── is it yours to answer?
     if decider_role != request["currentApproverRole"]:
+        raise NotYourQueue(
+            "This request is waiting on the "
+            f"{(request['currentApproverRole'] or 'nobody').replace('_', ' ')}."
+        )
+    # 3b ── AND does your OWN binding actually cover it, not just your role name?
+    # Same exception, same message: from the caller's point of view this is a
+    # stricter form of "not your queue," not a new error class to learn.
+    if not await decider_covers_scope(
+        db, decider_id=decider_id, role=decider_role, request=request
+    ):
         raise NotYourQueue(
             "This request is waiting on the "
             f"{(request['currentApproverRole'] or 'nobody').replace('_', ' ')}."
@@ -676,18 +882,23 @@ async def decide(
                 code="EFFECT_UNAVAILABLE",
             )
 
-    if decision == "approve":
-        try:
-            effect_note = await apply_on_approve(db, request)
-        except EffectNotAvailable as exc:
-            raise EffectUnavailable(exc.detail, code="EFFECT_UNAVAILABLE")
-    else:
-        effect_note = await apply_on_reject(db, request)
-
     status = "approved" if decision == "approve" else "rejected"
     # Guarded on status in the UPDATE as well as checked above: two approvers
     # acting at the same instant both pass the read, and only one should win. The
     # row count tells us which.
+    #
+    # THIS RUNS BEFORE apply_on_approve/apply_on_reject, DELIBERATELY. Most effects
+    # write through this same `db` session and so are atomic with this UPDATE
+    # regardless of statement order (nothing commits until the outer session's
+    # final commit). But some effects — model_credential's `_apply_model_credential`
+    # is the first — call into services (`shared/services/model_grants.py`) that open
+    # their OWN session and commit independently of this transaction. For those, if
+    # the effect ran BEFORE this guarded UPDATE, a request already closed by a
+    # concurrent decide() would still let the effect's independent commit through
+    # even though this decision's own status flip gets rejected by AlreadyClosed
+    # below — an "effect applied, request never marked approved" half-succeed.
+    # Running the guard first closes that race: AlreadyClosed fires before any
+    # effect — independently-committing or not — ever runs.
     result = await db.execute(
         text(
             "UPDATE governance_requests SET status = :s, decided_by = :by, decided_at = :at, "
@@ -705,6 +916,19 @@ async def decide(
     )
     if not result.rowcount:
         raise AlreadyClosed("This request was decided by someone else first.")
+
+    # A failed effect must still leave the request untouched: this UPDATE has run
+    # but not committed (one transaction, per get_db_session), so an exception
+    # raised out of decide() from here rolls it back along with everything else —
+    # see get_db_session's except-rollback. Do not move this UPDATE outside the
+    # transaction the effect runs in, and do not commit early.
+    if decision == "approve":
+        try:
+            effect_note = await apply_on_approve(db, request)
+        except EffectNotAvailable as exc:
+            raise EffectUnavailable(exc.detail, code="EFFECT_UNAVAILABLE")
+    else:
+        effect_note = await apply_on_reject(db, request)
 
     await _emit(
         db,

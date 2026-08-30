@@ -47,7 +47,7 @@ from shared.authz.workspace import assert_workspace_in_tenant
 from shared.db import get_db_session
 from shared.models.orm import Project, Run, Workspace
 from shared.services import governance_requests as governance_service
-from shared.routers._schemas import Paginated, Pagination, ProjectOut, _slugify
+from shared.routers._schemas import BudgetIncreaseIn, Paginated, Pagination, ProjectOut, _slugify
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +567,67 @@ async def create_project(
     return ProjectOut.from_orm_project(project)
 
 
+@projects_router.post("/{project_id}/budget-increase-request", status_code=201)
+async def request_project_budget_increase(
+    project_id: str,
+    request: Request,
+    body: BudgetIncreaseIn,  # shared with workspaces.py's own budget-increase-request route
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The Project Admin's half of the budget cascade (mirrors
+    workspaces.py::request_budget_increase, the Business Unit Admin's half).
+
+    THE PROJECT, NOT THE WORKSPACE. `_apply_budget_increase` (shared/governance/effects.py)
+    has always supported a project-scoped target — "A Project Admin whose project has
+    exhausted its total budget raises this against their PROJECT" — but nothing has ever
+    called create_request with a project_id for this type, so that branch has been dead
+    code since it shipped (sub-project A, Task 1, parked finding). This is that caller.
+
+    The floor is cost:view, not project:update, matching workspaces.py's own reasoning
+    exactly: asking is not changing, and whoever can see a cap about to bind is who should
+    be able to raise it.
+    """
+    tenant_id = request.state.tenant_id
+    project = await _get_or_404(db, project_id, tenant_id)
+    if not await can_perform(
+        db, user_id=_user_id(request), permission="cost:view",
+        tenant_id=str(tenant_id), resource_kind="project", resource_id=str(project.id),
+    ):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from shared.services.governance_requests import GovernanceError  # noqa: PLC0415
+
+    amount = body.requestedAmountUsd
+    current = float(project.monthly_budget_usd) if project.monthly_budget_usd is not None else None
+    detail = (
+        f"{project.display_name} is asking to move its monthly cap "
+        + (f"from {current:.0f} " if current is not None else "")
+        + f"to {amount:.0f} USD."
+        + (f" {body.reason}" if body.reason else "")
+    )
+
+    try:
+        return await governance_service.create_request(
+            db,
+            tenant_id=str(tenant_id),
+            initiator_id=getattr(request.state, "user_id", "") or "",
+            initiator_name=await actor_display_name(db, request),
+            initiator_role=await effective_platform_role(db, request),
+            request_type="budget_increase",
+            title=f"Budget increase: {project.display_name} — {amount:.0f} USD/month",
+            description=detail,
+            workspace_id=str(project.workspace_id),
+            project_id=str(project.id),
+            target_ref=str(project.id),
+            payload={"requestedAmountUsd": amount, "previousAmountUsd": current},
+            priority="high",
+        )
+    except GovernanceError as exc:
+        raise HTTPException(
+            status_code=exc.http_status, detail={"code": exc.code, "message": str(exc)}
+        )
+
+
 # Connector kinds that are work-item BOARDS (vs MCP servers / other connectors that
 # can also be assigned to a stage). Only these are offered as a "pull stories" source.
 _BOARD_KINDS = ("azure_devops", "jira", "github_issues", "linear")
@@ -822,9 +883,15 @@ async def restore_project(
 # names. Mirrors _SETTINGS_FIELDS in shared/governance/effects.py, which does the
 # writing — the request stores what was ASKED FOR in the API's own vocabulary so an
 # approver's queue and the applied change describe the same thing.
+#
+# `description` is DELIBERATELY ABSENT, mirroring _SETTINGS_FIELDS: `projects` has no
+# such column, so queuing it here only bought a request that crashed with a 500 on
+# approval and never got a chance to close (live baseline audit, 2026-08-29). Leaving
+# a description edit off the queued payload entirely makes it consistent with the
+# direct-write branch below, where the same dead column already makes an edit a
+# silent no-op rather than an error.
 _SETTINGS_PAYLOAD_KEYS: dict[str, str] = {
     "name": "name",
-    "description": "description",
     "monthlyBudgetUsd": "monthlyBudgetUsd",
     "connectors": "connectors",
     "mcp_servers": "mcpServers",
@@ -833,7 +900,6 @@ _SETTINGS_PAYLOAD_KEYS: dict[str, str] = {
 
 _SETTINGS_FIELD_LABEL: dict[str, str] = {
     "name": "name",
-    "description": "description",
     "monthlyBudgetUsd": "budget",
     "connectors": "connectors",
     "mcp_servers": "MCP servers",

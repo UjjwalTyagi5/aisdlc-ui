@@ -67,8 +67,8 @@ async def test_migrates_specific_visibility_grants_to_provider_grants(seeded_org
     tenant_id, workspace_id = seeded_org_with_specific_grant
     await migrate(tenant_id)
 
-    from shared.db import get_db_session_superuser
-    async with get_db_session_superuser() as s:
+    from shared.db import get_db_session_for_tenant
+    async with get_db_session_for_tenant(tenant_id) as s:
         row = (await s.execute(
             text(
                 "SELECT 1 FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
@@ -89,8 +89,8 @@ async def test_global_visibility_grants_are_not_migrated(seeded_org_with_global_
     tenant_id = seeded_org_with_global_grant
     await migrate(tenant_id)
 
-    from shared.db import get_db_session_superuser
-    async with get_db_session_superuser() as s:
+    from shared.db import get_db_session_for_tenant
+    async with get_db_session_for_tenant(tenant_id) as s:
         count = (await s.execute(
             text(
                 "SELECT count(*) FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "
@@ -114,8 +114,8 @@ async def test_migration_is_idempotent(seeded_org_with_specific_grant):
     assert first == 1
     assert second == 0
 
-    from shared.db import get_db_session_superuser
-    async with get_db_session_superuser() as s:
+    from shared.db import get_db_session_for_tenant
+    async with get_db_session_for_tenant(tenant_id) as s:
         count = (await s.execute(
             text(
                 "SELECT count(*) FROM integration_grants WHERE tenant_id = CAST(:t AS uuid) "

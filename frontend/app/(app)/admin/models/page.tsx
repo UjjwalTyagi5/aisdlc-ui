@@ -24,6 +24,7 @@ import { UnitAccessPicker } from "@/components/app/unit-access-picker";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { useRawSession } from "@/components/auth/session-provider";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { getSpendSeries } from "@/lib/api/cost";
 import {
   getBuAllowedModels,
@@ -293,6 +294,36 @@ export default function ModelProvidersPage() {
     );
   }
 
+  // Checked BEFORE the fetch-failure branch below, deliberately. providerQueries
+  // fires for every scopedUnit regardless of whether the viewer holds
+  // model:manage — scopedUnits comes from bindings, not from role — so a viewer
+  // who lacks the permission gets a 403 from listModelProviders() on every unit
+  // they're bound to. Checked in the other order, that 403 always satisfied
+  // `failed` first, and this permission wall (along with its "Request access"
+  // action) was dead code: unreachable by any bound-but-unauthorized viewer,
+  // verified live against diego@abcbank.com (Developer, bound to a project) —
+  // he saw the generic "Couldn't load model providers" retry state, never this
+  // one. Real fetch failures unrelated to permission (a bound Org/BU/Project
+  // Admin's own listModelProviders erroring) still fall through to the `failed`
+  // branch below, since this check only fires for someone who was going to see
+  // a wall regardless of what the fetch returned.
+  if (!hasPermission(session, "model:manage") || !scope) {
+    return (
+      <RestrictedAccess
+        description="Model providers require the model:manage permission."
+        action={
+          <RequestAccessButton
+            prefill={{
+              type: "access_request",
+              title: "Access to Model Management",
+              description: "Requesting access to the Model Management admin page.",
+            }}
+          />
+        }
+      />
+    );
+  }
+
   const failed = providerQueries.find((q) => q.isError);
   if (failed) {
     return (
@@ -314,12 +345,6 @@ export default function ModelProvidersPage() {
           onRetry={() => providerQueries.forEach((q) => void q.refetch())}
         />
       </div>
-    );
-  }
-
-  if (!hasPermission(session, "model:manage") || !scope) {
-    return (
-      <RestrictedAccess description="Model providers require the model:manage permission." />
     );
   }
 
