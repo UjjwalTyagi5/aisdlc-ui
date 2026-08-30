@@ -9,6 +9,7 @@ import {
   FolderKanban,
   Import,
   Inbox,
+  Info,
   KeyRound,
   LayoutDashboard,
   Plug,
@@ -445,9 +446,9 @@ export const utilityNav: NavItem[] = [
      * `hiddenInSidebar` keeps it out of the main nav loop; the footer renders
      * it explicitly (components/app/sidebar.tsx).
      */
-    label: "Agent Catalogue",
+    label: "About",
     href: "/catalogue",
-    icon: Boxes,
+    icon: Info,
     segment: "catalogue",
     hiddenInSidebar: true,
     prdSection: "§20, §21–§25",
@@ -544,7 +545,7 @@ export const segmentLabels: Record<string, string> = {
   models: "Models",
   "agent-import-sources": "Import Sources",
   cost: "Cost & Budget",
-  catalogue: "Agent Catalogue",
+  catalogue: "About",
   activity: "Activity",
   "my-access": "My access",
   traces: "Traces",
@@ -625,7 +626,7 @@ function visibleTo(item: NavItem, perms: string[], ctx?: NavContext): boolean {
    * Handled here rather than as `hideForRoles: ["contributor"]` on each entry,
    * because the rule is about the ROLE holding nothing — not about these four
    * pages — so the next entry added must inherit it without anyone remembering.
-   * What stays reachable is the utility rail (Agent Catalogue, Help & docs),
+   * What stays reachable is the utility rail (About, Help & docs),
    * which is exactly what someone waiting to be given work can usefully read.
    */
   if (ctx?.role === "contributor") return false;

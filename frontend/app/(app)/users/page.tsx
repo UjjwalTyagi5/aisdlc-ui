@@ -43,12 +43,14 @@ import { AssignBusinessUnitRoleDialog } from "@/components/app/assign-bu-role-di
 import { ChangeAppointmentDialog } from "@/components/app/change-appointment-dialog";
 import { BulkOnboardDialog } from "@/components/app/bulk-onboard-dialog";
 import { RequestCrossBuMemberDialog } from "@/components/app/request-cross-bu-member-dialog";
+import { RequestOnboardingDialog } from "@/components/app/request-onboarding-dialog";
 import { listProjects } from "@/lib/api/projects";
 import { OnboardUserDialog } from "@/components/app/onboard-user-dialog";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { listCrossBuGrants, listUserDirectory, revokeCrossBuGrant } from "@/lib/api/users";
 import { qk } from "@/lib/api/query-keys";
+import { canRaiseType } from "@/lib/requests/routing";
 import { awaitsBusinessUnitRole, ROLE_META, type PlatformRole } from "@/lib/roles";
 import { RoleHistoryDialog } from "@/components/app/role-history-dialog";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
@@ -139,6 +141,7 @@ export default function UsersPage() {
 
   const [query, setQuery] = React.useState("");
   const [onboarding, setOnboarding] = React.useState(false);
+  const [requestingOnboard, setRequestingOnboard] = React.useState(false);
   const [bulkOpen, setBulkOpen] = React.useState(false);
   const [borrowOpen, setBorrowOpen] = React.useState(false);
   const queryClient = useQueryClient();
@@ -418,6 +421,23 @@ export default function UsersPage() {
             >
               <Building2 className="size-4" aria-hidden />
               Borrow from another {BUSINESS_UNIT_LABEL.toLowerCase()}
+            </Button>
+          )}
+
+          {/* The non-Org-Admin way to ask for the same handover — POST /onboarding
+              itself is Org-Admin-only, and the generic "Raise a request" dialog has
+              no email field to name who. Shown to whoever may raise
+              `user_onboarding` (a Business Unit Admin or Project Admin, per
+              raisableTypesFor) but never to the Organization Admin, who onboards
+              directly with the button above/below instead. */}
+          {!isOrgAdmin && canRaiseType(viewerRole, "user_onboarding") && (
+            <Button
+              variant="outline"
+              className="border-line-soft gap-2"
+              onClick={() => setRequestingOnboard(true)}
+            >
+              <UserPlus className="size-4" aria-hidden />
+              Request onboarding
             </Button>
           )}
 
@@ -833,6 +853,14 @@ export default function UsersPage() {
           onOpenChange={setBorrowOpen}
           projects={(projectsQ.data?.items ?? []).map((p) => ({ id: String(p.id), name: p.name }))}
           onRaised={() => queryClient.invalidateQueries({ queryKey: ["governance-approvals"] })}
+        />
+      )}
+
+      {!isOrgAdmin && canRaiseType(viewerRole, "user_onboarding") && (
+        <RequestOnboardingDialog
+          open={requestingOnboard}
+          onOpenChange={setRequestingOnboard}
+          requesterRole={viewerRole}
         />
       )}
 

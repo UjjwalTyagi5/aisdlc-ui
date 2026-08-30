@@ -187,7 +187,7 @@ export default function AgentCataloguePage() {
         <div className="relative max-w-3xl">
           <div className="text-brand-bright mb-3 flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] uppercase">
             <Sparkles className="size-3.5" aria-hidden />
-            Agent Catalogue
+            About
           </div>
           <h1 className="font-display text-[38px] leading-[1.05] font-bold tracking-[-0.035em] md:text-[46px]">
             Every agent, track and control the platform actually has.

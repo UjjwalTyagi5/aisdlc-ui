@@ -140,7 +140,7 @@ async def test_create_honours_the_body_unit_over_the_header(two_units):
     r = c.post(
         "/projects",
         headers=_headers(admin, t["org"], t["bu_a"], ["admin:*", "workspace:manage"]),
-        json={"name": "Chosen Unit B", "workspaceId": t["bu_b"]},
+        json={"name": "Chosen Unit B", "workspaceId": t["bu_b"], "monthlyBudgetUsd": 1000},
     )
     assert r.status_code == 201, r.text
     assert r.json()["workspaceId"] == t["bu_b"]
@@ -186,7 +186,7 @@ async def test_a_project_admin_can_create_a_project(two_units):
     r = c.post(
         "/projects",
         headers=_headers(admin, t["org"], t["bu_a"], ["artifact:view", "project:create"]),
-        json={"name": "Made By A Project Admin", "workspaceId": t["bu_b"]},
+        json={"name": "Made By A Project Admin", "workspaceId": t["bu_b"], "monthlyBudgetUsd": 1000},
     )
     assert r.status_code == 201, r.text
     assert r.json()["workspaceId"] == t["bu_b"]

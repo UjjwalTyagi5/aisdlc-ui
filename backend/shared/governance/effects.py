@@ -7,14 +7,53 @@ the failure mode most likely to go unnoticed: everyone believes it was handled.
 
 APPLIED IN THE SAME TRANSACTION as the status change, deliberately. Two statements that
 can half-succeed give you a request marked approved over a budget that never moved, and
-no way to tell from either row which of the two is wrong.
+no way to tell from either row which of the two is wrong. `decide()` also runs its
+status UPDATE (with its own AlreadyClosed optimistic-concurrency guard) BEFORE calling
+into this module, so a request a concurrent decision already closed never reaches an
+effect at all — closing the most likely way to hit the half-succeed above.
 
-NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request`,
-`connector_access`, `mcp_server`, `user_onboarding`, `agent_access` and `other`, the
-DECISION IS THE OUTCOME — the approver then does the thing by hand on the page that owns
-it, and the request is the record that they were asked and said yes. Wiring a side
-effect onto those would mean this module performing grants it has no business
-performing.
+TWO EFFECTS ARE A DOCUMENTED EXCEPTION to "same transaction": `_apply_model_credential`
+and `_apply_user_onboarding` both call into pre-existing service functions
+(`model_grants.py`'s `set_project_selection`/`get_project_selection`;
+`onboarding.py`'s `_onboard_person`) that open and commit their own independent
+sessions rather than using the `db` passed into the effect. This was a real Critical
+finding for the first of the two (`_apply_model_credential` was new code introduced
+here); for the second, `_onboard_person`'s multi-session shape is pre-existing,
+already-shipped behavior on the direct `POST /onboarding` route, not something this
+effect introduces. The `decide()` reorder above still closes the concurrent-decision
+race for both. The residual, accepted risk it does NOT close: an exception raised
+AFTER one of these two effects' independent commit but before the outer transaction's
+own commit (e.g. a failure in the notification/audit code that runs after
+`apply_on_approve` returns) can leave the effect's write durably applied while the
+request's own status change rolls back. Any NEW effect added to this file should write
+only through the passed-in `db` session — do not add a third exception without a
+reason as carefully argued as these two.
+
+NOT EVERY TYPE HAS AN EFFECT, and that is not an omission. For `access_request` and
+`other`, the DECISION IS THE OUTCOME — the approver then does the thing by hand on
+the page that owns it, and the request is the record that they were asked and said
+yes. Wiring a side effect onto those would mean this module performing grants it
+has no business performing.
+
+FOUR MORE TYPES USED TO LIVE IN `_DECISION_IS_THE_OUTCOME` and now have real effects
+below — each approving-recorded-agreement-and-changing-nothing, until now:
+  connector_access    granted no access; `_apply_connector_access` writes the real
+                      `integration_grants`/`project_connector_access` row.
+  model_credential    selected no model; `_apply_model_credential` adds it to the
+                      project's `set_project_selection`.
+  mcp_server          granted no server; `_apply_mcp_server` writes `integration_grants`.
+  user_onboarding     onboarded nobody, so an Organization Admin who approved a
+                      request still had to go and onboard the person by hand from
+                      Users. `_apply_user_onboarding` reuses `_onboard_person`
+                      (shared/routers/onboarding.py), the exact three-act body
+                      `POST /onboarding` already performs, rather than a second copy.
+
+`agent_access` used to be a fifth: approving recorded agreement and granted nothing,
+so the requester still had to be given the extra agent by hand. See
+`_apply_agent_access` below — it is the same `role_bindings.extra_agents` write the
+manual "grant extra agent access" admin action already performs (PRD §43.2 step 3).
+Only reachable for a phase whose owner holds `governance:decide` — see the migration
+`0037_agent_owner_decide` and its docstring for the reachability fix this needed.
 
 One type has an effect the backend cannot perform yet; it raises
 `EffectNotAvailable` rather than silently approving into a void:
@@ -74,14 +113,10 @@ _NOT_APPLICABLE = {
 _DECISION_IS_THE_OUTCOME = frozenset(
     {
         "access_request",
-        # `connector_access` used to live here — approving it recorded agreement and
-        # changed nothing, so the requester still had to go and set the grant by hand
-        # and an approved request granted no access at all. It now has a real effect
-        # below, which is what makes approval a gate rather than a note.
-        "mcp_server",
-        "user_onboarding",
-        "agent_access",
-        "model_credential",
+        # `model_credential`, `mcp_server`, `user_onboarding` and `agent_access` all
+        # used to live here too — see the module docstring above for what each one's
+        # real effect now does and why. `connector_access` left this set before this
+        # plan started (its own effect predates the work here).
         "other",
     }
 )
@@ -111,10 +146,18 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_project_settings_change(db, request)
     if rtype == "model_provider_access":
         return await _apply_model_provider_access(db, request)
+    if rtype == "model_credential":
+        return await _apply_model_credential(db, request)
     if rtype == "connector_access":
         return await _apply_connector_access(db, request)
+    if rtype == "mcp_server":
+        return await _apply_mcp_server(db, request)
+    if rtype == "agent_access":
+        return await _apply_agent_access(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
+    if rtype == "user_onboarding":
+        return await _apply_user_onboarding(db, request)
     if rtype.startswith("agent_default_"):
         return await _apply_agent_default(db, request)
 
@@ -209,9 +252,18 @@ async def _apply_budget_increase(db: AsyncSession, request: dict[str, Any]) -> s
 # to the fields shown on the request, and a mapping computed later could apply
 # something they never saw. Anything absent from here is not applicable through this
 # route no matter what the payload contains.
+#
+# `description` is DELIBERATELY ABSENT: `projects` has no such column (confirmed via
+# the live baseline audit, 2026-08-29 — approving a queued description edit crashed
+# with a raw 500 `UndefinedColumnError` on `UPDATE projects SET description = ...`,
+# and the request was left permanently stuck open since the crash rolled back the
+# status flip too). Leaving the key out is exactly the escape hatch this function's
+# own docstring already documents ("a request can outlive a schema"; see `applied`
+# below) — it makes a description edit a silent no-op on approval rather than a
+# crash, matching `patch_project`'s direct-write branch (shared/routers/projects.py),
+# where the same dead column already makes a direct edit a no-op instead of an error.
 _SETTINGS_FIELDS: dict[str, str] = {
     "name": "display_name",
-    "description": "description",
     "monthlyBudgetUsd": "monthly_budget_usd",
     "connectors": "connectors",
     "mcpServers": "mcp_servers",
@@ -465,34 +517,128 @@ async def _apply_project_creation_reject(db: AsyncSession, request: dict[str, An
 
 
 async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]) -> str:
-    """Activate the model provider the request was raised about.
+    """Grant the requesting Business Unit reach to the provider named — the same
+    write `PUT /model/providers/grants` performs by hand (shared/routers/model.py's
+    `set_model_provider_grants_route`, Org-Admin-only, delete-then-insert into
+    `integration_grants` for the target unit) and the same `integration_grants`
+    table `_apply_mcp_server` above writes for `kind='mcp'`. NOT a `model_providers`
+    row: migration `0028_model_provider_grant_kind`'s own docstring is explicit that
+    "a model_provider grant means 'this Business Unit may use provider X' — no
+    model, no key, exactly like a connector grant" — `model_providers.status` is an
+    unrelated enum (`unverified | valid | invalid`, frontend `ModelProviderStatus`)
+    written only by a real API-key verify probe and read only by model-dispatch
+    code that gates usability on `status = 'valid'`. An earlier version of this
+    function wrote `status = 'active'` there directly — not a legal value —
+    corrupting a live connection row into a shape the frontend's own schema
+    rejects outright. This function must never touch `model_providers` at all.
 
-    The provider row is created when the credential is onboarded and sits inactive
-    until an Org Admin agrees to it — this is the agreement.
+    Validated against `catalog_providers()`, the same check the manual route
+    performs, so a stale or hand-crafted provider slug refuses cleanly rather
+    than granting a name the catalog does not recognize. `ON CONFLICT ... DO
+    UPDATE` mirrors `_apply_mcp_server`'s idempotency: `integration_grants`'s
+    primary key IS `(tenant_id, kind, target_ref, workspace_id)`
+    (migration `0015_integration_grants`), so granting the same provider to the
+    same unit twice — a re-approval, two separate requests — is a no-op-shaped
+    upsert, never a duplicate-row error.
+
+    NO org_admin re-check here, unlike `_apply_mcp_server`'s. That one is real
+    defense-in-depth because `mcp_server` is tier-routed (absent from
+    `routing.TYPE_ROUTED`) and can in principle reach a lower tier before
+    escalating. `model_provider_access` is TYPE_ROUTED with a FIXED approver —
+    `routing.GOVERNANCE_APPROVER_ROLE["model_provider_access"] = "org_admin"` —
+    so `initial_approver_role` sets `current_approver_role = "org_admin"` at
+    creation and it never changes (escalation is refused: `can_escalate` sees
+    the request already at its ceiling). `decide()`'s own "is it yours to
+    answer?" gate (`decider_role != request["currentApproverRole"]`) therefore
+    already guarantees org_admin by the time this effect runs; re-checking here
+    would be a redundant copy of a guarantee the routing layer, not this
+    function, is responsible for keeping true.
     """
-    target = request.get("targetRef")
-    if not target:
+    from shared.services.model_catalog import list_providers as catalog_providers  # noqa: PLC0415
+
+    payload = request.get("payload") or {}
+    provider = (payload.get("providerModel") or {}).get("provider")
+    if not provider:
         raise EffectNotAvailable("model_provider_access", "This request names no provider.")
-    try:
-        _uuid.UUID(str(target))
-    except (ValueError, AttributeError):
+
+    catalog = {p["provider"] for p in catalog_providers()}
+    if provider not in catalog:
         raise EffectNotAvailable(
-            "model_provider_access", "This request's provider id is malformed."
+            "model_provider_access", f"{provider!r} is not a recognized model provider."
         )
 
-    result = await db.execute(
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable(
+            "model_provider_access", "This request names no business unit."
+        )
+
+    await db.execute(
         text(
-            "UPDATE model_providers SET status = 'active', updated_at = now() "
-            "WHERE id = CAST(:p AS uuid)"
+            "INSERT INTO integration_grants "
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), 'model_provider', :r, CAST(:w AS uuid), :by) "
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+            "  SET granted_by = EXCLUDED.granted_by"
         ),
-        {"p": str(target)},
+        {
+            "t": request["tenantId"], "r": provider, "w": str(workspace_id),
+            "by": request.get("decidedBy"),
+        },
     )
-    if not result.rowcount:
-        raise EffectNotAvailable("model_provider_access", "That provider no longer exists.")
     logger.info(
-        "governance: model provider activated request=%s provider=%s", request["id"], target
+        "model_provider_access approved: unit %s -> provider %s", workspace_id, provider,
     )
-    return "Model provider activated."
+    return f"{provider} granted to this business unit."
+
+
+async def _apply_model_credential(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Add the requested (provider, model_id) to the project's selection —
+    the exact write set_project_selection already performs when a Project
+    Admin does this by hand (Model Management). Reuses that function rather
+    than reimplementing its reachability checks (NotAllowedForUnitError etc.):
+    a request approved for a model the project's BU never made reachable
+    should fail the same way the manual path does, not silently succeed
+    through a second, looser route.
+    """
+    from shared.services.model_grants import (
+        NotAllowedForUnitError,
+        get_project_selection,
+        set_project_selection,
+    )
+
+    payload = request.get("payload") or {}
+    pm = payload.get("providerModel") or {}
+    provider, model_id = pm.get("provider"), pm.get("modelId")
+    project_id = request.get("projectId")
+
+    if not project_id:
+        raise EffectNotAvailable("model_credential", "This request names no project.")
+    if not provider or not model_id:
+        raise EffectNotAvailable(
+            "model_credential", "This request names no provider or model to select."
+        )
+
+    current = await get_project_selection(request["tenantId"], project_id)
+    already = any(
+        e["provider"] == provider and e["model_id"] == model_id for e in current["selected"]
+    )
+    if already:
+        return f"{provider}/{model_id} was already selected for this project."
+
+    next_selection = [*current["selected"], {"provider": provider, "model_id": model_id}]
+    try:
+        await set_project_selection(
+            request["tenantId"], project_id, next_selection, current.get("defaultKey")
+        )
+    except NotAllowedForUnitError as exc:
+        raise EffectNotAvailable("model_credential", str(exc))
+
+    logger.info(
+        "governance: model_credential applied request=%s project=%s model=%s/%s",
+        request["id"], project_id, provider, model_id,
+    )
+    return f"{provider}/{model_id} selected for this project."
 
 
 async def _apply_agent_default(db: AsyncSession, request: dict[str, Any]) -> str:
@@ -784,6 +930,145 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
     return f"{target_ref} set to {label(access)} for this project."
 
 
+async def _apply_mcp_server(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant the MCP server that was asked for to the business unit named on the
+    request — the same write `POST /integrations/access` performs for kind='mcp'
+    (shared/routers/integration_access.py's `grant_integration_access`), found by
+    reading that manual path first (557a86db's own commit message describes MCP
+    servers as "governed identically — granted to units, consumed by projects" to
+    connectors, and confirms it never merged the `mcp_server` request TYPE into
+    `connector_access`; the two stay genuinely distinct end to end — separate
+    `TYPE_ROUTED`/raisable-list entries in routing.py, untouched by that commit here
+    and in governance_requests.py). NOT a thin wrapper around `_apply_connector_access`
+    — the two request types are kept apart at every other layer, and a wrapper here
+    would be the one place they secretly weren't.
+
+    UNIT-LEVEL ONLY, unlike connector_access's two shapes. mcp_server's payload never
+    carries an access level — `governance_requests.create_request` merges `access`
+    into the payload for `connector_access` alone (see its own comment: "connector_
+    access alone also carries an access level"), because there is no per-stage read/
+    write question for an MCP server the way there is for a connector; a project
+    wiring an MCP server to a stage is a `project_settings_change` (the direct
+    `mcpServers` picker on Settings), not this request type. So there is no
+    project_connector_access-shaped second branch to mirror here — a reach grant to
+    the unit is the whole effect.
+
+    ORG-ADMIN GATE, restated here for the same reason `_apply_connector_access`
+    restates it: an approval is a second door into the same write, and
+    `grant_integration_access`'s `_require_org_admin` has no kind-specific carve-out
+    — 'mcp' is checked exactly like 'connector'. Skipping this check would let a
+    request tier-routed to a lower approver (mcp_server is absent from TYPE_ROUTED,
+    same as connector_access) grant a unit something only an Organization Admin may.
+    """
+    payload = request.get("payload") or {}
+    target_ref = (payload.get("targetId") or "").strip()
+    if not target_ref:
+        raise EffectNotAvailable(
+            "mcp_server",
+            "This request doesn't yet name which server — ask the requester to specify "
+            "one, or register it directly.",
+        )
+
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable("mcp_server", "This request names no business unit.")
+
+    decided_by_tier = request.get("currentApproverRole") or ""
+    if decided_by_tier != "org_admin":
+        raise EffectNotAvailable(
+            "mcp_server",
+            "Only an Organization Admin can give a business unit an MCP server. "
+            "Escalate this request rather than approving it here.",
+        )
+
+    tenant_id = request["tenantId"]
+    exists = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM mcp_servers WHERE id = CAST(:s AS uuid) "
+                "  AND tenant_id = CAST(:t AS uuid)"
+            ),
+            {"s": target_ref, "t": tenant_id},
+        )
+    ).first()
+    if exists is None:
+        raise EffectNotAvailable("mcp_server", "That MCP server no longer exists.")
+
+    await db.execute(
+        text(
+            "INSERT INTO integration_grants "
+            "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+            "VALUES (CAST(:t AS uuid), 'mcp', :r, CAST(:w AS uuid), :by) "
+            "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+            "  SET granted_by = EXCLUDED.granted_by"
+        ),
+        {
+            "t": tenant_id, "r": target_ref, "w": str(workspace_id),
+            "by": request.get("decidedBy"),
+        },
+    )
+    logger.info("mcp_server approved: unit %s -> mcp %s", workspace_id, target_ref)
+    return "MCP server granted to the business unit."
+
+
+async def _apply_agent_access(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant the requester the extra agent access their final approver just
+    signed off on — the same field the manual 'grant extra agent access'
+    admin action already writes (PRD §43.2 step 3), just reached through the
+    two-stage request instead of an admin acting directly.
+
+    Only reached at the FINAL decision. `decide()`'s two-stage block
+    (shared/services/governance_requests.py, ~610-667) returns early — before
+    apply_on_approve is ever called — whenever stage one's approval advances
+    to a stage two (routing.next_agent_access_stage returns non-None). This
+    function therefore only ever runs for a genuinely final approval: stage
+    two itself, or stage one alone when there is no stage two (the
+    `documentation` phase, whose owner IS project_admin).
+    """
+    payload = request.get("payload") or {}
+    phase = payload.get("phase")
+    user_id = request.get("requestedById")
+    project_id = request.get("projectId")
+
+    if not phase:
+        raise EffectNotAvailable("agent_access", "This request names no agent.")
+    if not user_id or not project_id:
+        raise EffectNotAvailable(
+            "agent_access", "This request names no person or project to grant access on."
+        )
+
+    row = (
+        await db.execute(
+            text(
+                "SELECT extra_agents FROM role_bindings WHERE user_id = :u "
+                "  AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+            ),
+            {"u": user_id, "p": project_id},
+        )
+    ).first()
+    if row is None:
+        raise EffectNotAvailable(
+            "agent_access", "This person no longer holds a role on this project."
+        )
+    current = list(row.extra_agents or [])
+    if phase in current:
+        return f"{phase} was already granted."
+    current.append(phase)
+
+    await db.execute(
+        text(
+            "UPDATE role_bindings SET extra_agents = CAST(:a AS jsonb) "
+            "WHERE user_id = :u AND scope_kind = 'project' AND scope_id = CAST(:p AS uuid)"
+        ),
+        {"a": json.dumps(current), "u": user_id, "p": project_id},
+    )
+    logger.info(
+        "governance: agent_access granted request=%s user=%s project=%s phase=%s",
+        request["id"], user_id, project_id, phase,
+    )
+    return f"Granted access to the {phase} agent."
+
+
 async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) -> str:
     """Record the loan and seat the borrowed contributor on the project.
 
@@ -848,3 +1133,70 @@ async def _apply_cross_bu_assignment(db: AsyncSession, request: dict[str, Any]) 
         user_id, project_id, role_name, parent_workspace_id,
     )
     return f"{email} joined as {role_name}, on loan from their business unit."
+
+
+async def _apply_user_onboarding(db: AsyncSession, request: dict[str, Any]) -> str | None:
+    """Onboard the person the request named — the exact three acts
+    `POST /onboarding` already performs (idempotent account, business-unit
+    placement, a `role_assignment` sub-request for the unit's admin), reused
+    via `_onboard_person` (shared/routers/onboarding.py) rather than
+    duplicated.
+
+    ORG-ADMIN ONLY, regardless of who technically holds `currentApproverRole`
+    at this decision — `onboarding.py`'s own module docstring is explicit that
+    `POST /onboarding` is "the Organization Admin's half of the handover", and
+    a Project or BU Admin approver genuinely lacks the standing to create an
+    account. `user_onboarding` is tier-routed rather than type-routed (absent
+    from `routing.TYPE_ROUTED`), so a request raised below `org_admin` is
+    decided by a Project Admin or BU Admin first and CAN close there without
+    ever reaching this tier. Same shape as `_apply_connector_access` and
+    `_apply_mcp_server`'s identical unit-tier guards: below `org_admin` this
+    records agreement only (as it always did, before this type had an effect)
+    until the request actually escalates that far.
+
+    Always onboards as `contributor` into `request["workspaceId"]` — never a
+    caller-supplied role. `user_onboarding`'s payload only ever carries an
+    email (see `RaiseRequestPrefill.onboardEmail`, `RequestCreateInput`); the
+    two-answer choice `POST /onboarding` itself offers (Business Unit Admin or
+    Contributor) is deliberately not something a requester picks for someone
+    else — an Organization Admin who wants to appoint a co-admin still does
+    that directly, from Users.
+
+    NOT authorization-checked the way `POST /onboarding` is: `_onboard_person`
+    performs no `is_org_wide`/`assert_can_grant_role` call (both read a live
+    HTTP request's session, which a governance decision has none of). This
+    effect's own `currentApproverRole == "org_admin"` check IS this path's
+    standing check, the same way `_apply_connector_access`'s and
+    `_apply_mcp_server`'s `decided_by_tier` checks are theirs.
+    """
+    payload = request.get("payload") or {}
+    email = payload.get("onboardEmail")
+    if not email:
+        raise EffectNotAvailable("user_onboarding", "This request names no email to onboard.")
+
+    if request.get("currentApproverRole") != "org_admin":
+        # Decision-is-the-outcome until the request reaches the tier that can
+        # actually admit someone — see the docstring above.
+        return None
+
+    workspace_id = request.get("workspaceId")
+    if not workspace_id:
+        raise EffectNotAvailable(
+            "user_onboarding", "This request names no business unit to place them in."
+        )
+
+    from shared.routers.onboarding import _onboard_person  # noqa: PLC0415
+
+    result = await _onboard_person(
+        db,
+        tenant_id=request["tenantId"],
+        email=email,
+        display_name=None,
+        workspace_id=workspace_id,
+        role="contributor",
+        actor_id=request.get("decidedBy"),
+    )
+    logger.info(
+        "governance: user_onboarding applied request=%s email=%s", request["id"], email
+    )
+    return f"{result['email']} onboarded to this business unit."

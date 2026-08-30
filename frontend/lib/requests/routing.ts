@@ -187,6 +187,14 @@ const BU_ADMIN_RAISABLE: readonly GovernanceApprovalType[] = [
   "model_provider_access",
   "user_onboarding",
   "connector_access",
+  // Same ask as `connector_access`, about the other half of the same estate:
+  // granting an MCP server to a Business Unit is the Organization Admin's
+  // alone, so a Business Unit Admin who lacks one can only request it. Absent
+  // here until now purely because it could not be reached — MCP tiles rendered
+  // as granted to everyone, so no Business Unit Admin ever saw an ungranted one
+  // to ask about. Tier-routed like its neighbours, which lands it with the Org
+  // Admin rather than a peer.
+  "mcp_server",
   "budget_increase",
   "access_request",
   "other",

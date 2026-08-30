@@ -53,6 +53,7 @@ def test_creating_a_project_with_a_track_persists_and_returns_it(org_and_unit):
             "name": "Warehouse Migration",
             "workspaceId": t["unit"],
             "track": "data_engineering",
+            "monthlyBudgetUsd": 1000,
         },
         headers=_hdr(user, t["org"], ["project:create", "admin:*"]),
     )
@@ -73,7 +74,7 @@ def test_creating_a_project_without_a_track_defaults_to_greenfield(org_and_unit)
     user = f"admin-{_uuid.uuid4()}"
     resp = _client().post(
         "/projects",
-        json={"name": "No Track Given", "workspaceId": t["unit"]},
+        json={"name": "No Track Given", "workspaceId": t["unit"], "monthlyBudgetUsd": 1000},
         headers=_hdr(user, t["org"], ["project:create", "admin:*"]),
     )
     assert resp.status_code == 201, resp.text

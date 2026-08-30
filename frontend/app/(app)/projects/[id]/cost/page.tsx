@@ -22,7 +22,12 @@ import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useSession } from "@/hooks/use-session";
 import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
-import { getProject, listProjects, updateProject } from "@/lib/api/projects";
+import {
+  getProject,
+  listProjects,
+  requestProjectBudgetIncrease,
+  updateProject,
+} from "@/lib/api/projects";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { budgetAllocation } from "@/lib/budget-allocation";
@@ -162,21 +167,26 @@ export default function ProjectCostPage() {
           )}
         >
           <Info className="mt-px size-4 shrink-0" aria-hidden />
-          <p>
-            {ratio >= 1 ? (
-              <>
-                This project is over its total cap. The next run is stopped,
-                scoped to the cap that was hit — in-flight work is never killed.
-                Request headroom to continue; it escalates one tier at a time.
-              </>
-            ) : (
-              <>
-                This project is at {Math.round(ratio * 100)}% of its total cap.
-                At the cap, the business unit&apos;s policy decides whether to
-                warn and escalate, or hard-stop the next run.
-              </>
+          <div>
+            <p>
+              {ratio >= 1 ? (
+                <>
+                  This project is over its total cap. The next run is stopped,
+                  scoped to the cap that was hit — in-flight work is never killed.
+                  Request headroom to continue; it escalates one tier at a time.
+                </>
+              ) : (
+                <>
+                  This project is at {Math.round(ratio * 100)}% of its total cap.
+                  At the cap, the business unit&apos;s policy decides whether to
+                  warn and escalate, or hard-stop the next run.
+                </>
+              )}
+            </p>
+            {ratio >= 1 && role === "project_admin" && (
+              <ProjectBudgetIncreaseRequest projectId={id} />
             )}
-          </p>
+          </div>
         </div>
       )}
 
@@ -382,5 +392,88 @@ function ProjectBudgetCard({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * A Project Admin's request for more headroom once the project is over its
+ * cap — a genuinely different flow from `ProjectBudgetCard`'s direct edit
+ * (BU/Org Admin, gated on `canSetCap`): this sends a governance approval to
+ * the Business Unit Admin instead of writing the cap directly. Follows the
+ * same inline-toggle shape as `ProjectBudgetCard` rather than a modal, to
+ * match this page's established taste for inline over modal.
+ */
+function ProjectBudgetIncreaseRequest({ projectId }: { projectId: ProjectId }) {
+  const [open, setOpen] = React.useState(false);
+  const [amount, setAmount] = React.useState("");
+  const [reason, setReason] = React.useState("");
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      requestProjectBudgetIncrease(projectId, {
+        requestedAmountUsd: Number(amount),
+        reason: reason.trim() || undefined,
+      }),
+    onSuccess: () => {
+      toast.info("Sent for approval", {
+        description: "Your Business Unit Admin needs to approve this before the budget changes.",
+      });
+      setOpen(false);
+      setAmount("");
+      setReason("");
+    },
+    onError: (e) =>
+      toast.error("Couldn't send request", {
+        description: e instanceof Error ? e.message : undefined,
+      }),
+  });
+
+  if (!open) {
+    return (
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 shrink-0 font-mono text-[11px]"
+        onClick={() => setOpen(true)}
+      >
+        Request more budget
+      </Button>
+    );
+  }
+
+  const parsed = Number(amount);
+  const valid = amount.trim() !== "" && Number.isFinite(parsed) && parsed > 0;
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <span className="text-muted-foreground font-mono text-[13px]">$</span>
+      <Input
+        type="number"
+        min={0}
+        step="1"
+        autoFocus
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        placeholder="New monthly cap"
+        className="border-line-soft h-8 w-40 font-mono text-[12px]"
+      />
+      <Input
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="Reason (optional)"
+        className="border-line-soft h-8 w-56 font-mono text-[12px]"
+      />
+      <Button
+        size="sm"
+        className="h-7"
+        disabled={!valid || mutation.isPending}
+        onClick={() => mutation.mutate()}
+      >
+        {mutation.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Send"}
+      </Button>
+      <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setOpen(false)}>
+        <X className="size-3.5" aria-hidden />
+      </Button>
+    </div>
   );
 }

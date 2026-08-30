@@ -241,6 +241,11 @@ _BU_ADMIN_RAISABLE: tuple[str, ...] = (
     "model_provider_access",
     "user_onboarding",
     "connector_access",
+    # Same ask as connector_access, about the other half of the same estate:
+    # granting an MCP server to a business unit is the Org Admin's alone.
+    # Mirrors frontend/lib/requests/routing.ts::BU_ADMIN_RAISABLE — see that
+    # file's comment for the full reasoning.
+    "mcp_server",
     "budget_increase",
     "access_request",
     "other",

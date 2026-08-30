@@ -17,13 +17,31 @@ import { hasPermission } from "@/lib/auth/permissions";
 export function RestrictedAccess({
   title = "Access restricted",
   description,
+  action,
 }: {
   title?: string;
   description: string;
+  action?: React.ReactNode;
 }) {
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">
-      <ApiErrorState title={title} description={description} />
+      {/* Synthesized as a `forbidden`-coded ApiError, not passed via `description`
+       *  alone. ApiErrorState's Lock-icon/no-retry "forbidden" treatment — the
+       *  one this component's own doc comment above already promised — is keyed
+       *  off `error?.code === "forbidden"`, not off the mere absence of an
+       *  `error` prop. Passing only `title`/`description` (the previous code)
+       *  left `forbidden` permanently false here, so this component silently
+       *  rendered the generic destructive/AlertTriangle treatment instead of
+       *  the calmer amber Lock one, AND would have made the new `action` prop
+       *  below — gated on `forbidden` in ApiErrorState — dead code that could
+       *  never render. Wrapping `description` as the ApiError's `message`
+       *  fixes both: same visible text, but now via the actually-forbidden
+       *  branch. */}
+      <ApiErrorState
+        title={title}
+        error={{ code: "forbidden", message: description }}
+        action={action}
+      />
     </div>
   );
 }
