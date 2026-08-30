@@ -452,6 +452,28 @@ async def create_request(
                 "That project doesn't exist.", code="PROJECT_NOT_FOUND", http_status=404
             )
         workspace_id = str(resolved_workspace)
+    else:
+        # Not resolved from a real project above (a project's own workspace_id is
+        # already guaranteed real via its FK) — every request still names SOME unit,
+        # and unlike project_id this one is never optional, so a bogus value here is
+        # the more exposed case. An unvalidated workspace_id that names no real row
+        # stores a request no `decider_covers_scope` fallback can ever match — visible
+        # to nobody, undecidable by anyone, forever, with no error at raise time to
+        # warn the caller. Same failure shape as the project_id case above, just
+        # unguarded until now.
+        workspace_exists = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM workspaces "
+                    "WHERE id = CAST(:w AS uuid) AND organization_id = CAST(:t AS uuid)"
+                ),
+                {"w": workspace_id, "t": tenant_id},
+            )
+        ).first()
+        if workspace_exists is None:
+            raise GovernanceError(
+                "That business unit doesn't exist.", code="WORKSPACE_NOT_FOUND", http_status=404
+            )
 
     if approver is None:
         raise GovernanceError(

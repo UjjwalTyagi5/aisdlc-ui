@@ -1662,6 +1662,25 @@ async def test_create_request_refuses_an_unknown_project(org):
 
 
 @pytest.mark.asyncio
+async def test_create_request_refuses_an_unknown_workspace(org):
+    """A workspaceId naming no real business unit — unlike projectId, never
+    optional — must refuse cleanly rather than storing a request no
+    decider_covers_scope fallback can ever match: undecidable by anyone,
+    forever, with no error at raise time to warn the caller."""
+    with pytest.raises(GovernanceError) as exc_info:
+        async with get_db_session_for_tenant(org["org"]) as s:
+            await svc.create_request(
+                s, tenant_id=org["org"], initiator_id=f"dev-{_uuid.uuid4()}",
+                initiator_name="Dev", initiator_role="developer", request_type="access_request",
+                title="Access to a ghost unit", description="—",
+                # A plausible real mistake: the tenant's own id, not a real
+                # workspaces row — confirmed live during the full-system audit.
+                workspace_id=org["org"],
+            )
+    assert exc_info.value.code == "WORKSPACE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
 async def test_agent_access_stage_two_refuses_the_wrong_projects_owner(org):
     """Finding 4 / Task 8's own scoping gap (sub-project A), closed: an architect
     bound to a DIFFERENT project than the request names must not be able to
