@@ -1,5 +1,7 @@
 import os
 import tempfile
+from pathlib import Path
+import shutil
 import unittest
 
 from agents_orchestrator.development_agent.config.session_state import (
@@ -64,12 +66,21 @@ class DevSessionStateTests(unittest.TestCase):
 
 class PathGuardTests(unittest.TestCase):
     def setUp(self):
-        self.workspace = tempfile.mkdtemp()
+        # RESOLVED, because resolve_safe_path resolves too and the two spellings of the
+        # same directory are not the same string on Windows: tempfile.mkdtemp() returns
+        # the TEMP env var verbatim (C:\WINDOWS\TEMP\...) while Path.resolve() returns
+        # the real on-disk casing (C:\Windows\Temp\...). Comparing the raw form against
+        # a resolved one failed on CASE ALONE, with the guard working perfectly.
+        self.workspace = str(Path(tempfile.mkdtemp()).resolve())
+        self.addCleanup(shutil.rmtree, self.workspace, ignore_errors=True)
 
     def test_resolve_safe_path_normal(self):
         p = resolve_safe_path(self.workspace, "src/app.py")
-        self.assertTrue(str(p).startswith(self.workspace))
-        self.assertTrue(str(p).endswith("app.py"))
+        # `is_relative_to`, not a string prefix: it asks the question the guard actually
+        # answers — is this path INSIDE the workspace — instead of a text comparison
+        # that a separator or a drive-letter casing can break while the answer is yes.
+        self.assertTrue(p.is_relative_to(Path(self.workspace)))
+        self.assertEqual(p.name, "app.py")
 
     def test_resolve_safe_path_rejects_traversal(self):
         with self.assertRaises(PathTraversalError):
