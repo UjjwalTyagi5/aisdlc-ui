@@ -13,6 +13,7 @@ that passes the tenant vault — see its docstring.
 """
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from azure.core.exceptions import ResourceNotFoundError
@@ -24,6 +25,11 @@ from shared.azure_credential import get_azure_credential
 logger = logging.getLogger(__name__)
 
 _KEYVAULT_TIMEOUT_SECONDS = 15
+
+# Key Vault permits alphanumerics and dashes only, and rejects anything else with a
+# 400 at request time. Checked here rather than trusted, because the resolved name is
+# built from a caller-supplied tenant id.
+_LEGAL_SECRET_NAME = re.compile(r"[0-9a-zA-Z-]+")
 
 
 def _vault(vault_url: Optional[str]) -> str:
@@ -48,6 +54,22 @@ async def load_secret(secret_name: str, tenant_id: str | None = None, *,
     but not provided (enforced by caller, not here).
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
+
+    # A name Key Vault cannot hold cannot be IN Key Vault, so asking is a round trip
+    # whose only possible answer is 400. Azure raises HttpResponseError for that —
+    # NOT the ResourceNotFoundError the "not configured" path below handles quietly —
+    # so every such call logged a WARNING for a secret that could never have existed.
+    #
+    # The caller that made this show up: connector health probes resolve credentials
+    # under the sentinel tenant `__health_probe__`, which has underscores, so a
+    # deployment pointed at a real vault printed a warning per connector per probe
+    # cycle for a lookup that was never going to succeed.
+    if not _LEGAL_SECRET_NAME.fullmatch(resolved_name):
+        logger.debug(
+            "Secret name %r is not a legal Key Vault name — skipping the read",
+            resolved_name,
+        )
+        return None
 
     _url = _vault(vault_url)
     if not _url:
@@ -125,6 +147,17 @@ async def delete_secret(secret_name: str, tenant_id: str | None = None, *,
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
 
+    # An illegal name on a WRITE is a caller bug, not a routine miss — the value would
+    # be silently lost. WARNING, not debug, and False rather than a raise, matching how
+    # every other failure in this function is reported.
+    if not _LEGAL_SECRET_NAME.fullmatch(resolved_name):
+        logger.warning(
+            "Refusing Key Vault write: %r is not a legal secret name "
+            "(alphanumerics and dashes only)",
+            resolved_name,
+        )
+        return False
+
     _url = _vault(vault_url)
     if not _url:
         logger.debug("No Key Vault URL configured — skipping Key Vault delete for '%s'", resolved_name)
@@ -172,6 +205,17 @@ async def store_secret(secret_name: str, value: str, tenant_id: str | None = Non
     Used by scim/admin.py set-credential CLI (Wave A) and future connector OAuth callbacks.
     """
     resolved_name = f"{tenant_id}-{secret_name}" if tenant_id else secret_name
+
+    # An illegal name on a WRITE is a caller bug, not a routine miss — the value would
+    # be silently lost. WARNING, not debug, and False rather than a raise, matching how
+    # every other failure in this function is reported.
+    if not _LEGAL_SECRET_NAME.fullmatch(resolved_name):
+        logger.warning(
+            "Refusing Key Vault write: %r is not a legal secret name "
+            "(alphanumerics and dashes only)",
+            resolved_name,
+        )
+        return False
 
     _url = _vault(vault_url)
     if not _url:

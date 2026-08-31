@@ -18,10 +18,22 @@ SKIPPED rather than written blank — Key Vault rejects empty values, and a secr
 exists holding nothing is worse than one that does not exist, because the loader would
 treat it as configured.
 
-THE DATABASE DSNs ARE NOT SEEDED HERE. They already have their own Key Vault names
-(KV_SECRET_POSTGRES_*) and their own loader in shared/db.py. See the module docstring of
-config/secret_bootstrap.py for why duplicating them would be a bug rather than a
-convenience.
+THE DATABASE DSNs ARE OPT-IN, VIA --with-database. They are absent from
+PLATFORM_SECRETS on purpose — see config/secret_bootstrap.py for why two mechanisms
+writing the same value is a bug rather than a convenience — but "not in
+PLATFORM_SECRETS" had become "written by nothing at all", which is a different and
+worse problem.
+
+Nothing in the codebase called store_secret for a Postgres DSN. shared/db.py,
+config/checkpoint.py and migrations/env.py all READ one from Key Vault under
+KV_SECRET_POSTGRES_*, every read missed, and every boot fell back to
+POSTGRES_CONN_STRING with a log line saying so. The net effect on a deployment that
+followed the runbook: every platform secret in the vault EXCEPT the database
+password, which stayed in .env — the one place the vault exists to get it out of.
+
+So this seeds them under exactly the names those three modules read, from
+config.env.KV_SECRET_POSTGRES_*. One writer, one naming convention, and the
+convention is the reader's own rather than a second copy of it.
 """
 from __future__ import annotations
 
@@ -36,6 +48,21 @@ sys.path.insert(0, str(BACKEND_ROOT))
 from dotenv import dotenv_values  # noqa: E402
 
 from config.secret_bootstrap import PLATFORM_SECRETS, secret_name_for  # noqa: E402
+from config.env import (  # noqa: E402
+    KV_SECRET_POSTGRES_CONN,
+    KV_SECRET_POSTGRES_MIGRATIONS_CONN,
+    KV_SECRET_POSTGRES_SYNC_CONN,
+)
+
+# env var -> the Key Vault name its READER already looks under. Deliberately not
+# secret_name_for(): these three predate that convention and are configurable, so
+# rebuilding the name here would seed a name nothing reads the moment one is
+# overridden. Same bug process_api's startup check had.
+DATABASE_DSNS: tuple[tuple[str, str], ...] = (
+    ("POSTGRES_CONN_STRING", KV_SECRET_POSTGRES_CONN),
+    ("POSTGRES_SYNC_CONN_STRING", KV_SECRET_POSTGRES_SYNC_CONN),
+    ("POSTGRES_MIGRATIONS_CONN_STRING", KV_SECRET_POSTGRES_MIGRATIONS_CONN),
+)
 
 
 def _mask(value: str) -> str:
@@ -76,6 +103,16 @@ def main() -> int:
         action="store_true",
         help="Print what would be written and exit without contacting the vault.",
     )
+    ap.add_argument(
+        "--with-database",
+        action="store_true",
+        help=(
+            "Also seed the three Postgres DSNs under the KV_SECRET_POSTGRES_* names "
+            "shared/db.py, config/checkpoint.py and migrations/env.py read. Without "
+            "this the vault holds every platform secret EXCEPT the database password, "
+            "and every boot falls back to POSTGRES_CONN_STRING from the environment."
+        ),
+    )
     args = ap.parse_args()
 
     if args.env.strip().lower() == "dev":
@@ -100,6 +137,14 @@ def main() -> int:
             skipped.append(var)
             continue
         present.append((var, secret_name_for(var, env=args.env.strip().lower(), prefix=None), raw))
+
+    if args.with_database:
+        for var, kv_name in DATABASE_DSNS:
+            raw = (values.get(var) or "").strip()
+            if not raw:
+                skipped.append(var)
+                continue
+            present.append((var, kv_name, raw))
 
     print(f"\n  source     : {env_path}")
     print(f"  target env : {args.env}")

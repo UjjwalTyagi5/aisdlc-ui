@@ -52,6 +52,7 @@ from config.env import (
     ENABLE_WORKER_POOL,
     ENABLE_WEBHOOK_TRIGGERS,
     ENABLE_CONNECTOR_HEALTH_PROBES,
+    KV_SECRET_POSTGRES_CONN,
     ENABLE_OIDC,
     ENABLE_SCIM,
     RBAC_CATALOG_AUTOREPAIR,
@@ -416,12 +417,24 @@ async def lifespan(app: FastAPI):
     from config.ws_helper import set_main_loop
     set_main_loop(asyncio.get_running_loop())
 
-    # Key Vault — TM1-008: attempt to read one secret at startup
-    env_name = AGENT_RUNTIME_MODE if AGENT_RUNTIME_MODE != "local" else "dev"
-    kv_secret = await load_secret(f"sdlc-{env_name}-postgres-conn-string")
+    # Key Vault — TM1-008: attempt to read one secret at startup.
+    #
+    # Uses KV_SECRET_POSTGRES_CONN, the SAME name shared/db.py resolves the DSN from.
+    # It used to rebuild `sdlc-{env}-postgres-conn-string` by hand, which is only the
+    # DEFAULT value of that setting — so any deployment that overrode the name (the
+    # setting exists precisely so a vault can use its own convention) had this check
+    # probing a name nothing else reads. It then reported "Key Vault startup read
+    # succeeded/failed" about the wrong secret, which is worse than not checking.
+    kv_secret = await load_secret(KV_SECRET_POSTGRES_CONN)
     if kv_secret:
-        logger.info("Key Vault startup read succeeded for sdlc-%s-postgres-conn-string", env_name)
-    # Non-fatal if None — env vars are the fallback
+        logger.info("Key Vault startup read succeeded for %s", KV_SECRET_POSTGRES_CONN)
+    else:
+        logger.info(
+            "No Key Vault DB DSN at %s — using POSTGRES_CONN_STRING from the "
+            "environment. Seed it with: python -m scripts.seed_key_vault --env <env> "
+            "--with-database",
+            KV_SECRET_POSTGRES_CONN,
+        )
 
     # Blob Storage — store client for health probe and artifact uploads
     if AZURE_BLOB_ACCOUNT_URL:
@@ -454,7 +467,17 @@ async def lifespan(app: FastAPI):
     # is unavailable.  Failures are tolerated (return_exceptions=True inside
     # _probe_all_connectors); the cache contains whatever connectors succeed.
     # This mirrors the infra _probe_postgres pattern used for the /health endpoint.
-    app.state.connector_health_cache = await _probe_all_connectors()
+    #
+    # GATED, and it was not before. This ran unconditionally, and then the block near
+    # the end of the lifespan threw the result away with
+    # `app.state.connector_health_cache = {}` whenever the flag was off — so
+    # ENABLE_CONNECTOR_HEALTH_PROBES=false paid the entire cost it exists to avoid
+    # (five TLS handshakes to external SaaS, each running out its own timeout when the
+    # credentials are unconfigured, blocking startup the whole time) and discarded the
+    # answer. The flag disabled the recurring refresh only.
+    app.state.connector_health_cache = (
+        await _probe_all_connectors() if ENABLE_CONNECTOR_HEALTH_PROBES else {}
+    )
 
     # REMOVED: the seven process-wide webhook secrets that used to be cached on
     # app.state here (github/gha/slack/jira signing secrets, the ADO Basic-Auth pair,
@@ -610,7 +633,9 @@ async def lifespan(app: FastAPI):
     if ENABLE_CONNECTOR_HEALTH_PROBES:
         connector_health_task = asyncio.create_task(_refresh_connector_health(app))
     else:
-        app.state.connector_health_cache = {}
+        # The cache was already set to {} above; re-assigning it here is what made the
+        # unconditional probe invisible, because the evidence of the wasted work was
+        # overwritten one screen later.
         logger.info(
             "Connector health probes DISABLED (ENABLE_CONNECTOR_HEALTH_PROBES=false)"
         )
