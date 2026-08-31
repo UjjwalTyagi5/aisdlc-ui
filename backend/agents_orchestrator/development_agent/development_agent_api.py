@@ -181,7 +181,9 @@ async def _load_dev_mcp_tools(tenant_id: str, project_id: str | None) -> list:
         return []
 
 
-async def _bind_pulled_workspace(s, message_data: dict, tenant_id: str) -> str:
+async def _bind_pulled_workspace(
+    s, message_data: dict, tenant_id: str, user_id: str = ""
+) -> str:
     """Bind the session to a pre-pulled workspace if one exists for the given project.
 
     Returns a guidance string that the caller should append to sys_content so the
@@ -211,7 +213,20 @@ async def _bind_pulled_workspace(s, message_data: dict, tenant_id: str) -> str:
     if not s.pat:
         try:
             from shared.services import ado_repos
-            _, s.pat = await ado_repos.resolve_auth(tenant_id)
+            # project_id/owner_id let this check the project-scoped personal
+            # credential a project admin saved via the Integrations page
+            # (project_integration_credentials) BEFORE falling back to a
+            # tenant-wide connector -- omitted here, resolve_auth silently
+            # found nothing and left s.pat empty, so every ADO write the
+            # chat agent attempted (create_pr in particular) sent an empty
+            # Basic-auth password and ADO answered with a 302 to its sign-in
+            # page instead of a clean 401. Same root cause and same fix
+            # shape as dev_workspace.py's REST routes (2026-08-31, commit
+            # d291651c) -- this call site was missed in that pass because it
+            # lives in the chat/WS agent flow, not the REST browsing routes.
+            _, s.pat = await ado_repos.resolve_auth(
+                tenant_id, project_id=project_id, owner_id=user_id
+            )
         except Exception:
             s.pat = ""
 
@@ -419,7 +434,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             state_messages = [HumanMessage(content=text)]
 
         if first_message:
-            workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id)
+            workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id, str(user_id))
             session_context = await _build_dev_session_context(
                 session_id, tenant_id=tenant_id, project_id=project_id
             )
