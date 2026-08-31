@@ -96,8 +96,9 @@ def write_file(relative_path: str, content: str) -> str:
         return f"Error: {e}"
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
+    existed = full_path.exists()
     original = ""
-    if full_path.exists():
+    if existed:
         try:
             original = full_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -110,7 +111,7 @@ def write_file(relative_path: str, content: str) -> str:
         broadcast_log(manager, f"Wrote: {relative_path} ({len(content)} chars)", level="INFO")
         broadcast_file_diff(
             manager, relative_path.replace("\\", "/"), original, content,
-            "created" if original == "" else "edited",
+            "created" if not existed else "edited",
         )
         return f"Successfully wrote: {relative_path}"
     except Exception as e:

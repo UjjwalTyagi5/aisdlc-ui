@@ -82,6 +82,35 @@ async def test_write_file_overwriting_existing_file_emits_edited_diff(monkeypatc
     assert payload["change_kind"] == "edited"
 
 
+async def test_write_file_overwriting_existing_but_empty_file_emits_edited_diff(monkeypatch, dev_session):
+    """Regression for the review finding: change_kind must be derived from whether the
+    file existed before the write, not from whether `original` happened to end up "".
+    A pre-existing 0-byte file is still an edit, not a creation, even though its
+    original content is indistinguishable (as a string) from a brand-new file's."""
+    from agents_orchestrator.development_agent.tools import file_tools
+
+    full_path = file_tools.resolve_safe_path(dev_session.work_dir, "__init__.py")
+    full_path.write_text("", encoding="utf-8")  # pre-existing, genuinely empty file
+
+    mock_broadcast = AsyncMock()
+    monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+
+    result = file_tools.write_file.invoke(
+        {"relative_path": "__init__.py", "content": "from .models import Foo\n"}
+    )
+    await asyncio.sleep(0)
+
+    assert "Successfully wrote" in result
+
+    diff_calls = [c for c in mock_broadcast.await_args_list if c.args[0].get("type") == "file_diff"]
+    assert len(diff_calls) == 1
+    payload = diff_calls[0].args[0]
+    assert payload["path"] == "__init__.py"
+    assert payload["original"] == ""
+    assert payload["modified"] == "from .models import Foo\n"
+    assert payload["change_kind"] == "edited"
+
+
 async def test_edit_file_emits_diff_matching_pre_and_post_content(monkeypatch, dev_session):
     from agents_orchestrator.development_agent.tools import file_tools
 
