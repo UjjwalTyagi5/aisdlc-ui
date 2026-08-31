@@ -21,6 +21,10 @@ each traced to an exact file:line, not a redesign.
 
 ## Global Constraints
 
+- **Every `pytest` invocation needs `PYTHONPATH=.` set** (`cd backend && PYTHONPATH=. uv run pytest ...`)
+  — confirmed by running the baseline suite: without it, pytest fails at collection with
+  `ModuleNotFoundError: No module named 'config'` before any test runs. Already applied to
+  every `Run:` command in this plan; carry it into any ad hoc pytest invocation too.
 - No new mechanism where an existing one already does the job — Task 5 reuses the existing
   `push_gate_enabled`/`push_approved` flag pattern (spec 3.2); Task 6 reuses the existing
   `_ARTIFACT_FORMATTERS` (spec 4.2/4.3).
@@ -181,7 +185,7 @@ async def test_require_agent_access_denies_a_role_held_only_on_a_different_proje
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && uv run pytest tests/test_agent_access.py::test_require_agent_access_denies_a_role_held_only_on_a_different_project -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_access.py::test_require_agent_access_denies_a_role_held_only_on_a_different_project -v`
 Expected: FAIL — `assert 200 == 404` (the leak: Project B's route lets the Project-A-only
 Developer/Security Engineer through today).
 
@@ -240,12 +244,12 @@ needed.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && uv run pytest tests/test_agent_access.py::test_require_agent_access_denies_a_role_held_only_on_a_different_project -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_access.py::test_require_agent_access_denies_a_role_held_only_on_a_different_project -v`
 Expected: PASS.
 
 - [ ] **Step 5: Run the full existing agent-access and security-workspace suites (no regressions)**
 
-Run: `cd backend && uv run pytest tests/test_agent_access.py tests/test_agent_access_override_grain.py tests/test_security_workspace_agent_access.py tests/test_security_agent_chat_access.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_access.py tests/test_agent_access_override_grain.py tests/test_security_workspace_agent_access.py tests/test_security_agent_chat_access.py -v`
 Expected: all PASS — confirms the fix doesn't break the existing owning-role-success case in
 `test_security_workspace_agent_access.py::test_the_security_engineer_reaches_the_same_route`
 (a real project member must still get through).
@@ -396,7 +400,7 @@ async def test_a_role_held_only_on_a_different_project_does_not_reach_this_ones_
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && uv run pytest tests/test_dev_workspace_agent_access.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_dev_workspace_agent_access.py -v`
 Expected: `test_an_org_admin_has_no_default_agent_access_and_gets_403_on_workspace_tree` FAILS
 (`assert 403 == 200`ish — currently 200 since only generic project membership is checked);
 the other two currently pass by coincidence (org_admin/developer generic membership already
@@ -430,12 +434,12 @@ dev_workspace_router = APIRouter(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && uv run pytest tests/test_dev_workspace_agent_access.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_dev_workspace_agent_access.py -v`
 Expected: all 3 PASS.
 
 - [ ] **Step 5: Run the full dev-workspace test suite (no regressions)**
 
-Run: `cd backend && uv run pytest tests/routers/test_dev_prs.py tests/test_development_agent_chat_access.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/routers/test_dev_prs.py tests/test_development_agent_chat_access.py -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
@@ -719,7 +723,7 @@ async def test_update_work_item_state_succeeds_once_approved(monkeypatch, gated_
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_tools.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_tools.py -v`
 Expected: the three "refuses without approval" tests FAIL (the tools currently execute
 immediately instead of refusing); the "succeeds once approved" test currently PASSES
 (no gate exists yet to interfere) — that's fine, it stays green throughout and exists to
@@ -789,12 +793,12 @@ every other tool in the file) — no new imports needed.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_tools.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_tools.py -v`
 Expected: all 4 PASS.
 
 - [ ] **Step 5: Run the full git_tools-adjacent suite (no regressions)**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_chat_access.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_chat_access.py -v`
 Expected: PASS (this task doesn't touch access control, only tool behavior).
 
 - [ ] **Step 6: Commit**
@@ -921,7 +925,7 @@ async def test_build_context_for_project_returns_empty_string_for_a_project_with
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_upstream_context.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_upstream_context.py -v`
 Expected: FAIL — `build_context_for_project` doesn't exist yet (`ImportError`).
 
 - [ ] **Step 3: Fix `_fmt_design`'s header**
@@ -1011,7 +1015,7 @@ async def build_context_for_project(project_id: str, tenant_id: str, agent_id: s
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_upstream_context.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_upstream_context.py -v`
 Expected: both PASS.
 
 - [ ] **Step 6: Wire the project-scoped lookup into `development_agent_api.py`**
@@ -1086,7 +1090,7 @@ by `assert_agent_access_for_chat` at line 552-554.)
 
 - [ ] **Step 7: Run the full development-agent test suite (no regressions)**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_chat_access.py tests/test_development_agent_upstream_context.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_chat_access.py tests/test_development_agent_upstream_context.py -v`
 Expected: all PASS.
 
 - [ ] **Step 8: Commit**
@@ -1300,7 +1304,7 @@ async def test_sandbox_policy_blocks_a_disallowed_command():
 
 - [ ] **Step 2: Run test to verify it fails first, for the right reason**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_live_e2e.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_live_e2e.py -v`
 Expected: at this point the test SHOULD run against real code (Tasks 2-6 are already done) —
 if it fails, read the failure carefully: a real assertion failure (e.g. push not actually
 refused) is a genuine bug to fix in the relevant tool, not a test bug. A collection error
@@ -1323,7 +1327,7 @@ found.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd backend && uv run pytest tests/test_development_agent_live_e2e.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_development_agent_live_e2e.py -v`
 Expected: all 3 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -1493,7 +1497,7 @@ async def test_model_gateway_cost_cap_degrades_legibly_under_concurrent_calls(mo
 
 - [ ] **Step 4: Run all load tests**
 
-Run: `cd backend && uv run pytest tests/load/test_development_agent_load.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/load/test_development_agent_load.py -v`
 Expected: all 3 PASS. If `test_model_gateway_cost_cap_degrades_legibly_under_concurrent_calls`
 fails because `guarded_completion`'s actual pre-call cap-check mechanism differs from what
 this test assumes (e.g. it estimates cost differently, or doesn't pre-check before invoking
@@ -1530,7 +1534,7 @@ concurrent access, not just single-caller correctness."
 
 Run:
 ```bash
-cd backend && uv run pytest tests/test_agent_access.py tests/test_dev_workspace_agent_access.py tests/test_development_agent_tools.py tests/test_development_agent_upstream_context.py tests/test_development_agent_live_e2e.py tests/load/test_development_agent_load.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_agent_access.py tests/test_dev_workspace_agent_access.py tests/test_development_agent_tools.py tests/test_development_agent_upstream_context.py tests/test_development_agent_live_e2e.py tests/load/test_development_agent_load.py -v
 ```
 Expected: all PASS. Do not proceed if any fail.
 
