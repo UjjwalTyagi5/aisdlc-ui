@@ -263,7 +263,11 @@ async def test_require_agent_access_denies_by_slug_when_default_reach_says_no(
     role at least "use" reach to Security by design, so `contributor` (which holds
     no role-level reach row) is used here instead, mirroring
     `test_org_admin_permissions_do_not_grant_agent_access`'s use of an out-of-table
-    role to prove a real deny.
+    role to prove a real deny. Note: `contributor` is a placeholder that is filtered
+    out of `visible_project_ids`, so it now fails the project membership check
+    (404 "not found") rather than the agent access check (403). This is correct
+    since `require_agent_access` now checks project membership first, same as
+    `assert_agent_access_for_chat`.
     """
     t = org_project
     user = f"contrib-{_uuid.uuid4()}"
@@ -272,7 +276,7 @@ async def test_require_agent_access_denies_by_slug_when_default_reach_says_no(
     hdr = _hdr(user, t["org"], ["artifact:view"])
 
     r = _client().get("/_test_only/agent-access/access-project", headers=hdr)
-    assert r.status_code == 403, r.text
+    assert r.status_code == 404, r.text
 
 
 @pytest.mark.asyncio
@@ -291,3 +295,60 @@ async def test_require_agent_access_404s_on_an_unknown_slug_not_500(
 
     r = _client().get("/_test_only/agent-access/no-such-project", headers=hdr)
     assert r.status_code == 404, r.text
+
+
+@pytest.mark.asyncio
+async def test_require_agent_access_denies_a_role_held_only_on_a_different_project():
+    """require_agent_access(agent_id) resolves role via effective_platform_role ->
+    platform_role_for, which is NOT project-scoped (resolves a role the caller holds
+    ANYWHERE in the tenant). Before this fix, a Developer on Project A reaches Project
+    B's require_agent_access-gated routes purely because
+    AGENT_DEFAULT_REACH["security"]["developer"] == "use" -- with no check that they
+    are actually a member of Project B. This is the same leak
+    assert_agent_access_for_chat's visible_project_ids check already closes for the
+    chat routes; this test proves the router-dependency form is now closed too, via
+    the one already-gated route that exists today (security_workspace_router)."""
+    import uuid as _uuid
+    from config.auth.jwt import create_access_token
+    from shared.authz.grant import grant_role
+    from shared.db import get_db_session_for_tenant, get_db_session_superuser
+    from sqlalchemy import text
+    from fastapi.testclient import TestClient
+    import process_api
+
+    org = str(_uuid.uuid4())
+    unit = str(_uuid.uuid4())
+    project_a = str(_uuid.uuid4())
+    project_b = str(_uuid.uuid4())
+    dev = f"dev-{_uuid.uuid4()}"
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'RAA Test')"
+        ), {"i": org, "s": f"raa-{org[:8]}"})
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'unit', 'Unit')"
+        ), {"i": unit, "o": org})
+    async with get_db_session_for_tenant(org) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
+            "VALUES (:i, :w, :t, 'Project A')"
+        ), {"i": project_a, "w": unit, "t": org})
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
+            "VALUES (:i, :w, :t, 'Project B')"
+        ), {"i": project_b, "w": unit, "t": org})
+    # dev is a Security Engineer on Project A only -- never added to Project B.
+    # security is chosen (not development) because security_workspace_router is the
+    # one require_agent_access-gated route that exists today; Task 3 adds the
+    # equivalent for development.
+    await grant_role(dev, project_a, "security_engineer", tenant_id=org, scope_kind="project", granted_by="test")
+
+    resp = TestClient(process_api.app).get(
+        f"/security/{project_b}/scans",
+        headers={
+            "Authorization": "Bearer "
+            + create_access_token(user_id=dev, tenant_id=org, permissions=["artifact:view"])
+        },
+    )
+    assert resp.status_code == 404
