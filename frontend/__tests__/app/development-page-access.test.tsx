@@ -17,6 +17,7 @@ describe("Development page access gate", () => {
   });
 
   it("coming_soon before development is verified, regardless of role", () => {
-    expect(tileStateFor("architect", "development", "greenfield", BUILT_AGENTS)).toBe("coming_soon");
+    const builtWithoutDev: readonly (typeof BUILT_AGENTS)[number][] = BUILT_AGENTS.filter((p) => p !== "development");
+    expect(tileStateFor("architect", "development", "greenfield", builtWithoutDev)).toBe("coming_soon");
   });
 });

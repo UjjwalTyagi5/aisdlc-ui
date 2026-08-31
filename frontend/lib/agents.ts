@@ -90,7 +90,7 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
  * this list one entry at a time as each agent passes verification, never in
  * two places.
  */
-export const BUILT_AGENTS: readonly Phase[] = ["security", "documentation"];
+export const BUILT_AGENTS: readonly Phase[] = ["security", "documentation", "development"];
 
 /** Label per agent (phases + the orchestrator meta-agent). */
 export const AGENT_LABEL: Record<AgentType, string> = {
