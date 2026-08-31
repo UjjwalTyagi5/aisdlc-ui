@@ -288,8 +288,43 @@ confirm the project-scoped lookup surfaces them — not just that the JSON round
    Requirements + Design artifacts from a fresh standalone-page conversation.
 6. At least one genuine, unscripted live model turn against a real test repo with the real
    Azure key.
+7. Load/concurrency tests per 5.3: shared-workspace contention, sandboxed-execution
+   contention, Model Gateway cap/rate-limit behavior under concurrent chat turns.
 
-### 5.3 Rollout
+### 5.3 Load & concurrency testing
+
+Added per the 2026-08-31 conversation — "enterprise project" scope, not covered by the
+single-session live_e2e tests above. This agent's failure modes under load are structural,
+not generic (a slow endpoint), given three real shared-resource constraints found while
+reading the code:
+
+- **Filesystem workspace isolation.** Every pulled repo lands at
+  `ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "repo"`
+  (`shared/routers/dev_workspace.py:82-84`) — one working directory per project, not per
+  session/user. Two people opening the same project's Development page and pulling/editing
+  concurrently share one checkout on disk. Load test: N concurrent sessions against the same
+  project, confirming either serialized-safe behavior or an explicit conflict signal — not
+  silent corruption of one user's in-flight edit by another's.
+- **Sandboxed command execution.** `execute_code_in_sandbox`/`run_command`
+  (`tools/code_execution_tools.py`, `tools/git_tools.py:769`), policed by
+  `sandbox_policy.py`'s allowlist/timeout/output-cap. Load test: many concurrent sandbox
+  executions across different sessions, confirming per-session timeouts and output caps hold
+  under contention (no cross-session resource starvation) and that `ENABLE_WORKER_POOL`
+  (`backend/.env`) — currently `false` in this dev environment — is a real, understood
+  capacity knob before rollout, not an unexamined default.
+- **Model Gateway cost/rate limits.** `guarded_completion` (`shared/services/model_call_wrapper.py`)
+  enforces a per-call cost cap. Load test: concurrent chat turns across multiple
+  sessions/projects against the same BYOK provider, confirming the cap and any provider-side
+  rate limit degrade as a legible error to the chat UI (matching the PRD's "legible failure"
+  state model, §37) rather than an unhandled exception or a silent hang.
+
+Tooling: checked for an existing load-testing pattern (`*load*` under `frontend/`, `*locust*`/
+`*load_test*` under `backend/`) — none exists yet. Build a minimal async harness (Python,
+`asyncio` + the same WS client shape the WS chat tests already use) driving N concurrent
+sessions against a real test project, scoped to what these three constraints actually need
+proven, not a generic throughput benchmark or a new framework dependency.
+
+### 5.4 Rollout
 
 Once every test above passes: add `"development"` to `builtAgents`
 (`frontend/app/(app)/projects/[id]/page.tsx:122`) — the same one-line flag that made
