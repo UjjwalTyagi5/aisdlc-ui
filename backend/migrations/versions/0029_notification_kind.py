@@ -32,6 +32,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Delete what the older constraint cannot hold, BEFORE narrowing to it. Postgres
+    # validates a CHECK against existing rows at ALTER time, so a single
+    # `project_activated` notification made this downgrade fail outright — which is
+    # what test_alembic_migration_cycle was catching.
+    #
+    # Expressed as NOT IN (_OLD_KINDS) rather than = 'project_activated' so that adding
+    # a kind to _NEW_KINDS later cannot leave this line behind, silently correct for
+    # the wrong set. A notification is a historical record, not state anything reads
+    # back: losing the ones the older schema has no name for is the honest outcome.
+    op.execute(
+        "DELETE FROM notifications WHERE kind NOT IN ("
+        + ", ".join(f"'{k}'" for k in _OLD_KINDS)
+        + ")"
+    )
     op.drop_constraint("ck_notification_kind", "notifications", type_="check")
     op.create_check_constraint(
         "ck_notification_kind", "notifications",

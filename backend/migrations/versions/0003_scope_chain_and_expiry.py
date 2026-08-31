@@ -112,6 +112,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Workstream-scoped bindings go before the constraint that forbids them. This
+    # downgrade also drops the `workstreams` table below, so a binding pointing at one
+    # is about to reference nothing whatever happens here — narrowing the CHECK while
+    # such rows exist just makes Postgres reject the ALTER first.
+    #
+    # Not yet reachable in practice (nothing grants at workstream scope today), which
+    # is exactly why it would have surprised whoever hit it first.
+    op.execute("DELETE FROM role_bindings WHERE scope_kind = 'workstream'")
     op.drop_constraint("ck_role_binding_scope_kind", "role_bindings", type_="check")
     op.create_check_constraint(
         "ck_role_binding_scope_kind",
