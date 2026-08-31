@@ -47,7 +47,7 @@ import {
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { BUILT_AGENTS, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -119,7 +119,7 @@ export default function ProjectOverviewPage() {
     // agents keep their old, unverified code per the design doc's "assume broken
     // until properly rebuilt" framing (multi-track-agent-access-design.md) — grow
     // this list one entry at a time as each agent gets the same Task 5-7 treatment.
-    const builtAgents: Phase[] = ["security", "documentation"];
+    const builtAgents: readonly Phase[] = BUILT_AGENTS;
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 
