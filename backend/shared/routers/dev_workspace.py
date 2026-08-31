@@ -53,20 +53,29 @@ class PullRequest(BaseModel):
 
 @dev_workspace_router.get("/{project_id}/ado/projects")
 async def get_ado_projects(project_id: str, request: Request) -> list[dict]:
-    return await ado_repos.list_projects(tenant_id=request.state.tenant_id)
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    return await ado_repos.list_projects(
+        tenant_id=request.state.tenant_id, project_id=project_id, owner_id=owner_id
+    )
 
 
 @dev_workspace_router.get("/{project_id}/ado/projects/{ado_project}/repos")
 async def get_ado_repos(project_id: str, ado_project: str, request: Request) -> list[dict]:
-    return await ado_repos.list_repos(ado_project, tenant_id=request.state.tenant_id)
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    return await ado_repos.list_repos(
+        ado_project, tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
+    )
 
 
 @dev_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/branches")
 async def get_ado_branches(
     project_id: str, ado_project: str, repo: str, request: Request
 ) -> list[dict]:
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
     return await ado_repos.list_branches(
-        ado_project, repo, tenant_id=request.state.tenant_id
+        ado_project, repo, tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
     )
 
 
@@ -75,7 +84,9 @@ async def pull_workspace(project_id: str, body: PullRequest, request: Request) -
     tenant_id: str = request.state.tenant_id
     pulled_by = str(uid) if (uid := getattr(request.state, "user_id", None)) else None
 
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id, project_id=project_id, owner_id=pulled_by or ""
+    )
     remote_url = await ado_repos.resolve_clone_url(
         body.ado_project, body.repo_name, pat=pat, org_url=org_url
     )
