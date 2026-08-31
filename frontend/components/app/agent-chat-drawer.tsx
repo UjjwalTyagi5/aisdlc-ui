@@ -3,6 +3,8 @@
 import * as React from "react";
 import {
   Bot,
+  ChevronDown,
+  ChevronRight,
   MessageSquare,
   Paperclip,
   Plus,
@@ -26,6 +28,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ThinkingIndicator } from "@/components/app/thinking-indicator";
+import { DiffViewer } from "@/components/app/diff-viewer";
 
 /**
  * UI-only in Chunk 6. Chunk 15 wires Vercel AI SDK `useChat` for real streaming.
@@ -52,6 +55,18 @@ export interface AgentChatMessage {
   attachments?: Array<{ name: string; url: string }>;
   /** Follow-up prompt chips offered after an agent turn (click → sends as a new message). */
   suggestions?: string[];
+  /**
+   * File diff cards produced this turn (from `code.diff` StreamEvents), one
+   * entry per path — the net original→modified change across the whole turn,
+   * not each intermediate write/edit_file call. Rendered as its own item in
+   * the timeline, not merged into the text bubble.
+   */
+  diffs?: Array<{
+    path: string;
+    original: string;
+    modified: string;
+    changeKind: "created" | "edited";
+  }>;
 }
 
 export interface AgentChatDrawerProps {
@@ -622,6 +637,16 @@ function ChatBubble({
           )}
         </div>
 
+        {/* Diff cards (agent only) — one per file touched this turn, own items
+            in the timeline rather than merged into the text bubble. */}
+        {!isUser && message.diffs && message.diffs.length > 0 && (
+          <div className="flex w-full min-w-0 flex-col gap-2">
+            {message.diffs.map((d) => (
+              <DiffCard key={d.path} {...d} />
+            ))}
+          </div>
+        )}
+
         {/* Follow-up suggestion chips (agent only, not while streaming) */}
         {!isUser && !message.streaming && message.suggestions && message.suggestions.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -674,6 +699,59 @@ function ChatBubble({
             minute: "2-digit",
           })}
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A single file's diff, collapsed by default. No accordion primitive exists
+ * under components/ui/ (checked) — hand-rolled to match the disclosure
+ * pattern already used by AuditEventRow (chevron + header button, toggling a
+ * `hidden` body rather than mounting/unmounting it).
+ *
+ * `DiffViewer` stays mounted at all times (just visually hidden while
+ * collapsed) rather than conditionally rendered — this keeps its Monaco
+ * instance warm across repeated expand/collapse instead of re-loading it
+ * every time, and keeps the card's contents test-observable regardless of
+ * the collapsed state.
+ */
+function DiffCard({
+  path,
+  original,
+  modified,
+  changeKind,
+}: {
+  path: string;
+  original: string;
+  modified: string;
+  changeKind: "created" | "edited";
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+
+  return (
+    <div className="border-line-soft bg-surface-1 w-full min-w-0 overflow-hidden rounded-lg border">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="hover:bg-surface-2 flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+      >
+        <span className="text-muted-foreground shrink-0" aria-hidden>
+          {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs" title={path}>
+          {path}
+        </span>
+        <Badge
+          variant={changeKind === "created" ? "success" : "info"}
+          className="shrink-0 text-[10px] capitalize"
+        >
+          {changeKind}
+        </Badge>
+      </button>
+      <div hidden={!expanded} className="border-line-soft border-t">
+        <DiffViewer original={original} modified={modified} filename={path} showToolbar />
       </div>
     </div>
   );
