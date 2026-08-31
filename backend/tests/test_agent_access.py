@@ -257,26 +257,20 @@ async def test_require_agent_access_resolves_a_slug_and_grants_access(
 async def test_require_agent_access_denies_by_slug_when_default_reach_says_no(
     org_project, _agent_access_probe_route
 ):
-    """Same slug resolution, but a role/agent pairing the default table denies
-    (`deployment`... no — this probe route is fixed to the "security" agent, so use
-    a role with no reach to Security). `AGENT_DEFAULT_REACH` gives every delivery
-    role at least "use" reach to Security by design, so `contributor` (which holds
-    no role-level reach row) is used here instead, mirroring
-    `test_org_admin_permissions_do_not_grant_agent_access`'s use of an out-of-table
-    role to prove a real deny. Note: `contributor` is a placeholder that is filtered
-    out of `visible_project_ids`, so it now fails the project membership check
-    (404 "not found") rather than the agent access check (403). This is correct
-    since `require_agent_access` now checks project membership first, same as
-    `assert_agent_access_for_chat`.
-    """
+    """Same slug resolution, but a role/agent pairing the default table denies.
+    Uses `scrum_master` (a real, visible project member role) which is NOT in
+    `AGENT_DEFAULT_REACH["security"]` — so it has "none" reach by design. This
+    proves that `require_agent_access` correctly propagates `assert_agent_access`'s
+    403 when a genuine project member is denied purely by role-reach, after passing
+    the new project membership check."""
     t = org_project
-    user = f"contrib-{_uuid.uuid4()}"
-    await grant_role(user, t["project"], "contributor",
+    user = f"scrum-{_uuid.uuid4()}"
+    await grant_role(user, t["project"], "scrum_master",
                      tenant_id=t["org"], scope_kind="project")
     hdr = _hdr(user, t["org"], ["artifact:view"])
 
     r = _client().get("/_test_only/agent-access/access-project", headers=hdr)
-    assert r.status_code == 404, r.text
+    assert r.status_code == 403, r.text
 
 
 @pytest.mark.asyncio
