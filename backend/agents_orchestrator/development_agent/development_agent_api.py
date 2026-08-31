@@ -114,7 +114,8 @@ def _extract_text(content) -> str:
 
 
 async def _build_dev_session_context(
-    session_id: str, *, tenant_id: str = "", project_id: str | None = None
+    session_id: str, *, tenant_id: str = "", project_id: str | None = None,
+    workspace_bound: bool = False,
 ) -> str:
     """Delegate to the shared context broker so all agents use one formatting path.
 
@@ -125,7 +126,20 @@ async def _build_dev_session_context(
     artifacts. Falls back to the session-keyed lookup only when no project is
     bound yet. See
     docs/superpowers/specs/2026-08-31-development-agent-verification-design.md Part 4.3.
+
+    When `workspace_bound` is True, the session already has a bound/pulled repo
+    workspace, so the full upstream payload is skipped in favour of a short
+    on-demand pointer — this keeps the session fast and scoped to the imported
+    repo instead of front-loading Requirements/Design the agent may not need.
     """
+    if workspace_bound:
+        return (
+            "[UPSTREAM CONTEXT — AVAILABLE ON DEMAND]\n"
+            "This project already has a bound repository workspace, so the full "
+            "Requirements/Design payload is not preloaded here — this keeps the session "
+            "fast and scoped to the imported repo. Call read_design_artifact if a task "
+            "genuinely needs the upstream requirements, HLD/LLD, or ADRs."
+        )
     if project_id and tenant_id:
         from config.context_broker import build_context_for_project
 
@@ -436,7 +450,8 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         if first_message:
             workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id, str(user_id))
             session_context = await _build_dev_session_context(
-                session_id, tenant_id=tenant_id, project_id=project_id
+                session_id, tenant_id=tenant_id, project_id=project_id,
+                workspace_bound=bool(workspace_guidance),
             )
             sys_content = DEV_SYS_MESSAGE
             if session_context:

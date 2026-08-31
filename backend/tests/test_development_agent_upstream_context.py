@@ -7,6 +7,7 @@ lookup (fetch_session_artifacts(session_id)) on that fresh id finds nothing even
 a project where Requirements and Design have both been baselined. See
 docs/superpowers/specs/2026-08-31-development-agent-verification-design.md Part 4.3."""
 import uuid as _uuid
+from unittest import mock
 
 import pytest
 
@@ -81,3 +82,29 @@ async def test_build_context_for_project_returns_empty_string_for_a_project_with
 
     ctx = await build_context_for_project(project, org, "development")
     assert ctx == ""
+
+
+async def test_build_dev_session_context_skips_upstream_payload_when_workspace_bound():
+    """When a chat session already has a bound/pulled repo workspace, the full
+    Requirements/Design payload must not be fetched at all — a short fixed
+    guidance string is returned instead, and build_context_for_project is never
+    called. See task-3-brief.md."""
+    from agents_orchestrator.development_agent.development_agent_api import (
+        _build_dev_session_context,
+    )
+
+    with mock.patch(
+        "config.context_broker.build_context_for_project",
+        new_callable=mock.AsyncMock,
+    ) as mocked:
+        ctx = await _build_dev_session_context(
+            str(_uuid.uuid4()),
+            tenant_id=str(_uuid.uuid4()),
+            project_id=str(_uuid.uuid4()),
+            workspace_bound=True,
+        )
+
+    mocked.assert_not_called()
+    assert "UPSTREAM CONTEXT" in ctx
+    assert "bound repository workspace" in ctx
+    assert "read_design_artifact" in ctx
