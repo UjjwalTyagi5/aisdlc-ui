@@ -76,6 +76,36 @@ async def _purge_tenants(conn, org_ids: set[str]) -> None:
         await conn.execute("DELETE FROM organizations WHERE id = ANY($1::uuid[])", ids)
 
 
+@pytest.fixture(autouse=True)
+def _restore_ws_context_vars():
+    """Put config.ws_helper's ContextVars back after every test.
+
+    A SAFETY NET, not the fix. The real fix is for a test that sets one to reset it —
+    `set_session_id` returns a reset token precisely so it can — and
+    tests/development/test_workspace_binding.py now does.
+
+    But eight test modules set these, `set_session_id(x)` reads like a plain setter,
+    and the token it hands back is easy to drop. When one leaks, the failure surfaces
+    somewhere else entirely: three tests in tests/pipeline/test_pipeline_session.py
+    opened with `assert get_session_id() is None`, passed on their own, and failed only
+    in a full run — pointing at the pipeline bridge, which was innocent.
+
+    Cheap enough to be unconditional: six ContextVar reads before and six writes after,
+    per test, and only when a value actually changed.
+    """
+    from config import ws_helper
+
+    names = ("SESSION_ID", "USER_ID", "PROVIDER_KIND", "TENANT_ID", "PROJECT_ID", "RUN_ID")
+    before = {n: getattr(ws_helper, n).get() for n in names}
+    try:
+        yield
+    finally:
+        for n in names:
+            var = getattr(ws_helper, n)
+            if var.get() != before[n]:
+                var.set(before[n])
+
+
 @pytest.fixture(scope="session")
 async def _cleanup_conn():
     """ONE asyncpg connection, reused by every purge_created_orgs teardown.

@@ -21,7 +21,7 @@ from agents_orchestrator.development_agent.config.session_state import (
     get_session,
 )
 from agents_orchestrator.development_agent.tools.git_tools import _get_work_dir
-from config.ws_helper import set_session_id, set_user_id
+from config.ws_helper import reset_session_id, set_session_id, set_user_id
 from shared.db import RESOLVED_POSTGRES_CONN_STRING as _DB_URL
 
 
@@ -31,11 +31,20 @@ class TestGetWorkDirHonoursPresetWorkDir:
     def setup_method(self):
         self._sid = "test-session-workspace-binding-001"
         set_user_id("test-user-workspace-binding")
-        set_session_id(self._sid)
+        # KEEP THE TOKEN. set_session_id returns a ContextVar reset token, and this
+        # discarded it — so the session id survived the test and leaked into every
+        # later one in the same context. That is what failed the three
+        # tests/pipeline/test_pipeline_session.py cases in a full run and nowhere else:
+        # they open with `assert get_session_id() is None`, which is true on a clean
+        # interpreter and false once this class has run.
+        self._sid_token = set_session_id(self._sid)
         clear_session(self._sid)
 
     def teardown_method(self):
         clear_session(self._sid)
+        # clear_session() empties the agent-session dict; it does NOT touch the
+        # ContextVar. Restoring that is a separate act, and the one that was missing.
+        reset_session_id(self._sid_token)
 
     def test_returns_preset_work_dir(self, tmp_path):
         expected = str(tmp_path / "pulled_repo")
