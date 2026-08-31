@@ -60,6 +60,13 @@ development_router_orchestrator = APIRouter()
 
 SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar("session_id", default=None)
 
+# Per-session in-flight guard — defense in depth against two concurrent turns for the
+# SAME session_id driving the SAME LangGraph checkpoint (thread_id: session_id) at once
+# (e.g. a reconnect racing an orphaned turn that hasn't been cancelled yet). Cleared in
+# _process_ws_message's finally block on every exit path: success, exception, or
+# cancellation. See development_agent-chat-overhaul task 4.
+_INFLIGHT_SESSIONS: set[str] = set()
+
 def _project_id_from_message(message_data: dict) -> str | None:
     pc = parse_pipeline_context(message_data.get("pipeline_context") or {})
     return (
@@ -323,6 +330,19 @@ async def websocket_endpoint(websocket: WebSocket):
     set_agent_folder("orchestrator")
     await manager.connect(websocket)
     user_id = claims.get("user_id", "")
+    # Tasks dispatched for THIS connection's turns — tracked so that if the connection
+    # drops mid-turn (reconnect, network blip, frontend idle-fallback) we can cancel the
+    # now-orphaned turn instead of letting it keep running unsupervised against the same
+    # session state / LangGraph checkpoint a new connection is about to drive. A single
+    # connection can only have one in-flight turn at a time given the in-flight guard in
+    # _process_ws_message, but this is tracked as a set defensively in case that changes.
+    _inflight_tasks: set[asyncio.Task] = set()
+
+    def _cancel_inflight_tasks() -> None:
+        for _t in list(_inflight_tasks):
+            if not _t.done():
+                _t.cancel()
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -340,7 +360,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 if _pk:
                     set_provider_kind(_pk)
                     _s.provider_kind = _pk
-                await _process_ws_message(message_data, websocket, user_id, tenant_id=claims.get("tenant_id", "") if claims else "")
+                _task = asyncio.create_task(
+                    _process_ws_message(
+                        message_data, websocket, user_id,
+                        tenant_id=claims.get("tenant_id", "") if claims else "",
+                    )
+                )
+                _inflight_tasks.add(_task)
+                _task.add_done_callback(_inflight_tasks.discard)
             elif msg_type == "clear_agents":
                 await manager.clear_agents()
             elif msg_type == "session_cleanup":
@@ -350,6 +377,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     json.dumps({"type": "echo", "message": data}), websocket
                 )
     except WebSocketDisconnect:
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
     except RuntimeError as e:
         # Starlette raises RuntimeError("WebSocket is not connected") when receive_text()
@@ -357,9 +385,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # disconnect, not a failure. Only real RuntimeErrors are worth logging.
         if "not connected" not in str(e).lower() and "disconnect" not in str(e).lower():
             print(f"Dev agent WebSocket error: {e}")
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
     except Exception as e:
         print(f"Dev agent WebSocket error: {e}")
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
 
 
@@ -387,6 +417,29 @@ def _is_push_approval(*texts) -> bool:
 
 async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id, tenant_id: str = ""):
     session_id = message_data.get("session_id", str(uuid4()))
+
+    if session_id in _INFLIGHT_SESSIONS:
+        # A turn for this session is already running (orphaned turn not yet cancelled,
+        # or a genuine double-send) — reject without touching agent/session state so we
+        # never let two turns drive the same LangGraph checkpoint concurrently.
+        await manager.send_personal_message(
+            json.dumps({
+                "type": "stream_chunk",
+                "content": (
+                    "\n\n> ⏳ Still processing your previous message — please wait "
+                    "for it to finish before sending another."
+                ),
+                "session_id": session_id,
+            }),
+            websocket,
+        )
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}),
+            websocket,
+        )
+        return
+
+    _INFLIGHT_SESSIONS.add(session_id)
     try:
         files_data = message_data.get("files", [])
         input_directory = f"{_FILES_DIR}/{user_id}/orchestrator/{session_id}/input"
@@ -543,6 +596,10 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
     finally:
         from shared.tools.mcp_runtime import clear_mcp_tools
         clear_mcp_tools()
+        # Always release the in-flight marker — success, exception, or task
+        # cancellation (asyncio.CancelledError propagates through this finally
+        # normally; verified directly, see task 4 report).
+        _INFLIGHT_SESSIONS.discard(session_id)
 
 
 async def _handle_cleanup_ws(message_data: dict, websocket: WebSocket):
