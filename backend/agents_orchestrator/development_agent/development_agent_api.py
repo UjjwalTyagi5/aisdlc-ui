@@ -113,8 +113,25 @@ def _extract_text(content) -> str:
     return ""
 
 
-async def _build_dev_session_context(session_id: str) -> str:
-    """Delegate to the shared context broker so all agents use one formatting path."""
+async def _build_dev_session_context(
+    session_id: str, *, tenant_id: str = "", project_id: str | None = None
+) -> str:
+    """Delegate to the shared context broker so all agents use one formatting path.
+
+    Resolved by PROJECT (most recent Run), not by session id, when a project is
+    known: a fresh standalone-page conversation mints a brand-new session id
+    unrelated to whatever session Requirements/Design used for theirs, so a
+    session-keyed lookup finds nothing even on a project with baselined upstream
+    artifacts. Falls back to the session-keyed lookup only when no project is
+    bound yet. See
+    docs/superpowers/specs/2026-08-31-development-agent-verification-design.md Part 4.3.
+    """
+    if project_id and tenant_id:
+        from config.context_broker import build_context_for_project
+
+        ctx = await build_context_for_project(project_id, tenant_id, "development")
+        if ctx:
+            return ctx
     return await build_context(session_id, "development")
 
 
@@ -403,7 +420,9 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
 
         if first_message:
             workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id)
-            session_context = await _build_dev_session_context(session_id)
+            session_context = await _build_dev_session_context(
+                session_id, tenant_id=tenant_id, project_id=project_id
+            )
             sys_content = DEV_SYS_MESSAGE
             if session_context:
                 sys_content = DEV_SYS_MESSAGE + "\n\n" + session_context
@@ -567,7 +586,9 @@ async def chat(
     incoming = [HumanMessage(content=text)]
 
     if first_message:
-        session_context = await _build_dev_session_context(session_id)
+        session_context = await _build_dev_session_context(
+            session_id, tenant_id=real_tenant_id, project_id=_lf_pid
+        )
         sys_content = DEV_SYS_MESSAGE
         if session_context:
             sys_content = DEV_SYS_MESSAGE + "\n\n" + session_context
