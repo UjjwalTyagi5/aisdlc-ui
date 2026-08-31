@@ -19,6 +19,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import shared.services as _services  # noqa: E402
+
+# Imported for its SIDE EFFECT, not its name: this is what sets the `secret_store`
+# attribute on the `shared.services` package, and _patch_store patches that attribute.
+# Without it the tests pass or fail on whether some EARLIER test in the run happened to
+# import the submodule first — which is exactly the import-order dependence being fixed
+# here, just pointing the other way.
+import shared.services.secret_store  # noqa: E402,F401
 import shared.services.notification_targets as targets  # noqa: E402
 from shared.services.notify_dispatch import notify_all  # noqa: E402
 
@@ -142,7 +150,26 @@ class _Store:
 
 
 def _patch_store(data):
-    return patch.dict(sys.modules, {"shared.services.secret_store": _Store(data)})
+    """Swap the secret store that notification_targets resolves at call time.
+
+    PATCHES THE PACKAGE ATTRIBUTE, NOT sys.modules — and the difference is the whole
+    reason these tests used to fail in a full run while passing on their own.
+
+    `notification_targets` does a lazy `from shared.services import secret_store`
+    inside the function. That statement imports the PACKAGE and then does a getattr on
+    it. The submodule attribute is set on the package the first time anything imports
+    `shared.services.secret_store` for real — so:
+
+      run alone      nothing had imported it, getattr misses, the import machinery
+                     falls through to sys.modules and finds the patched fake. Passes.
+      run in a suite an earlier test imported it, getattr HITS the real module, and
+                     the sys.modules entry is never consulted. The patch does nothing,
+                     get_secret returns None, and the assertion fails.
+
+    Patching the attribute is what the lookup actually reads, so it holds either way.
+    That the old form worked at all was an accident of import order.
+    """
+    return patch.object(_services, "secret_store", _Store(data))
 
 
 @pytest.mark.unit

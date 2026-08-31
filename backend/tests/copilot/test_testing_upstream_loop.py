@@ -69,28 +69,42 @@ def test_pull_upstream_context_sync_wrapper_alias_exists():
     assert not asyncio.iscoroutinefunction(testing_agent_mod.pull_upstream_context_sync)
 
 
+# THE NODE, NOT THE WHOLE GRAPH — and that is the fix, not a shortcut.
+#
+# Both tests below used to compile the graph and invoke it end to end, on the stated
+# assumption that with no session_id `pull_upstream_context` early-returns and nothing
+# expensive happens. True of that node, but the graph does not stop there: it runs on
+# to `classify_intent`, which calls a real model. So a test named
+# "does_not_cross_loops" made a live Anthropic request and failed with
+# `AuthenticationError: API key is invalid` — reporting a loop-crossing regression
+# that had not happened, on a machine whose ANTHROPIC_API_KEY was simply stale.
+#
+# The regression these guard is the node's dual sync/async REGISTRATION: `.invoke()`
+# must find a sync `func` and `.ainvoke()` must await the native coroutine on the
+# driving loop. Driving the node's own runnable exercises exactly those two paths, on
+# a real running loop for the async one, with no model and no database in the way.
+
+
 @pytest.mark.asyncio
-async def test_graph_ainvoke_on_driving_loop_does_not_cross_loops():
-    """Behavioral smoke test: compile + `await app.ainvoke(...)` on the
-    current (real, running) loop — mirrors the Copilot path
-    (`await graph.ainvoke`). No session_id is set, so `pull_upstream_context`
-    takes its early-return branch (no DB hit) — the point here is simply that
-    invoking the compiled graph with the node registered as a dual sync/async
-    RunnableCallable does not raise any asyncio/event-loop error.
+async def test_node_ainvoke_on_driving_loop_does_not_cross_loops():
+    """The Copilot path: `await ...ainvoke(...)` on the current running loop.
+
+    A cross-loop failure here is the `RuntimeError: got Future attached to a
+    different loop` the dual registration exists to prevent — it would surface as an
+    exception out of this await, so the assertion is that one does not.
     """
-    app = testing_agent_mod.graph_builder.compile(checkpointer=MemorySaver())
-    cfg = {"configurable": {"thread_id": "upstream-loop-smoke-async"}, "recursion_limit": 100}
-    final_state = await app.ainvoke({"user_prompt": "hello", "tenant_id": "t"}, config=cfg)
-    assert final_state is not None
+    node = testing_agent_mod.graph_builder.nodes["pull_upstream_context"].runnable
+    result = await node.ainvoke({"user_prompt": "hello", "tenant_id": "t"})
+    assert result is not None
 
 
-def test_graph_invoke_sync_on_standalone_path_does_not_raise_typeerror():
-    """Behavioral smoke test: the STANDALONE entrypoint's sync `.invoke()` must
-    not raise `TypeError: No synchronous function provided to
-    "pull_upstream_context"` — this is the exact regression C1 fixes. No
-    session_id is set, so `pull_upstream_context`'s sync wrapper takes the
-    early-return branch (no DB hit)."""
-    app = testing_agent_mod.graph_builder.compile(checkpointer=MemorySaver())
-    cfg = {"configurable": {"thread_id": "upstream-loop-smoke-sync"}, "recursion_limit": 100}
-    final_state = app.invoke({"user_prompt": "hello", "tenant_id": "t"}, config=cfg)
-    assert final_state is not None
+def test_node_invoke_sync_on_standalone_path_does_not_raise_typeerror():
+    """The standalone path: LangGraph's sync `.invoke()`.
+
+    Without a sync `func` registered alongside the coroutine this raises
+    `TypeError: No synchronous function provided to "pull_upstream_context"` — the
+    exact regression C1 fixed.
+    """
+    node = testing_agent_mod.graph_builder.nodes["pull_upstream_context"].runnable
+    result = node.invoke({"user_prompt": "hello", "tenant_id": "t"})
+    assert result is not None
