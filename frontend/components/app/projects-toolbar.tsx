@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Filter, LayoutGrid, List, Search } from "lucide-react";
+import { Filter, LayoutGrid, List, Search, Table2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -16,7 +16,12 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 
-export type ProjectsView = "grid" | "list";
+/**
+ * "table" is offered to an Organization or Business Unit Admin only, and is their
+ * default — they scan a portfolio rather than recognise a handful of projects.
+ * Everyone else keeps grid and list exactly as before. See `canUseTable`.
+ */
+export type ProjectsView = "grid" | "list" | "table";
 export type ProjectsSort = "recent" | "name" | "template";
 export type TemplateFilter =
   | "all"
@@ -24,6 +29,25 @@ export type TemplateFilter =
   | "microservice"
   | "data_pipeline"
   | "blank";
+
+/**
+ * The view this viewer should see, from the URL and their standing.
+ *
+ * Pure and exported so the one case worth pinning has a test: an admin's bookmarked
+ * `?view=table` opened by a contributor. Casting the param straight to the union —
+ * which is what every other filter here does — would render a table with no toggle to
+ * leave it by, because the Table button is not drawn for them.
+ */
+export function resolveProjectsView(
+  requested: string | null,
+  canUseTable: boolean,
+): ProjectsView {
+  if (requested === "grid" || requested === "list") return requested;
+  if (requested === "table" && canUseTable) return "table";
+  // An admin scans a portfolio and a contributor works on a few projects they know by
+  // name, so the same absent param means different things to each.
+  return canUseTable ? "table" : "grid";
+}
 
 export interface ProjectsToolbarState {
   search: string;
@@ -37,6 +61,8 @@ export interface ProjectsToolbarProps {
   value: ProjectsToolbarState;
   onChange: (patch: Partial<ProjectsToolbarState>) => void;
   className?: string;
+  /** Show the Table toggle. Admins only — see ProjectsView. */
+  canUseTable?: boolean;
 }
 
 const TEMPLATE_OPTIONS: Array<{ value: TemplateFilter; label: string }> = [
@@ -47,7 +73,12 @@ const TEMPLATE_OPTIONS: Array<{ value: TemplateFilter; label: string }> = [
   { value: "blank", label: "Blank" },
 ];
 
-export function ProjectsToolbar({ value, onChange, className }: ProjectsToolbarProps) {
+export function ProjectsToolbar({
+  value,
+  onChange,
+  className,
+  canUseTable = false,
+}: ProjectsToolbarProps) {
   return (
     <div
       className={cn(
@@ -130,7 +161,7 @@ export function ProjectsToolbar({ value, onChange, className }: ProjectsToolbarP
           </Label>
         </div>
 
-        {/* View toggle — grid / list */}
+        {/* View toggle — grid / list, plus table for an admin */}
         <div
           role="group"
           aria-label="View"
@@ -157,6 +188,7 @@ export function ProjectsToolbar({ value, onChange, className }: ProjectsToolbarP
             aria-pressed={value.view === "list"}
             className={cn(
               "h-9 rounded-none px-2.5 transition-colors",
+              canUseTable && "border-line-soft border-r",
               value.view === "list" && "bg-accent/60 text-foreground",
             )}
             onClick={() => onChange({ view: "list" })}
@@ -164,6 +196,22 @@ export function ProjectsToolbar({ value, onChange, className }: ProjectsToolbarP
             <List className="size-4" aria-hidden />
             <span className="sr-only">List view</span>
           </Button>
+          {canUseTable && (
+            <Button
+              type="button"
+              size="sm"
+              variant={value.view === "table" ? "secondary" : "ghost"}
+              aria-pressed={value.view === "table"}
+              className={cn(
+                "h-9 rounded-none px-2.5 transition-colors",
+                value.view === "table" && "bg-accent/60 text-foreground",
+              )}
+              onClick={() => onChange({ view: "table" })}
+            >
+              <Table2 className="size-4" aria-hidden />
+              <span className="sr-only">Table view</span>
+            </Button>
+          )}
         </div>
       </div>
     </div>
