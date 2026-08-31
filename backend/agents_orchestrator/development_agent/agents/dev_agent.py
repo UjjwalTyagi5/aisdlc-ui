@@ -176,17 +176,28 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
         return _LLM_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     from langchain_litellm import ChatLiteLLM
-    instance = ChatLiteLLM(
-        model=model,
-        custom_llm_provider=litellm_provider,
-        api_base=base_url,
-        api_key=api_key,
-        temperature=0.1,
-        max_tokens=8192,
-        max_retries=2,
+    kwargs: dict = {
+        "model": model,
+        "custom_llm_provider": litellm_provider,
+        "api_base": base_url,
+        "api_key": api_key,
+        "max_tokens": 8192,
+        "max_retries": 2,
         # Stream tokens so the copilot shows the dev agent's replies live.
-        streaming=True,
-    )
+        "streaming": True,
+    }
+    # gpt-5-family models (including gpt-5-codex) reject any temperature other
+    # than the default 1 -- litellm raises UnsupportedParamsError pre-call if
+    # we pass one. Confirmed live against a real azure/gpt-5-mini deployment
+    # (2026-08-31): identical call succeeds the instant temperature is omitted.
+    # Every other model keeps the low, determinism-favoring temperature this
+    # agent wants for code generation -- this is a narrow exception for the one
+    # model family that structurally cannot take the parameter, not a
+    # litellm.drop_params=True escape hatch that would silently swallow
+    # unsupported params for every model everywhere.
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = 0.1
+    instance = ChatLiteLLM(**kwargs)
     _LLM_CACHE[cache_key] = instance
     return instance
 
