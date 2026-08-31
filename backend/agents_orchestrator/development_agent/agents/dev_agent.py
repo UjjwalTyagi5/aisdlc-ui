@@ -80,39 +80,6 @@ class DevAgentState(TypedDict):
     model_id: str | None
 
 
-@tool
-async def write_development_artifact(
-    run_id: str,
-    repo_url: str = "",
-    branch_name: str = "",
-    pr_url: str = "",
-    code_summary: str = "",
-) -> str:
-    """Persist the development artifact to the database and notify the orchestrator.
-
-    Call this after the PR is created and the user confirms development is complete
-    to advance the pipeline to the testing stage.
-
-    Args:
-        run_id: Pipeline run identifier (provided in the system context).
-        repo_url: URL of the repository containing the implementation.
-        branch_name: Feature branch name.
-        pr_url: Pull request URL.
-        code_summary: Brief summary of what was implemented.
-    """
-    from shared.services.artifact_service import write_and_notify as _write_and_notify
-    from shared.models.artifacts import DevelopmentArtifact
-
-    artifact = DevelopmentArtifact(
-        repo_url=repo_url or None,
-        branch_name=branch_name or None,
-        pr_url=pr_url or None,
-        code_summary=code_summary or None,
-    )
-    await _write_and_notify(run_id, "development", artifact.model_dump())
-    return f"Development artifact persisted for run {run_id}"
-
-
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 tools = [
@@ -145,7 +112,6 @@ tools = [
     list_work_items,
     read_design_artifact,
     submit_development_artifacts,
-    write_development_artifact,
     generate_project_scaffold,
     generate_component,
     generate_api_endpoint,
@@ -315,8 +281,6 @@ def _tool_label(name: str, args: dict) -> str:
             return "Loading design & requirements context"
         case "submit_development_artifacts":
             return "Submitting development artifacts"
-        case "write_development_artifact":
-            return f"Persisting development artifact for run {a.get('run_id', '?')}"
         case "update_work_item_state":
             return f"Updating work item #{a.get('work_item_id', '?')} → {a.get('target_state', '?')}"
         case "add_pr_comment_to_work_items":
