@@ -37,7 +37,16 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
       // Only run specs that don't require the real API.
-      testIgnore: ["**/stream.spec.ts", "**/components-parity.spec.ts"],
+      //
+      // bu-admin-onboarding-and-projects-table signs in as the SEEDED PERSONAS with
+      // real passwords and writes a real role_binding, so it cannot run here: this
+      // project boots with NEXT_PUBLIC_AUTH_MODE=mock and no backend. It has its own
+      // config — see playwright.live.config.ts.
+      testIgnore: [
+        "**/stream.spec.ts",
+        "**/components-parity.spec.ts",
+        "**/bu-admin-onboarding-and-projects-table.spec.ts",
+      ],
     },
 
     // ── Real-API project (REQ-M4-02 parity gate) ────────────────────────

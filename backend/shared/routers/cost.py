@@ -38,7 +38,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.env import (
-    DEFAULT_PROJECT_BUDGET_USD,
     LLM_TENANT_BUDGET_OVERRIDES_JSON,
     LLM_TENANT_BUDGET_USD_DEFAULT,
 )
@@ -266,7 +265,6 @@ class BudgetsOut(BaseModel):
     org: BudgetRowOut
     workspaces: list[BudgetRowOut]
     projects: list[BudgetRowOut]
-    defaultProjectBudgetUsd: float
     generatedAt: str
 
 
@@ -441,7 +439,6 @@ async def get_budgets(request: Request, db: AsyncSession = Depends(get_db_sessio
                 monthlySpendUsd=round(proj_spend.get(str(r[0]), 0.0), 4),
             ) for r in proj_rows
         ],
-        defaultProjectBudgetUsd=DEFAULT_PROJECT_BUDGET_USD,
         generatedAt=datetime.now(timezone.utc).isoformat(),
     )
 

@@ -10,6 +10,23 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]  # platform/backend
 REPO_ROOT = Path(__file__).resolve().parents[3]     # repo root
 load_dotenv(BACKEND_ROOT / ".env")
 
+# ── where secrets come from ──────────────────────────────────────────────────
+# ENV=dev (the default) reads everything below from .env, exactly as it always has.
+# Any other value means the secrets live in Azure Key Vault, and this call writes them
+# into os.environ BEFORE the first constant is read — which is why none of the
+# os.environ.get(...) lines in this file needed to change.
+#
+# ORDER IS LOAD-BEARING: this must run after load_dotenv (it needs AZURE_KEY_VAULT_URL
+# and ENV, both of which come from .env) and before anything reads a setting. Moving it
+# below a constant means that constant silently keeps its .env value in production.
+#
+# It raises rather than falling back when the vault is required and unreachable. See
+# config/secret_bootstrap.py for why a refusal to boot is the safe failure here.
+from config.secret_bootstrap import current_env, hydrate_environment  # noqa: E402
+
+ENV: str = current_env()
+hydrate_environment()
+
 
 def _ensure_toolchains_on_path() -> None:
     """Add well-known toolchain install dirs to PATH for THIS process (and every
@@ -43,19 +60,14 @@ AGENTIC_INTERNAL_BASE_URL = os.environ.get("AGENTIC_INTERNAL_BASE_URL", AGENTIC_
 AGENTIC_WS_URL = os.environ["AGENTIC_WS_URL"]
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GOOGLE_API_KEY_DESIGN = os.environ.get("GOOGLE_API_KEY_design", GOOGLE_API_KEY)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-
-AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", OPENAI_API_KEY)
-AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+# NO OPENAI_API_KEY HERE, deliberately: LiteLLM reads it as an implicit fallback, so a
+# tenant call with no resolved credential would silently bill the platform's account.
+# Models are BYOK — the key comes from the tenant's own model_providers row via
+# model_resolver.
 
 AGENTIC_APP_PATH = os.environ.get("AGENTIC_APP_PATH", str(BACKEND_ROOT))
 
-ADO_ORG_URL = os.environ.get("ADO_ORG_URL", "")
-ADO_PAT = os.environ.get("ADO_PAT", "")
 DEV_WORKSPACE_ROOT: str = os.environ.get(
     "DEV_WORKSPACE_ROOT", str(BACKEND_ROOT / "files" / "dev-workspace")
 )
@@ -67,14 +79,6 @@ DOCS_OUTPUT_ROOT: str = os.environ.get(
 # Anthropic Claude
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL   = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-
-# Model selection by task — use the right model for the job
-# Fast: routing, document parsing, PR descriptions, simple extraction
-# Standard: requirements analysis, code generation, structured reasoning
-# Extended: design generation — same model but extended thinking enabled in the call
-ANTHROPIC_MODEL_FAST     = os.environ.get("ANTHROPIC_MODEL_FAST",     "claude-haiku-4-5-20251001")
-ANTHROPIC_MODEL_STANDARD = os.environ.get("ANTHROPIC_MODEL_STANDARD", "claude-sonnet-4-6")
-ANTHROPIC_MODEL_EXTENDED = os.environ.get("ANTHROPIC_MODEL_EXTENDED", "claude-sonnet-4-6")
 
 # MCP (Model Context Protocol) — user-registered servers consumed as agent tools.
 # MCP_ENABLED gates the whole feature (registry router + per-stage tool injection).
@@ -111,13 +115,8 @@ LLM_TENANT_BUDGET_OVERRIDES_JSON = os.environ.get("LLM_TENANT_BUDGET_OVERRIDES",
 # fails (Redis/DB down) the guard FAILS OPEN by default (a monitoring outage must not
 # block every run); set true to fail CLOSED (reject when spend can't be confirmed).
 BUDGET_ENFORCE_FAIL_CLOSED: bool = os.environ.get("BUDGET_ENFORCE_FAIL_CLOSED", "false").lower() == "true"
-# Default monthly USD budgets per scope (0032). Used both as the value stamped on a
-# NEW org/workspace/project and as the EFFECTIVE cap when a scope has no explicit budget
-# — so hierarchical allocation limits apply even to rows created before budgets existed.
-# org ⊇ workspace ⊇ project, so defaults nest: 100 ⊇ 50 ⊇ 25.
-DEFAULT_ORG_BUDGET_USD: float = float(os.environ.get("DEFAULT_ORG_BUDGET_USD", "100"))
-DEFAULT_WORKSPACE_BUDGET_USD: float = float(os.environ.get("DEFAULT_WORKSPACE_BUDGET_USD", "50"))
-DEFAULT_PROJECT_BUDGET_USD: float = float(os.environ.get("DEFAULT_PROJECT_BUDGET_USD", "25"))
+# There are no default budgets. A scope with no explicit budget has NO cap — see
+# shared/services/budget_alloc.py:_org_cap.
 
 # PostgreSQL — asyncpg URL for SQLAlchemy async engine (postgresql+asyncpg://user:pass@host:5432/dbname)
 # Use POSTGRES_MIGRATIONS_CONN_STRING for Alembic — it must use a superuser/BYPASSRLS role.
@@ -133,7 +132,19 @@ REDIS_URL = os.environ.get("REDIS_URL", "")
 AZURE_BLOB_ACCOUNT_URL = os.environ.get("AZURE_BLOB_ACCOUNT_URL", "")
 
 # Azure Key Vault URL (https://<vault-name>.vault.azure.net)
+# PLATFORM vault: secrets the app only ever READS (JWT signing key, Redis URL, webhook
+# secrets). The app's identity holds "Key Vault Secrets User" here — read-only, so a
+# code-execution bug cannot replace a platform credential.
 AZURE_KEY_VAULT_URL = os.environ.get("AZURE_KEY_VAULT_URL", "")
+
+# TENANT vault: per-tenant credentials the app must both READ and WRITE — BYOK model
+# keys ({tenant}-model-{provider_id}) and connector/MCP secrets. Split from the platform
+# vault by TRUST, not by name prefix: writing these requires "Key Vault Secrets Officer",
+# and that grant must not extend to jwt-secret-key.
+#
+# Falls back to the platform vault when unset, so an existing single-vault deployment
+# keeps working unchanged until it provisions the second vault.
+AZURE_TENANT_VAULT_URL = os.environ.get("AZURE_TENANT_VAULT_URL", "") or AZURE_KEY_VAULT_URL
 
 # Fernet key (urlsafe-base64, 32 bytes) for the DB secret-store backend used when
 # Azure Key Vault is not configured (local dev). Generate: Fernet.generate_key().decode()
@@ -187,15 +198,13 @@ RBAC_CATALOG_AUTOREPAIR: bool = os.environ.get("RBAC_CATALOG_AUTOREPAIR", "false
 DEFAULT_ORG_SLUG: str = os.getenv("DEFAULT_ORG_SLUG", "pwc").strip().lower()
 DEFAULT_ORG_NAME: str = os.getenv("DEFAULT_ORG_NAME", "PwC").strip()
 
-# Comma-separated emails + initial password for the org admin(s). PLATFORM_ADMIN_* are
-# the historical names for the same two values, honoured so an existing .env keeps
-# working; ORG_ADMIN_* wins when both are set.
+# Comma-separated emails + initial password for the org admin(s).
 ORG_ADMIN_EMAILS = [
     e.strip().lower()
-    for e in (os.getenv("ORG_ADMIN_EMAILS") or os.getenv("PLATFORM_ADMIN_EMAILS", "")).split(",")
+    for e in os.getenv("ORG_ADMIN_EMAILS", "").split(",")
     if e.strip()
 ]
-ORG_ADMIN_PASSWORD = os.getenv("ORG_ADMIN_PASSWORD") or os.getenv("PLATFORM_ADMIN_PASSWORD", "")
+ORG_ADMIN_PASSWORD = os.getenv("ORG_ADMIN_PASSWORD", "")
 
 # ── M2: LiteLLM Gateway (D-06, D-07, D-10) ──
 LITELLM_BASE_URL: str = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
@@ -204,18 +213,7 @@ ENABLE_LITELLM: bool = os.environ.get("ENABLE_LITELLM", "false").lower() == "tru
 
 # ── M3: Worker Pool (REQ-M3-01, REQ-M3-03) ──
 ENABLE_WORKER_POOL: bool = os.environ.get("ENABLE_WORKER_POOL", "false").lower() == "true"
-WORKER_POOL_CONCURRENCY: int = int(os.environ.get("WORKER_POOL_CONCURRENCY", "2"))
 WORKER_RECLAIM_TIMEOUT_MS: int = int(os.environ.get("WORKER_RECLAIM_TIMEOUT_MS", "60000"))
-
-SLA_REQUIREMENTS_HOURS: int = int(os.environ.get("SLA_REQUIREMENTS_HOURS", "24"))
-SLA_DESIGN_HOURS: int = int(os.environ.get("SLA_DESIGN_HOURS", "48"))
-SLA_DEVELOPMENT_HOURS: int = int(os.environ.get("SLA_DEVELOPMENT_HOURS", "72"))
-SLA_TESTING_HOURS: int = int(os.environ.get("SLA_TESTING_HOURS", "24"))
-SLA_GRACE_MINUTES: int = int(os.environ.get("SLA_GRACE_MINUTES", "5"))
-# M10.2: within-agent clarification SLA — deliberately shorter than the
-# inter-agent phase gates (24/48/72h) because a within-agent question
-# blocks an in-flight agent turn (REQ-M10-04).
-SLA_CLARIFICATION_HOURS: int = int(os.environ.get("SLA_CLARIFICATION_HOURS", "4"))
 
 # ── Langfuse LLM Observability (self-hosted OSS) ──
 # ENABLE_LANGFUSE gates all tracing: when false, build_agent_callbacks returns only
@@ -247,90 +245,28 @@ ENABLE_CONNECTOR_HEALTH_PROBES: bool = os.environ.get(
 
 # ── M6: Webhook Pipeline (REQ-M6-11) ──
 ENABLE_WEBHOOK_TRIGGERS: bool = os.environ.get("ENABLE_WEBHOOK_TRIGGERS", "false").lower() == "true"
-# Connector credential Key Vault secret names (convention only; values loaded via load_secret())
-# Jira:  load_secret("jira-email"), load_secret("jira-api-token"), load_secret("jira-url")
-# GitHub: load_secret("github-app-id"), load_secret("github-app-private-key"),
-#         load_secret("github-app-installation-id")
-# Slack:  load_secret("slack-bot-token")
-# Azure Repos: reuses ADO_ORG_URL + load_secret("ado-pat")
-# GitHub Actions: secret_store refs gha-pat / gha-owner (written by the Integrations
-#         "Add credentials" form) — see shared/routers/connectors.py.
-# MS Teams + SharePoint: ONE Entra app registration per tenant, shared by both kinds.
-#         secret_store refs msgraph-tenant-id / msgraph-client-id / msgraph-client-secret,
-#         plus non-secret routing refs msteams-team-id, msteams-channel-id,
-#         msteams-webhook-url, sharepoint-site-id, sharepoint-drive-id,
-#         sharepoint-folder-path.
-# Figma:  secret_store refs figma-pat OR figma-access-token (the two auth shapes),
-#         plus the figma-connected marker and the non-secret figma-file-key default.
-# Env-var fallbacks for local dev (never use in production)
-JIRA_URL:        str = os.environ.get("JIRA_URL", "")
-JIRA_EMAIL:      str = os.environ.get("JIRA_EMAIL", "")
-JIRA_API_TOKEN:  str = os.environ.get("JIRA_API_TOKEN", "")
-# Confluence: same credential shape as Jira (Basic Auth — email + API token) but
-# configured independently; see config/connectors/confluence.py module docstring.
-CONFLUENCE_URL:       str = os.environ.get("CONFLUENCE_URL", "")
-CONFLUENCE_EMAIL:     str = os.environ.get("CONFLUENCE_EMAIL", "")
-CONFLUENCE_API_TOKEN: str = os.environ.get("CONFLUENCE_API_TOKEN", "")
-# SonarQube: token-based Basic auth (token as username, empty password) — no email.
-SONARQUBE_URL:   str = os.environ.get("SONARQUBE_URL", "")
-SONARQUBE_TOKEN: str = os.environ.get("SONARQUBE_TOKEN", "")
-GITHUB_APP_ID:   str = os.environ.get("GITHUB_APP_ID", "")
-GITHUB_APP_INSTALLATION_ID: str = os.environ.get("GITHUB_APP_INSTALLATION_ID", "")
-# Local-dev fallbacks for the GitHub App private key (KV `github-app-private-key` wins).
-# Provide EITHER the raw PEM in GITHUB_APP_PRIVATE_KEY or a filesystem path in
-# GITHUB_APP_PRIVATE_KEY_PATH. Never use these in production — use Key Vault.
-GITHUB_APP_PRIVATE_KEY:      str = os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
-GITHUB_APP_PRIVATE_KEY_PATH: str = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", "")
-SLACK_BOT_TOKEN: str = os.environ.get("SLACK_BOT_TOKEN", "")
-# GitHub Actions — the per-tenant secret store is authoritative; these are local-dev
-# fallbacks only, matching the tail of every connector's auth ladder.
-GHA_PAT:   str = os.environ.get("GHA_PAT", "")
-GHA_OWNER: str = os.environ.get("GHA_OWNER", "")
-# Microsoft Graph app registration (client-credentials flow) — serves BOTH the
-# ms_teams and sharepoint connectors. Local-dev fallbacks; the per-tenant secret
-# store written by the Integrations form takes precedence.
-MSGRAPH_TENANT_ID:     str = os.environ.get("MSGRAPH_TENANT_ID", "")
-MSGRAPH_CLIENT_ID:     str = os.environ.get("MSGRAPH_CLIENT_ID", "")
-MSGRAPH_CLIENT_SECRET: str = os.environ.get("MSGRAPH_CLIENT_SECRET", "")
-# Figma — accepts EITHER a Personal Access Token or an OAuth2 app. The per-tenant
-# secret store (figma-pat / figma-access-token) is authoritative; FIGMA_PAT is a
-# local-dev fallback only. The OAuth client pair is platform-level, not per-tenant:
-# one registered Figma app serves every tenant, exactly like SLACK_CLIENT_ID.
-FIGMA_PAT:                 str = os.environ.get("FIGMA_PAT", "")
-FIGMA_OAUTH_CLIENT_ID:     str = os.environ.get("FIGMA_OAUTH_CLIENT_ID", "")
-FIGMA_OAUTH_CLIENT_SECRET: str = os.environ.get("FIGMA_OAUTH_CLIENT_SECRET", "")
 
-# Webhook signature secrets (REQ-M6-06) — verify inbound webhook signatures.
-# Loaded KV-first in the FastAPI lifespan, then these env vars as local-dev fallback.
-# KV secret names: github-webhook-secret, slack-signing-secret, jira-webhook-secret,
-#                  ado-webhook-user, ado-webhook-password
-# Azure DevOps service hooks have NO HMAC — they authenticate via HTTP Basic Auth,
-# so the ADO pair is a username/password, not a signing key.
-GITHUB_WEBHOOK_SECRET: str = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-SLACK_SIGNING_SECRET:  str = os.environ.get("SLACK_SIGNING_SECRET", "")
-JIRA_WEBHOOK_SECRET:   str = os.environ.get("JIRA_WEBHOOK_SECRET", "")
-ADO_WEBHOOK_USER:      str = os.environ.get("ADO_WEBHOOK_USER", "")
-ADO_WEBHOOK_PASSWORD:  str = os.environ.get("ADO_WEBHOOK_PASSWORD", "")
-# GitHub Actions workflow_run deliveries are signed exactly like GitHub Issues
-# (X-Hub-Signature-256, HMAC-SHA256 over the raw body) but with their own secret so a
-# CI webhook can be rotated without touching the issues webhook.
-GHA_WEBHOOK_SECRET:    str = os.environ.get("GHA_WEBHOOK_SECRET", "")
-# Microsoft Graph change notifications carry NO signature — clientState is the only
-# authentication Graph offers, so this must be >=32 bytes of entropy and is compared
-# with hmac.compare_digest. KV name: msgraph-webhook-client-state.
-MSGRAPH_WEBHOOK_CLIENT_STATE: str = os.environ.get("MSGRAPH_WEBHOOK_CLIENT_STATE", "")
+# ── Connector credentials: NOT HERE, AT ALL ─────────────────────────────────
+# Every connector value is per-tenant — credentials, OAuth client secrets, inbound
+# webhook signing secrets, and the site/org URLs that pair with them. They are written
+# by the Integrations "Add credentials" form into the tenant secret store and read back
+# through two tenant-scoped rungs, with no global-vault rung and no env-var rung:
+#
+#     secret_store(tenant, ref)  ->  Key Vault "{tenant}-{ref}"
+#
+# A tenant with no credential of its own fails cleanly as "not connected" rather than
+# borrowing the platform's. That is the whole point: a shared value let a tenant who
+# never connected Jira transact with somebody else's token, and let one webhook secret
+# verify a delivery to every tenant's URL.
+#
+# Enforced, not just documented:
+#   tests/test_connector_platform_fallback.py  — no connector may read config.env,
+#       resolve an untenanted secret, or take a credential in its constructor.
+#   webhooks/router.py:_tenant_webhook_secret  — inbound secrets resolve per tenant.
 
 # ── M7.4: SCIM Provisioning (REQ-M7-16) ──
 ENABLE_SCIM: bool = os.environ.get("ENABLE_SCIM", "false").lower() == "true"
 # KV secret: load_secret("scim-bearer-token", tenant_id=tid) — per-tenant SCIM credential
-
-# ── M7.4: Jira OAuth 3LO (REQ-M7-20) ──
-# KV secrets written at callback: jira-access-token, jira-refresh-token, jira-cloud-id (tenant-scoped)
-JIRA_OAUTH_CLIENT_ID: str = os.environ.get("JIRA_OAUTH_CLIENT_ID", "")
-JIRA_OAUTH_CLIENT_SECRET: str = os.environ.get("JIRA_OAUTH_CLIENT_SECRET", "")
-GITHUB_OAUTH_CLIENT_SECRET: str = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
-SLACK_CLIENT_ID: str = os.environ.get("SLACK_CLIENT_ID", "")
-SLACK_CLIENT_SECRET: str = os.environ.get("SLACK_CLIENT_SECRET", "")
 
 # ── Outbound email (onboarding invites + password reset) ──
 #

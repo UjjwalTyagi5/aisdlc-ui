@@ -454,7 +454,16 @@ async def upsert_project_credential(
         from shared.services import secret_store  # noqa: PLC0415
 
         secret_ref = project_credential_ref(project_id, owner, body.kind, body.targetId)
-        await secret_store.put_secret(tenant_id, secret_ref, body.secret)
+        # Before the row is written: a failed vault write must abort, not leave a
+        # credential row pointing at a secret that was never stored.
+        try:
+            await secret_store.put_secret(tenant_id, secret_ref, body.secret)
+        except secret_store.SecretWriteError:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not securely store the credential. The credential store "
+                       "is unavailable — nothing was saved.",
+            )
 
     row = (
         await db.execute(

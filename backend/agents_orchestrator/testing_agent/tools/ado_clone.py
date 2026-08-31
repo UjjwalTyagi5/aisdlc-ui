@@ -281,7 +281,7 @@ def extract_dev_chat_hints(text: str) -> dict:
     # ADO URL â€” most authoritative for org/project/repo
     m = _ADO_URL_PATTERN.search(text)
     if m:
-        # group(1) = org (skipped â€” testing agent reads ADO_ORG_URL from env)
+        # group(1) = org (skipped â€” org comes from the tenant connector)
         hints["project"] = m.group(2)
         hints["repo"] = m.group(3)
 

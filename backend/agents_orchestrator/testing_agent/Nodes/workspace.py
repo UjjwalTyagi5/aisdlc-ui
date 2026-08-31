@@ -252,7 +252,6 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
     error reaches the user via the final summary.
     """
     from agents_orchestrator.testing_agent.tools.ado_clone import clone_branch
-    from config.connector_client import get_connector, ConnectorNotInstalledError
 
     # Post-MVP Phase 5 — workspace reuse optimization. If the development agent
     # already cloned this repo+branch into its local workspace (typical when the
@@ -275,17 +274,17 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
         # filter + coverage skip on this path (analyze.py keeps full analysis
         # on empty diff, so no regression vs pre-Phase-7 behaviour).
         try:
-            from config.connector_client import get_connector, ConnectorNotInstalledError
             from agents_orchestrator.testing_agent.tools.pr_diff import fetch_base_branch
-            try:
-                creds = get_connector("azure_devops")
-                ado_url = _build_ado_remote_url(creds.get("org_url", ""), project, repo, creds.get("pat", ""))
-                if ado_url:
-                    await loop.run_in_executor(
-                        None, _add_ado_remote_and_fetch_main, fast_dest, ado_url,
-                    )
-            except ConnectorNotInstalledError:
-                # No creds → fall back to normal fetch_base_branch (which will
+            from shared.services.ado_repos import resolve_auth
+
+            _org, _pat = await resolve_auth(tenant_id or "")
+            ado_url = _build_ado_remote_url(_org, project, repo, _pat) if _pat else ""
+            if ado_url:
+                await loop.run_in_executor(
+                    None, _add_ado_remote_and_fetch_main, fast_dest, ado_url,
+                )
+            else:
+                # Not connected → fall back to normal fetch_base_branch (which will
                 # also fail on a local-only origin, but at least it tries).
                 await loop.run_in_executor(None, fetch_base_branch, fast_dest, "main")
         except Exception as exc:
@@ -312,14 +311,7 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
         from shared.services import ado_repos
         org_url, pat = await ado_repos.resolve_auth(tenant_id or "")
     except Exception as exc:  # noqa: BLE001
-        logger.info("ado_clone: connector resolve_auth failed (%s); trying env connector", exc)
-    if not (org_url and pat):
-        try:
-            creds = get_connector("azure_devops")
-            org_url = org_url or creds.get("org_url", "")
-            pat = pat or creds.get("pat", "")
-        except ConnectorNotInstalledError:
-            pass
+        logger.info("ado_clone: connector resolve_auth failed (%s)", exc)
     if not (org_url and pat):
         friendly = (
             f"Cannot clone {project}/{repo}@{branch} from Azure DevOps because "

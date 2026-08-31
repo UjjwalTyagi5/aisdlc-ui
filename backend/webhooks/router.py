@@ -72,16 +72,58 @@ def _extract_event_id(connector: str, payload: dict, headers) -> str:
     return ""
 
 
-def _get_verifier_args(connector: str, raw_body: bytes, headers) -> tuple:
-    """Build verifier call args from the per-provider credential state in app.state.
+# ── Webhook secrets are PER-TENANT ───────────────────────────────────────────
+#
+# They used to be one process-wide value each, loaded into app.state at startup from
+# an untenanted `load_secret("github-webhook-secret")` with an env var behind it. The
+# comment in config/env.py defended that as unavoidable, on the grounds that a
+# signature is checked "before a request is attributed to any tenant".
+#
+# That was not true of this router. The tenant is a PATH PARAMETER —
+# POST /webhooks/{connector}/{tenant_id} — so it is known before the body is even
+# read, let alone verified. What the shared secret actually bought was cross-tenant
+# forgery: one secret verifies a delivery to EVERY tenant's URL, so anyone holding it
+# (any tenant who configured a webhook, plus every operator) could inject work items
+# into any other tenant's pipeline, correctly signed and indistinguishable from real.
+#
+# Each tenant now registers the webhook in its own GitHub org / Jira site / Slack app
+# with its own secret, pastes it into Integrations, and it is resolved here through
+# the same two tenant-scoped rungs every connector credential uses.
+_WEBHOOK_SECRET_REFS: dict[str, tuple[str, ...]] = {
+    "github": ("github-webhook-secret",),
+    "github_actions": ("gha-webhook-secret",),
+    "slack": ("slack-signing-secret",),
+    "jira": ("jira-webhook-secret",),
+    # ADO service hooks have no HMAC — they authenticate with HTTP Basic, so this
+    # pair is a username and a password rather than a signing key.
+    "azure_repos": ("ado-webhook-user", "ado-webhook-password"),
+    "msgraph": ("msgraph-webhook-client-state",),
+}
 
-    Returns a tuple of positional args for the verifier callable.
-    The secrets are read from app.state at call time (set by lifespan).
-    This function builds the credential arguments from headers only;
-    the app.state secret injection happens in the route handler.
+
+async def _tenant_webhook_secret(tenant_id: str, ref: str) -> str:
+    """Resolve one webhook secret for THIS tenant. Returns "" when unset.
+
+    Two rungs, both tenant-scoped: the tenant secret store, then Key Vault
+    "{tenant}-{ref}". There is deliberately no global-vault rung and no env var —
+    see the note above. A "" return means this tenant has not configured the
+    webhook, and every caller treats that as a rejection, never as a pass.
     """
-    # Return just raw_body and headers; secret injection happens in handler
-    return (raw_body, headers)
+    if not tenant_id or not ref:
+        return ""
+    try:
+        from shared.services import secret_store  # lazy: avoid an import cycle
+        value = await secret_store.get_secret(tenant_id, ref)
+        if value:
+            return value
+    except Exception as exc:  # noqa: BLE001 — fall through to Key Vault
+        logger.warning("secret store unavailable for %s: %s", ref, type(exc).__name__)
+    try:
+        import shared.keyvault as _keyvault
+        return await _keyvault.load_secret(ref, tenant_id=tenant_id) or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("key vault unavailable for %s: %s", ref, type(exc).__name__)
+        return ""
 
 
 # ── Microsoft Graph change notifications ─────────────────────────────────────
@@ -142,8 +184,11 @@ async def receive_msgraph_notification(tenant_id: str, request: Request):
     if not isinstance(notifications, list):
         raise HTTPException(status_code=400, detail="Bad Request")
 
-    # Step 3: authenticate EVERY notification before acting on any of them.
-    expected = _get_state_attr(request.app.state, "msgraph_client_state", "")
+    # Step 3: authenticate EVERY notification before acting on any of them, against
+    # THIS TENANT's clientState — Graph offers no signature, so this string is the
+    # entire authentication story and a platform-wide one would let any tenant's
+    # subscription speak for any other.
+    expected = await _tenant_webhook_secret(tenant_id, "msgraph-webhook-client-state")
     if not expected:
         # Fail closed: with no configured clientState there is nothing to authenticate
         # against, so anyone could inject change events.
@@ -256,7 +301,7 @@ async def receive_webhook(
     # Returns 400 with generic "Bad Request" — never 401/403 (T-m6-06-ID)
     try:
         verifier = get_verifier(connector)
-        await _invoke_verifier(verifier, connector, raw_body, request)
+        await _invoke_verifier(verifier, connector, tenant_id, raw_body, request)
     except (ValueError, KeyError, Exception):
         WEBHOOK_DELIVERIES.labels(connector=connector, status="rejected_sig").inc()
         raise HTTPException(status_code=400, detail="Bad Request")
@@ -319,50 +364,45 @@ def _get_redis(request: Request):
     return pool  # already a client (e.g. injected in unit tests)
 
 
-async def _invoke_verifier(verifier, connector: str, raw_body: bytes, request: Request) -> None:
-    """Call the per-provider verifier with the correct arguments from request context.
+async def _invoke_verifier(
+    verifier, connector: str, tenant_id: str, raw_body: bytes, request: Request
+) -> None:
+    """Call the per-provider verifier with THIS TENANT's secret.
 
-    Each provider uses different header names and secret sources:
-    - github:      X-Hub-Signature-256 header + webhook secret from app.state
-    - slack:       X-Slack-Request-Timestamp + X-Slack-Signature + signing secret
-    - jira:        X-Hub-Signature header + webhook secret from app.state
-    - azure_repos: Authorization: Basic header + stored user/pass from app.state
+    Each provider uses different header names and a different credential shape:
+    - github / github_actions: X-Hub-Signature-256 + its own HMAC secret
+    - slack:                   X-Slack-Request-Timestamp + X-Slack-Signature + signing secret
+    - jira:                    X-Hub-Signature + HMAC secret
+    - azure_repos:             Authorization: Basic + a username/password pair
+
+    FAILS CLOSED ON AN UNCONFIGURED SECRET. This is not defensive tidiness — with a
+    secret of "" every HMAC verifier here computes hmac.new(b"", body), a value any
+    caller can compute for themselves, so an unconfigured tenant would accept ANY
+    signed-looking delivery rather than none. The old code passed app.state's ""
+    default straight through to the verifier. Raising instead makes "this tenant has
+    not set the webhook up" reject, which is what the caller turns into a 400.
     """
     headers = request.headers
-    state = request.app.state if hasattr(request.app, "state") else None
+    refs = _WEBHOOK_SECRET_REFS.get(connector, ())
+    secrets = [await _tenant_webhook_secret(tenant_id, ref) for ref in refs]
+    if not secrets or not all(secrets):
+        raise ValueError(f"{connector} webhook is not configured for this tenant")
 
-    if connector == "github":
+    if connector in ("github", "github_actions"):
+        # Identical HMAC-SHA256 algorithm, DIFFERENT secret — a CI webhook can then be
+        # rotated without disturbing the issues webhook.
         sig = headers.get("x-hub-signature-256") or headers.get("X-Hub-Signature-256")
-        secret = _get_state_attr(state, "github_webhook_secret", "")
-        await verifier(raw_body, sig, secret)
-
-    elif connector == "github_actions":
-        # Same HMAC-SHA256 algorithm as `github`, DIFFERENT secret — a CI webhook can
-        # then be rotated without disturbing the issues webhook.
-        sig = headers.get("x-hub-signature-256") or headers.get("X-Hub-Signature-256")
-        secret = _get_state_attr(state, "gha_webhook_secret", "")
-        await verifier(raw_body, sig, secret)
+        await verifier(raw_body, sig, secrets[0])
 
     elif connector == "slack":
         ts = headers.get("x-slack-request-timestamp") or headers.get("X-Slack-Request-Timestamp")
         sig = headers.get("x-slack-signature") or headers.get("X-Slack-Signature")
-        secret = _get_state_attr(state, "slack_signing_secret", "")
-        await verifier(raw_body, ts, sig, secret)
+        await verifier(raw_body, ts, sig, secrets[0])
 
     elif connector == "jira":
         sig = headers.get("x-hub-signature") or headers.get("X-Hub-Signature")
-        secret = _get_state_attr(state, "jira_webhook_secret", "")
-        await verifier(raw_body, sig, secret)
+        await verifier(raw_body, sig, secrets[0])
 
     elif connector == "azure_repos":
         auth = headers.get("authorization") or headers.get("Authorization")
-        user = _get_state_attr(state, "ado_webhook_user", "")
-        pwd = _get_state_attr(state, "ado_webhook_password", "")
-        await verifier(raw_body, auth, user, pwd)
-
-
-def _get_state_attr(state, attr: str, default):
-    """Safely read an attribute from app.state; return default if absent."""
-    if state is None:
-        return default
-    return getattr(state, attr, default)
+        await verifier(raw_body, auth, secrets[0], secrets[1])

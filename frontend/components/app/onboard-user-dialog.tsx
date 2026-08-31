@@ -24,7 +24,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { onboardPerson } from "@/lib/api/onboarding";
-import { ROLE_META } from "@/lib/roles";
+import { ROLE_META, type PlatformRole } from "@/lib/roles";
+import { BUSINESS_UNIT_ASSIGNABLE_BUILTIN_ROLES } from "@/hooks/use-assignable-roles";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 /** The two org-level appointments, with the sentence that decides between
@@ -61,6 +62,21 @@ export interface OnboardUserDialogProps {
   onOpenChange: (open: boolean) => void;
   businessUnits: readonly { id: string; displayName: string }[];
   onOnboarded: () => void;
+  /**
+   * Whose authority this is being done under.
+   *
+   * "organization" — an Org Admin admitting somebody to the ORGANISATION. They choose
+   * between the two org-level answers (run a unit, or work in one) and may leave the
+   * unit blank, because deciding it later is theirs to do.
+   *
+   * "business_unit" — a Business Unit Admin staffing a unit they already administer.
+   * There is no org-level choice to make: the unit is one of theirs, and they name the
+   * working role in the same act because they are the person who would otherwise be
+   * asked for it. `businessUnits` must already be narrowed to the units they
+   * administer — this dialog does not filter, and the server refuses anything else
+   * with a 404 regardless.
+   */
+  scope?: "organization" | "business_unit";
 }
 
 /**
@@ -81,11 +97,18 @@ export function OnboardUserDialog({
   onOpenChange,
   businessUnits,
   onOnboarded,
+  scope = "organization",
 }: OnboardUserDialogProps) {
+  const scoped = scope === "business_unit";
+  // One unit to administer is the common case, and offering a picker with a single
+  // option asks a question with one answer. Preselected, and shown as a statement.
+  const soleUnitId = businessUnits.length === 1 ? (businessUnits[0]?.id ?? "") : "";
+
   const [step, setStep] = React.useState<1 | 2>(1);
   const [email, setEmail] = React.useState("");
   const [displayName, setDisplayName] = React.useState("");
   const [role, setRole] = React.useState<OrgRoleChoice>("contributor");
+  const [unitRole, setUnitRole] = React.useState<PlatformRole | "">("");
   const [unitId, setUnitId] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -96,13 +119,19 @@ export function OnboardUserDialog({
     setEmail("");
     setDisplayName("");
     setRole("contributor");
-    setUnitId("");
+    setUnitRole("");
+    setUnitId(scoped ? soleUnitId : "");
     setError(null);
-  }, [open]);
+  }, [open, scoped, soleUnitId]);
 
   const choice = CHOICES.find((c) => c.role === role)!;
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
-  const unitSatisfied = choice.unit === "optional" || unitId !== "";
+  // Scoped: a unit AND a role, both required — the server rejects a missing unit with
+  // `unit_required` and a bare Contributor with `invalid_role`, and neither refusal is
+  // worth making somebody submit to discover.
+  const unitSatisfied = scoped
+    ? unitId !== "" && unitRole !== ""
+    : choice.unit === "optional" || unitId !== "";
 
   async function submit() {
     setSubmitting(true);
@@ -114,7 +143,7 @@ export function OnboardUserDialog({
         // A Business Unit Admin appointed without one sends no unit at all,
         // rather than an empty string the server would have to interpret.
         workspaceId: unitId || undefined,
-        role,
+        role: scoped ? (unitRole as string) : role,
       });
 
       // Say what happened NEXT, not just that it worked. For a Contributor the
@@ -126,6 +155,18 @@ export function OnboardUserDialog({
       // matters more than the placement: an admin who is not told will assume the
       // person was contacted and only find out when they say they never got in.
       const inviteFailed = result.created === true && result.invited === false;
+
+      if (!inviteFailed && scoped) {
+        // No "waiting for a role" clause: the role was granted in the same act, which
+        // is the whole difference between this path and the Org Admin's.
+        toast.success(
+          `${result.displayName} added to ${unitName(unitId)} as ${ROLE_META[unitRole as PlatformRole].label}`,
+          { description: "They can sign in once they set a password from the emailed link." },
+        );
+        onOpenChange(false);
+        onOnboarded();
+        return;
+      }
 
       if (inviteFailed) {
         toast.warning(`${result.displayName} added — but no email was sent`, {
@@ -168,7 +209,9 @@ export function OnboardUserDialog({
           <DialogDescription className="text-[13px]">
             {step === 1
               ? "Who they are. A new email is created automatically — there is no separate invite step."
-              : `What they are here to do. Everything more specific is the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s to decide.`}
+              : scoped
+                ? `Where they sit and what they do. Both are yours to decide, so they take effect straight away.`
+                : `What they are here to do. Everything more specific is the ${BUSINESS_UNIT_LABEL.toLowerCase()}'s to decide.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -221,6 +264,77 @@ export function OnboardUserDialog({
                 when they first sign in.
               </p>
             </div>
+          </div>
+        ) : scoped ? (
+          <div className="space-y-4">
+            {/* No org-level choice here. "Do they run a unit or work in one" is the
+                Organization Admin's question; this caller already knows the answer,
+                because the person is joining a unit they themselves administer. */}
+            <div className="space-y-1.5">
+              <Label htmlFor="onboard-unit-scoped">{BUSINESS_UNIT_LABEL}</Label>
+              {businessUnits.length === 1 ? (
+                <div className="border-line-soft bg-surface-1 text-muted-foreground flex items-center gap-2 rounded-md border px-3 py-2 text-[13px]">
+                  <Building2 className="size-3.5 shrink-0" aria-hidden />
+                  <span className="text-foreground">{businessUnits[0]?.displayName}</span>
+                </div>
+              ) : (
+                <Select
+                  value={unitId}
+                  onValueChange={(v) => {
+                    setUnitId(v);
+                    setError(null);
+                  }}
+                >
+                  <SelectTrigger id="onboard-unit-scoped">
+                    <SelectValue placeholder={`Select a ${BUSINESS_UNIT_LABEL.toLowerCase()}…`} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {businessUnits.map((u) => (
+                      <SelectItem key={u.id} value={u.id}>
+                        {u.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="onboard-unit-role">Role</Label>
+              <Select
+                value={unitRole}
+                onValueChange={(v) => {
+                  setUnitRole(v as PlatformRole);
+                  setError(null);
+                }}
+              >
+                <SelectTrigger id="onboard-unit-role">
+                  <SelectValue placeholder="Select a role…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {BUSINESS_UNIT_ASSIGNABLE_BUILTIN_ROLES.map((r) => (
+                    <SelectItem key={r} value={r}>
+                      {ROLE_META[r].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-muted-foreground text-[11.5px]">
+                {unitRole
+                  ? ROLE_META[unitRole as PlatformRole].oneLiner
+                  : `They hold it from the moment they sign in — there is no separate approval step, because it is yours to grant.`}
+              </p>
+            </div>
+
+            {/* Said once, plainly. A custom role is assignable from the row on this
+                page immediately afterwards; offering it here would mean two role
+                pickers backed by two different grant mechanisms. */}
+            <p className="text-muted-foreground text-[11.5px]">
+              For a role your {BUSINESS_UNIT_LABEL.toLowerCase()} defined itself, onboard
+              them with the closest built-in role and change it from their row.
+            </p>
+
+            {error && <p className="text-destructive text-[12px]">{error}</p>}
           </div>
         ) : (
           <div className="space-y-4">

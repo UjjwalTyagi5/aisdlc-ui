@@ -1,11 +1,10 @@
 ﻿"""Shared helper for ADO projects / repos / branches — consumed by the dev-workspace
 REST endpoints and the development-agent git tools (DRY source).
 
-Credentials come from config.env (ADO_ORG_URL, ADO_PAT) — global env vars, not
-per-tenant connectors.  Per-tenant / GitHub connector resolution is a post-v1
-follow-up (tracked separately); for now only env-based ADO is supported.
-# NOTE: GitHub / Jira connector resolution will route through get_connector_for_session
-# once those connectors are activated — intentionally deferred (post-v1).
+Credentials are PER-TENANT and resolve through resolve_auth() below: the connector
+bound to the running stage first, then an explicit tenant_id. There is no process-wide
+ADO_ORG_URL / ADO_PAT fallback — a platform-wide PAT would let a tenant that never
+connected Azure DevOps transact as the platform, against another tenant's projects.
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ import urllib.parse
 
 import httpx
 
-from config.env import ADO_ORG_URL, ADO_PAT, DEV_WORKSPACE_ROOT
+from config.env import DEV_WORKSPACE_ROOT
 
 WORKSPACE_ROOT = pathlib.Path(DEV_WORKSPACE_ROOT)
 
@@ -44,7 +43,7 @@ def _git_env() -> dict:
 
 
 def _auth_header(pat: str | None = None) -> dict[str, str]:
-    token = base64.b64encode(f":{pat or ADO_PAT}".encode()).decode()
+    token = base64.b64encode(f":{pat or ''}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
 
@@ -56,32 +55,53 @@ async def _get_json(url: str, pat: str | None = None) -> dict:
 
 
 async def resolve_auth(tenant_id: str = "") -> tuple[str, str]:
-    """Resolve (org_url, pat) for Azure DevOps from the configured connector.
+    """Resolve (org_url, pat) for Azure DevOps for THIS TENANT.
 
-    Credentials entered on the Integrations page live in the per-tenant secret
-    store (`ado-org-url` / `ado-pat`); the connector's auth_adapter reads them and
-    falls back to Key Vault / config.env. Never raises — returns env values on any
-    failure so callers can surface a clean "not configured" error.
+    Two tenant-scoped sources, in order:
+      1. the connector bound to the running stage (config.connectors.context) — this
+         is the path a pipeline run takes, and it carries the run's tenant;
+      2. an explicit tenant_id, for callers outside a stage (REST endpoints).
+
+    Returns ("", "") when neither answers. Never raises and never falls back to a
+    process-wide credential: callers surface a clean "not configured" instead.
     """
     try:
-        from config.connector_factory import get_connector_for_session
+        from config.connectors.context import get_connector as _active_connector
 
-        # unrestricted: this resolves CREDENTIALS via auth_adapter, which is
-        # neither a read nor a write of connector data and is never gated. The
-        # operations performed with those credentials are gated where they happen.
-        conn = await get_connector_for_session(
-            "azure_devops", tenant_id=tenant_id, unrestricted=True,
-        )
-        auth = await conn.auth_adapter(tenant_id)
-        return (auth.get("org_url") or ADO_ORG_URL, auth.get("pat") or ADO_PAT)
-    except Exception:
-        return (ADO_ORG_URL, ADO_PAT)
+        active = _active_connector()
+        # The bound connector is whatever THIS stage needs — often Jira or GitHub.
+        # Only an ADO one can answer for ADO; asking any other kind would read a
+        # "pat" key it does not have and silently return an empty credential.
+        if active.connector_name in ("azure_devops", "azure_repos"):
+            auth = await active.auth_adapter()
+            org, pat = (auth.get("org_url") or "").rstrip("/"), auth.get("pat") or ""
+            if pat:
+                return org, pat
+    except Exception:  # noqa: BLE001 — no connector bound to this run
+        pass
+
+    if tenant_id:
+        try:
+            from config.connector_factory import get_connector_for_session
+
+            # unrestricted: this resolves CREDENTIALS via auth_adapter, which is
+            # neither a read nor a write of connector data and is never gated. The
+            # operations performed with those credentials are gated where they happen.
+            conn = await get_connector_for_session(
+                "azure_devops", tenant_id=tenant_id, unrestricted=True,
+            )
+            auth = await conn.auth_adapter(tenant_id)
+            return (auth.get("org_url") or "").rstrip("/"), auth.get("pat") or ""
+        except Exception:  # noqa: BLE001
+            pass
+
+    return "", ""
 
 
 async def _resolve(org_url: str | None, pat: str | None, tenant_id: str) -> tuple[str, str]:
-    """Return (base_url, pat). Explicit args win; otherwise resolve from the
-    connector (Integrations creds), then env. Raises if no org URL is configured
-    so the endpoint returns a clear message instead of a malformed-URL 500."""
+    """Return (base_url, pat). Explicit args win; otherwise resolve from this
+    tenant's connector (Integrations creds). Raises if no org URL is configured so
+    the endpoint returns a clear message instead of a malformed-URL 500."""
     if not (org_url and pat):
         c_org, c_pat = await resolve_auth(tenant_id)
         org_url = org_url or c_org

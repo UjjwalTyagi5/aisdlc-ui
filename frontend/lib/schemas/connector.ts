@@ -74,20 +74,6 @@ export const Connector = z.object({
 export type Connector = z.infer<typeof Connector>;
 
 /**
- * Wave C — install response union (REQ-M7-22).
- *
- * FastAPI returns `{redirect_url: string}` for OAuth-based connectors (Jira,
- * GitHub, Slack, Azure Repos). The BFF normalises the key to `redirectUrl`.
- * For non-OAuth connectors the BFF may still return a full Connector record
- * directly (backward-compat path).
- */
-export const ConnectorInstallResponse = z.union([
-  Connector,
-  z.object({ redirectUrl: z.string() }),
-]);
-export type ConnectorInstallResponse = z.infer<typeof ConnectorInstallResponse>;
-
-/**
  * Result of POST /connectors/{kind}/credentials — direct credential entry
  * (Azure DevOps PAT, Jira email + API token). The backend stores the secret
  * and runs a live verify probe; `status` reflects whether the probe succeeded.

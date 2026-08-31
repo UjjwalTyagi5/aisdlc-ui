@@ -151,17 +151,136 @@ async def test_only_the_two_org_level_roles_are_accepted(org):
 
 
 @pytest.mark.asyncio
-async def test_a_unit_admin_cannot_onboard(org):
-    """Admitting someone to the ORGANISATION is org-wide authority. member:manage is
-    a BU Admin's, and they assign roles inside their unit — they do not decide who
-    belongs to the organisation."""
+async def test_member_manage_alone_onboards_nothing(org):
+    """`member:manage` says the caller administers a unit SOMEWHERE, never which one.
+
+    This caller holds the permission on a forged token and no binding at all, so they
+    administer nothing. 404 rather than 403 throughout the scoped path: a unit you do
+    not administer is not confirmed to exist by the error you get back.
+    """
     c = TestClient(process_api.app)
     r = c.post(
         "/onboarding",
         headers=_headers(f"bua-{_uuid.uuid4()}", org["org"], ["artifact:view", "member:manage"]),
-        json={"email": "x@abcbank.com", "role": "contributor", "workspaceId": org["bu"]},
+        json={"email": "x@abcbank.com", "role": "developer", "workspaceId": org["bu"]},
     )
-    assert r.status_code == 403
+    assert r.status_code == 404
+
+
+# ── A Business Unit Admin staffing their own unit ────────────────────────────
+#
+# This used to be a flat refusal: a unit admin raised a `user_onboarding` request so
+# an Organization Admin could press the button for them — an approval step over a
+# decision in a unit nobody else administers. They now do it directly, and because
+# they hold the role-granting authority the placeholder was waiting for, they name
+# the role in the same act rather than filing a request back to themselves.
+
+
+@pytest.fixture
+async def unit_admin(org):
+    """A REAL bu_admin binding on org["bu"], not a forged claim.
+
+    The scope check resolves administered units from role_bindings, so a token
+    asserting member:manage proves nothing — see test_member_manage_alone_onboards_nothing.
+    """
+    from shared.authz.grant import grant_role
+    uid = f"buadmin-{_uuid.uuid4()}"
+    await grant_role(uid, org["bu"], "bu_admin",
+                     tenant_id=org["org"], scope_kind="business_unit")
+    return _headers(uid, org["org"], ["artifact:view", "member:manage"])
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_onboards_into_their_own_unit(org, unit_admin):
+    """The whole point: account created, bound to their unit, holding the role they
+    chose — and no request raised, because nothing was handed to anybody."""
+    c = TestClient(process_api.app)
+    email = f"dev-{_uuid.uuid4().hex[:6]}@abcbank.com"
+
+    r = c.post("/onboarding", headers=unit_admin,
+               json={"email": email, "role": "developer", "workspaceId": org["bu"]})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["created"] is True
+    assert body["roleRequestId"] is None, "a unit admin grants the role, so nothing is pending"
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        binding = (await s.execute(
+            text("SELECT role_name, scope_kind, scope_id FROM role_bindings WHERE user_id = :u"),
+            {"u": body["identityId"]},
+        )).first()
+        assert binding.role_name == "developer"
+        assert binding.scope_kind == "business_unit"
+        assert str(binding.scope_id) == org["bu"]
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_onboard_into_another_unit(org, unit_admin):
+    """The containment. Administering Payments confers nothing over Lending."""
+    other = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(text(
+            "INSERT INTO workspaces (id, organization_id, slug, display_name) "
+            "VALUES (:i, :o, 'lending', 'Lending')"
+        ), {"i": other, "o": org["org"]})
+
+    c = TestClient(process_api.app)
+    r = c.post("/onboarding", headers=unit_admin,
+               json={"email": "elsewhere@abcbank.com", "role": "developer", "workspaceId": other})
+    assert r.status_code == 404
+
+    async with get_db_session_superuser() as s:
+        assert (await s.execute(
+            text("SELECT 1 FROM users WHERE lower(email) = 'elsewhere@abcbank.com'")
+        )).first() is None, "a refused onboarding must not leave an account behind"
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_must_name_a_unit(org, unit_admin):
+    """Leaving somebody unplaced is an organisation-level state — no unit admin is
+    answerable for them, so it is not a unit admin's to create."""
+    c = TestClient(process_api.app)
+    r = c.post("/onboarding", headers=unit_admin,
+               json={"email": "nowhere@abcbank.com", "role": "developer"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "unit_required"
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_appoint_another_unit_admin(org, unit_admin):
+    """bu_admin is an org-level appointment. A unit admin who could confer it could
+    hand their own unit to somebody else."""
+    c = TestClient(process_api.app)
+    r = c.post("/onboarding", headers=unit_admin,
+               json={"email": "rival@abcbank.com", "role": "bu_admin", "workspaceId": org["bu"]})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_role"
+
+
+@pytest.mark.asyncio
+async def test_a_unit_admin_cannot_onboard_a_bare_contributor(org, unit_admin):
+    """`contributor` raises a role_assignment request addressed to this unit's admin —
+    who is the caller. They hold the authority it waits for, so they name the role."""
+    c = TestClient(process_api.app)
+    r = c.post("/onboarding", headers=unit_admin,
+               json={"email": "pending@abcbank.com", "role": "contributor", "workspaceId": org["bu"]})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_role"
+
+
+@pytest.mark.asyncio
+async def test_the_org_admin_path_is_unchanged_by_the_scoped_one(org):
+    """The two branches are separate: an Org Admin still may not name a working role,
+    and still may leave a Business Unit Admin unplaced."""
+    c = TestClient(process_api.app)
+    r = c.post("/onboarding", headers=_admin(org),
+               json={"email": "dev2@abcbank.com", "role": "developer", "workspaceId": org["bu"]})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_role"
+
+    r = c.post("/onboarding", headers=_admin(org),
+               json={"email": f"unplaced-{_uuid.uuid4().hex[:6]}@abcbank.com", "role": "bu_admin"})
+    assert r.status_code == 201, r.text
 
 
 @pytest.mark.asyncio

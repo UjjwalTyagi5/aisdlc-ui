@@ -22,7 +22,10 @@ import { RequireRole } from "@/components/auth/require-role";
 import type { Project } from "@/lib/schemas";
 import { TRACK_META } from "@/lib/tracks";
 
-const TEMPLATE_LABEL: Record<Project["template"], string> = {
+// Exported so the table renders the SAME template chip, track badge, approval
+// pill, owner stack and action menu as the card. Two copies of a badge is how one
+// of them quietly stops matching the other.
+export const TEMPLATE_LABEL: Record<Project["template"], string> = {
   web_app: "Web app",
   microservice: "Microservice",
   data_pipeline: "Data pipeline",
@@ -30,7 +33,7 @@ const TEMPLATE_LABEL: Record<Project["template"], string> = {
 };
 
 /** Mono badge tones map to the northstar .tmpl classes */
-const TEMPLATE_TONE: Record<Project["template"], string> = {
+export const TEMPLATE_TONE: Record<Project["template"], string> = {
   web_app: "border-info/30 bg-info/10 text-info",
   microservice: "border-primary/30 bg-primary/10 text-brand-bright",
   data_pipeline: "border-success/30 bg-success/10 text-success",
@@ -38,7 +41,7 @@ const TEMPLATE_TONE: Record<Project["template"], string> = {
 };
 
 /** Delivery track (PRD §6) — which agent roster this project runs, distinct from `template`. */
-function TrackBadge({ track, className }: { track: Project["track"]; className?: string }) {
+export function TrackBadge({ track, className }: { track: Project["track"]; className?: string }) {
   const meta = TRACK_META[track];
   return (
     <Tooltip>
@@ -64,7 +67,7 @@ function TrackBadge({ track, className }: { track: Project["track"]; className?:
 /** A project a Project Admin created is invisible-to-pipeline until its BU
  *  Admin approves it (governance approval, not an agent gate) — surface that
  *  state everywhere the project appears rather than hiding the card. */
-function ApprovalStatusBadge({ status }: { status: Project["approvalStatus"] }) {
+export function ApprovalStatusBadge({ status }: { status: Project["approvalStatus"] }) {
   if (status === "pending_approval") {
     return (
       <span className="border-warning/30 bg-warning/10 text-warning inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider">
@@ -264,7 +267,7 @@ function OwnerStack({ owners }: { owners: Project["owners"] }) {
 /** The project's creator (owners[0] — set once at creation, see
  *  createProjectRecord in lib/mock/project-fixtures.ts) — an avatar stack
  *  alone doesn't answer "who made this", so name it explicitly. */
-function CreatedByLabel({ owners, className }: { owners: Project["owners"]; className?: string }) {
+export function CreatedByLabel({ owners, className }: { owners: Project["owners"]; className?: string }) {
   const creator = owners[0];
   if (!creator) return null;
   return (
@@ -277,7 +280,7 @@ function CreatedByLabel({ owners, className }: { owners: Project["owners"]; clas
   );
 }
 
-function ProjectActions({
+export function ProjectActions({
   project,
   onArchive,
   onRestore,

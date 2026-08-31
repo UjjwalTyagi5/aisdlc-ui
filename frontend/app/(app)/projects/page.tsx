@@ -14,9 +14,11 @@ import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { EmptyProjects } from "@/components/feedback/empty-projects";
 import { CreateProjectDialog } from "@/components/app/create-project-dialog";
 import { ProjectCard } from "@/components/app/project-card";
+import { ProjectsTable } from "@/components/app/projects-table";
 import { SpendBreakdownCard } from "@/components/app/spend-breakdown-card";
 import {
   ProjectsToolbar,
+  resolveProjectsView,
   type ProjectsToolbarState,
   type TemplateFilter,
 } from "@/components/app/projects-toolbar";
@@ -44,13 +46,27 @@ export default function ProjectsPage() {
   // canCreateProject (lib/auth/permissions.ts).
   const canCreate = canCreateProject(effectivePlatformRole(session));
 
-  // Filters + view in URL so refresh preserves state.
+  // The table is an ADMIN view, and their default.
+  //
+  // An Org or Business Unit Admin is scanning a portfolio for the two projects that
+  // are stuck; a card gives each project room and puts the same field in a different
+  // place on every tile, which is the wrong shape for that. Everyone else works on a
+  // handful of projects they know by name, where the card is right — so they keep
+  // grid and list and are never offered the third option.
+  const viewerRole = effectivePlatformRole(session);
+  const canUseTable = viewerRole === "org_admin" || viewerRole === "bu_admin";
+
+  // Filters + view in URL so refresh preserves state. `view` is resolved rather than
+  // cast — see resolveProjectsView for the bookmark case that makes it necessary.
+  const defaultView: ProjectsToolbarState["view"] = canUseTable ? "table" : "grid";
+  const view = resolveProjectsView(searchParams.get("view"), canUseTable);
+
   const toolbarState: ProjectsToolbarState = {
     search: searchParams.get("q") ?? "",
     template: (searchParams.get("template") as TemplateFilter) || "all",
     sort: (searchParams.get("sort") as ProjectsToolbarState["sort"]) || "recent",
     showArchived: searchParams.get("archived") === "1",
-    view: (searchParams.get("view") as ProjectsToolbarState["view"]) || "grid",
+    view,
   };
   const page = Number(searchParams.get("page") ?? "1");
 
@@ -68,11 +84,13 @@ export default function ProjectsPage() {
       if (patch.template !== undefined) set("template", patch.template, "all");
       if (patch.sort !== undefined) set("sort", patch.sort, "recent");
       if (patch.showArchived !== undefined) set("archived", patch.showArchived ? "1" : "");
-      if (patch.view !== undefined) set("view", patch.view, "grid");
+      // Default-aware: writing ?view= for the view this viewer already defaults to
+      // just makes a longer URL that says nothing.
+      if (patch.view !== undefined) set("view", patch.view, defaultView);
       if (patch.page !== undefined) set("page", patch.page, "1");
       router.replace(`/projects?${next.toString()}`);
     },
-    [router, searchParams],
+    [router, searchParams, defaultView],
   );
 
   // Create dialog state
@@ -290,6 +308,7 @@ export default function ProjectsPage() {
       <SpendBreakdownCard groupBy="project" />
 
       <ProjectsToolbar
+        canUseTable={canUseTable}
         value={toolbarState}
         onChange={(patch) => {
           // Any toolbar change resets to page 1
@@ -349,7 +368,13 @@ export default function ProjectsPage() {
                   <span className="bg-line-soft h-px flex-1" aria-hidden />
                 </div>
 
-                {toolbarState.view === "grid" ? (
+                {toolbarState.view === "table" ? (
+                  <ProjectsTable
+                    projects={group.items}
+                    onArchive={onArchive}
+                    onRestore={onRestore}
+                  />
+                ) : toolbarState.view === "grid" ? (
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     {group.items.map((p, i) => (
                       <ProjectCard

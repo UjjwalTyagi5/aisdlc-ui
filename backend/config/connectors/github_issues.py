@@ -4,9 +4,10 @@ Auth uses GitHub App installation tokens (JWT RS256 → POST access_tokens endpo
 with a class-level cache keyed by installation_id. Tokens are refreshed proactively
 when within 5 minutes of their 1-hour expiry (Pitfall 3 avoidance — REQ-M6-14).
 
-Credentials (github-app-id, github-app-private-key, github-app-installation-id) are
-loaded via load_secret() Key Vault-first, env-var fallback — never stored on self
-except the short-lived (token, expires_at) cache entry (REQ-M6-14).
+The App id and private key are PLATFORM-level: one registered GitHub App serves
+every tenant. github-app-installation-id is tenant-scoped — it selects which
+tenant's installation of that App is being used. Nothing is stored on self except
+the short-lived (token, expires_at) cache entry (REQ-M6-14).
 
 Per-tenant rate-limit backoff with retry_count auditing follows the same pattern as
 JiraConnector (Plan 03). GitHub rate-limit headers X-RateLimit-Remaining and
@@ -19,6 +20,7 @@ present; falls back to exponential backoff otherwise. Must be validated against 
 real GitHub tenant before production use.
 """
 from __future__ import annotations
+
 
 import asyncio
 import logging
@@ -44,12 +46,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import (
-    GITHUB_APP_ID,
-    GITHUB_APP_INSTALLATION_ID,
-    GITHUB_APP_PRIVATE_KEY,
-    GITHUB_APP_PRIVATE_KEY_PATH,
-)
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -60,23 +56,13 @@ _GH_API_VERSION = "2022-11-28"
 _TOKEN_REFRESH_MARGIN_S = 300  # 5 minutes
 
 
-def _resolve_private_key_env() -> str:
-    """Local-dev fallback PEM resolver. Returns "" when neither env var is set.
-
-    KV `github-app-private-key` always takes precedence; this is only consulted
-    when Key Vault returns nothing (e.g. AZURE_KEY_VAULT_URL unset). Supports an
-    inline PEM (GITHUB_APP_PRIVATE_KEY) or a file path (GITHUB_APP_PRIVATE_KEY_PATH).
-    """
-    if GITHUB_APP_PRIVATE_KEY:
-        return GITHUB_APP_PRIVATE_KEY
-    if GITHUB_APP_PRIVATE_KEY_PATH:
-        try:
-            with open(GITHUB_APP_PRIVATE_KEY_PATH, "r", encoding="utf-8") as fh:
-                return fh.read()
-        except OSError:
-            logger.warning("GITHUB_APP_PRIVATE_KEY_PATH set but unreadable")
-            return ""
-    return ""
+# REMOVED: _resolve_private_key_env(), which read the App's private key from
+# GITHUB_APP_PRIVATE_KEY or a path in GITHUB_APP_PRIVATE_KEY_PATH. It carried the
+# comment "Never use these in production — use Key Vault", which nothing enforced.
+# A GitHub App private key signs as the App itself, so a platform-wide one let any
+# tenant's run act on every installation the App had — the same cross-tenant reach the
+# env-var connector credentials had. A tenant that wants App auth registers its own
+# App and stores github-app-id / github-app-private-key in its own secret store.
 
 
 class GitHubIssuesConnector(BaseConnector):
@@ -134,7 +120,7 @@ class GitHubIssuesConnector(BaseConnector):
         """Return a valid GitHub App installation token, refreshing if needed.
 
         Flow:
-        1. Load secrets (KV tenant-scoped first, global fallback, env fallback).
+        1. Load secrets (tenant-scoped KV; the App id/PEM are platform-level).
         2. Check class-level cache for a non-expiring token.
         3. If absent or within 5 min of expiry, generate a short-lived RS256 JWT
            and exchange it at POST /app/installations/{id}/access_tokens.
@@ -159,22 +145,32 @@ class GitHubIssuesConnector(BaseConnector):
         if override and override.token:
             return override.token
 
-        app_id = (
-            (await _keyvault.load_secret("github-app-id", tenant_id=tenant_id) if tenant_id else None)
-            or await _keyvault.load_secret("github-app-id")
-            or self._app_id_hint
-            or GITHUB_APP_ID
-        )
-        private_key_pem = (
-            (await _keyvault.load_secret("github-app-private-key", tenant_id=tenant_id) if tenant_id else None)
-            or await _keyvault.load_secret("github-app-private-key")
-            or _resolve_private_key_env()
-        )
+        # Every rung tenant-scoped. The untenanted load_secret(...) global-vault rung
+        # and the env fallback that used to sit under each of these are gone: they made
+        # ONE App registration serve every tenant, so a tenant that never connected
+        # GitHub still transacted as the platform's App.
+        #
+        # The secret store is checked FIRST, matching jira/slack. It is where the
+        # Integrations form writes, and in local dev it is a Fernet-encrypted DB table
+        # rather than Key Vault — so a KV-only lookup here found nothing an admin had
+        # just entered.
+        async def _tenant_secret(ref: str) -> Optional[str]:
+            if not tenant_id or tenant_id == "__health_probe__":
+                return None
+            try:
+                from shared.services import secret_store  # lazy: avoid import cycle
+                value = await secret_store.get_secret(tenant_id, ref)
+                if value:
+                    return value
+            except Exception:  # noqa: BLE001 — fall through to Key Vault
+                pass
+            return await _keyvault.load_secret(ref, tenant_id=tenant_id)
+
+        app_id = await _tenant_secret("github-app-id") or self._app_id_hint
+        private_key_pem = await _tenant_secret("github-app-private-key")
         installation_id = (
-            (await _keyvault.load_secret("github-app-installation-id", tenant_id=tenant_id) if tenant_id else None)
-            or await _keyvault.load_secret("github-app-installation-id")
+            await _tenant_secret("github-app-installation-id")
             or self._installation_id_hint
-            or GITHUB_APP_INSTALLATION_ID
         )
 
         now = int(time.time())
@@ -243,7 +239,7 @@ class GitHubIssuesConnector(BaseConnector):
         """Return an ephemeral credential context for GitHub API calls.
 
         tenant_id is required — raises ValueError when absent (REQ-M7-01, SC-02).
-        Credentials are resolved tenant-scoped first, then fall back to global KV,
+        The installation id is tenant-scoped; the App id and PEM are platform-level,
         then to env vars (local development only).
         Return value is never stored on self beyond the token cache entry.
         """
@@ -438,7 +434,7 @@ class GitHubIssuesConnector(BaseConnector):
 
         # Thread the tenant into credential resolution. This previously called
         # _get_installation_token() with no argument, so every "tenant-scoped" call
-        # silently resolved the GLOBAL KV/env credential and the per-tenant tier was
+        # silently resolved a platform-wide credential and the per-tenant tier was
         # dead code. "default" is the rate-limit bucket sentinel, not a tenant, so it
         # is not treated as one; the instance tenant set by the factory wins there.
         auth_tenant = tenant_id if tenant_id and tenant_id != "default" else self._tenant_id

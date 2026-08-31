@@ -26,10 +26,12 @@ if _SKIP:
     pytest.skip(_SKIP_REASON, allow_module_level=True)
 
 
-def _make_connector(bot_token="xoxb-fake-token") -> SlackConnector:
+def _make_connector() -> SlackConnector:
     # tenant_id is required by auth_adapter() (REQ-M7-01) — connector credentials
-    # are per-tenant, so a connector built with none can never authenticate.
-    return SlackConnector(bot_token=bot_token, tenant_id="test-tenant")
+    # are per-tenant, so a connector built with none can never authenticate. There is
+    # no bot_token kwarg any more: the token is resolved per-tenant inside
+    # auth_adapter(), and these tests mock the Slack SDK call, so its value is moot.
+    return SlackConnector(tenant_id="test-tenant")
 
 
 @pytest.mark.unit

@@ -32,7 +32,7 @@ from config.connection_manager import manager
 from config.context_broker import build_context
 from config.orchestrator_state_client import set_state as _set_orchestrator_state, fetch_session_artifacts
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
-from config.env import AGENT_RUNTIME_MODE, ADO_PAT
+from config.env import AGENT_RUNTIME_MODE
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import broadcast_log, set_session_id, set_user_id, set_provider_kind
 from langchain_core.messages import ToolMessage
@@ -196,7 +196,7 @@ async def _bind_pulled_workspace(s, message_data: dict, tenant_id: str) -> str:
             from shared.services import ado_repos
             _, s.pat = await ado_repos.resolve_auth(tenant_id)
         except Exception:
-            s.pat = ADO_PAT
+            s.pat = ""
 
     repo_name = ws.get("repo_name", "")
     branch = ws.get("branch", "")

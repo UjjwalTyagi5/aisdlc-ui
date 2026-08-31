@@ -338,14 +338,10 @@ async def test_a_connector_authenticates_at_the_projects_own_url(org, monkeypatc
     """THE POINT OF ALL THIS: with no org-wide configuration of any kind, a
     connector still resolves a working URL — the one the member typed.
 
-    Every tenant-wide tier is emptied first (env default included), so the only
-    place the URL below can have come from is the project credential.
+    There are no tenant-wide tiers to empty any more — the connector reads only this
+    tenant's own secrets — so the only place the URL below can have come from is the
+    project credential.
     """
-    import config.connectors.sonarqube as _sq
-
-    monkeypatch.setattr(_sq, "SONARQUBE_URL", "")
-    monkeypatch.setattr(_sq, "SONARQUBE_TOKEN", "")
-
     c = TestClient(process_api.app)
     await _grant_integration(org, "connector", "sonarqube", org["payments"])
     admin = await _user(org, "orgadmin")
@@ -371,11 +367,18 @@ async def test_a_connector_authenticates_at_the_projects_own_url(org, monkeypatc
 @pytest.mark.asyncio
 async def test_a_credential_without_a_url_still_works(org, monkeypatch):
     """A row written before base_url existed carries only a token, and must keep
-    authenticating against the tenant-wide URL rather than against nothing."""
+    authenticating against the tenant-wide URL rather than against nothing.
+
+    The tenant-wide URL is now the tenant's own `sonarqube-url` Key Vault secret — it
+    used to be the SONARQUBE_URL env var, one value shared by every tenant."""
     import config.connectors.sonarqube as _sq
 
-    monkeypatch.setattr(_sq, "SONARQUBE_URL", "https://sonar.tenant-wide.internal")
-    monkeypatch.setattr(_sq, "SONARQUBE_TOKEN", "")
+    async def _tenant_wide_url(ref, tenant_id=None):
+        if ref == "sonarqube-url" and tenant_id:
+            return "https://sonar.tenant-wide.internal"
+        return None
+
+    monkeypatch.setattr(_sq._keyvault, "load_secret", _tenant_wide_url)
 
     c = TestClient(process_api.app)
     await _grant_integration(org, "connector", "sonarqube", org["payments"])

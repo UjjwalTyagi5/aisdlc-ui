@@ -242,31 +242,31 @@ def test_resolve_model_tries_byok_first_and_returns_it_on_success():
     assert call_kwargs["offering_id"] == "off-1"
 
 
-def test_resolve_model_falls_back_to_raw_chat_anthropic_preserving_model_id():
+def test_resolve_model_propagates_a_resolution_failure():
+    """A failed model resolution must surface, NOT fall back to the platform key.
+
+    This test previously asserted the opposite — that _resolve_model caught the error
+    and built a ChatAnthropic from the platform's ANTHROPIC_API_KEY. That behaviour was
+    the bug: the catch-all also swallowed the ImportError from `resolve_chat_model`,
+    which did not exist, so EVERY tenant run silently used the platform key and skipped
+    budgets, model grants and rate limits.
+
+    Whether a local-dev fallback is permitted is now resolve_chat_model's decision, made
+    once against AGENT_RUNTIME_MODE, rather than each agent's own catch-all.
+    See tests/test_byok_no_platform_fallback.py.
+    """
     from agents_orchestrator.documentation_agent.agents.compiler import _resolve_model
     import sys
 
-    fake_bound_model = MagicMock(name="fallback_model")
-    fake_anthropic_instance = MagicMock()
-    fake_anthropic_instance.bind_tools.return_value = fake_bound_model
-
-    # Mock resolve_chat_model to raise, so we test the fallback path
     mock_model_resolver = MagicMock()
     mock_model_resolver.resolve_chat_model = MagicMock(
         side_effect=RuntimeError("no provider configured")
     )
 
     with patch.dict(sys.modules, {"shared.services.model_resolver": mock_model_resolver}), patch(
-        "langchain_anthropic.ChatAnthropic",
-        return_value=fake_anthropic_instance,
+        "langchain_anthropic.ChatAnthropic"
     ) as mock_chat_anthropic:
-        result = _resolve_model(
-            {"model_id": "claude-requested", "offering_id": None}
-        )
+        with pytest.raises(RuntimeError, match="no provider configured"):
+            _resolve_model({"model_id": "claude-requested", "offering_id": None})
 
-    assert result is fake_bound_model
-    mock_chat_anthropic.assert_called_once()
-    # THE regression this test guards: compiler.py's fallback already uses
-    # state.get("model_id") or ANTHROPIC_MODEL correctly -- unlike Code Review's and
-    # pre-fix Security's, which both hardcoded the default here. Do not let this drift.
-    assert mock_chat_anthropic.call_args.kwargs["model"] == "claude-requested"
+    mock_chat_anthropic.assert_not_called()

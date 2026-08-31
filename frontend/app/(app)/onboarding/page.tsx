@@ -53,7 +53,7 @@ import { RequireRole } from "@/components/auth/require-role";
 import { PwcMark } from "@/components/brand/pwc-mark";
 import { useSession } from "@/hooks/use-session";
 import { useActiveWorkspace } from "@/hooks/use-workspaces";
-import { installConnector, listConnectors } from "@/lib/api/connectors";
+import { listConnectors } from "@/lib/api/connectors";
 import { createProject } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import type { Connector, ConnectorKind, ProjectTemplate } from "@/lib/schemas";
@@ -767,8 +767,6 @@ function ToolsStep({
   onBack: () => void;
   onNext: () => void;
 }) {
-  const queryClient = useQueryClient();
-
   // List connectors so we know what's already installed
   const connectorsQ = useQuery({
     queryKey: qk.connectors.list(),
@@ -779,32 +777,26 @@ function ToolsStep({
     (connectorsQ.data ?? []).filter((c) => c.installed).map((c) => c.kind),
   );
 
-  // Mutations run per-kind on Continue — parallel for a snappier UX.
-  const installing = useMutation({
-    mutationFn: (kind: ConnectorKind) => installConnector(kind),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: qk.connectors.list() });
-    },
-  });
-
-  const finish = async () => {
-    const targets: ConnectorKind[] = [];
-    if (value.work && !installedKinds.has(value.work)) targets.push(value.work);
-    if (value.scm && !installedKinds.has(value.scm)) targets.push(value.scm);
-    if (value.slack && !installedKinds.has("slack")) targets.push("slack");
-    if (targets.length === 0) {
-      onNext();
-      return;
+  // Continue only RECORDS the choice — it no longer installs anything.
+  //
+  // It used to fire installConnector() per kind, which returned an OAuth authorize URL
+  // for the browser to follow. That flow is gone: it ran against one OAuth app the
+  // platform registered and held a client secret for on every tenant's behalf. A
+  // connector is connected by pasting a credential on the Integrations page, which is
+  // per-tenant end to end, so there is nothing for this step to do but remember the
+  // selection and say where to finish the job.
+  const finish = () => {
+    const pending: ConnectorKind[] = [];
+    if (value.work && !installedKinds.has(value.work)) pending.push(value.work);
+    if (value.scm && !installedKinds.has(value.scm)) pending.push(value.scm);
+    if (value.slack && !installedKinds.has("slack")) pending.push("slack");
+    if (pending.length > 0) {
+      toast.info(
+        `Add credentials for ${pending.length} connector${pending.length === 1 ? "" : "s"} in Integrations`,
+        { description: "Your selection is saved — connect them whenever you're ready." },
+      );
     }
-    try {
-      await Promise.all(targets.map((k) => installing.mutateAsync(k)));
-      toast.success(`${targets.length} connector${targets.length === 1 ? "" : "s"} installed`);
-      onNext();
-    } catch (err) {
-      toast.error("Couldn't install some connectors", {
-        description: err instanceof Error ? err.message : undefined,
-      });
-    }
+    onNext();
   };
 
   const pickable = value.work !== null && value.scm !== null;
@@ -815,7 +807,8 @@ function ToolsStep({
         <CardTitle className="font-display font-semibold">Connect your tools</CardTitle>
         <CardDescription>
           Pick one work-management + one source-control connector. Slack is optional
-          but recommended for approvals.
+          but recommended for approvals. You&apos;ll add each one&apos;s credentials on the
+          Integrations page.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -860,12 +853,7 @@ function ToolsStep({
           <Button variant="ghost" onClick={onBack}>
             <ArrowLeft aria-hidden /> Back
           </Button>
-          <Button
-            onClick={finish}
-            disabled={!pickable || installing.isPending}
-            aria-busy={installing.isPending}
-          >
-            {installing.isPending && <Loader2 className="size-4 animate-spin" aria-hidden />}
+          <Button onClick={finish} disabled={!pickable}>
             Continue <ArrowRight aria-hidden />
           </Button>
         </div>

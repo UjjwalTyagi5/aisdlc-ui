@@ -17,11 +17,18 @@ import { bffProxy } from "@/lib/bff/proxy";
  * assigned rather than by being approved.
  *
  * Only a Contributor generates one — a Business Unit Admin was given their job by this
- * very act. The response says which happened via `roleRequestId`.
+ * very act, and so does somebody a unit admin onboards, because that caller names the
+ * role in the same request. The response says which happened via `roleRequestId`.
  *
- * The role check is the backend's and it is the real gate, not the dialog's: a picker
- * offering two options is a convenience, and a request naming `developer` from a stale
- * client has to be refused for the same reason the picker doesn't offer it.
+ * TWO CALLERS. An Organization Admin admits someone to the organisation and picks one
+ * of the two org-level roles. A Business Unit Admin staffs a unit they administer and
+ * picks the working role directly; the backend checks WHICH unit with
+ * assert_can_write_workspace and answers 404 for any other.
+ *
+ * Nothing is decided here — this proxies. The role and scope checks are the backend's
+ * and are the real gate, not the dialog's: a picker is a convenience, and a request
+ * naming `developer` from a stale client has to be refused for the same reason the
+ * picker doesn't offer it.
  */
 export async function POST(req: NextRequest) {
   const body: unknown = await req.json();

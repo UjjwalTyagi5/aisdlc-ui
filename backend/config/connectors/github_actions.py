@@ -9,11 +9,9 @@ other, so they do not share credentials.
 
 Credentials resolve through the standard ladder (mirrors AzureDevOpsConnector):
     secret_store(tenant, "gha-pat")   ← the Integrations form writes here
-      → Key Vault "{tenant}-gha-pat"
-      → Key Vault "gha-pat"
-      → config.env.GHA_PAT             ← local dev only
-A DISCONNECTED_MARKER in the secret store short-circuits with NO fallback, so a
-disconnect is honoured rather than silently falling through to a global credential.
+      → Key Vault "{tenant}-gha-pat"   ← both rungs are tenant-scoped
+There is no global-KV or env rung: a tenant that has not connected GitHub Actions
+resolves to nothing and fails as "not connected", never as the platform.
 
 The PAT is never stored on self and never logged.
 
@@ -43,7 +41,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import GHA_OWNER, GHA_PAT
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -92,7 +89,7 @@ class GitHubActionsConnector(BaseConnector):
 
     # ── Auth (ephemeral) ──────────────────────────────────────────────────
 
-    async def _resolve_ref(self, tenant_id: str, ref: str, env_fallback: str) -> Tuple[Optional[str], bool]:
+    async def _resolve_ref(self, tenant_id: str, ref: str) -> Tuple[Optional[str], bool]:
         """Resolve one credential ref through the standard ladder.
 
         Returns (value, disconnected). When `disconnected` is True the tenant has
@@ -108,14 +105,10 @@ class GitHubActionsConnector(BaseConnector):
                 if stored == secret_store.DISCONNECTED_MARKER:
                     return None, True
                 value = stored
-            except Exception:  # noqa: BLE001 — degrade to the KV/env tiers
+            except Exception:  # noqa: BLE001 — degrade to the tenant KV tier
                 value = None
         if not value and tenant_id:
             value = await _keyvault.load_secret(ref, tenant_id=tenant_id)
-        if not value:
-            value = await _keyvault.load_secret(ref)
-        if not value:
-            value = env_fallback
         return value, False
 
     async def auth_adapter(self, tenant_id: str = "") -> dict[str, Any]:
@@ -133,7 +126,7 @@ class GitHubActionsConnector(BaseConnector):
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
 
-        owner, _ = await self._resolve_ref(tid, "gha-owner", GHA_OWNER)
+        owner, _ = await self._resolve_ref(tid, "gha-owner")
         if not owner and self._org_url:
             owner = self._org_url.split("/")[0]
 
@@ -147,7 +140,7 @@ class GitHubActionsConnector(BaseConnector):
             # wins over the tenant-wide `gha-owner` resolved above.
             return {"pat": override.token, "owner": override.account or owner or ""}
 
-        pat, disconnected = await self._resolve_ref(tid, "gha-pat", GHA_PAT)
+        pat, disconnected = await self._resolve_ref(tid, "gha-pat")
         if disconnected:
             return {"pat": "", "owner": ""}
         return {"pat": pat or "", "owner": owner or ""}

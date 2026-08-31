@@ -14,7 +14,12 @@
  * become proxies. The shape it returns is the contract
  * (`lib/schemas/onboarding.ts::OnboardingResult`).
  */
-import { isOrgAssignableRole, ROLE_META, type PlatformRole } from "@/lib/roles";
+import {
+  isOrgAssignableRole,
+  isUnitAssignableRole,
+  ROLE_META,
+  type PlatformRole,
+} from "@/lib/roles";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 import { addAccessMember } from "./access-fixtures";
@@ -94,6 +99,14 @@ export interface OnboardingInput {
   displayName?: string;
   workspaceId?: string | null;
   role?: string;
+  /**
+   * Units the caller ADMINISTERS, or null meaning org-wide.
+   *
+   * Mirrors the two branches in shared/routers/onboarding.py. Without it this
+   * fixture answered every request as if an Organization Admin had made it, so mock
+   * mode showed a Business Unit Admin a 422 for the one flow that is now theirs.
+   */
+  administeredUnitIds?: string[] | null;
   /** Who is doing this, for the request's "raised by" line. Supplied by the
    *  route handler from the session — never by the browser. */
   actorName?: string;
@@ -117,6 +130,8 @@ export function onboardIntoOrganization(input: OnboardingInput): OnboardingOutco
   const { email, displayName, role } = input;
   const workspaceId = input.workspaceId || null;
   const actor = input.actorName?.trim() || ROLE_META.org_admin.label;
+  const administered = input.administeredUnitIds ?? null;
+  const orgWide = administered === null;
 
   if (!email || !role) {
     return {
@@ -125,26 +140,52 @@ export function onboardIntoOrganization(input: OnboardingInput): OnboardingOutco
     };
   }
 
-  if (!isOrgAssignableRole(role)) {
-    return {
-      status: 422,
-      body: {
-        code: "invalid_role",
-        message: `Onboarding assigns ${ROLE_META.bu_admin.label} or ${ROLE_META.contributor.label}. Every other role is granted by a ${BUSINESS_UNIT_LABEL.toLowerCase()}'s admin.`,
-      },
-    };
-  }
+  if (orgWide) {
+    if (!isOrgAssignableRole(role)) {
+      return {
+        status: 422,
+        body: {
+          code: "invalid_role",
+          message: `Onboarding assigns ${ROLE_META.bu_admin.label} or ${ROLE_META.contributor.label}. Every other role is granted by a ${BUSINESS_UNIT_LABEL.toLowerCase()}'s admin.`,
+        },
+      };
+    }
 
-  // A contributor with no unit belongs to nobody: no admin is prompted for
-  // their role, so they would sit with no access and nothing to explain why.
-  if (role === "contributor" && !workspaceId) {
-    return {
-      status: 422,
-      body: {
-        code: "invalid_input",
-        message: `A ${ROLE_META.contributor.label} needs a ${BUSINESS_UNIT_LABEL.toLowerCase()} — its admin is who gives them a role.`,
-      },
-    };
+    // A contributor with no unit belongs to nobody: no admin is prompted for
+    // their role, so they would sit with no access and nothing to explain why.
+    if (role === "contributor" && !workspaceId) {
+      return {
+        status: 422,
+        body: {
+          code: "invalid_input",
+          message: `A ${ROLE_META.contributor.label} needs a ${BUSINESS_UNIT_LABEL.toLowerCase()} — its admin is who gives them a role.`,
+        },
+      };
+    }
+  } else {
+    // The Business Unit Admin's branch. Mirrors the server exactly, including the
+    // 404 — a unit you do not administer is not confirmed to exist by the error.
+    if (!workspaceId) {
+      return {
+        status: 422,
+        body: {
+          code: "unit_required",
+          message: `Choose the ${BUSINESS_UNIT_LABEL.toLowerCase()} to onboard them into.`,
+        },
+      };
+    }
+    if (!administered.includes(String(workspaceId))) {
+      return { status: 404, body: { code: "not_found", message: "Unknown workspace" } };
+    }
+    if (!isUnitAssignableRole(role)) {
+      return {
+        status: 422,
+        body: {
+          code: "invalid_role",
+          message: `Choose the role this person will hold in your ${BUSINESS_UNIT_LABEL.toLowerCase()}. ${ROLE_META.bu_admin.label} is an organization-level appointment, and ${ROLE_META.contributor.label} would file a request back to you.`,
+        },
+      };
+    }
   }
 
   if (workspaceId && !getWorkspace(workspaceId)) {
@@ -152,7 +193,10 @@ export function onboardIntoOrganization(input: OnboardingInput): OnboardingOutco
   }
 
   const identity = findOrCreateIdentity(email, displayName);
-  setOrgRole(identity.id, role as OrgRole, workspaceId);
+  // The org-role store records the ORG-level standing. A unit role is not one, so a
+  // scoped onboarding leaves the person a contributor organisationally and carries
+  // the real role on the unit membership below — which is what the directory reads.
+  setOrgRole(identity.id, (orgWide ? role : "contributor") as OrgRole, workspaceId);
 
   let notified = false;
   if (workspaceId) {

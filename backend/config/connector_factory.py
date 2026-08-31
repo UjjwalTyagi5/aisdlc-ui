@@ -11,7 +11,6 @@ from __future__ import annotations
 import importlib
 
 from config.connectors.base import BaseConnector, ConnectorNotAvailableError
-from config.env import ADO_ORG_URL
 
 
 # ── Registry: kind → connector module + class ────────────────────────────────
@@ -71,44 +70,35 @@ async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> B
     # tenant_id is run context (not a credential): pass it so the connector's
     # auth_adapter() can resolve the tenant-scoped secret without each call site
     # threading it through. The health-probe sentinel is passed through unchanged;
-    # auth_adapter then misses the tenant-scoped KV name and falls back to the
-    # global name / env var, which is the intended probe credential.
-    if kind == "azure_devops":
-        # Prefer the per-tenant org URL set via the Integrations "Add credentials"
-        # form (secret store); fall back to the env default. Skipped for the
-        # health-probe sentinel and never allowed to raise.
-        org_url = ADO_ORG_URL
-        if tenant_id and tenant_id != "__health_probe__":
-            try:
-                from shared.services import secret_store
-                stored = await secret_store.get_secret(tenant_id, "ado-org-url")
-                if stored:
-                    org_url = stored
-            except Exception:
-                pass
-        return connector_class(org_url=org_url, tenant_id=tenant_id)
-    if kind == "azure_repos":
-        # Reuses ADO credentials — same org URL as AzureDevOpsConnector
-        return connector_class(org_url=ADO_ORG_URL, tenant_id=tenant_id)
-    if kind == "jira":
-        from config.env import JIRA_URL
-        # Pass tenant_id so the connector resolves THIS tenant's stored jira-url/email/
-        # token (not the empty global env), mirroring azure_devops above.
-        return connector_class(org_url=JIRA_URL, tenant_id=tenant_id)
-    if kind == "confluence":
-        from config.env import CONFLUENCE_URL
-        return connector_class(org_url=CONFLUENCE_URL, tenant_id=tenant_id)
-    if kind == "sonarqube":
-        from config.env import SONARQUBE_URL
-        return connector_class(org_url=SONARQUBE_URL, tenant_id=tenant_id)
-    # slack, github_issues, github_actions, ms_teams, sharepoint, figma and any future
-    # connectors: instantiate with an empty org_url; credentials are resolved lazily
-    # in auth_adapter() from the tenant secret store / Key Vault.
+    # auth_adapter then finds no tenant secret and reports "not configured", which
+    # is now the honest answer — the probe is not a tenant and has no credential of
+    # its own to probe with.
     #
+    # The site/org URL is tenant data too — it comes from the Integrations form via
+    # the secret store, exactly like the credential it pairs with. There is no env
+    # default: a platform-wide URL would point a tenant that never connected at the
+    # PLATFORM's own Jira/ADO/SonarQube instance, which is the same leak as sharing
+    # the token. Connectors whose URL is fixed (GitHub, Slack, Figma, Graph) get "".
+    url_ref = {
+        "azure_devops": "ado-org-url",
+        "azure_repos": "ado-org-url",
+        "jira": "jira-url",
+        "confluence": "confluence-url",
+        "sonarqube": "sonarqube-url",
+    }.get(kind)
+
+    org_url = ""
+    if url_ref and tenant_id and tenant_id != "__health_probe__":
+        try:
+            from shared.services import secret_store
+            org_url = await secret_store.get_secret(tenant_id, url_ref) or ""
+        except Exception:  # noqa: BLE001 — never let a secret-store hiccup block build
+            org_url = ""
+
     # Every connector constructor accepts org_url= and tenant_id= precisely so this
-    # tail works for all of them. SlackConnector used to take only bot_token, so this
-    # call raised TypeError and get_connector_for_session(kind="slack") was unusable.
-    return connector_class(org_url="", tenant_id=tenant_id)
+    # one tail works for all of them. SlackConnector used to take only bot_token, so
+    # this call raised TypeError and get_connector_for_session(kind="slack") was unusable.
+    return connector_class(org_url=org_url, tenant_id=tenant_id)
 
 
 async def list_available_connectors() -> list[dict]:

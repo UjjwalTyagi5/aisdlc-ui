@@ -39,7 +39,7 @@ from config.env import INVITE_TOKEN_TTL_MINUTES
 from shared.authz.dependency import require_permission
 from shared.authz.grant import UnitAlreadyAdministeredError, grant_role
 from shared.authz.grant_guard import assert_can_grant_role
-from shared.authz.read_scope import active_binding, is_org_wide
+from shared.authz.read_scope import active_binding, assert_can_write_workspace, is_org_wide
 from shared.db import get_db_session, get_db_session_superuser
 from shared.services import email_templates, password_setup
 from shared.services import governance_requests as governance
@@ -55,6 +55,38 @@ onboarding_router = APIRouter(
 # The only two answers an Organization Admin gives. Mirrors ORG_ASSIGNABLE_ROLES in
 # frontend/lib/roles.ts.
 ORG_ASSIGNABLE = ("bu_admin", "contributor")
+
+# What a BUSINESS UNIT ADMIN may onboard someone as, inside a unit they administer.
+# The delivery-tier built-ins minus `contributor` and `custom` — mirrors
+# BUSINESS_UNIT_ASSIGNABLE_BUILTIN_ROLES in frontend/hooks/use-assignable-roles.ts.
+#
+# `bu_admin` is absent and must stay absent: it is an ORG-level appointment
+# (ORG_ASSIGNABLE above), and one-admin-per-unit is enforced in grant.py. A unit
+# admin who could appoint one could hand their own unit to somebody else.
+#
+# `contributor` is absent for a different reason. It means "placed, awaiting a role
+# from this unit's admin", and raises a role_assignment request addressed to exactly
+# that admin — so a unit admin choosing it would be filing a request against
+# themselves. They hold the authority the placeholder is waiting for, so they name
+# the role now. That is act 3 in _onboard_person, which self-skips for any role
+# other than `contributor`.
+#
+# Custom roles are NOT here. They live in their own table and bind through
+# role_bindings.custom_role_id rather than role_name, so grant_role's role_name path
+# cannot express one. A unit admin onboards with a built-in role and assigns a custom
+# one afterwards from the same page (AssignBusinessUnitRoleDialog), which is the
+# existing route for it.
+UNIT_ASSIGNABLE = (
+    "project_admin",
+    "ba",
+    "architect",
+    "developer",
+    "qa",
+    "security_engineer",
+    "devops_engineer",
+    "data_engineer",
+    "scrum_master",
+)
 
 
 class OnboardIn(BaseModel):
@@ -100,29 +132,52 @@ async def onboard(
 ) -> dict[str, Any]:
     tenant_id = _tenant_id(request)
 
-    # Admitting someone to the ORGANISATION is org-wide authority, not `member:manage`
-    # — a Business Unit Admin assigns roles inside their unit and never decides who
-    # belongs to the organisation or to which unit.
-    if not is_org_wide(request):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "forbidden",
-                "message": "Onboarding is an Organization Admin action.",
-            },
-        )
+    # TWO CALLERS, TWO SCOPES.
+    #
+    # Deciding who belongs to the ORGANISATION, and to which unit, is org-wide
+    # authority. Staffing a unit you already administer is not the same act and never
+    # was: it names somebody, places them where the caller already writes, and gives
+    # them a role the caller already grants from the Users page a moment later.
+    #
+    # This used to be a flat `if not is_org_wide: 403`, which left a Business Unit
+    # Admin raising a `user_onboarding` request so an Organization Admin could press a
+    # button on their behalf — an approval step over a decision that was entirely
+    # theirs, in a unit nobody else administers.
+    if is_org_wide(request):
+        if body.role not in ORG_ASSIGNABLE:
+            raise _invalid(
+                "invalid_role",
+                "Onboarding assigns Business Unit Admin or Contributor. Every other role "
+                "is granted by a business unit's admin.",
+            )
+    else:
+        # A unit is REQUIRED here. Leaving somebody unplaced is an organisation-level
+        # state — no unit admin is answerable for them — so it is not this caller's to
+        # create, and `workspaceId` being optional on the model is for the branch above.
+        if not (body.workspaceId or "").strip():
+            raise _invalid(
+                "unit_required",
+                "Choose the business unit to onboard them into.",
+            )
 
-    if body.role not in ORG_ASSIGNABLE:
-        raise _invalid(
-            "invalid_role",
-            "Onboarding assigns Business Unit Admin or Contributor. Every other role "
-            "is granted by a business unit's admin.",
-        )
+        # THE SCOPE CHECK. `member:manage` says the caller administers a unit, not
+        # WHICH one — this is the half that asks. 404 rather than 403 throughout, so a
+        # unit the caller does not administer is not confirmed to exist by the error.
+        await assert_can_write_workspace(db, request, body.workspaceId)
 
-    # Belt and braces over the org-wide gate above, and not redundant: `is_org_wide`
-    # also passes on `settings:manage`, which no shipped role grants but a custom
-    # role or an override could. Someone who reached here that way must still not
-    # confer a Business Unit Admin's permissions without holding them.
+        if body.role not in UNIT_ASSIGNABLE:
+            raise _invalid(
+                "invalid_role",
+                "Choose the role this person will hold in your business unit. "
+                "Business Unit Admin is an organization-level appointment, and "
+                "Contributor would file a request back to you.",
+            )
+
+    # Belt and braces over the gates above, and not redundant for either branch:
+    # `is_org_wide` also passes on `settings:manage`, which no shipped role grants but
+    # a custom role or an override could, and the scoped branch has checked WHERE the
+    # caller may write without yet checking WHAT they may confer. Nobody grants a role
+    # carrying access-authority they do not hold themselves.
     await assert_can_grant_role(db, request, body.role)
 
     return await _onboard_person(

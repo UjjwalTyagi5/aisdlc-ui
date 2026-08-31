@@ -197,15 +197,11 @@ def _synthesise_upstream_development_from_hints(merged: Dict[str, str]) -> Optio
     project = (merged.get("project") or repo).strip()
     repo_url = (merged.get("repo_url") or "").strip()
     if not repo_url:
-        try:
-            from config.env import ADO_ORG_URL
-            org_url = (ADO_ORG_URL or "").rstrip("/")
-        except Exception:
-            org_url = ""
-        repo_url = (
-            f"{org_url}/{project}/_git/{repo}" if org_url
-            else f"https://dev.azure.com/_/{project}/_git/{repo}"
-        )
+        # No org here: the ADO org is tenant data (secret store "ado-org-url"),
+        # not process configuration, and this helper is sync. Callers that need a
+        # real URL pass repo_url explicitly; this placeholder only has to be shaped
+        # like an ADO URL for the downstream parser.
+        repo_url = f"https://dev.azure.com/_/{project}/_git/{repo}"
 
     return {
         "repo_url": repo_url,

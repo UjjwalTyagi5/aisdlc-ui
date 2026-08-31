@@ -13,9 +13,7 @@ and revocable from Figma's side, which a PAT is not.
 
 Credentials resolve through the standard ladder (mirrors GitHubActionsConnector):
     secret_store(tenant, "figma-access-token" | "figma-pat")  ← Integrations form / OAuth callback
-      → Key Vault "{tenant}-figma-pat"
-      → Key Vault "figma-pat"
-      → config.env.FIGMA_PAT                                   ← local dev only
+      → Key Vault "{tenant}-figma-pat"                        ← both rungs tenant-scoped
 A DISCONNECTED_MARKER on `figma-connected` short-circuits the whole ladder with NO
 fallback, so a disconnect is honoured rather than silently reverting to a global
 credential. The marker is checked FIRST because this kind has two credential refs and
@@ -56,7 +54,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import FIGMA_PAT
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -169,7 +166,7 @@ class FigmaConnector(BaseConnector):
     # ── Auth (ephemeral) ──────────────────────────────────────────────────
 
     async def _resolve_ref(
-        self, tenant_id: str, ref: str, env_fallback: str = ""
+        self, tenant_id: str, ref: str
     ) -> Tuple[Optional[str], bool]:
         """Resolve one credential ref through the standard ladder.
 
@@ -186,7 +183,7 @@ class FigmaConnector(BaseConnector):
                 if stored == secret_store.DISCONNECTED_MARKER:
                     return None, True
                 value = stored
-            except Exception:  # noqa: BLE001 — degrade to the KV/env tiers
+            except Exception:  # noqa: BLE001 — degrade to the tenant KV tier
                 value = None
         # The vault tiers are guarded too: these run under asyncio.gather, where one
         # coroutine raising leaves its sibling's result unretrieved. A vault hiccup
@@ -196,13 +193,6 @@ class FigmaConnector(BaseConnector):
                 value = await _keyvault.load_secret(ref, tenant_id=tenant_id)
             except Exception:  # noqa: BLE001
                 value = None
-        if not value:
-            try:
-                value = await _keyvault.load_secret(ref)
-            except Exception:  # noqa: BLE001
-                value = None
-        if not value:
-            value = env_fallback
         return value, False
 
     @staticmethod
@@ -233,7 +223,7 @@ class FigmaConnector(BaseConnector):
 
         Deliberately consults ONLY the secret store, unlike `_resolve_ref`. The marker
         is written exclusively by POST /connectors/figma/credentials and the OAuth
-        callback, both of which write there — so the Key Vault and env tiers can never
+        callback, both of which write there — so the Key Vault tier can never
         hold it, and asking them cost two wasted round trips on every call for any
         tenant that had not connected.
         """
@@ -323,7 +313,7 @@ class FigmaConnector(BaseConnector):
         # the OAuth ref first.
         (oauth_token, oauth_disconnected), (pat, pat_disconnected) = await asyncio.gather(
             self._resolve_ref(tid, "figma-access-token"),
-            self._resolve_ref(tid, "figma-pat", FIGMA_PAT),
+            self._resolve_ref(tid, "figma-pat"),
         )
         if oauth_disconnected or pat_disconnected:
             return dict(_EMPTY)

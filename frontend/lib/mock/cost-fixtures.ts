@@ -28,7 +28,6 @@ export function buildBudgets(
   org: BudgetRow;
   workspaces: BudgetRow[];
   projects: BudgetRow[];
-  defaultProjectBudgetUsd: number;
   generatedAt: string;
 } {
   const workspaces = listWorkspaces().filter(
@@ -66,7 +65,6 @@ export function buildBudgets(
     },
     workspaces: workspaceRows,
     projects: projectRows,
-    defaultProjectBudgetUsd: 4000,
     generatedAt: GENERATED_AT,
   };
 }

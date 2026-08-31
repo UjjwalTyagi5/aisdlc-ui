@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { Connector, ConnectorInstallResponse, type ConnectorKind } from "@/lib/schemas";
+import { Connector, type ConnectorKind } from "@/lib/schemas";
 import { ConnectorGrant, SetCredentialsResult } from "@/lib/schemas/connector";
 
 import { api } from "./client";
@@ -46,20 +46,6 @@ export const listConnectors = (workspaceId?: string | null) =>
 export const getConnector = (kind: ConnectorKind) =>
   api(`/connectors/${encodeURIComponent(kind)}`, { schema: Connector });
 
-/**
- * Wave C — POST /api/connectors/{kind}/install
- *
- * Returns a union: either `{redirectUrl: string}` (OAuth redirect path) or a
- * full `Connector` record (non-OAuth / backward-compat path). The caller's
- * `onSuccess` handler checks `data.redirectUrl` and calls
- * `window.location.assign(data.redirectUrl)` when present (UI-SPEC step 2).
- */
-export const installConnector = (kind: ConnectorKind) =>
-  api(`/connectors/${encodeURIComponent(kind)}/install`, {
-    method: "POST",
-    schema: ConnectorInstallResponse,
-  });
-
 export const disconnectConnector = (kind: ConnectorKind) =>
   api(`/connectors/${encodeURIComponent(kind)}/disconnect`, {
     method: "POST",
@@ -82,6 +68,17 @@ export const setConnectorCredentials = (
     owner?: string;
     /** Confluence default space (optional convenience — not required to connect). */
     space_key?: string;
+    /** GitHub App the TENANT registered in its own org. The platform no longer
+     *  registers one on everybody's behalf, so these come from the tenant. */
+    github_app_id?: string;
+    github_app_private_key?: string;
+    github_app_installation_id?: string;
+    /** INBOUND webhook signing secret, per tenant — the value set when creating the
+     *  webhook in the tenant's own GitHub org / Jira site / Slack app. Optional: a
+     *  tenant that receives no webhooks has nothing to set. Azure DevOps service
+     *  hooks use HTTP Basic instead of an HMAC, so they also need webhook_user. */
+    webhook_secret?: string;
+    webhook_user?: string;
     /** Which Business Unit the resulting connection belongs to. Required of a
      *  viewer bound to more than one — a credential lands in exactly one unit,
      *  and picking for them is how a key ends up in the wrong one. Ignored for
@@ -95,17 +92,6 @@ export const setConnectorCredentials = (
     schema: SetCredentialsResult,
   });
 
-/**
- * Wave C — complete the OAuth callback flow (Connect Flow steps 4-5).
- *
- * Called by the OAuthCallbackHandler page on mount. Forwards `code` and
- * `state` to the BFF callback route which validates CSRF state server-side
- * (FastAPI verify_oauth_state) and exchanges the code for tokens.
- *
- * Returns the resulting `Connector` record with `installed: true`.
- */
-export const completeOAuthCallback = (kind: string, code: string, state: string) =>
-  api(
-    `/connectors/${encodeURIComponent(kind)}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
-    { method: "GET", schema: Connector },
-  );
+// REMOVED: installConnector() and completeOAuthCallback(). Connecting a provider is
+// now one step — setConnectorCredentials() above — because the OAuth flow they drove
+// required the platform to register and hold an OAuth app on every tenant's behalf.
