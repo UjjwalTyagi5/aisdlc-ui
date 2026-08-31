@@ -306,6 +306,166 @@ async def test_create_ado_repo_is_refused_without_approval():
     clear_session(session_id)
 
 
+async def test_create_pr_is_refused_without_approval():
+    """create_pr's HITL gate — the backstop behind push_branch's, structurally
+    identical to create_ado_repo's and fired before any network call."""
+    from agents_orchestrator.development_agent.tools.git_tools import create_pr
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session,
+        get_session,
+    )
+    from config.ws_helper import set_session_id
+
+    session_id = f"dev-live-e2e-prgate-{uuid.uuid4().hex[:8]}"
+    set_session_id(session_id)
+    s = get_session(session_id)
+    s.push_gate_enabled = True
+    s.push_approved = False
+    # A repo + branch are deliberately present so the "no repo URL in session" /
+    # "no branch name in session" early returns cannot be mistaken for the gate
+    # firing. The URL is unroutable (.invalid) so a gate regression fails the
+    # assertion locally rather than reaching a live host.
+    s.repo_url = "https://dev.azure.invalid/example/Proj/_git/repo"
+    s.repo_type = "ado"
+    s.branch_name = "feature/greeting"
+    s.pat = "fake-pat"
+
+    out = await create_pr.ainvoke({
+        "title": "Update greeting",
+        "description": "## Summary\nGreeting change.",
+    })
+    assert "NOT CREATED" in out
+    assert "approval" in out
+
+    # The gate really is what stopped it: approve, and the tool proceeds past the gate
+    # into its real body. _create_ado_pr rejects the .invalid host at its own URL regex
+    # (git_tools.py:992-997) before any httpx call, so this stays offline and
+    # deterministic while still proving the refusal above was the gate, not a
+    # precondition check.
+    s.push_approved = True
+    approved_out = await create_pr.ainvoke({
+        "title": "Update greeting",
+        "description": "## Summary\nGreeting change.",
+    })
+    assert "NOT CREATED" not in approved_out
+    assert "Cannot parse ADO URL" in approved_out
+
+    clear_session(session_id)
+
+
+async def test_submit_development_artifacts_persists_the_pipeline_handoff():
+    """submit_development_artifacts is the Development -> Testing handoff: it rolls the
+    session's accumulated artifacts up, computes a final status, and persists both the
+    artifacts and the handoff event via patch_session_artifacts.
+
+    patch_session_artifacts is imported at artifact_tools' MODULE level
+    (`artifact_tools.py:12`), so it is patched as an attribute of artifact_tools — the
+    point of use — not on shared.services.agent_session_store. (Contrast agent_node's
+    resolve_model_for_run/guarded_completion, which are function-local imports and so
+    must be patched at their source modules.)
+
+    The mock is load-bearing rather than merely convenient: the tool wraps its persist
+    call in try/except and returns the same success string either way
+    (`artifact_tools.py:105-118`), so asserting on the return value alone would prove
+    nothing. The assertions are on what was actually handed to the store."""
+    from unittest.mock import AsyncMock
+
+    from agents_orchestrator.development_agent.tools import artifact_tools
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session,
+        get_session,
+    )
+    from config.ws_helper import set_session_id
+
+    session_id = f"dev-live-e2e-submit-{uuid.uuid4().hex[:8]}"
+    set_session_id(session_id)
+    s = get_session(session_id)
+
+    # State as the earlier tools in the loop would have left it: repo/branch on the
+    # session, a changed file recorded by edit_file, and a PR opened by create_pr.
+    s.repo_url = "https://dev.azure.invalid/example/Proj/_git/repo"
+    s.repo_type = "ado"
+    s.branch_name = "feature/greeting"
+    s.pr_url = "https://dev.azure.invalid/example/Proj/_git/repo/pullrequest/42"
+    s.pr_title = "Update greeting"
+    s.dev_artifacts.changed_files.append("app.py")
+
+    with patch.object(artifact_tools, "patch_session_artifacts", new_callable=AsyncMock) as mock_patch:
+        out = await artifact_tools.submit_development_artifacts.ainvoke(
+            {"batch_id": "BATCH-7", "work_item_ids": ["101", "102"]}
+        )
+
+    assert "persisted successfully" in out
+    mock_patch.assert_awaited_once()
+    call = mock_patch.await_args
+    assert call.args[0] == session_id
+    assert call.kwargs["tenant_id"] is None
+
+    fields = call.args[1]
+    arts = fields["development_artifacts"]
+
+    # Status determination: a PR URL wins over every other signal.
+    assert arts["status"] == "pr_created"
+    assert s.dev_artifacts.status == "pr_created"
+
+    # Session-level fields the earlier tools set were rolled into the artifact.
+    assert arts["repo_url"] == s.repo_url
+    assert arts["repo_type"] == "ado"
+    assert arts["branch_name"] == "feature/greeting"
+    assert arts["pr_url"] == s.pr_url
+    assert arts["pr_title"] == "Update greeting"
+    assert arts["changed_files"] == ["app.py"]
+    # work_item_ids land on the artifact. They are passed as strings because the tool's
+    # own schema is Optional[List[str]] — LangChain's arg validation rejects ints at the
+    # boundary (confirmed: passing [101, 102] raises a pydantic string_type error before
+    # the function body runs), so the body's own str() coercion is belt-and-braces.
+    assert arts["work_item_ids"] == ["101", "102"]
+
+    # The handoff event Testing keys off.
+    handoff = fields["last_handoff_event"]
+    assert handoff["to"] == "testing"
+    assert handoff["stage_completed"] == "development"
+    assert handoff["batch_id"] == "BATCH-7"
+    assert "development_artifacts" in handoff["context_keys"]
+
+    clear_session(session_id)
+
+
+async def test_submit_development_artifacts_reports_validated_when_there_is_no_pr():
+    """The push-only completion path the tool's own docstring calls out: no PR was
+    opened, but validation ran — status must be 'validated', not 'pr_created'."""
+    from unittest.mock import AsyncMock
+
+    from agents_orchestrator.development_agent.tools import artifact_tools
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session,
+        get_session,
+    )
+    from config.ws_helper import set_session_id
+    from shared.models.development import ValidationResult
+
+    session_id = f"dev-live-e2e-submit2-{uuid.uuid4().hex[:8]}"
+    set_session_id(session_id)
+    s = get_session(session_id)
+    s.branch_name = "feature/greeting"
+    s.dev_artifacts.changed_files.append("app.py")
+    s.dev_artifacts.lint_results.append(
+        ValidationResult(name="ruff: app.py", status="passed", command="ruff app.py",
+                         summary="No issues", output="")
+    )
+
+    with patch.object(artifact_tools, "patch_session_artifacts", new_callable=AsyncMock) as mock_patch:
+        await artifact_tools.submit_development_artifacts.ainvoke({})
+
+    arts = mock_patch.await_args.args[1]["development_artifacts"]
+    assert arts["pr_url"] is None
+    assert arts["status"] == "validated"
+    # Default batch_id per the tool's signature.
+    assert mock_patch.await_args.args[1]["last_handoff_event"]["batch_id"] == "TEST-READY"
+
+    clear_session(session_id)
+
+
 async def test_path_guard_blocks_a_traversal_escape(tmp_path):
     from agents_orchestrator.development_agent.tools.path_guard import (
         PathTraversalError,
