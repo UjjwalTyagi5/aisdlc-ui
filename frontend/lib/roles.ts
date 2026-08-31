@@ -236,6 +236,26 @@ export function isOrgAssignableRole(role: string): role is PlatformRole {
 }
 
 /**
+ * Is this a role a BUSINESS UNIT ADMIN may onboard somebody as, inside their unit?
+ *
+ * The delivery-tier built-ins minus `contributor` and `custom` — the mirror of
+ * UNIT_ASSIGNABLE in backend/shared/routers/onboarding.py, and the same set as
+ * BUSINESS_UNIT_ASSIGNABLE_BUILTIN_ROLES in hooks/use-assignable-roles.ts (kept here
+ * as a predicate so lib/mock can check it without importing a hooks module).
+ *
+ * `bu_admin` is excluded because it is an ORG-level appointment; `contributor`
+ * because it files a role_assignment request addressed to this very caller.
+ */
+export function isUnitAssignableRole(role: string): role is PlatformRole {
+  return (
+    role in ROLE_META &&
+    ROLE_META[role as PlatformRole].tier === "delivery" &&
+    role !== "contributor" &&
+    role !== "custom"
+  );
+}
+
+/**
  * The roles a contributor BORROWED from another Business Unit may hold.
  *
  * Project-scoped roles, plus Project Admin — someone can be lent to run a

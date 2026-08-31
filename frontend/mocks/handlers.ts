@@ -1792,10 +1792,19 @@ export const handlers = [
   // A Next.js server route and an MSW browser handler are separate JS
   // runtimes with independent copies of any "shared" module state, so both
   // sides of a read/write pair must run in the SAME one.
-  http.post("/api/onboarding", async ({ request }) => {
+  http.post("/api/onboarding", async ({ request, cookies }) => {
     await lag();
     const body = (await request.json()) as Parameters<typeof fxOnboardIntoOrganization>[0];
-    const { status, body: payload } = fxOnboardIntoOrganization(body);
+    // WHICH BRANCH the fixture takes. Org-wide passes null and keeps the two
+    // org-level roles; a Business Unit Admin passes the units they administer and
+    // may name a working role inside one of them. Without this the fixture answered
+    // every caller as an Organization Admin, so mock mode refused the flow that is
+    // now a unit admin's own.
+    const scope = scopeFromCookies(cookies);
+    const { status, body: payload } = fxOnboardIntoOrganization({
+      ...body,
+      administeredUnitIds: scope.isOrgWide ? null : scope.managedBusinessUnitIds,
+    });
     return HttpResponse.json(payload as Record<string, unknown>, { status });
   }),
 
