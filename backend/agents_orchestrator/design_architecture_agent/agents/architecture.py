@@ -90,6 +90,8 @@ async def _llm_generate_async(prompt: str, system: str = "") -> str:
     try:
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
         import litellm
+        from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
+
         response = await litellm.acompletion(
             model=resolved.model,
             custom_llm_provider=resolved.litellm_provider,
@@ -97,7 +99,8 @@ async def _llm_generate_async(prompt: str, system: str = "") -> str:
             api_base=resolved.base_url,
             messages=messages,
             max_tokens=8192,
-            temperature=0.25,
+            # Omitted entirely for gpt-5-family models — see temperature_kwargs.
+            **temperature_kwargs(resolved.model, 0.25),
             stream=True,
             timeout=120,
         )
@@ -460,24 +463,59 @@ async def update_ado_epic_design_complete(
         target_state: State to move the epic to. Default 'Design Complete'.
                       Use list_ado_states if unsure of the exact state name.
     """
+    # CONSEQUENTIAL (§1.5): this moves a real epic and comments on it in front of the
+    # team. The docstring above used to be the only control — "Always confirm with the
+    # user before calling this tool" is a request to the model, not an enforced rule,
+    # and the tool node executes whatever the model emits. Same shared rule the
+    # Requirements board writes go through.
+    # BOTH halves of the rule: the Architect's role AND their explicit yes on this
+    # turn. The role check alone would pass every time an Architect drove the chat,
+    # which is exactly who drives it — so the epic would move with nobody asked.
+    from shared.authz.consequential import authorize_consequential  # noqa: PLC0415 — import cycle
+
+    ok, why = await authorize_consequential(
+        "design",
+        action=f"Moving epic #{epic_id} to '{target_state}' and commenting on it",
+        ask=(
+            f"ask the user \"Shall I move epic #{epic_id} to '{target_state}' and post "
+            f"the design document link on it?\""
+        ),
+    )
+    if not ok:
+        return why
+
     try:
         connector = get_connector()
-    except RuntimeError as exc:
-        return f"Error connecting to project management connector: {exc}"
+    except RuntimeError:
+        return (
+            "No project-management board is connected for this run, so the epic could "
+            "not be updated. An administrator can connect one on the Integrations page."
+        )
 
     results = []
     try:
         await connector.write_adapter("move_item_state", project=project, item_id=epic_id, new_state=target_state)
         results.append(f"Epic #{epic_id} moved to '{target_state}'.")
-    except Exception as exc:
-        results.append(f"Warning: Could not move epic state: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        # The TYPE only. A connector error carries the instance URL and the full API
+        # path, and this string goes straight into the model's context and into the
+        # saved transcript. ConnectorAccessDenied is named separately because its fix
+        # is an access level, not a retry.
+        name = type(exc).__name__
+        results.append(
+            f"Could not move the epic state ({name})."
+            + (" This project's design stage does not have write access to its board;"
+               " an administrator can change that on the Integrations page."
+               if name == "ConnectorAccessDenied"
+               else f" Check that '{target_state}' is a real state on this board.")
+        )
 
     try:
         comment = f"Design complete. Architecture document: {design_url}"
         await connector.write_adapter("add_comment", project=project, item_id=epic_id, comment=comment)
         results.append(f"Comment with design document link added to #{epic_id}.")
-    except Exception as exc:
-        results.append(f"Warning: Could not add comment: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"Could not add the comment ({type(exc).__name__}).")
 
     return "\n".join(results)
 
@@ -1047,13 +1085,17 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         return _ORCHESTRATOR_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     from langchain_litellm import ChatLiteLLM
+    from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
+
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,
         api_base=base_url,
         api_key=api_key,
         max_tokens=8192,
-        temperature=0.2,
+        # Omitted entirely for gpt-5-family models, which reject any temperature but
+        # their default — see temperature_kwargs.
+        **temperature_kwargs(model, 0.2),
         max_retries=2,
         # Stream tokens so the copilot shows the design agent's replies live.
         streaming=True,
@@ -1065,41 +1107,15 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
 def _sanitize_messages(messages: list) -> list:
     """Keep tool_use / tool_result blocks paired in BOTH directions.
 
-    Anthropic rejects (400) a `tool_use` with no following `tool_result` AND a
-    `tool_result` with no preceding `tool_use`. The original version only dropped
-    orphan ToolMessages (the OpenAI failure mode); a dangling AIMessage tool_call
-    — left behind when a turn streamed an AIMessage with tool_calls but the tool
-    results weren't persisted — produced the BadRequestError seen in the design
-    chat. Two passes: keep only AIMessage tool_calls that have a matching
-    ToolMessage result; keep only ToolMessages whose tool_call survived."""
-    # Pass 1: which tool_call_ids actually have a ToolMessage result?
-    result_ids = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-    sanitized: list = []
-    answered_ids: set = set()
-    for msg in messages:
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            kept = [tc for tc in msg.tool_calls if tc.get("id") in result_ids]
-            if kept:
-                if len(kept) != len(msg.tool_calls) and hasattr(msg, "model_copy"):
-                    msg = msg.model_copy(update={"tool_calls": kept})
-                answered_ids.update(tc["id"] for tc in kept)
-                sanitized.append(msg)
-            else:
-                # No results for any tool_call → strip the tool_calls and keep the
-                # text (drop the message entirely if it has no content, since
-                # Anthropic also rejects an empty assistant turn).
-                content = getattr(msg, "content", "")
-                if content:
-                    if hasattr(msg, "model_copy"):
-                        msg = msg.model_copy(update={"tool_calls": []})
-                    sanitized.append(msg)
-        elif isinstance(msg, ToolMessage):
-            if msg.tool_call_id in answered_ids:
-                sanitized.append(msg)
-            # else: drop orphaned ToolMessage silently
-        else:
-            sanitized.append(msg)
-    return sanitized
+    The implementation moved to `shared.services.message_pairing` unchanged — the
+    Development and Requirements agents need exactly this repair for exactly the same
+    reason, and three copies is how one of them ends up with only half the rule (which
+    is what had already happened). See that module for why the invariant matters and
+    why a dangling call is stripped rather than answered with a fabricated result.
+    """
+    from shared.services.message_pairing import sanitize_tool_call_pairing  # noqa: PLC0415
+
+    return sanitize_tool_call_pairing(messages)
 
 
 async def agent(state: AgentState):

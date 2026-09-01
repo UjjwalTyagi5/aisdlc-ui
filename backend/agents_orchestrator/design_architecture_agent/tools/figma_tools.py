@@ -63,8 +63,23 @@ async def _figma_session() -> Tuple[Optional[Any], str]:
         return None, "ERROR: no tenant context in this session."
     try:
         from config.connector_factory import get_connector_for_session
+        from config.ws_helper import get_project_id  # noqa: PLC0415
 
-        connector = await get_connector_for_session(kind="figma", tenant_id=tenant_id)
+        # `project_id` and `agent_id` TOGETHER, or this permits nothing. The factory
+        # returns `ScopedConnector(raw, level)`, and with no project it has no level to
+        # resolve, so `permits(None, "read")` is False and every Figma call below raised
+        # ConnectorAccessDenied — which `_explain` does not recognise, so it surfaced as
+        # a bare exception name. Since migration 0024 the level is stored per
+        # (stage, tool), so project_id ALONE resolves to None just the same; the stage
+        # has to be named. This tool belongs to the design stage.
+        #
+        # Both are set by design_architecture_agent_api before the graph runs. If either
+        # is missing the connector permits nothing, which is the same (safe) answer as
+        # before this change — no path is loosened by naming them.
+        connector = await get_connector_for_session(
+            kind="figma", tenant_id=tenant_id,
+            project_id=get_project_id() or "", agent_id="design",
+        )
         return connector, ""
     except Exception as exc:  # noqa: BLE001
         return None, f"ERROR reaching Figma: {type(exc).__name__}"
@@ -80,7 +95,18 @@ def _explain(exc: Exception) -> str:
     import httpx
 
     from config.connectors.figma import ConnectorCredentialsMissing
+    from config.connectors.scoped import ConnectorAccessDenied
 
+    if isinstance(exc, ConnectorAccessDenied):
+        # NOT the same as "not connected", and the fixes are in different places:
+        # this one is an access level on the design stage, not a missing credential.
+        # Without this branch a denial fell through to the class name at the bottom,
+        # which is what an agent sees when the grant is simply too narrow.
+        return (
+            "ERROR: this project's design stage does not have read access to Figma. "
+            "An admin can grant it, or widen the stage's access level, on the "
+            "project's Integrations page."
+        )
     if isinstance(exc, ConnectorCredentialsMissing):
         return (
             "ERROR: Figma is not connected for this tenant. An admin can connect it "

@@ -201,6 +201,16 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     task_intent = message_data.get("task_intent")
     pipeline_context = message_data.get("pipeline_context")
 
+    # Consent for the Consequential epic write (update_ado_epic_design_complete),
+    # recomputed FROM THIS TURN'S MESSAGE and set unconditionally — a turn that is not
+    # an approval must clear the previous turn's yes. Only `task_intent` is read:
+    # conversation_context replays earlier messages, and an approval in the transcript
+    # is not an approval of what is being asked now. Same per-turn shape as the
+    # Development agent's push_approved.
+    from config.ws_helper import set_consequential_approved  # noqa: PLC0415
+    from shared.authz.consequential import is_approval_message  # noqa: PLC0415
+    set_consequential_approved(is_approval_message(task_intent))
+
     _lf_pid = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
 
     # Gate every message, not just the first — a session can be reused across
@@ -449,6 +459,11 @@ async def chat(
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
     set_user_id(real_user_id)
+    # Per-turn consent for the Consequential epic write — see the WS path above for why
+    # this reads task_intent only, and why it is set on every turn.
+    from config.ws_helper import set_consequential_approved  # noqa: PLC0415
+    from shared.authz.consequential import is_approval_message  # noqa: PLC0415
+    set_consequential_approved(is_approval_message(task_intent))
     set_provider_kind(provider_kind or "azure_devops")
     set_agent_folder("orchestrator")
 

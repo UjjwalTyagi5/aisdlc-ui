@@ -89,8 +89,30 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
  * project page's tile grid and any agent's own standalone page gate — grow
  * this list one entry at a time as each agent passes verification, never in
  * two places.
+ *
+ * requirements + design were added after help/requirements-design-e2e-plan.md
+ * Phases 1-5. What "verified" means for those two, concretely -- each claim has a
+ * test behind it, because "a file with the right name is there" is not evidence:
+ *   · the board connector is acquired with BOTH project_id and agent_id, so the
+ *     stage's grant actually resolves. It silently resolved to "no access" for
+ *     every run before (backend/tests/test_connector_stage_scope.py)
+ *   · the Requirements -> Design hand-off carries the payload across the
+ *     runs -> agent_sessions mirror. It read zero rows under FORCE RLS before, so
+ *     Design received nothing (backend/tests/test_requirements_to_design_handoff.py)
+ *   · board writes are gated on the owning role in code, not in prompt text
+ *     (backend/tests/test_consequential_gate.py)
+ *   · a run's initiator cannot approve their own gate
+ *     (backend/tests/test_gate_self_approval.py)
+ *   · one tenant's MCP servers do not reach another tenant
+ *     (backend/tests/test_mcp_tenant_isolation.py)
  */
-export const BUILT_AGENTS: readonly Phase[] = ["security", "documentation", "development"];
+export const BUILT_AGENTS: readonly Phase[] = [
+  "requirements",
+  "design",
+  "security",
+  "documentation",
+  "development",
+];
 
 /** Label per agent (phases + the orchestrator meta-agent). */
 export const AGENT_LABEL: Record<AgentType, string> = {

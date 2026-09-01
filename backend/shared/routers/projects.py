@@ -786,6 +786,8 @@ async def ingest_board(
         status="completed",
         trigger="manual",
         requirements_payload={"stories": stories, "board_project": board_name},
+        # See runs.py — the initiator is what the no-self-approval gate compares against.
+        created_by=getattr(request.state, "user_id", "") or None,
     )
     db.add(run)
     # Remember the chosen board on the local project so the picker pre-selects it.

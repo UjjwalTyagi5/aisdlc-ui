@@ -2276,19 +2276,66 @@ async def _advance_or_gate(stage: str, run_id: str, tenant_id: str, perms: list[
         logger.warning("copilot _advance_or_gate(%s/%s) failed: %s", stage, run_id, exc)
 
 
+async def _is_run_initiator(run_id: str, tenant_id: str, user_id: str) -> bool:
+    """Did `user_id` start this run?
+
+    False whenever it cannot be PROVEN true — an unknown user, a run with no recorded
+    initiator (`created_by` is nullable: webhook runs have no human one, and every run
+    predating migration 0038 has none either), or a lookup that fails. That is a
+    deliberate fail-open on a narrow case: the alternative refuses approval on every
+    pre-0038 run and on every webhook run forever, which would break the gate rather
+    than protect it. The rule still binds for every run created through a path that
+    records its initiator, which is all of them since 0038.
+    """
+    if not user_id or not run_id or not tenant_id:
+        return False
+    try:
+        async with get_db_session_for_tenant(tenant_id) as s:
+            run = (await s.execute(select(Run).where(Run.id == _as_run_uuid(run_id)))).scalar_one_or_none()
+            initiator = getattr(run, "created_by", None) if run is not None else None
+    except Exception:  # noqa: BLE001
+        logger.warning("could not resolve run initiator (run=%s) — not blocking", run_id)
+        return False
+    return bool(initiator) and str(initiator) == str(user_id)
+
+
 async def _handle_gate_decision(stage: str, run_id: str, tenant_id: str, perms: list[str],
                                 decision: str, reason: Optional[str],
-                                websocket: WebSocket) -> None:
+                                websocket: WebSocket, user_id: str = "") -> None:
     """Approve/reject the current stage's gate over the WS (conversational run).
 
     Approve → advance current_stage to the next stage (or complete). Reject → clear the
-    gate, stay on the stage. Server re-checks the stage approve permission (fail-closed).
-    Emits a chat note; the caller emits stage.changed after re-reading active."""
+    gate, stay on the stage. Emits a chat note; the caller emits stage.changed after
+    re-reading active.
+
+    TWO INDEPENDENT CHECKS ON APPROVE, and they answer different questions:
+
+      can_user_approve(perms, stage)   may this ROLE approve this stage
+      run.created_by != user_id        is this a different PERSON from the one who
+                                       started the run
+
+    Holding `artifact:approve_requirements` does not make you eligible to sign off your
+    own run — §1.5: "whoever ran the agent is never the one who accepts its own output."
+    A `ba` who starts a Requirements run holds the permission by definition, so the
+    permission check alone lets every such run be self-approved.
+
+    REJECT IS NOT GATED THE SAME WAY. Sending your own work back for changes is not
+    self-approval; it is the one decision that cannot be abused by the initiator, and
+    blocking it would leave a run stuck with nobody able to say "this isn't right".
+    """
     from shared.services.orchestrator import progression
     approve = decision in ("approve", "approved", "accept")
     if approve and not can_user_approve(perms, stage):
         await _send(websocket, {"type": "error", "run_id": run_id,
                                 "message": "You don't hold the approval permission for this stage."})
+        return
+    if approve and await _is_run_initiator(run_id, tenant_id, user_id):
+        logger.info("copilot gate self-approval blocked (run=%s stage=%s user=%s)",
+                    run_id, stage, user_id)
+        await _send(websocket, {"type": "error", "run_id": run_id,
+                                "message": "You started this run, so you can't approve its "
+                                           "own output. Someone else with the approval "
+                                           "permission for this stage has to accept it."})
         return
     # Never approve-advance a stage that hasn't actually produced its output
     # artifact. Without this, an approve that lands right after the run advances
@@ -2450,7 +2497,7 @@ async def copilot_ws(websocket: WebSocket) -> None:
                 await _handle_gate_decision(
                     active, run_id, tenant_id, perms,
                     str(msg.get("decision") or "approved"),
-                    (msg.get("reason") or None), websocket)
+                    (msg.get("reason") or None), websocket, user_id=str(user_id or ""))
                 nxt_active, run_project_id = await _active_stage(run_id)
                 if nxt_active != active:
                     active = nxt_active
