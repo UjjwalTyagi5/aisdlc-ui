@@ -717,7 +717,7 @@ function ChatBubble({
  * (`script-src 'self' ...`, `connect-src 'self' ...`) has no CDN host in it
  * by design, so Monaco hung on "Loading…" forever the first time this was
  * actually exercised in a browser (confirmed live 2026-09-01 — see
- * "desicions and issues.txt" Issue 10). Self-hosting Monaco was the other
+ * "desicions and issues.txt" Issue 12). Self-hosting Monaco was the other
  * option but adds real Turbopack worker-loading risk for a dev server that
  * already runs `next dev --turbo`; this path reuses proven, already-working
  * infrastructure with zero CDN/CSP/worker surface at all.

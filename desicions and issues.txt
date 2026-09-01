@@ -846,3 +846,134 @@ load-bearing enough for this one allowed fix wave):
 
 Full ledger with every dispatch, finding, fix round, and ruling:
 .superpowers/sdd/2026-08-31-development-agent-chat-overhaul/progress.md
+
+--------------------------------------------------------------------
+POST-MERGE LIVE TESTING (2026-09-01) -- self-inflicted regressions and
+real bugs found while the user tested the merged PR through the real UI
+--------------------------------------------------------------------
+
+ISSUE 10 (FOUND + RESTORED, root cause NOT YET fixed): running the full
+backend pytest suite (1934 tests) as this session's own
+finishing-a-development-branch verification step wiped every role_binding
+on the entire platform, for every user, down to zero rows. The user hit
+this live as "Your account is waiting for a role" logging in as
+kapsarthak (org_admin).
+Root cause: 5 test files (test_can_perform.py, test_local_auth.py,
+test_project_business_unit.py, test_project_run_scope.py,
+test_run_approval_gate.py) each run an UNSCOPED `DELETE FROM
+role_bindings` with no WHERE clause in their setup/teardown, written
+assuming an isolated/ephemeral test database. This local dev environment
+has no such isolation -- POSTGRES_CONN_STRING, POSTGRES_SYNC_CONN_STRING,
+and POSTGRES_MIGRATIONS_CONN_STRING all point at the exact same
+`sdlc_product` database the running app actually uses. The user
+independently confirmed this is a RECURRING pattern ("whenever we worked
+on something all accounts... were going away except org admin") -- it has
+happened before this session, not just today, every time a broad test run
+fires.
+RESTORED: kapsarthak's org_admin (auto-restored by seed_org_admins on
+backend restart -- confirmed in the DB, not just the log's claim); all 14
+dev test personas re-seeded via scripts/seed_dev_personas, then REMOVED
+again per the user's explicit instruction once they clarified those were
+incidental to the repair, not wanted long-term (scripts/unseed_dev_personas.py,
+already sitting in the repo untracked for exactly this purpose); srk02804
+restored as bu_admin on Payments (had to first remove a re-seeded synthetic
+persona -- farah@abcbank.com -- that claimed the same BU-admin slot, since
+the product enforces exactly one BU admin per unit); sarthak2004 restored
+as project_admin on the TEST1 project. Both real-account restorations were
+reconstructed from this session's own conversation context (exact
+user_id/tenant_id/project_id already known from earlier live-verification
+work), not guessed.
+NOT YET FIXED: the actual root cause (test suite operating destructively
+against the shared dev DB) is still live and will recur on the next broad
+test run. Proposed fix, approved in principle by the user but not yet
+executed: stand up a real `sdlc_product_test` database on the same local
+Postgres, run the existing 45 Alembic migrations against it, and require
+POSTGRES_CONN_STRING/POSTGRES_SYNC_CONN_STRING/POSTGRES_MIGRATIONS_CONN_STRING
+be overridden to point there for every test invocation from now on
+(load_dotenv() never overrides an already-set env var, so this needs no
+application-code change, only a documented convention + exported env vars
+before `pytest`). migrations/env.py already enforces
+POSTGRES_MIGRATIONS_CONN_STRING != POSTGRES_CONN_STRING and was always
+written correctly for this -- only this machine's .env was ever
+misconfigured with both pointing at the same database.
+
+ISSUE 11 (FIXED, environmental, not a code bug): immediately after Issue
+10's restoration, the user hit "Internal Server Error" trying to save a
+role change for sarthak2004 via the Users page, and could not deactivate
+a Business Unit either. Investigated by checking the backend's live log
+first (found nothing there -- the request never reached FastAPI at all),
+then the frontend's own dev-server log, which showed the real cause:
+`Jest worker encountered 2 child process exceptions, exceeding retry
+limit` on both PATCH /api/admin/users/[id] and POST
+/api/workspaces/[id]/archive. This is Next.js's own internal Turbopack
+compile-worker pool crashing -- a known failure mode for a `next dev`
+process that has been running continuously for many hours (this one had
+been up since early in the session, through dozens of hot-reloads across
+the whole chat-overhaul plan), specifically triggered by the FIRST
+on-demand compilation of these two dynamic routes, which had never been
+hit before in this long-running dev session.
+FIX: killed and restarted the frontend dev server. Confirmed both routes
+compiled cleanly afterward with no crash in the log. No application code
+was touched -- this was never a regression from any of this session's
+changes, just an unrelated dev-server staleness issue that happened to
+surface at the same time as Issue 10.
+
+ISSUE 12 (FIXED, commit 17c7b49c): live-testing the just-merged diff-card
+feature (Issue 8, Part 1) for the first time ever in a real browser, the
+diff card rendered its header/toolbar correctly but the content area was
+permanently stuck on "Loading..." -- confirming the exact gap already
+flagged honestly in the merged PR's own description ("verified at the
+wire-event level... not visually confirmed in a browser").
+Root cause: `@monaco-editor/react` (the library backing DiffViewer)
+defaults to fetching its entire editor bundle (JS + CSS) from
+cdn.jsdelivr.net at runtime -- nothing in this codebase ever configured it
+to self-host instead. next.config.ts's CSP is deliberately locked down
+(script-src 'self' 'unsafe-inline' 'unsafe-eval', connect-src 'self' ws:
+wss: https://*.auth0.com in dev) with no CDN host in either directive, so
+the browser silently blocked the CDN fetch and the loader hung instead of
+failing with a clear error. This also explains why the final whole-branch
+review's reviewer independently found DiffViewer had never actually been
+a *live* code path anywhere in this app before -- this was the literal
+first time Monaco was ever exercised in a real browser in this project's
+history.
+Two fix options considered: self-host monaco-editor locally (the "proper"
+fix, but real risk given this dev server runs Turbopack, whose Monaco
+worker-bundling story is a known rough edge distinct from webpack's
+well-trodden monaco-editor-webpack-plugin path), or drop Monaco for this
+surface entirely in favour of a much simpler approach the user had
+already used successfully in an earlier project (a syntax-highlighted
+text block streamed by the LLM, no heavy editor library). Chose the
+latter, per the user's own explicit steer.
+FIX: DiffCard now computes a unified diff (the `diff` npm package's
+createTwoFilesPatch) and renders it as a ```diff fenced code block through
+the SAME MarkdownMessage/CodeBlock pipeline every other chat message
+already uses (react-markdown + rehype-highlight, which natively colors
+unified-diff +/- lines) -- proven, already-working infrastructure, zero
+CDN/CSP/worker surface at all. DiffViewer (the Monaco component itself)
+was left in the codebase untouched, just no longer used in the chat
+drawer. Test file rewritten (the old assertions tested Monaco-mount
+timing/props, which no longer apply); 5/5 pass, full frontend suite still
+466/466 green.
+INCIDENTAL FIX, discovered while installing the new `diff` dependency: an
+orphaned package-lock.json + node_modules sitting at the REPO ROOT (no
+package.json there to justify them, weeks old, containing entirely
+unrelated packages -- @exodus/bytes, electron, workerd) was crashing every
+`npm install` run from frontend/ with "Cannot read properties of null
+(reading 'matches')" -- an npm/arborist bug triggered by encountering a
+pnpm-style node_modules layout it can't reconcile. frontend/node_modules
+itself also had this same pnpm-style contamination mixed in from some
+earlier non-npm install. Removed both root-level artifacts and did one
+clean `npm install` from frontend/ -- this also produced a real
+frontend/package-lock.json for the first time (frontend never had one
+before; gitignored per this project's existing convention, so not
+committed).
+
+STILL OPEN, not yet investigated: the user separately reported, while
+logged in as sarthak2004 (project_admin) on the TEST1 project's
+Integrations page, that "Save credential" stays disabled on the Azure
+DevOps credential dialog even after "Test connection" reports "Connected"
+-- confirmed via code read that the button's disabled state is gated by a
+`missingRequired` computation (integrations/page.tsx:471-475), not by the
+test result at all, but the exact reason it evaluates true in the user's
+specific case was not yet root-caused before the Monaco bug (Issue 12)
+took priority. Needs its own investigation pass.
