@@ -187,6 +187,10 @@ class JiraConnector(BaseConnector):
                     status="not_supported",
                     description="Jira uses project-specific workflows; use transitions endpoint",
                 ),
+                "list_item_types": CapabilityEntry(
+                    status="implemented",
+                    description="Issue types from the project's own issue-type scheme",
+                ),
                 "list_teams": CapabilityEntry(
                     status="not_supported",
                     description="Jira teams modelled differently; out of M6 scope",
@@ -324,6 +328,7 @@ class JiraConnector(BaseConnector):
             "list_items": self.list_stories,
             "fetch_item_detail": self.fetch_item_detail,
             "list_states": self.list_states,
+            "list_item_types": self.list_item_types,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -654,6 +659,24 @@ class JiraConnector(BaseConnector):
     @classmethod
     def _jira_item_type(cls, item_type: str) -> str:
         return cls._ITEM_TYPE_ALIASES.get((item_type or "").strip().lower(), item_type)
+
+    async def list_item_types(self, project: str) -> list:
+        """Issue types available on THIS project, from its own issue-type scheme.
+
+        Jira's schemes are per project just as ADO's process templates are, so the
+        answer is looked up rather than assumed. `_jira_item_type` translates the
+        provider-neutral vocabulary the tools speak into these, but only for the
+        aliases it knows — this is how an agent discovers the rest.
+        """
+        project_key = await self._resolve_project_key(project)
+        data, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/api/3/project/{project_key}"
+        )
+        return [
+            {"name": t.get("name", ""), "description": t.get("description", "")}
+            for t in (data or {}).get("issueTypes", [])
+            if t.get("name")
+        ]
 
     async def create_item(
         self,

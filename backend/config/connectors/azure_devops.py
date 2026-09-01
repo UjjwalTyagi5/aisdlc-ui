@@ -25,6 +25,7 @@ from config.ado_ingestion import (
     get_wiki_page,
     list_all_work_items,
     list_projects,
+    list_item_types,
     list_states,
     list_stories_by_state,
     list_teams,
@@ -135,6 +136,7 @@ class AzureDevOpsConnector(BaseConnector):
                 "list_projects": CapabilityEntry(status="implemented"),
                 "list_teams": CapabilityEntry(status="implemented"),
                 "list_states": CapabilityEntry(status="implemented"),
+                "list_item_types": CapabilityEntry(status="implemented"),
                 "list_stories": CapabilityEntry(status="implemented"),
                 "list_all_items": CapabilityEntry(status="implemented"),
                 "fetch_item_detail": CapabilityEntry(status="implemented"),
@@ -265,6 +267,7 @@ class AzureDevOpsConnector(BaseConnector):
             "list_projects": self.list_projects,
             "list_teams": self.list_teams,
             "list_states": self.list_states,
+            "list_item_types": self.list_item_types,
             "list_stories": self.list_stories,
             "list_all_items": self.list_all_items,
             "fetch_item_detail": self.fetch_item_detail,
@@ -343,6 +346,14 @@ class AzureDevOpsConnector(BaseConnector):
     async def list_teams(self, project: str) -> List[Dict[str, Any]]:
         auth = await self.auth_adapter()
         return await list_teams(org_url=auth["org_url"], project=project, pat=auth["pat"])
+
+    async def list_item_types(self, project: str) -> List[Dict[str, Any]]:
+        """Work item types this project's PROCESS TEMPLATE defines — not a fixed list.
+        Agile has "User Story", Scrum "Product Backlog Item", Basic "Issue"."""
+        auth = await self.auth_adapter()
+        return await list_item_types(
+            org_url=auth["org_url"], project=project, pat=auth["pat"]
+        )
 
     async def list_states(
         self, project: str, item_type: str = "User Story"

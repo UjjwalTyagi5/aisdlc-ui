@@ -97,6 +97,30 @@ async def list_states(
         ]
 
 
+async def list_item_types(
+    *, org_url: str, project: str, pat: str
+) -> List[Dict[str, Any]]:
+    """The work item types this PROJECT actually has.
+
+    NOT a fixed list, and that is the whole point. Azure DevOps types come from the
+    project's process template and differ per project: Agile has "User Story", Scrum
+    has "Product Backlog Item", Basic has neither — it has "Issue". An agent that
+    assumes one gets VS402323 ("Work item type X does not exist in project Y"), which
+    is what a real run hit on a Basic project.
+    """
+    org_url = org_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(
+            f"{org_url}/{project}/_apis/wit/workitemtypes?api-version=7.1"
+        )
+        r.raise_for_status()
+        return [
+            {"name": t.get("name", ""), "description": t.get("description", "")}
+            for t in r.json().get("value", [])
+            if t.get("name")
+        ]
+
+
 async def list_wikis(*, org_url: str, project: str, pat: str) -> List[Dict[str, Any]]:
     org_url = org_url.rstrip("/")
     async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:

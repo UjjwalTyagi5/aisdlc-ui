@@ -1492,6 +1492,46 @@ async def list_board_groups(project: str, provider: str = "") -> str:
 
 
 @tool
+async def list_board_item_types(project: str, provider: str = "") -> str:
+    """List the work item types this project actually supports, with their real names.
+
+    CALL THIS BEFORE CREATING AN ITEM IF YOU ARE NOT CERTAIN OF THE TYPE, and always
+    after a create fails with "work item type ... does not exist".
+
+    The valid types are NOT fixed and NOT the same on every board — they come from the
+    project's process template or issue-type scheme:
+      Azure DevOps Agile  -> Epic, Feature, User Story, Task, Bug
+      Azure DevOps Scrum  -> Epic, Feature, Product Backlog Item, Task, Bug
+      Azure DevOps Basic  -> Epic, Issue, Task            (no "User Story" at all)
+      Jira                -> whatever that project's scheme defines
+
+    Guessing "User Story" on a Basic project fails with VS402323. Use the exact name
+    returned here as work_item_type.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board.
+    """
+    connector, err = await _board_connector(provider=provider)
+    if err:
+        return f"Error: {err}"
+    try:
+        types = await connector.read_adapter("list_item_types", project=project)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error fetching work item types: {_board_error(exc)}"
+    if not types:
+        return f"No work item types returned for '{project}'."
+    lines = []
+    for t in types:
+        name = t.get("name", "") if isinstance(t, dict) else str(t)
+        desc = (t.get("description", "") if isinstance(t, dict) else "") or ""
+        lines.append(f"- {name}" + (f" — {desc[:100]}" if desc else ""))
+    return (
+        f"Work item types available in '{project}':\n" + "\n".join(lines)
+        + "\n\nUse one of these EXACT names as work_item_type."
+    )
+
+
+@tool
 async def list_board_states(project: str, work_item_type: str = "User Story", provider: str = "") -> str:
     """List the workflow states defined for a work item type in the project.
 
@@ -2246,7 +2286,9 @@ _BOARD_TOOLS = [
     # board are we even talking to. A project can hold more than one, and without this
     # the model can only guess at what `provider` accepts.
     list_board_providers,
-    list_board_projects, list_board_groups, list_board_states, list_board_items,
+    list_board_projects, list_board_groups, list_board_states,
+    list_board_item_types,
+    list_board_items,
     list_board_items_by_state, fetch_board_item_detail, fetch_board_hierarchy,
     create_board_project,
     create_board_item, update_board_item, delete_board_item,
@@ -2521,6 +2563,37 @@ Every board tool takes an optional `provider` argument.
   wrong board.
 - If a provider is refused, the message says which boards this project can use.
   Relay that and stop; do not retry with a different board the user did not ask for.
+
+── WORK ITEM TYPES ARE PER PROJECT — DO NOT GUESS ────────────────────────────────
+"User Story" does NOT exist on every board. The valid types come from the project's
+process template or issue-type scheme:
+  Azure DevOps Agile -> Epic, Feature, User Story, Task, Bug
+  Azure DevOps Scrum -> Epic, Feature, Product Backlog Item, Task, Bug
+  Azure DevOps Basic -> Epic, Issue, Task          (there is no "User Story")
+  Jira               -> whatever that project's scheme defines
+- Call list_board_item_types when you are not certain, and ALWAYS after a create
+  fails with "work item type ... does not exist" (ADO error VS402323).
+- Use the exact name it returns. Do not substitute a type the user did not ask for
+  without telling them you are doing it and why.
+
+── WHAT YOU CANNOT DO (never offer these) ────────────────────────────────────────
+You have exactly the tools listed above and nothing else. These are NOT among them,
+and offering them is a promise you cannot keep:
+- You CANNOT link a work item to a parent. create_board_item takes no parent, so
+  items are created UNPARENTED. Writing "Parent Epic: #1" into a description is text,
+  not a link — never report items as "linked under" or "children of" anything.
+- You CANNOT create or configure area paths, iterations, sprints, board columns,
+  swimlanes, saved queries, team settings, or project permissions.
+- You CANNOT assign a work item to a person.
+- You CANNOT read images or screenshots. If one is attached, say so and ask for text.
+If the user asks for any of these, say plainly that you cannot and that it must be
+done in the board's own UI. Offering to do it and then not doing it is far worse than
+saying no.
+
+── NEVER REPORT WORK YOU DID NOT DO ──────────────────────────────────────────────
+Report ONLY what a tool actually returned. If a tool returned an error, the change did
+not happen — say so. Do not describe intended changes in the past tense, and do not
+summarise a plan as though it were a result.
 
 ── FLOW J: GENERATE DOCUMENTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 After requirements are confirmed and the gap report is reviewed, offer to export:
