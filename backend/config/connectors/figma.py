@@ -116,9 +116,13 @@ class ConnectorCredentialsMissing(RuntimeError):
 def extract_file_key(url_or_key: str) -> str:
     """Return the Figma file key from a share URL, or the key unchanged.
 
-    Accepts https://www.figma.com/design/AbC123/My-File?node-id=1-2 and the bare
-    "AbC123". Returns "" when neither shape matches, so callers can give a specific
-    error instead of sending a doomed request.
+    Accepts https://www.figma.com/design/AbC123/My-File?node-id=1-2 and a bare key.
+
+    A BARE KEY NEEDS 10+ ALPHANUMERICS (`_BARE_KEY_RE`). The example here used to be
+    "AbC123", which is six and does not match its own regex — real Figma keys are
+    around 22 characters, and the floor exists so an ordinary word is not mistaken for
+    a key. Returns "" when neither shape matches, so callers can give a specific error
+    instead of sending a doomed request.
     """
     value = (url_or_key or "").strip()
     if not value:
