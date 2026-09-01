@@ -1166,6 +1166,16 @@ async def write_requirements_artifact(
 from config.connectors.context import get_connector as _get_active_connector
 
 
+# ── The Consequential gate on board writes (§1.5) ──────────────────────────────
+# Every board WRITE tool reaches the connector through `_board_connector("write")`, so
+# the tier check goes there and covers all of them — including ones added later, which
+# is the point of putting it at the choke point rather than on each tool.
+# The rule itself lives in shared/authz/consequential.py; Design uses the same one.
+from shared.authz.consequential import owner_approved as _owner_approved
+
+_CONSEQUENTIAL_STAGE = "requirements"
+
+
 async def _board_connector(mode: str = "read"):
     """Return (connector, None) for the run-injected connector, or (None, error_str).
 
@@ -1222,6 +1232,13 @@ async def _board_connector(mode: str = "read"):
                 f"Integrations page. You can still proceed with pasted or uploaded "
                 f"requirements."
             )
+
+    # The tier check, LAST — after the project is known to permit writing at all, so a
+    # project with no write grant hears about the grant rather than about approval.
+    if mode == "write":
+        ok, why = await _owner_approved(_CONSEQUENTIAL_STAGE)
+        if not ok:
+            return None, why
     return connector, None
 
 

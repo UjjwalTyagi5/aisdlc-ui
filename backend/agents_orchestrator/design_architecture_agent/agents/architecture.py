@@ -460,24 +460,49 @@ async def update_ado_epic_design_complete(
         target_state: State to move the epic to. Default 'Design Complete'.
                       Use list_ado_states if unsure of the exact state name.
     """
+    # CONSEQUENTIAL (§1.5): this moves a real epic and comments on it in front of the
+    # team. The docstring above used to be the only control — "Always confirm with the
+    # user before calling this tool" is a request to the model, not an enforced rule,
+    # and the tool node executes whatever the model emits. Same shared rule the
+    # Requirements board writes go through.
+    from shared.authz.consequential import owner_approved  # noqa: PLC0415 — import cycle
+
+    ok, why = await owner_approved("design")
+    if not ok:
+        return why
+
     try:
         connector = get_connector()
-    except RuntimeError as exc:
-        return f"Error connecting to project management connector: {exc}"
+    except RuntimeError:
+        return (
+            "No project-management board is connected for this run, so the epic could "
+            "not be updated. An administrator can connect one on the Integrations page."
+        )
 
     results = []
     try:
         await connector.write_adapter("move_item_state", project=project, item_id=epic_id, new_state=target_state)
         results.append(f"Epic #{epic_id} moved to '{target_state}'.")
-    except Exception as exc:
-        results.append(f"Warning: Could not move epic state: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        # The TYPE only. A connector error carries the instance URL and the full API
+        # path, and this string goes straight into the model's context and into the
+        # saved transcript. ConnectorAccessDenied is named separately because its fix
+        # is an access level, not a retry.
+        name = type(exc).__name__
+        results.append(
+            f"Could not move the epic state ({name})."
+            + (" This project's design stage does not have write access to its board;"
+               " an administrator can change that on the Integrations page."
+               if name == "ConnectorAccessDenied"
+               else f" Check that '{target_state}' is a real state on this board.")
+        )
 
     try:
         comment = f"Design complete. Architecture document: {design_url}"
         await connector.write_adapter("add_comment", project=project, item_id=epic_id, comment=comment)
         results.append(f"Comment with design document link added to #{epic_id}.")
-    except Exception as exc:
-        results.append(f"Warning: Could not add comment: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"Could not add the comment ({type(exc).__name__}).")
 
     return "\n".join(results)
 

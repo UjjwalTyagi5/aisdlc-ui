@@ -54,6 +54,15 @@ from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
 
+
+def _ctx_user_id():
+    """The user in session context, or None. Never raises: these paths also run in a
+    worker, where no user was ever set."""
+    from config.ws_helper import get_user_id  # noqa: PLC0415 — import cycle at module load
+
+    return get_user_id() or None
+
+
 logger = logging.getLogger("security_agent")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -196,6 +205,12 @@ async def _persist_scan_to_run(session_id: str, project_id: str | None, tenant_i
                     trigger="manual",
                     current_stage="security",
                     security_artifacts=artifact,
+                    # Whoever is in session context, so this run is not exempt from the
+                    # no-self-approval rule (0038). These rows are created already-completed
+                    # with no gate pending, so the rule is not reachable through them today —
+                    # recorded anyway, because "it cannot gate yet" is a property of this call
+                    # site that a later change could quietly remove.
+                    created_by=_ctx_user_id(),
                 )
             )
         await manager.broadcast({
