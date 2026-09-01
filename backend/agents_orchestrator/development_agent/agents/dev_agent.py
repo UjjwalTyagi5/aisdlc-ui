@@ -189,6 +189,29 @@ def _sanitize_messages(messages: list) -> list:
         dangling entries are stripped from the AIMessage instead -- we do NOT
         synthesize a fake ToolMessage, since we have no idea what the tool
         would have returned.
+
+    Two follow-on subtleties, both required to actually close the hole above
+    (task 4 re-review finding N1) rather than just reshape it:
+
+      - `additional_kwargs["tool_calls"]` is the raw provider-format mirror that
+        streaming `ChatLiteLLM` (langchain_litellm) populates alongside the
+        structured field. Its `_convert_message_to_dict` does
+        `elif "tool_calls" in message.additional_kwargs:` -- an `in` check, not
+        a truthiness check -- so merely emptying that list still trips the
+        fallback and puts `"tool_calls": []` on the wire. OpenAI's schema
+        requires at least one entry and rejects an empty array exactly as hard
+        as a dangling one. The key must be deleted, not set to `[]`, whenever
+        nothing survives the filter. (Anthropic's conversion path drops an
+        empty-content assistant turn outright, so it isn't exposed there --
+        this specifically matters for OpenAI-family models.)
+      - If, after stripping, an AIMessage has neither surviving tool_calls nor
+        any text content (cancelled before the model produced any), the
+        message carries no information and is dropped from the history
+        entirely rather than left as an empty assistant turn -- providers
+        reject or mishandle that shape too. Mirrors the same repair already
+        living in architecture.py's _sanitize_messages
+        (design_architecture_agent), written after a live BadRequestError on
+        this exact shape.
     """
     all_call_ids: set = set()
     answered_ids: set = set()
@@ -203,22 +226,36 @@ def _sanitize_messages(messages: list) -> list:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             kept = [tc for tc in msg.tool_calls if tc["id"] in answered_ids]
             if len(kept) != len(msg.tool_calls):
+                if not kept and not getattr(msg, "content", ""):
+                    # Nothing survives: no answered tool_calls, no text either.
+                    # Drop the message outright instead of leaving a fully
+                    # empty assistant turn in the history.
+                    continue
                 update: dict = {"tool_calls": kept}
                 # additional_kwargs can carry the raw provider-format tool_calls
-                # too (e.g. OpenAI's {"tool_calls": [...]}) -- some conversion
-                # paths read that instead of/alongside the structured field, so
-                # it must be filtered in step or a "repaired" message can still
-                # round-trip the dangling call back to the provider.
+                # too -- some conversion paths read that instead of/alongside
+                # the structured field, so it must be kept in lockstep or a
+                # "repaired" message can still round-trip the dangling call
+                # back to the provider.
                 raw_kwargs = getattr(msg, "additional_kwargs", None) or {}
                 if "tool_calls" in raw_kwargs:
-                    kept_ids = {tc["id"] for tc in kept}
-                    update["additional_kwargs"] = {
-                        **raw_kwargs,
-                        "tool_calls": [
-                            rtc for rtc in raw_kwargs["tool_calls"]
-                            if rtc.get("id") in kept_ids
-                        ],
-                    }
+                    if kept:
+                        kept_ids = {tc["id"] for tc in kept}
+                        update["additional_kwargs"] = {
+                            **raw_kwargs,
+                            "tool_calls": [
+                                rtc for rtc in raw_kwargs["tool_calls"]
+                                if rtc.get("id") in kept_ids
+                            ],
+                        }
+                    else:
+                        # DELETE the key -- see the docstring's N1 note. Setting
+                        # it to [] still trips litellm's `in` check and puts an
+                        # empty tool_calls array on the wire, which OpenAI
+                        # rejects (schema requires min length 1).
+                        update["additional_kwargs"] = {
+                            k: v for k, v in raw_kwargs.items() if k != "tool_calls"
+                        }
                 msg = msg.model_copy(update=update)
             out.append(msg)
         elif isinstance(msg, ToolMessage):
