@@ -175,7 +175,11 @@ def test_every_write_tool_goes_through_the_choke_point():
         if "write_adapter(" not in chunk:
             continue
         name = chunk.split("async def ", 1)[1].split("(", 1)[0]
-        assert '_board_connector("write")' in chunk, (
+        # Prefix, not the whole call: the choke point also takes an optional `provider`
+        # now, so pinning the exact string made this fail on a change that did not
+        # weaken anything. What must stay true is that write tools ask for "write"
+        # MODE — that is the argument the tier and lattice checks hang off.
+        assert '_board_connector("write"' in chunk, (
             f"{name} calls write_adapter without going through the gated choke point"
         )
 

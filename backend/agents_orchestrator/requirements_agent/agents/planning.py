@@ -1237,7 +1237,90 @@ def _board_error(exc: Exception) -> str:
     return f"the board call failed ({type(exc).__name__})."
 
 
-async def _board_connector(mode: str = "read"):
+#: What a person calls each board, mapped to the kind the grant is stored under. The
+#: model is told the canonical names, but users say "ADO" and the model echoes them —
+#: and an unrecognised provider must fail with "which boards you can use", never by
+#: silently falling through to the stage default and writing somewhere else.
+_PROVIDER_ALIASES = {
+    "ado": "azure_devops",
+    "azure devops": "azure_devops",
+    "azuredevops": "azure_devops",
+    "azure_devops": "azure_devops",
+    "azure boards": "azure_devops",
+    "devops": "azure_devops",
+    "tfs": "azure_devops",
+    "jira": "jira",
+    "atlassian": "jira",
+    "github": "github_issues",
+    "github issues": "github_issues",
+    "github_issues": "github_issues",
+    "linear": "linear",
+}
+
+
+def _canonical_provider(provider: str) -> str:
+    return _PROVIDER_ALIASES.get((provider or "").strip().lower().replace("-", " "), "")
+
+
+async def _stage_boards() -> list[str]:
+    """The board kinds this project's requirements stage may reach."""
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+    from shared.services.agent_run import stage_board_kinds  # noqa: PLC0415
+
+    return await stage_board_kinds(
+        get_tenant_id(), get_project_id(), _CONSEQUENTIAL_STAGE
+    )
+
+
+async def _named_board_connector(provider: str):
+    """A scoped connector for a NAMED board, or (None, error_str).
+
+    THE ACCESS PATH IS THE SAME ONE, deliberately. This resolves through
+    `get_connector_for_session` with the project, the stage and the owner exactly as
+    `agent_run_scope` does for the injected connector — so the level is looked up per
+    (stage, tool) for THIS provider, and a board the stage never wired resolves to no
+    access rather than to the stage's other board. Naming a provider chooses between
+    boards the project already holds; it cannot reach one it does not.
+    """
+    from config.connector_factory import get_connector_for_session  # noqa: PLC0415
+    from config.ws_helper import (  # noqa: PLC0415
+        get_project_id,
+        get_tenant_id,
+        get_user_id,
+    )
+
+    kind = _canonical_provider(provider)
+    available = await _stage_boards()
+    if not kind:
+        return None, (
+            f"'{provider}' is not a board this agent recognises. "
+            + (f"This project's requirements stage can use: {', '.join(available)}."
+               if available else "This project has no board connected.")
+        )
+    if available and kind not in available:
+        return None, (
+            f"This project's requirements stage is not wired to {kind}. "
+            f"It can use: {', '.join(available)}. An administrator can add another "
+            f"board on the project's Settings page."
+        )
+
+    tenant_id, project_id = get_tenant_id(), get_project_id()
+    if not (tenant_id and project_id):
+        # A queued run has no project in this context, so a named provider cannot be
+        # resolved or access-checked. Fall back to the injected connector rather than
+        # resolving one that would permit nothing.
+        return None, ""
+    try:
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, project_id=str(project_id),
+            owner_id=get_user_id() or "", agent_id=_CONSEQUENTIAL_STAGE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Could not reach the {kind} board ({type(exc).__name__})."
+    return connector, None
+
+
+async def _board_connector(mode: str = "read", provider: str = ""):
     """Return (connector, None) for the run-injected connector, or (None, error_str).
 
     `mode` is the kind of operation the caller is about to perform — "read" or
@@ -1256,15 +1339,23 @@ async def _board_connector(mode: str = "read"):
     boundary — the boundary is at connector acquisition and cannot be bypassed by a
     tool that forgets to pass a mode.
     """
-    try:
-        connector = _get_active_connector()
-    except Exception:
-        return None, (
-            "No project-management board is connected for this run. An administrator "
-            "must connect Azure DevOps or Jira on the Integrations page before board "
-            "stories can be ingested. You can still proceed with pasted or uploaded "
-            "requirements."
-        )
+    connector = None
+    if provider:
+        named, err = await _named_board_connector(provider)
+        if err:
+            return None, err
+        connector = named  # None only on the no-project fallback described there
+
+    if connector is None:
+        try:
+            connector = _get_active_connector()
+        except Exception:
+            return None, (
+                "No project-management board is connected for this run. An administrator "
+                "must connect Azure DevOps or Jira on the Integrations page before board "
+                "stories can be ingested. You can still proceed with pasted or uploaded "
+                "requirements."
+            )
     try:
         broadcast_log(
             manager,
@@ -1311,12 +1402,50 @@ async def _board_connector(mode: str = "read"):
 
 
 @tool
-async def list_board_projects() -> str:
+async def list_board_providers() -> str:
+    """List which project-management boards this project can use (Azure DevOps, Jira, …).
+
+    Call this when the user names a board — "put it on ADO, not Jira" — or when a board
+    tool refuses because a provider is not available. Every other board tool takes an
+    optional `provider` argument accepting any name listed here.
+
+    A project can have more than one board wired to its requirements stage. Without
+    naming one, the tools use the stage's default, which may not be the one the user
+    means.
+    """
+    boards = await _stage_boards()
+    if not boards:
+        return (
+            "This project's requirements stage has no board connected. An administrator "
+            "can connect one on the project's Settings page."
+        )
+    default = boards[0]
+    try:
+        from shared.services.agent_run import _pick_board_kind  # noqa: PLC0415
+
+        default = _pick_board_kind(boards) or boards[0]
+    except Exception:  # noqa: BLE001 — the list is the answer; the default is a nicety
+        pass
+    lines = [f"- {b}" + ("  (default)" if b == default else "") for b in boards]
+    return (
+        "Boards available to this project's requirements stage:\n"
+        + "\n".join(lines)
+        + "\n\nPass one as the `provider` argument of any board tool to target it "
+          "explicitly, e.g. provider=\"azure_devops\". Omit it to use the default."
+    )
+
+
+@tool
+async def list_board_projects(provider: str = "") -> str:
     """List all projects visible in the connected project-management board.
 
     Call this first when the user wants to ingest stories from the board.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1333,7 +1462,7 @@ async def list_board_projects() -> str:
 
 
 @tool
-async def list_board_groups(project: str) -> str:
+async def list_board_groups(project: str, provider: str = "") -> str:
     """List optional board groups/teams for the given project.
 
     Jira usually returns no groups (its project roles are permissions, not delivery
@@ -1341,8 +1470,12 @@ async def list_board_groups(project: str) -> str:
 
     Args:
         project: Exact project name/key as returned by list_board_projects.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1359,13 +1492,17 @@ async def list_board_groups(project: str) -> str:
 
 
 @tool
-async def list_board_states(project: str, work_item_type: str = "User Story") -> str:
+async def list_board_states(project: str, work_item_type: str = "User Story", provider: str = "") -> str:
     """List the workflow states defined for a work item type in the project.
 
     Use this to discover real state names (e.g. "New", "Active") instead of guessing.
     Defaults to User Story.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1381,7 +1518,7 @@ async def list_board_states(project: str, work_item_type: str = "User Story") ->
 
 
 @tool
-async def list_board_items(project: str, team: Optional[str] = None) -> str:
+async def list_board_items(project: str, team: Optional[str] = None, provider: str = "") -> str:
     """Fetch ALL work items in a project regardless of state or type.
 
     Use this FIRST when the user asks to pull existing board items — it never
@@ -1390,8 +1527,12 @@ async def list_board_items(project: str, team: Optional[str] = None) -> str:
     Args:
         project: Project name.
         team: Optional team name to scope the query.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1409,15 +1550,19 @@ async def list_board_items(project: str, team: Optional[str] = None) -> str:
 
 
 @tool
-async def list_board_items_by_state(project: str, state: str, team: Optional[str] = None) -> str:
+async def list_board_items_by_state(project: str, state: str, team: Optional[str] = None, provider: str = "") -> str:
     """List user stories matching a state filter in the project.
 
     Args:
         project: Project name.
         state: Exact state name from list_board_states (e.g. "New", "Active", "To Do").
         team: Optional team name to scope the query.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1437,9 +1582,14 @@ async def list_board_items_by_state(project: str, state: str, team: Optional[str
 
 
 @tool
-async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
-    """Fetch the full normalized detail of one story (description + acceptance criteria)."""
-    connector, err = await _board_connector()
+async def fetch_board_item_detail(project: str, work_item_id: int, provider: str = "") -> str:
+    """Fetch the full normalized detail of one story (description + acceptance criteria).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
+    """
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1458,7 +1608,7 @@ async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
 
 
 @tool
-async def fetch_board_hierarchy(project: str) -> str:
+async def fetch_board_hierarchy(project: str, provider: str = "") -> str:
     """Fetch the full Epic → Feature → User Story hierarchy from the board.
 
     Use when the user wants all work items organised by parent-child relationships
@@ -1466,8 +1616,12 @@ async def fetch_board_hierarchy(project: str) -> str:
 
     Args:
         project: Exact project name.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1500,6 +1654,7 @@ async def create_board_item(
     work_item_type: str = "User Story",
     description: str = "",
     acceptance_criteria: str = "",
+    provider: str = "",
 ) -> str:
     """Create a single work item of ANY type (Epic/Feature/User Story/Task/Bug) on the board.
 
@@ -1509,8 +1664,12 @@ async def create_board_item(
         work_item_type: Exact type — e.g. "Epic", "Feature", "User Story", "Task", "Bug".
         description: Optional description.
         acceptance_criteria: Optional acceptance criteria text.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1534,6 +1693,7 @@ async def create_board_project(
     name: str,
     key: str = "",
     description: str = "",
+    provider: str = "",
 ) -> str:
     """Create a NEW project/space on the connected board (Jira project or ADO project).
 
@@ -1544,8 +1704,12 @@ async def create_board_project(
         name: The new project's display name.
         key: Optional Jira project key (uppercase, ≤10 chars); ignored for ADO.
         description: Optional project description.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1560,15 +1724,19 @@ async def create_board_project(
 
 
 @tool
-async def move_board_item_state(project: str, work_item_ids: List[int], target_state: str) -> str:
+async def move_board_item_state(project: str, work_item_ids: List[int], target_state: str, provider: str = "") -> str:
     """Move one or more work items to a workflow state. Confirm with the user first.
 
     Args:
         project: Project name.
         work_item_ids: List of work item IDs to move.
         target_state: Target state name (use list_board_states for valid values).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     moved, failed = [], []
@@ -1587,15 +1755,19 @@ async def move_board_item_state(project: str, work_item_ids: List[int], target_s
 
 
 @tool
-async def add_board_comment(project: str, work_item_id: int, comment: str) -> str:
+async def add_board_comment(project: str, work_item_id: int, comment: str, provider: str = "") -> str:
     """Add a comment to a work item — for gap reports, design links, PR URLs, or audit notes.
 
     Args:
         project: Project name.
         work_item_id: Work item ID to comment on.
         comment: Comment text to post.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1615,6 +1787,7 @@ async def update_board_item(
     description: str = "",
     acceptance_criteria: str = "",
     state: str = "",
+    provider: str = "",
 ) -> str:
     """Update an existing work item — change its title, description, acceptance criteria,
     and/or move its workflow state. Only the fields you pass are changed.
@@ -1626,8 +1799,12 @@ async def update_board_item(
         description: New description (optional).
         acceptance_criteria: New acceptance criteria (optional; applied on ADO).
         state: New workflow state to transition to (optional; use list_board_states for valid values).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     changed: List[str] = []
@@ -1655,15 +1832,19 @@ async def update_board_item(
 
 
 @tool
-async def delete_board_item(project: str, work_item_id: str) -> str:
+async def delete_board_item(project: str, work_item_id: str, provider: str = "") -> str:
     """Permanently delete a work item from the board. IRREVERSIBLE — confirm the id with
     the user first. (ADO: moved to the project Recycle Bin; Jira: the issue is deleted.)
 
     Args:
         project: Project name (Jira: the project name or key).
         work_item_id: Work item id (ADO, e.g. "42") or Jira issue key (e.g. "SCRUM-5").
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1820,7 +2001,7 @@ No markdown. Only valid JSON."""
 
 
 @tool
-async def write_stories_to_board(stories_json: str, project: str) -> str:
+async def write_stories_to_board(stories_json: str, project: str, provider: str = "") -> str:
     """Create generated user stories as NEW work items on the board (bulk create).
 
     Args:
@@ -1830,8 +2011,12 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
         project: Board project name to create the stories in.
 
     Returns a summary of created work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1869,7 +2054,8 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
 
 @tool
 async def write_acceptance_criteria_to_board(
-    ac_json: str, story_ids: List[int], project: str
+    ac_json: str, story_ids: List[int], project: str,
+    provider: str = "",
 ) -> str:
     """Write generated acceptance criteria back onto EXISTING work items.
 
@@ -1879,8 +2065,12 @@ async def write_acceptance_criteria_to_board(
         project: Board project name.
 
     Returns a summary of updated work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1910,7 +2100,8 @@ async def write_acceptance_criteria_to_board(
 
 @tool
 async def write_back_normalized_to_board(
-    stories_json: str, project: str, add_audit_comment: bool = True
+    stories_json: str, project: str, add_audit_comment: bool = True,
+    provider: str = "",
 ) -> str:
     """Write normalised descriptions + Gherkin AC back to existing work items.
 
@@ -1923,8 +2114,12 @@ async def write_back_normalized_to_board(
         add_audit_comment: If True, adds an audit comment to each updated work item.
 
     Returns a summary of updated work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1979,6 +2174,7 @@ async def build_requirements_payload(
     scope_summary: str = "",
     assumptions: str = "",
     out_of_scope: str = "",
+    provider: str = "",
 ) -> str:
     """Build the structured requirements payload the Design Agent will consume.
 
@@ -1995,6 +2191,10 @@ async def build_requirements_payload(
         out_of_scope: Comma-separated out-of-scope items (or empty string).
 
     Returns a JSON payload string prefixed with REQUIREMENTS_PAYLOAD::.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
     from datetime import datetime as _dt
 
@@ -2006,7 +2206,7 @@ async def build_requirements_payload(
         stories = []
 
     kind = "unknown"
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if not err and connector is not None:
         try:
             kind = connector.connector_name
@@ -2042,6 +2242,10 @@ async def build_requirements_payload(
 
 
 _BOARD_TOOLS = [
+    # FIRST, because it answers the question every other board tool depends on: which
+    # board are we even talking to. A project can hold more than one, and without this
+    # the model can only guess at what `provider` accepts.
+    list_board_providers,
     list_board_projects, list_board_groups, list_board_states, list_board_items,
     list_board_items_by_state, fetch_board_item_detail, fetch_board_hierarchy,
     create_board_project,
@@ -2303,6 +2507,20 @@ CRITICAL — GAP QUALITY:
 - add_board_comment: post any text as a comment on a board item.
   Use to attach gap report summaries to the parent epic.
 - ALWAYS confirm with the user before calling any mutating tool.
+
+── CHOOSING WHICH BOARD (only when the user names one) ───────────────────────────
+This project may have more than one board wired (e.g. Azure DevOps AND Jira).
+Every board tool takes an optional `provider` argument.
+- If the user names a board — "put it on ADO", "not Jira", "use Azure DevOps" —
+  pass provider on EVERY tool call for that request. "ado" and "azure_devops"
+  both work.
+- If you are unsure which boards exist, call list_board_providers first.
+- If you do NOT pass provider, the project's default board is used. NEVER tell the
+  user you are writing to a board you did not name in `provider` — without it you
+  do not control which one is used, and saying otherwise is how work lands on the
+  wrong board.
+- If a provider is refused, the message says which boards this project can use.
+  Relay that and stop; do not retry with a different board the user did not ask for.
 
 ── FLOW J: GENERATE DOCUMENTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 After requirements are confirmed and the gap report is reviewed, offer to export:
