@@ -121,44 +121,55 @@ def test_an_empty_payload_does_not_crash_or_invent_sections():
         assert absent not in out
 
 
-# ── Design finds the context on the standalone page ──────────────────────────
+# -- standalone Design starts blank, on purpose --------------------------------
+#
+# A project-keyed fallback was added here and then REMOVED as a product decision.
+# `build_context_for_project` would make the standalone Design page inherit whatever
+# Requirements last produced — which is what Development does, and is not what this
+# product wants for Design. Opening Project -> Design on its own is a blank-slate
+# design conversation, not a silent continuation of a pipeline the user did not start.
+#
+# The formatter tests above still matter: they cover what Design receives through the
+# ORCHESTRATOR, where the pipeline uses the run id as the session id.
 
 
 @pytest.mark.unit
-async def test_design_falls_back_to_the_project_when_the_session_has_nothing():
-    """The standalone-page case: a fresh session id resolves to nothing, so the
-    project's most recent Run has to answer instead."""
+async def test_standalone_design_gets_no_context_when_the_session_has_none():
+    """The whole point of the decision: no project fallback, so a fresh session id
+    yields an empty context rather than the last run's payload."""
     from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as api
 
-    by_project = AsyncMock(return_value="[REQUIREMENTS CONTEXT — Project: sdlc]")
-    with patch.object(api, "build_context", AsyncMock(return_value="")), \
-            patch("config.context_broker.build_context_for_project", by_project):
-        ctx = await api._build_session_context("fresh-session", "proj-1", "tenant-1")
-    assert "REQUIREMENTS CONTEXT" in ctx
-    assert by_project.await_args.args == ("proj-1", "tenant-1", "design")
-
-
-@pytest.mark.unit
-async def test_the_session_answer_wins_when_there_is_one():
-    """Inside a pipeline run the session names THIS run's artifacts; the project read
-    would return the latest run's, which may be a different one."""
-    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as api
-
-    by_project = AsyncMock(return_value="from-project")
-    with patch.object(api, "build_context", AsyncMock(return_value="from-session")), \
-            patch("config.context_broker.build_context_for_project", by_project):
-        ctx = await api._build_session_context("run-id", "proj-1", "tenant-1")
-    assert ctx == "from-session"
-    by_project.assert_not_awaited()
-
-
-@pytest.mark.unit
-async def test_no_project_context_means_no_fallback_rather_than_a_bad_lookup():
-    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as api
-
-    by_project = AsyncMock(return_value="should-not-be-used")
-    with patch.object(api, "build_context", AsyncMock(return_value="")), \
-            patch("config.context_broker.build_context_for_project", by_project):
-        ctx = await api._build_session_context("fresh-session", "", "")
+    by_project = AsyncMock(return_value="[REQUIREMENTS CONTEXT - Project: sdlc]")
+    with patch.object(api, "build_context", AsyncMock(return_value="")),             patch("config.context_broker.build_context_for_project", by_project):
+        ctx = await api._build_session_context("fresh-session")
     assert ctx == ""
     by_project.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_the_pipeline_still_gets_its_run_context():
+    """Inside the orchestrator the session id IS the run id, so the session-keyed
+    lookup finds that run's artifacts. Removing the fallback must not break this."""
+    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as api
+
+    with patch.object(api, "build_context", AsyncMock(return_value="from-session")):
+        ctx = await api._build_session_context("run-id")
+    assert ctx == "from-session"
+
+
+@pytest.mark.unit
+def test_design_does_not_reach_for_the_project_fallback():
+    """A source-level guard, because the fallback is a one-line change somebody will
+    reasonably re-add — Development uses it, and the docstring on
+    build_context_for_project frames finding nothing as a bug."""
+    import inspect
+
+    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as api
+
+    src = inspect.getsource(api)
+    # A CALL or an IMPORT, not a mention — the docstring names the function on purpose,
+    # to say why it is not used. A bare substring check would fail on the explanation.
+    assert "build_context_for_project(" not in src.replace(
+        "`build_context_for_project`", ""
+    ), "standalone Design must start blank - see _build_session_context"
+    assert "import build_context_for_project" not in src
