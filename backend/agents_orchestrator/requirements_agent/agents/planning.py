@@ -1184,6 +1184,59 @@ from shared.authz.consequential import authorize_consequential as _authorize_con
 _CONSEQUENTIAL_STAGE = "requirements"
 
 
+def _board_error(exc: Exception) -> str:
+    """What went wrong on the board, said safely and actionably.
+
+    NEVER `str(exc)`. httpx's HTTPStatusError renders as
+    "Client error '400 Bad Request' for url 'https://acme.atlassian.net/rest/api/3/issue'",
+    and every board tool used to interpolate that straight into its return value — which
+    lands in the model's context and in the saved transcript. That is the instance URL
+    and the full API path, for every tenant, on every failure.
+
+    It is also useless to the reader: "400 Bad Request" does not say WHAT was wrong.
+    The provider does say, in the response BODY, which is a different thing from the
+    exception's own message — Jira answers
+    {"errors": {"issuetype": "The issue type selected is invalid."}} and that sentence
+    is exactly what the agent needs to correct itself and retry.
+
+    So: pull the provider's own reason out of the body when there is one, fall back to
+    the status code, and fall back again to the exception TYPE name. None of those
+    carry a URL or a credential.
+    """
+    import httpx  # noqa: PLC0415
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        reasons: list[str] = []
+        try:
+            body = exc.response.json()
+        except Exception:  # noqa: BLE001 — a non-JSON body is normal for some errors
+            body = None
+        if isinstance(body, dict):
+            # Jira: {"errorMessages": [...], "errors": {"field": "why"}}
+            for m in body.get("errorMessages") or []:
+                if isinstance(m, str):
+                    reasons.append(m)
+            errs = body.get("errors")
+            if isinstance(errs, dict):
+                reasons.extend(f"{k}: {v}" for k, v in errs.items() if isinstance(v, str))
+            # Azure DevOps: {"message": "..."}
+            msg = body.get("message")
+            if isinstance(msg, str) and msg:
+                reasons.append(msg)
+        code = exc.response.status_code
+        if reasons:
+            return f"the board rejected it (HTTP {code}) — " + "; ".join(reasons[:3])
+        if code in (401, 403):
+            return (
+                f"the board rejected the credential (HTTP {code}) — check the personal "
+                "access token on the Integrations page."
+            )
+        if code == 404:
+            return f"the board could not find that (HTTP {code}) — check the project name."
+        return f"the board returned HTTP {code}."
+    return f"the board call failed ({type(exc).__name__})."
+
+
 async def _board_connector(mode: str = "read"):
     """Return (connector, None) for the run-injected connector, or (None, error_str).
 
@@ -1269,7 +1322,7 @@ async def list_board_projects() -> str:
     try:
         projects = await connector.read_adapter("list_projects")
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching projects: {exc}"
+        return f"Error fetching projects: {_board_error(exc)}"
     if not projects:
         return "No projects found."
     lines = [
@@ -1295,7 +1348,7 @@ async def list_board_groups(project: str) -> str:
     try:
         teams = await connector.read_adapter("list_teams", project=project)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching teams for project '{project}': {exc}"
+        return f"Error fetching teams for project '{project}': {_board_error(exc)}"
     if not teams:
         return (
             f"No board groups/teams found in project '{project}'. "
@@ -1320,7 +1373,7 @@ async def list_board_states(project: str, work_item_type: str = "User Story") ->
             "list_states", project=project, item_type=work_item_type
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching states: {exc}"
+        return f"Error fetching states: {_board_error(exc)}"
     if not states:
         return "No states returned."
     lines = [f"- {s['name']} ({s.get('category', '')})" for s in states]
@@ -1344,7 +1397,7 @@ async def list_board_items(project: str, team: Optional[str] = None) -> str:
     try:
         items = await connector.read_adapter("list_all_items", project=project, team=team)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching work items: {exc}"
+        return f"Error fetching work items: {_board_error(exc)}"
     if not items:
         return f"No work items found in project '{project}'."
     lines = [
@@ -1372,7 +1425,7 @@ async def list_board_items_by_state(project: str, state: str, team: Optional[str
             "list_stories", project=project, state=state, team=team
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching stories: {exc}"
+        return f"Error fetching stories: {_board_error(exc)}"
     if not stories:
         return f"No stories in state '{state}' for project '{project}'."
     lines = [
@@ -1394,7 +1447,7 @@ async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
             "fetch_item_detail", project=project, item_id=work_item_id
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching work item #{work_item_id}: {exc}"
+        return f"Error fetching work item #{work_item_id}: {_board_error(exc)}"
     ac_lines = "\n".join(f"  - {c}" for c in norm.get("acceptance_criteria", [])) or "  (none)"
     return (
         f"Story #{norm.get('source_key') or norm['work_item_id']} (id: {norm['id']}): {norm['title']}\n"
@@ -1420,7 +1473,7 @@ async def fetch_board_hierarchy(project: str) -> str:
     try:
         tree = await connector.read_adapter("fetch_hierarchy", project=project)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching hierarchy: {exc}"
+        return f"Error fetching hierarchy: {_board_error(exc)}"
     if not tree:
         return f"No work items found in project '{project}'."
 
@@ -1473,7 +1526,7 @@ async def create_board_item(
         url = wi.get("url") or wi.get("work_item_url") or wi.get("_links", {}).get("html", {}).get("href", "")
         return f"Created {work_item_type} #{wid}: {title}" + (f"\n{url}" if url else "")
     except Exception as exc:  # noqa: BLE001
-        return f"Error creating {work_item_type} '{title}': {exc}"
+        return f"Error creating {work_item_type} '{title}': {_board_error(exc)}"
 
 
 @tool
@@ -1503,7 +1556,7 @@ async def create_board_project(
             return f"Project '{name}' creation queued on Azure DevOps (provisions in the background)."
         return f"Created project '{res.get('name', name)}' (key: {res.get('key', '?')})."
     except Exception as exc:  # noqa: BLE001
-        return f"Error creating project '{name}': {exc}"
+        return f"Error creating project '{name}': {_board_error(exc)}"
 
 
 @tool
@@ -1526,7 +1579,7 @@ async def move_board_item_state(project: str, work_item_ids: List[int], target_s
             )
             moved.append(f"#{wid}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
     lines = [f"Moved {len(moved)} item(s) to '{target_state}':"] + moved
     if failed:
         lines += [f"Failed ({len(failed)}):"] + failed
@@ -1551,7 +1604,7 @@ async def add_board_comment(project: str, work_item_id: int, comment: str) -> st
         )
         return f"Comment added to #{work_item_id}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error adding comment to #{work_item_id}: {exc}"
+        return f"Error adding comment to #{work_item_id}: {_board_error(exc)}"
 
 
 @tool
@@ -1598,7 +1651,7 @@ async def update_board_item(
             return f"Nothing to update for #{work_item_id} — pass a title, description, acceptance_criteria, or state."
         return f"Updated #{work_item_id}: {', '.join(changed)}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error updating #{work_item_id}: {exc}"
+        return f"Error updating #{work_item_id}: {_board_error(exc)}"
 
 
 @tool
@@ -1617,7 +1670,7 @@ async def delete_board_item(project: str, work_item_id: str) -> str:
         await connector.write_adapter("delete_item", project=project, item_id=work_item_id)
         return f"Deleted work item #{work_item_id}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error deleting #{work_item_id}: {exc}"
+        return f"Error deleting #{work_item_id}: {_board_error(exc)}"
 
 
 # ── §4.1 authoring tools (gap analysis · normalisation · epics · write-back) ────
@@ -1806,7 +1859,7 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
             )
             created.append(f"#{wi['id']} {title}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"{title}: {exc}")
+            failed.append(f"{title}: {_board_error(exc)}")
 
     lines = [f"Created {len(created)} work item(s):"] + created
     if failed:
@@ -1847,7 +1900,7 @@ async def write_acceptance_criteria_to_board(
             )
             updated.append(f"#{wid}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
 
     lines = [f"Updated {len(updated)} work item(s):"] + updated
     if failed:
@@ -1910,7 +1963,7 @@ async def write_back_normalized_to_board(
                     pass
             updated.append(f"#{wid} {s.get('title', '')}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
 
     lines = [f"Updated {len(updated)} work item(s):"] + updated
     if failed:

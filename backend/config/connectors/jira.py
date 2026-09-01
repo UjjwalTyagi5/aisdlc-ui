@@ -632,6 +632,29 @@ class JiraConnector(BaseConnector):
                 return p.get("key") or project
         return project
 
+    #: The board tools are provider-neutral and speak ADO's vocabulary — its own
+    #: `create_item` defaults to "User Story" — so that is what arrives here whichever
+    #: board is wired. Jira's default schemes have no "User Story" type and answer
+    #: 400 for one, which surfaced as a bare "400 Bad Request" naming only the URL.
+    #:
+    #: Same job as `_normalize_kwargs`, one level down: that maps the parameter NAMES,
+    #: this maps a parameter VALUE. Only types Jira genuinely lacks are translated —
+    #: Bug, Task, Epic and Story exist in the default schemes and are passed through
+    #: untouched, and an unrecognised type is passed through too rather than guessed
+    #: at, so a project with a custom scheme still works.
+    _ITEM_TYPE_ALIASES = {
+        "user story": "Story",
+        "userstory": "Story",
+        "product backlog item": "Story",
+        "pbi": "Story",
+        "requirement": "Story",
+        "issue": "Task",
+    }
+
+    @classmethod
+    def _jira_item_type(cls, item_type: str) -> str:
+        return cls._ITEM_TYPE_ALIASES.get((item_type or "").strip().lower(), item_type)
+
     async def create_item(
         self,
         project: str,
@@ -642,6 +665,7 @@ class JiraConnector(BaseConnector):
     ) -> Dict[str, Any]:
         """POST /rest/api/3/issue → canonical dict with created key."""
         project_key = await self._resolve_project_key(project)
+        item_type = self._jira_item_type(item_type)
         payload = {
             "fields": {
                 "project": {"key": project_key},
