@@ -111,9 +111,21 @@ export default function DesignPage() {
     () =>
       requirementStories
         .map((s) =>
-          s.body.kind === "story" ? { ref: storyRef(s), title: s.body.title } : null,
+          s.body.kind === "story"
+            ? {
+                ref: storyRef(s),
+                title: s.body.title,
+                // The board's own type. Without it an Epic and three board-setup
+                // Tasks reach the Design agent indistinguishable from user stories,
+                // and it designs a system for whatever it is handed.
+                type: s.body.workItemType || undefined,
+              }
+            : null,
         )
-        .filter((s): s is { ref: string | undefined; title: string } => !!s),
+        .filter(
+          (s): s is { ref: string | undefined; title: string; type: string | undefined } =>
+            !!s,
+        ),
     [requirementStories, storyRef],
   );
 

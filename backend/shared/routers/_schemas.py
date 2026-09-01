@@ -569,6 +569,17 @@ def story_artifacts_from_run(run: Any, project_id: str) -> List["ArtifactOut"]:
             "title": title,
             "description": description,
             "acceptanceCriteria": ac_rows,
+            # THE BOARD'S OWN TYPE, carried through rather than flattened away.
+            # ingest_board pulls EVERY work item on the board, so this list routinely
+            # holds Epics, Tasks and Bugs alongside real stories — one project's
+            # "stories" were an Epic and three Tasks about configuring the board
+            # itself. Dropping the type presented all four to the Design agent as user
+            # stories to design a system for, which is how a board-setup chore became
+            # an eight-section architecture document.
+            #
+            # `kind` stays "story" because that is the ARTIFACT shape the frontend
+            # renders; workItemType is what the item actually is on the board.
+            "workItemType": s.get("work_item_type") or s.get("type") or "",
             "traceability": {"jiraIssueKey": source_key} if source_key else {},
         }
         content_hash = hashlib.sha256(

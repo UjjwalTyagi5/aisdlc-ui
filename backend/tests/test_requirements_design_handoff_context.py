@@ -87,6 +87,52 @@ def test_acceptance_criteria_lists_are_not_rendered_as_python_reprs():
     assert "Given a BRD; Then stories" in out
 
 
+# -- the board's own item type survives ---------------------------------------
+
+
+@pytest.mark.unit
+def test_non_story_work_items_are_labelled_with_their_type():
+    """Board ingestion pulls EVERY work item, so this list is not all user stories.
+
+    Observed live: a project's four "stories" were an Epic and three Tasks about
+    configuring the board itself, handed to the Design agent as requirements to
+    design a system for."""
+    out = _fmt({
+        "project": "sdlc",
+        "stories": [
+            {"title": "Project Initiation", "work_item_type": "Epic"},
+            {"title": "Set up backlog and board structure", "work_item_type": "Task"},
+        ],
+    })
+    assert "[Epic] Project Initiation" in out
+    assert "[Task] Set up backlog and board structure" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("wtype", ["User Story", "user story", "Story"])
+def test_actual_stories_are_not_labelled(wtype):
+    """Prefixing every line with [User Story] would be noise — the label exists to
+    mark the ones that are NOT stories."""
+    out = _fmt({"project": "sdlc", "stories": [{"title": "Log in", "work_item_type": wtype}]})
+    assert "  - Log in" in out
+
+
+@pytest.mark.unit
+def test_the_list_is_not_called_user_stories():
+    """It was headed "User Stories (4)" for a list containing no user stories."""
+    out = _fmt({"project": "sdlc", "stories": [{"title": "x", "work_item_type": "Task"}]})
+    assert "User Stories (" not in out
+    assert "Requirement items (" in out
+
+
+@pytest.mark.unit
+def test_a_story_with_no_type_still_renders():
+    """Payloads written before the type was carried through have none."""
+    out = _fmt({"project": "sdlc", "stories": [{"title": "Legacy item"}]})
+    assert "  - Legacy item" in out
+
+
+
 # ── truncation is announced ──────────────────────────────────────────────────
 
 

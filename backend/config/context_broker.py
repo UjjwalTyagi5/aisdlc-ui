@@ -75,9 +75,18 @@ def _fmt_requirements(req: Dict[str, Any]) -> str:
     if brd:
         lines.append(_clip("BRD", str(brd), 4000))
     if stories:
-        lines.append(f"User Stories ({len(stories)}" + (", showing first 20" if len(stories) > 20 else "") + "):")
+        # "Work items", not "User Stories" — the list is whatever the board holds.
+        lines.append(f"Requirement items ({len(stories)}" + (", showing first 20" if len(stories) > 20 else "") + "):")
         for s in stories[:20]:
             title = s.get("title", "") if isinstance(s, dict) else str(s)
+            # The BOARD's type, when the payload carries one. Ingestion pulls every
+            # work item, so this list routinely holds Epics and chore Tasks — one
+            # project's four "stories" were an Epic and three Tasks about configuring
+            # the board itself. Labelling them all "User Stories" is what let a
+            # board-setup chore be read as a system to design.
+            wtype = s.get("work_item_type") or s.get("type") or "" if isinstance(s, dict) else ""
+            if wtype and wtype.lower() not in ("user story", "story"):
+                title = f"[{wtype}] {title}"
             ac = s.get("acceptance_criteria", "") if isinstance(s, dict) else ""
             # AC is a list on the board shape and a string on the artifact shape;
             # f-string on a list renders a Python repr into the model's context.
