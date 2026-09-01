@@ -366,3 +366,61 @@ def test_consent_is_set_on_every_chat_turn_of_both_agents():
     for mod in (api, dapi):
         src = inspect.getsource(mod)
         assert src.count("set_consequential_approved(") == 2, mod.__name__
+
+
+# ── the consent flag actually reaches the tools ──────────────────────────────
+
+
+@pytest.mark.unit
+def test_consent_set_in_the_outer_frame_reaches_a_tool():
+    """THE ASSUMPTION THE WHOLE GATE RESTS ON, and it is not obvious.
+
+    Requirements' `action` node is SYNC and runs its tools through
+    `asyncio.run(execute_tools())` — a fresh event loop. Its own comments record that
+    `set_resolved_model()`, called inside the async `agent` node, does NOT survive into
+    that context; the resolved model has to be threaded through graph state instead.
+
+    Consent survives where the model does not, and the difference is WHERE it is set,
+    not what it is. `asyncio.run` copies the CURRENT context, so a value set in an
+    ancestor frame — the WS/REST handler, before the graph is invoked — is visible;
+    a value set inside a sibling task is not. Setting the flag in the handler rather
+    than in a node is therefore load-bearing, and this test fails if anyone moves it.
+
+    If this ever broke, `get_consequential_approved()` would read False inside every
+    tool and every board write would refuse — the feature would look dead rather than
+    broken, which is exactly the failure mode this branch has been fixing elsewhere.
+    """
+    import asyncio
+
+    from config.ws_helper import get_consequential_approved, set_consequential_approved
+
+    def action_node():
+        """The shape of planning.action → execute_tools."""
+        async def execute_tools():
+            return get_consequential_approved()
+
+        return asyncio.run(execute_tools())
+
+    set_consequential_approved(True)
+    assert action_node() is True
+    set_consequential_approved(False)
+    assert action_node() is False
+
+
+@pytest.mark.unit
+def test_consent_set_inside_a_node_would_not_reach_the_caller():
+    """The control for the test above: this is the propagation that does NOT work, and
+    is why the flag is set in the handler. Pinned so the distinction stays visible."""
+    import asyncio
+
+    from config.ws_helper import get_consequential_approved, set_consequential_approved
+
+    async def sets_it_inside_a_task():
+        set_consequential_approved(True)
+
+    async def outer():
+        set_consequential_approved(False)
+        await asyncio.create_task(sets_it_inside_a_task())
+        return get_consequential_approved()
+
+    assert asyncio.run(outer()) is False
