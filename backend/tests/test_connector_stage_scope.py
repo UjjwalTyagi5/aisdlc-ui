@@ -274,3 +274,43 @@ def test_a_figma_denial_is_explained_as_an_access_level():
     assert "access" in msg.lower()
     assert "integrations" in msg.lower()
     assert "ConnectorAccessDenied" not in msg
+
+
+# ── the REST path: the "Pull stories" button ─────────────────────────────────
+
+
+@pytest.mark.unit
+async def test_the_board_picker_names_its_stage():
+    """`shared.routers.projects._connector_or_409`, the seventh site with this bug.
+
+    FOUND FROM A LIVE 502, not from reading. Clicking "Pull stories" on a fresh
+    project logged:
+
+        connector access denied: jira read (level=None)
+        list_board_projects: list_projects failed: ConnectorAccessDenied
+        GET /projects/{id}/board-projects 502
+
+    `level=None` is the signature of this defect. Both callers of the helper --
+    `list_board_projects` (the picker) and `ingest_board` (the actual pull) -- were
+    therefore dead for EVERY project and EVERY tenant, however the board was wired.
+    The 502 blamed the board ("Couldn't reach the board"), which is why it read as a
+    credential problem.
+
+    The stage is not a guess: `_board_providers` resolves the kind from
+    `Project.connectors["requirements"]`, so the level must be read under that same
+    stage or it names nothing.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from shared.routers import projects as projects_router
+
+    factory = AsyncMock(return_value=object())
+    project = types.SimpleNamespace(
+        id=PROJECT, connectors={"requirements": ["jira"]}, provider_kind=None,
+    )
+    with patch("config.connector_factory.get_connector_for_session", factory):
+        await projects_router._connector_or_409(project, TENANT, kind="jira")
+
+    assert factory.await_args.kwargs.get("agent_id") == "requirements"
+    # And it still passes the project — the stage alone resolves nothing either.
+    assert factory.await_args.kwargs.get("project_id") == str(PROJECT)

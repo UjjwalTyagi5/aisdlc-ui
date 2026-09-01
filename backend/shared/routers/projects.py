@@ -656,6 +656,13 @@ def _board_kind(project, requested: Optional[str] = None) -> str:
     return providers[0]
 
 
+#: The stage both callers of `_connector_or_409` act for. `_board_providers` reads
+#: `Project.connectors["requirements"]`, so the board they resolve is by definition the
+#: one wired to the Requirements stage — the level has to be looked up under the same
+#: name, or it resolves to nothing.
+_BOARD_STAGE = "requirements"
+
+
 async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None):
     """Resolve the tenant's board connector for a project, or 409 fail-closed."""
     from config.connector_factory import get_connector_for_session  # noqa: PLC0415
@@ -664,6 +671,17 @@ async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None)
     try:
         return await get_connector_for_session(
             kind=kind, tenant_id=tenant_id, project_id=str(project.id),
+            # REQUIRED, and its absence was not a narrower grant — it was none at all.
+            # `effective_access` returns None the moment `agent_id` is empty
+            # (connector_grants.py: `if not agent_id: return None`), and
+            # `permits(None, mode)` is False for every mode, so this resolved to
+            # ScopedConnector(raw, None) and BOTH callers below were dead for every
+            # project and every tenant, however the board was wired: "Pull stories"
+            # answered 502 and board ingestion never ran. It failed in the safe
+            # direction behind a plausible message ("Couldn't reach the board"), which
+            # is exactly why it survived. Same defect as the three workers and
+            # agent_run_scope — see tests/test_connector_stage_scope.py.
+            agent_id=_BOARD_STAGE,
         )
     except Exception:
         raise HTTPException(
