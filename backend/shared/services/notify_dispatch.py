@@ -109,7 +109,20 @@ async def _deliver(tenant_id: str, *, kind: str, operation: str, kwargs: dict) -
     try:
         from config.connector_factory import get_connector_for_session
 
-        connector = await get_connector_for_session(kind=kind, tenant_id=tenant_id)
+        # `unrestricted` NAMED, because this is the fail-open door and it should read
+        # as one. A tenant notification acts for no project and no stage: it is the
+        # platform telling a human that a gate is waiting, not an agent reaching a
+        # tool on a project's behalf. There is no stage whose grant could be checked.
+        #
+        # WITHOUT IT THIS WAS SILENTLY DEAD. Passing neither a project nor a stage nor
+        # this flag yields ScopedConnector(raw, None), and `permits(None, "write")` is
+        # False — so every write_adapter below raised ConnectorAccessDenied, which the
+        # `except` swallows into `return False`. Slack and Teams delivery failed for
+        # every tenant with nothing but a warning line, and "notifications are not
+        # arriving" is not a symptom anyone traces back to an access level.
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, unrestricted=True,
+        )
         await connector.write_adapter(operation, **kwargs)
         return True
     except Exception as exc:  # noqa: BLE001
