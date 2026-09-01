@@ -171,16 +171,58 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _sanitize_messages(messages: list) -> list:
-    """Drop ToolMessages whose tool_call_id has no matching AIMessage tool_call."""
-    valid_ids: set = set()
+    """Repair a message history that drifted out of the strict AIMessage.tool_calls
+    <-> ToolMessage pairing every provider requires. Two independent directions of
+    drift are possible:
+
+      - Orphan ToolMessage: a tool_call_id with no matching AIMessage tool_call
+        (e.g. a stale/replayed message). Dropped (original behaviour).
+      - Dangling tool_call: an AIMessage tool_call with NO ToolMessage response
+        anywhere in the history -- e.g. a WS turn that was `task.cancel()`-ed
+        (see task 4, development-agent-chat-overhaul: cancelling an in-flight
+        turn on disconnect/reconnect) landed between the agent node committing
+        its AIMessage and the tools node running, so the checkpoint persisted a
+        tool_call the tools node never got to answer. Every major provider
+        (Anthropic/OpenAI/etc.) rejects a history that ends on an unanswered
+        tool_call, so the next turn on that session_id would otherwise fail at
+        the provider with no obvious link back to the earlier cancellation. The
+        dangling entries are stripped from the AIMessage instead -- we do NOT
+        synthesize a fake ToolMessage, since we have no idea what the tool
+        would have returned.
+    """
+    all_call_ids: set = set()
+    answered_ids: set = set()
+    for msg in messages:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            all_call_ids.update(tc["id"] for tc in msg.tool_calls)
+        if isinstance(msg, ToolMessage):
+            answered_ids.add(msg.tool_call_id)
+
     out = []
     for msg in messages:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                valid_ids.add(tc["id"])
+            kept = [tc for tc in msg.tool_calls if tc["id"] in answered_ids]
+            if len(kept) != len(msg.tool_calls):
+                update: dict = {"tool_calls": kept}
+                # additional_kwargs can carry the raw provider-format tool_calls
+                # too (e.g. OpenAI's {"tool_calls": [...]}) -- some conversion
+                # paths read that instead of/alongside the structured field, so
+                # it must be filtered in step or a "repaired" message can still
+                # round-trip the dangling call back to the provider.
+                raw_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                if "tool_calls" in raw_kwargs:
+                    kept_ids = {tc["id"] for tc in kept}
+                    update["additional_kwargs"] = {
+                        **raw_kwargs,
+                        "tool_calls": [
+                            rtc for rtc in raw_kwargs["tool_calls"]
+                            if rtc.get("id") in kept_ids
+                        ],
+                    }
+                msg = msg.model_copy(update=update)
             out.append(msg)
         elif isinstance(msg, ToolMessage):
-            if msg.tool_call_id in valid_ids:
+            if msg.tool_call_id in all_call_ids:
                 out.append(msg)
         else:
             out.append(msg)
