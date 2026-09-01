@@ -31,7 +31,7 @@ import os
 
 from sqlalchemy import select
 
-from config.ws_helper import get_project_id, get_run_id, get_tenant_id
+from config.ws_helper import get_project_id, get_run_id, get_session_id, get_tenant_id
 from shared.db import get_db_session_for_tenant
 from shared.models.orm import Artifact, Run
 
@@ -86,13 +86,60 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
     return str(run.id)
 
 
-async def register_generated_file(filename: str, file_path: str, url: str, *, stage: str) -> None:
-    """Persist a chat-generated file as an Artifact row (+ notify). Never raises."""
+#: Files generated this session that the user has NOT yet agreed to store.
+#: Keyed by session id. In-process and deliberately not persisted: a pending file is
+#: a question waiting for an answer in THIS conversation, not durable state.
+_PENDING: dict[str, list[dict]] = {}
+
+
+def pending_for_session(session_id: str) -> list[dict]:
+    """What has been generated but not stored. Copy — callers must not mutate."""
+    return list(_PENDING.get(session_id or "", []))
+
+
+def clear_pending(session_id: str) -> None:
+    _PENDING.pop(session_id or "", None)
+
+
+async def register_generated_file(
+    filename: str, file_path: str, url: str, *, stage: str, consented: bool | None = None
+) -> None:
+    """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
+
+    STORING IS NOW THE USER'S CALL. A generated document is downloadable the moment it
+    is written — the tool broadcasts a `/generated/...` link — so persisting it into the
+    project's artifacts and uploading the bytes to Blob is a separate act with a
+    separate consequence: it puts the document in a shared, durable, tenant-visible
+    place. The user is asked first.
+
+    Without consent this stages the file instead (see `_PENDING`) and returns. The
+    agent then offers to save it, and `save_pending_artifacts` stores it on a yes.
+
+    `consented=None` reads the per-turn consent flag, so a turn where the user said
+    "yes, save it" stores immediately and no second round trip is needed.
+    """
     try:
         tenant_id = get_tenant_id()
         project_id = get_project_id()
         if not tenant_id or not project_id:
             logger.debug("register_generated_file: no tenant/project in context — skip persist (%s)", filename)
+            return
+
+        if consented is None:
+            from config.ws_helper import get_consequential_approved  # noqa: PLC0415
+
+            consented = get_consequential_approved()
+        if not consented:
+            sid = get_session_id() or ""
+            entry = {"filename": filename, "file_path": file_path, "url": url, "stage": stage}
+            pend = _PENDING.setdefault(sid, [])
+            # Re-generating the same filename replaces the pending entry rather than
+            # queueing a duplicate the user would be asked about twice.
+            pend[:] = [e for e in pend if e["filename"] != filename] + [entry]
+            logger.info(
+                "register_generated_file: %s generated but NOT stored — awaiting the "
+                "user's go-ahead (session=%s)", filename, sid,
+            )
             return
 
         content_type = _CONTENT_TYPES.get(os.path.splitext(filename)[1].lower())
@@ -160,3 +207,41 @@ async def register_generated_file(filename: str, file_path: str, url: str, *, st
         logger.info("register_generated_file: persisted %s (%s) for run %s", filename, artifact_type, run_id)
     except Exception:
         logger.warning("register_generated_file: failed to persist %s", filename, exc_info=True)
+
+
+async def save_pending_artifacts(session_id: str = "") -> tuple[list[str], list[str]]:
+    """Store every file this session generated but has not yet saved.
+
+    Returns (stored_filenames, failed_filenames). The pending list is cleared for the
+    ones that stored, so a second call does not duplicate them; a failure stays pending
+    so the user can retry rather than being told nothing happened and losing the file.
+
+    `consented=True` is passed explicitly — reaching this function IS the consent, and
+    re-reading the per-turn flag here would refuse the very action it was granted for
+    when the user's approving message arrives on a later turn.
+    """
+    sid = session_id or get_session_id() or ""
+    pending = list(_PENDING.get(sid, []))
+    if not pending:
+        return [], []
+
+    stored: list[str] = []
+    failed: list[str] = []
+    for entry in pending:
+        before = len(_PENDING.get(sid, []))  # noqa: F841 — readability at the call site
+        try:
+            await register_generated_file(
+                entry["filename"], entry["file_path"], entry["url"],
+                stage=entry["stage"], consented=True,
+            )
+            stored.append(entry["filename"])
+        except Exception:  # noqa: BLE001 — register_* never raises, but never say never
+            logger.warning("save_pending_artifacts: %s failed", entry["filename"], exc_info=True)
+            failed.append(entry["filename"])
+
+    remaining = [e for e in _PENDING.get(sid, []) if e["filename"] in failed]
+    if remaining:
+        _PENDING[sid] = remaining
+    else:
+        _PENDING.pop(sid, None)
+    return stored, failed

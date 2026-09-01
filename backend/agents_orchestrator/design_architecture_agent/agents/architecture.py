@@ -694,6 +694,72 @@ async def generate_diagram(diagram_type: str, source: str, output_path: str = ""
     return f"Rendered {dtype} diagram '{filename}'.{tail}"
 
 
+
+@tool
+async def save_architecture_pdf(content: str = "", filename: str = "architecture.pdf") -> str:
+    """Save the architecture document as a PDF instead of a .docx.
+
+    Use when the user asks for a PDF. For Word use save_architecture; for slides use
+    generate_ppt.
+
+    Args:
+        content: The markdown document. Omit to use the most recently generated
+            architecture for this session.
+        filename: Output filename, e.g. project_architecture.pdf
+    """
+    if not (content and content.strip()):
+        content = getattr(shared, "output_file", "") or ""
+    if not (content and content.strip()):
+        return ("Error: nothing to save. Generate the architecture first "
+                "(generate_architecture_from_context), or pass the content explicitly.")
+
+    filename = os.path.basename(filename or "architecture.pdf")
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, filename)
+
+    try:
+        from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
+
+        markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating the PDF ({type(exc).__name__})."
+
+    url = await _design_broadcast_file(filename, full_path)
+    return (
+        f"Saved '{filename}'."
+        + (f" Download it here: {url}" if url else "")
+        + " It is NOT yet in the project's artifacts — ask the user whether to save it "
+          "there, and call save_to_project_artifacts if they agree."
+    )
+
+
+@tool
+async def save_to_project_artifacts() -> str:
+    """Store the documents generated in this chat into the project's artifacts.
+
+    Call this ONLY after the user has agreed. Generated files are downloadable straight
+    away; adding them to the project's artifacts uploads them to shared, durable
+    storage, which is the user's decision to make. Ask first, then call this on a yes.
+    """
+    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
+
+    stored, failed = await save_pending_artifacts(get_session_id() or "")
+    if not stored and not failed:
+        return "There are no generated documents waiting to be saved."
+    parts = []
+    if stored:
+        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
+    if failed:
+        parts.append(
+            f"Could not save: {', '.join(failed)} — they are still downloadable and "
+            "can be retried."
+        )
+    return " ".join(parts)
+
 tools = [
     read_document,
     generate_architecture,
@@ -704,6 +770,10 @@ tools = [
     # empty content and looping. Removing it forces the correct
     # generate_architecture_from_context → save_architecture path.
     save_architecture,
+    # PDF output, and the explicit save the user is asked for before anything is
+    # written to the project's shared artifact storage.
+    save_architecture_pdf,
+    save_to_project_artifacts,
     generate_ppt,
     generate_diagram,
     render_diagram_via_kroki,
@@ -752,6 +822,25 @@ from Requirements") and ask what they want built.
 
 When you ARE asked, use the context you have: pass those stories as `context`, and
 never ask the user to re-supply requirements that are already in front of you.
+
+
+── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
+A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
+ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
+whole project can see — and it is the user's decision, not yours.
+- After generating a document, tell the user it is ready, give the download link, and
+  ASK whether to add it to the project's artifacts.
+- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
+  and never claim a document was added to the project unless that tool confirmed it.
+- If they say no, do nothing: the file stays downloadable from the chat.
+
+── FILE FORMATS ──────────────────────────────────────────────────────────────────
+Match the format the user asks for:
+  Word / .docx   save_architecture
+  PDF            save_architecture_pdf
+  Spreadsheet    (not available — say so)
+  Slides         generate_ppt
+Do not substitute a format silently — if they ask for PDF, produce a PDF.
 
 ── SCOPE BOUNDARY (CRITICAL) ─────────────────────────────────────────────────
 You are ONLY responsible for design and architecture artifacts.

@@ -1401,6 +1401,75 @@ async def _board_connector(mode: str = "read", provider: str = ""):
     return connector, None
 
 
+
+@tool
+async def markdowntopdf(content: str = "", output_path: str = "requirements_document.pdf") -> str:
+    """Convert Markdown (or the last generated document) into a PDF file.
+
+    Use when the user asks for a PDF specifically. Word -> markdowntodoc,
+    spreadsheet -> generate_planning_sheet, slides -> generate_ppt.
+
+    Args:
+        content: The markdown to convert. Omit to use the most recently generated
+            document (BRD / PDD / Risk Register) for this session.
+        output_path: Filename, e.g. project_topic_brd.pdf
+    """
+    if not (content and content.strip()):
+        try:
+            content = _LAST_GENERATED_DOC.get(get_session_id(), "")
+        except Exception:  # noqa: BLE001
+            content = ""
+    if not (content and content.strip()):
+        return ("Error: nothing to convert. Generate a BRD / PDD / Risk Register first, "
+                "or pass the markdown content explicitly.")
+
+    filename = os.path.basename(output_path or "requirements_document.pdf")
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = f"{esett.FILES}/{user_id}/requirements_agent/{session_id}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, filename)
+
+    try:
+        from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
+
+        markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating the PDF ({type(exc).__name__})."
+
+    url = await broadcast_file_generated(session_id, filename, full_path)
+    return (
+        f"Generated '{filename}'."
+        + (f" Download it here: {url}" if url else "")
+        + " It is NOT yet saved to the project's artifacts — ask the user whether to "
+          "save it, and call save_to_project_artifacts if they agree."
+    )
+
+
+@tool
+async def save_to_project_artifacts() -> str:
+    """Store the documents generated in this chat into the project's artifacts.
+
+    Call this ONLY after the user has agreed. Generated files are downloadable straight
+    away; adding them to the project's artifacts uploads them to shared, durable
+    storage, which is the user's decision to make. Ask first, then call this on a yes.
+    """
+    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
+
+    stored, failed = await save_pending_artifacts(get_session_id() or "")
+    if not stored and not failed:
+        return "There are no generated documents waiting to be saved."
+    parts = []
+    if stored:
+        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
+    if failed:
+        parts.append(
+            f"Could not save: {', '.join(failed)} — they are still downloadable and "
+            "can be retried."
+        )
+    return " ".join(parts)
+
 @tool
 async def list_board_providers() -> str:
     """List which project-management boards this project can use (Azure DevOps, Jira, …).
@@ -2326,6 +2395,9 @@ _BOARD_TOOLS = [
 
 # Convert tools to async
 tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
+         # PDF output, and the explicit save the user is asked for before
+         # anything is written to the project's shared artifact storage.
+         markdowntopdf, save_to_project_artifacts,
          generate_risk_register, general_query, update_response, markdowntodoc,
          generate_ppt, generate_diagram,
          template_pdd, generate_planning_sheet, generate_user_stories, revise_user_stories,
@@ -2645,6 +2717,25 @@ Post the gap report summary as a comment on the parent epic/item using add_board
 - Pass extracted text to generate_stories_from_brd or generate_user_stories.
 - Supported formats: .txt, .md, .csv, .xlsx, .xls, .docx, .pdf.
 - NEVER say you cannot access files — always call read_uploaded_file.
+
+
+── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
+A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
+ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
+whole project can see — and it is the user's decision, not yours.
+- After generating a document, tell the user it is ready, give the download link, and
+  ASK whether to add it to the project's artifacts.
+- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
+  and never claim a document was added to the project unless that tool confirmed it.
+- If they say no, do nothing: the file stays downloadable from the chat.
+
+── FILE FORMATS ──────────────────────────────────────────────────────────────────
+Match the format the user asks for:
+  Word / .docx   markdowntodoc
+  PDF            markdowntopdf
+  Spreadsheet    generate_planning_sheet
+  Slides         generate_ppt
+Do not substitute a format silently — if they ask for PDF, produce a PDF.
 
 ── HANDOFF RULES (CRITICAL) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ALWAYS call build_requirements_payload before emitting any HANDOFF.
