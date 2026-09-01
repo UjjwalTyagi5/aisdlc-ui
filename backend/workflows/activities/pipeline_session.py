@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 
 from config.ws_helper import set_session_id, reset_session_id
-from shared.db import get_db_session_superuser
+from shared.db import get_db_session_for_tenant, get_db_session_superuser
 from shared.models.orm import Run
 from shared.services.agent_session_store import upsert_agent_session
 from shared.services.run_workspace import RunWorkspace, prepare_run_workspace
@@ -49,18 +49,41 @@ def _as_run_id(run_id: str):
         return run_id
 
 
-async def _read_run_upstream(run_id: str) -> dict:
+async def _read_run_upstream(run_id: str, tenant_id: Optional[str] = None) -> dict:
     """Read the canonical upstream artifacts off the `runs` row (durable source).
 
-    Superuser session: this is a system pipeline operation keyed by run_id, not a
-    tenant request path. Returns {} on miss or any DB error so the Bridge degrades
-    gracefully (needs_repo=False callers still work with zero DB)."""
+    TENANT-SCOPED WHEN IT CAN BE. This used a superuser session on the reasoning that a
+    run-keyed pipeline read is a system operation rather than a tenant request. That
+    reasoning stopped holding when FORCE RLS was enabled: `runs` is FORCE RLS, so a
+    session with no `app.tenant_id` GUC reads ZERO ROWS — not an error, just nothing.
+    `persist_artifact` already documents this exact trap ("once Plan 04 enables FORCE
+    RLS this fallback will return zero rows unless the role is BYPASSRLS").
+
+    The consequence was silent and total: this returned `{}` for every run, so the
+    mirror below wrote nothing into `agent_sessions`, so `build_context` found nothing,
+    so **the Design agent never received the Requirements payload** — and nothing
+    logged, because "no upstream yet" is a legitimate state on the first stage and
+    `upsert_agent_session` swallows its own failures.
+
+    Superuser remains the fallback for callers with no tenant in scope, which is the
+    pre-existing behaviour for those and no worse than before.
+
+    Returns {} on miss or any DB error so the bridge degrades gracefully
+    (needs_repo=False callers still work with zero DB).
+    """
+    ctx = get_db_session_for_tenant(tenant_id) if tenant_id else get_db_session_superuser()
     try:
-        async with get_db_session_superuser() as s:
+        async with ctx as s:
             run = (
                 await s.execute(select(Run).where(Run.id == _as_run_id(run_id)))
             ).scalar_one_or_none()
             if run is None:
+                if not tenant_id:
+                    # Worth saying out loud: this is the shape the RLS bug took.
+                    logger.info(
+                        "_read_run_upstream(%s): no tenant in scope, so this read is "
+                        "unscoped and returns nothing under FORCE RLS", run_id,
+                    )
                 return {}
             return {f: getattr(run, f, None) for f in _MIRROR_FIELDS}
     except Exception as exc:  # never break the activity on a read
@@ -100,7 +123,9 @@ async def pipeline_session(
     token = set_session_id(run_id)
     ps = PipelineSession(run_id=run_id)
     try:
-        upstream = await _read_run_upstream(run_id)
+        # tenant_id, or the read silently returns nothing under FORCE RLS — see
+        # the note on _read_run_upstream. This is the whole hand-off.
+        upstream = await _read_run_upstream(run_id, tenant_id)
         ps._upstream = upstream
 
         # Mirror canonical runs artifacts into the run-keyed session the agents' tools
