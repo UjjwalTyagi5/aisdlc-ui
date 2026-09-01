@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,7 @@ from shared.db import get_db_session
 from shared.models.orm import Artifact, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
 from shared.routers.projects import _get_or_404
+from shared.services.artifact_store import is_blob_path
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,87 @@ async def get_artifact(
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, run.project_id)
     return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+
+@artifacts_router.get("/artifacts/{artifact_id}/download")
+async def download_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Stream an artifact's stored bytes, scoped to the caller's tenant.
+
+    THE ONE SAFE DOWNLOAD PATH, and it replaces an unsafe one. The Requirements agent
+    used to expose `GET /sdlc/agent/requirement/download/{filename}` reading a flat,
+    process-wide `outputs/` directory whose files are written under fixed names
+    (`outputs/brd.docx`). Path traversal was guarded there, but nothing was
+    tenant-scoped: one tenant's BRD overwrote another's, and whichever was on disk was
+    served to any caller holding `artifact:view`.
+
+    Here the identifier is an artifact id, and `_get_artifact_or_404` resolves it
+    through a join on `Run.tenant_id` — so an id belonging to another tenant is a 404,
+    not a download. `_assert_project_visible` then applies the same project-visibility
+    rule the rest of this router uses, because being in your tenant is not the same as
+    being on your project.
+
+    404 rather than 403 for a cross-tenant id: a 403 would confirm the artifact exists.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, run.project_id)
+
+    if not artifact.blob_path:
+        # A row with no blob path predates blob storage, or was recorded by an agent
+        # that only wrote the JSONB payload. Not an error worth a 500.
+        raise HTTPException(status_code=404, detail="This artifact has no stored file")
+
+    # LEGACY ROWS HOLD A LOCAL FILESYSTEM PATH, NOT A BLOB NAME. Before
+    # chat_artifacts.register_generated_file went through artifact_store, it recorded
+    # `blob_path` = the on-disk path and `blob_url` = a `/generated/...` static URL.
+    # Passing either to download_bytes asks Azure for a blob literally named
+    # `C:\pwc_work\...`, which surfaces as a 502 that reads like a storage outage.
+    #
+    # `is_blob_path` tests the tenant prefix, which is exactly what store_artifact
+    # guarantees and what no local path satisfies. Answering 404 with a reason beats
+    # both a misleading 502 and a silent empty download.
+    if not is_blob_path(artifact.blob_path, str(tenant_id)):
+        logger.info(
+            "Artifact %s predates blob storage (path is local) — not downloadable",
+            artifact_id,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="This artifact was generated before blob storage and has no "
+                   "downloadable copy. Re-run the agent to produce a stored version.",
+        )
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    if blob_client is None:
+        # AZURE_BLOB_ACCOUNT_URL unset — the common local-dev state. Say which of the
+        # two possible causes it is, rather than a bare 404 the caller must guess at.
+        raise HTTPException(
+            status_code=503,
+            detail="Blob storage is not configured on this deployment",
+        )
+
+    try:
+        data = await blob_client.download_bytes(artifact.blob_path)
+    except Exception as exc:  # noqa: BLE001
+        # Type name only: an Azure error can carry a SAS token or the account URL.
+        logger.warning(
+            "Artifact %s download failed: %s", artifact_id, type(exc).__name__
+        )
+        raise HTTPException(status_code=502, detail="Artifact could not be retrieved")
+
+    # The filename shown to the browser is the LEAF of the stored path, which
+    # artifact_store already sanitised on the way in — never a caller-supplied value,
+    # so it cannot be used to inject a header.
+    leaf = artifact.blob_path.rsplit("/", 1)[-1]
+    return Response(
+        content=data,
+        media_type=artifact.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{leaf}"'},
+    )
 
 
 @artifacts_router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)

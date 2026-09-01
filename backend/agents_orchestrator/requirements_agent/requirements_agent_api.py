@@ -23,7 +23,6 @@ from typing import Any, Dict, List
 import aiofiles
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -740,15 +739,26 @@ async def chat(
     }
 
 
-@requirement_router_orchestrator.get("/download/{filename}")
-async def download_generated_file(filename: str):
-    outputs_dir = os.path.realpath("outputs")
-    file_path = os.path.realpath(os.path.join("outputs", filename))
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    if not file_path.startswith(outputs_dir + os.sep):
-        raise HTTPException(status_code=403, detail="Access denied")
-    return FileResponse(path=file_path, filename=filename, media_type="application/octet-stream")
+# REMOVED: GET /download/{filename}, which served a flat process-wide `outputs/`
+# directory.
+#
+# It was not an arbitrary-file read — traversal was guarded with realpath + a
+# startswith check, and the router sits behind `artifact:view`. The problem was that
+# NOTHING ABOUT IT WAS TENANT-SCOPED. Its signature was `(filename: str)` with no
+# `Request`, so it could not have checked a tenant even in principle, and the documents
+# it served are written under fixed names — `outputs/brd.docx`, `outputs/pdd.docx`,
+# `outputs/risk_register.docx` (see the prompts in deployment_agent/api.py). One
+# tenant's BRD overwrote another's, and whichever was on disk went to any caller
+# holding `artifact:view`.
+#
+# Replaced by `GET /artifacts/{artifact_id}/download` (shared/routers/artifacts.py),
+# which resolves the id through a join on `Run.tenant_id` — a cross-tenant id is a 404
+# — and then applies the same project-visibility check as the rest of that router.
+# Documents reach it via `shared/services/artifact_store.store_artifact`, which writes
+# them under `{tenant_id}/{run_id}/{artifact_type}/{filename}` in blob storage.
+#
+# Safe to remove outright rather than deprecate: nothing in the frontend called it
+# (grep-verified — the only agent download route the UI uses is the testing agent's).
 
 
 @requirement_router_orchestrator.get("/sessions")
