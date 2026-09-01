@@ -969,11 +969,57 @@ before; gitignored per this project's existing convention, so not
 committed).
 
 STILL OPEN, not yet investigated: the user separately reported, while
-logged in as sarthak2004 (project_admin) on the TEST1 project's
-Integrations page, that "Save credential" stays disabled on the Azure
-DevOps credential dialog even after "Test connection" reports "Connected"
--- confirmed via code read that the button's disabled state is gated by a
-`missingRequired` computation (integrations/page.tsx:471-475), not by the
-test result at all, but the exact reason it evaluates true in the user's
-specific case was not yet root-caused before the Monaco bug (Issue 12)
-took priority. Needs its own investigation pass.
+logged in as sarthak2004 (project_admin) on a project's Integrations page,
+that "Save credential" stays disabled on the Azure DevOps credential
+dialog even after "Test connection" reports "Connected" -- confirmed via
+code read that the button's disabled state is gated by a `missingRequired`
+computation (integrations/page.tsx:471-475), not by the test result at
+all, but the exact reason it evaluates true in the user's specific case
+was not yet root-caused before the Monaco bug (Issue 12) took priority.
+Needs its own investigation pass.
+NOTE: the original TEST1 project (ba74c3dd-28a5-48e0-8b4f-36663b417232)
+referenced throughout Issues 1-9 no longer exists -- the user created a
+fresh project called "test" (03e8a3a7-08b4-4f68-bb39-99d2a92e7422, same
+Payments business unit) at some point after Issue 10's restoration.
+Confirmed live during Issue 13's investigation below when a stale
+project_id lookup failed with "unknown project". Any future live
+verification against "the test project" should use the new id.
+
+ISSUE 13 (FIXED, commit 752ede96): immediately after Issue 12's fix
+deployed, the user hit a NEW real bug on the very next real request (a
+CSS color-theme change) -- "Agent error: TimeoutError" -- and separately
+asked why the agent "feels so dull."
+Root-caused by direct reproduction against this project's own real,
+configured model (azure/gpt-5-mini), not by guessing: a single, TRIVIAL
+completion call with no tools bound and no system prompt took 28.1s --
+already at shared/services/model_call_wrapper.py's hardcoded 30-second
+per-attempt ceiling (_CALL_TIMEOUT_SECONDS), before accounting for the
+real chat flow's extra overhead (tool-call schemas, the full system
+prompt, actual file content already read into context). That module is
+shared by three agents (Development, Design/Architecture, Requirements),
+not just Development. The 30s figure traced to an earlier spec ("task
+#20") that simply predates this tenant ever being configured against a
+reasoning-capable model -- every attempt (all 3, per the existing 2s/4s
+retry backoff) was doomed before the retry loop even started, so retrying
+only added latency on top of latency instead of ever succeeding. This is
+very plausibly a real, direct contributor to the "why is it so slow" /
+"why does it time out" feedback given across this whole session, not a
+one-off.
+FIX: raised _CALL_TIMEOUT_SECONDS from 30.0 to 90.0, with the reasoning
+and the measured evidence recorded directly in the module's own docstring
+so a future reader doesn't just see a bare number change. Two regression
+tests added: one pins the new floor so it can't silently drift back down
+without someone re-confirming reasoning-model latency has changed, one
+confirms the constant is actually wired into asyncio.wait_for's timeout
+kwarg (not just that it exists as a constant). 14/14 tests in the module
+pass; 52/52 in the broader Development-agent suite pass.
+NOT ADDRESSED (separate, explicitly deferred): the "why is the agent so
+dull" complaint is real but distinct from this timeout bug -- looking at
+the transcript, the agent's prose is heavily procedural (long numbered
+plans, two separate confirmation questions before a one-line CSS color
+change, formal engineering phrasing) rather than feeling fast/decisive.
+This is a system-prompt tone/behavior question (dev_agent_prompt.py), not
+a bug with a single root cause -- needs the user's input on what "less
+dull" should actually look like before touching the prompt, matching this
+session's own established discipline (brainstorm before building) rather
+than guessing at a rewrite.
