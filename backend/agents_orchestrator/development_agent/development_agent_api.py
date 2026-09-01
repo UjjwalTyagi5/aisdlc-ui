@@ -437,6 +437,18 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             json.dumps({"type": "stream_end", "session_id": session_id}),
             websocket,
         )
+        await manager.send_personal_message(
+            json.dumps({
+                "type": "activity_update",
+                "activity": {
+                    "id": str(uuid4()), "type": "complete",
+                    "session_id": session_id,
+                    "message": "Rejected — previous turn still in progress",
+                    "time": "Just now",
+                },
+            }),
+            websocket,
+        )
         return
 
     _INFLIGHT_SESSIONS.add(session_id)

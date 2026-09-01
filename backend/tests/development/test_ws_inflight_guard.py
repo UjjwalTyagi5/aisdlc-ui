@@ -97,10 +97,19 @@ async def test_second_message_for_inflight_session_is_rejected_without_running_g
     mock_stream.assert_not_called()
 
     types = [m.get("type") for m in sent]
-    assert types == ["stream_chunk", "stream_end"]
+    assert types == ["stream_chunk", "stream_end", "activity_update"]
     assert "Still processing" in sent[0]["content"]
     assert sent[0]["session_id"] == session_id
     assert sent[1]["session_id"] == session_id
+
+    # The rejection path must still emit the terminal "complete" activity signal
+    # (same shape the real completion path broadcasts) so the frontend chat bridge,
+    # which only closes its SSE stream immediately on activity_update/complete,
+    # doesn't sit "busy" for up to 45s waiting on its idle-fallback timer.
+    complete_activity = sent[2]["activity"]
+    assert complete_activity["type"] == "complete"
+    assert complete_activity["session_id"] == session_id
+    assert "Rejected" in complete_activity["message"]
 
     # The guard rejected without ever removing/touching the marker it didn't set --
     # the session is still (correctly) marked in-flight by whatever put it there.
