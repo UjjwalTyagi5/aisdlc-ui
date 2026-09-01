@@ -55,7 +55,7 @@ function messageWithDiff(overrides: Partial<AgentChatMessage> = {}): AgentChatMe
 }
 
 describe("AgentChatDrawer — code.diff rendering", () => {
-  it("renders a DiffViewer with the right original/modified/filename props", () => {
+  it("does not mount DiffViewer until the card has been expanded, then mounts it with the right props", async () => {
     render(
       <AgentChatDrawer
         open
@@ -64,6 +64,14 @@ describe("AgentChatDrawer — code.diff rendering", () => {
         onSend={vi.fn()}
       />,
     );
+
+    // Lazy mount (final-review.md I3/I4): nothing Monaco-backed renders before
+    // the user ever expands the card.
+    expect(diffViewerSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("diff-viewer-stub")).not.toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: /src\/foo\.ts/i });
+    await userEvent.click(toggle);
 
     expect(diffViewerSpy).toHaveBeenCalledTimes(1);
     const props = diffViewerSpy.mock.calls[0]![0] as {
@@ -88,16 +96,36 @@ describe("AgentChatDrawer — code.diff rendering", () => {
 
     const toggle = screen.getByRole("button", { name: /src\/foo\.ts/i });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    const stub = screen.getByTestId("diff-viewer-stub");
-    expect(stub).not.toBeVisible();
+    expect(screen.queryByTestId("diff-viewer-stub")).not.toBeInTheDocument();
 
     await userEvent.click(toggle);
 
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const stub = screen.getByTestId("diff-viewer-stub");
     expect(stub).toBeVisible();
   });
 
-  it("renders one card per path and shows the changeKind badge", () => {
+  it("stays mounted (not unmounted) after collapsing again once it has been expanded", async () => {
+    render(
+      <AgentChatDrawer
+        open
+        onOpenChange={() => {}}
+        messages={[messageWithDiff()]}
+        onSend={vi.fn()}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: /src\/foo\.ts/i });
+    await userEvent.click(toggle); // expand
+    expect(screen.getByTestId("diff-viewer-stub")).toBeVisible();
+
+    await userEvent.click(toggle); // collapse again
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // Still present in the DOM (just hidden), i.e. not unmounted/remounted.
+    expect(screen.getByTestId("diff-viewer-stub")).not.toBeVisible();
+  });
+
+  it("renders one card per path and shows the changeKind badge", async () => {
     render(
       <AgentChatDrawer
         open
@@ -125,9 +153,16 @@ describe("AgentChatDrawer — code.diff rendering", () => {
       />,
     );
 
-    expect(diffViewerSpy).toHaveBeenCalledTimes(2);
     expect(screen.getByText(/created/i)).toBeInTheDocument();
     expect(screen.getByText(/edited/i)).toBeInTheDocument();
+
+    // Neither card mounts DiffViewer until expanded.
+    expect(diffViewerSpy).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: /src\/new-file\.ts/i }));
+    await userEvent.click(screen.getByRole("button", { name: /src\/foo\.ts/i }));
+
+    expect(diffViewerSpy).toHaveBeenCalledTimes(2);
   });
 
   it("does not render diff cards for user messages", () => {

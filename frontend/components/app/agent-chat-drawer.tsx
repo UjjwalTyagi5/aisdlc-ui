@@ -710,11 +710,15 @@ function ChatBubble({
  * pattern already used by AuditEventRow (chevron + header button, toggling a
  * `hidden` body rather than mounting/unmounting it).
  *
- * `DiffViewer` stays mounted at all times (just visually hidden while
- * collapsed) rather than conditionally rendered — this keeps its Monaco
- * instance warm across repeated expand/collapse instead of re-loading it
- * every time, and keeps the card's contents test-observable regardless of
- * the collapsed state.
+ * `DiffViewer` (a real Monaco diff editor) is mounted lazily — only once the
+ * card has been expanded at least once — rather than kept warm at all times.
+ * Mounting it unconditionally behind `hidden` (display:none) meant every
+ * diff card in a session accumulated a live Monaco instance plus two full
+ * file copies whether or not the user ever looked at it, and Monaco doesn't
+ * reliably recover its layout when revealed from a 0×0 container without
+ * `automaticLayout`. `hasBeenExpanded` latches true on first expand and never
+ * resets, so re-collapsing doesn't unmount/remount DiffViewer repeatedly —
+ * only the very first expand pays the mount cost. See final-review.md I3/I4.
  */
 function DiffCard({
   path,
@@ -728,12 +732,18 @@ function DiffCard({
   changeKind: "created" | "edited";
 }) {
   const [expanded, setExpanded] = React.useState(false);
+  const [hasBeenExpanded, setHasBeenExpanded] = React.useState(false);
+
+  const toggle = () => {
+    setExpanded((v) => !v);
+    setHasBeenExpanded(true);
+  };
 
   return (
     <div className="border-line-soft bg-surface-1 w-full min-w-0 overflow-hidden rounded-lg border">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggle}
         aria-expanded={expanded}
         className="hover:bg-surface-2 flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
       >
@@ -750,9 +760,11 @@ function DiffCard({
           {changeKind}
         </Badge>
       </button>
-      <div hidden={!expanded} className="border-line-soft border-t">
-        <DiffViewer original={original} modified={modified} filename={path} showToolbar />
-      </div>
+      {hasBeenExpanded && (
+        <div hidden={!expanded} className="border-line-soft border-t">
+          <DiffViewer original={original} modified={modified} filename={path} showToolbar />
+        </div>
+      )}
     </div>
   );
 }
