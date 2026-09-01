@@ -43,6 +43,11 @@ _CONTENT_TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
     ".svg": "image/svg+xml",
+    # jpg/jpeg were already classified as "diagram" by _artifact_type_for but had no
+    # content type here, so a browser was handed application/octet-stream and offered
+    # a download instead of showing the image. Figma renders jpg on request.
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 

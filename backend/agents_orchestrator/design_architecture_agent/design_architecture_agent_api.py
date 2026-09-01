@@ -508,6 +508,21 @@ async def chat(
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
     set_user_id(real_user_id)
+    # Tenant/project/run in the tool context, so a document this turn generates is
+    # PERSISTED. `chat_artifacts.register_generated_file` returns early without both a
+    # tenant and a project ("no tenant/project in context — skip persist"), so the .docx
+    # and diagrams produced through this route were written to local disk and never
+    # became Artifact rows — no Blob upload, nothing in the project's artifact panel,
+    # and a debug-level log line as the only trace. The WS path set these; this one
+    # never did.
+    #
+    # `project_id` here is the value assert_agent_access_for_chat RETURNED, not the raw
+    # form field — it is resolved and access-checked, which is what makes it safe to use
+    # as the isolation key for stored artifacts.
+    from config.ws_helper import set_project_id, set_run_id, set_tenant_id  # noqa: PLC0415
+    set_tenant_id(real_tenant_id or None)
+    set_project_id(project_id or None)
+    set_run_id(None)  # a standalone chat turn belongs to no pipeline run
     # Per-turn consent for the Consequential epic write — see the WS path above for why
     # this reads task_intent only, and why it is set on every turn.
     from config.ws_helper import set_consequential_approved  # noqa: PLC0415
