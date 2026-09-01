@@ -16,14 +16,24 @@
  */
 
 import type { Session } from "@/lib/auth/types";
-import { mintBffToken } from "@/lib/bff/jwt";
+import { bearerForRequest } from "@/lib/bff/client";
 
 const FASTAPI_BASE =
   process.env["FASTAPI_INTERNAL_URL"] ?? "http://localhost:8001";
 
 /** Mints a single-use WebSocket ticket from the FastAPI ticket endpoint. */
 export async function mintWsTicket(session: Session): Promise<string> {
-  const jwt = await mintBffToken(session);
+  // Same three-way branch every other BFF->FastAPI call already uses
+  // (lib/bff/client.ts::bearerForRequest) -- OIDC forwards the Auth0 token,
+  // local mode forwards the token FastAPI itself issued at login, everything
+  // else mints. This used to call mintBffToken() directly, which throws in
+  // local mode (by design -- see lib/bff/jwt.ts) since local sessions carry
+  // client-writable state that must never be signed into a trusted claim.
+  // That made the WS chat bridge the one BFF surface never updated to the
+  // post-audit pattern every REST proxy route already uses -- unnoticed until
+  // now because every prior chat-access test exercised the backend WS handler
+  // directly, never through this Next.js bridge.
+  const jwt = await bearerForRequest(session);
   const res = await fetch(`${FASTAPI_BASE}/auth/ws-ticket`, {
     method: "POST",
     headers: {

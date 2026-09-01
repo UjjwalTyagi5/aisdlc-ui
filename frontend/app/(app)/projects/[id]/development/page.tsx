@@ -43,6 +43,9 @@ import {
 } from "@/lib/api/dev-workspace";
 import { getProject } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { tileStateFor } from "@/lib/agent-access";
+import { BUILT_AGENTS } from "@/lib/agents";
 import type { ChangeStatus } from "@/components/app/repo-file-tree";
 import type { DevPr, ProjectId } from "@/lib/schemas";
 
@@ -58,7 +61,8 @@ export default function DevelopmentPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id as ProjectId;
   const queryClient = useQueryClient();
-  useSession({ required: true });
+  const session = useSession({ required: true });
+  const role = effectivePlatformRole(session);
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -173,6 +177,24 @@ export default function DevelopmentPage() {
           title="Project not found"
           description={projectQ.error instanceof Error ? projectQ.error.message : "Unknown error."}
           onRetry={() => projectQ.refetch()}
+        />
+      </div>
+    );
+  }
+
+  const project = projectQ.data;
+  const tileState = role ? tileStateFor(role, "development", project.track, BUILT_AGENTS) : "locked";
+  if (tileState === "locked" || tileState === "coming_soon") {
+    return (
+      <div className="mx-auto w-full max-w-lg p-6 md:p-10">
+        <EmptyState
+          title={tileState === "coming_soon" ? "Not available yet" : "No access"}
+          description={
+            tileState === "coming_soon"
+              ? "The Development agent hasn't been verified for this track yet."
+              : "Your role doesn't reach the Development agent on this project."
+          }
+          variant="plain"
         />
       </div>
     );

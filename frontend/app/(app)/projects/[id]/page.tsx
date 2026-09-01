@@ -47,7 +47,7 @@ import {
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { BUILT_AGENTS, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -113,31 +113,12 @@ export default function ProjectOverviewPage() {
     const track = projectQ.data?.track;
     if (!viewerRole || !track) return undefined;
     // TODO(next task): read the project's actually-verified agent list once that
-    // signal exists server-side; until then, this list names only the agents that
-    // have been rebuilt and verified end to end. Grow it one entry at a time, per
-    // the design doc's "assume broken until properly rebuilt" framing
-    // (multi-track-agent-access-design.md).
-    //
-    // requirements + design added after help/requirements-design-e2e-plan.md
-    // Phases 1-5. What "verified" means for these two, concretely:
-    //   · the board connector is acquired with BOTH project_id and agent_id, so
-    //     the stage's grant actually resolves (it silently resolved to "no access"
-    //     for every run before — tests/test_connector_stage_scope.py)
-    //   · the Requirements → Design hand-off carries the payload across the
-    //     runs → agent_sessions mirror (it read zero rows under FORCE RLS before,
-    //     so Design received nothing — tests/test_requirements_to_design_handoff.py)
-    //   · board writes are gated on the owning role in code rather than in prompt
-    //     text (tests/test_consequential_gate.py)
-    //   · a run's initiator cannot approve their own gate
-    //     (tests/test_gate_self_approval.py)
-    //   · a tenant's MCP servers do not reach another tenant
-    //     (tests/test_mcp_tenant_isolation.py)
-    const builtAgents: Phase[] = [
-      "requirements",
-      "design",
-      "security",
-      "documentation",
-    ];
+    // signal exists server-side. Until then BUILT_AGENTS is the single source of
+    // truth, shared with each agent's own standalone page gate — see lib/agents.ts
+    // for which agents are on it and what "verified" meant for each. Agents not on
+    // it keep their old, unverified code per the design doc's "assume broken until
+    // properly rebuilt" framing (multi-track-agent-access-design.md).
+    const builtAgents: readonly Phase[] = BUILT_AGENTS;
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 

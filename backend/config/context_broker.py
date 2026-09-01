@@ -51,7 +51,7 @@ def _fmt_requirements(req: Dict[str, Any]) -> str:
 
 
 def _fmt_design(design: Dict[str, Any]) -> str:
-    lines = ["[DESIGN ARTIFACTS]"]
+    lines = ["[DESIGN CONTEXT]"]
     # Accept either the C4 url key (DesignArtifact) or the WS/REST diagrams key (DesignArtifacts).
     c4 = design.get("c4_diagram_url") or design.get("c4_diagrams") or ""
     api = design.get("api_contracts") or design.get("api_contract") or ""
@@ -266,4 +266,64 @@ async def build_context(session_id: str, agent_id: str) -> str:
         if formatter:
             parts.append(formatter(value))
 
+    return "\n\n".join(parts) if parts else ""
+
+
+async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+    """The project's most recent Run row's artifact columns, or None if the project
+    has no runs yet. `Run`, not `AgentSession`, is canonical for project-scoped
+    upstream reads — matches Documentation's read_upstream_artifacts precedent
+    (help/portfolio-1-agent-status.md's Documentation section)."""
+    import uuid as _uuid
+
+    from sqlalchemy import select
+
+    from shared.db import get_db_session_for_tenant
+    from shared.models.orm import Run
+
+    async with get_db_session_for_tenant(tenant_id) as db:
+        stmt = (
+            select(Run)
+            .where(Run.project_id == _uuid.UUID(project_id), Run.tenant_id == _uuid.UUID(tenant_id))
+            .order_by(Run.created_at.desc())
+            .limit(1)
+        )
+        run = (await db.execute(stmt)).scalars().first()
+        if run is None:
+            return None
+        return {
+            "requirements_payload": run.requirements_payload,
+            "design_artifacts": run.design_artifacts,
+            "development_artifacts": run.development_artifacts,
+            "testing_artifacts": run.testing_artifacts,
+            "code_review_artifacts": run.code_review_artifacts,
+            "security_artifacts": run.security_artifacts,
+        }
+
+
+async def build_context_for_project(project_id: str, tenant_id: str, agent_id: str) -> str:
+    """Same formatting as build_context, but resolved by PROJECT (the project's most
+    recent Run row), not by session id. A fresh standalone-page conversation mints a
+    brand-new session id unrelated to whatever session Requirements/Design used for
+    theirs, so build_context's session-keyed lookup finds nothing even when the
+    project's Requirements and Design have both been baselined. See
+    docs/superpowers/specs/2026-08-31-development-agent-verification-design.md Part 4.3.
+    """
+    agent_def = AGENT_REGISTRY.get(agent_id)
+    if not agent_def or not agent_def.input_artifacts or not project_id or not tenant_id:
+        return ""
+    try:
+        artifacts = await _fetch_artifacts_for_project(project_id, tenant_id)
+    except Exception:
+        return ""
+    if not artifacts:
+        return ""
+    parts: list[str] = []
+    for field_name in agent_def.input_artifacts:
+        value = artifacts.get(field_name)
+        if not value or not isinstance(value, dict):
+            continue
+        formatter = _ARTIFACT_FORMATTERS.get(field_name)
+        if formatter:
+            parts.append(formatter(value))
     return "\n\n".join(parts) if parts else ""

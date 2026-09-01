@@ -384,6 +384,14 @@ async def create_ado_repo(project: str, repo_name: str) -> str:
 
     session_id = get_session_id()
     s = get_session(session_id)
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT CREATED — this is NOT an error. Creating a repository is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I create the "
+            f"'{repo_name}' repository in ADO project '{project}'?\". Do NOT call "
+            "create_ado_repo again until the user replies with approval."
+        )
     pat = s.pat
     org_url = (s.ado_org_url or "").rstrip("/")
 
@@ -1212,6 +1220,16 @@ async def update_work_item_state(
     'To Do', 'In Progress', 'In Review', or 'Done'. Provider fallback maps
     'In Development' to Jira's 'In Progress' when needed.
     """
+    session_id = get_session_id()
+    s = get_session(session_id)
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT UPDATED — this is NOT an error. Moving work items is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I move "
+            f"{work_item_ids} to '{target_state}'?\". Do NOT call "
+            "update_work_item_state again until the user replies with approval."
+        )
     if not work_item_ids:
         return "No work item IDs provided - skipping."
     try:
@@ -1239,6 +1257,16 @@ async def add_pr_comment_to_work_items(
     pr_url: str,
 ) -> str:
     """Post a comment with the PR URL on each linked PM work item."""
+    session_id = get_session_id()
+    s = get_session(session_id)
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT ADDED — this is NOT an error. Commenting on work items is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I comment the PR link "
+            f"on {work_item_ids}?\". Do NOT call add_pr_comment_to_work_items "
+            "again until the user replies with approval."
+        )
     if not work_item_ids:
         return "No work item IDs provided - skipping."
     try:

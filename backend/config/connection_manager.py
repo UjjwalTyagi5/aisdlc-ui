@@ -81,6 +81,32 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect(conn)
 
+    async def broadcast_to_session(self, message: dict):
+        """Send message ONLY to websockets registered under message['session_id'].
+
+        Unlike broadcast(), this never falls back to all active connections —
+        if session_id is missing or has no registered connections, nothing is
+        sent to anyone. Use this for payloads (e.g. file_diff) that can carry
+        sensitive per-session content and must never fan out cross-tenant.
+        """
+        session_id = message.get("session_id")
+        if not session_id:
+            return
+        targets = list(self._session_connections.get(session_id, []))
+        if not targets:
+            return
+
+        message_str = json.dumps(message)
+        disconnected = []
+        for connection in targets:
+            try:
+                await connection.send_text(message_str)
+            except Exception as e:
+                print(f"Error broadcasting to session connection: {e}")
+                disconnected.append(connection)
+        for conn in disconnected:
+            self.disconnect(conn)
+
     async def add_agent(self, agent_data: dict):
         agent_id = str(uuid4())
         self.agents[agent_id] = {

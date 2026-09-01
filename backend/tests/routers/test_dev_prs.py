@@ -86,6 +86,27 @@ def _mock_workspace_resolution(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_agent_access(monkeypatch):
+    """dev_workspace_router is gated by require_agent_access("development")
+    (Task 3), which — via assert_agent_access — resolves the project through
+    the mocked `get_db_session` above. `session.execute(...).first()` on that
+    mock returns a truthy but non-UUID-shaped MagicMock id, so the router's
+    `_is_uuid(project_id)` guard in `check_agent_access` fails closed with a
+    403 that has nothing to do with these tests' actual PR-listing contract.
+    Patches only `assert_agent_access` (the one call `require_agent_access`
+    can't satisfy against a mocked DB) — everything else in the dependency
+    chain runs for real.
+    """
+    async def _fake(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "shared.authz.agent_access.assert_agent_access",
+        _fake,
+    )
+
+
 def _mint(tenant_id: str, permissions: list[str] | None = None):
     from datetime import datetime, timedelta
 

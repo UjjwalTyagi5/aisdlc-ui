@@ -197,6 +197,10 @@ def require_agent_access(agent_id: str, project_id_param: str = "project_id"):
         if project is None:
             raise HTTPException(status_code=404, detail="not found")
 
+        visible = await visible_project_ids(db, user_id=str(user_id), tenant_id=str(tenant_id))
+        if visible is not None and str(project.id) not in visible:
+            raise HTTPException(status_code=404, detail="not found")
+
         role = await effective_platform_role(db, request)
         await assert_agent_access(
             db, tenant_id=str(tenant_id), project_id=str(project.id),

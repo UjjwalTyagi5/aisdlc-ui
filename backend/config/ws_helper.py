@@ -156,5 +156,49 @@ def broadcast_log(manager, message: str, level: str = "INFO"):
         # No running loop: fallback to synchronous log
 
         print(f"Could not schedule broadcast, falling back. {level}: {message}")
- 
- 
+
+
+def broadcast_file_diff(manager, path: str, original: str, modified: str, change_kind: str) -> None:
+    """Broadcast a structured file-diff event so the frontend can render a diff card
+    for a write_file/edit_file call. Sibling to broadcast_log — same thread-safe
+    MAIN_LOOP scheduling dance, since file_tools' write_file/edit_file are sync
+    functions calling into async broadcast machinery."""
+
+    session_id = get_session_id()
+
+    payload = {
+        "type": "file_diff",
+        "session_id": session_id,
+        "path": path,
+        "original": original,
+        "modified": modified,
+        "change_kind": change_kind,
+    }
+
+    # If we have the main loop and it's running, schedule thread-safe.
+
+    if MAIN_LOOP and MAIN_LOOP.is_running():
+
+        try:
+
+            asyncio.run_coroutine_threadsafe(manager.broadcast_to_session(payload), MAIN_LOOP)
+
+            return
+
+        except Exception as e:
+
+            print(f"broadcast_file_diff scheduling failed on MAIN_LOOP: {e}")
+
+    # Otherwise, if we're inside an async context, use current loop.
+
+    try:
+
+        loop = asyncio.get_running_loop()
+
+        loop.create_task(manager.broadcast_to_session(payload))
+
+    except RuntimeError:
+
+        # No running loop: fallback to synchronous log
+
+        print(f"Could not schedule file_diff broadcast, falling back. {change_kind}: {path}")
