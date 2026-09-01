@@ -153,18 +153,27 @@ def warnings_for(kind: str, access: str) -> list[str]:
 def default_access_for(kind: str) -> AccessLevel:
     """The level to grant when the caller did not name one.
 
-    NOT a flat `read`, and that distinction is the whole function. Least privilege
-    means the narrowest level that is USEFUL, and for a notify-only connector `read`
-    is not narrow — it is empty. Defaulting to it made Slack and MS Teams impossible
-    to grant at all: the button sends no level, the server filled in `read`, and the
-    capability check then refused the grant it had just constructed.
+    NEVER A FLAT CONSTANT, and that is the whole function. Whatever the default is,
+    it has to be a level THIS connector can actually honour, or the request is refused
+    at decide time by the capability check — an approved-looking ask that could never
+    take effect. That is not hypothetical: defaulting to a flat `read` made Slack and
+    MS Teams impossible to grant at all, because they are write-only.
 
-    So: `read` when the connector can read, otherwise the only thing it can do. That
-    is still the narrowest real option, because you cannot be narrower than what
-    exists. A connector that cannot be introspected keeps the plain default, since
-    guessing on absent knowledge is what `supported_modes` returning None is for.
+    So the default is the WIDEST level the connector really supports:
+
+        read + write   ->  read_write
+        read only      ->  read
+        write only     ->  write        (Slack, MS Teams)
+        unknown        ->  DEFAULT_ACCESS
+
+    `supported_level` already answers exactly that question, so it is reused rather
+    than re-derived. The last line is the only place the flat default survives, and it
+    is reached only for a kind that cannot be introspected — MCP servers, which have no
+    manifest, and connectors we do not ship.
+
+    THIS WIDENED when DEFAULT_ACCESS moved from `read` to `read_write`: a connector
+    that can do both now defaults to both instead of to read. That is the intended
+    change — see the note on DEFAULT_ACCESS — and it still cannot produce a level the
+    connector does not support, which is what this function exists to guarantee.
     """
-    found = supported_modes(kind)
-    if found is None or "read" in found:
-        return DEFAULT_ACCESS
-    return from_modes(found) or DEFAULT_ACCESS
+    return supported_level(kind) or DEFAULT_ACCESS

@@ -54,6 +54,15 @@ from shared.services import dev_workspace_store
 from shared.db import get_db_session_for_tenant
 from shared.models.orm import Run
 
+
+def _ctx_user_id():
+    """The user in session context, or None. Never raises: these paths also run in a
+    worker, where no user was ever set."""
+    from config.ws_helper import get_user_id  # noqa: PLC0415 — import cycle at module load
+
+    return get_user_id() or None
+
+
 _FILES_DIR = str(pathlib.Path(__file__).resolve().parents[2] / "files")
 
 development_router_orchestrator = APIRouter()
@@ -973,6 +982,12 @@ async def _persist_pr_to_run(session_id: str, project_id: str | None, tenant_id:
                             trigger="manual",
                             current_stage="development",
                             development_artifacts=dev_artifacts,
+                            # Whoever is in session context, so this run is not exempt from the
+                            # no-self-approval rule (0038). These rows are created already-completed
+                            # with no gate pending, so the rule is not reachable through them today —
+                            # recorded anyway, because "it cannot gate yet" is a property of this call
+                            # site that a later change could quietly remove.
+                            created_by=_ctx_user_id(),
                         )
                     )
             except Exception as dup_exc:

@@ -154,6 +154,10 @@ async def create_run(
         model_id=resolved_model_id,
         offering_id=resolved_offering_id,
         model_display_name=resolved_display_name,
+        # The initiator, so the gate can refuse to let this person approve their own
+        # run's output (0038, §1.5). Leaving it unset would silently exempt every run
+        # created here from that rule.
+        created_by=_user_id(request),
     )
     db.add(run)
     await db.commit()

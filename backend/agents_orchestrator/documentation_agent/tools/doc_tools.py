@@ -296,7 +296,20 @@ async def _sharepoint_session():
                 "ERROR: SharePoint is not connected for this tenant. An admin can "
                 "connect it on the Integrations page (Documents & knowledge)."
             )
-        connector = await get_connector_for_session(kind="sharepoint", tenant_id=tenant_id)
+        # `project_id` and `agent_id` TOGETHER, or this permits nothing. The project
+        # comes off the SAME DocSessionState this function already read the tenant
+        # from — `config.ws_helper.get_project_id` is set only by the requirements and
+        # design APIs and would be empty here, which is the failure this is fixing. The factory
+        # returns `ScopedConnector(raw, level)`; with no project it has no level to
+        # resolve, and since migration 0024 the level is stored per (stage, tool), so a
+        # project without a stage resolves to None just the same. `permits(None, mode)`
+        # is False for every mode, which made every call below raise
+        # ConnectorAccessDenied. Naming them LOOSENS nothing — the connector goes from
+        # permitting nothing at all to permitting exactly what the grant says.
+        connector = await get_connector_for_session(
+            kind="sharepoint", tenant_id=tenant_id,
+            project_id=getattr(s, "project_id", "") or "", agent_id="documentation",
+        )
         return (connector, target), ""
     except Exception as exc:
         return None, f"ERROR reaching SharePoint: {type(exc).__name__}"
@@ -455,7 +468,20 @@ async def _ado_wiki_session():
                 "can set ado-wiki-project / ado-wiki-id on the Integrations page, or "
                 "use the SharePoint tools instead if the runbook lives there."
             )
-        connector = await get_connector_for_session(kind="azure_devops", tenant_id=tenant_id)
+        # `project_id` and `agent_id` TOGETHER, or this permits nothing. The project
+        # comes off the SAME DocSessionState this function already read the tenant
+        # from — `config.ws_helper.get_project_id` is set only by the requirements and
+        # design APIs and would be empty here, which is the failure this is fixing. The factory
+        # returns `ScopedConnector(raw, level)`; with no project it has no level to
+        # resolve, and since migration 0024 the level is stored per (stage, tool), so a
+        # project without a stage resolves to None just the same. `permits(None, mode)`
+        # is False for every mode, which made every call below raise
+        # ConnectorAccessDenied. Naming them LOOSENS nothing — the connector goes from
+        # permitting nothing at all to permitting exactly what the grant says.
+        connector = await get_connector_for_session(
+            kind="azure_devops", tenant_id=tenant_id,
+            project_id=getattr(s, "project_id", "") or "", agent_id="documentation",
+        )
         return (connector, target), ""
     except Exception as exc:
         return None, f"ERROR reaching Azure DevOps Wiki: {type(exc).__name__}"
@@ -534,7 +560,20 @@ async def _confluence_session():
         from config.connector_factory import get_connector_for_session
 
         target = await confluence_target(tenant_id)
-        connector = await get_connector_for_session(kind="confluence", tenant_id=tenant_id)
+        # `project_id` and `agent_id` TOGETHER, or this permits nothing. The project
+        # comes off the SAME DocSessionState this function already read the tenant
+        # from — `config.ws_helper.get_project_id` is set only by the requirements and
+        # design APIs and would be empty here, which is the failure this is fixing. The factory
+        # returns `ScopedConnector(raw, level)`; with no project it has no level to
+        # resolve, and since migration 0024 the level is stored per (stage, tool), so a
+        # project without a stage resolves to None just the same. `permits(None, mode)`
+        # is False for every mode, which made every call below raise
+        # ConnectorAccessDenied. Naming them LOOSENS nothing — the connector goes from
+        # permitting nothing at all to permitting exactly what the grant says.
+        connector = await get_connector_for_session(
+            kind="confluence", tenant_id=tenant_id,
+            project_id=getattr(s, "project_id", "") or "", agent_id="documentation",
+        )
         return (connector, (target or {}).get("space", "")), ""
     except Exception as exc:  # noqa: BLE001
         return None, f"ERROR reaching Confluence: {type(exc).__name__}"

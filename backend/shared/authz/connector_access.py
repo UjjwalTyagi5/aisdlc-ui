@@ -49,10 +49,23 @@ READ_WRITE: AccessLevel = "read_write"
 #: Every valid level, for CHECK constraints and request validation.
 ACCESS_LEVELS: tuple[AccessLevel, ...] = (READ, WRITE, READ_WRITE)
 
-#: The default for a NEW grant. Least privilege: an Org Admin who wants a unit to
-#: write must say so. Existing rows were backfilled to read_write by migration 0023
-#: instead, because tightening them silently would have stopped agents mid-flight.
-DEFAULT_ACCESS: AccessLevel = READ
+#: The fallback level when a connector's own capabilities cannot be determined.
+#:
+#: CHANGED FROM `read` TO `read_write` — a deliberate product decision, recorded here
+#: because it moves away from least privilege and should not be mistaken for an
+#: oversight. The reasoning: a grant defaulting to `read` produced connectors that
+#: looked wired and silently refused every write, and the resulting "why is nothing
+#: happening" is answered by widening a level nobody knew was narrow. `DEFAULT_TOOL_MODE`
+#: below has been "both" for the stage runtime for exactly that reason; this aligns the
+#: grant-request default with it rather than leaving the two disagreeing.
+#:
+#: WHAT THIS IS NOT. It is not a blanket write grant. It is only the level filled in
+#: when a caller names none, and `default_access_for` narrows it to what the connector
+#: can actually honour first — a read-only connector still defaults to `read`, and a
+#: write-only one (Slack, MS Teams) still to `write`. An Org Admin still has to approve
+#: the request, and the stage still has to wire the tool: reach and wiring are hard
+#: stops in `effective_access` that no default reaches past.
+DEFAULT_ACCESS: AccessLevel = READ_WRITE
 
 #: A level expanded into the operation modes it admits. This mapping IS the lattice.
 _MODES: dict[str, frozenset[str]] = {

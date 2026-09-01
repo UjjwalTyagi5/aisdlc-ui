@@ -143,9 +143,19 @@ async def agent_run_scope(
                 # Bound to this project's effective access (unit grant ∩ project
                 # narrowing). Board tools then fail closed on an operation the
                 # grant does not admit, the same way they do with no connector.
+                #
+                # `agent_id` is REQUIRED, not decorative. Since migration 0024 the
+                # level is stored per (stage, tool), and `effective_access` returns
+                # None for a caller that names no stage — so passing project_id
+                # alone resolved to no access and every board tool in every chat
+                # turn was denied, however the project was granted. Omitting it
+                # fails in the safe direction, which is why it read as a broken
+                # board rather than a bug. See copilot_api.py, which already does
+                # this.
                 connector = await get_connector_for_session(
                     kind=kind, tenant_id=tenant_id, project_id=str(project_id or ""),
                     owner_id=owner_id or "",
+                    agent_id=agent_id,
                 )
                 set_connector(connector)
                 scope.connector_injected = True

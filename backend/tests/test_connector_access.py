@@ -59,8 +59,46 @@ def test_nothing_permits_anything():
         assert not ca.permits(level, "write")
 
 
-def test_the_default_for_a_new_grant_is_least_privilege():
-    assert ca.DEFAULT_ACCESS == "read"
+def test_the_fallback_default_is_read_write():
+    """DELIBERATELY NOT least privilege, and the reversal is the point of the test.
+
+    This asserted `read` until it was changed on purpose: a grant defaulting to read
+    produced connectors that looked wired and silently refused every write, and
+    `DEFAULT_TOOL_MODE` had already been "both" on the stage runtime, so the two
+    defaults disagreed about the same question. If somebody "restores least privilege"
+    here without also moving DEFAULT_TOOL_MODE, they reintroduce that split.
+    """
+    assert ca.DEFAULT_ACCESS == "read_write"
+    assert ca.DEFAULT_TOOL_MODE == "both"
+    # The two constants are the same decision expressed in the two vocabularies —
+    # `level_from_mode` is what maps between them, so they must agree through it.
+    assert ca.level_from_mode(ca.DEFAULT_TOOL_MODE) == ca.DEFAULT_ACCESS
+
+
+def test_the_default_never_exceeds_what_a_connector_supports():
+    """The guarantee that makes a wider default safe to have at all.
+
+    A default is only useful if the connector can honour it — the capability check at
+    decide time refuses anything else, which is how a flat `read` once made Slack and
+    MS Teams permanently un-grantable. Widening the fallback must not reintroduce that
+    failure from the other side.
+    """
+    from shared.authz.connector_capabilities import default_access_for, supported_level
+
+    for kind in ("azure_devops", "jira", "slack", "ms_teams", "figma", "github_actions"):
+        got = default_access_for(kind)
+        supported = supported_level(kind)
+        if supported is not None:
+            assert got == supported, f"{kind}: defaulted to {got}, supports {supported}"
+        # Whatever it picked must be a real level, never None or a made-up string.
+        assert got in ca.ACCESS_LEVELS, f"{kind}: {got!r} is not a valid level"
+
+
+def test_an_unintrospectable_kind_falls_back_to_the_flat_default():
+    """MCP servers come through the same grant table and have no manifest at all."""
+    from shared.authz.connector_capabilities import default_access_for
+
+    assert default_access_for("not-a-connector-we-ship") == ca.DEFAULT_ACCESS
 
 
 # ── the runtime gate ─────────────────────────────────────────────────────────

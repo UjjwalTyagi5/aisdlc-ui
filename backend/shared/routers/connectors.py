@@ -712,7 +712,16 @@ async def _resolve_and_cache_sharepoint_ids(tenant_id: str, site_url: str) -> Op
         from shared.services import secret_store
         from config.connector_factory import get_connector_for_session
 
-        connector = await get_connector_for_session(kind="sharepoint", tenant_id=tenant_id)
+        # `unrestricted` NAMED, same reasoning as the other org-level probes in this
+        # router (see the connect/verify handlers): this runs during ADMIN SETUP of the
+        # tenant-wide connection, before any project has wired SharePoint to a stage.
+        # There is no stage whose grant could be consulted, so gating it on one would
+        # deny every first-time setup — the level would be None and
+        # `permits(None, "read")` False, making the connect flow fail with an access
+        # error about a project that is not part of this operation.
+        connector = await get_connector_for_session(
+            kind="sharepoint", tenant_id=tenant_id, unrestricted=True,
+        )
         site = await connector.read_adapter("resolve_site", site_url=site_url)
         site_id = (site or {}).get("id", "")
         if not site_id:
