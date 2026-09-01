@@ -18,7 +18,7 @@ from agents_orchestrator.development_agent.tools.path_guard import (
     resolve_safe_path,
 )
 from config.connection_manager import manager
-from config.ws_helper import broadcast_log, get_session_id, get_user_id
+from config.ws_helper import broadcast_file_diff, broadcast_log, get_session_id, get_user_id
 
 # file_tools.py → tools/ → development_agent/ → agents_orchestrator/ → agentic_app/
 _FILES_DIR = str(pathlib.Path(__file__).resolve().parents[3] / "files")
@@ -96,12 +96,23 @@ def write_file(relative_path: str, content: str) -> str:
         return f"Error: {e}"
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
+    existed = full_path.exists()
+    original = ""
+    if existed:
+        try:
+            original = full_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            original = ""
     try:
         full_path.write_text(content, encoding="utf-8")
         s = get_session(get_session_id())
         if relative_path not in s.dev_artifacts.generated_files:
             s.dev_artifacts.generated_files.append(relative_path)
         broadcast_log(manager, f"Wrote: {relative_path} ({len(content)} chars)", level="INFO")
+        broadcast_file_diff(
+            manager, relative_path.replace("\\", "/"), original, content,
+            "created" if not existed else "edited",
+        )
         return f"Successfully wrote: {relative_path}"
     except Exception as e:
         return f"Error writing {relative_path}: {e}"
@@ -220,6 +231,7 @@ def edit_file(relative_path: str, old_string: str, new_string: str) -> str:
         if relative_path not in s.dev_artifacts.changed_files:
             s.dev_artifacts.changed_files.append(relative_path)
         broadcast_log(manager, f"Edited: {relative_path}", level="INFO")
+        broadcast_file_diff(manager, relative_path.replace("\\", "/"), content, new_content, "edited")
         return f"Successfully edited: {relative_path}"
     except Exception as e:
         return f"Error editing {relative_path}: {e}"

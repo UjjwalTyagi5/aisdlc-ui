@@ -131,7 +131,6 @@ NATIVE_TAGS: dict[str, dict[str, "str | list[str]"]] = {
         # ── artifact.* ────────────────────────────────────────────────────────
         "read_design_artifact": "artifact.read",
         "submit_development_artifacts": "artifact.write",
-        "write_development_artifact": "artifact.write",
     },
     "code_review": {
         # ── review.diff.analyze ───────────────────────────────────────────────

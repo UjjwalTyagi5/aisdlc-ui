@@ -81,6 +81,17 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
   data_engineering: "Builds and registers the data pipeline — ingest, transform, schema (Track 5).",
 };
 
+/**
+ * Agents that have gone through the full "properly rebuilt and verified" pass
+ * (help/portfolio-1-agent-status.md, Part 5 of
+ * multi-track-agent-access-design.md) and are safe to render as real, clickable
+ * tiles instead of "Coming soon". The single source of truth for both the
+ * project page's tile grid and any agent's own standalone page gate — grow
+ * this list one entry at a time as each agent passes verification, never in
+ * two places.
+ */
+export const BUILT_AGENTS: readonly Phase[] = ["security", "documentation", "development"];
+
 /** Label per agent (phases + the orchestrator meta-agent). */
 export const AGENT_LABEL: Record<AgentType, string> = {
   orchestrator: "Orchestrator",

@@ -187,3 +187,59 @@ async def test_bind_pulled_workspace_with_pipeline_context(_seeded_workspace):
     assert s.ado_project == "TestADOProject", f"s.ado_project not set: {s.ado_project!r}"
 
     clear_session(sid)
+
+
+async def test_bind_pulled_workspace_forwards_project_id_and_owner_id_to_resolve_auth(monkeypatch):
+    """Regression: _bind_pulled_workspace's own resolve_auth call must pass
+    project_id/owner_id, not just tenant_id.
+
+    Found live during Task 10 verification (2026-08-31): create_pr failed on a
+    real project with a real project-scoped ADO credential saved via the
+    Integrations page, because resolve_auth(tenant_id) alone can't find a
+    project-scoped personal credential (project_integration_credentials) --
+    it silently left s.pat empty, so create_pr's Basic-auth header carried no
+    real password and Azure DevOps answered with a 302 redirect to its
+    sign-in page instead of a clean 401. Same root cause and same fix shape
+    as ado_repos.py's dev_workspace.py callers (commit d291651c) -- this call
+    site inside the chat/WS agent flow was missed in that pass.
+    """
+    from agents_orchestrator.development_agent import development_agent_api
+    from shared.services import ado_repos
+
+    captured: dict = {}
+
+    async def _fake_resolve_auth(tenant_id, *, project_id="", owner_id=""):
+        captured["tenant_id"] = tenant_id
+        captured["project_id"] = project_id
+        captured["owner_id"] = owner_id
+        return "https://dev.azure.com/fake-org", "fake-real-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
+    async def _fake_get_for_project(tenant_id, project_id):
+        return {
+            "status": "ready",
+            "work_dir": "/tmp/binding-test",
+            "remote_url": "https://dev.azure.com/fake-org/proj/_git/repo",
+            "branch": "main",
+            "ado_project": "proj",
+            "repo_name": "repo",
+        }
+
+    monkeypatch.setattr(
+        development_agent_api.dev_workspace_store, "get_for_project", _fake_get_for_project
+    )
+
+    sid = "bind-workspace-pat-forward-test"
+    clear_session(sid)
+    s = get_session(sid)
+
+    message_data = {"pipeline_context": {"project_id": "the-project-id"}}
+    await development_agent_api._bind_pulled_workspace(
+        s, message_data, "the-tenant-id", "the-user-id"
+    )
+
+    assert captured["project_id"] == "the-project-id"
+    assert captured["owner_id"] == "the-user-id"
+    assert s.pat == "fake-real-pat"
+
+    clear_session(sid)

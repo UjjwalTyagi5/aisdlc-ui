@@ -80,39 +80,6 @@ class DevAgentState(TypedDict):
     model_id: str | None
 
 
-@tool
-async def write_development_artifact(
-    run_id: str,
-    repo_url: str = "",
-    branch_name: str = "",
-    pr_url: str = "",
-    code_summary: str = "",
-) -> str:
-    """Persist the development artifact to the database and notify the orchestrator.
-
-    Call this after the PR is created and the user confirms development is complete
-    to advance the pipeline to the testing stage.
-
-    Args:
-        run_id: Pipeline run identifier (provided in the system context).
-        repo_url: URL of the repository containing the implementation.
-        branch_name: Feature branch name.
-        pr_url: Pull request URL.
-        code_summary: Brief summary of what was implemented.
-    """
-    from shared.services.artifact_service import write_and_notify as _write_and_notify
-    from shared.models.artifacts import DevelopmentArtifact
-
-    artifact = DevelopmentArtifact(
-        repo_url=repo_url or None,
-        branch_name=branch_name or None,
-        pr_url=pr_url or None,
-        code_summary=code_summary or None,
-    )
-    await _write_and_notify(run_id, "development", artifact.model_dump())
-    return f"Development artifact persisted for run {run_id}"
-
-
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 tools = [
@@ -145,7 +112,6 @@ tools = [
     list_work_items,
     read_design_artifact,
     submit_development_artifacts,
-    write_development_artifact,
     generate_project_scaffold,
     generate_component,
     generate_api_endpoint,
@@ -176,17 +142,28 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
         return _LLM_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     from langchain_litellm import ChatLiteLLM
-    instance = ChatLiteLLM(
-        model=model,
-        custom_llm_provider=litellm_provider,
-        api_base=base_url,
-        api_key=api_key,
-        temperature=0.1,
-        max_tokens=8192,
-        max_retries=2,
+    kwargs: dict = {
+        "model": model,
+        "custom_llm_provider": litellm_provider,
+        "api_base": base_url,
+        "api_key": api_key,
+        "max_tokens": 8192,
+        "max_retries": 2,
         # Stream tokens so the copilot shows the dev agent's replies live.
-        streaming=True,
-    )
+        "streaming": True,
+    }
+    # gpt-5-family models (including gpt-5-codex) reject any temperature other
+    # than the default 1 -- litellm raises UnsupportedParamsError pre-call if
+    # we pass one. Confirmed live against a real azure/gpt-5-mini deployment
+    # (2026-08-31): identical call succeeds the instant temperature is omitted.
+    # Every other model keeps the low, determinism-favoring temperature this
+    # agent wants for code generation -- this is a narrow exception for the one
+    # model family that structurally cannot take the parameter, not a
+    # litellm.drop_params=True escape hatch that would silently swallow
+    # unsupported params for every model everywhere.
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = 0.1
+    instance = ChatLiteLLM(**kwargs)
     _LLM_CACHE[cache_key] = instance
     return instance
 
@@ -194,16 +171,95 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _sanitize_messages(messages: list) -> list:
-    """Drop ToolMessages whose tool_call_id has no matching AIMessage tool_call."""
-    valid_ids: set = set()
+    """Repair a message history that drifted out of the strict AIMessage.tool_calls
+    <-> ToolMessage pairing every provider requires. Two independent directions of
+    drift are possible:
+
+      - Orphan ToolMessage: a tool_call_id with no matching AIMessage tool_call
+        (e.g. a stale/replayed message). Dropped (original behaviour).
+      - Dangling tool_call: an AIMessage tool_call with NO ToolMessage response
+        anywhere in the history -- e.g. a WS turn that was `task.cancel()`-ed
+        (see task 4, development-agent-chat-overhaul: cancelling an in-flight
+        turn on disconnect/reconnect) landed between the agent node committing
+        its AIMessage and the tools node running, so the checkpoint persisted a
+        tool_call the tools node never got to answer. Every major provider
+        (Anthropic/OpenAI/etc.) rejects a history that ends on an unanswered
+        tool_call, so the next turn on that session_id would otherwise fail at
+        the provider with no obvious link back to the earlier cancellation. The
+        dangling entries are stripped from the AIMessage instead -- we do NOT
+        synthesize a fake ToolMessage, since we have no idea what the tool
+        would have returned.
+
+    Two follow-on subtleties, both required to actually close the hole above
+    (task 4 re-review finding N1) rather than just reshape it:
+
+      - `additional_kwargs["tool_calls"]` is the raw provider-format mirror that
+        streaming `ChatLiteLLM` (langchain_litellm) populates alongside the
+        structured field. Its `_convert_message_to_dict` does
+        `elif "tool_calls" in message.additional_kwargs:` -- an `in` check, not
+        a truthiness check -- so merely emptying that list still trips the
+        fallback and puts `"tool_calls": []` on the wire. OpenAI's schema
+        requires at least one entry and rejects an empty array exactly as hard
+        as a dangling one. The key must be deleted, not set to `[]`, whenever
+        nothing survives the filter. (Anthropic's conversion path drops an
+        empty-content assistant turn outright, so it isn't exposed there --
+        this specifically matters for OpenAI-family models.)
+      - If, after stripping, an AIMessage has neither surviving tool_calls nor
+        any text content (cancelled before the model produced any), the
+        message carries no information and is dropped from the history
+        entirely rather than left as an empty assistant turn -- providers
+        reject or mishandle that shape too. Mirrors the same repair already
+        living in architecture.py's _sanitize_messages
+        (design_architecture_agent), written after a live BadRequestError on
+        this exact shape.
+    """
+    all_call_ids: set = set()
+    answered_ids: set = set()
+    for msg in messages:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            all_call_ids.update(tc["id"] for tc in msg.tool_calls)
+        if isinstance(msg, ToolMessage):
+            answered_ids.add(msg.tool_call_id)
+
     out = []
     for msg in messages:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                valid_ids.add(tc["id"])
+            kept = [tc for tc in msg.tool_calls if tc["id"] in answered_ids]
+            if len(kept) != len(msg.tool_calls):
+                if not kept and not getattr(msg, "content", ""):
+                    # Nothing survives: no answered tool_calls, no text either.
+                    # Drop the message outright instead of leaving a fully
+                    # empty assistant turn in the history.
+                    continue
+                update: dict = {"tool_calls": kept}
+                # additional_kwargs can carry the raw provider-format tool_calls
+                # too -- some conversion paths read that instead of/alongside
+                # the structured field, so it must be kept in lockstep or a
+                # "repaired" message can still round-trip the dangling call
+                # back to the provider.
+                raw_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                if "tool_calls" in raw_kwargs:
+                    if kept:
+                        kept_ids = {tc["id"] for tc in kept}
+                        update["additional_kwargs"] = {
+                            **raw_kwargs,
+                            "tool_calls": [
+                                rtc for rtc in raw_kwargs["tool_calls"]
+                                if rtc.get("id") in kept_ids
+                            ],
+                        }
+                    else:
+                        # DELETE the key -- see the docstring's N1 note. Setting
+                        # it to [] still trips litellm's `in` check and puts an
+                        # empty tool_calls array on the wire, which OpenAI
+                        # rejects (schema requires min length 1).
+                        update["additional_kwargs"] = {
+                            k: v for k, v in raw_kwargs.items() if k != "tool_calls"
+                        }
+                msg = msg.model_copy(update=update)
             out.append(msg)
         elif isinstance(msg, ToolMessage):
-            if msg.tool_call_id in valid_ids:
+            if msg.tool_call_id in all_call_ids:
                 out.append(msg)
         else:
             out.append(msg)
@@ -304,8 +360,6 @@ def _tool_label(name: str, args: dict) -> str:
             return "Loading design & requirements context"
         case "submit_development_artifacts":
             return "Submitting development artifacts"
-        case "write_development_artifact":
-            return f"Persisting development artifact for run {a.get('run_id', '?')}"
         case "update_work_item_state":
             return f"Updating work item #{a.get('work_item_id', '?')} → {a.get('target_state', '?')}"
         case "add_pr_comment_to_work_items":

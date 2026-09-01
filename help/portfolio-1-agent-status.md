@@ -81,12 +81,50 @@ File: `backend/agents_orchestrator/design_architecture_agent/design_architecture
 - [x] Test: `backend/tests/test_design_agent_chat_access.py` (3 passed)
 - Notes: **this route previously had no `project_id` Form field at all, and no tenant scoping** — a comment in the original code said "This REST endpoint carries no tenant_id (unlike the WS path)." Added `project_id: str = Form(...)` as a new required field to make the check possible — a real contract change, but safe: Design isn't in the frontend's `builtAgents` list yet, so nothing live depends on the old (broken) contract.
 
-### 3. Development — owner role: Architect (Developer builds) — `agent_id="development"` — **access-hardening DONE**
+### 3. Development — owner role: Architect (Developer builds) — `agent_id="development"` — **access-hardening DONE; real-logic verification IN PROGRESS (2026-08-31)**
 File: `backend/agents_orchestrator/development_agent/development_agent_api.py`
 - [x] WS handler (`_process_ws_message`): `assert_agent_access_for_chat` added, checked every message
 - [x] REST `/chat/`: stopped trusting client `user_id`, `assert_agent_access_for_chat` added
 - [x] Test: `backend/tests/test_development_agent_chat_access.py` (3 passed)
 - Notes: no `project_id` Form field here either — project id only exists inside the `pipeline_context` JSON field, reused via the existing `_lf_pid` extraction rather than adding a new field.
+
+**Real-logic verification pass started 2026-08-31.** Full design:
+`docs/superpowers/specs/2026-08-31-development-agent-verification-design.md`. Unlike Code
+Review/Security/Documentation at their own verification time, this agent's model resolution
+was found to already use the real, working `resolve_chat_model`/`resolve_model_for_run` path
+(`agents/dev_agent.py:215-244`) — the dead-`.env`-key fallback documented below for the other
+three agents does not apply to Development; that gap has since been closed platform-wide.
+
+Frontend (`frontend/app/(app)/projects/[id]/development/page.tsx`) and backend
+(`backend/agents_orchestrator/development_agent/`, ~5,150 lines) were diffed byte-for-byte
+against the last known-good build and found already complete — a real "Pull repo" flow
+(ADO + GitHub), a VSCode-style file-tree + Monaco viewer, a PR list, and a chat drawer with
+real git/file/lint/sandbox/work-item tools. Nothing needed porting over. What this pass
+actually found and is fixing:
+
+1. **RBAC gap**: `require_agent_access()` (`shared/authz/agent_access.py:168`) resolves role
+   via `platform_role_for`, which is **not** project-scoped — a role held on Project A reaches
+   Project B's agent-gated routes. This affects `dev_workspace_router`
+   (`shared/routers/dev_workspace.py` — pull/tree/file/changes/PRs, currently gated only by
+   generic project membership, no per-agent check at all) and, as a pre-existing latent bug,
+   the already-shipped `security_workspace_router` too. Fix is one shared change to
+   `require_agent_access`, closing both.
+2. **Two Consequential-tier tools ungated**: `create_ado_repo`, `update_work_item_state`,
+   `add_pr_comment_to_work_items` (`tools/git_tools.py`) execute on any model tool call with
+   no approval check — `push_branch`/`create_pr` already have a real code-level HITL gate
+   (`push_gate_enabled`/`push_approved`, `tools/git_tools.py:868,927`); the fix extends that
+   same mechanism to the other three rather than inventing a second one.
+3. **Upstream context likely doesn't reach the standalone page**: opening Development fresh
+   mints a new random `session_id` (`createConversation` → `development_agent_api.py:284,343`)
+   unrelated to whatever session Requirements/Design used — `fetch_session_artifacts` on that
+   fresh id is very unlikely to find prior-stage artifacts. Fix: resolve context by project
+   (the project's most recent `Run` row, matching Documentation's already-established
+   `read_upstream_artifacts` precedent) instead of by session continuity.
+
+Once verified end-to-end (including load/concurrency testing — shared per-project workspace
+directory, sandboxed-execution contention, Model Gateway cap under concurrent turns), the
+sole rollout step is adding `"development"` to `builtAgents`
+(`frontend/app/(app)/projects/[id]/page.tsx:122`) — same one-line flip as Security/Documentation.
 
 ### 4. Code Review — owner role: Architect — `agent_id="code_review"` — **access-hardening DONE; real-logic verification DONE (no builtAgents flip yet — see below)**
 File: `backend/agents_orchestrator/code_review_agent/code_review_agent_api.py`
@@ -442,5 +480,5 @@ touched.
 
 ---
 
-*Last updated: 2026-08-20. Keep this file current as each agent's row changes — this is
+*Last updated: 2026-08-31. Keep this file current as each agent's row changes — this is
 the shared source of truth across everyone working on Portfolio 1, not a snapshot.*

@@ -258,6 +258,7 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
         streaming: true,
         toolCalls: [],
         citations: [],
+        diffs: [],
       };
 
       // Snapshot history *before* we mutate state so the request body is stable.
@@ -436,10 +437,18 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
 //   step.output.delta  → append `delta` to the streaming agent bubble
 //   run.completed      → stop streaming (clears the typing indicator)
 //   artifact.updated   → surface as a citation chip
+//   code.diff          → upsert a per-turn diff card, keyed by path
 type ChatEvent =
   | { type: "step.output.delta"; delta?: string }
   | { type: "run.completed"; status?: string }
   | { type: "artifact.updated"; artifactId?: string; name?: string; url?: string }
+  | {
+      type: "code.diff";
+      path?: string;
+      original?: string;
+      modified?: string;
+      changeKind?: string;
+    }
   | { type: string; [k: string]: unknown };
 
 function applyEvent(
@@ -462,6 +471,23 @@ function applyEvent(
             : m;
         case "run.completed":
           return { ...m, streaming: false };
+        case "code.diff": {
+          const path = typeof event.path === "string" ? event.path : "";
+          if (!path) return m;
+          const modified = typeof event.modified === "string" ? event.modified : "";
+          const original = typeof event.original === "string" ? event.original : "";
+          const changeKind = event.changeKind === "created" ? "created" : "edited";
+          const existing = m.diffs ?? [];
+          const idx = existing.findIndex((d) => d.path === path);
+          if (idx === -1) {
+            return { ...m, diffs: [...existing, { path, original, modified, changeKind }] };
+          }
+          // Same path seen again this turn (e.g. edit_file called twice): the
+          // later `modified` wins, but `original` stays the FIRST event's value
+          // so the card shows the net change across the whole turn.
+          const next = existing.map((d, i) => (i === idx ? { ...d, modified } : d));
+          return { ...m, diffs: next };
+        }
         default:
           return m;
       }
