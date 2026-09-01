@@ -314,3 +314,44 @@ async def test_the_board_picker_names_its_stage():
     assert factory.await_args.kwargs.get("agent_id") == "requirements"
     # And it still passes the project — the stage alone resolves nothing either.
     assert factory.await_args.kwargs.get("project_id") == str(PROJECT)
+
+
+@pytest.mark.unit
+async def test_the_board_picker_also_names_who_is_asking():
+    """The SECOND half of the same call, and it has its own failure mode.
+
+    Naming the stage fixed authorization and revealed the next wall: the board
+    credential on these projects is a PERSONAL one a member saved on the Integrations
+    dialog, stored in project_integration_credentials keyed by (project, owner) with
+    the org URL travelling alongside it. `_resolve_credential_override` opens with
+
+        if not (project_id and owner_id): return None
+
+    so passing the project WITHOUT the owner used neither, fell back to a tenant-wide
+    credential that does not exist, and left the connector with no org_url. httpx then
+    failed on a scheme-less URL and the handler reported
+
+        502 Couldn't reach the board (UnsupportedProtocol)
+
+    which reads as "the board is down" rather than "nobody looked up your credential".
+    Confirmed end to end against a real Azure DevOps org: 502 before, 200 and a real
+    project list after. Same defect main fixed for the dev_workspace ADO routes.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from shared.routers import projects as projects_router
+
+    factory = AsyncMock(return_value=object())
+    project = types.SimpleNamespace(
+        id=PROJECT, connectors={"requirements": ["azure_devops"]}, provider_kind=None,
+    )
+    with patch("config.connector_factory.get_connector_for_session", factory):
+        await projects_router._connector_or_409(
+            project, TENANT, kind="azure_devops", owner_id="the-member",
+        )
+
+    kwargs = factory.await_args.kwargs
+    # All three travel together; any one missing and the call resolves to nothing.
+    assert kwargs.get("agent_id") == "requirements"
+    assert kwargs.get("project_id") == str(PROJECT)
+    assert kwargs.get("owner_id") == "the-member"
