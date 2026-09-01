@@ -1022,4 +1022,49 @@ This is a system-prompt tone/behavior question (dev_agent_prompt.py), not
 a bug with a single root cause -- needs the user's input on what "less
 dull" should actually look like before touching the prompt, matching this
 session's own established discipline (brainstorm before building) rather
-than guessing at a rewrite.
+than guessing at a rewrite. User's answer, when asked: bring back emojis
+and richer formatting -- "it used to have emojis links etc." Still
+pending a full prompt-tuning pass.
+
+ISSUE 14 (FIXED, commit 3054c5c2): on the very next real request after
+Issue 13 deployed, the user hit "Agent error: RateLimitError" and asked
+directly whether this was Azure's fault or this codebase's fault --
+correctly refused to guess and pulled the real error text from the
+backend log instead of speculating.
+The proximate cause IS genuinely the provider: the real Azure error is
+"AzureException RateLimitError - Your requests to gpt-5-mini for
+gpt-5-mini in swedencentral have exceeded rate limit." -- real quota
+exhaustion from real traffic (a large share of it this session's own
+heavy live-testing today across the chat-overhaul verification work).
+But the log also showed something making it meaningfully worse, which IS
+a code bug: guarded_completion's own retry loop (shared/services/
+model_call_wrapper.py -- 3 attempts, 2s/4s backoff, deliberately NOT a
+tenacity wrapper per its own docstring, specifically so retries stay
+logged/controlled/cost-checked) was firing at the same time as a SECOND,
+completely uncoordinated retry layer: ChatLiteLLM's own built-in
+tenacity-based retry-on-RateLimitError, enabled because _build_llm passed
+max_retries=2 straight into its constructor across all three agents that
+share this pattern (Development, Design/Architecture, Requirements). A
+single guarded_completion call could therefore fire up to 3x3=9 real
+requests at Azure instead of the intended 3 -- piling more load onto an
+endpoint that was already telling every caller to back off, plausibly
+extending how long the rate limit stayed hot rather than helping recovery.
+FIX: max_retries=0 on ChatLiteLLM's constructor in all three agents --
+guarded_completion is now genuinely the only retry mechanism, matching
+what its own docstring already claimed it was. Regression test added for
+Development's _build_llm (the other two share the identical pattern with
+no prior dedicated unit coverage to extend). 53/53 tests pass across the
+affected Development-agent suites.
+ANSWER TO THE USER'S QUESTION: both, but in different senses -- the rate
+limit itself is a real, external, provider-side fact (not something this
+code controls), but this code was making the SYMPTOM worse by retrying
+harder than intended during the exact condition where backing off matters
+most. The fix doesn't raise or bypass Azure's quota (not something a code
+change can do) -- it stops this codebase from accidentally amplifying
+load against it.
+STILL OPEN: whether this specific gpt-5-mini/swedencentral deployment's
+quota is adequate for normal usage going forward, independent of today's
+unusually concentrated testing traffic, is not something a code fix can
+answer -- worth the user checking the deployment's actual RPM/TPM tier in
+the Azure portal if RateLimitError recurs under normal (non-testing)
+usage after today.
