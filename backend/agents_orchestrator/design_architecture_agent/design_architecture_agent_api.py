@@ -290,14 +290,19 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         # passing paths and hoping the agent calls read_document (which can silently skip,
         # or fail on a Windows path mangled through the LLM tool-call). Falls back to the
         # path hint when a file can't be read.
-        from shared.tools.document_tools import extract_file_text as _extract  # noqa: PLC0415
+        from shared.tools.document_tools import (  # noqa: PLC0415
+            extract_file_text as _extract,
+            extraction_succeeded as _extracted_ok,
+        )
         _parts, _unread = [], []
         for _p in _all_files:
             try:
                 _txt = _extract(_p)
             except Exception:  # noqa: BLE001 — best-effort; degrade to the path hint
                 _txt = ""
-            if _txt and _txt.strip():
+            # NOT `if _txt` — extraction returns a non-empty PLACEHOLDER on failure.
+            # See the same block in requirements_agent_api for the failure it caused.
+            if _extracted_ok(_txt):
                 _parts.append(f"--- Attached file: {os.path.basename(_p)} ---\n{_txt.strip()[:20000]}")
             else:
                 _unread.append(_p)
@@ -306,8 +311,19 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
                 content="The user attached the following file(s); use their content directly:\n\n"
                         + "\n\n".join(_parts)))
         if _unread:
+            # Name the limit instead of handing over a path the file tools cannot read
+            # either. Design is more exposed to this than Requirements — people attach
+            # screenshots of diagrams and wireframes to it constantly.
+            _names = ", ".join(os.path.basename(_u) for _u in _unread)
             state["messages"].append(HumanMessage(
-                content=f"please use the following files {', '.join(_unread)}"))
+                content=(
+                    f"The user attached {_names}, which could not be read as text — it "
+                    "is an image or an unsupported format. You CANNOT open it: do not "
+                    "call a file tool on it, and do not claim to have looked at it. "
+                    "Tell the user you cannot read that file type and ask them to paste "
+                    "the relevant text, or re-upload as .pdf, .docx, .txt, .md, .csv "
+                    "or .xlsx."
+                )))
 
     await manager.broadcast({"type": "message_received", "session_id": session_id, "message": "Processing your request..."})
 
