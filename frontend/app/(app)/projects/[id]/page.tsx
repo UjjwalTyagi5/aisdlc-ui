@@ -113,13 +113,31 @@ export default function ProjectOverviewPage() {
     const track = projectQ.data?.track;
     if (!viewerRole || !track) return undefined;
     // TODO(next task): read the project's actually-verified agent list once that
-    // signal exists server-side; until then, this list is seeded with only the
-    // agent this plan actually rebuilt and verified end-to-end (Security, via
-    // Tasks 5-7's REST/WS/workspace RBAC enforcement). The other 7 Portfolio-1
-    // agents keep their old, unverified code per the design doc's "assume broken
-    // until properly rebuilt" framing (multi-track-agent-access-design.md) — grow
-    // this list one entry at a time as each agent gets the same Task 5-7 treatment.
-    const builtAgents: Phase[] = ["security", "documentation"];
+    // signal exists server-side; until then, this list names only the agents that
+    // have been rebuilt and verified end to end. Grow it one entry at a time, per
+    // the design doc's "assume broken until properly rebuilt" framing
+    // (multi-track-agent-access-design.md).
+    //
+    // requirements + design added after help/requirements-design-e2e-plan.md
+    // Phases 1-5. What "verified" means for these two, concretely:
+    //   · the board connector is acquired with BOTH project_id and agent_id, so
+    //     the stage's grant actually resolves (it silently resolved to "no access"
+    //     for every run before — tests/test_connector_stage_scope.py)
+    //   · the Requirements → Design hand-off carries the payload across the
+    //     runs → agent_sessions mirror (it read zero rows under FORCE RLS before,
+    //     so Design received nothing — tests/test_requirements_to_design_handoff.py)
+    //   · board writes are gated on the owning role in code rather than in prompt
+    //     text (tests/test_consequential_gate.py)
+    //   · a run's initiator cannot approve their own gate
+    //     (tests/test_gate_self_approval.py)
+    //   · a tenant's MCP servers do not reach another tenant
+    //     (tests/test_mcp_tenant_isolation.py)
+    const builtAgents: Phase[] = [
+      "requirements",
+      "design",
+      "security",
+      "documentation",
+    ];
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 
