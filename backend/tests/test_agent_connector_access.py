@@ -20,24 +20,30 @@ from config.connectors.context import clear_connector, set_connector
 def as_owner():
     """Put an owner of the Requirements stage in session context.
 
-    `_board_connector("write")` now enforces TWO independent things, and these tests
+    `_board_connector("write")` now enforces THREE independent things, and these tests
     are about the first:
 
-        permits(level, "write")   may this PROJECT'S STAGE write to its board
-        owner_approved(stage)     may this PERSON authorise a Consequential action
+        permits(level, "write")        may this PROJECT'S STAGE write to its board
+        owner_approved(stage)          may this PERSON authorise a Consequential action
+        get_consequential_approved()   did they say so ON THIS TURN
 
-    A test that establishes no person hits the second check and never reaches the
-    lattice question it was written to ask. This states the precondition those tests
-    always implicitly assumed — a human driving the turn — so each layer is tested on
-    its own. `test_a_write_needs_an_owner_even_on_a_read_write_project` below covers
-    the interaction itself.
+    A test that establishes no person, or no approval for the turn, hits one of the
+    later checks and never reaches the lattice question it was written to ask. This
+    states the preconditions those tests always implicitly assumed — a human driving
+    the turn, who has just said yes — so each layer is tested on its own.
+    `test_a_write_needs_an_owner_even_on_a_read_write_project` below covers the
+    interaction itself, and tests/test_consequential_gate.py covers the other two
+    layers in isolation.
     """
     import config.ws_helper as ws
 
     async def _perms(_u, _t):
         return ["artifact:approve_requirements"]
 
-    with patch.object(ws, "get_user_id", lambda: "the-ba"),             patch.object(ws, "get_tenant_id", lambda: "tenant-1"),             patch("shared.authz.resolver.resolve_permissions_for_user", _perms):
+    with patch.object(ws, "get_user_id", lambda: "the-ba"), \
+            patch.object(ws, "get_tenant_id", lambda: "tenant-1"), \
+            patch.object(ws, "get_consequential_approved", lambda: True), \
+            patch("shared.authz.resolver.resolve_permissions_for_user", _perms):
         yield
 
 

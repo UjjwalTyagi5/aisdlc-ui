@@ -260,6 +260,27 @@ def invalidate_key_cache(tenant_id: str, secret_ref: str | None = None) -> None:
         _KEY_CACHE.pop(key, None)
 
 
+def temperature_kwargs(model: str, temperature: float) -> dict:
+    """`{"temperature": ...}`, or `{}` for a model that structurally cannot take it.
+
+    gpt-5-family models (including gpt-5-codex) accept only the default temperature of
+    1, and litellm raises `UnsupportedParamsError` BEFORE the call rather than clamping
+    the value — so a tenant on azure/gpt-5-mini got a failed turn every time, with only
+    the exception type in the log (never `str(exc)`, which routinely echoes credentials
+    back). The Development agent hit this live on 2026-08-31 and fixed it in
+    `dev_agent._build_llm`; Requirements and Design had the same hardcoded temperature
+    in four more places, two `ChatLiteLLM` builds and two direct `litellm` calls.
+
+    A HELPER RATHER THAN A FIFTH COPY, and deliberately NOT `litellm.drop_params=True`.
+    Dropping params globally would silently swallow every other unsupported parameter
+    for every model everywhere, turning a loud, fixable error into a quiet behaviour
+    change. This is the narrow, verified exception for the one family that cannot take
+    the parameter; every other model keeps the low, determinism-favouring temperature
+    its agent chose.
+    """
+    return {} if "gpt-5" in (model or "").lower() else {"temperature": temperature}
+
+
 def resolve_chat_model(
     *,
     model_id: str | None = None,

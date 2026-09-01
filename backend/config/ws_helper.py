@@ -21,6 +21,18 @@ PROVIDER_KIND: contextvars.ContextVar[str] = contextvars.ContextVar("provider_ki
 TENANT_ID: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default=None)
 PROJECT_ID: contextvars.ContextVar[str] = contextvars.ContextVar("project_id", default=None)
 RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar("run_id", default=None)
+# Did the human explicitly approve a Consequential action ON THIS TURN? The Development
+# agent keeps the same signal on its per-session DevSessionState (`push_approved`);
+# Requirements and Design have no session object and read everything per-turn from these
+# ContextVars, so it lives here for them.
+#
+# DEFAULT False, AND RE-SET EVERY TURN. Consent is for one action, not for a session:
+# "yes, create those work items" is not standing permission to create more on the next
+# message. The chat entry points call `set_consequential_approved` on every turn, so a
+# turn that is not an approval clears the previous turn's yes rather than inheriting it.
+CONSEQUENTIAL_APPROVED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "consequential_approved", default=False
+)
 
 def set_tenant_id(tenant_id):
     TENANT_ID.set(str(tenant_id) if tenant_id else None)
@@ -48,6 +60,17 @@ def get_run_id():
         return RUN_ID.get()
     except LookupError:
         return None
+
+def set_consequential_approved(approved: bool) -> None:
+    CONSEQUENTIAL_APPROVED.set(bool(approved))
+
+def get_consequential_approved() -> bool:
+    """False on every uncertainty, including a context that never set it — a worker run
+    has no human to have approved anything, so the unknown answer is 'no'."""
+    try:
+        return bool(CONSEQUENTIAL_APPROVED.get())
+    except LookupError:
+        return False
 
 def set_session_id(session_id: str):
     return SESSION_ID.set(session_id)

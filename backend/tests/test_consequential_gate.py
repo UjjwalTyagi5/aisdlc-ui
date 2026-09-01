@@ -138,7 +138,7 @@ async def test_the_requirements_board_write_is_gated():
     """`_board_connector("write")` is what every Requirements write tool calls."""
     from agents_orchestrator.requirements_agent.agents import planning
 
-    with patch.object(planning, "_owner_approved",
+    with patch.object(planning, "_authorize_consequential",
                       AsyncMock(return_value=(False, "no owner present"))), \
             patch.object(planning, "_get_active_connector", lambda: _AnyConnector()):
         connector, err = await planning._board_connector("write")
@@ -153,7 +153,7 @@ async def test_reads_are_not_gated():
     from agents_orchestrator.requirements_agent.agents import planning
 
     approver = AsyncMock(return_value=(False, "no owner present"))
-    with patch.object(planning, "_owner_approved", approver), \
+    with patch.object(planning, "_authorize_consequential", approver), \
             patch.object(planning, "_get_active_connector", lambda: _AnyConnector()):
         connector, err = await planning._board_connector("read")
     assert err is None and connector is not None
@@ -183,9 +183,9 @@ def test_every_write_tool_goes_through_the_choke_point():
 @pytest.mark.unit
 def test_the_design_epic_write_is_gated():
     src = _design_epic_tool_source()
-    assert 'owner_approved("design")' in src
+    assert "authorize_consequential(" in src
     # The gate runs BEFORE the write, not as an afterthought beside it.
-    assert src.index('owner_approved("design")') < src.index("write_adapter")
+    assert src.index("authorize_consequential(") < src.index("write_adapter")
 
 
 @pytest.mark.unit
@@ -220,3 +220,149 @@ class _AnyConnector:
 
     display_name = "Test Board"
     connector_name = "test_board"
+
+
+# ── the second half: the owner has to actually say yes, on this turn ─────────
+#
+# WHY THIS EXISTS AT ALL. `owner_approved` asks whether this PERSON may authorise the
+# action. On its own it is not a gate here, and the reason is arithmetic rather than
+# subtle: the owning role for `requirements` is `ba`, so a BA driving the chat holds
+# `artifact:approve_requirements` by definition and passes the role check on every
+# turn. Every board write a BA's session produced would have gone through with nobody
+# asked — including `delete_board_item`, which calls itself IRREVERSIBLE. The
+# Development agent has the mirror-image hole: push_gate_enabled/push_approved asks the
+# human but never checks the role, so any project member driving that chat can approve
+# a push. These tests pin both halves running together.
+
+
+def _consent(approved: bool):
+    import config.ws_helper as ws
+
+    return patch.object(ws, "get_consequential_approved", lambda: approved)
+
+
+async def _ask_full(stage, *, approved, user_id=OWNER, perms=BA_PERMS):
+    from shared.authz.consequential import authorize_consequential
+
+    async def _resolve(_u, _t):
+        return perms
+
+    ctx_user, ctx_tenant = _context(user_id)
+    with ctx_user, ctx_tenant, _consent(approved), \
+            patch("shared.authz.resolver.resolve_permissions_for_user", _resolve):
+        return await authorize_consequential(stage, action="Writing to the board")
+
+
+@pytest.mark.unit
+async def test_the_owner_alone_is_not_enough_without_an_explicit_yes():
+    ok, why = await _ask_full("requirements", approved=False)
+    assert ok is False
+    assert "NOT DONE" in why
+
+
+@pytest.mark.unit
+async def test_the_owner_plus_an_explicit_yes_passes():
+    ok, why = await _ask_full("requirements", approved=True)
+    assert ok is True and why == ""
+
+
+@pytest.mark.unit
+async def test_a_yes_from_a_non_owner_is_still_refused():
+    """Consent does not substitute for authority. Somebody without the stage's approval
+    permission saying "yes" is not an approval — their yes was never theirs to give."""
+    ok, why = await _ask_full("requirements", approved=True, user_id=BYSTANDER, perms=NO_PERMS)
+    assert ok is False
+    assert "NOT DONE" not in why  # they hear about authority, not about being asked
+
+
+@pytest.mark.unit
+async def test_the_role_check_is_reported_before_the_consent_one():
+    """Order matters for the message, not just the outcome. Telling somebody who lacks
+    the permission to "ask the user for approval" is nonsense — they ARE the user, and
+    their yes would not count."""
+    ok, why = await _ask_full("design", approved=False, user_id=BYSTANDER, perms=NO_PERMS)
+    assert ok is False
+    assert "approval permission" in why
+
+
+@pytest.mark.unit
+async def test_a_background_run_has_no_consent_to_inherit():
+    """A worker sets no user and no consent flag. Both halves refuse, and the one that
+    answers first is the one naming the real problem: nobody is there."""
+    ok, why = await _ask_full("requirements", approved=False, user_id=None)
+    assert ok is False
+    assert "signed-in approver" in why
+
+
+# ── what counts as a yes ─────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", [
+    "yes", "Yes", "  ok  ", "confirm", "proceed", "go ahead", "approved",
+    "yes please", "I approve", "please proceed", "you have my approval",
+    # A leading approval clause, and a phrase the message opens with.
+    "yes, go ahead", "Yes, create them", "go ahead and create them",
+])
+def test_these_are_approvals(text):
+    from shared.authz.consequential import is_approval_message
+
+    assert is_approval_message(text) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", [
+    "",
+    None,
+    "no",
+    "do not approve that",
+    "who needs to approve this?",
+    "Should I approve this?",
+    # Contains "i approve" but does not open with it. An unanchored substring test
+    # read this as consent, which is why the matching is anchored.
+    "what happens when I approve it",
+    "no, do not go ahead",
+    "I am not sure, do not proceed yet",
+    "write the stories to the board",
+    "delete the epic",
+    # The Development agent treats these as approvals because its action is always a
+    # push. On a board they describe work rather than consent to it, which is why the
+    # two phrase lists are deliberately not shared.
+    "push the release notes to the epic",
+    "create the pr description as a work item",
+])
+def test_these_are_not_approvals(text):
+    from shared.authz.consequential import is_approval_message
+
+    assert is_approval_message(text) is False
+
+
+@pytest.mark.unit
+def test_a_transcript_approval_does_not_authorise_the_next_turn():
+    """The chat entry points pass ONLY this turn's `task_intent`, never the replayed
+    `conversation_context`. If they ever passed both, an approval anywhere in the
+    history would authorise every later write in the session."""
+    import inspect
+
+    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as dapi
+    from agents_orchestrator.requirements_agent import requirements_agent_api as api
+
+    for mod in (api, dapi):
+        src = inspect.getsource(mod)
+        assert "set_consequential_approved(is_approval_message(task_intent))" in src, mod.__name__
+        assert "is_approval_message(conversation_context" not in src, mod.__name__
+
+
+@pytest.mark.unit
+def test_consent_is_set_on_every_chat_turn_of_both_agents():
+    """Both agents, both paths (WS and REST) = two call sites each. Set
+    UNCONDITIONALLY: a turn that is not an approval has to clear the previous turn's
+    yes, or one "yes" becomes standing permission for the rest of the session."""
+    import inspect
+
+    from agents_orchestrator.design_architecture_agent import design_architecture_agent_api as dapi
+    from agents_orchestrator.requirements_agent import requirements_agent_api as api
+
+    for mod in (api, dapi):
+        src = inspect.getsource(mod)
+        assert src.count("set_consequential_approved(") == 2, mod.__name__
