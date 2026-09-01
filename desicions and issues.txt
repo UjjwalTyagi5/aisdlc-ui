@@ -1068,3 +1068,41 @@ unusually concentrated testing traffic, is not something a code fix can
 answer -- worth the user checking the deployment's actual RPM/TPM tier in
 the Azure portal if RateLimitError recurs under normal (non-testing)
 usage after today.
+
+ISSUE 15 (FIXED, commit 253cf79): the "why is the agent so dull" feedback
+from Issue 13's writeup. Asked the user directly what "less dull" should
+look like rather than guessing at a rewrite; answer: "it used to have
+emojis, links etc."
+Root cause, confirmed by reading the full prompt (dev_agent_prompt.py,
+~530 lines): it is a purely procedural instruction set -- extensive rules
+for WHAT to do and WHEN to stop (accuracy rules, phase-by-phase workflow,
+HITL confirmation gates), but not one line anywhere about HOW responses
+should read. The chat UI has rendered full rich markdown (bold, lists,
+links, syntax-highlighted code, emoji) since the diff-card overhaul
+(Issue 8 Part 1) -- the model was simply never told it could use any of
+that. The two confirmation questions visible in the user's own screenshot
+trace to the Phase 2 plan-approval ⛔ STOP gate -- a deliberate, reviewed
+HITL behavior, not a bug, and NOT touched by this fix.
+FIX: added a new, purely additive COMMUNICATION STYLE section right after
+the identity line, so it colors tone before all the procedural detail
+that follows. Covers: use markdown richly (bold/bullets/inline code),
+sparing/functional emoji as status markers (not decoration), always
+format URLs as markdown links instead of bare text, scale ceremony to the
+size of the change (a one-line CSS swap doesn't need a numbered plan with
+a "Questions:" section), skip throat-clearing preambles ("I will now
+proceed to..."), and phrase required confirmations as one direct friendly
+question instead of a formal bulleted report. Every existing ⛔ STOP gate
+and procedural rule is untouched -- this section only changes how the
+surrounding prose reads, not what the agent is required to do or when it
+must wait for the user.
+VERIFIED LIVE, not just asserted: restarted the backend, sent a real "hi"
+through a real WS connection to the real configured model (same
+azure/gpt-5-mini deployment as Issues 13-14), and confirmed the response
+now contains a real emoji (a magnifying-glass "investigating" marker) and markdown bold
+-- a visibly warmer, more concise greeting than the prior bland "take
+right away:" bullet dump from earlier transcripts. 53/53 tests in the
+Development-agent suite still pass (nothing asserts on the prompt's exact
+content).
+NOT ADDRESSED (separate, not requested): the credential "Save credential"
+button bug and the Issue-10 test-database root fix are both still open,
+listed further up this section.
