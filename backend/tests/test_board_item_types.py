@@ -159,14 +159,20 @@ def test_both_declare_the_capability(module, cls):
 
 
 @pytest.mark.unit
-def test_the_prompt_forbids_claiming_a_parent_link():
-    """It reported "created the 3 Tasks and linked them under Epic #1". create_work_item
-    sends no relations at all, so the link never existed — the items are unparented and
-    the only trace of the Epic is a sentence in a description."""
+def test_the_prompt_forbids_claiming_a_link_that_was_not_made():
+    """It reported "created the 3 Tasks and linked them under Epic #1" when
+    create_work_item sent no relations at all.
+
+    Parent linking now EXISTS (see test_board_parent_linking.py), so the rule is no
+    longer "you cannot" — it is "only say so when you actually passed parent_id".
+    The false report was the real damage: a board that looks organised and is not."""
     from agents_orchestrator.requirements_agent.agents.planning import INGESTION_SYS_MESSAGE
 
-    assert "CANNOT link a work item to a parent" in INGESTION_SYS_MESSAGE
     assert "unparented" in INGESTION_SYS_MESSAGE.lower()
+    assert "not a link" in INGESTION_SYS_MESSAGE
+    assert "unless you passed parent_id" in INGESTION_SYS_MESSAGE
+    # And the now-false blanket claim must be gone.
+    assert "CANNOT link a work item to a parent" not in INGESTION_SYS_MESSAGE
 
 
 @pytest.mark.unit

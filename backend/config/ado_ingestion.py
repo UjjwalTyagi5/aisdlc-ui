@@ -186,9 +186,20 @@ async def create_work_item(
     title: str,
     description: str = "",
     acceptance_criteria: str = "",
+    parent_id: str = "",
     pat: str,
 ) -> Dict[str, Any]:
-    """Create a new work item in ADO. Returns the created work item."""
+    """Create a new work item in ADO. Returns the created work item.
+
+    `parent_id` links the new item UNDER an existing one. Without it items are created
+    unparented — which is what happened when an agent reported creating Tasks "linked
+    under Epic #1" and the board showed three orphans, because the only trace of the
+    parent was a sentence somebody had typed into a description.
+
+    The link goes in THIS request, not a follow-up PATCH, so it is atomic: either the
+    item exists parented or it does not exist. A second call could leave an orphan
+    behind on failure, which is the state we are trying to stop producing.
+    """
     org_url = org_url.rstrip("/")
     api_url = f"{org_url}/{project}/_apis/wit/workitems/${work_item_type}?api-version=7.1"
     ops = [
@@ -200,6 +211,21 @@ async def create_work_item(
         ops.append({"op": "add", "path": "/fields/System.Description", "value": description})
     if acceptance_criteria:
         ops.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", "value": acceptance_criteria})
+    if parent_id:
+        # Hierarchy-REVERSE is the child->parent direction. Hierarchy-Forward would
+        # declare the new item the PARENT of the id given, which is the same call with
+        # the tree upside down and no error to tell you.
+        #
+        # The URL is org-level (no project segment) — that is what the API returns in
+        # `relations` and what it expects here.
+        ops.append({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "System.LinkTypes.Hierarchy-Reverse",
+                "url": f"{org_url}/_apis/wit/workItems/{parent_id}",
+            },
+        })
     async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
         r = await client.post(api_url, json=ops, headers={"Content-Type": "application/json-patch+json"})
         r.raise_for_status()

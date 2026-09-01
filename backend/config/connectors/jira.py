@@ -684,9 +684,16 @@ class JiraConnector(BaseConnector):
         title: str = "",
         description: str = "",
         item_type: str = "Story",
+        parent_id: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """POST /rest/api/3/issue → canonical dict with created key."""
+        """POST /rest/api/3/issue → canonical dict with created key.
+
+        `parent_id` is a Jira KEY ("SCRUM-1"), not a numeric id — the provider-neutral
+        tool passes whatever the board uses, and for Jira that is the key. Sent in the
+        same request as the create, so an item is never left orphaned by a failed
+        follow-up.
+        """
         project_key = await self._resolve_project_key(project)
         item_type = self._jira_item_type(item_type)
         payload = {
@@ -696,6 +703,12 @@ class JiraConnector(BaseConnector):
                 "issuetype": {"name": item_type},
             }
         }
+        if parent_id:
+            # `fields.parent` is the modern Jira Cloud shape and covers both a subtask's
+            # parent and an issue's epic. The classic "Epic Link" custom field
+            # (customfield_100xx) is deliberately NOT attempted: its id differs per
+            # site, so guessing one writes to an unrelated field on some tenants.
+            payload["fields"]["parent"] = {"key": str(parent_id)}
         if description:
             payload["fields"]["description"] = {
                 "type": "doc",

@@ -1694,6 +1694,7 @@ async def create_board_item(
     work_item_type: str = "User Story",
     description: str = "",
     acceptance_criteria: str = "",
+    parent_id: str = "",
     provider: str = "",
 ) -> str:
     """Create a single work item of ANY type (Epic/Feature/User Story/Task/Bug) on the board.
@@ -1704,6 +1705,12 @@ async def create_board_item(
         work_item_type: Exact type — e.g. "Epic", "Feature", "User Story", "Task", "Bug".
         description: Optional description.
         acceptance_criteria: Optional acceptance criteria text.
+        parent_id: Optional — the item to create this one UNDER. Azure DevOps wants the
+            numeric id ("1"); Jira wants the issue key ("SCRUM-1"). Pass it exactly as
+            the board reported it when the parent was created.
+            WITHOUT THIS THE ITEM IS UNPARENTED. Writing "Parent: #1" into the
+            description is text, not a link — if the user asked for items under an
+            Epic, pass parent_id or tell them the items are not linked.
 
     `provider` optionally names which board to use when this project has more than one
     (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
@@ -1720,10 +1727,14 @@ async def create_board_item(
             title=title,
             description=description,
             acceptance_criteria=acceptance_criteria,
+            parent_id=parent_id,
         )
         wid = wi.get("work_item_id") or wi.get("id", "?")
         url = wi.get("url") or wi.get("work_item_url") or wi.get("_links", {}).get("html", {}).get("href", "")
-        return f"Created {work_item_type} #{wid}: {title}" + (f"\n{url}" if url else "")
+        # State whether it was parented. "Created" alone is what let a previous run
+        # report three Tasks as "linked under Epic #1" when they were orphans.
+        parented = f" (child of #{parent_id})" if parent_id else ""
+        return f"Created {work_item_type} #{wid}: {title}{parented}" + (f"\n{url}" if url else "")
     except Exception as exc:  # noqa: BLE001
         return f"Error creating {work_item_type} '{title}': {_board_error(exc)}"
 
@@ -2041,7 +2052,13 @@ No markdown. Only valid JSON."""
 
 
 @tool
-async def write_stories_to_board(stories_json: str, project: str, provider: str = "") -> str:
+async def write_stories_to_board(
+    stories_json: str,
+    project: str,
+    work_item_type: str = "User Story",
+    parent_id: str = "",
+    provider: str = "",
+) -> str:
     """Create generated user stories as NEW work items on the board (bulk create).
 
     Args:
@@ -2049,6 +2066,13 @@ async def write_stories_to_board(stories_json: str, project: str, provider: str 
             generate_user_stories). Each story needs at least a "title"; optional
             "description" and "acceptance_criteria" (list).
         project: Board project name to create the stories in.
+        work_item_type: The type to create. Defaults to "User Story", which does NOT
+            exist on every board — an Azure DevOps Basic project has Epic/Issue/Task
+            and a Scrum one has Product Backlog Item. Call list_board_item_types when
+            unsure; this used to be hardcoded and failed every bulk create on such a
+            project.
+        parent_id: Optional — create all of them UNDER this item (an Epic, usually).
+            ADO wants the numeric id, Jira the issue key. Omitted, they are unparented.
 
     Returns a summary of created work item IDs.
 
@@ -2077,10 +2101,11 @@ async def write_stories_to_board(stories_json: str, project: str, provider: str 
             wi = await connector.write_adapter(
                 "create_item",
                 project=project,
-                item_type="User Story",
+                item_type=work_item_type,
                 title=title,
                 description=s.get("description", ""),
                 acceptance_criteria=ac_html,
+                parent_id=parent_id,
             )
             created.append(f"#{wi['id']} {title}")
         except Exception as exc:  # noqa: BLE001
@@ -2579,9 +2604,6 @@ process template or issue-type scheme:
 ── WHAT YOU CANNOT DO (never offer these) ────────────────────────────────────────
 You have exactly the tools listed above and nothing else. These are NOT among them,
 and offering them is a promise you cannot keep:
-- You CANNOT link a work item to a parent. create_board_item takes no parent, so
-  items are created UNPARENTED. Writing "Parent Epic: #1" into a description is text,
-  not a link — never report items as "linked under" or "children of" anything.
 - You CANNOT create or configure area paths, iterations, sprints, board columns,
   swimlanes, saved queries, team settings, or project permissions.
 - You CANNOT assign a work item to a person.
@@ -2589,6 +2611,17 @@ and offering them is a promise you cannot keep:
 If the user asks for any of these, say plainly that you cannot and that it must be
 done in the board's own UI. Offering to do it and then not doing it is far worse than
 saying no.
+
+── PARENT LINKS (create_board_item / write_stories_to_board) ─────────────────────
+Both take an optional `parent_id` that creates the item UNDER an existing one.
+- Azure DevOps wants the numeric id ("1"); Jira wants the issue key ("SCRUM-1").
+  Use the id exactly as the board reported it when the parent was created.
+- If the user asks for stories "under" an Epic, create the Epic FIRST, take the id
+  from the tool's reply, and pass it as parent_id on every child.
+- WITHOUT parent_id the item is UNPARENTED. Putting "Parent Epic: #1" in the
+  description is text, not a link. Never describe items as "linked under" or
+  "children of" anything unless you passed parent_id and the tool confirmed it —
+  the reply says "(child of #N)" when it did.
 
 ── NEVER REPORT WORK YOU DID NOT DO ──────────────────────────────────────────────
 Report ONLY what a tool actually returned. If a tool returned an error, the change did

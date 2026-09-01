@@ -434,6 +434,8 @@ class AzureDevOpsConnector(BaseConnector):
         title: str,
         description: str = "",
         acceptance_criteria: str = "",
+        parent_id: str = "",
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         auth = await self.auth_adapter()
         created = await create_work_item(
@@ -443,6 +445,7 @@ class AzureDevOpsConnector(BaseConnector):
             title=title,
             description=description,
             acceptance_criteria=acceptance_criteria,
+            parent_id=str(parent_id or ""),
             pat=auth["pat"],
         )
         return make_board_item(
