@@ -181,7 +181,7 @@ def broadcast_file_diff(manager, path: str, original: str, modified: str, change
 
         try:
 
-            asyncio.run_coroutine_threadsafe(manager.broadcast(payload), MAIN_LOOP)
+            asyncio.run_coroutine_threadsafe(manager.broadcast_to_session(payload), MAIN_LOOP)
 
             return
 
@@ -195,7 +195,7 @@ def broadcast_file_diff(manager, path: str, original: str, modified: str, change
 
         loop = asyncio.get_running_loop()
 
-        loop.create_task(manager.broadcast(payload))
+        loop.create_task(manager.broadcast_to_session(payload))
 
     except RuntimeError:
 

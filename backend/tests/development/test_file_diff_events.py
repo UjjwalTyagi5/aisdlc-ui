@@ -6,6 +6,12 @@ scheduling (config/ws_helper.py) — with no MAIN_LOOP set in tests, that falls
 through to `asyncio.get_running_loop().create_task(...)`, so these tests run as
 async and flush the scheduled task with `await asyncio.sleep(0)` before asserting,
 same technique as tests/cost/test_cost_service.py and tests/test_m93_eval_emit.py.
+
+Post final-review.md C1 fix: file_diff routes through `manager.broadcast_to_session`
+(session-scoped, never falls back to a global fan-out), NOT `manager.broadcast`
+(which broadcast_log still uses, and which DOES fall back to all connections when
+session_id isn't registered). These tests mock `broadcast_to_session` for the
+diff-specific assertions, and `broadcast` for the activity-log assertion.
 """
 from __future__ import annotations
 
@@ -37,8 +43,8 @@ def dev_session(tmp_path):
 async def test_write_file_on_new_file_emits_created_diff(monkeypatch, dev_session):
     from agents_orchestrator.development_agent.tools import file_tools
 
-    mock_broadcast = AsyncMock()
-    monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+    mock_broadcast_to_session = AsyncMock()
+    monkeypatch.setattr(file_tools.manager, "broadcast_to_session", mock_broadcast_to_session)
 
     result = file_tools.write_file.invoke(
         {"relative_path": "src/App.jsx", "content": "export default function App() {}\n"}
@@ -47,7 +53,7 @@ async def test_write_file_on_new_file_emits_created_diff(monkeypatch, dev_sessio
 
     assert "Successfully wrote" in result
 
-    diff_calls = [c for c in mock_broadcast.await_args_list if c.args[0].get("type") == "file_diff"]
+    diff_calls = [c for c in mock_broadcast_to_session.await_args_list if c.args[0].get("type") == "file_diff"]
     assert len(diff_calls) == 1
     payload = diff_calls[0].args[0]
     assert payload["session_id"] == "dev-file-diff-events-test"
@@ -63,8 +69,8 @@ async def test_write_file_overwriting_existing_file_emits_edited_diff(monkeypatc
     full_path = file_tools.resolve_safe_path(dev_session.work_dir, "config.py")
     full_path.write_text("OLD = 1\n", encoding="utf-8")
 
-    mock_broadcast = AsyncMock()
-    monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+    mock_broadcast_to_session = AsyncMock()
+    monkeypatch.setattr(file_tools.manager, "broadcast_to_session", mock_broadcast_to_session)
 
     result = file_tools.write_file.invoke(
         {"relative_path": "config.py", "content": "NEW = 2\n"}
@@ -73,7 +79,7 @@ async def test_write_file_overwriting_existing_file_emits_edited_diff(monkeypatc
 
     assert "Successfully wrote" in result
 
-    diff_calls = [c for c in mock_broadcast.await_args_list if c.args[0].get("type") == "file_diff"]
+    diff_calls = [c for c in mock_broadcast_to_session.await_args_list if c.args[0].get("type") == "file_diff"]
     assert len(diff_calls) == 1
     payload = diff_calls[0].args[0]
     assert payload["path"] == "config.py"
@@ -92,8 +98,8 @@ async def test_write_file_overwriting_existing_but_empty_file_emits_edited_diff(
     full_path = file_tools.resolve_safe_path(dev_session.work_dir, "__init__.py")
     full_path.write_text("", encoding="utf-8")  # pre-existing, genuinely empty file
 
-    mock_broadcast = AsyncMock()
-    monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+    mock_broadcast_to_session = AsyncMock()
+    monkeypatch.setattr(file_tools.manager, "broadcast_to_session", mock_broadcast_to_session)
 
     result = file_tools.write_file.invoke(
         {"relative_path": "__init__.py", "content": "from .models import Foo\n"}
@@ -102,7 +108,7 @@ async def test_write_file_overwriting_existing_but_empty_file_emits_edited_diff(
 
     assert "Successfully wrote" in result
 
-    diff_calls = [c for c in mock_broadcast.await_args_list if c.args[0].get("type") == "file_diff"]
+    diff_calls = [c for c in mock_broadcast_to_session.await_args_list if c.args[0].get("type") == "file_diff"]
     assert len(diff_calls) == 1
     payload = diff_calls[0].args[0]
     assert payload["path"] == "__init__.py"
@@ -117,8 +123,8 @@ async def test_edit_file_emits_diff_matching_pre_and_post_content(monkeypatch, d
     full_path = file_tools.resolve_safe_path(dev_session.work_dir, "app.py")
     full_path.write_text("def hello():\n    return 'hi'\n", encoding="utf-8")
 
-    mock_broadcast = AsyncMock()
-    monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+    mock_broadcast_to_session = AsyncMock()
+    monkeypatch.setattr(file_tools.manager, "broadcast_to_session", mock_broadcast_to_session)
 
     result = file_tools.edit_file.invoke({
         "relative_path": "app.py",
@@ -129,7 +135,7 @@ async def test_edit_file_emits_diff_matching_pre_and_post_content(monkeypatch, d
 
     assert "Successfully edited" in result
 
-    diff_calls = [c for c in mock_broadcast.await_args_list if c.args[0].get("type") == "file_diff"]
+    diff_calls = [c for c in mock_broadcast_to_session.await_args_list if c.args[0].get("type") == "file_diff"]
     assert len(diff_calls) == 1
     payload = diff_calls[0].args[0]
     assert payload["path"] == "app.py"
@@ -140,16 +146,21 @@ async def test_edit_file_emits_diff_matching_pre_and_post_content(monkeypatch, d
 
 async def test_write_file_still_emits_activity_log_alongside_diff(monkeypatch, dev_session):
     """The diff event is additive, not a replacement — broadcast_log's
-    activity_update message must still fire (asserted via manager.broadcast, which
-    both broadcast_log and broadcast_file_diff funnel through)."""
+    activity_update message must still fire via manager.broadcast, while file_diff
+    (post-C1 fix) routes separately through the session-scoped
+    manager.broadcast_to_session — they are asserted on their respective mocks."""
     from agents_orchestrator.development_agent.tools import file_tools
 
     mock_broadcast = AsyncMock()
+    mock_broadcast_to_session = AsyncMock()
     monkeypatch.setattr(file_tools.manager, "broadcast", mock_broadcast)
+    monkeypatch.setattr(file_tools.manager, "broadcast_to_session", mock_broadcast_to_session)
 
     file_tools.write_file.invoke({"relative_path": "a.txt", "content": "hello\n"})
     await asyncio.sleep(0)
 
-    types = [c.args[0].get("type") for c in mock_broadcast.await_args_list]
-    assert "activity_update" in types
-    assert "file_diff" in types
+    broadcast_types = [c.args[0].get("type") for c in mock_broadcast.await_args_list]
+    session_types = [c.args[0].get("type") for c in mock_broadcast_to_session.await_args_list]
+    assert "activity_update" in broadcast_types
+    assert "file_diff" not in broadcast_types
+    assert "file_diff" in session_types
