@@ -2798,9 +2798,12 @@ async def agent(state: AgentState):
     except Exception as e:
         _req_agent_logger.exception("Requirements agent error (tenant=%s alias=%s)",
                                     tenant_id, resolved.alias)
-        return {"messages": [AIMessage(content=(
-            "The agent hit an error while generating a response. Please try again, "
-            "or contact an administrator if the problem persists."))]}
+        # Was a single generic sentence for every failure, so a rate limit (wait and
+        # retry, or switch model) read the same as a bad credential (an admin must act).
+        # Still never str(exc) — a BYOK provider error can echo the tenant's own key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
 
 def action(state: AgentState):
 

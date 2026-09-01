@@ -129,9 +129,36 @@ async def _persist_design_artifacts(
     await patch_session_artifacts(session_id, {"design_artifacts": artifacts_dict}, tenant_id=tenant_id or None)
 
 
-async def _build_session_context(session_id: str) -> str:
-    """Delegate to the shared context broker so all agents use one formatting path."""
-    return await build_context(session_id, "design")
+async def _build_session_context(
+    session_id: str, project_id: str = "", tenant_id: str = ""
+) -> str:
+    """Upstream Requirements context for this turn, by session and then by PROJECT.
+
+    THE SESSION LOOKUP ALONE FINDS NOTHING ON THE STANDALONE PAGE. It works in the
+    orchestrator because the pipeline uses the run id AS the session id, so artifacts
+    mirrored under that key are the ones this turn wants. Opening Project -> Design
+    directly mints a fresh session id unrelated to whatever session Requirements used,
+    and `fetch_session_artifacts` on it returns nothing — so Design silently began with
+    NO requirements context on a project whose Requirements had been fully baselined,
+    and neither the user nor the agent was told.
+
+    `build_context_for_project` is the existing answer to exactly that: it reads the
+    project's most recent Run instead of a session. The Development agent already falls
+    back to it for the same reason; Design did not, which is why this is a fallback
+    rather than a new mechanism.
+
+    Session FIRST, because it is the more specific answer: inside a pipeline run it
+    names THIS run's artifacts, where the project read would return the latest run's,
+    which may be a different one.
+    """
+    ctx = await build_context(session_id, "design")
+    if ctx:
+        return ctx
+    if project_id and tenant_id:
+        from config.context_broker import build_context_for_project  # noqa: PLC0415
+
+        return await build_context_for_project(project_id, tenant_id, "design")
+    return ""
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -262,7 +289,13 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
 
     first_call = session_id not in _initialized_sessions
     if first_call:
-        session_context = await _build_session_context(session_id)
+        # project_id + tenant_id give the standalone page a way to find the
+        # project's baselined Requirements; the session lookup alone finds nothing
+        # there, because a fresh conversation mints an unrelated session id.
+        _ctx_pid = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
+        session_context = await _build_session_context(
+            session_id, str(_ctx_pid or ""), str(tenant_id or "")
+        )
         sys_content = DESIGN_SYS_MESSAGE
         if session_context:
             sys_content = DESIGN_SYS_MESSAGE + "\n\n" + session_context
@@ -519,7 +552,10 @@ async def chat(
 
     first_call = session_id not in _initialized_sessions
     if first_call:
-        session_context = await _build_session_context(session_id)
+        # This REST route carries no tenant_id (see the profile note below), so the
+        # project fallback cannot run here — build_context_for_project needs both.
+        # Session-keyed lookup only, exactly as before.
+        session_context = await _build_session_context(session_id, str(_lf_pid or ""), "")
         sys_content = DESIGN_SYS_MESSAGE
         if session_context:
             sys_content = DESIGN_SYS_MESSAGE + "\n\n" + session_context

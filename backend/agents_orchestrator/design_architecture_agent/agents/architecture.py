@@ -1131,7 +1131,13 @@ async def agent(state: AgentState):
             "An administrator must add and verify a model provider in Org Settings → Model Providers."))]}
     except Exception as e:
         logger.error("Design agent model resolution error (tenant=%s): %s", tenant_id, type(e).__name__)
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # The TYPE NAME ALONE WAS THE WHOLE REPLY — a user hit an Azure rate limit
+        # and was shown "Agent error: RateLimitError", which does not say it is
+        # temporary, not their fault, or that another model would work now.
+        # Still never str(exc): a BYOK provider error can echo the tenant key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
     set_resolved_model(resolved)
     try:
         clean_messages = _sanitize_messages(state["messages"])
@@ -1156,7 +1162,13 @@ async def agent(state: AgentState):
             resolved.alias,
             type(e).__name__,
         )
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # The TYPE NAME ALONE WAS THE WHOLE REPLY — a user hit an Azure rate limit
+        # and was shown "Agent error: RateLimitError", which does not say it is
+        # temporary, not their fault, or that another model would work now.
+        # Still never str(exc): a BYOK provider error can echo the tenant key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
 
 
 _TOOL_ARG_HINTS: dict[str, str] = {
