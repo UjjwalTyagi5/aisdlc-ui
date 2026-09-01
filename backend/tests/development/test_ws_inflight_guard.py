@@ -163,6 +163,12 @@ async def test_inflight_marker_cleared_after_exception_during_processing(
     )
 
     ws = _fake_websocket()
+    sent: list[dict] = []
+
+    async def _capture(message: str, websocket):
+        sent.append(json.loads(message))
+
+    monkeypatch.setattr(dev_api.manager, "send_personal_message", AsyncMock(side_effect=_capture))
 
     assert session_id not in dev_api._INFLIGHT_SESSIONS
     # _process_ws_message's own except Exception clause swallows the error and
@@ -173,6 +179,22 @@ async def test_inflight_marker_cleared_after_exception_during_processing(
     )
 
     assert session_id not in dev_api._INFLIGHT_SESSIONS
+
+    # Regression for final-review.md I1: a genuine error must ALSO emit the terminal
+    # "complete" activity signal via send_personal_message (not broadcast) -- same
+    # shape as the in-flight-guard rejection path above -- so the frontend chat
+    # bridge closes its SSE stream immediately instead of sitting "busy" for the
+    # full 45s idle-fallback window.
+    types = [m.get("type") for m in sent]
+    assert "stream_end" in types
+    assert types[-1] == "activity_update"
+    complete_activity = sent[-1]["activity"]
+    assert complete_activity["type"] == "complete"
+    assert complete_activity["session_id"] == session_id
+    assert complete_activity["message"] not in (
+        "Processing complete",
+        "Rejected — previous turn still in progress",
+    )
 
     clear_session(session_id)
 

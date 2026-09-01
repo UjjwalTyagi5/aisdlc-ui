@@ -533,7 +533,12 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 "tenant_id": tenant_id,
                 "model_id": message_data.get("model_id"),
             }
-            s.system_injected = True
+            # NOTE: s.system_injected is deliberately NOT set here. It is set only
+            # after _stream_agent_response returns successfully below — setting it
+            # this early left a window (broadcast/persist_turn/MCP scope awaits)
+            # where a cancelled turn would strand the session thinking a system
+            # prompt had been delivered when the checkpoint never got one. See
+            # final-review.md I2.
         else:
             state = {
                 "messages": state_messages,
@@ -577,6 +582,12 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         ), skill_context_scope("development", _dev_skills):
             _final_response = await _stream_agent_response(state, config, websocket, session_id)
 
+        if first_message:
+            # Only mark the system prompt as delivered once the graph has actually
+            # consumed it successfully — see the NOTE above where this used to be
+            # set before the run.
+            s.system_injected = True
+
         # Persist the agent turn to the conversation transcript (§11A) — best-effort.
         await persist_turn(
             session_id, "agent", _final_response, tenant_id=tenant_id or None,
@@ -602,6 +613,26 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         try:
             await manager.send_personal_message(
                 json.dumps({"type": "stream_end", "session_id": session_id}), websocket
+            )
+        except Exception:
+            pass
+        # Terminal "complete" activity signal so the frontend chat bridge (which
+        # only closes its SSE stream immediately on activity_update/complete —
+        # stream_end alone just arms a 45s idle-fallback timer) doesn't leave a
+        # genuine agent/tool/DB error sitting "busy" for the full 45s. Same shape
+        # as the in-flight-guard rejection branch's fix above.
+        try:
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "activity_update",
+                    "activity": {
+                        "id": str(uuid4()), "type": "complete",
+                        "session_id": session_id,
+                        "message": "An error occurred while processing your request",
+                        "time": "Just now",
+                    },
+                }),
+                websocket,
             )
         except Exception:
             pass
