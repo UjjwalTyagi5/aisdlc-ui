@@ -100,6 +100,10 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
         optional_capabilities=[
             "board.sprints.read", "board.capacity.read", "board.write",
             "plan.risk.track", "plan.report.status", "plan.rebaseline",
+            # Costing is optional because the platform stores no labour rate: the
+            # planner works without one, it simply cannot cost a plan until the user
+            # supplies rates.
+            "plan.cost.estimate", "plan.budget.read",
         ],
     ),
     "development": AgentDefinition(

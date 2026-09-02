@@ -328,3 +328,112 @@ def _member_hours(member: Dict[str, Any]) -> Optional[float]:
         return float(per_day) * max(0.0, float(days) - off)
     except (TypeError, ValueError):
         return None
+
+
+def apply_changes(
+    tasks: Sequence[Dict[str, Any]], changes: Sequence[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Apply add / remove / re-estimate operations to a task set.
+
+    Returns (tasks, rejected) — a change naming work that is not there is REJECTED with
+    a reason rather than silently creating it. "Re-estimate T7" when there is no T7 is
+    usually a typo, and inventing T7 would put phantom work in the plan.
+    """
+    by_id = {str(t.get("id") or t.get("title")): dict(t) for t in tasks}
+    rejected: List[str] = []
+
+    for change in changes:
+        op = str(change.get("op") or change.get("operation") or "").strip().lower()
+        tid = str(change.get("id") or change.get("title") or "")
+
+        if op in ("add", "added", "new"):
+            if tid in by_id:
+                rejected.append(f"add {tid}: already in the plan")
+                continue
+            by_id[tid] = {k: v for k, v in change.items() if k not in ("op", "operation")}
+            by_id[tid].setdefault("id", tid)
+        elif op in ("remove", "removed", "delete", "drop"):
+            if by_id.pop(tid, None) is None:
+                rejected.append(f"remove {tid}: not in the plan")
+        elif op in ("reestimate", "re-estimate", "resize", "update"):
+            if tid not in by_id:
+                rejected.append(f"{op} {tid}: not in the plan")
+                continue
+            for field in ("estimate", "depends_on", "title", "assigned_to"):
+                if field in change:
+                    by_id[tid][field] = change[field]
+        else:
+            rejected.append(f"{op or '(no op)'} {tid}: unknown operation")
+
+    return list(by_id.values()), rejected
+
+
+def tasks_from_schedule(schedule: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every task a schedule holds, in order — the input a re-plan starts from."""
+    return [task for slot in schedule for task in slot.get("items", [])]
+
+
+def replan(
+    current: Sequence[Dict[str, Any]],
+    changes: Sequence[Dict[str, Any]],
+    sprints: Sequence[Dict[str, Any]],
+    team: Optional[Sequence[Dict[str, Any]]] = None,
+    baseline: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Re-sequence after a change and say WHAT MOVED.
+
+    The new schedule alone is not the answer. A manager asking "what does this change
+    cost us" needs the delta: which work slipped a sprint, what fell out entirely, how
+    much the total grew. Handing back a fresh plan and leaving them to diff two lists is
+    how a re-plan gets rubber-stamped without anyone seeing what it did.
+
+    `baseline` is compared against separately when given, because drift from the
+    original commitment and drift since last week are different questions.
+    """
+    before = {
+        str(t.get("id") or t.get("title")): i
+        for i, slot in enumerate(current)
+        for t in slot.get("items", [])
+    }
+    tasks, rejected = apply_changes(tasks_from_schedule(current), changes)
+    result = build_schedule(tasks, sprints, team)
+
+    after = {
+        str(t.get("id") or t.get("title")): i
+        for i, slot in enumerate(result["schedule"])
+        for t in slot.get("items", [])
+    }
+    names = [s.get("name") or s.get("id") or f"#{i}" for i, s in enumerate(result["schedule"])]
+
+    def _name(index: Optional[int]) -> Optional[str]:
+        return names[index] if index is not None and index < len(names) else None
+
+    moved = [
+        {"task": tid, "from": _name(before[tid]), "to": _name(after[tid])}
+        for tid in sorted(set(before) & set(after))
+        if before[tid] != after[tid]
+    ]
+    dropped_out = [
+        {"task": tid, "was": _name(before[tid])}
+        for tid in sorted(set(before) - set(after))
+    ]
+    newly_placed = sorted(set(after) - set(before))
+
+    total_before = round(sum(float(s.get("committed") or 0) for s in current), 2)
+    total_after = round(sum(s["committed"] for s in result["schedule"]), 2)
+
+    summary: Dict[str, Any] = {
+        **result,
+        "changes_rejected": rejected,
+        "moved": moved,
+        "no_longer_scheduled": dropped_out,
+        "newly_scheduled": newly_placed,
+        "committed_before": total_before,
+        "committed_after": total_after,
+        "committed_change": round(total_after - total_before, 2),
+    }
+    if baseline:
+        summary["vs_baseline"] = round(
+            total_after - sum(float(s.get("committed") or 0) for s in baseline), 2
+        )
+    return summary

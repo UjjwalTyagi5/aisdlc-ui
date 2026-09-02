@@ -37,6 +37,7 @@ CAPABILITIES: frozenset[str] = frozenset({
     # plan.*
     "plan.wbs.generate", "plan.estimate", "plan.schedule.build",
     "plan.resource.allocate", "plan.risk.track", "plan.report.status", "plan.rebaseline",
+    "plan.cost.estimate", "plan.budget.read",
     # code.*
     "code.generate", "code.edit", "code.lint", "code.format", "code.build",
     "code.execute", "code.search",

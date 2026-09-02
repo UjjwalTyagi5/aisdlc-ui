@@ -408,6 +408,197 @@ async def status_report(
     )
 
 
+
+# ── Re-planning and budget ───────────────────────────────────────────────────
+
+
+@tool
+async def replan(
+    schedule_json: str, changes_json: str, sprints_json: str = "",
+    team_json: str = "", baseline_json: str = "",
+) -> str:
+    """Re-sequence after a change and report WHAT MOVED.
+
+    `changes_json` [{"op": "add"|"remove"|"reestimate", "id", "estimate", "depends_on"}]
+
+    Returns the new schedule plus the delta: which work slipped a sprint (`moved`),
+    what fell out entirely (`no_longer_scheduled`), and how much the total grew
+    (`committed_change`).
+
+    RELAY THE DELTA, NOT JUST THE NEW PLAN. "What does this change cost us" is the
+    question being asked; handing back a fresh schedule and leaving the user to diff
+    two lists is how a re-plan gets waved through without anyone seeing what it did.
+
+    `changes_rejected` names operations on work that is not in the plan — usually a
+    typo. A rejected change is NOT applied, so say so rather than letting the user
+    believe it took effect.
+    """
+    from agents_orchestrator.pm_agent import scheduling  # noqa: PLC0415
+
+    try:
+        current = _as_list(schedule_json, "schedule") or []
+        changes = _as_list(changes_json, "changes") or []
+        sprints = _as_list(sprints_json, "sprints") or []
+        team = _as_list(team_json, "team") or []
+        baseline = _as_list(baseline_json, "baseline") or []
+    except ValueError as exc:
+        return f"Could not re-plan: {exc}"
+
+    if not current:
+        return "No current schedule was given, so there is nothing to re-plan."
+    if not changes:
+        return "No changes were given, so the plan is unchanged."
+
+    if not sprints:
+        # Reuse the shape the current plan already has rather than inventing sprints.
+        sprints = [
+            {k: s.get(k) for k in ("id", "name", "start_date", "finish_date", "capacity")}
+            for s in current
+        ]
+
+    return json.dumps(
+        scheduling.replan(current, changes, sprints, team, baseline), indent=2, default=str
+    )
+
+
+@tool
+async def budget_status() -> str:
+    """This project's LLM budget and what it has spent so far.
+
+    WHAT THIS BUDGET IS. The platform meters LLM spend — the cost of running the agents
+    — against a cap set per project. It is NOT a labour budget and knows nothing about
+    what the team costs.
+
+    So do not compare it with a plan's effort, add the two together, or answer "can we
+    afford this plan" from it. If the user wants the plan costed, use `cost_plan` with
+    rates they supply, and keep the two figures apart.
+    """
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+
+    project_id, tenant_id = get_project_id(), get_tenant_id()
+    if not project_id or not tenant_id:
+        return "This conversation is not attached to a project, so there is no budget to read."
+
+    try:
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.models.orm import Project  # noqa: PLC0415
+        from shared.services.budget_store import read_scope_spend  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(tenant_id) as session:
+            budget = (await session.execute(
+                select(Project.monthly_budget_usd).where(Project.id == project_id)
+            )).scalar_one_or_none()
+        spent = await read_scope_spend("project", str(project_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("budget_status failed: %s", type(exc).__name__)
+        return f"Could not read the budget ({type(exc).__name__})."
+
+    budget = float(budget) if budget is not None else None
+    spent = round(float(spent or 0), 4)
+    note = (
+        "This is the LLM budget for running the agents, not a labour budget. It is a "
+        "lifetime total, not a monthly allowance."
+    )
+    if budget is None:
+        note += " No cap is set on this project, so nothing limits spend here."
+
+    return json.dumps({
+        "kind": "llm_spend",
+        "budget_usd": budget,
+        "spent_usd": spent,
+        "remaining_usd": round(budget - spent, 4) if budget is not None else None,
+        "note": note,
+    }, indent=2, default=str)
+
+
+@tool
+async def cost_plan(schedule_json: str, rates_json: str) -> str:
+    """Cost planned effort at rates the USER supplies.
+
+    `rates_json` [{"name": "Ana", "rate": 85}] or [{"role": "developer", "rate": 70}],
+    plus optionally {"default": 75}.
+
+    THE PLATFORM STORES NO LABOUR RATE, and this will not invent one. Effort with no
+    matching rate is reported as uncosted rather than charged at a guess — a total built
+    on an assumed day rate is a number somebody will put in front of a client.
+
+    The result is a labour cost. Keep it separate from `budget_status`, which is LLM
+    spend; adding them together compares two different things.
+    """
+    try:
+        schedule = _as_list(schedule_json, "schedule") or []
+        rates_raw = _as_list(rates_json, "rates") or []
+    except ValueError as exc:
+        return f"Could not cost the plan: {exc}"
+
+    if not schedule:
+        return "No schedule was given, so there is nothing to cost."
+    if not rates_raw:
+        return (
+            "No rates were given. The platform stores no labour rate, so tell me what "
+            "each person or role costs per unit of effort and I will apply it."
+        )
+
+    by_key: dict = {}
+    default: Optional[float] = None
+    for row in rates_raw:
+        if not isinstance(row, dict):
+            continue
+        if "default" in row:
+            try:
+                default = float(row["default"])
+            except (TypeError, ValueError):
+                pass
+        key = row.get("name") or row.get("role")
+        if key is None:
+            continue
+        try:
+            by_key[str(key).lower()] = float(row.get("rate"))
+        except (TypeError, ValueError):
+            continue
+
+    total = 0.0
+    uncosted_effort = 0.0
+    uncosted: set = set()
+    per_sprint = []
+    for slot in schedule:
+        sprint_cost = 0.0
+        for task in slot.get("items", []):
+            try:
+                effort = float(task.get("estimate") or 0)
+            except (TypeError, ValueError):
+                effort = 0.0
+            who = str(task.get("assigned_to") or task.get("role") or "").lower()
+            rate = by_key.get(who, default)
+            if rate is None:
+                uncosted_effort += effort
+                if who:
+                    uncosted.add(task.get("assigned_to") or task.get("role"))
+                continue
+            sprint_cost += effort * rate
+        total += sprint_cost
+        per_sprint.append({"sprint": slot.get("name") or slot.get("id"), "cost": round(sprint_cost, 2)})
+
+    notes = []
+    if uncosted_effort:
+        detail = f" (no rate for: {', '.join(sorted(map(str, uncosted)))})" if uncosted else ""
+        notes.append(
+            f"{uncosted_effort} units of effort had no matching rate and are NOT in this "
+            f"total{detail}. Supply a rate or a default to include them."
+        )
+    notes.append("Labour cost. Not comparable with budget_status, which is LLM spend.")
+
+    return json.dumps({
+        "kind": "labour_cost",
+        "total": round(total, 2),
+        "per_sprint": per_sprint,
+        "uncosted_effort": uncosted_effort,
+        "notes": notes,
+    }, indent=2, default=str)
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 _SHARED_TOOLS: List[Any] = []
@@ -429,6 +620,9 @@ tools = [
     allocate_resources,
     track_risks,
     status_report,
+    replan,
+    budget_status,
+    cost_plan,
     save_plan,
     *_SHARED_TOOLS,
 ]
@@ -454,15 +648,16 @@ Do NOT call it when the user describes the work themselves — their words are t
 then.
 
 ── WHAT YOU DO ───────────────────────────────────────────────────────────────
-WORK BREAKDOWN, ESTIMATION, SCHEDULING, RESOURCE PLANNING, RISK TRACKING and STATUS
-REPORTING. You turn the design's components into tasks traced back to the requirements
-that motivated them, size them, sequence them into sprints, assign them against real
-capacity, track what threatens them, and report where the work actually is.
+WORK BREAKDOWN, ESTIMATION, SCHEDULING, RESOURCE PLANNING, RISK TRACKING, STATUS
+REPORTING, RE-PLANNING and COSTING. You turn the design's components into tasks traced
+back to the requirements that motivated them, size them, sequence them into sprints,
+assign them against real capacity, track what threatens them, report where the work
+actually is, and re-sequence when things change.
 
 ── THE ARITHMETIC IS NOT YOURS TO DO (CRITICAL) ──────────────────────────────
-Call `build_schedule`, `allocate_resources`, `track_risks` and `status_report`. Do NOT
-work out the packing, the capacity sums, who is over-allocated, a velocity or a forecast
-yourself and describe the result.
+Call `build_schedule`, `allocate_resources`, `track_risks`, `status_report`, `replan`
+and `cost_plan`. Do NOT work out the packing, the capacity sums, who is over-allocated,
+a velocity, a forecast or a cost yourself and describe the result.
 
 A schedule you compute in your head LOOKS right — plausible sprint names, confident
 dates — and is wrong in ways nobody can see without redoing the arithmetic. The tools
@@ -503,6 +698,28 @@ looks stalled when it is not. Ask which states mean done.
 Azure DevOps exposes team capacity. Jira has NO capacity API — it lives in a plugin or
 in calendars. On Jira, ask the user for the team's availability rather than assuming a
 full sprint each. Never present an assumed capacity as if it were read from the board.
+
+── WHEN SOMETHING CHANGES ────────────────────────────────────────────────────
+Call `replan`, and REPORT THE DELTA — what moved sprint, what fell out, how much the
+total grew. "What does this change cost us" is the question actually being asked, and
+handing back a fresh schedule for the user to diff against the old one is how a re-plan
+gets waved through without anyone seeing what it did.
+
+`changes_rejected` names operations on work that is not in the plan. Those changes were
+NOT applied. Say so — a user who believes a rejected change took effect is planning
+against something that does not exist.
+
+── TWO BUDGETS, NEVER ADDED TOGETHER ─────────────────────────────────────────
+`budget_status` reports the LLM budget: what running the agents costs, metered against a
+per-project cap. `cost_plan` reports LABOUR cost from rates the user supplies.
+
+They measure different things. Do NOT sum them, compare them, or answer "can we afford
+this plan" from the LLM budget — it knows nothing about what the team costs.
+
+The platform stores NO labour rate. If the user wants a plan costed, ask what people or
+roles cost; do not assume a day rate. Effort with no matching rate comes back as
+uncosted, and that is the honest answer — a total built on an invented rate is a number
+somebody will put in front of a client.
 
 ── SAVING ────────────────────────────────────────────────────────────────────
 Call `save_plan` when the user is satisfied. The plan is recorded as AWAITING APPROVAL:
