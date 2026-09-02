@@ -27,6 +27,15 @@ from agents_orchestrator.deployment_agent.tools.deploy_tools import (
     open_deploy_pr,
     submit_release,
 )
+from agents_orchestrator.deployment_agent.tools.pipeline_tools import (
+    check_deployment_request,
+    get_pipeline_runs,
+    get_run_status,
+    list_pipelines,
+    list_service_connections,
+    request_pipeline_creation,
+    request_pipeline_run,
+)
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -50,6 +59,15 @@ _tools = [
     stage_deploy_file,
     open_deploy_pr,
     submit_release,
+    # Pipeline lifecycle. The two request_* tools file an approval and perform
+    # nothing; see tools/pipeline_tools.py.
+    list_pipelines,
+    list_service_connections,
+    get_pipeline_runs,
+    get_run_status,
+    request_pipeline_creation,
+    request_pipeline_run,
+    check_deployment_request,
 ]
 
 
