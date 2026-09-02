@@ -35,6 +35,9 @@ export const StoryBody = z.object({
   traceability: z
     .object({
       jiraIssueKey: z.string().optional(),
+      /** Browsable link to the item on its board, resolved at ingest. Absent on
+       *  items ingested before it existed, and on providers with no URL template. */
+      boardUrl: z.string().url().optional(),
       designArtifactId: ArtifactId.optional(),
       prUrl: z.string().url().optional(),
     })

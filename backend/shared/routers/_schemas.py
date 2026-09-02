@@ -684,7 +684,20 @@ def story_artifacts_from_run(run: Any, project_id: str) -> List["ArtifactOut"]:
             # `kind` stays "story" because that is the ARTIFACT shape the frontend
             # renders; workItemType is what the item actually is on the board.
             "workItemType": s.get("work_item_type") or s.get("type") or "",
-            "traceability": {"jiraIssueKey": source_key} if source_key else {},
+            # `boardUrl` is the browsable link to the item, resolved at ingest because
+            # that is the only place holding both the connector and the item. Without it
+            # the Requirements page rendered the work-item key as inert text: nothing in
+            # the payload said which Jira site or ADO organisation the key belonged to.
+            # Absent on items ingested before that, and on providers with no known URL
+            # template — the key still shows, it just does not link.
+            "traceability": (
+                {
+                    "jiraIssueKey": source_key,
+                    **({"boardUrl": s["url"]} if s.get("url") else {}),
+                }
+                if source_key
+                else {}
+            ),
         }
         content_hash = hashlib.sha256(
             (source_key + title + description).encode()
