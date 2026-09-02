@@ -63,6 +63,12 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         label: "Export artifacts",
         grants: "Export an artifact outside the platform.",
       },
+      {
+        id: "artifact:delete",
+        label: "Delete artifacts",
+        grants:
+          "Permanently delete an artifact and its stored file. Not implied by Export — exporting takes a copy out, deleting destroys the original.",
+      },
     ],
   },
   {

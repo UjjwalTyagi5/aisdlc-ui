@@ -29,6 +29,7 @@ import {
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { getRunSteps, listRuns } from "@/lib/api/runs";
@@ -174,6 +175,20 @@ export default function DesignPage() {
     },
     [router, projectId, searchParams],
   );
+
+  const deletion = useDeleteArtifact(projectId, {
+    onDeleted: (a) => {
+      // `selected` resolves through designs.find(), so it goes null on its own once the
+      // list refetches — but ?artifact= would linger in the URL, and a copied link would
+      // point at an artifact that no longer exists.
+      if (selectedFromUrl === a.id) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/design${qs ? `?${qs}` : ""}`);
+      }
+    },
+  });
 
   // Chat drawer — talk directly to the Design agent. It consumes the imported user
   // stories through `context.requirements` (the backend formats pipeline_context
@@ -370,10 +385,13 @@ export default function DesignPage() {
             items={artifactsQ.isLoading ? null : designs}
             selectedId={selected?.id}
             onSelect={selectArtifact}
+            onDelete={deletion.onDelete}
+            deletingId={deletion.deletingId}
             isLoading={artifactsQ.isLoading}
             emptyTitle="No design artifacts yet"
             emptyDescription="Trigger the Design agent once Requirements are approved."
           />
+          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">

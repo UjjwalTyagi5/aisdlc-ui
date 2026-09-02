@@ -29,7 +29,7 @@ from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
-from shared.models.orm import Artifact, Run
+from shared.models.orm import Artifact, AuditEvent, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
 from shared.routers.projects import _get_or_404
 from shared.services.artifact_store import is_blob_path
@@ -226,6 +226,105 @@ async def download_artifact(
         media_type=artifact.content_type or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{leaf}"'},
     )
+
+
+@artifacts_router.delete(
+    "/artifacts/{artifact_id}",
+    status_code=204,
+    dependencies=[Depends(require_permission("artifact:delete"))],
+)
+async def delete_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Destroy an artifact: the stored bytes AND the row. Irreversible.
+
+    THE ONE MUTATION ON AN OTHERWISE IMMUTABLE RESOURCE, and the asymmetry is
+    deliberate. `patch_artifact` refuses to change an artifact because a design document
+    that shifts under an approval it already received is worse than no edit at all. That
+    argument says nothing about REMOVING one, and the table accumulates things nobody
+    approved: a failed generation, a duplicate, and above all a row whose `blob_url` is
+    NULL because the upload failed while the row was recorded anyway — listed in the UI
+    as a downloadable document that cannot be downloaded, and previously unremovable.
+
+    ORDER MATTERS, and it is audit -> blob -> row:
+
+    1. The AuditEvent is written FIRST. It is the only record that survives, so it must
+       exist before anything is destroyed. Written into this transaction, so a later
+       failure rolls it back with everything else and no event claims a delete that did
+       not happen.
+    2. The blob next. If it cannot be deleted the row STAYS — orphaned bytes that
+       nothing points at are worse than a row the user can retry, because the row is at
+       least visible. A blob that was already missing is success, not failure: that is
+       precisely the failed-upload case this endpoint exists for.
+    3. The row last.
+
+    404 rather than 403 for an artifact outside the caller's tenant or projects, matching
+    every sibling route here: a 403 would confirm it exists.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, run.project_id)
+
+    blob_path = artifact.blob_path
+    # A legacy row holds a LOCAL FILESYSTEM path, not a blob name (see the note in
+    # download_artifact). Handing it to delete_blob would ask Azure to delete a blob
+    # named `C:\pwc_work\...`, which answers "not found" and reads like success.
+    is_blob = is_blob_path(blob_path, str(tenant_id))
+
+    db.add(
+        AuditEvent(
+            tenant_id=tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_delete",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "run_id": str(artifact.run_id),
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "blob_path": blob_path,
+                "size_bytes": artifact.size_bytes,
+                # Whether bytes ever existed to delete. False here means the artifact was
+                # a row pointing at nothing, which is a materially different event from
+                # destroying a real document and should not read the same in the log.
+                "had_stored_bytes": bool(artifact.blob_url) and is_blob,
+            },
+        )
+    )
+    await db.flush()
+
+    blob_deleted = False
+    if is_blob and blob_path:
+        blob_client = getattr(request.app.state, "blob_client", None)
+        if blob_client is not None:
+            try:
+                blob_deleted = await blob_client.delete_blob(blob_path)
+            except Exception as exc:  # noqa: BLE001
+                # Type name only: an Azure error can carry a SAS token or the account URL.
+                logger.warning(
+                    "Artifact %s blob delete failed: %s", artifact_id, type(exc).__name__
+                )
+                await db.rollback()
+                raise HTTPException(
+                    status_code=502,
+                    detail="The stored file could not be deleted, so the artifact was "
+                           "kept. Retry, or ask an administrator to check storage access.",
+                )
+
+    await db.delete(artifact)
+    await db.commit()
+
+    logger.info(
+        "Artifact %s deleted by %s (blob_deleted=%s, legacy_local=%s)",
+        artifact_id,
+        getattr(request.state, "user_id", None),
+        blob_deleted,
+        bool(blob_path) and not is_blob,
+    )
+    return Response(status_code=204)
 
 
 @artifacts_router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)

@@ -31,3 +31,15 @@ export const updateArtifact = (id: ArtifactId, patch: ArtifactPatch) =>
     body: patch,
     schema: Artifact,
   });
+
+/** Permanently delete an artifact and its stored file. Irreversible.
+ *
+ * Returns nothing: the backend answers 204. Callers must invalidate the artifact list
+ * query — the deleted row will otherwise stay on screen until the next refetch, which
+ * looks exactly like the delete having failed.
+ */
+export const deleteArtifact = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    schema: z.unknown(),
+  });

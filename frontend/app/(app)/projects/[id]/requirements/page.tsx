@@ -29,6 +29,7 @@ import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { BoardProjectDialog } from "@/components/app/board-project-dialog";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject, getBoardProjects } from "@/lib/api/projects";
@@ -124,6 +125,19 @@ export default function RequirementsPage() {
     },
     [router, projectId, searchParams],
   );
+
+  const deletion = useDeleteArtifact(projectId, {
+    onDeleted: (a) => {
+      // Drop ?artifact= when the deleted one was open, so a copied link does not point
+      // at an artifact that no longer exists.
+      if (searchParams.get("artifact") === a.id) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/requirements${qs ? `?${qs}` : ""}`);
+      }
+    },
+  });
 
   // Round checkbox = CHAT SCOPE only (which stories the agent works on). Does NOT change
   // the viewed detail. Nothing checked ⇒ no story context is sent to the chat.
@@ -466,10 +480,13 @@ export default function RequirementsPage() {
             onSelect={selectArtifact}
             selectedIds={selectedStoryIds}
             onToggleSelect={toggleStorySelect}
+            onDelete={deletion.onDelete}
+            deletingId={deletion.deletingId}
             isLoading={artifactsQ.isLoading}
             emptyTitle="No stories yet"
             emptyDescription='Click "Pull stories" to pull structured stories from Azure DevOps.'
           />
+          {deletion.dialog}
         </aside>
 
         {/* Right — story detail */}

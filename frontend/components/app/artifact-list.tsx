@@ -15,6 +15,7 @@ import {
   Presentation,
   Rocket,
   TestTubes,
+  Trash2,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -89,6 +90,13 @@ export interface ArtifactListProps {
   selectedIds?: Set<string>;
   /** When provided, each row renders a round selector checkbox. */
   onToggleSelect?: (artifact: Artifact) => void;
+  /** When provided, each row renders a delete button. Omit it to hide deletion
+   *  entirely — the caller gates on the `artifact:delete` permission, not this
+   *  component, so an unprivileged user never renders a control they cannot use. */
+  onDelete?: (artifact: Artifact) => void;
+  /** Id currently being deleted — its row shows a pending state and stops accepting
+   *  clicks, so an impatient second click cannot fire a second DELETE. */
+  deletingId?: string | null;
   isLoading?: boolean;
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
@@ -103,6 +111,8 @@ export function ArtifactList({
   onSelect,
   selectedIds,
   onToggleSelect,
+  onDelete,
+  deletingId,
   isLoading,
   emptyTitle = "No artifacts yet",
   emptyDescription = "Artifacts appear here once the agent runs.",
@@ -298,6 +308,28 @@ export function ArtifactList({
                     )}
                   </div>
                 </button>
+
+                {onDelete && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(a);
+                    }}
+                    disabled={deletingId === a.id}
+                    className={cn(
+                      "text-muted-foreground hover:text-destructive shrink-0 rounded-md p-1.5",
+                      "transition-colors focus-visible:outline-none focus-visible:ring-2",
+                      "focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
+                    )}
+                    // The label names the artifact: a screen-reader user hears which
+                    // one they are about to destroy, not just "Delete".
+                    aria-label={`Delete ${a.title}`}
+                    title="Delete artifact"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                )}
               </li>
             );
           })}

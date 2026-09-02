@@ -72,6 +72,28 @@ class BlobStorageClient:
         stream = await blob_client.download_blob()
         return await stream.readall()
 
+    async def delete_blob(self, blob_name: str) -> bool:
+        """Delete a blob. Returns True if it was removed, False if it was not there.
+
+        A MISSING BLOB IS NOT AN ERROR HERE. The caller deleting an artifact wants the
+        bytes gone; a blob that never existed — because the upload failed and the row was
+        recorded anyway, which is exactly the case that motivated the delete feature —
+        already satisfies that. Raising would leave the row undeletable precisely when it
+        is most useless.
+
+        Every OTHER failure (permission, network, an account outage) DOES raise, so the
+        caller can refuse to delete the row and avoid orphaning bytes it cannot reach.
+        """
+        from azure.core.exceptions import ResourceNotFoundError
+
+        container_client = self._client.get_container_client(self._container)
+        blob_client = container_client.get_blob_client(blob_name)
+        try:
+            await blob_client.delete_blob()
+            return True
+        except ResourceNotFoundError:
+            return False
+
     def get_url(self, blob_name: str) -> str:
         """Return the blob URL without making a network call."""
         blob_client = self._client.get_blob_client(

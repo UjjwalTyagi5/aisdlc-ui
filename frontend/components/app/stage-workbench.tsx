@@ -33,6 +33,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { GATE_POLICY } from "@/lib/agents";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
@@ -124,6 +125,19 @@ export function StageWorkbench({
     },
     [router, projectId, routeSegment, searchParams],
   );
+
+  const deletion = useDeleteArtifact(projectId, {
+    onDeleted: (a) => {
+      // Drop ?artifact= when the deleted one was open, so a copied link does not point
+      // at an artifact that no longer exists.
+      if (searchParams.get("artifact") === a.id) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/${routeSegment}${qs ? `?${qs}` : ""}`);
+      }
+    },
+  });
 
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
@@ -279,10 +293,13 @@ export function StageWorkbench({
             items={artifactsQ.isLoading ? null : items}
             selectedId={selected?.id}
             onSelect={selectArtifact}
+            onDelete={deletion.onDelete}
+            deletingId={deletion.deletingId}
             isLoading={artifactsQ.isLoading}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
           />
+          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
