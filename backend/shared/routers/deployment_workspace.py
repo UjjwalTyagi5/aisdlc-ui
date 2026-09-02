@@ -190,6 +190,19 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
 # both would leave the permission granted to nobody who could use it.
 
 
+def deployment_gate_error() -> tuple:
+    """The two refusals these routes translate into HTTP.
+
+    Both carry `.code` and `.reason`; a gate refusal ("not approved") and an execution
+    refusal ("ADO would not answer") are different failures with the same shape, and
+    the caller needs to be told which.
+    """
+    from shared.services.deployment_executor import DeploymentExecutionError
+    from shared.services.deployment_gate import DeploymentGateError
+
+    return (DeploymentGateError, DeploymentExecutionError)
+
+
 class DeploymentDecisionIn(BaseModel):
     """A rejection may carry a reason; an approval needs nothing."""
 
@@ -297,3 +310,63 @@ async def reject_deployment_route(
     if str(dep.project_id) != str(project_id):
         raise HTTPException(status_code=404, detail="Deployment not found")
     return _deployment_out(dep)
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/execute",
+    dependencies=[Depends(require_permission("artifact:approve_deployment"))],
+)
+async def execute_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+) -> dict:
+    """Perform an approved deployment. This is the call that actually deploys.
+
+    SEPARATE FROM APPROVAL, and not an accident. Approval is a decision recorded in the
+    database; execution is a network call to Azure DevOps that can be slow and can
+    fail. Running it inside the approve request would mean an approval that could not
+    be committed because a deploy timed out.
+
+    NO `db` PARAMETER. The executor opens and closes its own short transactions around
+    the network call — see shared/services/deployment_executor. Passing the
+    request-scoped session would hold a pooled connection open for as long as ADO takes
+    to answer.
+    """
+    from shared.services import deployment_executor
+
+    try:
+        return await deployment_executor.execute_deployment(
+            deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+        )
+    except deployment_gate_error() as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/refresh",
+)
+async def refresh_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+) -> dict:
+    """Re-read a running deployment from Azure DevOps.
+
+    Reading a status is not a deployment decision, so this needs no approval
+    permission — the router's project scoping is the whole gate.
+    """
+    from shared.services import deployment_executor
+
+    try:
+        return await deployment_executor.refresh_status(
+            deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+        )
+    except deployment_gate_error() as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None
