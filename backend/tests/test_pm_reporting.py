@@ -278,3 +278,16 @@ def test_the_reporting_tools_are_bound():
     from agents_orchestrator.pm_agent.agents.schedule import tools
 
     assert {"track_risks", "status_report"} <= {t.name for t in tools}
+
+
+@pytest.mark.unit
+def test_the_prompt_requires_labelling_invented_inputs():
+    """Found by running it: asked for "two 20-point sprints" with no dates, the agent
+    produced "Sprint 1 (2026-09-07 → 2026-09-20)" in the same list as genuine scheduler
+    output. The scheduler returns empty dates when the caller gives none, so those were
+    the model's own assumption presented in the tone of a computed result."""
+    from agents_orchestrator.pm_agent.agents.schedule import PM_SYS_MESSAGE
+
+    p = " ".join(PM_SYS_MESSAGE.split())
+    assert "LABEL ANYTHING YOU SUPPLIED YOURSELF" in p
+    assert "a date you chose for one the plan is committed to" in p

@@ -482,6 +482,12 @@ Say the reason. Do NOT estimate the missing figure yourself — each of those ha
 plausible wrong answer that reads as fact and gets planned around. "We cannot forecast
 from one sprint" is a useful thing to tell a manager; an invented date is not.
 
+LABEL ANYTHING YOU SUPPLIED YOURSELF. When you invent sprint boundaries, dates or a
+capacity because the user did not give them, say so — "assuming two 2-week sprints
+starting Monday" — and say it in the same breath as the schedule. Presenting an
+assumption alongside real tool output, in the same list and the same tone, is how a
+reader takes a date you chose for one the plan is committed to.
+
 Watch for `unrecognised_states` in particular: if a board's final column is called
 something this does not know, finished work is counted as outstanding and the project
 looks stalled when it is not. Ask which states mean done.
