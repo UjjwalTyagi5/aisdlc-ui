@@ -268,7 +268,9 @@ def test_the_prompt_requires_relaying_what_could_not_be_placed():
     from agents_orchestrator.pm_agent.agents.schedule import PM_SYS_MESSAGE
 
     p = " ".join(PM_SYS_MESSAGE.split())
-    assert "RELAY `unscheduled` AND `over_allocated` VERBATIM" in p
+    # Widened in phase 4 to cover every `notes` entry, which carries the same class
+    # of thing: something the tool could not decide and a person must.
+    assert "RELAY `unscheduled`, `over_allocated` AND EVERY `notes` ENTRY VERBATIM" in p
 
 
 @pytest.mark.unit

@@ -330,6 +330,84 @@ def _as_list(raw: str, field: str) -> Optional[list]:
     return value if isinstance(value, list) else [value]
 
 
+
+# ── Risk and status ──────────────────────────────────────────────────────────
+
+
+@tool
+async def track_risks(risks_json: str, schedule_json: str = "") -> str:
+    """Attach risks to the work they threaten and total the exposure.
+
+    `risks_json`    [{"title", "impact", "owner", "threatens": [task ids]}]
+    `schedule_json` the `schedule` array from build_schedule, so exposure can be summed.
+
+    A risk that names no specific work is KEPT, not dropped — "the vendor contract is
+    unsigned" threatens the project without pointing at a task. Its exposure just cannot
+    be quantified, and the output says so.
+
+    `unknown_links` names ids a risk points at that are not in the plan. Relay them:
+    usually a typo, sometimes work nobody scheduled.
+    """
+    from agents_orchestrator.pm_agent import reporting  # noqa: PLC0415
+
+    try:
+        risks = _as_list(risks_json, "risks") or []
+        schedule = _as_list(schedule_json, "schedule") or []
+    except ValueError as exc:
+        return f"Could not assess risks: {exc}"
+
+    if not risks:
+        return "No risks were given, so there is nothing to assess."
+    return json.dumps(reporting.assess_risks(risks, schedule), indent=2, default=str)
+
+
+@tool
+async def status_report(
+    schedule_json: str, board_items_json: str = "", baseline_json: str = ""
+) -> str:
+    """Progress, velocity, a forecast, and slippage against the baseline.
+
+    `schedule_json`     the `schedule` array from build_schedule or the saved plan.
+    `board_items_json`  the CURRENT board items, so completion is read from what the
+                        team actually finished rather than from the plan. Without it,
+                        the report says so.
+    `baseline_json`     the plan's `baseline`, for slippage.
+
+    DO NOT COMPUTE ANY OF THIS YOURSELF. "Are we on track" has a numeric answer, and a
+    sentence estimating it is one nobody can check.
+
+    Several fields can come back null WITH A REASON — velocity from a single sprint, a
+    forecast with nothing completed, slippage with no baseline. Relay the reason rather
+    than filling the gap: each of those has a plausible wrong answer that reads as fact.
+    """
+    from agents_orchestrator.pm_agent import reporting  # noqa: PLC0415
+
+    try:
+        schedule = _as_list(schedule_json, "schedule") or []
+        items = _as_list(board_items_json, "board items") or []
+        baseline_raw = _as_list(baseline_json, "baseline")
+    except ValueError as exc:
+        return f"Could not build a status report: {exc}"
+
+    if not schedule:
+        return "No schedule was given, so there is no progress to report."
+
+    progress = reporting.summarise_progress(schedule, items)
+    velocity = reporting.velocity_from(progress["sprints"])
+    forecast = reporting.forecast_completion(progress["total_remaining"], velocity.get("velocity"))
+
+    baseline = None
+    if baseline_raw:
+        first = baseline_raw[0] if isinstance(baseline_raw, list) else baseline_raw
+        baseline = first if isinstance(first, dict) else None
+    slippage = reporting.compare_to_baseline(schedule, baseline)
+
+    return json.dumps(
+        {"progress": progress, "velocity": velocity, "forecast": forecast, "baseline": slippage},
+        indent=2, default=str,
+    )
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 _SHARED_TOOLS: List[Any] = []
@@ -349,6 +427,8 @@ tools = [
     read_team_capacity,
     build_schedule,
     allocate_resources,
+    track_risks,
+    status_report,
     save_plan,
     *_SHARED_TOOLS,
 ]
@@ -374,23 +454,37 @@ Do NOT call it when the user describes the work themselves — their words are t
 then.
 
 ── WHAT YOU DO ───────────────────────────────────────────────────────────────
-WORK BREAKDOWN, ESTIMATION, SCHEDULING and RESOURCE PLANNING. You turn the design's
-components into tasks traced back to the requirements that motivated them, size them,
-sequence them into sprints, and assign them against real capacity.
+WORK BREAKDOWN, ESTIMATION, SCHEDULING, RESOURCE PLANNING, RISK TRACKING and STATUS
+REPORTING. You turn the design's components into tasks traced back to the requirements
+that motivated them, size them, sequence them into sprints, assign them against real
+capacity, track what threatens them, and report where the work actually is.
 
 ── THE ARITHMETIC IS NOT YOURS TO DO (CRITICAL) ──────────────────────────────
-Call `build_schedule` and `allocate_resources`. Do NOT work out the packing, the
-capacity sums or who is over-allocated yourself and describe the result.
+Call `build_schedule`, `allocate_resources`, `track_risks` and `status_report`. Do NOT
+work out the packing, the capacity sums, who is over-allocated, a velocity or a forecast
+yourself and describe the result.
 
 A schedule you compute in your head LOOKS right — plausible sprint names, confident
 dates — and is wrong in ways nobody can see without redoing the arithmetic. The tools
 do the ordering and the sums; your job is to supply the inputs and explain what comes
 back.
 
-RELAY `unscheduled` AND `over_allocated` VERBATIM. They are the decisions only a person
-can make: an item with no estimate, an item too big for any sprint, a dependency cycle,
-somebody committed past their capacity. A schedule presented as complete while these
-are hidden is worse than no schedule.
+RELAY `unscheduled`, `over_allocated` AND EVERY `notes` ENTRY VERBATIM. They are the
+decisions only a person can make: an item with no estimate, an item too big for any
+sprint, a dependency cycle, somebody committed past their capacity. A schedule presented
+as complete while these are hidden is worse than no schedule.
+
+── A NULL IS AN ANSWER, NOT A GAP TO FILL ────────────────────────────────────
+`status_report` returns null with a REASON where a number would be a guess: a velocity
+from one sprint, a forecast with nothing completed yet, slippage with no baseline.
+
+Say the reason. Do NOT estimate the missing figure yourself — each of those has a
+plausible wrong answer that reads as fact and gets planned around. "We cannot forecast
+from one sprint" is a useful thing to tell a manager; an invented date is not.
+
+Watch for `unrecognised_states` in particular: if a board's final column is called
+something this does not know, finished work is counted as outstanding and the project
+looks stalled when it is not. Ask which states mean done.
 
 ── ESTIMATING HONESTLY ───────────────────────────────────────────────────────
 - Say what each estimate assumes. An unexplained number cannot be challenged.
