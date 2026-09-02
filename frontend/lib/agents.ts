@@ -11,7 +11,7 @@ import { AGENT_OWNER_ROLE, ROLE_META } from "@/lib/roles";
  */
 
 /**
- * The eight shared agents in Track 1 hand-off order (PRD §7) — the default
+ * The nine shared agents in Track 1 hand-off order (PRD §7) — the default
  * roster, and the one used by surfaces that are not yet track-aware.
  *
  * Prefer `agentsForTrack(project.track)` wherever a project is in scope:
@@ -21,6 +21,7 @@ import { AGENT_OWNER_ROLE, ROLE_META } from "@/lib/roles";
 export const PHASE_ORDER: readonly Phase[] = [
   "requirements",
   "design",
+  "plan",
   "development",
   "review",
   "security",

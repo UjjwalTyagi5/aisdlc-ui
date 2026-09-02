@@ -188,7 +188,7 @@ export const ROLE_META: Record<PlatformRole, RoleMeta> = {
     scope: "project",
     tier: "delivery",
     oneLiner:
-      "Coordinates the team's flow across every agent stage; observes but owns no single gate.",
+      "Coordinates the team's flow across every agent stage, and owns the plan: schedule, estimates and who is on what.",
     governanceOnly: false,
     prdSection: "— (platform addition, beyond the original PRD §33.1 roster)",
   },
@@ -414,7 +414,8 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "use",
     design: "primary",
-    plan: "primary",
+    // Reads the plan its design is scheduled against; scrum_master drives it.
+    plan: "use",
     development: "primary",
     review: "primary",
     security: "use",
@@ -430,6 +431,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // `primary` — never self-approval.
   developer: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     development: "build",
     review: "requests",
@@ -442,6 +444,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Development because that is what it tests.
   qa: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     development: "use",
     security: "use",
@@ -455,7 +458,6 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "use",
     design: "use",
-    plan: "use",
     development: "use",
     review: "use",
     security: "primary",
@@ -475,6 +477,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Owns Data Engineering. Reads Development for the pipelines' surroundings.
   data_engineer: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     design: "use",
     security: "use",
@@ -490,6 +493,10 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   scrum_master: {
     ...ALL_NONE,
     requirements: "use",
+    // The one gate this role owns. AGENT_OWNER_ROLE.plan is scrum_master, and an
+    // owner who cannot open the agent they sign off for is a gate with nobody
+    // behind it — the rule the invariant test above enforces.
+    plan: "owner",
     documentation: "use",
   },
 
