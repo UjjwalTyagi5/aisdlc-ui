@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import { FileText, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
@@ -78,10 +77,6 @@ export default function DesignPage() {
   });
   // The upstream Requirements-phase stories — the Design agent designs FROM these.
   // Distinct query key from the design artifacts above so the two caches don't clash.
-  const reqStoriesQ = useQuery({
-    queryKey: ["artifacts", "project", projectId, "requirements"],
-    queryFn: () => listArtifacts(projectId, { phase: "requirements" }),
-  });
   const runsQ = useQuery({
     queryKey: qk.runs.forProject(projectId),
     queryFn: () => listRuns({ projectId, pageSize: 20 }),
@@ -90,70 +85,6 @@ export default function DesignPage() {
   const designs = React.useMemo(
     () => (artifactsQ.data ?? []).filter((a) => DESIGN_TYPES.includes(a.type)),
     [artifactsQ.data],
-  );
-
-  const requirementStories = React.useMemo(
-    () => (reqStoriesQ.data ?? []).filter((a) => a.type === "story"),
-    [reqStoriesQ.data],
-  );
-
-  // ADO source key for a story = body.traceability.jiraIssueKey.
-  const storyRef = React.useCallback(
-    (a: Artifact): string | undefined =>
-      a.body.kind === "story" ? a.body.traceability?.jiraIssueKey : undefined,
-    [],
-  );
-
-  // Ref + title of every requirements story — lightweight index for the agent.
-  const allStories = React.useMemo(
-    () =>
-      requirementStories
-        .map((s) =>
-          s.body.kind === "story"
-            ? {
-                ref: storyRef(s),
-                title: s.body.title,
-                // The board's own type. Without it an Epic and three board-setup
-                // Tasks reach the Design agent indistinguishable from user stories,
-                // and it designs a system for whatever it is handed.
-                type: s.body.workItemType || undefined,
-              }
-            : null,
-        )
-        .filter(
-          (s): s is { ref: string | undefined; title: string; type: string | undefined } =>
-            !!s,
-        ),
-    [requirementStories, storyRef],
-  );
-
-  // Full content of each story (AC given/when/then rows flattened to lines) so the
-  // design agent has everything it needs to design from without re-fetching the board.
-  const allStoryContent = React.useMemo(
-    () =>
-      requirementStories
-        .map((a) => {
-          if (a.body.kind !== "story") return null;
-          const ac = (a.body.acceptanceCriteria ?? [])
-            .map((c) =>
-              [
-                c.given && `Given ${c.given}`,
-                c.when && `When ${c.when}`,
-                c.then && `Then ${c.then}`,
-              ]
-                .filter(Boolean)
-                .join(" "),
-            )
-            .filter(Boolean);
-          return {
-            ref: storyRef(a),
-            title: a.body.title,
-            description: a.body.description,
-            acceptance_criteria: ac,
-          };
-        })
-        .filter((s): s is NonNullable<typeof s> => !!s),
-    [requirementStories, storyRef],
   );
 
   const selectedFromUrl = searchParams.get("artifact");
@@ -192,13 +123,6 @@ export default function DesignPage() {
   // .requirements into the agent input).
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
-  // Design source: "requirements" threads the approved stories into the agent's
-  // context; "freeform" sends none, so the agent designs purely from the chat
-  // prompt (a deliberate standalone choice, not just "no stories exist").
-  const [designSource, setDesignSource] = React.useState<"requirements" | "freeform">(
-    "requirements",
-  );
-  const fromRequirements = designSource === "requirements";
   const chat = useAgentChat({
     agent: "design",
     projectId,
@@ -212,13 +136,10 @@ export default function DesignPage() {
       project_id: projectId,
       page: "Design",
       artifactTitle: selected?.title,
-      // Freeform mode omits requirements entirely → the agent works standalone.
-      requirements: fromRequirements
-        ? {
-            all_stories: allStories,
-            selected_stories: allStoryContent,
-          }
-        : undefined,
+      // NO REQUIREMENTS ARE INJECTED. The agent calls read_project_requirements when
+      // the conversation warrants it. Pushing every story in before the user had typed
+      // fed it whatever the board held — Epics and setup Tasks included — and it
+      // designed a system for them.
     },
   });
 
@@ -321,41 +242,6 @@ export default function DesignPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="inline-flex items-center rounded-md border p-0.5 text-xs"
-              role="group"
-              aria-label="Design source"
-            >
-              <button
-                type="button"
-                aria-pressed={fromRequirements}
-                onClick={() => setDesignSource("requirements")}
-                className={cn(
-                  "rounded px-2 py-1 font-medium transition-colors",
-                  fromRequirements
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                From requirements
-                {requirementStories.length > 0 && (
-                  <span className="ml-1 opacity-70">{requirementStories.length}</span>
-                )}
-              </button>
-              <button
-                type="button"
-                aria-pressed={!fromRequirements}
-                onClick={() => setDesignSource("freeform")}
-                className={cn(
-                  "rounded px-2 py-1 font-medium transition-colors",
-                  !fromRequirements
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                Freeform
-              </button>
-            </div>
             <ModelSelector
               aria-label="Design agent model"
               projectId={projectId}

@@ -742,6 +742,47 @@ async def save_architecture_pdf(content: str = "", filename: str = "architecture
 
 
 @tool
+async def read_project_requirements() -> str:
+    """Load this project's requirements — the stories, their descriptions and their
+    acceptance criteria — from the Requirements stage.
+
+    Call this when the user asks you to design something FOR THIS PROJECT, or refers to
+    "the requirements", "the stories", "the backlog" or similar. Do NOT call it when the
+    user is asking you to design something they have described themselves in the chat:
+    their words are the requirement then, and loading the project's backlog on top of
+    them would design the wrong system.
+
+    Returns the requirements as text, or says plainly that the project has none.
+
+    THIS REPLACED AN AUTOMATIC INJECTION. The Design page used to push every story into
+    the agent's context before the user had typed anything, behind a "From requirements
+    / Freeform" toggle that defaulted to on. That fed the agent whatever the board held
+    — Epics and project-setup Tasks included — and it designed a system for them. Making
+    it a tool is what `_build_session_context` argued for all along: context the model
+    chooses to load, not an injection it cannot decline.
+    """
+    from config.context_broker import build_context_for_project  # noqa: PLC0415
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+
+    project_id, tenant_id = get_project_id(), get_tenant_id()
+    if not project_id or not tenant_id:
+        # A standalone conversation outside any project. Say so rather than returning
+        # an empty string the model would read as "the project has no requirements".
+        return (
+            "This conversation is not attached to a project, so there are no stored "
+            "requirements to read. Design from what the user has described."
+        )
+
+    context = await build_context_for_project(project_id, tenant_id, "design")
+    if not context:
+        return (
+            "This project has no requirements recorded yet. Design from what the user "
+            "has described, or ask them what the system needs to do."
+        )
+    return context
+
+
+@tool
 async def save_to_project_artifacts() -> str:
     """Store the documents generated in this chat into the project's artifacts.
 
@@ -835,6 +876,9 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
 
 tools = [
     read_document,
+    # The project's requirements, ON DEMAND. Replaced the Design page's automatic
+    # injection, which pushed every board item into context before the user had typed.
+    read_project_requirements,
     generate_architecture,
     generate_architecture_from_context,
     update_response,
@@ -896,6 +940,22 @@ from Requirements") and ask what they want built.
 
 When you ARE asked, use the context you have: pass those stories as `context`, and
 never ask the user to re-supply requirements that are already in front of you.
+
+── THE PROJECT'S REQUIREMENTS ARE A TOOL CALL, NOT SOMETHING YOU ARE HANDED ──────
+You do NOT automatically receive this project's stories. Call
+`read_project_requirements` to load them.
+
+CALL IT when the user asks you to design something FOR THIS PROJECT, or refers to
+"the requirements", "the stories", "the backlog", "what we captured" or similar.
+Call it BEFORE designing in that case — designing from memory when stored
+requirements exist produces a system nobody asked for.
+
+DO NOT CALL IT when the user describes what they want in the chat. Their words ARE
+the requirement then. Loading the project's backlog on top of a description the user
+just gave you designs the wrong system — and a project's board holds Epics and
+setup Tasks alongside real stories, none of which are things to design.
+
+DO NOT CALL IT on a greeting. "hi" is not a request to design anything.
 
 
 ── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────

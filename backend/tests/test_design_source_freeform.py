@@ -1,26 +1,26 @@
-"""Freeform Design means the agent gets NO requirements. Not "fewer" — none.
+"""Design is handed no requirements. It calls a tool when it needs them.
 
-The Design page has a source toggle: "From requirements" threads the project's stories
-into the agent's context, "Freeform" sends none so it designs purely from the chat.
+WHAT THIS REPLACED. The Design page had a "From requirements / Freeform" toggle. In the
+first position it pushed every requirements story into the agent's context before the
+user had typed anything; in the second it sent none. The toggle defaulted to ON, was not
+persisted (a plain useState, so it silently reset to "From requirements" on every page
+load), and demanded a decision before the user knew whether the conversation needed the
+stories at all.
 
-THIS HAS ALREADY REGRESSED ONCE. A user opened standalone Design, typed "hi", and
-watched the agent start an end-to-end design of four board items it should never have
-seen. The cause was a PROJECT-KEYED fallback in the context builder: it read the
-project's most recent Run, so the standalone page inherited whatever Requirements last
-produced. It was removed, and `_build_session_context`'s docstring now says in capitals
-not to add it back — but nothing tested the behaviour, on either side.
+It was also wrong by default on a real project. Board ingestion pulls EVERY item on the
+board, so what got injected here was one Epic and three project-setup Tasks — not one
+user story among them — and the agent dutifully designed a system for them.
 
-TWO INDEPENDENT PATHS reach the agent and BOTH must stay quiet in freeform:
+The toggle is gone. `read_project_requirements` is a tool the model calls when the
+conversation warrants it, which is what `_build_session_context`'s docstring argued for
+all along: "context the model chooses to load, not an injection it cannot decline."
 
-  1. `pipeline_context.requirements` -> build_agent_input_text(sections=("requirements",)).
-     The toggle controls this one: the frontend passes `requirements: undefined`, which
-     JSON omits.
+TWO PATHS still reach the agent and this file pins both:
 
-  2. `build_context(session_id, "design")` -> the session's stored requirements_payload.
-     The toggle cannot reach this. A Design chat session has no requirements_payload, so
-     it stays empty; an ORCHESTRATED run does, which is how the pipeline legitimately
-     feeds Design. Both halves are asserted here, because "freeform is empty" is only
-     meaningful alongside "the pipeline still works".
+  1. pipeline_context.requirements — the ORCHESTRATED pipeline still uses it, so the
+     mechanism must keep working. The Design PAGE never populates it any more.
+  2. build_context(session_id, "design") — session-keyed. A Design chat session has no
+     requirements_payload, so a standalone conversation stays blank.
 """
 from __future__ import annotations
 
@@ -34,11 +34,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.agent_context import build_agent_input_text, format_pipeline_context  # noqa: E402
 
 PROJECT = "f45e7d23-c821-44b3-a88b-6175f67ddef0"
+TENANT = "81a736f4-cd44-4f63-842c-ae57023d0346"
 
-# The exact shape app/(app)/projects/[id]/design/page.tsx sends.
-FROM_REQUIREMENTS = {
+# What the Design page sends NOW: identity and plumbing, no requirements.
+PAGE_CONTEXT = {"project_id": PROJECT, "page": "Design"}
+
+# What the ORCHESTRATOR still sends when it drives Design as part of a pipeline.
+ORCHESTRATED = {
     "project_id": PROJECT,
-    "page": "Design",
     "requirements": {
         "all_stories": [{"ref": "1", "title": "Project Initiation", "type": "Epic"}],
         "selected_stories": [
@@ -47,9 +50,6 @@ FROM_REQUIREMENTS = {
         ],
     },
 }
-
-# Freeform omits the key entirely — `undefined` does not survive JSON.
-FREEFORM = {"project_id": PROJECT, "page": "Design"}
 
 
 def _text(pc):
@@ -60,94 +60,67 @@ def _text(pc):
     )
 
 
-# -- freeform sends nothing ----------------------------------------------------
+# -- the page injects nothing --------------------------------------------------
 
 
 @pytest.mark.unit
-def test_freeform_sends_no_requirements():
-    text = _text(FREEFORM)
-    assert "Project Initiation" not in text
+def test_the_design_page_context_carries_no_requirements():
+    text = _text(PAGE_CONTEXT)
     assert "[STRUCTURED PIPELINE CONTEXT JSON]" not in text
+    assert text.strip() == "Task intent: Design a URL shortener"
 
 
 @pytest.mark.unit
-def test_freeform_sends_only_the_users_own_words():
-    """THE REGRESSION. "hi" must reach the agent as "hi" — anything else and it starts
-    designing a system the user never mentioned."""
-    assert _text(FREEFORM).strip() == "Task intent: Design a URL shortener"
+def test_the_project_id_does_not_leak_into_the_prompt():
+    """It is in pipeline_context so the backend can resolve per-stage MCP tools. It is
+    plumbing, not context, and naming the project invites the model to go hunting."""
+    assert PROJECT not in _text(PAGE_CONTEXT)
 
 
 @pytest.mark.unit
-def test_freeform_does_not_leak_the_project_id_either():
-    """project_id is in pipeline_context so the backend can resolve per-stage MCP
-    tools. It is plumbing, not context, and naming the project invites the model to go
-    looking for its stories."""
-    assert PROJECT not in _text(FREEFORM)
+def test_an_empty_requirements_object_produces_no_section():
+    """An empty header would invite the model to ask which stories it should be reading."""
+    assert "[STRUCTURED PIPELINE CONTEXT JSON]" not in _text(
+        {"project_id": PROJECT, "requirements": {}}
+    )
+
+
+# -- the orchestrated path still works ----------------------------------------
 
 
 @pytest.mark.unit
-def test_an_empty_requirements_object_is_still_nothing():
-    """A page with no stories yet sends `requirements: {}`. An empty section header
-    would invite the model to ask which stories it should be reading."""
-    pc = {"project_id": PROJECT, "requirements": {}}
-    assert "[STRUCTURED PIPELINE CONTEXT JSON]" not in _text(pc)
-
-
-# -- from-requirements sends the stories --------------------------------------
-
-
-@pytest.mark.unit
-def test_from_requirements_sends_the_stories():
-    text = _text(FROM_REQUIREMENTS)
+def test_the_orchestrator_can_still_supply_requirements():
+    """A suite that only proved emptiness would pass just as well if the pipeline
+    hand-off were broken outright."""
+    text = _text(ORCHESTRATED)
     assert "[STRUCTURED PIPELINE CONTEXT JSON]" in text
     assert "Project Initiation" in text
     assert "Given x When y Then z" in text
 
 
 @pytest.mark.unit
-def test_the_board_work_item_type_survives():
-    """Board ingestion pulls Epics and chore Tasks alongside real stories. Without the
-    type they all reach the agent as things to design a system for — which is exactly
-    what produced a design for four SDLC-setup board items."""
-    assert '"type": "Epic"' in _text(FROM_REQUIREMENTS)
-
-
-@pytest.mark.unit
-def test_the_two_modes_differ_by_more_than_formatting():
-    assert len(_text(FROM_REQUIREMENTS)) > len(_text(FREEFORM)) + 100
-
-
-# -- only the requested section is passed through ------------------------------
-
-
-@pytest.mark.unit
 def test_design_receives_requirements_and_not_later_stages():
-    """`pipeline_sections=("requirements",)` is the Design agent's whole filter. Passing
+    """`pipeline_sections=("requirements",)` is Design's whole filter. Passing
     development or testing output would hand it the answers to what it is designing."""
-    pc = {
-        "requirements": {"all_stories": [{"ref": "1", "title": "Wanted"}]},
-        "development": {"prs": ["should not appear"]},
-        "testing": {"suites": ["should not appear either"]},
-    }
-    text = format_pipeline_context(pc, sections=("requirements",))
+    text = format_pipeline_context(
+        {
+            "requirements": {"all_stories": [{"ref": "1", "title": "Wanted"}]},
+            "development": {"prs": ["should not appear"]},
+            "testing": {"suites": ["should not appear either"]},
+        },
+        sections=("requirements",),
+    )
     assert "Wanted" in text
     assert "should not appear" not in text
 
 
-@pytest.mark.unit
-def test_nothing_at_all_produces_no_context_block():
-    assert format_pipeline_context(None, sections=("requirements",)) == ""
-    assert format_pipeline_context({}, sections=("requirements",)) == ""
-
-
-# -- the second path: the session-keyed lookup --------------------------------
+# -- the session-keyed path ----------------------------------------------------
 
 
 @pytest.mark.unit
-async def test_a_session_without_requirements_gives_design_no_context(monkeypatch):
-    """A standalone Design chat session stores design_artifacts and no
-    requirements_payload, so this path contributes nothing — which is what keeps
-    freeform freeform even though the toggle cannot reach it."""
+async def test_a_design_chat_session_gets_no_context(monkeypatch):
+    """It stores design_artifacts and no requirements_payload, so a standalone
+    conversation starts blank however the toggle used to be set."""
     from config import context_broker
 
     async def _fake(_sid):
@@ -158,42 +131,90 @@ async def test_a_session_without_requirements_gives_design_no_context(monkeypatc
 
 
 @pytest.mark.unit
-async def test_an_orchestrated_session_does_feed_design(monkeypatch):
-    """The other half of the contract: the pipeline is SUPPOSED to hand Requirements to
-    Design. A test that only proved emptiness would pass just as well if this path were
-    broken outright."""
-    from config import context_broker
+def test_the_api_does_not_inject_project_context(monkeypatch):
+    """A guard on the original regression: `build_context_for_project` reads the
+    project's runs, and calling it from the API is what made standalone Design inherit a
+    pipeline the user never started. It is legitimate inside the TOOL, where the model
+    chooses to call it — but must not be imported by the API module.
 
-    async def _fake(_sid):
-        return {
-            "status": "ok",
-            "requirements_payload": {
-                "board_project": "sdlc",
-                "work_items": [{"title": "Password reset", "type": "User Story"}],
-            },
-        }
-
-    monkeypatch.setattr(context_broker, "fetch_session_artifacts", _fake)
-    ctx = await context_broker.build_context("run-as-session", "design")
-    assert ctx
-    assert "Password reset" in ctx
-
-
-@pytest.mark.unit
-def test_the_project_keyed_fallback_is_not_reinstated():
-    """A guard on the regression itself. `build_context_for_project` reads the project's
-    most recent Run; calling it from the Design API is what made the standalone page
-    inherit a pipeline the user never started.
-
-    The check is on the MODULE NAMESPACE, not the source text — the source names the
-    function in the docstring explaining why it must not be used, so a substring search
+    Checked on the module NAMESPACE, not the source text: the source names the function
+    in the docstring explaining why it must not be auto-injected, so a substring search
     matches the warning as readily as the mistake.
     """
     from agents_orchestrator.design_architecture_agent import (
         design_architecture_agent_api as api,
     )
 
-    assert not hasattr(api, "build_context_for_project"), (
-        "the project-keyed fallback is imported again; standalone Design will inherit "
-        "the project's last Requirements run"
+    assert not hasattr(api, "build_context_for_project")
+
+
+# -- the tool that replaced the toggle -----------------------------------------
+
+
+@pytest.mark.unit
+def test_the_agent_has_a_tool_to_read_requirements():
+    from agents_orchestrator.design_architecture_agent.agents import architecture
+
+    assert "read_project_requirements" in {t.name for t in architecture.tools}
+
+
+@pytest.mark.unit
+def test_the_prompt_tells_the_model_the_tool_exists():
+    """An unmentioned tool is a tool that does not get called. The old behaviour was
+    automatic, so nothing in the prompt had to ask for it."""
+    from agents_orchestrator.design_architecture_agent.agents.architecture import (
+        DESIGN_SYS_MESSAGE,
     )
+
+    prompt = " ".join(DESIGN_SYS_MESSAGE.split())
+    assert "read_project_requirements" in prompt
+    assert "You do NOT automatically receive this project's stories" in prompt
+    # And when NOT to call it — the failure mode is over-fetching, not under-fetching.
+    assert "DO NOT CALL IT when the user describes what they want" in prompt
+    assert "DO NOT CALL IT on a greeting" in prompt
+
+
+@pytest.mark.unit
+async def test_the_tool_says_so_plainly_when_there_is_no_project(monkeypatch):
+    """Returning "" would read to the model as "this project has no requirements",
+    which is a different and wrong statement."""
+    from agents_orchestrator.design_architecture_agent.agents import architecture
+    from config import ws_helper
+
+    monkeypatch.setattr(ws_helper, "get_project_id", lambda: None)
+    monkeypatch.setattr(ws_helper, "get_tenant_id", lambda: None)
+
+    out = await architecture.read_project_requirements.ainvoke({})
+    assert "not attached to a project" in out
+
+
+@pytest.mark.unit
+async def test_the_tool_distinguishes_no_project_from_no_requirements(monkeypatch):
+    from agents_orchestrator.design_architecture_agent.agents import architecture
+    from config import context_broker, ws_helper
+
+    monkeypatch.setattr(ws_helper, "get_project_id", lambda: PROJECT)
+    monkeypatch.setattr(ws_helper, "get_tenant_id", lambda: TENANT)
+
+    async def _empty(*_a, **_kw):
+        return ""
+
+    monkeypatch.setattr(context_broker, "build_context_for_project", _empty)
+    out = await architecture.read_project_requirements.ainvoke({})
+    assert "no requirements recorded yet" in out
+
+
+@pytest.mark.unit
+async def test_the_tool_returns_the_requirements_when_there_are_some(monkeypatch):
+    from agents_orchestrator.design_architecture_agent.agents import architecture
+    from config import context_broker, ws_helper
+
+    monkeypatch.setattr(ws_helper, "get_project_id", lambda: PROJECT)
+    monkeypatch.setattr(ws_helper, "get_tenant_id", lambda: TENANT)
+
+    async def _ctx(*_a, **_kw):
+        return "[REQUIREMENTS CONTEXT]\nRequirement items (4):\n  - [Epic] Project Initiation"
+
+    monkeypatch.setattr(context_broker, "build_context_for_project", _ctx)
+    out = await architecture.read_project_requirements.ainvoke({})
+    assert "Project Initiation" in out

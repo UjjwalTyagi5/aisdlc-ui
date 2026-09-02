@@ -346,11 +346,39 @@ async def build_context(session_id: str, agent_id: str) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+#: How many of the project's runs to look back through. Each stage's payload is taken
+#: from the newest run that HAS one, so this only needs to span the runs since the
+#: oldest stage of interest — not the project's whole history.
+_PROJECT_RUN_LOOKBACK = 100
+
+_ARTIFACT_FIELDS = (
+    "requirements_payload",
+    "design_artifacts",
+    "development_artifacts",
+    "testing_artifacts",
+    "code_review_artifacts",
+    "security_artifacts",
+)
+
+
 async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
-    """The project's most recent Run row's artifact columns, or None if the project
-    has no runs yet. `Run`, not `AgentSession`, is canonical for project-scoped
-    upstream reads — matches Documentation's read_upstream_artifacts precedent
-    (help/portfolio-1-agent-status.md's Documentation section)."""
+    """The project's latest artifact payload PER STAGE, or None if it has no runs.
+
+    EACH COLUMN COMES FROM THE NEWEST RUN THAT HAS ONE, which is not the same as
+    "every column from the newest run" — and reading it the second way was a bug. This
+    took the single most recent Run and returned its columns wholesale, so any later run
+    SHADOWED the earlier stages: a project whose Requirements had been baselined, and
+    which then had one Design chat, reported no requirements at all, because the newest
+    run was the design one and its requirements_payload is NULL. The requirements had
+    not gone anywhere; the query stopped one row short of them.
+
+    That is the normal shape of a project, not an edge case — stages run in sequence, so
+    by the time anything downstream asks for upstream context there is always a newer
+    run than the one holding it.
+
+    `Run`, not `AgentSession`, is canonical for project-scoped upstream reads — matches
+    Documentation's read_upstream_artifacts precedent (help/portfolio-1-agent-status.md).
+    """
     import uuid as _uuid
 
     from sqlalchemy import select
@@ -363,19 +391,20 @@ async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optio
             select(Run)
             .where(Run.project_id == _uuid.UUID(project_id), Run.tenant_id == _uuid.UUID(tenant_id))
             .order_by(Run.created_at.desc())
-            .limit(1)
+            .limit(_PROJECT_RUN_LOOKBACK)
         )
-        run = (await db.execute(stmt)).scalars().first()
-        if run is None:
+        runs = (await db.execute(stmt)).scalars().all()
+        if not runs:
             return None
-        return {
-            "requirements_payload": run.requirements_payload,
-            "design_artifacts": run.design_artifacts,
-            "development_artifacts": run.development_artifacts,
-            "testing_artifacts": run.testing_artifacts,
-            "code_review_artifacts": run.code_review_artifacts,
-            "security_artifacts": run.security_artifacts,
-        }
+
+        artifacts: Dict[str, Any] = {}
+        for field in _ARTIFACT_FIELDS:
+            # Newest first, so the first non-empty value wins.
+            artifacts[field] = next(
+                (value for run in runs if (value := getattr(run, field, None))),
+                None,
+            )
+        return artifacts
 
 
 async def build_context_for_project(project_id: str, tenant_id: str, agent_id: str) -> str:
