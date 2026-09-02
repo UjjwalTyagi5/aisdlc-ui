@@ -31,6 +31,7 @@ import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
 import { ProjectCostPanel } from "@/components/app/project-cost-panel";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
 import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
+import { isStoredArtifact } from "@/components/app/artifact-list";
 import { RequireRole } from "@/components/auth/require-role";
 import { OutOfScope } from "@/components/auth/scope-empty-state";
 import { ApiRequestError } from "@/lib/api/client";
@@ -206,7 +207,18 @@ export default function ProjectOverviewPage() {
   const artifacts = artifactsQ.data ?? [];
 
   const recentRuns = runs.slice(0, 10);
-  const recentArtifacts = [...artifacts]
+
+  // FILES THE PROJECT PRODUCED, not board rows. `listArtifacts` with no phase filter
+  // also returns the SYNTHESISED story artifacts materialised from a run's
+  // requirements_payload, and a board pull yields one per work item — all sharing the
+  // ingest run's timestamp. Fifteen of those buried the project's only real document
+  // below the fold, so this panel showed no artifacts at all while being full of rows.
+  //
+  // The test is the id shape (`isStoredArtifact`): a stored artifact's id is a UUID, a
+  // synthesised one is `{run_id}:story:{key}`. That corrects itself if stories ever get
+  // real rows. Stories have their own screen and their own count.
+  const recentArtifacts = artifacts
+    .filter((a) => isStoredArtifact(a.id))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 8);
 
@@ -479,8 +491,11 @@ function RecentArtifactsList({
   if (artifacts.length === 0) {
     return (
       <EmptyState
-        title="No artifacts yet"
-        description="Run an agent to generate stories, designs, code, or tests."
+        title="No documents yet"
+        // Stories are deliberately not counted here — they are board rows, not files,
+        // and they have their own screen. Promising them would explain an empty panel
+        // with something that will never fill it.
+        description="Ask an agent to generate a document, diagram, or deck."
         variant="card"
       />
     );
