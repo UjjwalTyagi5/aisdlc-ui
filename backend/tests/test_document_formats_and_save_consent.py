@@ -194,7 +194,7 @@ async def test_saving_pending_files_stores_them(tmp_path):
         called["filename"] = filename
 
     with patch.object(ca, "register_generated_file", _fake):
-        stored, failed = await ca.save_pending_artifacts("s1")
+        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
 
     assert stored == ["brd.docx"] and failed == []
     # Reaching save IS the consent — re-reading the per-turn flag here would refuse the
@@ -207,7 +207,7 @@ async def test_saving_pending_files_stores_them(tmp_path):
 async def test_saving_with_nothing_pending_is_not_an_error():
     from shared.services import chat_artifacts as ca
 
-    assert await ca.save_pending_artifacts("nobody") == ([], [])
+    assert await ca.save_pending_artifacts("nobody") == ([], [], [])
 
 
 @pytest.mark.unit
@@ -401,3 +401,84 @@ def test_the_separator_row_is_not_data(tmp_path):
     markdown_to_xlsx("| A | B |\n|:--|--:|\n| 1 | 2 |\n", out)
     ws = load_workbook(out).active
     assert ws["A2"].value == "1"
+
+
+# -- a row without bytes must not be reported as "saved" -----------------------
+
+
+@pytest.mark.unit
+async def test_a_failed_blob_upload_is_reported_separately(tmp_path):
+    """From a live run:
+
+        WARNING: Artifact upload failed for run 67fbd232-... (document): HttpResponseError
+        INFO:  register_generated_file: persisted sdlc-password-reset-design.pdf
+
+    store_artifact DEGRADES on an upload failure — it writes the row with
+    blob_url=None so the document is still listed and the run does not die. Correct,
+    and it was invisible: the user saw "saved to the project's artifacts", found the
+    row in the panel, and found nothing in Blob.
+    """
+    from shared.services import chat_artifacts as ca
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4")
+    a, b, c, d = _ctx(consented=False)
+    with a, b, c, d:
+        await ca.register_generated_file("doc.pdf", str(f), "u", stage="design")
+
+    async def _row_only(filename, file_path, url, *, stage, consented=None):
+        # what store_artifact leaves behind when the upload fails
+        ca._LAST_UPLOAD_OK[filename] = False
+
+    with patch.object(ca, "register_generated_file", _row_only):
+        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
+
+    assert stored == ["doc.pdf"]      # the row DID get written
+    assert failed == []               # and nothing raised
+    assert not_uploaded == ["doc.pdf"]  # but the bytes are not in storage
+
+
+@pytest.mark.unit
+async def test_a_successful_upload_is_not_flagged(tmp_path):
+    from shared.services import chat_artifacts as ca
+
+    f = tmp_path / "ok.pdf"
+    f.write_bytes(b"%PDF-1.4")
+    a, b, c, d = _ctx(consented=False)
+    with a, b, c, d:
+        await ca.register_generated_file("ok.pdf", str(f), "u", stage="design")
+
+    async def _uploaded(filename, file_path, url, *, stage, consented=None):
+        ca._LAST_UPLOAD_OK[filename] = True
+
+    with patch.object(ca, "register_generated_file", _uploaded):
+        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
+
+    assert stored == ["ok.pdf"] and not_uploaded == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "agents_orchestrator/requirements_agent/agents/planning.py",
+        "agents_orchestrator/design_architecture_agent/agents/architecture.py",
+    ],
+)
+def test_both_agents_warn_when_the_file_was_not_uploaded(rel):
+    """The tool's reply has to distinguish the two, because they need different
+    actions: nothing for a real save, an administrator for a row without bytes.
+
+    Read by PATH rather than by import: both agents ship an `agents/planning.py`, and
+    under pytest the dotted name resolved to the wrong one — a latent shadowing hazard
+    worth avoiding here rather than debugging in a test about something else.
+    """
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8")
+    # Join adjacent string literals before flattening: the message is written across
+    # several of them, so a naive whitespace squeeze leaves `the " "project's`.
+    flat = re.sub(r'"\s*\n\s*"', "", src)
+    flat = re.sub(r"\s+", " ", flat)
+    assert "could not be uploaded to the project's file storage" in flat
+    assert "the artifact is recorded and listed, but the file itself is not stored" in flat

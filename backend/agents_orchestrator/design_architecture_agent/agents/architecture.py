@@ -751,12 +751,23 @@ async def save_to_project_artifacts() -> str:
     """
     from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
 
-    stored, failed = await save_pending_artifacts(get_session_id() or "")
+    stored, failed, not_uploaded = await save_pending_artifacts(get_session_id() or "")
     if not stored and not failed:
         return "There are no generated documents waiting to be saved."
     parts = []
     if stored:
         parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
+    if not_uploaded:
+        # THE ROW EXISTS AND THE BYTES DO NOT. Saying only "saved" here is how a user
+        # finds the document listed in the artifacts panel and absent from storage,
+        # and has no way to tell which happened. Relay this verbatim.
+        parts.append(
+            f"WARNING: {', '.join(not_uploaded)} could not be uploaded to the "
+            "project's file storage — the artifact is recorded and listed, but the "
+            "file itself is not stored and cannot be downloaded from the artifacts "
+            "panel. The chat download link still works. An administrator needs to "
+            "check the storage configuration."
+        )
     if failed:
         parts.append(
             f"Could not save: {', '.join(failed)} — they are still downloadable and "

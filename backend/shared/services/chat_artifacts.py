@@ -86,6 +86,11 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
     return str(run.id)
 
 
+#: filename -> did the BYTES reach Blob on the last store attempt. Separate from the
+#: row being written, because those two succeed independently and the difference is
+#: exactly what a user cannot see from the artifacts panel.
+_LAST_UPLOAD_OK: dict[str, bool] = {}
+
 #: Files generated this session that the user has NOT yet agreed to store.
 #: Keyed by session id. In-process and deliberately not persisted: a pending file is
 #: a question waiting for an answer in THIS conversation, not durable state.
@@ -187,7 +192,7 @@ async def register_generated_file(
                 from shared.services.artifact_store import (  # noqa: PLC0415
                     get_blob_client, store_artifact,
                 )
-                await store_artifact(
+                _art = await store_artifact(
                     session,
                     tenant_id=tenant_id,
                     run_id=run_id,
@@ -197,6 +202,13 @@ async def register_generated_file(
                     content_type=content_type or "application/octet-stream",
                     blob_client=get_blob_client(),
                 )
+                # store_artifact DEGRADES rather than raising: on an upload failure it
+                # still writes the row, with blob_url=None, so the document is listed
+                # and the run does not die. That is the right behaviour and it was also
+                # invisible — a user watched "saved to the project's artifacts", found
+                # the row in the panel, and found nothing in Blob. Record the real
+                # outcome so the caller can say which of the two happened.
+                _uploaded = bool(getattr(_art, "blob_url", None))
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415
@@ -204,15 +216,21 @@ async def register_generated_file(
         except Exception:
             logger.debug("register_generated_file: artifact_ready notify failed", exc_info=True)
 
-        logger.info("register_generated_file: persisted %s (%s) for run %s", filename, artifact_type, run_id)
+        _LAST_UPLOAD_OK[filename] = _uploaded
+        logger.info(
+            "register_generated_file: persisted %s (%s) for run %s (blob upload %s)",
+            filename, artifact_type, run_id, "ok" if _uploaded else "FAILED",
+        )
     except Exception:
         logger.warning("register_generated_file: failed to persist %s", filename, exc_info=True)
 
 
-async def save_pending_artifacts(session_id: str = "") -> tuple[list[str], list[str]]:
+async def save_pending_artifacts(
+    session_id: str = "",
+) -> tuple[list[str], list[str], list[str]]:
     """Store every file this session generated but has not yet saved.
 
-    Returns (stored_filenames, failed_filenames). The pending list is cleared for the
+    Returns (stored, failed, stored_but_not_uploaded). The pending list is cleared for the
     ones that stored, so a second call does not duplicate them; a failure stays pending
     so the user can retry rather than being told nothing happened and losing the file.
 
@@ -223,10 +241,14 @@ async def save_pending_artifacts(session_id: str = "") -> tuple[list[str], list[
     sid = session_id or get_session_id() or ""
     pending = list(_PENDING.get(sid, []))
     if not pending:
-        return [], []
+        return [], [], []
 
     stored: list[str] = []
     failed: list[str] = []
+    # Recorded in the project but NOT uploaded — the row exists and the bytes do not.
+    # Reported separately because "saved" covers both and they need different actions:
+    # nothing for the first, an administrator for the second.
+    not_uploaded: list[str] = []
     for entry in pending:
         before = len(_PENDING.get(sid, []))  # noqa: F841 — readability at the call site
         try:
@@ -235,6 +257,8 @@ async def save_pending_artifacts(session_id: str = "") -> tuple[list[str], list[
                 stage=entry["stage"], consented=True,
             )
             stored.append(entry["filename"])
+            if not _LAST_UPLOAD_OK.get(entry["filename"], True):
+                not_uploaded.append(entry["filename"])
         except Exception:  # noqa: BLE001 — register_* never raises, but never say never
             logger.warning("save_pending_artifacts: %s failed", entry["filename"], exc_info=True)
             failed.append(entry["filename"])
@@ -244,4 +268,4 @@ async def save_pending_artifacts(session_id: str = "") -> tuple[list[str], list[
         _PENDING[sid] = remaining
     else:
         _PENDING.pop(sid, None)
-    return stored, failed
+    return stored, failed, not_uploaded
