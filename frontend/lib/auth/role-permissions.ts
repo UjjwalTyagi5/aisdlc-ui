@@ -58,12 +58,14 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:cancel",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     // Documentation's acceptance is automatic and AGENT_OWNER_ROLE.documentation is
     // project_admin — the fallback approver on every agent. It is the override for a
     // stage no delivery role owns.
     "artifact:approve_documentation",
+    "artifact:approve_plan",
     "connector:view",
     "connector:manage",
     "cost:view",
@@ -76,6 +78,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     "artifact:approve_requirements",
@@ -100,6 +103,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     "artifact:approve_design",
@@ -120,6 +124,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "connector:view",
     "skill:edit",
@@ -128,6 +133,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     "artifact:approve_testing",
@@ -141,6 +147,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     // The Security gate is this role's own (AGENT_OWNER_ROLE.security). It held the
@@ -161,6 +168,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     "artifact:approve_deployment",
@@ -175,6 +183,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "run:view",
     "artifact:view",
     "artifact:export",
+    "artifact:delete",
     "agent:invoke",
     "approve",
     "connector:view",
@@ -183,6 +192,6 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // above.
     "governance:decide",
   ],
-  scrum_master: ["run:view", "artifact:view", "artifact:export", "agent:invoke", "connector:view"],
+  scrum_master: ["run:view", "artifact:view", "artifact:export", "artifact:delete", "artifact:approve_plan", "agent:invoke", "connector:view"],
   custom: ["artifact:view"],
 };

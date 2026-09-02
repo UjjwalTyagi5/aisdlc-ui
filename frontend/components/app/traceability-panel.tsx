@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUpRight, ExternalLink, GitPullRequest, Network, TestTubes } from "lucide-react";
+import { ArrowUpRight, ExternalLink, GitPullRequest, Network } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { Artifact } from "@/lib/schemas";
@@ -10,11 +10,11 @@ export interface TraceabilityPanelProps {
   /** From a `StoryBody.traceability` record — missing links render as empty slots. */
   trace: {
     jiraIssueKey?: string;
+    /** Browsable link to the item on its board, resolved at ingest. */
+    boardUrl?: string;
     designArtifactId?: Artifact["id"];
     prUrl?: string;
   };
-  /** Workspace base URL for Jira — optional. */
-  jiraBaseUrl?: string;
   /** When we know the project id, design links are scoped correctly. */
   projectId?: string;
   className?: string;
@@ -22,7 +22,6 @@ export interface TraceabilityPanelProps {
 
 export function TraceabilityPanel({
   trace,
-  jiraBaseUrl,
   projectId,
   className,
 }: TraceabilityPanelProps) {
@@ -39,10 +38,10 @@ export function TraceabilityPanel({
       label: "Work item",
       icon: ArrowUpRight,
       value: trace.jiraIssueKey,
-      href:
-        trace.jiraIssueKey && jiraBaseUrl
-          ? `${jiraBaseUrl.replace(/\/$/, "")}/browse/${encodeURIComponent(trace.jiraIssueKey)}`
-          : undefined,
+      // The URL is resolved at INGEST, where the connector is in scope. It used to be
+      // built here from a `jiraBaseUrl` prop that no caller ever passed, so the key
+      // rendered as inert text on every story.
+      href: trace.boardUrl,
       external: true,
     },
     {
@@ -63,14 +62,15 @@ export function TraceabilityPanel({
       href: trace.prUrl,
       external: true,
     },
-    {
-      key: "tests",
-      label: "Tests",
-      icon: TestTubes,
-      // Not modelled yet — reserved for Chunk 12.
-      value: undefined,
-    },
   ];
+
+  // ONLY THE LINKS THAT EXIST. `designArtifactId` and `prUrl` are written by nothing
+  // in the product — their sole writer is scripts/seed_e2e_fixtures.py — so every story
+  // showed three rows reading "unlinked" forever, which advertises a feature rather
+  // than reporting a state. Filtering rather than deleting them means each reappears on
+  // its own the moment something populates it.
+  const linked = rows.filter((r) => r.value);
+  if (linked.length === 0) return null;
 
   return (
     <section className={cn("space-y-2", className)} aria-label="Traceability">
@@ -80,7 +80,7 @@ export function TraceabilityPanel({
       </h3>
 
       <ul className="divide-y divide-line-soft rounded-md border border-line-soft bg-panel-elevated">
-        {rows.map((r) => (
+        {linked.map((r) => (
           <li key={r.key} className="flex items-center gap-3 px-3 py-2.5">
             <r.icon
               className={cn(
@@ -106,11 +106,7 @@ export function TraceabilityPanel({
               ) : (
                 <span className="font-mono text-[11px] text-foreground/80">{r.value}</span>
               )
-            ) : (
-              <span className="font-mono text-[11px] italic text-muted-foreground/50">
-                unlinked
-              </span>
-            )}
+            ) : null}
           </li>
         ))}
       </ul>

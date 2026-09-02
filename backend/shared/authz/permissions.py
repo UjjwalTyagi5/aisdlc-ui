@@ -94,11 +94,14 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # workspace:manage, which only bu_admin holds.
         "member:manage", "project:create", "project:update", "model:manage",
         "run:create", "run:view", "run:cancel",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         # Documentation's owner (AGENT_OWNER_ROLE.documentation) is project_admin, the
         # fallback approver — its acceptance is automatic and no delivery role owns it.
         "artifact:approve_documentation",
+        # project_admin is "owner" on every agent (AGENT_DEFAULT_REACH) and the fallback
+        # approver, so it holds the plan gate alongside scrum_master.
+        "artifact:approve_plan",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
         # Tier 1 of routing.REQUEST_ESCALATION_CHAIN — the first approver a request
@@ -107,7 +110,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "ba": [
         "run:create", "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "artifact:approve_requirements",
         "connector:view",
@@ -130,7 +133,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "architect": [
         "run:create", "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "artifact:approve_design",
         "artifact:approve_development",
@@ -148,14 +151,14 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "developer": [
         "run:create", "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke",
         "connector:view",
         "skill:edit",
     ],
     "qa": [
         "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "artifact:approve_testing",
         "connector:view",
@@ -166,7 +169,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "security_engineer": [
         "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         # Its own gate. has_permission is an exact membership test — the generic
         # "approve" above does NOT imply this, which is why the Security Engineer
@@ -181,7 +184,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "devops_engineer": [
         "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "artifact:approve_deployment",
         "connector:view",
@@ -192,7 +195,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "data_engineer": [
         "run:create", "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "connector:view",
         # AGENT_OWNER_ROLE.data_engineering is data_engineer — stage two's
@@ -202,7 +205,11 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "scrum_master": [
         "run:view",
-        "artifact:view", "artifact:export",
+        "artifact:view", "artifact:export", "artifact:delete",
+        # AGENT_OWNER_ROLE.plan is scrum_master — the PM agent is the first thing this
+        # role OWNS rather than merely uses, and this permission is what makes that
+        # ownership real rather than a table entry.
+        "artifact:approve_plan",
         "agent:invoke",
         "connector:view",
     ],
@@ -221,6 +228,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
 _PHASE_PERMISSION: dict[str, str] = {
     "requirements": "artifact:approve_requirements",
     "design": "artifact:approve_design",
+    "plan": "artifact:approve_plan",
     "development": "artifact:approve_development",
     "code_review": "artifact:approve_code_review",
     "security": "artifact:approve_security",
@@ -248,9 +256,14 @@ _PERMISSION_CATALOG: list[str] = [
     "run:create", "run:view", "run:cancel",
     # Artifacts
     "artifact:view", "artifact:export",
+    # Destroying an artifact — the blob AND the row. Deliberately NOT implied by
+    # artifact:export: exporting takes a copy out, deleting removes the original, and a
+    # role that may read a design does not thereby get to destroy it.
+    "artifact:delete",
     "approve",
     "artifact:approve_requirements",
     "artifact:approve_design",
+    "artifact:approve_plan",
     "artifact:approve_development",
     "artifact:approve_code_review",
     "artifact:approve_security",

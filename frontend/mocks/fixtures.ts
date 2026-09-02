@@ -291,6 +291,7 @@ const PHASE_BY_AGENT: Record<Run["agent"], Run["phase"]> = {
   orchestrator: "requirements",
   requirements: "requirements",
   design: "design",
+  plan: "plan",
   development: "development",
   review: "review",
   security: "security",

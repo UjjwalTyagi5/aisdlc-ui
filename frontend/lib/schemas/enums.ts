@@ -38,6 +38,7 @@ export const AgentType = z.enum([
   "orchestrator",
   "requirements",
   "design",
+  "plan", // Project Manager agent — sits between design and development
   "development",
   "review", // Code Review agent
   "security",
@@ -56,6 +57,7 @@ export type AgentType = z.infer<typeof AgentType>;
 export const Phase = z.enum([
   "requirements",
   "design",
+  "plan",
   "development",
   "review", // Code Review
   "security",

@@ -18,18 +18,21 @@ Threat mitigations (T-M4-05):
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
-from shared.models.orm import Artifact, Run
+from shared.models.orm import Artifact, AuditEvent, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
 from shared.routers.projects import _get_or_404
 from shared.services.artifact_store import is_blob_path
@@ -108,8 +111,14 @@ async def list_artifacts_for_project(
     ]
 
     # Materialize board-ingested stories (no structured-story table — they live in
-    # Run.requirements_payload). Use the most recent requirements run that has
+    # Run.requirements_payload). Use the most recently WRITTEN requirements run that has
     # stories so re-ingests don't duplicate. Only for the requirements phase.
+    #
+    # ORDERED BY updated_at, NOT created_at. A chat run is created once per project and
+    # then REUSED (`_get_or_create_chat_run`), so its creation time is whenever the user
+    # first opened the chat — possibly long before a later "Pull stories". Ordering by
+    # creation would let a newer ingest permanently shadow requirements the agent wrote
+    # afterwards onto that older run. What matters is which payload was written last.
     if phase in (None, "requirements"):
         req_runs = (
             await db.execute(
@@ -117,7 +126,7 @@ async def list_artifacts_for_project(
                 .where(Run.project_id == project.id)
                 .where(Run.tenant_id == tenant_id)
                 .where(Run.stage == "requirements")
-                .order_by(Run.created_at.desc())
+                .order_by(Run.updated_at.desc())
             )
         ).scalars().all()
         for r in req_runs:
@@ -174,6 +183,17 @@ async def download_artifact(
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, run.project_id)
 
+    if getattr(artifact, "approval_status", "approved") != "approved":
+        # The bytes are under the tenant's `_pending` prefix, not at blob_path. Serving
+        # them would make the approval gate decorative — the whole point is that a
+        # document is not part of the project's record until somebody accepts it.
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact is still awaiting approval and cannot be downloaded yet."
+            if artifact.approval_status == "pending"
+            else "This artifact was rejected and its file has been deleted.",
+        )
+
     if not artifact.blob_path:
         # A row with no blob path predates blob storage, or was recorded by an agent
         # that only wrote the JSONB payload. Not an error worth a 500.
@@ -226,6 +246,281 @@ async def download_artifact(
         media_type=artifact.content_type or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{leaf}"'},
     )
+
+
+class ArtifactDecisionIn(BaseModel):
+    """A rejection may carry a reason; an approval needs nothing."""
+
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id: str):
+    """Resolve the artifact and refuse anyone who does not RUN this project.
+
+    `require_permission("approve")` on the route says the caller takes approval
+    decisions at all; it does not say which projects. `assert_can_administer_project`
+    is the second half: org-wide callers pass, everyone else must administer the
+    project's parent unit or hold a project_admin binding on the project itself.
+    Without it, any holder of `approve` anywhere in the tenant could accept another
+    team's documents into their shared record.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    project = await _get_or_404(db, str(run.project_id), tenant_id)
+    await assert_can_administer_project(db, request, project)
+    return artifact, run
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/approve",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("approve"))],
+)
+async def approve_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Accept a generated document into the project's shared record.
+
+    THE BYTES MOVE HERE, and that is the whole point of the gate. `store_artifact`
+    parks them under the tenant's `_pending` prefix and leaves `blob_url` NULL, so a
+    pending artifact is listed, is not downloadable, and is not in the project's
+    hierarchy. Approval promotes it to the real path and records who decided.
+
+    ORDER: move the bytes, THEN mark the row. A row marked approved whose bytes never
+    moved would advertise a download that 404s — the same class of failure as the
+    upload that reported success while the container stayed empty. The move itself
+    verifies the copy before deleting the source.
+    """
+    artifact, run = await _artifact_for_decision(db, request, artifact_id)
+
+    if artifact.approval_status == "approved":
+        # Idempotent: a double-click must not attempt a second move whose source has
+        # already been deleted.
+        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    if artifact.approval_status == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact was rejected; its file has been deleted and cannot be approved.",
+        )
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    if artifact.blob_path and blob_client is not None:
+        from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+        try:
+            artifact.blob_url = await blob_client.move_blob(
+                pending_blob_path(artifact.blob_path),
+                artifact.blob_path,
+                content_type=artifact.content_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Type name only: an Azure error can carry a SAS token or the account URL.
+            logger.warning(
+                "Artifact %s could not be promoted on approval: %s",
+                artifact_id, type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="The file could not be moved into the project's storage, so the "
+                       "artifact was left pending. Retry, or ask an administrator to "
+                       "check storage access.",
+            )
+
+    artifact.approval_status = "approved"
+    artifact.approved_by = getattr(request.state, "user_id", None)
+    artifact.approved_at = datetime.now(timezone.utc)
+
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_approve",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "blob_path": artifact.blob_path,
+            },
+        )
+    )
+    # NO COMMIT HERE, and no refresh. `get_db_session` sets the RLS tenant with
+    # `set_config(..., true)` — TRANSACTION-local — and commits once at the end of the
+    # request. Committing mid-handler ends that transaction and drops the setting, so
+    # every subsequent statement in the request sees zero rows; `db.refresh()` then
+    # failed outright with "Could not refresh instance". The dependency's commit
+    # persists both the artifact and the audit event.
+    logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
+    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/reject",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("approve"))],
+)
+async def reject_artifact(
+    artifact_id: str,
+    body: ArtifactDecisionIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Refuse a generated document. Its pending bytes are deleted; the row stays.
+
+    THE ROW SURVIVES ON PURPOSE. Deleting it would erase the fact that the agent
+    produced something and somebody declined it — which is exactly what a reviewer
+    looking at the project's history needs to see. The bytes go because nobody agreed
+    they should be kept; the decision stays because it was made.
+    """
+    artifact, run = await _artifact_for_decision(db, request, artifact_id)
+
+    if artifact.approval_status == "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact is already approved. Delete it instead of rejecting it.",
+        )
+    if artifact.approval_status == "rejected":
+        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    if artifact.blob_path and blob_client is not None:
+        from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+        try:
+            await blob_client.delete_blob(pending_blob_path(artifact.blob_path))
+        except Exception as exc:  # noqa: BLE001
+            # A rejection that cannot clear its bytes still records the DECISION. The
+            # leftover is in the pending area, which nothing serves and no listing reads.
+            logger.warning(
+                "Artifact %s rejected but its pending bytes remain: %s",
+                artifact_id, type(exc).__name__,
+            )
+
+    artifact.approval_status = "rejected"
+    artifact.approved_by = getattr(request.state, "user_id", None)
+    artifact.approved_at = datetime.now(timezone.utc)
+    artifact.rejection_reason = body.reason
+
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_reject",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "reason": body.reason,
+            },
+        )
+    )
+    # See approve_artifact: the request-scoped dependency owns the commit.
+    logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
+    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+
+@artifacts_router.delete(
+    "/artifacts/{artifact_id}",
+    status_code=204,
+    dependencies=[Depends(require_permission("artifact:delete"))],
+)
+async def delete_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Destroy an artifact: the stored bytes AND the row. Irreversible.
+
+    THE ONE MUTATION ON AN OTHERWISE IMMUTABLE RESOURCE, and the asymmetry is
+    deliberate. `patch_artifact` refuses to change an artifact because a design document
+    that shifts under an approval it already received is worse than no edit at all. That
+    argument says nothing about REMOVING one, and the table accumulates things nobody
+    approved: a failed generation, a duplicate, and above all a row whose `blob_url` is
+    NULL because the upload failed while the row was recorded anyway — listed in the UI
+    as a downloadable document that cannot be downloaded, and previously unremovable.
+
+    ORDER MATTERS, and it is audit -> blob -> row:
+
+    1. The AuditEvent is written FIRST. It is the only record that survives, so it must
+       exist before anything is destroyed. Written into this transaction, so a later
+       failure rolls it back with everything else and no event claims a delete that did
+       not happen.
+    2. The blob next. If it cannot be deleted the row STAYS — orphaned bytes that
+       nothing points at are worse than a row the user can retry, because the row is at
+       least visible. A blob that was already missing is success, not failure: that is
+       precisely the failed-upload case this endpoint exists for.
+    3. The row last.
+
+    404 rather than 403 for an artifact outside the caller's tenant or projects, matching
+    every sibling route here: a 403 would confirm it exists.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, run.project_id)
+
+    blob_path = artifact.blob_path
+    # A legacy row holds a LOCAL FILESYSTEM path, not a blob name (see the note in
+    # download_artifact). Handing it to delete_blob would ask Azure to delete a blob
+    # named `C:\pwc_work\...`, which answers "not found" and reads like success.
+    is_blob = is_blob_path(blob_path, str(tenant_id))
+
+    db.add(
+        AuditEvent(
+            tenant_id=tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_delete",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "run_id": str(artifact.run_id),
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "blob_path": blob_path,
+                "size_bytes": artifact.size_bytes,
+                # Whether bytes ever existed to delete. False here means the artifact was
+                # a row pointing at nothing, which is a materially different event from
+                # destroying a real document and should not read the same in the log.
+                "had_stored_bytes": bool(artifact.blob_url) and is_blob,
+            },
+        )
+    )
+    await db.flush()
+
+    blob_deleted = False
+    if is_blob and blob_path:
+        blob_client = getattr(request.app.state, "blob_client", None)
+        if blob_client is not None:
+            try:
+                blob_deleted = await blob_client.delete_blob(blob_path)
+            except Exception as exc:  # noqa: BLE001
+                # Type name only: an Azure error can carry a SAS token or the account URL.
+                logger.warning(
+                    "Artifact %s blob delete failed: %s", artifact_id, type(exc).__name__
+                )
+                await db.rollback()
+                raise HTTPException(
+                    status_code=502,
+                    detail="The stored file could not be deleted, so the artifact was "
+                           "kept. Retry, or ask an administrator to check storage access.",
+                )
+
+    await db.delete(artifact)
+    await db.commit()
+
+    logger.info(
+        "Artifact %s deleted by %s (blob_deleted=%s, legacy_local=%s)",
+        artifact_id,
+        getattr(request.state, "user_id", None),
+        blob_deleted,
+        bool(blob_path) and not is_blob,
+    )
+    return Response(status_code=204)
 
 
 @artifacts_router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)
@@ -321,7 +616,20 @@ async def _get_artifact_or_404(
 
     Returns (Artifact, Run) tuple; raises 404 if not found or cross-tenant
     access is attempted (T-M4-05).
+
+    A NON-UUID ID IS A 404, NOT A 500. Not every id the frontend holds addresses a row:
+    `story_artifacts_from_run` synthesises story artifacts straight from a run's
+    requirements_payload with ids shaped `{run_id}:story:{source_key}`, because there is
+    no structured-story table. Comparing one of those to a uuid column makes Postgres
+    raise on the cast, which surfaced as a bare 500 from PATCH, DELETE and download
+    alike — an error that reads like a server fault when the real answer is "that id
+    does not name a stored artifact".
     """
+    try:
+        _uuid.UUID(str(artifact_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
     result = await db.execute(
         select(Artifact, Run)
         .join(Run, Artifact.run_id == Run.id)

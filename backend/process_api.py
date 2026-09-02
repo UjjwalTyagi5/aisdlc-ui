@@ -25,6 +25,7 @@ from agents_orchestrator.orchestrator.orchestrator_api import orchestrator_route
 from agents_orchestrator.orchestrator.copilot_api import copilot_router
 from agents_orchestrator.requirements_agent.requirements_agent_api import requirement_router_orchestrator
 from agents_orchestrator.design_architecture_agent.design_architecture_agent_api import design_router_orchestrator
+from agents_orchestrator.pm_agent.pm_agent_api import pm_router_orchestrator
 from agents_orchestrator.development_agent.development_agent_api import development_router_orchestrator
 from agents_orchestrator.code_review_agent.code_review_agent_api import code_review_router
 from agents_orchestrator.security_agent.security_agent_api import security_router
@@ -970,6 +971,10 @@ app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/requirem
 app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/ingestion_orchestrator", tags=["ingestion-orchestrator"], dependencies=[_VIEW_DEP])
 app.include_router(design_router_orchestrator, prefix="/sdlc/agent/design", tags=["design"], dependencies=[_VIEW_DEP])
 app.include_router(design_router_orchestrator, prefix="/sdlc/agent/design_orchestrator", tags=["design-orchestrator"], dependencies=[_VIEW_DEP])
+# Project Manager: sits between Design and Development. One prefix, not two — the
+# duplicate mounts above are legacy paths kept for clients that predate the rename, and
+# a new agent has no such history to carry.
+app.include_router(pm_router_orchestrator, prefix="/sdlc/agent/plan", tags=["plan"], dependencies=[_VIEW_DEP])
 # Development: active orchestrated router serves both the primary and legacy prefixes
 app.include_router(development_router_orchestrator, prefix="/sdlc/agent/development", tags=["development"], dependencies=[_VIEW_DEP])
 app.include_router(development_router_orchestrator, prefix="/sdlc/agent/development_orchestrator", tags=["development-orchestrator"], dependencies=[_VIEW_DEP])

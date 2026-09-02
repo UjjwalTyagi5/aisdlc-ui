@@ -32,6 +32,7 @@ _ARTIFACT_CHANNEL = "artifact_events"
 _COLUMN_MAP = {
     "requirements": "requirements_payload",
     "design": "design_artifacts",
+    "plan": "plan_artifacts",
     "development": "development_artifacts",
     "testing": "testing_artifacts",
     "code_review": "code_review_artifacts",

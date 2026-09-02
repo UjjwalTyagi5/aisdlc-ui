@@ -72,6 +72,55 @@ class BlobStorageClient:
         stream = await blob_client.download_blob()
         return await stream.readall()
 
+    async def delete_blob(self, blob_name: str) -> bool:
+        """Delete a blob. Returns True if it was removed, False if it was not there.
+
+        A MISSING BLOB IS NOT AN ERROR HERE. The caller deleting an artifact wants the
+        bytes gone; a blob that never existed — because the upload failed and the row was
+        recorded anyway, which is exactly the case that motivated the delete feature —
+        already satisfies that. Raising would leave the row undeletable precisely when it
+        is most useless.
+
+        Every OTHER failure (permission, network, an account outage) DOES raise, so the
+        caller can refuse to delete the row and avoid orphaning bytes it cannot reach.
+        """
+        from azure.core.exceptions import ResourceNotFoundError
+
+        container_client = self._client.get_container_client(self._container)
+        blob_client = container_client.get_blob_client(blob_name)
+        try:
+            await blob_client.delete_blob()
+            return True
+        except ResourceNotFoundError:
+            return False
+
+    async def move_blob(self, src: str, dst: str, content_type: str | None = None) -> str:
+        """Copy `src` to `dst`, verify, then delete `src`. Returns the new blob's URL.
+
+        USED BY APPROVAL, to promote a document out of the tenant's `_pending` prefix
+        into the project's real hierarchy path.
+
+        DOWNLOAD-AND-REUPLOAD RATHER THAN A SERVER-SIDE COPY. `start_copy_from_url`
+        would avoid pulling the bytes through this process, but it needs the source
+        readable by URL — meaning a user-delegation SAS minted per move, and a copy
+        whose completion is asynchronous and has to be polled. These are documents:
+        tens of kilobytes to a few megabytes. The simpler path is worth more than the
+        saved round trip, and it is synchronous, so the caller knows the bytes landed
+        before it updates the row.
+
+        THE SOURCE IS DELETED LAST, and only after the destination is read back and
+        compared. A failed verification leaves both copies, which is recoverable; a
+        source deleted against an unverified copy is not.
+        """
+        data = await self.download_bytes(src)
+        url = await self.upload_bytes(
+            data, dst, content_type=content_type or "application/octet-stream"
+        )
+        if await self.download_bytes(dst) != data:
+            raise RuntimeError("copy verification failed; source left in place")
+        await self.delete_blob(src)
+        return url
+
     def get_url(self, blob_name: str) -> str:
         """Return the blob URL without making a network call."""
         blob_client = self._client.get_blob_client(

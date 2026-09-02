@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -49,6 +50,68 @@ def _normalize_base_url(url: str) -> str:
     if u and not u.startswith(("http://", "https://")):
         u = "https://" + u
     return u
+
+
+def _jira_planning(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the planning values out of a Jira issue's fields.
+
+    JIRA HAS NO FIXED FIELD ID FOR STORY POINTS. It is a custom field whose id differs
+    per site — customfield_10016 on most Jira Cloud sites, 10026 and 10002 on others —
+    so there is no single key to read and no way to know which one this site uses
+    without asking. Scanning the known ids in order is the pragmatic answer; a site
+    using something else simply yields no estimate, which is honest, rather than a
+    wrong number.
+
+    `timeoriginalestimate` and friends are in SECONDS. Converting to hours here keeps
+    one unit in the canonical item instead of leaving every caller to remember.
+
+    The sprint field is an array of sprint objects (or, on older sites, of strings with
+    the name embedded); the LAST entry is the current one, because Jira appends on each
+    move and keeps the history.
+    """
+    def _num(*keys: str) -> Optional[float]:
+        for key in keys:
+            value = fields.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    estimate = _num(
+        "customfield_10016", "customfield_10026", "customfield_10002", "story_points"
+    )
+    seconds = _num("timeoriginalestimate")
+    if estimate is None and seconds is not None:
+        estimate = round(seconds / 3600.0, 2)
+
+    remaining = _num("timeestimate")
+    spent = _num("timespent")
+
+    iteration = ""
+    sprints = fields.get("customfield_10020") or fields.get("sprint") or []
+    if isinstance(sprints, list) and sprints:
+        last = sprints[-1]
+        if isinstance(last, dict):
+            iteration = str(last.get("name") or "")
+        elif isinstance(last, str):
+            # Older Jira returns "...,name=Sprint 3,startDate=..." rather than an object.
+            for part in last.split(","):
+                if part.strip().startswith("name="):
+                    iteration = part.split("=", 1)[1]
+                    break
+
+    return {
+        "estimate": estimate,
+        "iteration": iteration,
+        "start_date": str(fields.get("customfield_10015") or ""),
+        "due_date": str(fields.get("duedate") or ""),
+        "remaining_work": round(remaining / 3600.0, 2) if remaining is not None else None,
+        "completed_work": round(spent / 3600.0, 2) if spent is not None else None,
+    }
+
 
 
 class JiraConnector(BaseConnector):
@@ -195,6 +258,19 @@ class JiraConnector(BaseConnector):
                     status="not_supported",
                     description="Jira teams modelled differently; out of M6 scope",
                 ),
+                "list_sprints": CapabilityEntry(
+                    status="implemented",
+                    description="Sprints from the project's first Agile board; Kanban boards have none",
+                ),
+                "team_capacity": CapabilityEntry(
+                    status="not_supported",
+                    description=(
+                        "Jira Software has no capacity API. Capacity there lives in a "
+                        "plugin (Tempo, Structure) or in calendars, so there is nothing "
+                        "to read without knowing which. Use Microsoft Graph calendars, "
+                        "or supply capacity to the planner directly."
+                    ),
+                ),
                 "fetch_hierarchy": CapabilityEntry(
                     status="not_supported",
                     description="Jira hierarchy modelling deferred to future plan",
@@ -328,6 +404,7 @@ class JiraConnector(BaseConnector):
             "list_items": self.list_stories,
             "fetch_item_detail": self.fetch_item_detail,
             "list_states": self.list_states,
+            "list_sprints": self.list_sprints,
             "list_item_types": self.list_item_types,
         }
         fn = _MAP.get(operation)
@@ -412,6 +489,49 @@ class JiraConnector(BaseConnector):
             return {}
 
         return resp.json()
+
+    async def list_sprints(self, project: str, team: str = "") -> List[Dict[str, Any]]:
+        """The project's sprints, via the Agile API.
+
+        TWO CALLS, because sprints hang off a BOARD and not off a project: a project can
+        have several boards (a Scrum board and a Kanban board, say) and only Scrum boards
+        have sprints at all. The first board for the project is used, which is the common
+        single-board case; a project whose sprints live on a second board yields nothing
+        rather than the wrong board's sprints.
+
+        `team` is accepted and ignored — Jira has no team concept here — so the two
+        providers share one signature and the agent does not branch on which board it is
+        talking to.
+        """
+        boards, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/agile/1.0/board?projectKeyOrId={quote(project, safe='')}"
+        )
+        values = (boards or {}).get("values") or []
+        if not values:
+            return []
+        board_id = values[0].get("id")
+
+        data, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/agile/1.0/board/{board_id}/sprint?maxResults=200"
+        )
+        out: List[Dict[str, Any]] = []
+        for s in (data or {}).get("values", []):
+            state = str(s.get("state") or "").lower()
+            out.append(
+                {
+                    "id": str(s.get("id", "")),
+                    "name": s.get("name", ""),
+                    "path": s.get("name", ""),
+                    "start_date": str(s.get("startDate") or ""),
+                    "finish_date": str(s.get("endDate") or ""),
+                    # Mapped to ADO's vocabulary so a caller reads one set of values
+                    # whichever board it is talking to.
+                    "time_frame": {
+                        "active": "current", "future": "future", "closed": "past",
+                    }.get(state, state),
+                }
+            )
+        return out
 
     async def _jira_request_with_retry(
         self,
@@ -508,6 +628,7 @@ class JiraConnector(BaseConnector):
             project=project,
             raw=row,
             priority=priority,
+            **_jira_planning(fields),
         )
 
     # ── Preserved helpers (test_board_provider_contracts.py compatibility) ──

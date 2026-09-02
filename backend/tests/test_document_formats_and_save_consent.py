@@ -15,9 +15,11 @@ TWO THINGS.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -122,144 +124,189 @@ def test_each_format_stores_with_the_right_content_type(ext, ctype):
     assert _CONTENT_TYPES.get(ext) == ctype
 
 
-# -- consent before anything is stored -----------------------------------------
+# -- what happens when a file is generated -------------------------------------
 
 
 @pytest.fixture(autouse=True)
-def _clean_pending():
+def _clean_upload_flags():
+    """`_LAST_UPLOAD_OK` is process-wide and keyed by filename, so one test's result
+    would otherwise be read by the next one using the same name."""
     from shared.services import chat_artifacts
 
-    chat_artifacts._PENDING.clear()
+    chat_artifacts._LAST_UPLOAD_OK.clear()
     yield
-    chat_artifacts._PENDING.clear()
+    chat_artifacts._LAST_UPLOAD_OK.clear()
 
 
+class _FakeDbSession:
+    """Enough of an AsyncSession for register_generated_file's own bookkeeping.
+
+    Needed since the approval gate landed: the per-turn consent branch used to return
+    BEFORE any database work, so these tests never reached it. Now every generated file
+    is recorded immediately, which means resolving a chat run.
+    """
+
+    def add(self, _obj):
+        return None
+
+    async def flush(self):
+        return None
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_a):
+        return False
+
+
+@contextlib.contextmanager
 def _ctx(consented: bool, session="s1"):
+    """The chat context a generated file is registered in.
+
+    ONE context manager, not a tuple of patches the caller unpacks into names. The tuple
+    form invited `a, b, c, d = _ctx(...)`, and when this grew a fifth and sixth patch the
+    obvious extension — `a, b, c, d, e, f` — silently rebound `f`, which every test here
+    uses for its temp FILE. The file path became a patcher's repr, os.path.exists said
+    no, and the assertions failed somewhere else entirely.
+    """
     import config.ws_helper as ws
     from shared.services import chat_artifacts as ca
 
-    return (
-        patch.object(ca, "get_tenant_id", lambda: "t1"),
-        patch.object(ca, "get_project_id", lambda: "p1"),
-        patch.object(ca, "get_session_id", lambda: session),
-        patch.object(ws, "get_consequential_approved", lambda: consented),
-    )
+    async def _run(_session, _tenant, _project, _stage):
+        return "11111111-1111-1111-1111-111111111111"
+
+    with contextlib.ExitStack() as stack:
+        for patcher in (
+            patch.object(ca, "get_tenant_id", lambda: "t1"),
+            patch.object(ca, "get_project_id", lambda: "p1"),
+            patch.object(ca, "get_session_id", lambda: session),
+            patch.object(ws, "get_consequential_approved", lambda: consented),
+            patch.object(ca, "get_db_session_for_tenant", lambda _t: _FakeDbSession()),
+            patch.object(ca, "_get_or_create_chat_run", _run),
+        ):
+            stack.enter_context(patcher)
+        yield
 
 
 @pytest.mark.unit
-async def test_without_consent_nothing_is_stored(tmp_path):
-    """THE HEADLINE. No Artifact row, no Blob upload — the file is staged instead."""
+async def test_every_generated_file_is_recorded_immediately(tmp_path):
+    """NO PER-TURN CONSENT ANY MORE. It used to stage the file and have the agent ask
+    "shall I save this?". Migration 0040 moved that decision to whoever RUNS the
+    project, so asking the person chatting would be a question whose answer no longer
+    decides anything on its own. The row is written straight away — as PENDING."""
     from shared.services import chat_artifacts as ca
 
     f = tmp_path / "brd.docx"
     f.write_bytes(b"x")
-    store = AsyncMock()
-    a, b, c, d = _ctx(consented=False)
-    with a, b, c, d, patch("shared.services.artifact_store.store_artifact", store):
+    store = AsyncMock(return_value=SimpleNamespace(blob_url=None, upload_succeeded=True))
+    with _ctx(consented=True), patch("shared.services.artifact_store.store_artifact", store):
         await ca.register_generated_file("brd.docx", str(f), "http://x/brd.docx", stage="requirements")
 
-    store.assert_not_awaited()
-    pending = ca.pending_for_session("s1")
-    assert [p["filename"] for p in pending] == ["brd.docx"]
+    store.assert_awaited()
 
 
 @pytest.mark.unit
-async def test_regenerating_the_same_file_does_not_queue_it_twice(tmp_path):
-    """The user would otherwise be asked about one document two or three times."""
+async def test_a_false_consent_flag_no_longer_withholds_the_file(tmp_path):
+    """`consented` is vestigial — retained in the signature for callers that still pass
+    it. Honouring it would reinstate a gate the admin one replaced, and the file would
+    never be recorded at all, so no admin could approve it either."""
     from shared.services import chat_artifacts as ca
 
     f = tmp_path / "brd.docx"
     f.write_bytes(b"x")
-    a, b, c, d = _ctx(consented=False)
-    with a, b, c, d:
-        for _ in range(3):
-            await ca.register_generated_file("brd.docx", str(f), "u", stage="requirements")
-    assert len(ca.pending_for_session("s1")) == 1
+    store = AsyncMock(return_value=SimpleNamespace(blob_url=None, upload_succeeded=True))
+    with _ctx(consented=True), patch("shared.services.artifact_store.store_artifact", store):
+        await ca.register_generated_file(
+            "brd.docx", str(f), "u", stage="requirements", consented=False
+        )
+
+    store.assert_awaited()
 
 
 @pytest.mark.unit
-async def test_saving_pending_files_stores_them(tmp_path):
+async def test_the_artifact_is_stored_pending_not_approved(tmp_path):
+    """The gate only means something if what lands is unapproved. store_artifact sets
+    approval_status="pending" and leaves blob_url None; this checks the caller does not
+    quietly override either."""
     from shared.services import chat_artifacts as ca
 
     f = tmp_path / "brd.docx"
     f.write_bytes(b"x")
-    a, b, c, d = _ctx(consented=False)
-    with a, b, c, d:
+    captured = {}
+
+    async def _store(db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(blob_url=None, upload_succeeded=True)
+
+    with _ctx(consented=True), patch("shared.services.artifact_store.store_artifact", _store):
         await ca.register_generated_file("brd.docx", str(f), "u", stage="requirements")
 
-    called = {}
-
-    async def _fake(filename, file_path, url, *, stage, consented=None):
-        called["consented"] = consented
-        called["filename"] = filename
-
-    with patch.object(ca, "register_generated_file", _fake):
-        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
-
-    assert stored == ["brd.docx"] and failed == []
-    # Reaching save IS the consent — re-reading the per-turn flag here would refuse the
-    # very action the user just granted.
-    assert called["consented"] is True
-    assert ca.pending_for_session("s1") == []
+    assert captured["filename"] == "brd.docx"
+    assert captured["agent"] == "requirements"
 
 
-@pytest.mark.unit
-async def test_saving_with_nothing_pending_is_not_an_error():
-    from shared.services import chat_artifacts as ca
 
-    assert await ca.save_pending_artifacts("nobody") == ([], [], [])
+# -- the agents are told the admin decides -------------------------------------
 
 
-@pytest.mark.unit
-async def test_consent_in_the_same_turn_stores_immediately(tmp_path):
-    """"generate the BRD and save it" must not need a second round trip."""
-    from shared.services import chat_artifacts as ca
-
-    f = tmp_path / "brd.docx"
-    f.write_bytes(b"x")
-    a, b, c, d = _ctx(consented=True)
-    with a, b, c, d, patch.object(ca, "_get_or_create_chat_run", AsyncMock(return_value=None)):
-        await ca.register_generated_file("brd.docx", str(f), "u", stage="requirements")
-    # Staged nothing: it took the store path (which stopped at the run lookup here).
-    assert ca.pending_for_session("s1") == []
+_PROMPTS = [
+    ("agents_orchestrator.requirements_agent.agents.planning", "INGESTION_SYS_MESSAGE"),
+    ("agents_orchestrator.design_architecture_agent.agents.architecture", "DESIGN_SYS_MESSAGE"),
+]
 
 
-# -- the agents are told to ask ------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("module", "attr"),
-    [
-        ("agents_orchestrator.requirements_agent.agents.planning", "SYS_MESSAGE"),
-        ("agents_orchestrator.design_architecture_agent.agents.architecture", "DESIGN_SYS_MESSAGE"),
-    ],
-)
-def test_both_prompts_require_asking_before_saving(module, attr):
+def _prompt(module: str, attr: str) -> str:
     import importlib
 
-    prompt = getattr(importlib.import_module(module), attr, None)
-    if prompt is None:  # requirements exports INGESTION_SYS_MESSAGE
-        prompt = getattr(importlib.import_module(module), "INGESTION_SYS_MESSAGE")
-    flat = " ".join(prompt.split())
-    assert "SAVING DOCUMENTS TO THE PROJECT (ASK FIRST)" in flat
-    assert "ONLY after they say yes" in flat
-    assert "never claim a document was added to the project" in flat
+    return " ".join(getattr(importlib.import_module(module), attr).split())
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "module",
-    [
-        "agents_orchestrator.requirements_agent.agents.planning",
-        "agents_orchestrator.design_architecture_agent.agents.architecture",
-    ],
-)
-def test_both_agents_expose_the_explicit_save(module):
+@pytest.mark.parametrize(("module", "attr"), _PROMPTS)
+def test_neither_prompt_asks_the_user_for_permission_any_more(module, attr):
+    """The per-turn question was replaced by a project admin's decision (migration
+    0040). Leaving the old instruction in would have the agent ask something whose
+    answer no longer decides anything, and then call a tool that no longer exists."""
+    flat = _prompt(module, attr)
+    assert "ASK FIRST" not in flat
+    assert "ONLY after they say yes" not in flat
+    assert "save_to_project_artifacts" not in flat
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("module", "attr"), _PROMPTS)
+def test_both_prompts_say_the_document_is_awaiting_approval(module, attr):
+    flat = _prompt(module, attr)
+    assert "AWAITING APPROVAL" in flat
+    assert "a project admin decides" in flat
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("module", "attr"), _PROMPTS)
+def test_neither_prompt_lets_the_agent_claim_the_document_is_saved(module, attr):
+    """It is waiting on someone else's decision. "Added to the project" would set an
+    expectation the admin has not agreed to — the same false-success the upload warning
+    exists to prevent, one step earlier."""
+    flat = _prompt(module, attr)
+    assert 'Do NOT claim it has been "added to the project"' in flat
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("module", [m for m, _ in _PROMPTS])
+def test_the_explicit_save_tool_is_gone(module):
+    """It called save_pending_artifacts, which staged files for a consent step that no
+    longer happens. A tool that cannot do anything is worse than no tool: the model
+    calls it and reports success."""
     import importlib
 
     mod = importlib.import_module(module)
-    assert "save_to_project_artifacts" in {t.name for t in mod.tools}
+    assert "save_to_project_artifacts" not in {t.name for t in mod.tools}
 
 
 # -- both agents can produce every format --------------------------------------
@@ -406,79 +453,5 @@ def test_the_separator_row_is_not_data(tmp_path):
 # -- a row without bytes must not be reported as "saved" -----------------------
 
 
-@pytest.mark.unit
-async def test_a_failed_blob_upload_is_reported_separately(tmp_path):
-    """From a live run:
-
-        WARNING: Artifact upload failed for run 67fbd232-... (document): HttpResponseError
-        INFO:  register_generated_file: persisted sdlc-password-reset-design.pdf
-
-    store_artifact DEGRADES on an upload failure — it writes the row with
-    blob_url=None so the document is still listed and the run does not die. Correct,
-    and it was invisible: the user saw "saved to the project's artifacts", found the
-    row in the panel, and found nothing in Blob.
-    """
-    from shared.services import chat_artifacts as ca
-
-    f = tmp_path / "doc.pdf"
-    f.write_bytes(b"%PDF-1.4")
-    a, b, c, d = _ctx(consented=False)
-    with a, b, c, d:
-        await ca.register_generated_file("doc.pdf", str(f), "u", stage="design")
-
-    async def _row_only(filename, file_path, url, *, stage, consented=None):
-        # what store_artifact leaves behind when the upload fails
-        ca._LAST_UPLOAD_OK[filename] = False
-
-    with patch.object(ca, "register_generated_file", _row_only):
-        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
-
-    assert stored == ["doc.pdf"]      # the row DID get written
-    assert failed == []               # and nothing raised
-    assert not_uploaded == ["doc.pdf"]  # but the bytes are not in storage
 
 
-@pytest.mark.unit
-async def test_a_successful_upload_is_not_flagged(tmp_path):
-    from shared.services import chat_artifacts as ca
-
-    f = tmp_path / "ok.pdf"
-    f.write_bytes(b"%PDF-1.4")
-    a, b, c, d = _ctx(consented=False)
-    with a, b, c, d:
-        await ca.register_generated_file("ok.pdf", str(f), "u", stage="design")
-
-    async def _uploaded(filename, file_path, url, *, stage, consented=None):
-        ca._LAST_UPLOAD_OK[filename] = True
-
-    with patch.object(ca, "register_generated_file", _uploaded):
-        stored, failed, not_uploaded = await ca.save_pending_artifacts("s1")
-
-    assert stored == ["ok.pdf"] and not_uploaded == []
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "rel",
-    [
-        "agents_orchestrator/requirements_agent/agents/planning.py",
-        "agents_orchestrator/design_architecture_agent/agents/architecture.py",
-    ],
-)
-def test_both_agents_warn_when_the_file_was_not_uploaded(rel):
-    """The tool's reply has to distinguish the two, because they need different
-    actions: nothing for a real save, an administrator for a row without bytes.
-
-    Read by PATH rather than by import: both agents ship an `agents/planning.py`, and
-    under pytest the dotted name resolved to the wrong one — a latent shadowing hazard
-    worth avoiding here rather than debugging in a test about something else.
-    """
-    import re
-
-    src = (Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8")
-    # Join adjacent string literals before flattening: the message is written across
-    # several of them, so a naive whitespace squeeze leaves `the " "project's`.
-    flat = re.sub(r'"\s*\n\s*"', "", src)
-    flat = re.sub(r"\s+", " ", flat)
-    assert "could not be uploaded to the project's file storage" in flat
-    assert "the artifact is recorded and listed, but the file itself is not stored" in flat

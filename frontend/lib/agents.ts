@@ -11,7 +11,7 @@ import { AGENT_OWNER_ROLE, ROLE_META } from "@/lib/roles";
  */
 
 /**
- * The eight shared agents in Track 1 hand-off order (PRD §7) — the default
+ * The nine shared agents in Track 1 hand-off order (PRD §7) — the default
  * roster, and the one used by surfaces that are not yet track-aware.
  *
  * Prefer `agentsForTrack(project.track)` wherever a project is in scope:
@@ -21,6 +21,7 @@ import { AGENT_OWNER_ROLE, ROLE_META } from "@/lib/roles";
 export const PHASE_ORDER: readonly Phase[] = [
   "requirements",
   "design",
+  "plan",
   "development",
   "review",
   "security",
@@ -50,6 +51,7 @@ export const PHASE_ALL: readonly Phase[] = [
 export const PHASE_LABEL: Record<Phase, string> = {
   requirements: "Requirements",
   design: "Design",
+  plan: "Plan",
   development: "Development",
   review: "Code Review",
   security: "Security",
@@ -68,6 +70,8 @@ export const PHASE_LABEL: Record<Phase, string> = {
 export const PHASE_DESCRIPTION: Record<Phase, string> = {
   requirements: "Turns intent and conversations into structured requirements and work items.",
   design: "Produces HLD/LLD, C4 diagrams, API contracts, database schema, and ADRs.",
+  plan: "Turns an accepted design into a schedule: work breakdown, estimates, sprints, and who is on what."
+    ,
   development: "Generates code in a sandboxed runtime with command allowlists and secret redaction.",
   review: "Reviews changes against requirements, design, and quality standards.",
   security: "Dependency scanning, SAST, and secret detection with risk scoring.",
@@ -109,6 +113,7 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
 export const BUILT_AGENTS: readonly Phase[] = [
   "requirements",
   "design",
+  "plan",
   "security",
   "documentation",
   "development",
@@ -131,6 +136,7 @@ export const AGENT_LABEL: Record<AgentType, string> = {
 export const ROUTABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>([
   "requirements",
   "design",
+  "plan",
   "development",
   "review",
   "security",
@@ -237,6 +243,15 @@ export const GATE_POLICY: Record<Phase, GatePolicy> = {
     title: "Gate: accept the design",
     description:
       "Sign-off accepts the design and unlocks Development. Marking the epic “Design Complete” is a separate Consequential write.",
+    mandatory: false,
+  },
+  plan: {
+    type: "approval_required",
+    capabilityClass: "signoff",
+    ownerLabel: owner("plan"),
+    title: "Gate: commit to the plan",
+    description:
+      "Sign-off commits the schedule and the people on it, and unlocks Development. Writing sprints and assignments to Jira/ADO is a separate Consequential approval.",
     mandatory: false,
   },
   development: {

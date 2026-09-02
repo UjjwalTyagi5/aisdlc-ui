@@ -737,43 +737,50 @@ async def save_architecture_pdf(content: str = "", filename: str = "architecture
         f"Saved '{filename}'."
         + (f" Download it here: {url}" if url else "")
         + " It is NOT yet in the project's artifacts — ask the user whether to save it "
-          "there, and call save_to_project_artifacts if they agree."
+          "there. It is awaiting a project admin's approval."
     )
 
 
 @tool
-async def save_to_project_artifacts() -> str:
-    """Store the documents generated in this chat into the project's artifacts.
+async def read_project_requirements() -> str:
+    """Load this project's requirements — the stories, their descriptions and their
+    acceptance criteria — from the Requirements stage.
 
-    Call this ONLY after the user has agreed. Generated files are downloadable straight
-    away; adding them to the project's artifacts uploads them to shared, durable
-    storage, which is the user's decision to make. Ask first, then call this on a yes.
+    Call this when the user asks you to design something FOR THIS PROJECT, or refers to
+    "the requirements", "the stories", "the backlog" or similar. Do NOT call it when the
+    user is asking you to design something they have described themselves in the chat:
+    their words are the requirement then, and loading the project's backlog on top of
+    them would design the wrong system.
+
+    Returns the requirements as text, or says plainly that the project has none.
+
+    THIS REPLACED AN AUTOMATIC INJECTION. The Design page used to push every story into
+    the agent's context before the user had typed anything, behind a "From requirements
+    / Freeform" toggle that defaulted to on. That fed the agent whatever the board held
+    — Epics and project-setup Tasks included — and it designed a system for them. Making
+    it a tool is what `_build_session_context` argued for all along: context the model
+    chooses to load, not an injection it cannot decline.
     """
-    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
+    from config.context_broker import build_context_for_project  # noqa: PLC0415
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
 
-    stored, failed, not_uploaded = await save_pending_artifacts(get_session_id() or "")
-    if not stored and not failed:
-        return "There are no generated documents waiting to be saved."
-    parts = []
-    if stored:
-        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
-    if not_uploaded:
-        # THE ROW EXISTS AND THE BYTES DO NOT. Saying only "saved" here is how a user
-        # finds the document listed in the artifacts panel and absent from storage,
-        # and has no way to tell which happened. Relay this verbatim.
-        parts.append(
-            f"WARNING: {', '.join(not_uploaded)} could not be uploaded to the "
-            "project's file storage — the artifact is recorded and listed, but the "
-            "file itself is not stored and cannot be downloaded from the artifacts "
-            "panel. The chat download link still works. An administrator needs to "
-            "check the storage configuration."
+    project_id, tenant_id = get_project_id(), get_tenant_id()
+    if not project_id or not tenant_id:
+        # A standalone conversation outside any project. Say so rather than returning
+        # an empty string the model would read as "the project has no requirements".
+        return (
+            "This conversation is not attached to a project, so there are no stored "
+            "requirements to read. Design from what the user has described."
         )
-    if failed:
-        parts.append(
-            f"Could not save: {', '.join(failed)} — they are still downloadable and "
-            "can be retried."
+
+    context = await build_context_for_project(project_id, tenant_id, "design")
+    if not context:
+        return (
+            "This project has no requirements recorded yet. Design from what the user "
+            "has described, or ask them what the system needs to do."
         )
-    return " ".join(parts)
+    return context
+
 
 
 @tool
@@ -822,8 +829,12 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
 
     try:
         await render_document(content, full_path, title=name.rsplit(".", 1)[0])
-    except ValueError as exc:
-        return f"Error: {exc}"
+    except ValueError:
+        # render_document refuses an extension it has no renderer for. Its message is
+        # ours, not a connector's, but the sweep in test_board_write_failures cannot
+        # tell those apart from source text — and the filename already names the
+        # offending extension, so interpolating the exception adds nothing.
+        return f"Error: '{name}' has an unsupported extension. Supported: {supported_list()}"
     except Exception as exc:  # noqa: BLE001
         return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
 
@@ -835,6 +846,9 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
 
 tools = [
     read_document,
+    # The project's requirements, ON DEMAND. Replaced the Design page's automatic
+    # injection, which pushed every board item into context before the user had typed.
+    read_project_requirements,
     generate_architecture,
     generate_architecture_from_context,
     update_response,
@@ -847,7 +861,6 @@ tools = [
     # written to the project's shared artifact storage.
     save_architecture_pdf,
     export_document,
-    save_to_project_artifacts,
     generate_ppt,
     generate_diagram,
     render_diagram_via_kroki,
@@ -897,16 +910,32 @@ from Requirements") and ask what they want built.
 When you ARE asked, use the context you have: pass those stories as `context`, and
 never ask the user to re-supply requirements that are already in front of you.
 
+── THE PROJECT'S REQUIREMENTS ARE A TOOL CALL, NOT SOMETHING YOU ARE HANDED ──────
+You do NOT automatically receive this project's stories. Call
+`read_project_requirements` to load them.
 
-── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
-A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
-ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
-whole project can see — and it is the user's decision, not yours.
-- After generating a document, tell the user it is ready, give the download link, and
-  ASK whether to add it to the project's artifacts.
-- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
-  and never claim a document was added to the project unless that tool confirmed it.
-- If they say no, do nothing: the file stays downloadable from the chat.
+CALL IT when the user asks you to design something FOR THIS PROJECT, or refers to
+"the requirements", "the stories", "the backlog", "what we captured" or similar.
+Call it BEFORE designing in that case — designing from memory when stored
+requirements exist produces a system nobody asked for.
+
+DO NOT CALL IT when the user describes what they want in the chat. Their words ARE
+the requirement then. Loading the project's backlog on top of a description the user
+just gave you designs the wrong system — and a project's board holds Epics and
+setup Tasks alongside real stories, none of which are things to design.
+
+DO NOT CALL IT on a greeting. "hi" is not a request to design anything.
+
+
+── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, THEN APPROVED) ────────────────────
+Every document you generate is recorded in the project's artifacts automatically, as
+AWAITING APPROVAL. You do NOT ask whether to save it, and there is no tool to call.
+- After generating a document, tell the user it is ready and give the download link.
+- Then say it has been submitted for approval, and that a project admin decides whether
+  it joins the project's shared record.
+- Do NOT claim it has been "added to the project" or "saved to artifacts" — it is
+  waiting on someone else's decision, and saying otherwise sets the wrong expectation.
+- The download link works immediately either way.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
 export_document produces EVERY document format — the format comes from the FILENAME

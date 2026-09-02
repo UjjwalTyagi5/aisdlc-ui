@@ -7,12 +7,12 @@ import { toast } from "sonner";
 import { FileText, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 
 import { AdrViewer } from "@/components/app/adr-viewer";
+import { DocumentCard } from "@/components/app/document-card";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -22,13 +22,11 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
 import { MonacoViewer } from "@/components/app/monaco-viewer";
 import { OpenApiViewer } from "@/components/app/openapi-viewer";
-import {
-  InlineCommentThread,
-  type InlineComment,
-} from "@/components/app/inline-comment-thread";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
+import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { getRunSteps, listRuns } from "@/lib/api/runs";
@@ -80,10 +78,6 @@ export default function DesignPage() {
   });
   // The upstream Requirements-phase stories — the Design agent designs FROM these.
   // Distinct query key from the design artifacts above so the two caches don't clash.
-  const reqStoriesQ = useQuery({
-    queryKey: ["artifacts", "project", projectId, "requirements"],
-    queryFn: () => listArtifacts(projectId, { phase: "requirements" }),
-  });
   const runsQ = useQuery({
     queryKey: qk.runs.forProject(projectId),
     queryFn: () => listRuns({ projectId, pageSize: 20 }),
@@ -92,70 +86,6 @@ export default function DesignPage() {
   const designs = React.useMemo(
     () => (artifactsQ.data ?? []).filter((a) => DESIGN_TYPES.includes(a.type)),
     [artifactsQ.data],
-  );
-
-  const requirementStories = React.useMemo(
-    () => (reqStoriesQ.data ?? []).filter((a) => a.type === "story"),
-    [reqStoriesQ.data],
-  );
-
-  // ADO source key for a story = body.traceability.jiraIssueKey.
-  const storyRef = React.useCallback(
-    (a: Artifact): string | undefined =>
-      a.body.kind === "story" ? a.body.traceability?.jiraIssueKey : undefined,
-    [],
-  );
-
-  // Ref + title of every requirements story — lightweight index for the agent.
-  const allStories = React.useMemo(
-    () =>
-      requirementStories
-        .map((s) =>
-          s.body.kind === "story"
-            ? {
-                ref: storyRef(s),
-                title: s.body.title,
-                // The board's own type. Without it an Epic and three board-setup
-                // Tasks reach the Design agent indistinguishable from user stories,
-                // and it designs a system for whatever it is handed.
-                type: s.body.workItemType || undefined,
-              }
-            : null,
-        )
-        .filter(
-          (s): s is { ref: string | undefined; title: string; type: string | undefined } =>
-            !!s,
-        ),
-    [requirementStories, storyRef],
-  );
-
-  // Full content of each story (AC given/when/then rows flattened to lines) so the
-  // design agent has everything it needs to design from without re-fetching the board.
-  const allStoryContent = React.useMemo(
-    () =>
-      requirementStories
-        .map((a) => {
-          if (a.body.kind !== "story") return null;
-          const ac = (a.body.acceptanceCriteria ?? [])
-            .map((c) =>
-              [
-                c.given && `Given ${c.given}`,
-                c.when && `When ${c.when}`,
-                c.then && `Then ${c.then}`,
-              ]
-                .filter(Boolean)
-                .join(" "),
-            )
-            .filter(Boolean);
-          return {
-            ref: storyRef(a),
-            title: a.body.title,
-            description: a.body.description,
-            acceptance_criteria: ac,
-          };
-        })
-        .filter((s): s is NonNullable<typeof s> => !!s),
-    [requirementStories, storyRef],
   );
 
   const selectedFromUrl = searchParams.get("artifact");
@@ -175,18 +105,27 @@ export default function DesignPage() {
     [router, projectId, searchParams],
   );
 
+  const approval = useArtifactApproval(projectId);
+
+  const deletion = useDeleteArtifact(projectId, {
+    onDeleted: (a) => {
+      // `selected` resolves through designs.find(), so it goes null on its own once the
+      // list refetches — but ?artifact= would linger in the URL, and a copied link would
+      // point at an artifact that no longer exists.
+      if (selectedFromUrl === a.id) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/design${qs ? `?${qs}` : ""}`);
+      }
+    },
+  });
+
   // Chat drawer — talk directly to the Design agent. It consumes the imported user
   // stories through `context.requirements` (the backend formats pipeline_context
   // .requirements into the agent input).
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
-  // Design source: "requirements" threads the approved stories into the agent's
-  // context; "freeform" sends none, so the agent designs purely from the chat
-  // prompt (a deliberate standalone choice, not just "no stories exist").
-  const [designSource, setDesignSource] = React.useState<"requirements" | "freeform">(
-    "requirements",
-  );
-  const fromRequirements = designSource === "requirements";
   const chat = useAgentChat({
     agent: "design",
     projectId,
@@ -200,13 +139,10 @@ export default function DesignPage() {
       project_id: projectId,
       page: "Design",
       artifactTitle: selected?.title,
-      // Freeform mode omits requirements entirely → the agent works standalone.
-      requirements: fromRequirements
-        ? {
-            all_stories: allStories,
-            selected_stories: allStoryContent,
-          }
-        : undefined,
+      // NO REQUIREMENTS ARE INJECTED. The agent calls read_project_requirements when
+      // the conversation warrants it. Pushing every story in before the user had typed
+      // fed it whatever the board held — Epics and setup Tasks included — and it
+      // designed a system for them.
     },
   });
 
@@ -309,41 +245,6 @@ export default function DesignPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="inline-flex items-center rounded-md border p-0.5 text-xs"
-              role="group"
-              aria-label="Design source"
-            >
-              <button
-                type="button"
-                aria-pressed={fromRequirements}
-                onClick={() => setDesignSource("requirements")}
-                className={cn(
-                  "rounded px-2 py-1 font-medium transition-colors",
-                  fromRequirements
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                From requirements
-                {requirementStories.length > 0 && (
-                  <span className="ml-1 opacity-70">{requirementStories.length}</span>
-                )}
-              </button>
-              <button
-                type="button"
-                aria-pressed={!fromRequirements}
-                onClick={() => setDesignSource("freeform")}
-                className={cn(
-                  "rounded px-2 py-1 font-medium transition-colors",
-                  !fromRequirements
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                Freeform
-              </button>
-            </div>
             <ModelSelector
               aria-label="Design agent model"
               projectId={projectId}
@@ -370,10 +271,13 @@ export default function DesignPage() {
             items={artifactsQ.isLoading ? null : designs}
             selectedId={selected?.id}
             onSelect={selectArtifact}
+            onDelete={deletion.onDelete}
+            deletingId={deletion.deletingId}
             isLoading={artifactsQ.isLoading}
             emptyTitle="No design artifacts yet"
             emptyDescription="Trigger the Design agent once Requirements are approved."
           />
+          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
@@ -417,7 +321,7 @@ export default function DesignPage() {
                   </p>
                 </header>
 
-                <ArtifactViewer artifact={selected} />
+                <ArtifactViewer artifact={selected} approval={approval} />
 
                 <ApprovalCard
                   status={selected.status}
@@ -459,19 +363,6 @@ export default function DesignPage() {
                       : null
                   }
                 />
-
-                <section className="space-y-3">
-                  <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
-                    Comments
-                  </h3>
-                  <InlineCommentThread
-                    comments={DEMO_COMMENTS}
-                    currentUser={me}
-                    onReply={async () => {
-                      toast.message("Comments wire to the real thread API in Chunk 15");
-                    }}
-                  />
-                </section>
               </div>
             ) : (
               <EmptyState
@@ -518,7 +409,13 @@ export default function DesignPage() {
 
 // ───────── Viewer switcher ─────────
 
-function ArtifactViewer({ artifact }: { artifact: Artifact }) {
+function ArtifactViewer({
+  artifact,
+  approval,
+}: {
+  artifact: Artifact;
+  approval: ReturnType<typeof useArtifactApproval>;
+}) {
   const { body } = artifact;
   switch (body.kind) {
     case "c4_diagram":
@@ -536,7 +433,26 @@ function ArtifactViewer({ artifact }: { artifact: Artifact }) {
       );
     case "adr":
       return <AdrViewer markdown={body.markdown} />;
+    case "document":
+      return (
+        <DocumentCard
+          artifactId={artifact.id}
+          filename={body.filename}
+          contentType={body.contentType}
+          sizeBytes={body.sizeBytes}
+          stored={body.stored}
+          awaitingApproval={body.awaitingApproval}
+          rejected={body.rejected}
+          // Handlers only for someone who may decide — the card renders no controls
+          // without them, so an unprivileged viewer never sees a button that 403s.
+          onApprove={approval.canDecide ? () => approval.approve(artifact.id) : undefined}
+          onReject={approval.canDecide ? () => approval.reject(artifact.id) : undefined}
+          deciding={approval.decidingId === artifact.id}
+        />
+      );
     case "raw":
+      // AdrViewer captions its output "Architecture Decision Record", which is right
+      // for an ADR and wrong for everything else that lands here.
       return <AdrViewer markdown={body.markdown} />;
     default:
       return (
@@ -549,12 +465,3 @@ function ArtifactViewer({ artifact }: { artifact: Artifact }) {
   }
 }
 
-const DEMO_COMMENTS: InlineComment[] = [
-  {
-    id: "c1",
-    author: "agent",
-    body: "Idempotency-Key is now required. Clients must persist keys until the replay completes or 409s.",
-    createdAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-    severity: "suggestion",
-  },
-];

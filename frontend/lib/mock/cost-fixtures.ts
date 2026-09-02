@@ -306,6 +306,7 @@ const AGENT_MODEL_MIX: Record<Phase, Partial<Record<string, number>>> = {
   strategy: {},
   migration_mapping: {},
   validation: {},
+  plan: {},
   data_engineering: {},
 };
 

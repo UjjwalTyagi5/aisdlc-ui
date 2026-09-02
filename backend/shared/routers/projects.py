@@ -29,6 +29,7 @@ import json
 import uuid
 from datetime import date
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
@@ -753,6 +754,35 @@ async def list_board_projects(
     "/{project_id}/ingest-board",
     dependencies=[Depends(require_permission("run:create"))],
 )
+def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -> str:
+    """A browsable URL for a work item, or "" if this provider is not known.
+
+    The two supported boards address items differently — Jira by issue key under
+    /browse, Azure DevOps by numeric id under the team project — so there is no single
+    template. An unknown provider returns "" and the UI shows the key as plain text,
+    which is what it did for every provider before this existed.
+
+    Never raises: a missing link is a cosmetic loss, and ingestion has already done the
+    expensive part by the time this is called.
+    """
+    try:
+        base = (getattr(connector, "_org_url", "") or "").rstrip("/")
+        if not base or not source_key:
+            return ""
+        kind = getattr(connector, "connector_name", "")
+        if kind == "jira":
+            return f"{base}/browse/{quote(source_key, safe='')}"
+        if kind == "azure_devops":
+            # ADO's browse URL keys off the numeric id, not the source key.
+            item_id = str(detail.get("id") or "")
+            if not item_id:
+                return ""
+            return f"{base}/{quote(board, safe='')}/_workitems/edit/{quote(item_id, safe='')}"
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def ingest_board(
     project_id: str,
     request: Request,
@@ -806,15 +836,26 @@ async def ingest_board(
             )
         except Exception:  # noqa: BLE001 — fall back to the summary row
             detail = it
+        _key = str(detail.get("source_key") or item_id or "")
         stories.append(
             {
                 "id": str(detail.get("id") or item_id or ""),
-                "source_key": str(detail.get("source_key") or item_id or ""),
+                "source_key": _key,
                 "title": detail.get("title") or "",
                 "description": detail.get("description") or "",
                 "acceptance_criteria": detail.get("acceptance_criteria") or [],
                 "state": detail.get("state") or "",
                 "work_item_type": detail.get("work_item_type") or "",
+                # A LINK BACK TO THE BOARD, resolved HERE because this is the only place
+                # that holds both the connector and the item. The Requirements page shows
+                # the work-item key under Traceability and could not link it: nothing in
+                # the payload said which Jira site or ADO organisation the key belonged
+                # to, so it rendered as inert text.
+                #
+                # `detail["url"]` is preferred when the adapter supplies one, but Jira's
+                # canonical detail maps it from a field the issue response does not carry,
+                # so it is usually empty — hence the per-provider fallback.
+                "url": detail.get("url") or _board_item_url(connector, board_name, _key, detail),
             }
         )
 
