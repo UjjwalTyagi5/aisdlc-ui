@@ -708,7 +708,11 @@ async def save_architecture_pdf(content: str = "", filename: str = "architecture
         filename: Output filename, e.g. project_architecture.pdf
     """
     if not (content and content.strip()):
-        content = getattr(shared, "output_file", "") or ""
+        # `last_architecture`, NOT `output_file`. output_file holds a FILENAME
+        # (os.path.basename(docx_path)) — reading it as content produced
+        # "Error: nothing to save" for a user who had a full document on screen,
+        # because the fallback was looking at the wrong attribute entirely.
+        content = getattr(shared, "last_architecture", "") or ""
     if not (content and content.strip()):
         return ("Error: nothing to save. Generate the architecture first "
                 "(generate_architecture_from_context), or pass the content explicitly.")
@@ -790,7 +794,11 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
     )
 
     if not (content and content.strip()):
-        content = getattr(shared, "output_file", "") or ""
+        # `last_architecture`, NOT `output_file`. output_file holds a FILENAME
+        # (os.path.basename(docx_path)) — reading it as content produced
+        # "Error: nothing to save" for a user who had a full document on screen,
+        # because the fallback was looking at the wrong attribute entirely.
+        content = getattr(shared, "last_architecture", "") or ""
     if not (content and content.strip()):
         return ("Error: nothing to export. Generate the architecture first "
                 "(generate_architecture_from_context), or pass the content explicitly.")
