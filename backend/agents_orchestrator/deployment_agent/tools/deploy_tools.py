@@ -338,3 +338,151 @@ async def plan_deploy_package(also: str = "") -> str:
         ),
         indent=2, default=str,
     )
+
+
+@tool
+async def plan_security_scans(sonar_project_key: str = "") -> str:
+    """Decide which quality and vulnerability scan stages belong in the generated
+    pipeline. Call after plan_deploy_package, before writing the CI file.
+
+    Returns `stages` — concrete tasks to paste into the pipeline, per the bound CI
+    system — and `not_configured`: scans that CANNOT run here, each with what to
+    connect so they can.
+
+    RELAY `not_configured`. A scan stage that cannot run has two wrong answers: drop it
+    quietly, so nobody knows the code is unscanned, or write it anyway so the pipeline
+    fails on first run and somebody disables the stage. Both end with unscanned code
+    and a green tick.
+    """
+    from agents_orchestrator.deployment_agent.packaging import detect_stack
+    from agents_orchestrator.deployment_agent.scanning import plan_scans
+
+    s = get_session(get_session_id())
+    root = _work_dir()
+    if root is None or not root.exists():
+        return "ERROR: no workspace prepared."
+
+    raw = json.loads(await inspect_repo.ainvoke({}))
+    markers = raw.get("markers", {}) if isinstance(raw, dict) else {}
+    stack = detect_stack(markers)
+
+    sonar_configured, resolved_key, sonar_reason = False, sonar_project_key, ""
+    try:
+        from config.connector_factory import get_connector_for_session
+
+        conn = await get_connector_for_session(
+            "sonarqube", s.tenant_id or "", project_id=s.project_id or "",
+            agent_id="deployment",
+        )
+        # Being able to BUILD the connector is not the same as it working. Ask it for
+        # something cheap; a tenant with no Sonar URL or token fails here, and that is
+        # the answer worth reporting rather than a stage that fails in CI.
+        found = await conn.read_adapter("list_projects", project=resolved_key or (s.repo_name or ""))
+        sonar_configured = True
+        if not resolved_key and found:
+            resolved_key = found[0].get("key", "")
+    except Exception as exc:  # noqa: BLE001
+        kind = type(exc).__name__
+        if kind == "ConnectorAccessDenied":
+            # The connector may well be configured. What is missing is a grant for THIS
+            # agent, and telling someone to connect SonarQube when it is already
+            # connected wastes the one message they will read.
+            sonar_reason = (
+                "This project has not granted the Deployment agent access to SonarQube. "
+                "The connector may already be configured — grant the deployment agent "
+                "read access to it rather than reconnecting it."
+            )
+        elif kind == "ConnectorNotAvailableError":
+            sonar_reason = (
+                "SonarQube is connected but did not answer — its URL or token is not "
+                "usable. Fix the credential rather than adding a stage that will fail "
+                "on the pipeline's first run."
+            )
+        broadcast_log(manager, f"SonarQube not usable here ({kind})", level="INFO")
+
+    # There is an image to scan if the repo already has a Dockerfile, or if the package
+    # will generate one - which it only does for a stack it recognised. A repo with
+    # neither gets an honest "nothing to scan" rather than a Trivy stage with no image.
+    has_image = bool(markers.get("dockerfile")) or stack["kind"] is not None
+
+    return json.dumps(
+        plan_scans(
+            stack["kind"], s.deploy_via or "",
+            has_dockerfile=has_image,
+            sonar_configured=sonar_configured,
+            sonar_project_key=resolved_key,
+            sonar_unavailable_reason=sonar_reason,
+        ),
+        indent=2, default=str,
+    )
+
+
+@tool
+async def read_quality_gate(project_key: str = "", create_if_missing: bool = False) -> str:
+    """Read this project's SonarQube quality gate as GATE EVIDENCE for the release
+    decision, and combine it with the upstream test results.
+
+    `create_if_missing` registers the Sonar project when it does not exist yet —
+    a generated pipeline pointing at a project key that was never created fails on its
+    first run.
+
+    A `None` anywhere in the result means NOT MEASURED, and is never a pass. "No
+    critical vulnerabilities were found" and "nothing looked" are different sentences,
+    and only one of them is a reason to ship.
+    """
+    from agents_orchestrator.deployment_agent.scanning import gate_verdict
+
+    s = get_session(get_session_id())
+    key = project_key or s.repo_name or ""
+    if not key:
+        return "ERROR: no Sonar project key and no repo name to fall back on."
+
+    quality_gate, created = None, False
+    try:
+        from config.connector_factory import get_connector_for_session
+
+        conn = await get_connector_for_session(
+            "sonarqube", s.tenant_id or "", project_id=s.project_id or "",
+            agent_id="deployment",
+        )
+        existing = await conn.read_adapter("list_projects", project=key)
+        if not any(p.get("key") == key for p in existing):
+            if not create_if_missing:
+                return json.dumps({
+                    "quality_gate": None,
+                    "note": f"No SonarQube project {key!r} exists. Nothing has been "
+                            "scanned, so there is no gate to read. Re-run with "
+                            "create_if_missing=true to register it, then let the "
+                            "pipeline run once.",
+                    **gate_verdict(None, unscanned=["SonarQube"]),
+                }, indent=2)
+            await conn.write_adapter("create_project", name=key, key=key)
+            created = True
+        else:
+            quality_gate = await conn.read_adapter("get_quality_gate_status", project=key)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({
+            "quality_gate": None,
+            "note": f"Could not reach SonarQube ({type(exc).__name__}). The gate is "
+                    "UNREAD, which is not the same as passed.",
+            **gate_verdict(None, unscanned=["SonarQube"]),
+        }, indent=2)
+
+    tests_passing = None
+    try:
+        upstream = json.loads(await read_upstream_artifacts.ainvoke({}))
+        testing = upstream.get("testing")
+        if isinstance(testing, dict):
+            for field in ("all_passed", "passed", "success"):
+                if isinstance(testing.get(field), bool):
+                    tests_passing = testing[field]
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+
+    return json.dumps({
+        "project_key": key,
+        "created": created,
+        "quality_gate": quality_gate,
+        **gate_verdict(quality_gate, tests_passing=tests_passing),
+    }, indent=2, default=str)
