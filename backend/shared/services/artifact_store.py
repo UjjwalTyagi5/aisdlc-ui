@@ -87,17 +87,63 @@ def safe_leaf_name(filename: str) -> str:
     return leaf
 
 
-def blob_path_for(tenant_id: str, run_id: str, artifact_type: str, filename: str) -> str:
-    """`{tenant_id}/{run_id}/{artifact_type}/{filename}` — the isolation boundary.
+#: Stand-ins for a missing segment. A run need not belong to a project (Run.project_id
+#: is nullable), and without a project there is no business unit either. Substituting a
+#: literal keeps the path DEPTH CONSTANT, so "the fourth segment is the agent" stays
+#: true for every blob in the container; collapsing the segment instead would shift
+#: every level below it and make the layout unreadable exactly where it is least
+#: obvious. The leading underscore cannot collide with a UUID.
+_NO_WORKSPACE = "_no-business-unit"
+_NO_PROJECT = "_no-project"
+_NO_AGENT = "_no-agent"
 
-    Every segment is sanitised, not just the filename. `artifact_type` comes from the
+
+def blob_path_for(
+    tenant_id: str,
+    run_id: str,
+    artifact_type: str,
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    project_id: str | None = None,
+    agent: str | None = None,
+) -> str:
+    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{filename}`.
+
+    THE FIRST SEGMENT IS THE ISOLATION BOUNDARY and everything after it is
+    organisation. Blob storage has no rows and no row-level security — it is a flat
+    key-value namespace — so the tenant prefix is the only thing separating one
+    tenant's documents from another's, and `is_blob_path` tests exactly that prefix.
+    Keep it first.
+
+    THE MIDDLE SEGMENTS MIRROR THE PRODUCT'S OWN HIERARCHY: organisation → business
+    unit → project → agent. The layout used to be `{tenant}/{run}/{type}/{file}`, which
+    is correct but scatters everything a project ever produced across unrelated run
+    ids — there was no way to see one project's documents, or one agent's, without
+    resolving every run first.
+
+    IDS, NOT DISPLAY NAMES, at every level. A path built from names breaks the moment
+    somebody renames a project or a business unit: the blobs already written keep the
+    old name and are orphaned from the row that points at them. Ids never change. The
+    cost is a container that is hard to read by eye in the portal, which is the right
+    trade because the UI never shows these paths — it shows the filename and downloads
+    by artifact id.
+
+    RUN ID STAYS, below the agent. Two runs of the same agent routinely produce the
+    same filename (`brd.docx`), and `upload_bytes` overwrites by default, so without it
+    the second run silently destroys the first one's document.
+
+    EVERY SEGMENT IS SANITISED, not just the filename. `artifact_type` comes from the
     agent rather than the user today, but it is one refactor away from being
-    caller-supplied, and a `..` there escapes the run prefix exactly as it would in the
-    leaf.
+    caller-supplied, and a `..` in any segment escapes the tenant prefix exactly as it
+    would in the leaf.
     """
     return "/".join(
         (
             safe_leaf_name(str(tenant_id)),
+            safe_leaf_name(str(workspace_id)) if workspace_id else _NO_WORKSPACE,
+            safe_leaf_name(str(project_id)) if project_id else _NO_PROJECT,
+            safe_leaf_name(str(agent)) if agent else _NO_AGENT,
             safe_leaf_name(str(run_id)),
             safe_leaf_name(artifact_type),
             safe_leaf_name(filename),
@@ -159,6 +205,32 @@ def is_blob_path(blob_path: str | None, tenant_id: str) -> bool:
     return blob_path.startswith(f"{safe_leaf_name(str(tenant_id))}/")
 
 
+async def _workspace_for_project(db: AsyncSession, project_id: str) -> Optional[str]:
+    """The business unit owning `project_id`, or None if it cannot be resolved.
+
+    NEVER RAISES. A path segment is not worth failing a generated document over: an
+    unresolvable project yields `_no-business-unit` and the artifact is still stored,
+    still listed and still downloadable. The query runs under the caller's session, so
+    RLS applies and a project in another tenant resolves to None rather than leaking a
+    workspace id.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.models.orm import Project  # noqa: PLC0415
+
+    try:
+        row = (
+            await db.execute(select(Project.workspace_id).where(Project.id == project_id))
+        ).scalar_one_or_none()
+        return str(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not resolve business unit for project %s (%s)",
+            project_id, type(exc).__name__,
+        )
+        return None
+
+
 async def store_artifact(
     db: AsyncSession,
     *,
@@ -167,6 +239,8 @@ async def store_artifact(
     artifact_type: str,
     filename: str,
     data: bytes,
+    project_id: str | None = None,
+    agent: str | None = None,
     content_type: str = "application/octet-stream",
     blob_client: Any = None,
 ) -> Artifact:
@@ -186,7 +260,20 @@ async def store_artifact(
         # two tenants' documents into one prefix.
         raise ValueError("store_artifact requires a tenant_id and a run_id")
 
-    blob_name = blob_path_for(tenant_id, run_id, artifact_type, filename)
+    # The business unit is DERIVED, never passed in. A caller that supplied both a
+    # project and a workspace could supply a mismatched pair, and the resulting path
+    # would file the artifact under a unit that does not own it.
+    workspace_id = await _workspace_for_project(db, project_id) if project_id else None
+
+    blob_name = blob_path_for(
+        tenant_id,
+        run_id,
+        artifact_type,
+        filename,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        agent=agent,
+    )
 
     blob_url: Optional[str] = None
     if blob_client is None:

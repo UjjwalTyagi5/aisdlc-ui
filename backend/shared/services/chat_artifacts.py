@@ -185,10 +185,17 @@ async def register_generated_file(
                 # authentication at all — so the "blob" columns described a file anyone
                 # who guessed the path could read.
                 #
-                # store_artifact composes `{tenant_id}/{run_id}/{artifact_type}/{file}`,
-                # which is the only thing separating tenants in blob storage, and
-                # degrades to `blob_url=None` when blob storage is unconfigured rather
-                # than failing the generation.
+                # store_artifact composes
+                # `{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{file}`.
+                # The leading tenant segment is the only thing separating tenants in
+                # blob storage; the rest mirrors the product's own hierarchy so a
+                # project's or an agent's output can be found without resolving every
+                # run first. It degrades to `blob_url=None` when blob storage is
+                # unconfigured rather than failing the generation.
+                #
+                # `project_id` and `stage` are passed because THIS caller already knows
+                # both — the business unit is derived from the project inside
+                # store_artifact, so the two can never disagree.
                 from shared.services.artifact_store import (  # noqa: PLC0415
                     get_blob_client, store_artifact,
                 )
@@ -199,6 +206,8 @@ async def register_generated_file(
                     artifact_type=artifact_type,
                     filename=filename,
                     data=data,
+                    project_id=project_id,
+                    agent=stage,
                     content_type=content_type or "application/octet-stream",
                     blob_client=get_blob_client(),
                 )
