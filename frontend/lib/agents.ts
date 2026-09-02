@@ -113,6 +113,7 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
 export const BUILT_AGENTS: readonly Phase[] = [
   "requirements",
   "design",
+  "plan",
   "security",
   "documentation",
   "development",
@@ -135,6 +136,7 @@ export const AGENT_LABEL: Record<AgentType, string> = {
 export const ROUTABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>([
   "requirements",
   "design",
+  "plan",
   "development",
   "review",
   "security",
