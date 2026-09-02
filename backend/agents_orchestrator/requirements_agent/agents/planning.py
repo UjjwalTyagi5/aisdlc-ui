@@ -1470,6 +1470,64 @@ async def save_to_project_artifacts() -> str:
         )
     return " ".join(parts)
 
+
+@tool
+async def export_document(content: str = "", filename: str = "requirements_document.docx") -> str:
+    """Export content as a Word (.docx), PDF (.pdf), Excel (.xlsx), Markdown (.md) or text file.
+
+    ONE tool for every document format — the format comes from the FILENAME EXTENSION,
+    so "as a PDF" means filename="something.pdf".
+
+        Word         report.docx
+        PDF          report.pdf
+        Excel        matrix.xlsx   (exports the MARKDOWN TABLES, one sheet per table)
+        Markdown     notes.md
+
+    Args:
+        content: The markdown to export. Omit to use the most recently generated
+            document (BRD / PDD / Risk Register) for this session.
+        filename: Output filename INCLUDING the extension you want.
+
+    For diagrams/images use generate_diagram; for slides use generate_ppt.
+    """
+    from shared.tools.doc_export import (  # noqa: PLC0415
+        export_result_message,
+        normalise_filename,
+        render_document,
+        supported_list,
+    )
+
+    if not (content and content.strip()):
+        try:
+            content = _LAST_GENERATED_DOC.get(get_session_id(), "")
+        except Exception:  # noqa: BLE001
+            content = ""
+    if not (content and content.strip()):
+        return ("Error: nothing to export. Generate a BRD / PDD / Risk Register first, "
+                "or pass the content explicitly.")
+
+    name = normalise_filename(filename, "requirements_document.docx")
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = f"{esett.FILES}/{user_id}/requirements_agent/{session_id}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, name)
+
+    try:
+        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
+
+    url = await broadcast_file_generated(session_id, name, full_path)
+    extras = []
+    if name.lower().endswith(".xlsx"):
+        # Said plainly: an Excel export of a document with no tables is a workbook
+        # with one explanatory sheet, and the user should hear that from the agent
+        # rather than discover it on opening the file.
+        extras.append("Excel exports contain the document's TABLES, one sheet each.")
+    return export_result_message(name, url, extras)
+
 @tool
 async def list_board_providers() -> str:
     """List which project-management boards this project can use (Azure DevOps, Jira, …).
@@ -2398,6 +2456,7 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # PDF output, and the explicit save the user is asked for before
          # anything is written to the project's shared artifact storage.
          markdowntopdf, save_to_project_artifacts,
+         export_document,
          generate_risk_register, general_query, update_response, markdowntodoc,
          generate_ppt, generate_diagram,
          template_pdd, generate_planning_sheet, generate_user_stories, revise_user_stories,
@@ -2730,12 +2789,17 @@ whole project can see — and it is the user's decision, not yours.
 - If they say no, do nothing: the file stays downloadable from the chat.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
-Match the format the user asks for:
-  Word / .docx   markdowntodoc
-  PDF            markdowntopdf
-  Spreadsheet    generate_planning_sheet
-  Slides         generate_ppt
-Do not substitute a format silently — if they ask for PDF, produce a PDF.
+export_document produces EVERY document format — the format comes from the FILENAME
+EXTENSION you pass:
+  Word         export_document(filename="report.docx")
+  PDF          export_document(filename="report.pdf")
+  Excel        export_document(filename="matrix.xlsx")  — exports the document's
+               TABLES, one sheet per table (not prose)
+  Markdown     export_document(filename="notes.md")
+  Diagram      generate_diagram
+  Slides       generate_ppt
+Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
+If they ask for a format not listed here, say which ones are available.
 
 ── HANDOFF RULES (CRITICAL) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ALWAYS call build_requirements_payload before emitting any HANDOFF.

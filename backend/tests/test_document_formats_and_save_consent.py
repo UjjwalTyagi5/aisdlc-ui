@@ -260,3 +260,144 @@ def test_both_agents_expose_the_explicit_save(module):
 
     mod = importlib.import_module(module)
     assert "save_to_project_artifacts" in {t.name for t in mod.tools}
+
+
+# -- both agents can produce every format --------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    [
+        "agents_orchestrator.requirements_agent.agents.planning",
+        "agents_orchestrator.design_architecture_agent.agents.architecture",
+    ],
+)
+def test_both_agents_export_every_document_format(module):
+    """Design had no Excel generator at all, and its Word/PDF tools were hard-wired to
+    the architecture document — it could not export arbitrary content in any format."""
+    import importlib
+
+    mod = importlib.import_module(module)
+    names = {t.name for t in mod.tools}
+    assert "export_document" in names            # word / pdf / excel / markdown
+    assert "generate_diagram" in names           # image
+    assert "generate_ppt" in names               # slides
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ext", [".docx", ".pdf", ".xlsx", ".md"])
+async def test_the_dispatcher_writes_each_format(tmp_path, ext):
+    from shared.tools.doc_export import render_document
+
+    md = "# Title\n\ntext\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"
+    out = str(tmp_path / f"doc{ext}")
+    await render_document(md, out, title="Doc")
+    assert os.path.getsize(out) > 0
+
+
+@pytest.mark.unit
+async def test_an_unsupported_format_is_refused_by_name(tmp_path):
+    """Silently writing a .docx for a .rtf request is how a user ends up with a file
+    they cannot open."""
+    from shared.tools.doc_export import render_document
+
+    with pytest.raises(ValueError) as e:
+        await render_document("x", str(tmp_path / "doc.rtf"))
+    assert ".rtf" in str(e.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("report.pdf", "report.pdf"),
+        ("report", "report.docx"),               # extension from the default
+        ("../../etc/passwd.pdf", "passwd.pdf"),  # path separators stripped
+        ("", "d.docx"),
+    ],
+)
+def test_the_model_cannot_choose_a_path(given, expected):
+    """The FILENAME comes from the model. A separator in it would write outside the
+    session's output directory."""
+    from shared.tools.doc_export import normalise_filename
+
+    assert normalise_filename(given, "d.docx") == expected
+
+
+# -- excel exports tables ------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_excel_makes_one_sheet_per_table_named_from_the_heading(tmp_path):
+    from openpyxl import load_workbook
+
+    from shared.tools.xlsx_render import markdown_to_xlsx
+
+    md = (
+        "# Risk Register\n\n| Risk | Impact |\n|---|---|\n| A | High |\n\n"
+        "## Owners\n\n| Name | Role |\n|---|---|\n| Ana | Admin |\n"
+    )
+    out = str(tmp_path / "t.xlsx")
+    markdown_to_xlsx(md, out)
+    wb = load_workbook(out)
+    assert wb.sheetnames == ["Risk Register", "Owners"]
+    assert wb["Risk Register"]["A1"].value == "Risk"
+
+
+@pytest.mark.unit
+def test_a_sheet_name_excel_would_reject_is_made_legal(tmp_path):
+    """Excel refuses a name over 31 characters or containing []:*?/\\ — openpyxl raises
+    on save, losing the whole workbook rather than one tab."""
+    from openpyxl import load_workbook
+
+    from shared.tools.xlsx_render import markdown_to_xlsx
+
+    md = "# A/B:C*D?E[a very long heading well past the excel limit]\n\n| X |\n|---|\n| 1 |\n"
+    out = str(tmp_path / "n.xlsx")
+    markdown_to_xlsx(md, out)
+    name = load_workbook(out).sheetnames[0]
+    assert len(name) <= 31
+    assert not (set(name) & set("[]:*?/\\"))
+
+
+@pytest.mark.unit
+def test_two_tables_under_the_same_heading_get_distinct_sheets(tmp_path):
+    """Excel rejects duplicate sheet names outright."""
+    from openpyxl import load_workbook
+
+    from shared.tools.xlsx_render import markdown_to_xlsx
+
+    md = (
+        "# Data\n\n| A |\n|---|\n| 1 |\n\ntext between\n\n| B |\n|---|\n| 2 |\n"
+    )
+    out = str(tmp_path / "dup.xlsx")
+    markdown_to_xlsx(md, out)
+    names = load_workbook(out).sheetnames
+    assert len(names) == len(set(names)) == 2
+
+
+@pytest.mark.unit
+def test_a_document_with_no_tables_still_opens(tmp_path):
+    """An empty workbook looks corrupt; a sheet saying why does not."""
+    from openpyxl import load_workbook
+
+    from shared.tools.xlsx_render import markdown_to_xlsx
+
+    out = str(tmp_path / "none.xlsx")
+    markdown_to_xlsx("# Just prose\n\nNo tables here.", out)
+    ws = load_workbook(out).active
+    assert "No tables" in str(ws["A1"].value)
+
+
+@pytest.mark.unit
+def test_the_separator_row_is_not_data(tmp_path):
+    """|---|:--:|---| is layout. Exporting it would put dashes in row 2 of every sheet."""
+    from openpyxl import load_workbook
+
+    from shared.tools.xlsx_render import markdown_to_xlsx
+
+    out = str(tmp_path / "sep.xlsx")
+    markdown_to_xlsx("| A | B |\n|:--|--:|\n| 1 | 2 |\n", out)
+    ws = load_workbook(out).active
+    assert ws["A2"].value == "1"

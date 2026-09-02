@@ -760,6 +760,60 @@ async def save_to_project_artifacts() -> str:
         )
     return " ".join(parts)
 
+
+@tool
+async def export_document(content: str = "", filename: str = "architecture.docx") -> str:
+    """Export content as a Word (.docx), PDF (.pdf), Excel (.xlsx), Markdown (.md) or text file.
+
+    ONE tool for every document format — the format comes from the FILENAME EXTENSION,
+    so "as a PDF" means filename="something.pdf".
+
+        Word         architecture.docx
+        PDF          architecture.pdf
+        Excel        api_contract.xlsx  (exports the MARKDOWN TABLES, one sheet per table)
+        Markdown     architecture.md
+
+    Args:
+        content: The markdown to export. Omit to use the most recently generated
+            architecture document for this session.
+        filename: Output filename INCLUDING the extension you want.
+
+    For diagrams/images use generate_diagram or render_diagram_via_kroki; for slides
+    use generate_ppt. save_architecture / save_architecture_pdf remain for the plain
+    architecture document; this tool exports ANY content in ANY of these formats.
+    """
+    from shared.tools.doc_export import (  # noqa: PLC0415
+        export_result_message,
+        normalise_filename,
+        render_document,
+        supported_list,
+    )
+
+    if not (content and content.strip()):
+        content = getattr(shared, "output_file", "") or ""
+    if not (content and content.strip()):
+        return ("Error: nothing to export. Generate the architecture first "
+                "(generate_architecture_from_context), or pass the content explicitly.")
+
+    name = normalise_filename(filename, "architecture.docx")
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, name)
+
+    try:
+        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
+
+    url = await _design_broadcast_file(name, full_path)
+    extras = []
+    if name.lower().endswith(".xlsx"):
+        extras.append("Excel exports contain the document's TABLES, one sheet each.")
+    return export_result_message(name, url, extras)
+
 tools = [
     read_document,
     generate_architecture,
@@ -773,6 +827,7 @@ tools = [
     # PDF output, and the explicit save the user is asked for before anything is
     # written to the project's shared artifact storage.
     save_architecture_pdf,
+    export_document,
     save_to_project_artifacts,
     generate_ppt,
     generate_diagram,
@@ -835,12 +890,17 @@ whole project can see — and it is the user's decision, not yours.
 - If they say no, do nothing: the file stays downloadable from the chat.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
-Match the format the user asks for:
-  Word / .docx   save_architecture
-  PDF            save_architecture_pdf
-  Spreadsheet    (not available — say so)
-  Slides         generate_ppt
-Do not substitute a format silently — if they ask for PDF, produce a PDF.
+export_document produces EVERY document format — the format comes from the FILENAME
+EXTENSION you pass:
+  Word         export_document(filename="report.docx")
+  PDF          export_document(filename="report.pdf")
+  Excel        export_document(filename="matrix.xlsx")  — exports the document's
+               TABLES, one sheet per table (not prose)
+  Markdown     export_document(filename="notes.md")
+  Diagram      generate_diagram
+  Slides       generate_ppt
+Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
+If they ask for a format not listed here, say which ones are available.
 
 ── SCOPE BOUNDARY (CRITICAL) ─────────────────────────────────────────────────
 You are ONLY responsible for design and architecture artifacts.
