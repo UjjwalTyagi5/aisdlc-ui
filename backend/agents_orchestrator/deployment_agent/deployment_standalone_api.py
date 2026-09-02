@@ -297,7 +297,27 @@ async def chat(
         s.system_injected = True
     else:
         state = {"messages": [HumanMessage(content=user_text)]}
-    config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140}
+    # CALLBACKS ARE NOT OPTIONAL PLUMBING, and this route had none while the WS route
+    # above did. `langfuse_langchain_extras` is what threads the run's PROJECT into the
+    # async context via set_run_project, and resolve_model_for_run reads it: once a
+    # tenant has any org_model_grants row, effective_project_offerings fails CLOSED
+    # without a project and every turn answers "no model configured", pointing an
+    # administrator at a model that was never the problem. Latent while that table is
+    # empty, which is exactly how it survives review. Same fix as the Design REST route.
+    # The audit handler is the other half — without it a REST turn left no trail.
+    _audit = AuditCallbackHandler(
+        audit_service, run_id=session_id, tenant_id=str(real_tenant_id)
+    )
+    _lf_cbs, _lf_meta = langfuse_langchain_extras(
+        session_id=session_id, tenant_id=str(real_tenant_id), agent_type="deployment",
+        project_id=project_id,
+    )
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": 140,
+        "callbacks": [_audit, *_lf_cbs],
+        "metadata": _lf_meta,
+    }
     # Agent-profile prompt layer (design §3.4): resolve over the BARE constant (the deployer
     # node uses it verbatim) using the session's bound tenant/project. Fail-soft.
     _injected, _skills = await resolve_agent_turn(
