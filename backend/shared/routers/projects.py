@@ -656,7 +656,16 @@ def _board_kind(project, requested: Optional[str] = None) -> str:
     return providers[0]
 
 
-async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None):
+#: The stage both callers of `_connector_or_409` act for. `_board_providers` reads
+#: `Project.connectors["requirements"]`, so the board they resolve is by definition the
+#: one wired to the Requirements stage — the level has to be looked up under the same
+#: name, or it resolves to nothing.
+_BOARD_STAGE = "requirements"
+
+
+async def _connector_or_409(
+    project, tenant_id: str, kind: Optional[str] = None, owner_id: str = "",
+):
     """Resolve the tenant's board connector for a project, or 409 fail-closed."""
     from config.connector_factory import get_connector_for_session  # noqa: PLC0415
 
@@ -664,6 +673,33 @@ async def _connector_or_409(project, tenant_id: str, kind: Optional[str] = None)
     try:
         return await get_connector_for_session(
             kind=kind, tenant_id=tenant_id, project_id=str(project.id),
+            # WHO IS ASKING — a credential decision, not an access one, and the
+            # connector needs BOTH this and project_id or it uses neither:
+            # `_resolve_credential_override` opens with
+            # `if not (project_id and owner_id): return None` and falls back to the
+            # tenant-wide credential.
+            #
+            # There usually IS no tenant-wide one. A project member saves their own
+            # PAT on the Integrations dialog, which writes
+            # project_integration_credentials keyed by (project, owner) and carries
+            # the org URL with it. Without the owner the fallback found nothing, so
+            # the connector had no org_url and httpx failed on a scheme-less URL —
+            # surfacing as 502 "Couldn't reach the board (UnsupportedProtocol)",
+            # which reads like the board is down rather than like the credential was
+            # never looked up. Same defect main fixed for the dev_workspace ADO
+            # routes in d291651.
+            owner_id=owner_id,
+            # REQUIRED, and its absence was not a narrower grant — it was none at all.
+            # `effective_access` returns None the moment `agent_id` is empty
+            # (connector_grants.py: `if not agent_id: return None`), and
+            # `permits(None, mode)` is False for every mode, so this resolved to
+            # ScopedConnector(raw, None) and BOTH callers below were dead for every
+            # project and every tenant, however the board was wired: "Pull stories"
+            # answered 502 and board ingestion never ran. It failed in the safe
+            # direction behind a plausible message ("Couldn't reach the board"), which
+            # is exactly why it survived. Same defect as the three workers and
+            # agent_run_scope — see tests/test_connector_stage_scope.py.
+            agent_id=_BOARD_STAGE,
         )
     except Exception:
         raise HTTPException(
@@ -691,7 +727,7 @@ async def list_board_projects(
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
     kind = _board_kind(project, provider)
-    connector = await _connector_or_409(project, tenant_id, kind=kind)
+    connector = await _connector_or_409(project, tenant_id, kind=kind, owner_id=_user_id(request))
     try:
         boards = await connector.read_adapter("list_projects")
     except Exception as exc:  # noqa: BLE001
@@ -735,7 +771,10 @@ async def ingest_board(
     tenant_id = request.state.tenant_id
     tenant_uuid = uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
-    connector = await _connector_or_409(project, tenant_id, kind=_board_kind(project, body.provider))
+    connector = await _connector_or_409(
+        project, tenant_id, kind=_board_kind(project, body.provider),
+        owner_id=_user_id(request),
+    )
 
     try:
         boards = await connector.read_adapter("list_projects")

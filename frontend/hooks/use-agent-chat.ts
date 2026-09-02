@@ -53,7 +53,13 @@ export interface AgentChatContext {
       description?: string;
       acceptance_criteria?: string[];
     }>;
-    all_stories?: Array<{ ref?: string; title?: string }>;
+    /**
+     * `type` is the BOARD's work item type ("User Story", "Epic", "Task"),
+     * not the artifact kind. Board ingestion pulls every item on the board, so
+     * this list mixes Epics and chore Tasks in with real stories — without the
+     * type they all reach the agent as user stories to design a system for.
+     */
+    all_stories?: Array<{ ref?: string; title?: string; type?: string }>;
   };
 }
 

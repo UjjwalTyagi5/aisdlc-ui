@@ -144,24 +144,61 @@ _APPROVE_EXACT = frozenset({
 #: when I approve it", which is a question about the process and not consent to
 #: anything — an early version of this used `p in t` and read exactly that as a yes.
 _APPROVE_PHRASES = (
-    "yes please", "go ahead", "please proceed", "i approve", "i confirm",
-    "that's approved", "thats approved", "you have my approval",
+    "yes please", "go ahead", "please proceed", "please go ahead", "i approve",
+    "i confirm", "that's approved", "thats approved", "you have my approval",
+    "do it",
 )
+
+#: NOT here on purpose: "create them", "create it" and friends. Those are INSTRUCTIONS,
+#: not approvals, and treating them as consent would defeat the whole propose-then-
+#: approve shape — the model could act on the first message without ever proposing.
+
+#: A LEADING word that affirms, whatever follows it. "yes create these two for me" is a
+#: yes; so is "ok do it" and "approve this". Requiring the WHOLE message to be one of
+#: these is what broke the gate in practice — see is_approval_message.
+_APPROVE_LEADING = frozenset({
+    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "k", "sure", "confirm", "confirmed",
+    "approve", "approved", "proceed", "correct", "affirmative", "agreed",
+})
+
+#: A LEADING word that refuses. Checked FIRST and separately, because it is the reason
+#: leading-token matching is safe: every dangerous phrase this could misread —
+#: "no, do not go ahead", "don't approve that" — opens with one of these.
+_REFUSE_LEADING = frozenset({
+    "no", "nope", "nah", "dont", "don't", "never", "stop", "cancel", "wait",
+    "not", "hold", "abort", "n",
+})
+
+#: Multi-word refusals, checked as a prefix. "do" cannot go in _REFUSE_LEADING: it would
+#: reject "do it", which is an approval. So the negation is matched on both words.
+_REFUSE_PREFIXES = ("do not", "does not", "will not", "can not", "cannot")
 
 
 def is_approval_message(*texts: object) -> bool:
     """True when the user's message for THIS turn is an explicit approval.
 
-    THREE FORMS, ALL ANCHORED, in narrowing order of certainty: the whole message is an
-    approval word; the clause before the first comma is ("yes, go ahead"); or the
-    message opens with an approval phrase ("go ahead and create them").
+    ANCHORED TO THE FRONT OF THE MESSAGE, never a substring search anywhere in it.
+    That distinction is the whole function: an unanchored "approve" reads "do not
+    approve that" and "who needs to approve this?" as consent, silently and in the
+    permissive direction.
 
-    NEVER A SUBSTRING TEST. That is what makes this kind of check dangerous: an
-    unanchored "approve" reads "do not approve that" and "who needs to approve this?" as
-    consent, and the failure is silent and in the permissive direction. Anchoring costs
-    a few phrasings that will simply be asked again; the alternative costs a live board.
+    THIS WAS TOO STRICT AND THE PRODUCT WAS UNUSABLE FOR IT. The first version required
+    the WHOLE message to be an approval word, or the clause before a comma to be one.
+    Real approvals fail that: "yes create these two for me", "yes do this", "ok do it"
+    all read as refusals. Observed live — a user approved four times in a row, the gate
+    rejected every one, and the agent re-asked each time. An approval gate that cannot
+    recognise "yes create these two for me" does not protect anything; it just makes the
+    feature impossible to use, and the pressure that creates is to remove the gate.
 
-    A question is never consent, whatever it contains.
+    So the rule is the LEADING token, not the whole string:
+
+        refusal word first   -> False, always, before anything else is considered
+        question mark        -> False; a question is never consent
+        leading affirmative  -> True  ("yes ...", "ok ...", "approve ...")
+        leading phrase       -> True  ("go ahead and ...", "please proceed ...")
+
+    Checking refusals first is what keeps this safe. Every phrase that leading-token
+    matching could plausibly misread opens with one of them.
     """
     t = " ".join(x for x in texts if isinstance(x, str)).strip().lower()
     if not t:
@@ -169,8 +206,18 @@ def is_approval_message(*texts: object) -> bool:
     t = t.rstrip(".!").strip()
     if t.endswith("?"):
         return False
-    if t in _APPROVE_EXACT:
+
+    # The leading word, punctuation stripped: "yes," and "yes" are the same answer.
+    first = t.split()[0].strip(".,!:;\"'") if t.split() else ""
+
+    # REFUSALS FIRST. This ordering is what makes leading-token matching safe below:
+    # "no, go ahead and stop" opens with a refusal and must never reach the yes rules.
+    if first in _REFUSE_LEADING or t.startswith(_REFUSE_PREFIXES):
+        return False
+
+    if t in _APPROVE_EXACT or first in _APPROVE_LEADING:
         return True
+    # "yes, create them" — the clause before the comma carries the answer.
     if t.split(",", 1)[0].strip() in _APPROVE_EXACT:
         return True
     return any(t.startswith(p) for p in _APPROVE_PHRASES)

@@ -694,6 +694,145 @@ async def generate_diagram(diagram_type: str, source: str, output_path: str = ""
     return f"Rendered {dtype} diagram '{filename}'.{tail}"
 
 
+
+@tool
+async def save_architecture_pdf(content: str = "", filename: str = "architecture.pdf") -> str:
+    """Save the architecture document as a PDF instead of a .docx.
+
+    Use when the user asks for a PDF. For Word use save_architecture; for slides use
+    generate_ppt.
+
+    Args:
+        content: The markdown document. Omit to use the most recently generated
+            architecture for this session.
+        filename: Output filename, e.g. project_architecture.pdf
+    """
+    if not (content and content.strip()):
+        # `last_architecture`, NOT `output_file`. output_file holds a FILENAME
+        # (os.path.basename(docx_path)) — reading it as content produced
+        # "Error: nothing to save" for a user who had a full document on screen,
+        # because the fallback was looking at the wrong attribute entirely.
+        content = getattr(shared, "last_architecture", "") or ""
+    if not (content and content.strip()):
+        return ("Error: nothing to save. Generate the architecture first "
+                "(generate_architecture_from_context), or pass the content explicitly.")
+
+    filename = os.path.basename(filename or "architecture.pdf")
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, filename)
+
+    try:
+        from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
+
+        markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating the PDF ({type(exc).__name__})."
+
+    url = await _design_broadcast_file(filename, full_path)
+    return (
+        f"Saved '{filename}'."
+        + (f" Download it here: {url}" if url else "")
+        + " It is NOT yet in the project's artifacts — ask the user whether to save it "
+          "there, and call save_to_project_artifacts if they agree."
+    )
+
+
+@tool
+async def save_to_project_artifacts() -> str:
+    """Store the documents generated in this chat into the project's artifacts.
+
+    Call this ONLY after the user has agreed. Generated files are downloadable straight
+    away; adding them to the project's artifacts uploads them to shared, durable
+    storage, which is the user's decision to make. Ask first, then call this on a yes.
+    """
+    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
+
+    stored, failed, not_uploaded = await save_pending_artifacts(get_session_id() or "")
+    if not stored and not failed:
+        return "There are no generated documents waiting to be saved."
+    parts = []
+    if stored:
+        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
+    if not_uploaded:
+        # THE ROW EXISTS AND THE BYTES DO NOT. Saying only "saved" here is how a user
+        # finds the document listed in the artifacts panel and absent from storage,
+        # and has no way to tell which happened. Relay this verbatim.
+        parts.append(
+            f"WARNING: {', '.join(not_uploaded)} could not be uploaded to the "
+            "project's file storage — the artifact is recorded and listed, but the "
+            "file itself is not stored and cannot be downloaded from the artifacts "
+            "panel. The chat download link still works. An administrator needs to "
+            "check the storage configuration."
+        )
+    if failed:
+        parts.append(
+            f"Could not save: {', '.join(failed)} — they are still downloadable and "
+            "can be retried."
+        )
+    return " ".join(parts)
+
+
+@tool
+async def export_document(content: str = "", filename: str = "architecture.docx") -> str:
+    """Export content as a Word (.docx), PDF (.pdf), Excel (.xlsx), Markdown (.md) or text file.
+
+    ONE tool for every document format — the format comes from the FILENAME EXTENSION,
+    so "as a PDF" means filename="something.pdf".
+
+        Word         architecture.docx
+        PDF          architecture.pdf
+        Excel        api_contract.xlsx  (exports the MARKDOWN TABLES, one sheet per table)
+        Markdown     architecture.md
+
+    Args:
+        content: The markdown to export. Omit to use the most recently generated
+            architecture document for this session.
+        filename: Output filename INCLUDING the extension you want.
+
+    For diagrams/images use generate_diagram or render_diagram_via_kroki; for slides
+    use generate_ppt. save_architecture / save_architecture_pdf remain for the plain
+    architecture document; this tool exports ANY content in ANY of these formats.
+    """
+    from shared.tools.doc_export import (  # noqa: PLC0415
+        export_result_message,
+        normalise_filename,
+        render_document,
+        supported_list,
+    )
+
+    if not (content and content.strip()):
+        # `last_architecture`, NOT `output_file`. output_file holds a FILENAME
+        # (os.path.basename(docx_path)) — reading it as content produced
+        # "Error: nothing to save" for a user who had a full document on screen,
+        # because the fallback was looking at the wrong attribute entirely.
+        content = getattr(shared, "last_architecture", "") or ""
+    if not (content and content.strip()):
+        return ("Error: nothing to export. Generate the architecture first "
+                "(generate_architecture_from_context), or pass the content explicitly.")
+
+    name = normalise_filename(filename, "architecture.docx")
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, name)
+
+    try:
+        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
+
+    url = await _design_broadcast_file(name, full_path)
+    extras = []
+    if name.lower().endswith(".xlsx"):
+        extras.append("Excel exports contain the document's TABLES, one sheet each.")
+    return export_result_message(name, url, extras)
+
 tools = [
     read_document,
     generate_architecture,
@@ -704,6 +843,11 @@ tools = [
     # empty content and looping. Removing it forces the correct
     # generate_architecture_from_context → save_architecture path.
     save_architecture,
+    # PDF output, and the explicit save the user is asked for before anything is
+    # written to the project's shared artifact storage.
+    save_architecture_pdf,
+    export_document,
+    save_to_project_artifacts,
     generate_ppt,
     generate_diagram,
     render_diagram_via_kroki,
@@ -721,19 +865,61 @@ tools = [
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
+# WHY "ACT, DON'T NARRATE" IS WORDED THE WAY IT IS. It used to end with "if the
+# structured pipeline context already contains requirements / user stories ... call
+# generate_architecture_from_context immediately". The presence of context WAS the
+# instruction, so a user who opened the Design page and typed "hi" received a complete
+# eight-section architecture document they had never asked for. The Design page threads
+# the project's stories into pipeline_context by default ("From requirements" mode), so
+# this fired on the first message of every project that had requirements.
+#
+# The anti-narration rule itself is worth keeping — a model that says "I'll generate
+# that now" and then stops is a real failure. The trigger just has to be the user
+# asking. See tests/test_design_greeting_does_not_generate.py.
 DESIGN_SYS_MESSAGE = """\
 You are the Design & Architecture Agent — powered by Claude. You transform
 requirements, BRDs, PDDs, and user stories into comprehensive, enterprise-grade
 architecture documents structured across 8 standard artifacts.
 
 ── ACT, DON'T NARRATE (CRITICAL) ─────────────────────────────────────────────
-When the user asks you to generate, design, or save, you MUST emit the tool call
+When the user ASKS you to generate, design, or save, you MUST emit the tool call
 in the SAME response — do NOT reply with only a preamble like "I'll generate it
 now" and then stop. A turn that announces an action without calling the tool is a
-failure. If the structured pipeline context already contains requirements / user
-stories, treat them as the source material and call generate_architecture_from_context
-immediately (pass those stories as `context`); never ask the user to re-supply
-requirements that are already in context.
+failure.
+
+THE USER ASKING IS THE TRIGGER — NOT THE PRESENCE OF CONTEXT. Structured pipeline
+context (requirements / user stories) is SOURCE MATERIAL for when you are asked to
+design. It is not an instruction, and it is not consent. If the user greets you,
+asks a question, or says something you cannot read as a request to produce a design,
+REPLY TO WHAT THEY SAID. Say briefly what you can see (e.g. "I can see N stories
+from Requirements") and ask what they want built.
+
+When you ARE asked, use the context you have: pass those stories as `context`, and
+never ask the user to re-supply requirements that are already in front of you.
+
+
+── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
+A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
+ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
+whole project can see — and it is the user's decision, not yours.
+- After generating a document, tell the user it is ready, give the download link, and
+  ASK whether to add it to the project's artifacts.
+- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
+  and never claim a document was added to the project unless that tool confirmed it.
+- If they say no, do nothing: the file stays downloadable from the chat.
+
+── FILE FORMATS ──────────────────────────────────────────────────────────────────
+export_document produces EVERY document format — the format comes from the FILENAME
+EXTENSION you pass:
+  Word         export_document(filename="report.docx")
+  PDF          export_document(filename="report.pdf")
+  Excel        export_document(filename="matrix.xlsx")  — exports the document's
+               TABLES, one sheet per table (not prose)
+  Markdown     export_document(filename="notes.md")
+  Diagram      generate_diagram
+  Slides       generate_ppt
+Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
+If they ask for a format not listed here, say which ones are available.
 
 ── SCOPE BOUNDARY (CRITICAL) ─────────────────────────────────────────────────
 You are ONLY responsible for design and architecture artifacts.
@@ -741,6 +927,17 @@ You are ONLY responsible for design and architecture artifacts.
   Development Agent." then call write_design_artifact to persist your output.
 - If asked about test plans or QA: say "That's handled by the Testing Agent."
   then call write_design_artifact to persist your output if design is complete.
+- If asked for a REQUIREMENTS artifact — a BRD, PDD, MoM, risk register, user
+  stories, acceptance criteria, or a requirements document of any kind — say
+  "That's handled by the Requirements Agent, on the Requirements page." and STOP.
+  You have no tool that produces any of them.
+
+NEVER SUBSTITUTE A DIFFERENT ARTIFACT FOR THE ONE ASKED FOR. If you cannot produce
+what the user named, say which agent can and stop. Producing an architecture
+document because a BRD was requested wastes minutes of the user's time, spends
+their tokens, and answers a question nobody asked — the user has to read the whole
+thing to discover it is not what they wanted. "I can't do that here, the
+Requirements Agent can" is a better answer than a document.
 
 ── ACCURACY & GROUNDING (READ FIRST — CRITICAL FOR DEMO) ────────────────────
 These rules prevent hallucination. Every section of the architecture document
@@ -1002,6 +1199,29 @@ Respond with 1-2 sentences ONLY — e.g. "Architecture document generated. Would
 you like me to save it as a .docx file?" Do NOT repeat or summarise the tool
 output.
 
+── MERMAID THAT ACTUALLY RENDERS ─────────────────────────────────────────────
+A diagram that fails to parse shows the reader an error box instead of a diagram,
+so it is worse than a simpler diagram that works.
+
+USE ONLY these four types — they are the ones the templates use and the ones the
+viewer renders reliably:
+    graph / flowchart      classDiagram      sequenceDiagram      erDiagram
+
+NEVER use C4Context, C4Container, C4Component, mindmap, timeline, quadrantChart or
+block-beta. Mermaid's C4 support is experimental and fails often; the C4 sections
+above are drawn with `graph TB` for exactly that reason — follow those templates
+rather than reaching for a C4-specific syntax.
+
+Rules that prevent most parse failures:
+- Put EVERY node label in double quotes: A["Order Service"], never A[Order Service].
+  An unquoted label containing a bracket, parenthesis, comma, colon or slash is the
+  single most common cause of a broken diagram.
+- Never put a raw " inside a label. Use a different word.
+- In classDiagram, keep method signatures simple: +save(), +findById(). Avoid
+  generics (List~T~), nested parentheses and return-type annotations.
+- One statement per line. Do not put a comment on the same line as a statement.
+- Keep every diagram under ~25 nodes; split it rather than growing it.
+
 ── ABSOLUTE RULES ────────────────────────────────────────────────────────────
 - NEVER write architecture as a plain-text reply. ALWAYS call a tool first.
 - NEVER say you cannot access files — always call read_document.
@@ -1096,7 +1316,13 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         # Omitted entirely for gpt-5-family models, which reject any temperature but
         # their default — see temperature_kwargs.
         **temperature_kwargs(model, 0.2),
-        max_retries=2,
+        # 0, not langchain_litellm's own default -- guarded_completion
+        # (shared/services/model_call_wrapper.py) already retries the whole
+        # ainvoke call; ChatLiteLLM's own tenacity retry underneath it also
+        # retries on RateLimitError, uncoordinated with the outer loop. See
+        # dev_agent.py::_build_llm's identical fix and "desicions and
+        # issues.txt" Issue 14 for the live evidence.
+        max_retries=0,
         # Stream tokens so the copilot shows the design agent's replies live.
         streaming=True,
     )
@@ -1131,7 +1357,13 @@ async def agent(state: AgentState):
             "An administrator must add and verify a model provider in Org Settings → Model Providers."))]}
     except Exception as e:
         logger.error("Design agent model resolution error (tenant=%s): %s", tenant_id, type(e).__name__)
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # The TYPE NAME ALONE WAS THE WHOLE REPLY — a user hit an Azure rate limit
+        # and was shown "Agent error: RateLimitError", which does not say it is
+        # temporary, not their fault, or that another model would work now.
+        # Still never str(exc): a BYOK provider error can echo the tenant key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
     set_resolved_model(resolved)
     try:
         clean_messages = _sanitize_messages(state["messages"])
@@ -1156,7 +1388,13 @@ async def agent(state: AgentState):
             resolved.alias,
             type(e).__name__,
         )
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # The TYPE NAME ALONE WAS THE WHOLE REPLY — a user hit an Azure rate limit
+        # and was shown "Agent error: RateLimitError", which does not say it is
+        # temporary, not their fault, or that another model would work now.
+        # Still never str(exc): a BYOK provider error can echo the tenant key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
 
 
 _TOOL_ARG_HINTS: dict[str, str] = {

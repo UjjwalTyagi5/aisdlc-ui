@@ -446,6 +446,34 @@ async def upsert_project_credential(
             },
         )
 
+    # VALIDATE A FIGMA DEFAULT FILE BEFORE STORING IT. The dialog labels this field
+    # "Default file" and the backend reads it as one — `FigmaConnector.auth_adapter`
+    # does `extract_file_key(override.account)`. Anything unparseable therefore stores
+    # cleanly, reads back as no key at all, and surfaces MUCH later as "no default file
+    # is configured for this tenant" in the middle of a design session, pointing at a
+    # tenant setting rather than at the project field somebody actually filled in.
+    #
+    # Observed exactly that: an email address typed into "Default file". The
+    # tenant-level route (connectors._store_figma_credentials) already rejects this
+    # with a 422; this one accepted it, so the two doors onto the same setting
+    # disagreed about what counts as valid.
+    if body.targetId == "figma" and (body.account or "").strip():
+        from config.connectors.figma import extract_file_key  # noqa: PLC0415
+
+        if not extract_file_key(body.account.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "bad_figma_file",
+                    "message": (
+                        "'Default file' must be a Figma file URL "
+                        "(https://www.figma.com/design/<key>/<name>) or the file key "
+                        "itself — not an account or email. Leave it blank to pass a "
+                        "file URL to the Design agent per request instead."
+                    ),
+                },
+            )
+
     owner = getattr(request.state, "user_id", "") or ""
 
     secret_ref = None

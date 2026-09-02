@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from uuid import uuid4
 import contextvars
 
@@ -130,7 +130,24 @@ async def _persist_design_artifacts(
 
 
 async def _build_session_context(session_id: str) -> str:
-    """Delegate to the shared context broker so all agents use one formatting path."""
+    """Upstream Requirements context for this turn — BY SESSION ONLY, deliberately.
+
+    A PROJECT-KEYED FALLBACK WAS ADDED HERE AND REMOVED AGAIN. `build_context_for_project`
+    reads the project's most recent Run, which makes the standalone Design page inherit
+    whatever Requirements last produced. That is what the Development agent does, and it
+    is NOT what this product wants for Design: opening Project -> Design on its own is a
+    blank-slate design conversation, not a continuation of a pipeline the user did not
+    start. Preloading the last run's payload also silently spends tokens on context the
+    user never asked for and may be stale.
+
+    So the rule is: context arrives through the ORCHESTRATOR, where the pipeline uses
+    the run id as the session id and this lookup finds the artifacts for THAT run.
+    Standalone starts empty, and the user pastes or points at what they want.
+
+    Do not "fix" this by adding the project fallback back. If Design should be able to
+    reach upstream artifacts on demand, that is a TOOL the model chooses to call, not an
+    injection it cannot decline.
+    """
     return await build_context(session_id, "design")
 
 
@@ -262,6 +279,8 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
 
     first_call = session_id not in _initialized_sessions
     if first_call:
+        # SESSION-KEYED ONLY. See _build_session_context: standalone Design starts
+        # blank on purpose, so there is no project fallback to feed here.
         session_context = await _build_session_context(session_id)
         sys_content = DESIGN_SYS_MESSAGE
         if session_context:
@@ -290,14 +309,19 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         # passing paths and hoping the agent calls read_document (which can silently skip,
         # or fail on a Windows path mangled through the LLM tool-call). Falls back to the
         # path hint when a file can't be read.
-        from shared.tools.document_tools import extract_file_text as _extract  # noqa: PLC0415
+        from shared.tools.document_tools import (  # noqa: PLC0415
+            extract_file_text as _extract,
+            extraction_succeeded as _extracted_ok,
+        )
         _parts, _unread = [], []
         for _p in _all_files:
             try:
                 _txt = _extract(_p)
             except Exception:  # noqa: BLE001 — best-effort; degrade to the path hint
                 _txt = ""
-            if _txt and _txt.strip():
+            # NOT `if _txt` — extraction returns a non-empty PLACEHOLDER on failure.
+            # See the same block in requirements_agent_api for the failure it caused.
+            if _extracted_ok(_txt):
                 _parts.append(f"--- Attached file: {os.path.basename(_p)} ---\n{_txt.strip()[:20000]}")
             else:
                 _unread.append(_p)
@@ -306,8 +330,19 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
                 content="The user attached the following file(s); use their content directly:\n\n"
                         + "\n\n".join(_parts)))
         if _unread:
+            # Name the limit instead of handing over a path the file tools cannot read
+            # either. Design is more exposed to this than Requirements — people attach
+            # screenshots of diagrams and wireframes to it constantly.
+            _names = ", ".join(os.path.basename(_u) for _u in _unread)
             state["messages"].append(HumanMessage(
-                content=f"please use the following files {', '.join(_unread)}"))
+                content=(
+                    f"The user attached {_names}, which could not be read as text — it "
+                    "is an image or an unsupported format. You CANNOT open it: do not "
+                    "call a file tool on it, and do not claim to have looked at it. "
+                    "Tell the user you cannot read that file type and ask them to paste "
+                    "the relevant text, or re-upload as .pdf, .docx, .txt, .md, .csv "
+                    "or .xlsx."
+                )))
 
     await manager.broadcast({"type": "message_received", "session_id": session_id, "message": "Processing your request..."})
 
@@ -349,7 +384,23 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
                     content = _extract_text(msg_chunk.content)
                     if content and not (hasattr(msg_chunk, "tool_calls") and msg_chunk.tool_calls):
                         streaming_started = True
+                        # ACCUMULATE EVERYTHING, SEND ONLY THE MODEL'S OWN TEXT.
+                        #
+                        # `final_content` feeds the transcript and
+                        # _persist_design_artifacts, which parses the eight sections out
+                        # of the DOCUMENT — and the document is the tool's output, so it
+                        # has to stay in here.
+                        #
+                        # Sending it is a different question. generate_architecture_from_
+                        # context streams the document to the client itself, token by
+                        # token, as it generates (_llm_generate_async broadcasts
+                        # stream_chunk). Its return value then arrives here as a
+                        # ToolMessage and was streamed a SECOND time — the user saw the
+                        # whole architecture twice, both copies truncated at the same
+                        # word because they were the same string.
                         final_content += content
+                        if isinstance(msg_chunk, ToolMessage):
+                            continue
                         await manager.send_personal_message(
                             json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
                             websocket,
@@ -440,6 +491,9 @@ async def chat(
     provider_kind: str = Form(None),
     session_id: str = Form(...),
     user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
+    # Optional BYOK model override, same field the Requirements REST route takes. None
+    # means "use the tenant's default", which resolve_model_for_run picks.
+    model_id: str = Form(None),
     uploaded_files: List[UploadFile] = File(None),
 ):
     """REST endpoint — invokes Design Agent and persists typed design artifacts."""
@@ -459,6 +513,21 @@ async def chat(
     set_websocket_context(manager, session_id)
     set_session_id(session_id)
     set_user_id(real_user_id)
+    # Tenant/project/run in the tool context, so a document this turn generates is
+    # PERSISTED. `chat_artifacts.register_generated_file` returns early without both a
+    # tenant and a project ("no tenant/project in context — skip persist"), so the .docx
+    # and diagrams produced through this route were written to local disk and never
+    # became Artifact rows — no Blob upload, nothing in the project's artifact panel,
+    # and a debug-level log line as the only trace. The WS path set these; this one
+    # never did.
+    #
+    # `project_id` here is the value assert_agent_access_for_chat RETURNED, not the raw
+    # form field — it is resolved and access-checked, which is what makes it safe to use
+    # as the isolation key for stored artifacts.
+    from config.ws_helper import set_project_id, set_run_id, set_tenant_id  # noqa: PLC0415
+    set_tenant_id(real_tenant_id or None)
+    set_project_id(project_id or None)
+    set_run_id(None)  # a standalone chat turn belongs to no pipeline run
     # Per-turn consent for the Consequential epic write — see the WS path above for why
     # this reads task_intent only, and why it is set on every turn.
     from config.ws_helper import set_consequential_approved  # noqa: PLC0415
@@ -471,16 +540,32 @@ async def chat(
     file_names: List[str] = []
     os.makedirs(input_directory, exist_ok=True)
 
-    _lf_pid = None
-    if pipeline_context:
+    # THE PROJECT IS THE FORM FIELD, not something to dig out of pipeline_context.
+    # `project_id` is required on this route and was REASSIGNED above by
+    # assert_agent_access_for_chat to the resolved, access-checked id — so it is both
+    # present and trustworthy, while pipeline_context is optional and often absent.
+    #
+    # Reading only pipeline_context meant a request without one had no project, and
+    # `_set_run_project(None)` inside langfuse_langchain_extras then left model
+    # resolution with no project context. Once a tenant has ANY org_model_grants row,
+    # effective_project_offerings fails CLOSED without a project — so every call to
+    # this endpoint answered "No usable model is configured for your organization",
+    # pointing an administrator at a model that was never the problem.
+    _lf_pid = project_id
+    if not _lf_pid and pipeline_context:
         try:
             import json as _json_pc
             _pc = _json_pc.loads(pipeline_context) if isinstance(pipeline_context, str) else pipeline_context
             _lf_pid = _pc.get("project_id") if isinstance(_pc, dict) else None
         except Exception:
             _lf_pid = None
-    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id="")
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, user_id=user_id, agent_type="design", project_id=_lf_pid)
+    # tenant_id passed too: it keys the usage meter and the budget checks, and the WS
+    # path has always supplied it.
+    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
+    _lf_cbs, _lf_meta = langfuse_langchain_extras(
+        session_id=session_id, tenant_id=real_tenant_id or "", user_id=user_id,
+        model=model_id, agent_type="design", project_id=_lf_pid,
+    )
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}
 
     if uploaded_files:
@@ -514,7 +599,19 @@ async def chat(
         new_messages = [SystemMessage(content=sys_content)] + new_messages
         _initialized_sessions.add(session_id)
 
-    state: Dict[str, Any] = {"messages": new_messages}
+    state: Dict[str, Any] = {
+        "messages": new_messages,
+        # WITHOUT THESE THIS ENDPOINT COULD NEVER RUN. The agent node calls
+        # resolve_model_for_run(state["tenant_id"], state["model_id"]), so an absent
+        # tenant resolved no provider and every request answered "No usable model is
+        # configured for your organization" — a message that sends an administrator to
+        # Org Settings to fix a model that was never the problem.
+        #
+        # The WS path has passed both since it was written; this one was built with
+        # just the messages and nobody noticed, because the UI drives the WebSocket.
+        "tenant_id": real_tenant_id,
+        "model_id": model_id,
+    }
 
     final_content = ""
     total_input_tokens = 0

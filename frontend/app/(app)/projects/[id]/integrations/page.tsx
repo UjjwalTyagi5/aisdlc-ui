@@ -352,12 +352,16 @@ const CREDENTIAL_FIELDS: Record<
     // No URL: api.figma.com is fixed. `account` carries the default file — a
     // share URL or a bare key; extract_file_key() on the backend accepts either.
     account: {
-      label: "Default file",
+      // NOT an account, despite sharing the `account` slot every other connector
+      // uses for one — the label says so because somebody typed their email here
+      // and it stored cleanly, then surfaced a session later as "no default file is
+      // configured". The backend now rejects an unparseable value outright.
+      label: "Default Figma file URL (not an account)",
       placeholder: "https://www.figma.com/design/abc123/Product",
       optional: true,
     },
     secretLabel: "Personal access token",
-    hint: "Figma → Settings → Security → Personal access tokens. Read-only: the Design agent reads your screens and never writes to them.",
+    hint: "Figma → Settings → Security → Personal access tokens. Read-only: the Design agent reads your screens and never writes to them. Leave the file blank to pass a file URL to the agent per request.",
   },
   github: {
     // No URL: api.github.com is fixed. `account` carries owner/repo, which is

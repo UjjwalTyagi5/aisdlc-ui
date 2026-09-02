@@ -28,7 +28,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ThinkingIndicator } from "@/components/app/thinking-indicator";
-import { DiffViewer } from "@/components/app/diff-viewer";
+import { createTwoFilesPatch } from "diff";
 
 /**
  * UI-only in Chunk 6. Chunk 15 wires Vercel AI SDK `useChat` for real streaming.
@@ -710,15 +710,17 @@ function ChatBubble({
  * pattern already used by AuditEventRow (chevron + header button, toggling a
  * `hidden` body rather than mounting/unmounting it).
  *
- * `DiffViewer` (a real Monaco diff editor) is mounted lazily — only once the
- * card has been expanded at least once — rather than kept warm at all times.
- * Mounting it unconditionally behind `hidden` (display:none) meant every
- * diff card in a session accumulated a live Monaco instance plus two full
- * file copies whether or not the user ever looked at it, and Monaco doesn't
- * reliably recover its layout when revealed from a 0×0 container without
- * `automaticLayout`. `hasBeenExpanded` latches true on first expand and never
- * resets, so re-collapsing doesn't unmount/remount DiffViewer repeatedly —
- * only the very first expand pays the mount cost. See final-review.md I3/I4.
+ * Renders as a syntax-highlighted ```diff fenced code block through the same
+ * MarkdownMessage/CodeBlock pipeline every other chat message already uses —
+ * not a Monaco DiffViewer. Monaco (`@monaco-editor/react`) defaults to
+ * fetching its editor bundle from a CDN at runtime; this app's CSP
+ * (`script-src 'self' ...`, `connect-src 'self' ...`) has no CDN host in it
+ * by design, so Monaco hung on "Loading…" forever the first time this was
+ * actually exercised in a browser (confirmed live 2026-09-01 — see
+ * "desicions and issues.txt" Issue 12). Self-hosting Monaco was the other
+ * option but adds real Turbopack worker-loading risk for a dev server that
+ * already runs `next dev --turbo`; this path reuses proven, already-working
+ * infrastructure with zero CDN/CSP/worker surface at all.
  */
 function DiffCard({
   path,
@@ -732,18 +734,22 @@ function DiffCard({
   changeKind: "created" | "edited";
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  const [hasBeenExpanded, setHasBeenExpanded] = React.useState(false);
 
-  const toggle = () => {
-    setExpanded((v) => !v);
-    setHasBeenExpanded(true);
-  };
+  const diffMarkdown = React.useMemo(() => {
+    const patch = createTwoFilesPatch(path, path, original, modified, undefined, undefined, {
+      context: 3,
+    });
+    // Drop createTwoFilesPatch's own "Index: <path>\n===...\n" header — the
+    // card's own header already names the file; keep from "--- " onward.
+    const body = patch.slice(patch.indexOf("--- "));
+    return "```diff\n" + body.trimEnd() + "\n```";
+  }, [path, original, modified]);
 
   return (
     <div className="border-line-soft bg-surface-1 w-full min-w-0 overflow-hidden rounded-lg border">
       <button
         type="button"
-        onClick={toggle}
+        onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
         className="hover:bg-surface-2 flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
       >
@@ -760,9 +766,9 @@ function DiffCard({
           {changeKind}
         </Badge>
       </button>
-      {hasBeenExpanded && (
-        <div hidden={!expanded} className="border-line-soft border-t">
-          <DiffViewer original={original} modified={modified} filename={path} showToolbar />
+      {expanded && (
+        <div className="border-line-soft [&>div]:my-0 [&>div]:rounded-none [&>div]:border-0 border-t">
+          <MarkdownMessage content={diffMarkdown} />
         </div>
       )}
     </div>

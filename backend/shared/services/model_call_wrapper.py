@@ -8,7 +8,8 @@ this as deliberately out of scope for the BU-cascade design; this module closes 
   - Estimates the call's cost up front and enforces the provider's per-call cap
     (shared.services.model_rate_limit.enforce_per_call_cost) BEFORE any network call —
     PRD §376/§545's "max cost per call" / "per-call limits".
-  - Enforces a 30s timeout per attempt.
+  - Enforces a per-attempt timeout (see _CALL_TIMEOUT_SECONDS below — originally 30s
+    per task #20, raised after live testing showed it was systematically too short).
   - Retries twice (3 attempts total) on a timeout or a 429-shaped error, with 2s then
     4s backoff — the exact schedule the task named.
   - Logs every retry (outcome=retry) via the standard logger, and — best-effort, only
@@ -30,7 +31,17 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_CALL_TIMEOUT_SECONDS = 30.0
+# Originally 30.0 (task #20). Confirmed live (2026-09-01, "desicions and issues.txt"
+# Issue 13) that this was systematically too short for reasoning-capable models:
+# a direct, un-timed reproduction of a real chat-flow prompt against this platform's
+# own configured gpt-5-mini deployment measured 28.1s for a TRIVIAL completion with
+# NO tools bound and NO system prompt — already at the old ceiling before accounting
+# for the real agentic call's extra overhead (tool-call schemas, the full system
+# prompt, actual file content in context). Every attempt was therefore doomed before
+# the retry loop even started, which is why retrying never helped and just added
+# latency on top of latency. 90s gives real headroom over that measured baseline for
+# the fuller agentic context, while still bounding a genuinely hung call.
+_CALL_TIMEOUT_SECONDS = 90.0
 _RETRY_BACKOFFS_SECONDS = (2.0, 4.0)  # attempt 2 waits 2s, attempt 3 waits 4s
 _MAX_ATTEMPTS = 1 + len(_RETRY_BACKOFFS_SECONDS)
 
@@ -136,8 +147,9 @@ async def guarded_completion(
     **invoke_kwargs: Any,
 ):
     """Invoke `chat_model.ainvoke(messages, **invoke_kwargs)` under the gateway's
-    guardrails: per-call cost cap, 30s timeout, 2-retry backoff (2s, 4s), retry
-    logging, and the resolved model's no-training extras.
+    guardrails: per-call cost cap, a per-attempt timeout (_CALL_TIMEOUT_SECONDS),
+    2-retry backoff (2s, 4s), retry logging, and the resolved model's no-training
+    extras.
 
     `resolved` is a model_resolver.ResolvedModel — this function reads
     `max_cost_per_call_usd`, `extra_kwargs`, and `alias`/`input_price_per_million`-less

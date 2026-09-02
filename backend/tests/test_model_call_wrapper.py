@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from shared.services.model_call_wrapper import (
+    _CALL_TIMEOUT_SECONDS,
     _MAX_ATTEMPTS,
     estimate_input_tokens,
     guarded_completion,
@@ -82,6 +83,34 @@ async def test_retries_on_timeout_then_succeeds(_no_real_sleep):
     result = await guarded_completion(_resolved(), model, ["hi"])
     assert model.calls == 2
     assert result is not None
+
+
+def test_call_timeout_has_real_headroom_for_reasoning_models():
+    """Regression guard for Issue 13 (desicions and issues.txt, 2026-09-01): a live,
+    un-timed reproduction of a real chat-flow prompt against this platform's own
+    configured gpt-5-mini deployment measured 28.1s for a TRIVIAL completion with no
+    tools bound and no system prompt -- already at the old 30s ceiling before
+    accounting for a real agentic call's extra overhead. Every attempt was doomed
+    before the retry loop even started. Guards against someone reverting this back
+    down to 30s without re-confirming reasoning-model latency has changed."""
+    assert _CALL_TIMEOUT_SECONDS >= 60.0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_is_called_with_the_module_timeout_constant(monkeypatch):
+    """Confirms guarded_completion actually wires _CALL_TIMEOUT_SECONDS into
+    asyncio.wait_for's timeout kwarg -- not just that the constant exists."""
+    captured: dict = {}
+    real_wait_for = asyncio.wait_for
+
+    async def _spy_wait_for(coro, timeout=None):
+        captured["timeout"] = timeout
+        return await real_wait_for(coro, timeout=timeout)
+
+    monkeypatch.setattr("shared.services.model_call_wrapper.asyncio.wait_for", _spy_wait_for)
+    model = _FakeChatModel(fail_times=0)
+    await guarded_completion(_resolved(), model, ["hi"])
+    assert captured["timeout"] == _CALL_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

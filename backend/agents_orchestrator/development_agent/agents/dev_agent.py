@@ -148,7 +148,20 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
         "api_base": base_url,
         "api_key": api_key,
         "max_tokens": 8192,
-        "max_retries": 2,
+        # 0, not langchain_litellm's own default -- guarded_completion
+        # (shared/services/model_call_wrapper.py) already retries the whole
+        # ainvoke call (3 attempts, 2s/4s backoff, logged). ChatLiteLLM's own
+        # tenacity-based retry wraps EVERY call underneath that and ALSO
+        # retries on RateLimitError, uncoordinated with the outer loop -- a
+        # single guarded_completion call could fire up to 3x3=9 real requests
+        # at the provider instead of 3, piling more load onto an endpoint
+        # that's already rate-limited. Confirmed live (2026-09-01,
+        # "desicions and issues.txt" Issue 14) via a real 429 from Azure:
+        # the log showed both retry layers firing independently on the same
+        # RateLimitError. See guarded_completion's own docstring -- it was
+        # already written to be the sole retry mechanism; this only makes
+        # that actually true.
+        "max_retries": 0,
         # Stream tokens so the copilot shows the dev agent's replies live.
         "streaming": True,
     }

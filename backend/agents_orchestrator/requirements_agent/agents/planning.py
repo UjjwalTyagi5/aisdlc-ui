@@ -1184,7 +1184,143 @@ from shared.authz.consequential import authorize_consequential as _authorize_con
 _CONSEQUENTIAL_STAGE = "requirements"
 
 
-async def _board_connector(mode: str = "read"):
+def _board_error(exc: Exception) -> str:
+    """What went wrong on the board, said safely and actionably.
+
+    NEVER `str(exc)`. httpx's HTTPStatusError renders as
+    "Client error '400 Bad Request' for url 'https://acme.atlassian.net/rest/api/3/issue'",
+    and every board tool used to interpolate that straight into its return value — which
+    lands in the model's context and in the saved transcript. That is the instance URL
+    and the full API path, for every tenant, on every failure.
+
+    It is also useless to the reader: "400 Bad Request" does not say WHAT was wrong.
+    The provider does say, in the response BODY, which is a different thing from the
+    exception's own message — Jira answers
+    {"errors": {"issuetype": "The issue type selected is invalid."}} and that sentence
+    is exactly what the agent needs to correct itself and retry.
+
+    So: pull the provider's own reason out of the body when there is one, fall back to
+    the status code, and fall back again to the exception TYPE name. None of those
+    carry a URL or a credential.
+    """
+    import httpx  # noqa: PLC0415
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        reasons: list[str] = []
+        try:
+            body = exc.response.json()
+        except Exception:  # noqa: BLE001 — a non-JSON body is normal for some errors
+            body = None
+        if isinstance(body, dict):
+            # Jira: {"errorMessages": [...], "errors": {"field": "why"}}
+            for m in body.get("errorMessages") or []:
+                if isinstance(m, str):
+                    reasons.append(m)
+            errs = body.get("errors")
+            if isinstance(errs, dict):
+                reasons.extend(f"{k}: {v}" for k, v in errs.items() if isinstance(v, str))
+            # Azure DevOps: {"message": "..."}
+            msg = body.get("message")
+            if isinstance(msg, str) and msg:
+                reasons.append(msg)
+        code = exc.response.status_code
+        if reasons:
+            return f"the board rejected it (HTTP {code}) — " + "; ".join(reasons[:3])
+        if code in (401, 403):
+            return (
+                f"the board rejected the credential (HTTP {code}) — check the personal "
+                "access token on the Integrations page."
+            )
+        if code == 404:
+            return f"the board could not find that (HTTP {code}) — check the project name."
+        return f"the board returned HTTP {code}."
+    return f"the board call failed ({type(exc).__name__})."
+
+
+#: What a person calls each board, mapped to the kind the grant is stored under. The
+#: model is told the canonical names, but users say "ADO" and the model echoes them —
+#: and an unrecognised provider must fail with "which boards you can use", never by
+#: silently falling through to the stage default and writing somewhere else.
+_PROVIDER_ALIASES = {
+    "ado": "azure_devops",
+    "azure devops": "azure_devops",
+    "azuredevops": "azure_devops",
+    "azure_devops": "azure_devops",
+    "azure boards": "azure_devops",
+    "devops": "azure_devops",
+    "tfs": "azure_devops",
+    "jira": "jira",
+    "atlassian": "jira",
+    "github": "github_issues",
+    "github issues": "github_issues",
+    "github_issues": "github_issues",
+    "linear": "linear",
+}
+
+
+def _canonical_provider(provider: str) -> str:
+    return _PROVIDER_ALIASES.get((provider or "").strip().lower().replace("-", " "), "")
+
+
+async def _stage_boards() -> list[str]:
+    """The board kinds this project's requirements stage may reach."""
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+    from shared.services.agent_run import stage_board_kinds  # noqa: PLC0415
+
+    return await stage_board_kinds(
+        get_tenant_id(), get_project_id(), _CONSEQUENTIAL_STAGE
+    )
+
+
+async def _named_board_connector(provider: str):
+    """A scoped connector for a NAMED board, or (None, error_str).
+
+    THE ACCESS PATH IS THE SAME ONE, deliberately. This resolves through
+    `get_connector_for_session` with the project, the stage and the owner exactly as
+    `agent_run_scope` does for the injected connector — so the level is looked up per
+    (stage, tool) for THIS provider, and a board the stage never wired resolves to no
+    access rather than to the stage's other board. Naming a provider chooses between
+    boards the project already holds; it cannot reach one it does not.
+    """
+    from config.connector_factory import get_connector_for_session  # noqa: PLC0415
+    from config.ws_helper import (  # noqa: PLC0415
+        get_project_id,
+        get_tenant_id,
+        get_user_id,
+    )
+
+    kind = _canonical_provider(provider)
+    available = await _stage_boards()
+    if not kind:
+        return None, (
+            f"'{provider}' is not a board this agent recognises. "
+            + (f"This project's requirements stage can use: {', '.join(available)}."
+               if available else "This project has no board connected.")
+        )
+    if available and kind not in available:
+        return None, (
+            f"This project's requirements stage is not wired to {kind}. "
+            f"It can use: {', '.join(available)}. An administrator can add another "
+            f"board on the project's Settings page."
+        )
+
+    tenant_id, project_id = get_tenant_id(), get_project_id()
+    if not (tenant_id and project_id):
+        # A queued run has no project in this context, so a named provider cannot be
+        # resolved or access-checked. Fall back to the injected connector rather than
+        # resolving one that would permit nothing.
+        return None, ""
+    try:
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, project_id=str(project_id),
+            owner_id=get_user_id() or "", agent_id=_CONSEQUENTIAL_STAGE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Could not reach the {kind} board ({type(exc).__name__})."
+    return connector, None
+
+
+async def _board_connector(mode: str = "read", provider: str = ""):
     """Return (connector, None) for the run-injected connector, or (None, error_str).
 
     `mode` is the kind of operation the caller is about to perform — "read" or
@@ -1203,15 +1339,23 @@ async def _board_connector(mode: str = "read"):
     boundary — the boundary is at connector acquisition and cannot be bypassed by a
     tool that forgets to pass a mode.
     """
-    try:
-        connector = _get_active_connector()
-    except Exception:
-        return None, (
-            "No project-management board is connected for this run. An administrator "
-            "must connect Azure DevOps or Jira on the Integrations page before board "
-            "stories can be ingested. You can still proceed with pasted or uploaded "
-            "requirements."
-        )
+    connector = None
+    if provider:
+        named, err = await _named_board_connector(provider)
+        if err:
+            return None, err
+        connector = named  # None only on the no-project fallback described there
+
+    if connector is None:
+        try:
+            connector = _get_active_connector()
+        except Exception:
+            return None, (
+                "No project-management board is connected for this run. An administrator "
+                "must connect Azure DevOps or Jira on the Integrations page before board "
+                "stories can be ingested. You can still proceed with pasted or uploaded "
+                "requirements."
+            )
     try:
         broadcast_log(
             manager,
@@ -1257,19 +1401,195 @@ async def _board_connector(mode: str = "read"):
     return connector, None
 
 
+
 @tool
-async def list_board_projects() -> str:
+async def markdowntopdf(content: str = "", output_path: str = "requirements_document.pdf") -> str:
+    """Convert Markdown (or the last generated document) into a PDF file.
+
+    Use when the user asks for a PDF specifically. Word -> markdowntodoc,
+    spreadsheet -> generate_planning_sheet, slides -> generate_ppt.
+
+    Args:
+        content: The markdown to convert. Omit to use the most recently generated
+            document (BRD / PDD / Risk Register) for this session.
+        output_path: Filename, e.g. project_topic_brd.pdf
+    """
+    if not (content and content.strip()):
+        try:
+            content = _LAST_GENERATED_DOC.get(get_session_id(), "")
+        except Exception:  # noqa: BLE001
+            content = ""
+    if not (content and content.strip()):
+        return ("Error: nothing to convert. Generate a BRD / PDD / Risk Register first, "
+                "or pass the markdown content explicitly.")
+
+    filename = os.path.basename(output_path or "requirements_document.pdf")
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = f"{esett.FILES}/{user_id}/requirements_agent/{session_id}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, filename)
+
+    try:
+        from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
+
+        markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating the PDF ({type(exc).__name__})."
+
+    url = await broadcast_file_generated(session_id, filename, full_path)
+    return (
+        f"Generated '{filename}'."
+        + (f" Download it here: {url}" if url else "")
+        + " It is NOT yet saved to the project's artifacts — ask the user whether to "
+          "save it, and call save_to_project_artifacts if they agree."
+    )
+
+
+@tool
+async def save_to_project_artifacts() -> str:
+    """Store the documents generated in this chat into the project's artifacts.
+
+    Call this ONLY after the user has agreed. Generated files are downloadable straight
+    away; adding them to the project's artifacts uploads them to shared, durable
+    storage, which is the user's decision to make. Ask first, then call this on a yes.
+    """
+    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
+
+    stored, failed, not_uploaded = await save_pending_artifacts(get_session_id() or "")
+    if not stored and not failed:
+        return "There are no generated documents waiting to be saved."
+    parts = []
+    if stored:
+        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
+    if not_uploaded:
+        # THE ROW EXISTS AND THE BYTES DO NOT. Saying only "saved" here is how a user
+        # finds the document listed in the artifacts panel and absent from storage,
+        # and has no way to tell which happened. Relay this verbatim.
+        parts.append(
+            f"WARNING: {', '.join(not_uploaded)} could not be uploaded to the "
+            "project's file storage — the artifact is recorded and listed, but the "
+            "file itself is not stored and cannot be downloaded from the artifacts "
+            "panel. The chat download link still works. An administrator needs to "
+            "check the storage configuration."
+        )
+    if failed:
+        parts.append(
+            f"Could not save: {', '.join(failed)} — they are still downloadable and "
+            "can be retried."
+        )
+    return " ".join(parts)
+
+
+@tool
+async def export_document(content: str = "", filename: str = "requirements_document.docx") -> str:
+    """Export content as a Word (.docx), PDF (.pdf), Excel (.xlsx), Markdown (.md) or text file.
+
+    ONE tool for every document format — the format comes from the FILENAME EXTENSION,
+    so "as a PDF" means filename="something.pdf".
+
+        Word         report.docx
+        PDF          report.pdf
+        Excel        matrix.xlsx   (exports the MARKDOWN TABLES, one sheet per table)
+        Markdown     notes.md
+
+    Args:
+        content: The markdown to export. Omit to use the most recently generated
+            document (BRD / PDD / Risk Register) for this session.
+        filename: Output filename INCLUDING the extension you want.
+
+    For diagrams/images use generate_diagram; for slides use generate_ppt.
+    """
+    from shared.tools.doc_export import (  # noqa: PLC0415
+        export_result_message,
+        normalise_filename,
+        render_document,
+        supported_list,
+    )
+
+    if not (content and content.strip()):
+        try:
+            content = _LAST_GENERATED_DOC.get(get_session_id(), "")
+        except Exception:  # noqa: BLE001
+            content = ""
+    if not (content and content.strip()):
+        return ("Error: nothing to export. Generate a BRD / PDD / Risk Register first, "
+                "or pass the content explicitly.")
+
+    name = normalise_filename(filename, "requirements_document.docx")
+    user_id, session_id = get_user_id(), get_session_id()
+    out_dir = f"{esett.FILES}/{user_id}/requirements_agent/{session_id}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    full_path = os.path.join(out_dir, name)
+
+    try:
+        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
+
+    url = await broadcast_file_generated(session_id, name, full_path)
+    extras = []
+    if name.lower().endswith(".xlsx"):
+        # Said plainly: an Excel export of a document with no tables is a workbook
+        # with one explanatory sheet, and the user should hear that from the agent
+        # rather than discover it on opening the file.
+        extras.append("Excel exports contain the document's TABLES, one sheet each.")
+    return export_result_message(name, url, extras)
+
+@tool
+async def list_board_providers() -> str:
+    """List which project-management boards this project can use (Azure DevOps, Jira, …).
+
+    Call this when the user names a board — "put it on ADO, not Jira" — or when a board
+    tool refuses because a provider is not available. Every other board tool takes an
+    optional `provider` argument accepting any name listed here.
+
+    A project can have more than one board wired to its requirements stage. Without
+    naming one, the tools use the stage's default, which may not be the one the user
+    means.
+    """
+    boards = await _stage_boards()
+    if not boards:
+        return (
+            "This project's requirements stage has no board connected. An administrator "
+            "can connect one on the project's Settings page."
+        )
+    default = boards[0]
+    try:
+        from shared.services.agent_run import _pick_board_kind  # noqa: PLC0415
+
+        default = _pick_board_kind(boards) or boards[0]
+    except Exception:  # noqa: BLE001 — the list is the answer; the default is a nicety
+        pass
+    lines = [f"- {b}" + ("  (default)" if b == default else "") for b in boards]
+    return (
+        "Boards available to this project's requirements stage:\n"
+        + "\n".join(lines)
+        + "\n\nPass one as the `provider` argument of any board tool to target it "
+          "explicitly, e.g. provider=\"azure_devops\". Omit it to use the default."
+    )
+
+
+@tool
+async def list_board_projects(provider: str = "") -> str:
     """List all projects visible in the connected project-management board.
 
     Call this first when the user wants to ingest stories from the board.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
         projects = await connector.read_adapter("list_projects")
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching projects: {exc}"
+        return f"Error fetching projects: {_board_error(exc)}"
     if not projects:
         return "No projects found."
     lines = [
@@ -1280,7 +1600,7 @@ async def list_board_projects() -> str:
 
 
 @tool
-async def list_board_groups(project: str) -> str:
+async def list_board_groups(project: str, provider: str = "") -> str:
     """List optional board groups/teams for the given project.
 
     Jira usually returns no groups (its project roles are permissions, not delivery
@@ -1288,14 +1608,18 @@ async def list_board_groups(project: str) -> str:
 
     Args:
         project: Exact project name/key as returned by list_board_projects.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
         teams = await connector.read_adapter("list_teams", project=project)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching teams for project '{project}': {exc}"
+        return f"Error fetching teams for project '{project}': {_board_error(exc)}"
     if not teams:
         return (
             f"No board groups/teams found in project '{project}'. "
@@ -1306,13 +1630,57 @@ async def list_board_groups(project: str) -> str:
 
 
 @tool
-async def list_board_states(project: str, work_item_type: str = "User Story") -> str:
+async def list_board_item_types(project: str, provider: str = "") -> str:
+    """List the work item types this project actually supports, with their real names.
+
+    CALL THIS BEFORE CREATING AN ITEM IF YOU ARE NOT CERTAIN OF THE TYPE, and always
+    after a create fails with "work item type ... does not exist".
+
+    The valid types are NOT fixed and NOT the same on every board — they come from the
+    project's process template or issue-type scheme:
+      Azure DevOps Agile  -> Epic, Feature, User Story, Task, Bug
+      Azure DevOps Scrum  -> Epic, Feature, Product Backlog Item, Task, Bug
+      Azure DevOps Basic  -> Epic, Issue, Task            (no "User Story" at all)
+      Jira                -> whatever that project's scheme defines
+
+    Guessing "User Story" on a Basic project fails with VS402323. Use the exact name
+    returned here as work_item_type.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board.
+    """
+    connector, err = await _board_connector(provider=provider)
+    if err:
+        return f"Error: {err}"
+    try:
+        types = await connector.read_adapter("list_item_types", project=project)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error fetching work item types: {_board_error(exc)}"
+    if not types:
+        return f"No work item types returned for '{project}'."
+    lines = []
+    for t in types:
+        name = t.get("name", "") if isinstance(t, dict) else str(t)
+        desc = (t.get("description", "") if isinstance(t, dict) else "") or ""
+        lines.append(f"- {name}" + (f" — {desc[:100]}" if desc else ""))
+    return (
+        f"Work item types available in '{project}':\n" + "\n".join(lines)
+        + "\n\nUse one of these EXACT names as work_item_type."
+    )
+
+
+@tool
+async def list_board_states(project: str, work_item_type: str = "User Story", provider: str = "") -> str:
     """List the workflow states defined for a work item type in the project.
 
     Use this to discover real state names (e.g. "New", "Active") instead of guessing.
     Defaults to User Story.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1320,7 +1688,7 @@ async def list_board_states(project: str, work_item_type: str = "User Story") ->
             "list_states", project=project, item_type=work_item_type
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching states: {exc}"
+        return f"Error fetching states: {_board_error(exc)}"
     if not states:
         return "No states returned."
     lines = [f"- {s['name']} ({s.get('category', '')})" for s in states]
@@ -1328,7 +1696,7 @@ async def list_board_states(project: str, work_item_type: str = "User Story") ->
 
 
 @tool
-async def list_board_items(project: str, team: Optional[str] = None) -> str:
+async def list_board_items(project: str, team: Optional[str] = None, provider: str = "") -> str:
     """Fetch ALL work items in a project regardless of state or type.
 
     Use this FIRST when the user asks to pull existing board items — it never
@@ -1337,14 +1705,18 @@ async def list_board_items(project: str, team: Optional[str] = None) -> str:
     Args:
         project: Project name.
         team: Optional team name to scope the query.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
         items = await connector.read_adapter("list_all_items", project=project, team=team)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching work items: {exc}"
+        return f"Error fetching work items: {_board_error(exc)}"
     if not items:
         return f"No work items found in project '{project}'."
     lines = [
@@ -1356,15 +1728,19 @@ async def list_board_items(project: str, team: Optional[str] = None) -> str:
 
 
 @tool
-async def list_board_items_by_state(project: str, state: str, team: Optional[str] = None) -> str:
+async def list_board_items_by_state(project: str, state: str, team: Optional[str] = None, provider: str = "") -> str:
     """List user stories matching a state filter in the project.
 
     Args:
         project: Project name.
         state: Exact state name from list_board_states (e.g. "New", "Active", "To Do").
         team: Optional team name to scope the query.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1372,7 +1748,7 @@ async def list_board_items_by_state(project: str, state: str, team: Optional[str
             "list_stories", project=project, state=state, team=team
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching stories: {exc}"
+        return f"Error fetching stories: {_board_error(exc)}"
     if not stories:
         return f"No stories in state '{state}' for project '{project}'."
     lines = [
@@ -1384,9 +1760,14 @@ async def list_board_items_by_state(project: str, state: str, team: Optional[str
 
 
 @tool
-async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
-    """Fetch the full normalized detail of one story (description + acceptance criteria)."""
-    connector, err = await _board_connector()
+async def fetch_board_item_detail(project: str, work_item_id: int, provider: str = "") -> str:
+    """Fetch the full normalized detail of one story (description + acceptance criteria).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
+    """
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1394,7 +1775,7 @@ async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
             "fetch_item_detail", project=project, item_id=work_item_id
         )
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching work item #{work_item_id}: {exc}"
+        return f"Error fetching work item #{work_item_id}: {_board_error(exc)}"
     ac_lines = "\n".join(f"  - {c}" for c in norm.get("acceptance_criteria", [])) or "  (none)"
     return (
         f"Story #{norm.get('source_key') or norm['work_item_id']} (id: {norm['id']}): {norm['title']}\n"
@@ -1405,7 +1786,7 @@ async def fetch_board_item_detail(project: str, work_item_id: int) -> str:
 
 
 @tool
-async def fetch_board_hierarchy(project: str) -> str:
+async def fetch_board_hierarchy(project: str, provider: str = "") -> str:
     """Fetch the full Epic → Feature → User Story hierarchy from the board.
 
     Use when the user wants all work items organised by parent-child relationships
@@ -1413,14 +1794,18 @@ async def fetch_board_hierarchy(project: str) -> str:
 
     Args:
         project: Exact project name.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if err:
         return f"Error: {err}"
     try:
         tree = await connector.read_adapter("fetch_hierarchy", project=project)
     except Exception as exc:  # noqa: BLE001
-        return f"Error fetching hierarchy: {exc}"
+        return f"Error fetching hierarchy: {_board_error(exc)}"
     if not tree:
         return f"No work items found in project '{project}'."
 
@@ -1447,6 +1832,8 @@ async def create_board_item(
     work_item_type: str = "User Story",
     description: str = "",
     acceptance_criteria: str = "",
+    parent_id: str = "",
+    provider: str = "",
 ) -> str:
     """Create a single work item of ANY type (Epic/Feature/User Story/Task/Bug) on the board.
 
@@ -1456,8 +1843,18 @@ async def create_board_item(
         work_item_type: Exact type — e.g. "Epic", "Feature", "User Story", "Task", "Bug".
         description: Optional description.
         acceptance_criteria: Optional acceptance criteria text.
+        parent_id: Optional — the item to create this one UNDER. Azure DevOps wants the
+            numeric id ("1"); Jira wants the issue key ("SCRUM-1"). Pass it exactly as
+            the board reported it when the parent was created.
+            WITHOUT THIS THE ITEM IS UNPARENTED. Writing "Parent: #1" into the
+            description is text, not a link — if the user asked for items under an
+            Epic, pass parent_id or tell them the items are not linked.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1468,12 +1865,16 @@ async def create_board_item(
             title=title,
             description=description,
             acceptance_criteria=acceptance_criteria,
+            parent_id=parent_id,
         )
         wid = wi.get("work_item_id") or wi.get("id", "?")
         url = wi.get("url") or wi.get("work_item_url") or wi.get("_links", {}).get("html", {}).get("href", "")
-        return f"Created {work_item_type} #{wid}: {title}" + (f"\n{url}" if url else "")
+        # State whether it was parented. "Created" alone is what let a previous run
+        # report three Tasks as "linked under Epic #1" when they were orphans.
+        parented = f" (child of #{parent_id})" if parent_id else ""
+        return f"Created {work_item_type} #{wid}: {title}{parented}" + (f"\n{url}" if url else "")
     except Exception as exc:  # noqa: BLE001
-        return f"Error creating {work_item_type} '{title}': {exc}"
+        return f"Error creating {work_item_type} '{title}': {_board_error(exc)}"
 
 
 @tool
@@ -1481,6 +1882,7 @@ async def create_board_project(
     name: str,
     key: str = "",
     description: str = "",
+    provider: str = "",
 ) -> str:
     """Create a NEW project/space on the connected board (Jira project or ADO project).
 
@@ -1491,8 +1893,12 @@ async def create_board_project(
         name: The new project's display name.
         key: Optional Jira project key (uppercase, ≤10 chars); ignored for ADO.
         description: Optional project description.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1503,19 +1909,23 @@ async def create_board_project(
             return f"Project '{name}' creation queued on Azure DevOps (provisions in the background)."
         return f"Created project '{res.get('name', name)}' (key: {res.get('key', '?')})."
     except Exception as exc:  # noqa: BLE001
-        return f"Error creating project '{name}': {exc}"
+        return f"Error creating project '{name}': {_board_error(exc)}"
 
 
 @tool
-async def move_board_item_state(project: str, work_item_ids: List[int], target_state: str) -> str:
+async def move_board_item_state(project: str, work_item_ids: List[int], target_state: str, provider: str = "") -> str:
     """Move one or more work items to a workflow state. Confirm with the user first.
 
     Args:
         project: Project name.
         work_item_ids: List of work item IDs to move.
         target_state: Target state name (use list_board_states for valid values).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     moved, failed = [], []
@@ -1526,7 +1936,7 @@ async def move_board_item_state(project: str, work_item_ids: List[int], target_s
             )
             moved.append(f"#{wid}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
     lines = [f"Moved {len(moved)} item(s) to '{target_state}':"] + moved
     if failed:
         lines += [f"Failed ({len(failed)}):"] + failed
@@ -1534,15 +1944,19 @@ async def move_board_item_state(project: str, work_item_ids: List[int], target_s
 
 
 @tool
-async def add_board_comment(project: str, work_item_id: int, comment: str) -> str:
+async def add_board_comment(project: str, work_item_id: int, comment: str, provider: str = "") -> str:
     """Add a comment to a work item — for gap reports, design links, PR URLs, or audit notes.
 
     Args:
         project: Project name.
         work_item_id: Work item ID to comment on.
         comment: Comment text to post.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1551,7 +1965,7 @@ async def add_board_comment(project: str, work_item_id: int, comment: str) -> st
         )
         return f"Comment added to #{work_item_id}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error adding comment to #{work_item_id}: {exc}"
+        return f"Error adding comment to #{work_item_id}: {_board_error(exc)}"
 
 
 @tool
@@ -1562,6 +1976,7 @@ async def update_board_item(
     description: str = "",
     acceptance_criteria: str = "",
     state: str = "",
+    provider: str = "",
 ) -> str:
     """Update an existing work item — change its title, description, acceptance criteria,
     and/or move its workflow state. Only the fields you pass are changed.
@@ -1573,8 +1988,12 @@ async def update_board_item(
         description: New description (optional).
         acceptance_criteria: New acceptance criteria (optional; applied on ADO).
         state: New workflow state to transition to (optional; use list_board_states for valid values).
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     changed: List[str] = []
@@ -1598,26 +2017,30 @@ async def update_board_item(
             return f"Nothing to update for #{work_item_id} — pass a title, description, acceptance_criteria, or state."
         return f"Updated #{work_item_id}: {', '.join(changed)}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error updating #{work_item_id}: {exc}"
+        return f"Error updating #{work_item_id}: {_board_error(exc)}"
 
 
 @tool
-async def delete_board_item(project: str, work_item_id: str) -> str:
+async def delete_board_item(project: str, work_item_id: str, provider: str = "") -> str:
     """Permanently delete a work item from the board. IRREVERSIBLE — confirm the id with
     the user first. (ADO: moved to the project Recycle Bin; Jira: the issue is deleted.)
 
     Args:
         project: Project name (Jira: the project name or key).
         work_item_id: Work item id (ADO, e.g. "42") or Jira issue key (e.g. "SCRUM-5").
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
         await connector.write_adapter("delete_item", project=project, item_id=work_item_id)
         return f"Deleted work item #{work_item_id}."
     except Exception as exc:  # noqa: BLE001
-        return f"Error deleting #{work_item_id}: {exc}"
+        return f"Error deleting #{work_item_id}: {_board_error(exc)}"
 
 
 # ── §4.1 authoring tools (gap analysis · normalisation · epics · write-back) ────
@@ -1767,7 +2190,13 @@ No markdown. Only valid JSON."""
 
 
 @tool
-async def write_stories_to_board(stories_json: str, project: str) -> str:
+async def write_stories_to_board(
+    stories_json: str,
+    project: str,
+    work_item_type: str = "User Story",
+    parent_id: str = "",
+    provider: str = "",
+) -> str:
     """Create generated user stories as NEW work items on the board (bulk create).
 
     Args:
@@ -1775,10 +2204,21 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
             generate_user_stories). Each story needs at least a "title"; optional
             "description" and "acceptance_criteria" (list).
         project: Board project name to create the stories in.
+        work_item_type: The type to create. Defaults to "User Story", which does NOT
+            exist on every board — an Azure DevOps Basic project has Epic/Issue/Task
+            and a Scrum one has Product Backlog Item. Call list_board_item_types when
+            unsure; this used to be hardcoded and failed every bulk create on such a
+            project.
+        parent_id: Optional — create all of them UNDER this item (an Epic, usually).
+            ADO wants the numeric id, Jira the issue key. Omitted, they are unparented.
 
     Returns a summary of created work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1799,14 +2239,15 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
             wi = await connector.write_adapter(
                 "create_item",
                 project=project,
-                item_type="User Story",
+                item_type=work_item_type,
                 title=title,
                 description=s.get("description", ""),
                 acceptance_criteria=ac_html,
+                parent_id=parent_id,
             )
             created.append(f"#{wi['id']} {title}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"{title}: {exc}")
+            failed.append(f"{title}: {_board_error(exc)}")
 
     lines = [f"Created {len(created)} work item(s):"] + created
     if failed:
@@ -1816,7 +2257,8 @@ async def write_stories_to_board(stories_json: str, project: str) -> str:
 
 @tool
 async def write_acceptance_criteria_to_board(
-    ac_json: str, story_ids: List[int], project: str
+    ac_json: str, story_ids: List[int], project: str,
+    provider: str = "",
 ) -> str:
     """Write generated acceptance criteria back onto EXISTING work items.
 
@@ -1826,8 +2268,12 @@ async def write_acceptance_criteria_to_board(
         project: Board project name.
 
     Returns a summary of updated work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1847,7 +2293,7 @@ async def write_acceptance_criteria_to_board(
             )
             updated.append(f"#{wid}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
 
     lines = [f"Updated {len(updated)} work item(s):"] + updated
     if failed:
@@ -1857,7 +2303,8 @@ async def write_acceptance_criteria_to_board(
 
 @tool
 async def write_back_normalized_to_board(
-    stories_json: str, project: str, add_audit_comment: bool = True
+    stories_json: str, project: str, add_audit_comment: bool = True,
+    provider: str = "",
 ) -> str:
     """Write normalised descriptions + Gherkin AC back to existing work items.
 
@@ -1870,8 +2317,12 @@ async def write_back_normalized_to_board(
         add_audit_comment: If True, adds an audit comment to each updated work item.
 
     Returns a summary of updated work item IDs.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
-    connector, err = await _board_connector("write")
+    connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
     try:
@@ -1910,7 +2361,7 @@ async def write_back_normalized_to_board(
                     pass
             updated.append(f"#{wid} {s.get('title', '')}")
         except Exception as exc:  # noqa: BLE001
-            failed.append(f"#{wid}: {exc}")
+            failed.append(f"#{wid}: {_board_error(exc)}")
 
     lines = [f"Updated {len(updated)} work item(s):"] + updated
     if failed:
@@ -1926,6 +2377,7 @@ async def build_requirements_payload(
     scope_summary: str = "",
     assumptions: str = "",
     out_of_scope: str = "",
+    provider: str = "",
 ) -> str:
     """Build the structured requirements payload the Design Agent will consume.
 
@@ -1942,6 +2394,10 @@ async def build_requirements_payload(
         out_of_scope: Comma-separated out-of-scope items (or empty string).
 
     Returns a JSON payload string prefixed with REQUIREMENTS_PAYLOAD::.
+
+    `provider` optionally names which board to use when this project has more than one
+    (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
+    list_board_providers first if you are unsure which are available.
     """
     from datetime import datetime as _dt
 
@@ -1953,7 +2409,7 @@ async def build_requirements_payload(
         stories = []
 
     kind = "unknown"
-    connector, err = await _board_connector()
+    connector, err = await _board_connector(provider=provider)
     if not err and connector is not None:
         try:
             kind = connector.connector_name
@@ -1989,7 +2445,13 @@ async def build_requirements_payload(
 
 
 _BOARD_TOOLS = [
-    list_board_projects, list_board_groups, list_board_states, list_board_items,
+    # FIRST, because it answers the question every other board tool depends on: which
+    # board are we even talking to. A project can hold more than one, and without this
+    # the model can only guess at what `provider` accepts.
+    list_board_providers,
+    list_board_projects, list_board_groups, list_board_states,
+    list_board_item_types,
+    list_board_items,
     list_board_items_by_state, fetch_board_item_detail, fetch_board_hierarchy,
     create_board_project,
     create_board_item, update_board_item, delete_board_item,
@@ -2002,6 +2464,10 @@ _BOARD_TOOLS = [
 
 # Convert tools to async
 tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
+         # PDF output, and the explicit save the user is asked for before
+         # anything is written to the project's shared artifact storage.
+         markdowntopdf, save_to_project_artifacts,
+         export_document,
          generate_risk_register, general_query, update_response, markdowntodoc,
          generate_ppt, generate_diagram,
          template_pdd, generate_planning_sheet, generate_user_stories, revise_user_stories,
@@ -2251,6 +2717,59 @@ CRITICAL — GAP QUALITY:
   Use to attach gap report summaries to the parent epic.
 - ALWAYS confirm with the user before calling any mutating tool.
 
+── CHOOSING WHICH BOARD (only when the user names one) ───────────────────────────
+This project may have more than one board wired (e.g. Azure DevOps AND Jira).
+Every board tool takes an optional `provider` argument.
+- If the user names a board — "put it on ADO", "not Jira", "use Azure DevOps" —
+  pass provider on EVERY tool call for that request. "ado" and "azure_devops"
+  both work.
+- If you are unsure which boards exist, call list_board_providers first.
+- If you do NOT pass provider, the project's default board is used. NEVER tell the
+  user you are writing to a board you did not name in `provider` — without it you
+  do not control which one is used, and saying otherwise is how work lands on the
+  wrong board.
+- If a provider is refused, the message says which boards this project can use.
+  Relay that and stop; do not retry with a different board the user did not ask for.
+
+── WORK ITEM TYPES ARE PER PROJECT — DO NOT GUESS ────────────────────────────────
+"User Story" does NOT exist on every board. The valid types come from the project's
+process template or issue-type scheme:
+  Azure DevOps Agile -> Epic, Feature, User Story, Task, Bug
+  Azure DevOps Scrum -> Epic, Feature, Product Backlog Item, Task, Bug
+  Azure DevOps Basic -> Epic, Issue, Task          (there is no "User Story")
+  Jira               -> whatever that project's scheme defines
+- Call list_board_item_types when you are not certain, and ALWAYS after a create
+  fails with "work item type ... does not exist" (ADO error VS402323).
+- Use the exact name it returns. Do not substitute a type the user did not ask for
+  without telling them you are doing it and why.
+
+── WHAT YOU CANNOT DO (never offer these) ────────────────────────────────────────
+You have exactly the tools listed above and nothing else. These are NOT among them,
+and offering them is a promise you cannot keep:
+- You CANNOT create or configure area paths, iterations, sprints, board columns,
+  swimlanes, saved queries, team settings, or project permissions.
+- You CANNOT assign a work item to a person.
+- You CANNOT read images or screenshots. If one is attached, say so and ask for text.
+If the user asks for any of these, say plainly that you cannot and that it must be
+done in the board's own UI. Offering to do it and then not doing it is far worse than
+saying no.
+
+── PARENT LINKS (create_board_item / write_stories_to_board) ─────────────────────
+Both take an optional `parent_id` that creates the item UNDER an existing one.
+- Azure DevOps wants the numeric id ("1"); Jira wants the issue key ("SCRUM-1").
+  Use the id exactly as the board reported it when the parent was created.
+- If the user asks for stories "under" an Epic, create the Epic FIRST, take the id
+  from the tool's reply, and pass it as parent_id on every child.
+- WITHOUT parent_id the item is UNPARENTED. Putting "Parent Epic: #1" in the
+  description is text, not a link. Never describe items as "linked under" or
+  "children of" anything unless you passed parent_id and the tool confirmed it —
+  the reply says "(child of #N)" when it did.
+
+── NEVER REPORT WORK YOU DID NOT DO ──────────────────────────────────────────────
+Report ONLY what a tool actually returned. If a tool returned an error, the change did
+not happen — say so. Do not describe intended changes in the past tense, and do not
+summarise a plan as though it were a result.
+
 ── FLOW J: GENERATE DOCUMENTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 After requirements are confirmed and the gap report is reviewed, offer to export:
 - generate_brd_document(project, scope_summary, stories_json, gap_report_json)
@@ -2268,6 +2787,30 @@ Post the gap report summary as a comment on the parent epic/item using add_board
 - Pass extracted text to generate_stories_from_brd or generate_user_stories.
 - Supported formats: .txt, .md, .csv, .xlsx, .xls, .docx, .pdf.
 - NEVER say you cannot access files — always call read_uploaded_file.
+
+
+── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
+A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
+ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
+whole project can see — and it is the user's decision, not yours.
+- After generating a document, tell the user it is ready, give the download link, and
+  ASK whether to add it to the project's artifacts.
+- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
+  and never claim a document was added to the project unless that tool confirmed it.
+- If they say no, do nothing: the file stays downloadable from the chat.
+
+── FILE FORMATS ──────────────────────────────────────────────────────────────────
+export_document produces EVERY document format — the format comes from the FILENAME
+EXTENSION you pass:
+  Word         export_document(filename="report.docx")
+  PDF          export_document(filename="report.pdf")
+  Excel        export_document(filename="matrix.xlsx")  — exports the document's
+               TABLES, one sheet per table (not prose)
+  Markdown     export_document(filename="notes.md")
+  Diagram      generate_diagram
+  Slides       generate_ppt
+Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
+If they ask for a format not listed here, say which ones are available.
 
 ── HANDOFF RULES (CRITICAL) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ALWAYS call build_requirements_payload before emitting any HANDOFF.
@@ -2363,7 +2906,13 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         # their default — see temperature_kwargs.
         **temperature_kwargs(model, 0.3),
         max_tokens=8096,
-        max_retries=2,
+        # 0, not langchain_litellm's own default -- guarded_completion
+        # (shared/services/model_call_wrapper.py) already retries the whole
+        # ainvoke call; ChatLiteLLM's own tenacity retry underneath it also
+        # retries on RateLimitError, uncoordinated with the outer loop. See
+        # dev_agent.py::_build_llm's identical fix and "desicions and
+        # issues.txt" Issue 14 for the live evidence.
+        max_retries=0,
         # Stream tokens so the copilot shows text live as it's generated (first
         # token in ~1.4s instead of a frozen wait for the whole response). Verified
         # to emit incremental chunks; LangChain still assembles the final message
@@ -2421,9 +2970,12 @@ async def agent(state: AgentState):
     except Exception as e:
         _req_agent_logger.exception("Requirements agent error (tenant=%s alias=%s)",
                                     tenant_id, resolved.alias)
-        return {"messages": [AIMessage(content=(
-            "The agent hit an error while generating a response. Please try again, "
-            "or contact an administrator if the problem persists."))]}
+        # Was a single generic sentence for every failure, so a rate limit (wait and
+        # retry, or switch model) read the same as a bad credential (an admin must act).
+        # Still never str(exc) — a BYOK provider error can echo the tenant's own key.
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
 
 def action(state: AgentState):
 

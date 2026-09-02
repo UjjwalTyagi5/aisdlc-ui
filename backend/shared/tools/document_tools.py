@@ -8,11 +8,33 @@ from __future__ import annotations
 import os
 
 
+#: What this function returns INSTEAD of text when it could not extract any. These read
+#: like content to a caller that only checks for a non-empty string, and that is exactly
+#: how a screenshot ended up announced to an agent as "the user attached this, use its
+#: content directly" with the content being the words "[Binary file: shot.png]". The
+#: agent then tried to open the path and dead-ended on "local file not found".
+#:
+#: Callers must use `extraction_succeeded` rather than truthiness.
+_PLACEHOLDER_PREFIXES = ("[Binary file:", "[Error reading ")
+
+
+def extraction_succeeded(text: str) -> bool:
+    """True when `extract_file_text` returned real content rather than a placeholder.
+
+    `if text:` is NOT good enough and never was: both failure modes return a non-empty
+    human-readable sentence, which is the right thing to SHOW a person and the wrong
+    thing to hand a model as though it were the document.
+    """
+    t = (text or "").strip()
+    return bool(t) and not t.startswith(_PLACEHOLDER_PREFIXES)
+
+
 def extract_file_text(file_path: str) -> str:
     """Return plain text from any supported file type.
 
     Supports: .pdf, .docx, .doc, .txt, .md, .csv, .xlsx, .xls
-    Returns an error string (not an exception) so callers get a readable message.
+    Returns an error string (not an exception) so callers get a readable message —
+    check it with `extraction_succeeded` before treating the result as content.
     """
     ext = os.path.splitext(file_path)[1].lower()
     try:
