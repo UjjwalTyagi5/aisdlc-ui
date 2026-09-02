@@ -475,6 +475,9 @@ async def chat(
     provider_kind: str = Form(None),
     session_id: str = Form(...),
     user_id: str = Form(...),  # kept for wire compatibility; NOT trusted for identity
+    # Optional BYOK model override, same field the Requirements REST route takes. None
+    # means "use the tenant's default", which resolve_model_for_run picks.
+    model_id: str = Form(None),
     uploaded_files: List[UploadFile] = File(None),
 ):
     """REST endpoint — invokes Design Agent and persists typed design artifacts."""
@@ -521,16 +524,32 @@ async def chat(
     file_names: List[str] = []
     os.makedirs(input_directory, exist_ok=True)
 
-    _lf_pid = None
-    if pipeline_context:
+    # THE PROJECT IS THE FORM FIELD, not something to dig out of pipeline_context.
+    # `project_id` is required on this route and was REASSIGNED above by
+    # assert_agent_access_for_chat to the resolved, access-checked id — so it is both
+    # present and trustworthy, while pipeline_context is optional and often absent.
+    #
+    # Reading only pipeline_context meant a request without one had no project, and
+    # `_set_run_project(None)` inside langfuse_langchain_extras then left model
+    # resolution with no project context. Once a tenant has ANY org_model_grants row,
+    # effective_project_offerings fails CLOSED without a project — so every call to
+    # this endpoint answered "No usable model is configured for your organization",
+    # pointing an administrator at a model that was never the problem.
+    _lf_pid = project_id
+    if not _lf_pid and pipeline_context:
         try:
             import json as _json_pc
             _pc = _json_pc.loads(pipeline_context) if isinstance(pipeline_context, str) else pipeline_context
             _lf_pid = _pc.get("project_id") if isinstance(_pc, dict) else None
         except Exception:
             _lf_pid = None
-    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id="")
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, user_id=user_id, agent_type="design", project_id=_lf_pid)
+    # tenant_id passed too: it keys the usage meter and the budget checks, and the WS
+    # path has always supplied it.
+    _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
+    _lf_cbs, _lf_meta = langfuse_langchain_extras(
+        session_id=session_id, tenant_id=real_tenant_id or "", user_id=user_id,
+        model=model_id, agent_type="design", project_id=_lf_pid,
+    )
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}
 
     if uploaded_files:
@@ -564,7 +583,19 @@ async def chat(
         new_messages = [SystemMessage(content=sys_content)] + new_messages
         _initialized_sessions.add(session_id)
 
-    state: Dict[str, Any] = {"messages": new_messages}
+    state: Dict[str, Any] = {
+        "messages": new_messages,
+        # WITHOUT THESE THIS ENDPOINT COULD NEVER RUN. The agent node calls
+        # resolve_model_for_run(state["tenant_id"], state["model_id"]), so an absent
+        # tenant resolved no provider and every request answered "No usable model is
+        # configured for your organization" — a message that sends an administrator to
+        # Org Settings to fix a model that was never the problem.
+        #
+        # The WS path has passed both since it was written; this one was built with
+        # just the messages and nobody noticed, because the UI drives the WebSocket.
+        "tenant_id": real_tenant_id,
+        "model_id": model_id,
+    }
 
     final_content = ""
     total_input_tokens = 0
