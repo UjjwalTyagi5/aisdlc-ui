@@ -323,6 +323,7 @@ class StepOut(BaseModel):
 _STAGE_TO_AGENT = {
     "requirements": "requirements",
     "design": "design",
+    "plan": "plan",
     "development": "development",
     "testing": "testing",
     "deployment": "deployment",
@@ -331,6 +332,7 @@ _STAGE_TO_AGENT = {
 _JSONB_COLUMNS = [
     ("requirements", "requirements_payload"),
     ("design", "design_artifacts"),
+    ("plan", "plan_artifacts"),
     ("development", "development_artifacts"),
     ("testing", "testing_artifacts"),
 ]

@@ -50,6 +50,7 @@ export const PHASE_ALL: readonly Phase[] = [
 export const PHASE_LABEL: Record<Phase, string> = {
   requirements: "Requirements",
   design: "Design",
+  plan: "Plan",
   development: "Development",
   review: "Code Review",
   security: "Security",
@@ -68,6 +69,8 @@ export const PHASE_LABEL: Record<Phase, string> = {
 export const PHASE_DESCRIPTION: Record<Phase, string> = {
   requirements: "Turns intent and conversations into structured requirements and work items.",
   design: "Produces HLD/LLD, C4 diagrams, API contracts, database schema, and ADRs.",
+  plan: "Turns an accepted design into a schedule: work breakdown, estimates, sprints, and who is on what."
+    ,
   development: "Generates code in a sandboxed runtime with command allowlists and secret redaction.",
   review: "Reviews changes against requirements, design, and quality standards.",
   security: "Dependency scanning, SAST, and secret detection with risk scoring.",
@@ -237,6 +240,15 @@ export const GATE_POLICY: Record<Phase, GatePolicy> = {
     title: "Gate: accept the design",
     description:
       "Sign-off accepts the design and unlocks Development. Marking the epic “Design Complete” is a separate Consequential write.",
+    mandatory: false,
+  },
+  plan: {
+    type: "approval_required",
+    capabilityClass: "signoff",
+    ownerLabel: owner("plan"),
+    title: "Gate: commit to the plan",
+    description:
+      "Sign-off commits the schedule and the people on it, and unlocks Development. Writing sprints and assignments to Jira/ADO is a separate Consequential approval.",
     mandatory: false,
   },
   development: {

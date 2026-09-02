@@ -99,6 +99,9 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # Documentation's owner (AGENT_OWNER_ROLE.documentation) is project_admin, the
         # fallback approver — its acceptance is automatic and no delivery role owns it.
         "artifact:approve_documentation",
+        # project_admin is "owner" on every agent (AGENT_DEFAULT_REACH) and the fallback
+        # approver, so it holds the plan gate alongside scrum_master.
+        "artifact:approve_plan",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
         # Tier 1 of routing.REQUEST_ESCALATION_CHAIN — the first approver a request
@@ -203,6 +206,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
     "scrum_master": [
         "run:view",
         "artifact:view", "artifact:export", "artifact:delete",
+        # AGENT_OWNER_ROLE.plan is scrum_master — the PM agent is the first thing this
+        # role OWNS rather than merely uses, and this permission is what makes that
+        # ownership real rather than a table entry.
+        "artifact:approve_plan",
         "agent:invoke",
         "connector:view",
     ],
@@ -221,6 +228,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
 _PHASE_PERMISSION: dict[str, str] = {
     "requirements": "artifact:approve_requirements",
     "design": "artifact:approve_design",
+    "plan": "artifact:approve_plan",
     "development": "artifact:approve_development",
     "code_review": "artifact:approve_code_review",
     "security": "artifact:approve_security",
@@ -255,6 +263,7 @@ _PERMISSION_CATALOG: list[str] = [
     "approve",
     "artifact:approve_requirements",
     "artifact:approve_design",
+    "artifact:approve_plan",
     "artifact:approve_development",
     "artifact:approve_code_review",
     "artifact:approve_security",

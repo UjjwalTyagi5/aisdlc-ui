@@ -91,6 +91,12 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         legacy: true,
       },
       { id: "artifact:approve_design", label: "Approve Design", legacy: true },
+      {
+        id: "artifact:approve_plan",
+        label: "Approve Plan",
+        grants:
+          "Accept a project plan — its schedule, assignments and dates. Held by Scrum Master, who owns the PM agent, and Project Admin as fallback approver.",
+      },
       { id: "artifact:approve_development", label: "Approve Development", legacy: true },
       // Listed in PIPELINE order, and all eight stages are present. Code Review,
       // Security and Documentation were missing here while the backend's

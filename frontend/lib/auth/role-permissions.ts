@@ -65,6 +65,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // project_admin — the fallback approver on every agent. It is the override for a
     // stage no delivery role owns.
     "artifact:approve_documentation",
+    "artifact:approve_plan",
     "connector:view",
     "connector:manage",
     "cost:view",
@@ -191,6 +192,6 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // above.
     "governance:decide",
   ],
-  scrum_master: ["run:view", "artifact:view", "artifact:export", "artifact:delete", "agent:invoke", "connector:view"],
+  scrum_master: ["run:view", "artifact:view", "artifact:export", "artifact:delete", "artifact:approve_plan", "agent:invoke", "connector:view"],
   custom: ["artifact:view"],
 };

@@ -73,11 +73,43 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
         ],
         optional_capabilities=["design.tech.stack.recommend", "design.system.analyze"],
     ),
+    "plan": AgentDefinition(
+        id="plan",
+        name="Project Manager Agent",
+        pipeline_position=3,
+        # BOTH upstream artifacts, because a plan needs to know what is being built AND
+        # how big it is. Requirements alone gives scope with no sizing; design alone
+        # gives components with nothing tying them to what anybody asked for.
+        input_artifacts=["requirements_payload", "design_artifacts"],
+        output_artifact="plan_artifacts",
+        route_path="/chat-project-manager-agent",
+        # A plan commits people and dates. That is a decision somebody signs, not an
+        # output that simply appears.
+        gate_type="approval_required",
+        sla_hours=24,
+        can_parallel_with=[],
+        max_rejections=1,
+        required_capabilities=[
+            "plan.wbs.generate", "plan.estimate", "plan.schedule.build",
+            "board.read", "artifact.write",
+        ],
+        # CAPACITY IS OPTIONAL ON PURPOSE. Azure DevOps exposes it; Jira has no capacity
+        # API at all (see the connector manifest). Requiring it would make the agent
+        # unusable on Jira rather than merely less precise, so resource levelling
+        # degrades to "no capacity data" instead of refusing to run.
+        optional_capabilities=[
+            "board.sprints.read", "board.capacity.read", "board.write",
+            "plan.risk.track", "plan.report.status", "plan.rebaseline",
+        ],
+    ),
     "development": AgentDefinition(
         id="development",
         name="Development Agent",
-        pipeline_position=3,
-        input_artifacts=["requirements_payload", "design_artifacts"],
+        pipeline_position=4,
+        # `plan_artifacts` is what makes the PM agent worth having: without a consumer
+        # it would produce a schedule nothing reads. Development needs to know what was
+        # committed to and in which sprint, not just what to build.
+        input_artifacts=["requirements_payload", "design_artifacts", "plan_artifacts"],
         output_artifact="development_artifacts",
         route_path="/chat-development-agent",
         gate_type="approval_required",
@@ -93,7 +125,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     "testing": AgentDefinition(
         id="testing",
         name="Testing Agent",
-        pipeline_position=4,
+        pipeline_position=5,
         input_artifacts=["requirements_payload", "design_artifacts", "development_artifacts"],
         output_artifact="testing_artifacts",
         route_path="/chat-testing-agent",
@@ -114,7 +146,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     "code_review": AgentDefinition(
         id="code_review",
         name="Code Review Agent",
-        pipeline_position=4,
+        pipeline_position=5,
         input_artifacts=["requirements_payload", "design_artifacts", "development_artifacts"],
         output_artifact="code_review_artifacts",
         route_path="/chat-code-review-agent",
@@ -132,7 +164,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     "security": AgentDefinition(
         id="security",
         name="Security Agent",
-        pipeline_position=4,
+        pipeline_position=5,
         input_artifacts=["design_artifacts", "development_artifacts"],
         output_artifact="security_artifacts",
         route_path="/chat-security-agent",
@@ -150,7 +182,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     "deployment": AgentDefinition(
         id="deployment",
         name="Deployment Agent",
-        pipeline_position=5,
+        pipeline_position=6,
         input_artifacts=["development_artifacts", "testing_artifacts"],
         output_artifact="deployment_artifacts",
         route_path="/chat-deployment-agent",
@@ -167,7 +199,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     "documentation": AgentDefinition(
         id="documentation",
         name="Documentation Agent",
-        pipeline_position=6,
+        pipeline_position=7,
         input_artifacts=[
             "requirements_payload", "design_artifacts", "development_artifacts",
             "code_review_artifacts", "security_artifacts", "testing_artifacts",
@@ -208,7 +240,7 @@ def get_pipeline_order() -> List[List[str]]:
 # because none of their agents exist as AGENT_REGISTRY entries yet (spec Part 5 —
 # an agent id is added here only once it's actually built and mounted).
 _PORTFOLIO_1: list[str] = [
-    "requirements", "design", "development", "code_review",
+    "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
 ]
 
@@ -234,6 +266,13 @@ AGENT_DEFAULT_REACH: dict[str, dict[str, str]] = {
         "project_admin": "owner", "ba": "owner", "architect": "use",
         "developer": "use", "qa": "use", "security_engineer": "use",
         "devops_engineer": "none", "data_engineer": "use", "scrum_master": "use",
+    },
+    # The PM agent is the first place `scrum_master` owns rather than merely uses: it
+    # is the role whose actual job this is. project_admin is owner everywhere by design.
+    "plan": {
+        "project_admin": "owner", "scrum_master": "owner",
+        "ba": "use", "architect": "use", "developer": "use", "qa": "use",
+        "security_engineer": "none", "devops_engineer": "none", "data_engineer": "use",
     },
     "design": {
         "project_admin": "owner", "ba": "use", "architect": "owner",

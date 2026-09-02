@@ -314,6 +314,7 @@ export type Involvement = "owner" | "primary" | "build" | "requests" | "use" | "
 const ALL_NONE: Record<Phase, Involvement> = {
   requirements: "none",
   design: "none",
+  plan: "none",
   development: "none",
   review: "none",
   security: "none",
@@ -330,6 +331,7 @@ const ALL_NONE: Record<Phase, Involvement> = {
 const ALL_OWNER: Record<Phase, Involvement> = {
   requirements: "owner",
   design: "owner",
+  plan: "owner",
   development: "owner",
   review: "owner",
   security: "owner",
@@ -391,6 +393,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "primary",
     design: "use",
+    plan: "use",
     development: "use",
     review: "use",
     security: "use",
@@ -411,6 +414,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "use",
     design: "primary",
+    plan: "primary",
     development: "primary",
     review: "primary",
     security: "use",
@@ -451,6 +455,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "use",
     design: "use",
+    plan: "use",
     development: "use",
     review: "use",
     security: "primary",
@@ -500,6 +505,8 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
 export const AGENT_OWNER_ROLE: Record<Phase, PlatformRole> = {
   requirements: "ba",
   design: "architect",
+  // The one agent scrum_master owns rather than merely uses.
+  plan: "scrum_master",
   development: "architect", // Developer builds; Architect approves — never self-approval.
   review: "architect",
   security: "security_engineer",

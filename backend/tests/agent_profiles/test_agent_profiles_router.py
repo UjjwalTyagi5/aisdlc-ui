@@ -535,7 +535,7 @@ def test_router_has_all_six_routes():
 def test_pipeline_order_matches_registry_keys():
     from config.agent_registry import AGENT_REGISTRY
     assert set(ap.PIPELINE_ORDER) == set(AGENT_REGISTRY.keys())
-    assert len(ap.PIPELINE_ORDER) == 8
+    assert len(ap.PIPELINE_ORDER) == 9   # + the PM agent (0041)
 
 
 # ── create_draft / preview: scope-aware write authorization (route-level) ──────────

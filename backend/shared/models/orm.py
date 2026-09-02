@@ -129,6 +129,9 @@ class Run(Base):
     requirements_payload: Mapped[dict | None] = mapped_column(JSONB)
     requirements_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     design_artifacts: Mapped[dict | None] = mapped_column(JSONB)
+    # The PM agent's output (0041): tasks, schedule, assignments, risks, baseline.
+    # Sits between design and development because that is where it runs.
+    plan_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     development_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     testing_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     code_review_artifacts: Mapped[dict | None] = mapped_column(JSONB)
@@ -796,6 +799,7 @@ class AgentSession(Base):
     # Typed artifacts â€” strict superset of Django's columns (adds code_review/security/deployment)
     requirements_payload: Mapped[dict | None] = mapped_column(JSONB)
     design_artifacts: Mapped[dict | None] = mapped_column(JSONB)
+    plan_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     development_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     testing_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     code_review_artifacts: Mapped[dict | None] = mapped_column(JSONB)

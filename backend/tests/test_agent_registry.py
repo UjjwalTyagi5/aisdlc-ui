@@ -13,7 +13,8 @@ def test_agent_definition_has_orchestration_fields():
 
 def test_all_agents_present():
     assert set(AGENT_REGISTRY.keys()) == {
-        "requirements", "design", "development", "testing", "deployment",
+        "requirements",
+        "plan", "design", "development", "testing", "deployment",
         "code_review", "security", "documentation",
     }
 
@@ -31,7 +32,7 @@ def test_pipeline_order_returns_phases():
 def test_code_review_agent_registered():
     cr = AGENT_REGISTRY["code_review"]
     assert cr.name == "Code Review Agent"
-    assert cr.pipeline_position == 4
+    assert cr.pipeline_position == 5
     assert cr.output_artifact == "code_review_artifacts"
     assert "development_artifacts" in cr.input_artifacts
     assert cr.gate_type == "approval_required"
@@ -42,7 +43,7 @@ def test_security_agent_registered():
     from config.agent_registry import AGENT_REGISTRY
     sec = AGENT_REGISTRY["security"]
     assert sec.name == "Security Agent"
-    assert sec.pipeline_position == 4
+    assert sec.pipeline_position == 5
     assert sec.output_artifact == "security_artifacts"
     assert "development_artifacts" in sec.input_artifacts
     # "mandatory", not "approval_required" — security signoff is a stricter,
