@@ -18,6 +18,7 @@ Threat mitigations (T-M4-05):
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -420,7 +421,20 @@ async def _get_artifact_or_404(
 
     Returns (Artifact, Run) tuple; raises 404 if not found or cross-tenant
     access is attempted (T-M4-05).
+
+    A NON-UUID ID IS A 404, NOT A 500. Not every id the frontend holds addresses a row:
+    `story_artifacts_from_run` synthesises story artifacts straight from a run's
+    requirements_payload with ids shaped `{run_id}:story:{source_key}`, because there is
+    no structured-story table. Comparing one of those to a uuid column makes Postgres
+    raise on the cast, which surfaced as a bare 500 from PATCH, DELETE and download
+    alike — an error that reads like a server fault when the real answer is "that id
+    does not name a stored artifact".
     """
+    try:
+        _uuid.UUID(str(artifact_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
     result = await db.execute(
         select(Artifact, Run)
         .join(Run, Artifact.run_id == Run.id)

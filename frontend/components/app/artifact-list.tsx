@@ -56,6 +56,22 @@ const TYPE_ICON: Record<ArtifactType, LucideIcon> = {
   diagram: ImageIcon,
 };
 
+/** A stored artifact's id is a UUID. A SYNTHESISED one is not.
+ *
+ *  `story_artifacts_from_run` materialises the Requirements list straight out of a run's
+ *  `requirements_payload` — there is no structured-story table — giving ids shaped
+ *  `{run_id}:story:{source_key}`. Those name no row, so every write route answers 404
+ *  for them. Offering a delete button on one is offering an action that cannot work.
+ *
+ *  Testing the id shape rather than `type === "story"` means the check corrects itself:
+ *  if stories ever get real rows, they become deletable without touching this.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isStoredArtifact(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 /** Artifact types that have a generated blob available for download. */
 const BLOB_TYPES = new Set<ArtifactType>([
   "adr", "hld", "lld", "story", "acceptance_criteria",
@@ -309,7 +325,7 @@ export function ArtifactList({
                   </div>
                 </button>
 
-                {onDelete && (
+                {onDelete && isStoredArtifact(a.id) && (
                   <button
                     type="button"
                     onClick={(e) => {

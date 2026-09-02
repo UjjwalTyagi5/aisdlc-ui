@@ -345,3 +345,44 @@ async def test_delete_blob_reraises_anything_that_is_not_a_missing_blob():
 
     with pytest.raises(RuntimeError):
         await client.delete_blob("t/r/document/x.pdf")
+
+
+# ── a synthesised id is not a stored artifact ────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "synthetic",
+    [
+        "2c1ee894-d371-4e53-8e71-efb825a83dac:story:SCRUM-16",
+        "not-a-uuid",
+        "",
+        "../../etc/passwd",
+    ],
+)
+async def test_a_non_uuid_id_is_a_404_not_a_500(synthetic):
+    """NOT EVERY ID THE FRONTEND HOLDS ADDRESSES A ROW. story_artifacts_from_run
+    synthesises story artifacts straight from a run's requirements_payload — there is no
+    structured-story table — with ids shaped `{run_id}:story:{source_key}`.
+
+    Comparing one to a uuid column makes Postgres raise on the cast, and PATCH, DELETE,
+    GET and download all surfaced that as a bare 500. The Requirements page hands these
+    ids to every one of those routes, so clicking delete on a pulled story produced an
+    error that reads like a server fault when the real answer is "that id does not name
+    a stored artifact".
+    """
+    from shared.routers.artifacts import _get_artifact_or_404
+
+    with pytest.raises(HTTPException) as e:
+        await _get_artifact_or_404(None, synthetic, str(TENANT))
+
+    assert e.value.status_code == 404
+
+
+@pytest.mark.unit
+async def test_the_guard_runs_before_the_database_is_touched():
+    """Passing db=None proves it: a query would raise AttributeError instead."""
+    from shared.routers.artifacts import _get_artifact_or_404
+
+    with pytest.raises(HTTPException):
+        await _get_artifact_or_404(None, "definitely-not-a-uuid", str(TENANT))
