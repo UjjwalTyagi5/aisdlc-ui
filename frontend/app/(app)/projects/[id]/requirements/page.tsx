@@ -2,24 +2,18 @@
 
 import * as React from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, MessageSquare, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
-import { Textarea } from "@/components/ui/textarea";
 
-import { AcEditor, type AcRow } from "@/components/app/ac-editor";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { ModelSelector } from "@/components/app/model-selector";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
-import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
@@ -27,17 +21,11 @@ import { RequireRole } from "@/components/auth/require-role";
 import { useSession } from "@/hooks/use-session";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { BoardProjectDialog } from "@/components/app/board-project-dialog";
-import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { getProject, getBoardProjects } from "@/lib/api/projects";
 import { getRunSteps, listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import type {
-  Artifact,
-  ArtifactId,
-  ProjectId,
-  Step,
-  UserRef,
-} from "@/lib/schemas";
+import type { Artifact, ProjectId, Step } from "@/lib/schemas";
 
 export default function RequirementsPage() {
   const params = useParams<{ id: string }>();
@@ -45,15 +33,8 @@ export default function RequirementsPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, role } = useSession({ required: true });
+  const { role } = useSession({ required: true });
 
-  const me: UserRef = {
-    id: user.id as UserRef["id"],
-    name: user.name,
-    email: user.email,
-    avatarUrl: user.avatarUrl,
-    initials: user.initials,
-  };
 
   // Fetches
   const projectQ = useQuery({
@@ -247,119 +228,7 @@ export default function RequirementsPage() {
 
   // Rejection UX is inside ApprovalCard already; we just wire the handler here.
 
-  // Mutations
-  const saveMutation = useMutation({
-    mutationFn: async (input: {
-      id: ArtifactId;
-      patch: Parameters<typeof updateArtifact>[1];
-    }) => updateArtifact(input.id, input.patch),
-    onMutate: async ({ id, patch }) => {
-      await queryClient.cancelQueries({
-        queryKey: qk.artifacts.forProject(projectId),
-      });
-      const previous = queryClient.getQueryData<Artifact[]>(
-        qk.artifacts.forProject(projectId),
-      );
-      if (previous) {
-        queryClient.setQueryData<Artifact[]>(
-          qk.artifacts.forProject(projectId),
-          previous.map((a) =>
-            a.id === id
-              ? {
-                  ...a,
-                  title: patch.title ?? a.title,
-                  status: patch.status ?? a.status,
-                  body: patch.body ?? a.body,
-                  updatedAt: new Date().toISOString(),
-                }
-              : a,
-          ),
-        );
-      }
-      return { previous };
-    },
-    onError: (err, _vars, ctx) => {
-      if (ctx?.previous) {
-        queryClient.setQueryData(qk.artifacts.forProject(projectId), ctx.previous);
-      }
-      toast.error("Couldn't save", {
-        description: err instanceof Error ? err.message : undefined,
-      });
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
-    },
-  });
-
-  const decisionMutation = useMutation({
-    mutationFn: async (input: {
-      id: ArtifactId;
-      status: "approved" | "rejected";
-      reason?: string;
-    }) => updateArtifact(input.id, { status: input.status }),
-    onSuccess: (_data, vars) => {
-      toast.success(vars.status === "approved" ? "Approved" : "Rejected", {
-        description: vars.reason ? `“${vars.reason}”` : undefined,
-      });
-      queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
-    },
-    onError: (err) =>
-      toast.error("Couldn't submit decision", {
-        description: err instanceof Error ? err.message : undefined,
-      }),
-  });
-
-  // Per-story edit buffer so updates feel instant
-  const [buffer, setBuffer] = React.useState<{
-    id: string;
-    title: string;
-    description: string;
-    ac: AcRow[];
-  } | null>(null);
-
-  React.useEffect(() => {
-    if (!selected || selected.body.kind !== "story") {
-      setBuffer(null);
-      return;
-    }
-    setBuffer({
-      id: selected.id,
-      title: selected.body.title,
-      description: selected.body.description,
-      ac: selected.body.acceptanceCriteria.map((r) => ({ ...r })),
-    });
-  }, [selected?.id, selected?.version]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const flushBuffer = React.useCallback(() => {
-    if (!selected || !buffer || selected.body.kind !== "story") return;
-    const dirty =
-      buffer.title !== selected.body.title ||
-      buffer.description !== selected.body.description ||
-      JSON.stringify(buffer.ac) !== JSON.stringify(selected.body.acceptanceCriteria);
-    if (!dirty) return;
-    saveMutation.mutate({
-      id: selected.id,
-      patch: {
-        title: buffer.title,
-        body: {
-          kind: "story",
-          title: buffer.title,
-          description: buffer.description,
-          acceptanceCriteria: buffer.ac,
-          traceability: selected.body.traceability,
-        },
-      },
-    });
-  }, [buffer, selected, saveMutation]);
-
-  // Debounced autosave (600ms)
-  React.useEffect(() => {
-    if (!buffer) return;
-    const t = setTimeout(() => flushBuffer(), 600);
-    return () => clearTimeout(t);
-  }, [buffer, flushBuffer]);
-
-  // Keyboard shortcuts — j/k navigate, a approve, r reject, c toggles chat.
+  // Keyboard shortcuts — j/k navigate, c toggles chat.
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
@@ -377,16 +246,6 @@ export default function RequirementsPage() {
         e.preventDefault();
         const prev = stories[Math.max(0, idx - 1)];
         if (prev) setActiveArtifact(prev);
-      } else if (e.key === "a" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        decisionMutation.mutate({ id: selected.id, status: "approved" });
-      } else if (e.key === "r" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        // Defer reason to the card's inline textarea
-        const cardReject = document.querySelector<HTMLButtonElement>(
-          '[data-testid="approval-reject"]',
-        );
-        cardReject?.click();
       } else if (e.key === "c") {
         e.preventDefault();
         setChatOpen((o) => !o);
@@ -394,7 +253,7 @@ export default function RequirementsPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [stories, selected, setActiveArtifact, decisionMutation]);
+  }, [stories, selected, setActiveArtifact]);
 
   const selectedRun = React.useMemo(() => {
     if (!selected) return null;
@@ -514,98 +373,72 @@ export default function RequirementsPage() {
                 </section>
               </div>
             )}
-            {selected && buffer && selected.body.kind === "story" ? (
+            {selected && selected.body.kind === "story" ? (
               <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
-                {/* Title + description */}
+                {/* READ-ONLY. These stories are PULLED FROM the board — the board is
+                    the source of truth and this platform has no write-back yet. The
+                    fields used to be editable with a 600ms debounced autosave, and
+                    every save was a 500: a synthesised story id names no row, and
+                    PATCH /artifacts/{id} is an accepted-but-no-op stub regardless. It
+                    also printed "last saved HH:MM" from the run's created_at, so it
+                    claimed to have saved work it had discarded. */}
                 <section className="space-y-3">
-                  <Label htmlFor="story-title" className="sr-only">
-                    Story title
-                  </Label>
-                  <Input
-                    id="story-title"
-                    value={buffer.title}
-                    onChange={(e) => setBuffer({ ...buffer, title: e.target.value })}
-                    className="text-lg font-semibold"
-                  />
-                  <Textarea
-                    aria-label="Story description"
-                    rows={3}
-                    value={buffer.description}
-                    onChange={(e) =>
-                      setBuffer({ ...buffer, description: e.target.value })
-                    }
-                  />
+                  <h2 className="text-lg font-semibold">{selected.body.title}</h2>
+                  {selected.body.description ? (
+                    <p className="text-muted-foreground whitespace-pre-wrap text-sm">
+                      {selected.body.description}
+                    </p>
+                  ) : (
+                    <p className="text-muted-foreground text-sm italic">
+                      No description on the board.
+                    </p>
+                  )}
                   <p className="text-muted-foreground text-xs">
-                    {saveMutation.isPending
-                      ? "Saving…"
-                      : `v${selected.version} · last saved ${new Date(
-                          selected.updatedAt,
-                        ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                    {selected.body.workItemType
+                      ? `${selected.body.workItemType} · read-only`
+                      : "Read-only"}{" "}
+                    — edit this item on the board, or ask the Requirements agent to
+                    change it.
                   </p>
                 </section>
 
-                {/* AC editor */}
                 <section className="space-y-2">
                   <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
                     Acceptance criteria
                   </h3>
-                  <AcEditor
-                    value={buffer.ac}
-                    onChange={(next) => setBuffer({ ...buffer, ac: next })}
-                  />
+                  {selected.body.acceptanceCriteria.length > 0 ? (
+                    <ul className="space-y-1.5">
+                      {selected.body.acceptanceCriteria.map((c, i) => (
+                        <li
+                          key={i}
+                          className="text-muted-foreground rounded-md border px-3 py-2 text-sm"
+                        >
+                          {[
+                            c.given && `Given ${c.given}`,
+                            c.when && `When ${c.when}`,
+                            c.then && `Then ${c.then}`,
+                          ]
+                            .filter(Boolean)
+                            .join(" ") || "—"}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-muted-foreground text-sm italic">
+                      None on the board.
+                    </p>
+                  )}
                 </section>
 
-                {/* Traceability */}
                 <TraceabilityPanel
                   trace={selected.body.traceability ?? {}}
                   projectId={projectId}
-                />
-
-                {/* Approval */}
-                <ApprovalCard
-                  status={selected.status}
-                  title="Gate: PM review"
-                  description="Approval unlocks the Design phase for this story."
-                  decidedBy={selected.status === "approved" || selected.status === "rejected" ? me : undefined}
-                  decidedAt={
-                    selected.status === "approved" || selected.status === "rejected"
-                      ? selected.updatedAt
-                      : undefined
-                  }
-                  onApprove={
-                    selected.status === "awaiting_approval"
-                      ? () =>
-                          decisionMutation.mutate({ id: selected.id, status: "approved" })
-                      : undefined
-                  }
-                  onReject={
-                    selected.status === "awaiting_approval"
-                      ? (reason) =>
-                          decisionMutation.mutate({
-                            id: selected.id,
-                            status: "rejected",
-                            reason,
-                          })
-                      : undefined
-                  }
-                  onRetry={() => {
-                    toast.message("Retry wires to the run orchestrator in Chunk 15");
-                  }}
-                  onAskAgent={() => setChatOpen(true)}
-                  pending={decisionMutation.isPending}
-                  pendingDecision={
-                    decisionMutation.isPending && decisionMutation.variables
-                      ? decisionMutation.variables.status === "approved"
-                        ? "approve"
-                        : "reject"
-                      : null
-                  }
                 />
               </div>
             ) : (
               <EmptyState
                 title="Select a story"
-                description="Pick a story from the list to view and edit it."
+                description="Pick a story from the list to view it."
                 variant="plain"
                 className="mt-10"
               />
