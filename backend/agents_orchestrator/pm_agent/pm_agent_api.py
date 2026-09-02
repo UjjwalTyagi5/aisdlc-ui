@@ -282,20 +282,54 @@ async def _process_turn_ws(
         _initialized_sessions.add(session_id)
     messages.append(HumanMessage(content=text))
 
-    final = await planning_app.ainvoke(
-        {
-            "messages": messages,
-            "tenant_id": tenant_id,
-            "model_id": message_data.get("model_id"),
-            "offering_id": None,
-            "resolved_model": None,
-        },
-        await _run_config(session_id, tenant_id, str(user_id), project_id),
-    )
+    error: Optional[str] = None
+    try:
+        final = await planning_app.ainvoke(
+            {
+                "messages": messages,
+                "tenant_id": tenant_id,
+                "model_id": message_data.get("model_id"),
+                "offering_id": None,
+                "resolved_model": None,
+            },
+            await _run_config(session_id, tenant_id, str(user_id), project_id),
+        )
+        reply = _last_reply(final.get("messages", []))
+    except Exception as exc:  # noqa: BLE001
+        error = classify_error(exc, "planning")
+        logger.error("PM turn failed: %s", error)
+        reply = f"An error occurred: {error}"
 
     await manager.broadcast({
         "type": "agent_response",
         "session_id": session_id,
         "agent": "plan",
-        "message": _last_reply(final.get("messages", [])),
+        "message": reply,
+    })
+
+    # THE TURN MUST SAY IT IS OVER. The chat BFF ends a run on
+    # activity_update{type: "complete"} and arms its idle fallback on stream_end; with
+    # neither, the composer stays disabled and the run hangs open, because nothing
+    # closes the socket from this side either. Every other agent route emits both, and
+    # this one emitted neither until a real socket turn showed the client waiting.
+    #
+    # Emitted on EVERY path, including the failure above — a turn that errors is the
+    # case where a stuck composer is least forgivable.
+    if error is not None:
+        await manager.broadcast({
+            "type": "agent_completed",
+            "session_id": session_id,
+            "success": False,
+            "error": error,
+        })
+    await manager.broadcast({"type": "stream_end", "session_id": session_id})
+    await manager.broadcast({
+        "type": "activity_update",
+        "activity": {
+            "id": str(uuid4()),
+            "type": "complete",
+            "session_id": session_id,
+            "message": "Processing complete",
+            "time": "Just now",
+        },
     })
