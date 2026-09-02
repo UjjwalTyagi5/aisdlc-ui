@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -257,6 +258,19 @@ class JiraConnector(BaseConnector):
                     status="not_supported",
                     description="Jira teams modelled differently; out of M6 scope",
                 ),
+                "list_sprints": CapabilityEntry(
+                    status="implemented",
+                    description="Sprints from the project's first Agile board; Kanban boards have none",
+                ),
+                "team_capacity": CapabilityEntry(
+                    status="not_supported",
+                    description=(
+                        "Jira Software has no capacity API. Capacity there lives in a "
+                        "plugin (Tempo, Structure) or in calendars, so there is nothing "
+                        "to read without knowing which. Use Microsoft Graph calendars, "
+                        "or supply capacity to the planner directly."
+                    ),
+                ),
                 "fetch_hierarchy": CapabilityEntry(
                     status="not_supported",
                     description="Jira hierarchy modelling deferred to future plan",
@@ -390,6 +404,7 @@ class JiraConnector(BaseConnector):
             "list_items": self.list_stories,
             "fetch_item_detail": self.fetch_item_detail,
             "list_states": self.list_states,
+            "list_sprints": self.list_sprints,
             "list_item_types": self.list_item_types,
         }
         fn = _MAP.get(operation)
@@ -474,6 +489,49 @@ class JiraConnector(BaseConnector):
             return {}
 
         return resp.json()
+
+    async def list_sprints(self, project: str, team: str = "") -> List[Dict[str, Any]]:
+        """The project's sprints, via the Agile API.
+
+        TWO CALLS, because sprints hang off a BOARD and not off a project: a project can
+        have several boards (a Scrum board and a Kanban board, say) and only Scrum boards
+        have sprints at all. The first board for the project is used, which is the common
+        single-board case; a project whose sprints live on a second board yields nothing
+        rather than the wrong board's sprints.
+
+        `team` is accepted and ignored — Jira has no team concept here — so the two
+        providers share one signature and the agent does not branch on which board it is
+        talking to.
+        """
+        boards, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/agile/1.0/board?projectKeyOrId={quote(project, safe='')}"
+        )
+        values = (boards or {}).get("values") or []
+        if not values:
+            return []
+        board_id = values[0].get("id")
+
+        data, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/agile/1.0/board/{board_id}/sprint?maxResults=200"
+        )
+        out: List[Dict[str, Any]] = []
+        for s in (data or {}).get("values", []):
+            state = str(s.get("state") or "").lower()
+            out.append(
+                {
+                    "id": str(s.get("id", "")),
+                    "name": s.get("name", ""),
+                    "path": s.get("name", ""),
+                    "start_date": str(s.get("startDate") or ""),
+                    "finish_date": str(s.get("endDate") or ""),
+                    # Mapped to ADO's vocabulary so a caller reads one set of values
+                    # whichever board it is talking to.
+                    "time_frame": {
+                        "active": "current", "future": "future", "closed": "past",
+                    }.get(state, state),
+                }
+            )
+        return out
 
     async def _jira_request_with_retry(
         self,
