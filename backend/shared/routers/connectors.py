@@ -64,6 +64,7 @@ _KNOWN_KINDS = {
     "jira",
     "github",
     "azure_repos",
+    "azure_pipelines",
     "github_actions",
     "slack",
     "ms_teams",
@@ -101,6 +102,7 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
     "github": ["github-access-token"],
     "slack": ["slack-bot-token"],
     "azure_repos": ["ado-pat"],
+    "azure_pipelines": ["ado-pat"],
     "figma": ["figma-access-token"],
 }
 

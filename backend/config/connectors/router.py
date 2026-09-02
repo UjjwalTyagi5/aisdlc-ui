@@ -33,6 +33,7 @@ _EXPECTED_CONNECTOR_NAMES = frozenset(
         "jira",
         "github_issues",
         "azure_repos",
+        "azure_pipelines",
         "slack",
         "github_actions",
         "ms_teams",

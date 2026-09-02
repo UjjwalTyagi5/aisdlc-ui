@@ -331,6 +331,7 @@ def _build_connectors_for_health_probe():
     from config.connectors.jira import JiraConnector
     from config.connectors.github_issues import GitHubIssuesConnector
     from config.connectors.azure_repos import AzureReposConnector
+    from config.connectors.azure_pipelines import AzurePipelinesConnector
     from config.connectors.slack import SlackConnector
     from config.connectors.github_actions import GitHubActionsConnector
     from config.connectors.msteams import MSTeamsConnector
@@ -348,6 +349,7 @@ def _build_connectors_for_health_probe():
         JiraConnector(""),
         GitHubIssuesConnector(),
         AzureReposConnector(""),
+        AzurePipelinesConnector(""),
         SlackConnector(),
         GitHubActionsConnector(),
         MSTeamsConnector(),
