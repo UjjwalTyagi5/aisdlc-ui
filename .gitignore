@@ -50,6 +50,9 @@ backend/.env
 # anyone should have to keep true.
 DEV_LOGINS.txt
 
+# Local, personal project-overview notes — compiled reference, not a source doc
+/PROJECT.md
+
 # ── Tooling ──────────────────────────────────────────────────────────────
 # settings.json is shared, settings.local.json accumulates local paths
 .claude/settings.local.json
