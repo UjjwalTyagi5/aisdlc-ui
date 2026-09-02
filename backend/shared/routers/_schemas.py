@@ -336,11 +336,28 @@ _JSONB_COLUMNS = [
 ]
 
 
-def derive_steps_from_run(run: Any) -> List[StepOut]:
-    """Derive a Step[] from Run JSONB stage columns.
+def derive_steps_from_run(run: Any, artifacts: Optional[List[Any]] = None) -> List[StepOut]:
+    """Derive a Step[] from what the run actually produced.
 
-    One synthetic Step per populated stage column. StepId is deterministic:
-    f"{run_id}:{stage}". There is no steps table; a step is derived from the run.
+    TWO SOURCES, because the run has two ways of producing things and only one of them
+    used to be visible here.
+
+      1. THE JSONB STAGE COLUMNS — the PIPELINE hand-off, how one agent passes
+         structured output to the next. One step per populated column.
+
+      2. THE ARTIFACT ROWS — every file the run generated. THIS IS THE ADDITION.
+         Chat-driven work never touches the JSONB columns: `register_generated_file`
+         writes an `artifacts` row and nothing else. So a run where somebody asked the
+         Design agent for a PDF, approved it and downloaded it reported "No activity
+         yet" — the panel looked broken standing next to a document that plainly
+         existed. The artifacts are the evidence the work happened; not reading them
+         was the bug.
+
+    Steps are ordered by when they happened and indexed afterwards, so the two sources
+    interleave by time rather than appearing as two blocks.
+
+    StepIds stay deterministic — `{run_id}:{stage}` for a stage, `{run_id}:artifact:{id}`
+    for a file — so a client can key on them across refetches.
     """
     steps: List[StepOut] = []
     run_id = str(run.id)
@@ -367,6 +384,51 @@ def derive_steps_from_run(run: Any) -> List[StepOut]:
                 error=None,
             )
         )
+
+    run_agent = _STAGE_TO_AGENT.get(getattr(run, "stage", "") or "", "orchestrator")
+    for artifact in artifacts or []:
+        # The FILENAME is the leaf of the stored path. A row with no path (blob storage
+        # unconfigured, or an upload that never got that far) still describes a real
+        # event, so it becomes a step named by its type rather than being dropped.
+        stored_path = getattr(artifact, "blob_path", None) or ""
+        leaf = stored_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        atype = getattr(artifact, "artifact_type", "artifact")
+        created = getattr(artifact, "created_at", None)
+
+        # SAY WHETHER THE BYTES ARRIVED. "Generated" reads as success, and this is the
+        # one place a reader would otherwise never learn that an upload failed.
+        stored = bool(getattr(artifact, "blob_url", None))
+        size = getattr(artifact, "size_bytes", None)
+        detail = f"{size:,} bytes" if size else atype
+        summary = (
+            f"{detail} stored" if stored
+            else f"{detail} — recorded, but the file did not reach storage"
+        )
+
+        steps.append(
+            StepOut(
+                id=f"{run_id}:artifact:{artifact.id}",
+                runId=run_id,
+                index=0,  # replaced below, once everything is in time order
+                kind="artifact_write",
+                agent=run_agent,
+                title=leaf or f"{atype} generated",
+                status="approved" if stored else "failed",
+                startedAt=_iso(created),
+                completedAt=_iso(created),
+                durationMs=None,
+                cost=None,
+                model=None,
+                summary=summary,
+                error=None,
+            )
+        )
+
+    # Time order, then index — so stage steps and file steps interleave as they
+    # happened rather than appearing as two blocks.
+    steps.sort(key=lambda s: s.startedAt)
+    for position, step in enumerate(steps):
+        step.index = position
     return steps
 
 
