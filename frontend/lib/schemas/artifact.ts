@@ -12,6 +12,19 @@ export const StoryBody = z.object({
   kind: z.literal("story"),
   title: z.string(),
   description: z.string(),
+  /**
+   * What the item actually is ON THE BOARD — "User Story", "Epic", "Task", "Bug".
+   *
+   * `kind` above is the ARTIFACT shape this renders as; this is the work item type.
+   * Board ingestion pulls every item on the board, so this list routinely mixes Epics
+   * and Tasks in with real stories — and without this field they all arrived at the
+   * Design agent labelled "user stories", which is how three board-configuration
+   * chores became requirements to design a system for.
+   *
+   * Optional: artifacts synthesised before this existed have no type, and a project
+   * on a board whose items are genuinely all stories will not miss it.
+   */
+  workItemType: z.string().optional(),
   acceptanceCriteria: z.array(
     z.object({
       given: z.string(),

@@ -187,6 +187,10 @@ class JiraConnector(BaseConnector):
                     status="not_supported",
                     description="Jira uses project-specific workflows; use transitions endpoint",
                 ),
+                "list_item_types": CapabilityEntry(
+                    status="implemented",
+                    description="Issue types from the project's own issue-type scheme",
+                ),
                 "list_teams": CapabilityEntry(
                     status="not_supported",
                     description="Jira teams modelled differently; out of M6 scope",
@@ -324,6 +328,7 @@ class JiraConnector(BaseConnector):
             "list_items": self.list_stories,
             "fetch_item_detail": self.fetch_item_detail,
             "list_states": self.list_states,
+            "list_item_types": self.list_item_types,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -632,16 +637,65 @@ class JiraConnector(BaseConnector):
                 return p.get("key") or project
         return project
 
+    #: The board tools are provider-neutral and speak ADO's vocabulary — its own
+    #: `create_item` defaults to "User Story" — so that is what arrives here whichever
+    #: board is wired. Jira's default schemes have no "User Story" type and answer
+    #: 400 for one, which surfaced as a bare "400 Bad Request" naming only the URL.
+    #:
+    #: Same job as `_normalize_kwargs`, one level down: that maps the parameter NAMES,
+    #: this maps a parameter VALUE. Only types Jira genuinely lacks are translated —
+    #: Bug, Task, Epic and Story exist in the default schemes and are passed through
+    #: untouched, and an unrecognised type is passed through too rather than guessed
+    #: at, so a project with a custom scheme still works.
+    _ITEM_TYPE_ALIASES = {
+        "user story": "Story",
+        "userstory": "Story",
+        "product backlog item": "Story",
+        "pbi": "Story",
+        "requirement": "Story",
+        "issue": "Task",
+    }
+
+    @classmethod
+    def _jira_item_type(cls, item_type: str) -> str:
+        return cls._ITEM_TYPE_ALIASES.get((item_type or "").strip().lower(), item_type)
+
+    async def list_item_types(self, project: str) -> list:
+        """Issue types available on THIS project, from its own issue-type scheme.
+
+        Jira's schemes are per project just as ADO's process templates are, so the
+        answer is looked up rather than assumed. `_jira_item_type` translates the
+        provider-neutral vocabulary the tools speak into these, but only for the
+        aliases it knows — this is how an agent discovers the rest.
+        """
+        project_key = await self._resolve_project_key(project)
+        data, _ = await self._jira_request_with_retry(
+            "GET", f"/rest/api/3/project/{project_key}"
+        )
+        return [
+            {"name": t.get("name", ""), "description": t.get("description", "")}
+            for t in (data or {}).get("issueTypes", [])
+            if t.get("name")
+        ]
+
     async def create_item(
         self,
         project: str,
         title: str = "",
         description: str = "",
         item_type: str = "Story",
+        parent_id: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """POST /rest/api/3/issue → canonical dict with created key."""
+        """POST /rest/api/3/issue → canonical dict with created key.
+
+        `parent_id` is a Jira KEY ("SCRUM-1"), not a numeric id — the provider-neutral
+        tool passes whatever the board uses, and for Jira that is the key. Sent in the
+        same request as the create, so an item is never left orphaned by a failed
+        follow-up.
+        """
         project_key = await self._resolve_project_key(project)
+        item_type = self._jira_item_type(item_type)
         payload = {
             "fields": {
                 "project": {"key": project_key},
@@ -649,6 +703,12 @@ class JiraConnector(BaseConnector):
                 "issuetype": {"name": item_type},
             }
         }
+        if parent_id:
+            # `fields.parent` is the modern Jira Cloud shape and covers both a subtask's
+            # parent and an issue's epic. The classic "Epic Link" custom field
+            # (customfield_100xx) is deliberately NOT attempted: its id differs per
+            # site, so guessing one writes to an unrelated field on some tenants.
+            payload["fields"]["parent"] = {"key": str(parent_id)}
         if description:
             payload["fields"]["description"] = {
                 "type": "doc",

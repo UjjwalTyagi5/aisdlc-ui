@@ -175,7 +175,11 @@ def test_every_write_tool_goes_through_the_choke_point():
         if "write_adapter(" not in chunk:
             continue
         name = chunk.split("async def ", 1)[1].split("(", 1)[0]
-        assert '_board_connector("write")' in chunk, (
+        # Prefix, not the whole call: the choke point also takes an optional `provider`
+        # now, so pinning the exact string made this fail on a change that did not
+        # weaken anything. What must stay true is that write tools ask for "write"
+        # MODE — that is the argument the tier and lattice checks hang off.
+        assert '_board_connector("write"' in chunk, (
             f"{name} calls write_adapter without going through the gated choke point"
         )
 
@@ -303,6 +307,19 @@ async def test_a_background_run_has_no_consent_to_inherit():
     "yes please", "I approve", "please proceed", "you have my approval",
     # A leading approval clause, and a phrase the message opens with.
     "yes, go ahead", "Yes, create them", "go ahead and create them",
+    # FROM A REAL TRANSCRIPT. Every one of these was REJECTED by the first version of
+    # this rule, which demanded the whole message be an approval word. The user
+    # approved four times, was refused four times, and the agent re-asked each time.
+    # A gate that cannot read "yes create these two for me" protects nothing — it
+    # makes the feature unusable, and the pressure that creates is to delete the gate.
+    "yes create these two for me",
+    "yes do this",
+    "ok do it",
+    "approve this",
+    "sure, create both of them",
+    "yep go ahead and create them",
+    "do it",          # must survive the "do not" refusal rule
+    "do it now",
 ])
 def test_these_are_approvals(text):
     from shared.authz.consequential import is_approval_message
@@ -330,6 +347,22 @@ def test_these_are_approvals(text):
     # two phrase lists are deliberately not shared.
     "push the release notes to the epic",
     "create the pr description as a work item",
+    # LEADING REFUSALS. This is why leading-token matching is safe at all: the refusal
+    # check runs FIRST, so a message opening with one never reaches the yes rules
+    # however many approving words appear later in it.
+    "nope, cancel that",
+    "don't approve that",
+    "dont create them",
+    "stop, go ahead is not what I said",
+    "cancel it",
+    "wait, approve only the first one",
+    "not yet, proceed tomorrow",
+    # A bare INSTRUCTION is not an approval. Treating it as one would defeat the
+    # propose-then-approve shape entirely: the model could act on the first message
+    # without ever having said what it was about to do.
+    "create them",
+    "create it",
+    "create both stories on the board",
 ])
 def test_these_are_not_approvals(text):
     from shared.authz.consequential import is_approval_message
