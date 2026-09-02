@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from uuid import uuid4
 import contextvars
 
@@ -384,7 +384,23 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
                     content = _extract_text(msg_chunk.content)
                     if content and not (hasattr(msg_chunk, "tool_calls") and msg_chunk.tool_calls):
                         streaming_started = True
+                        # ACCUMULATE EVERYTHING, SEND ONLY THE MODEL'S OWN TEXT.
+                        #
+                        # `final_content` feeds the transcript and
+                        # _persist_design_artifacts, which parses the eight sections out
+                        # of the DOCUMENT — and the document is the tool's output, so it
+                        # has to stay in here.
+                        #
+                        # Sending it is a different question. generate_architecture_from_
+                        # context streams the document to the client itself, token by
+                        # token, as it generates (_llm_generate_async broadcasts
+                        # stream_chunk). Its return value then arrives here as a
+                        # ToolMessage and was streamed a SECOND time — the user saw the
+                        # whole architecture twice, both copies truncated at the same
+                        # word because they were the same string.
                         final_content += content
+                        if isinstance(msg_chunk, ToolMessage):
+                            continue
                         await manager.send_personal_message(
                             json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
                             websocket,

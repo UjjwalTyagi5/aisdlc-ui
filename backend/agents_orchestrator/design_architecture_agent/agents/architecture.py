@@ -1188,6 +1188,29 @@ Respond with 1-2 sentences ONLY — e.g. "Architecture document generated. Would
 you like me to save it as a .docx file?" Do NOT repeat or summarise the tool
 output.
 
+── MERMAID THAT ACTUALLY RENDERS ─────────────────────────────────────────────
+A diagram that fails to parse shows the reader an error box instead of a diagram,
+so it is worse than a simpler diagram that works.
+
+USE ONLY these four types — they are the ones the templates use and the ones the
+viewer renders reliably:
+    graph / flowchart      classDiagram      sequenceDiagram      erDiagram
+
+NEVER use C4Context, C4Container, C4Component, mindmap, timeline, quadrantChart or
+block-beta. Mermaid's C4 support is experimental and fails often; the C4 sections
+above are drawn with `graph TB` for exactly that reason — follow those templates
+rather than reaching for a C4-specific syntax.
+
+Rules that prevent most parse failures:
+- Put EVERY node label in double quotes: A["Order Service"], never A[Order Service].
+  An unquoted label containing a bracket, parenthesis, comma, colon or slash is the
+  single most common cause of a broken diagram.
+- Never put a raw " inside a label. Use a different word.
+- In classDiagram, keep method signatures simple: +save(), +findById(). Avoid
+  generics (List~T~), nested parentheses and return-type annotations.
+- One statement per line. Do not put a comment on the same line as a statement.
+- Keep every diagram under ~25 nodes; split it rather than growing it.
+
 ── ABSOLUTE RULES ────────────────────────────────────────────────────────────
 - NEVER write architecture as a plain-text reply. ALWAYS call a tool first.
 - NEVER say you cannot access files — always call read_document.
