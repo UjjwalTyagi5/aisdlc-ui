@@ -162,7 +162,19 @@ class Artifact(Base):
     blob_path: Mapped[str | None] = mapped_column(Text)
     content_type: Mapped[str | None] = mapped_column(String(100))
     size_bytes: Mapped[int | None] = mapped_column(Integer)
-    # No updated_at â€” immutable after creation
+    # Approval gate (migration 0040). "pending" until whoever runs the project accepts
+    # it; the bytes sit under the tenant's _pending prefix until then. The default is
+    # deliberately the UNAPPROVED value so a writer that has not been taught about this
+    # column fails closed rather than adding to the project's shared record silently.
+    approval_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    # No updated_at â€” the CONTENT is immutable after creation; the approval columns
+    # above are the one thing that changes, and they are decisions about the artifact
+    # rather than edits to it.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="artifacts")

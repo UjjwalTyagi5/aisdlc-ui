@@ -19,15 +19,17 @@ from __future__ import annotations
 
 import logging
 import uuid as _uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
+from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Run
@@ -181,6 +183,17 @@ async def download_artifact(
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, run.project_id)
 
+    if getattr(artifact, "approval_status", "approved") != "approved":
+        # The bytes are under the tenant's `_pending` prefix, not at blob_path. Serving
+        # them would make the approval gate decorative — the whole point is that a
+        # document is not part of the project's record until somebody accepts it.
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact is still awaiting approval and cannot be downloaded yet."
+            if artifact.approval_status == "pending"
+            else "This artifact was rejected and its file has been deleted.",
+        )
+
     if not artifact.blob_path:
         # A row with no blob path predates blob storage, or was recorded by an agent
         # that only wrote the JSONB payload. Not an error worth a 500.
@@ -233,6 +246,179 @@ async def download_artifact(
         media_type=artifact.content_type or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{leaf}"'},
     )
+
+
+class ArtifactDecisionIn(BaseModel):
+    """A rejection may carry a reason; an approval needs nothing."""
+
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id: str):
+    """Resolve the artifact and refuse anyone who does not RUN this project.
+
+    `require_permission("approve")` on the route says the caller takes approval
+    decisions at all; it does not say which projects. `assert_can_administer_project`
+    is the second half: org-wide callers pass, everyone else must administer the
+    project's parent unit or hold a project_admin binding on the project itself.
+    Without it, any holder of `approve` anywhere in the tenant could accept another
+    team's documents into their shared record.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    project = await _get_or_404(db, str(run.project_id), tenant_id)
+    await assert_can_administer_project(db, request, project)
+    return artifact, run
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/approve",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("approve"))],
+)
+async def approve_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Accept a generated document into the project's shared record.
+
+    THE BYTES MOVE HERE, and that is the whole point of the gate. `store_artifact`
+    parks them under the tenant's `_pending` prefix and leaves `blob_url` NULL, so a
+    pending artifact is listed, is not downloadable, and is not in the project's
+    hierarchy. Approval promotes it to the real path and records who decided.
+
+    ORDER: move the bytes, THEN mark the row. A row marked approved whose bytes never
+    moved would advertise a download that 404s — the same class of failure as the
+    upload that reported success while the container stayed empty. The move itself
+    verifies the copy before deleting the source.
+    """
+    artifact, run = await _artifact_for_decision(db, request, artifact_id)
+
+    if artifact.approval_status == "approved":
+        # Idempotent: a double-click must not attempt a second move whose source has
+        # already been deleted.
+        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    if artifact.approval_status == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact was rejected; its file has been deleted and cannot be approved.",
+        )
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    if artifact.blob_path and blob_client is not None:
+        from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+        try:
+            artifact.blob_url = await blob_client.move_blob(
+                pending_blob_path(artifact.blob_path),
+                artifact.blob_path,
+                content_type=artifact.content_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Type name only: an Azure error can carry a SAS token or the account URL.
+            logger.warning(
+                "Artifact %s could not be promoted on approval: %s",
+                artifact_id, type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="The file could not be moved into the project's storage, so the "
+                       "artifact was left pending. Retry, or ask an administrator to "
+                       "check storage access.",
+            )
+
+    artifact.approval_status = "approved"
+    artifact.approved_by = getattr(request.state, "user_id", None)
+    artifact.approved_at = datetime.now(timezone.utc)
+
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_approve",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "blob_path": artifact.blob_path,
+            },
+        )
+    )
+    await db.commit()
+    await db.refresh(artifact)
+    logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
+    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/reject",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("approve"))],
+)
+async def reject_artifact(
+    artifact_id: str,
+    body: ArtifactDecisionIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Refuse a generated document. Its pending bytes are deleted; the row stays.
+
+    THE ROW SURVIVES ON PURPOSE. Deleting it would erase the fact that the agent
+    produced something and somebody declined it — which is exactly what a reviewer
+    looking at the project's history needs to see. The bytes go because nobody agreed
+    they should be kept; the decision stays because it was made.
+    """
+    artifact, run = await _artifact_for_decision(db, request, artifact_id)
+
+    if artifact.approval_status == "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="This artifact is already approved. Delete it instead of rejecting it.",
+        )
+    if artifact.approval_status == "rejected":
+        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    if artifact.blob_path and blob_client is not None:
+        from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+        try:
+            await blob_client.delete_blob(pending_blob_path(artifact.blob_path))
+        except Exception as exc:  # noqa: BLE001
+            # A rejection that cannot clear its bytes still records the DECISION. The
+            # leftover is in the pending area, which nothing serves and no listing reads.
+            logger.warning(
+                "Artifact %s rejected but its pending bytes remain: %s",
+                artifact_id, type(exc).__name__,
+            )
+
+    artifact.approval_status = "rejected"
+    artifact.approved_by = getattr(request.state, "user_id", None)
+    artifact.approved_at = datetime.now(timezone.utc)
+    artifact.rejection_reason = body.reason
+
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_reject",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(run.project_id),
+                "stage": run.stage,
+                "artifact_type": artifact.artifact_type,
+                "reason": body.reason,
+            },
+        )
+    )
+    await db.commit()
+    await db.refresh(artifact)
+    logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
+    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
 
 
 @artifacts_router.delete(

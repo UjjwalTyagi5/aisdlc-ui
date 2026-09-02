@@ -91,37 +91,23 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
 #: exactly what a user cannot see from the artifacts panel.
 _LAST_UPLOAD_OK: dict[str, bool] = {}
 
-#: Files generated this session that the user has NOT yet agreed to store.
-#: Keyed by session id. In-process and deliberately not persisted: a pending file is
-#: a question waiting for an answer in THIS conversation, not durable state.
-_PENDING: dict[str, list[dict]] = {}
-
-
-def pending_for_session(session_id: str) -> list[dict]:
-    """What has been generated but not stored. Copy — callers must not mutate."""
-    return list(_PENDING.get(session_id or "", []))
-
-
-def clear_pending(session_id: str) -> None:
-    _PENDING.pop(session_id or "", None)
-
-
 async def register_generated_file(
     filename: str, file_path: str, url: str, *, stage: str, consented: bool | None = None
 ) -> None:
     """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
 
-    STORING IS NOW THE USER'S CALL. A generated document is downloadable the moment it
-    is written — the tool broadcasts a `/generated/...` link — so persisting it into the
-    project's artifacts and uploading the bytes to Blob is a separate act with a
-    separate consequence: it puts the document in a shared, durable, tenant-visible
-    place. The user is asked first.
+    STORING IS THE PROJECT ADMIN'S CALL. A generated document is downloadable from chat
+    the moment it is written — the tool broadcasts a `/generated/...` link. Becoming
+    part of the project's shared, durable record is a separate act with a separate
+    consequence, and since migration 0040 that decision belongs to whoever runs the
+    project rather than to whoever happened to be chatting.
 
-    Without consent this stages the file instead (see `_PENDING`) and returns. The
-    agent then offers to save it, and `save_pending_artifacts` stores it on a yes.
+    So this records the artifact immediately, as PENDING, with its bytes under the
+    tenant's `_pending` prefix. `POST /artifacts/{id}/approve` promotes them to the
+    project's hierarchy path; `/reject` deletes them and keeps the decision.
 
-    `consented=None` reads the per-turn consent flag, so a turn where the user said
-    "yes, save it" stores immediately and no second round trip is needed.
+    `consented` is vestigial — kept in the signature for callers that still pass it,
+    and no longer consulted.
     """
     try:
         tenant_id = get_tenant_id()
@@ -130,22 +116,16 @@ async def register_generated_file(
             logger.debug("register_generated_file: no tenant/project in context — skip persist (%s)", filename)
             return
 
-        if consented is None:
-            from config.ws_helper import get_consequential_approved  # noqa: PLC0415
-
-            consented = get_consequential_approved()
-        if not consented:
-            sid = get_session_id() or ""
-            entry = {"filename": filename, "file_path": file_path, "url": url, "stage": stage}
-            pend = _PENDING.setdefault(sid, [])
-            # Re-generating the same filename replaces the pending entry rather than
-            # queueing a duplicate the user would be asked about twice.
-            pend[:] = [e for e in pend if e["filename"] != filename] + [entry]
-            logger.info(
-                "register_generated_file: %s generated but NOT stored — awaiting the "
-                "user's go-ahead (session=%s)", filename, sid,
-            )
-            return
+        # NO PER-TURN CONSENT STEP ANY MORE. It used to stage the file and have the
+        # agent ask "shall I save this?", because storing put the document straight into
+        # the project's shared record. Migration 0040 moved that decision to whoever
+        # RUNS the project: every generated file is recorded immediately as PENDING,
+        # its bytes parked under the tenant's `_pending` prefix, and a project admin
+        # approves or rejects it.
+        #
+        # Asking the person chatting as well would be a question whose answer no longer
+        # decides anything on its own — the admin's does. `consented` is retained in the
+        # signature for callers that still pass it; it no longer gates anything.
 
         content_type = _CONTENT_TYPES.get(os.path.splitext(filename)[1].lower())
         artifact_type = _artifact_type_for(filename)
@@ -161,6 +141,13 @@ async def register_generated_file(
             except OSError as exc:
                 logger.warning("register_generated_file: unreadable %s (%s)",
                                file_path, type(exc).__name__)
+
+        # Initialised HERE, not in the branch that sets it. It was assigned only where
+        # bytes were uploaded, so the "no readable file" path fell through to
+        # `_LAST_UPLOAD_OK[filename] = _uploaded` and raised UnboundLocalError — which
+        # the enclosing try swallowed, silently skipping the notify and the log line
+        # too. False is also the honest value: nothing was uploaded.
+        _uploaded = False
 
         async with get_db_session_for_tenant(tenant_id) as session:
             run_id = await _get_or_create_chat_run(session, tenant_id, project_id, stage)
@@ -212,12 +199,17 @@ async def register_generated_file(
                     blob_client=get_blob_client(),
                 )
                 # store_artifact DEGRADES rather than raising: on an upload failure it
-                # still writes the row, with blob_url=None, so the document is listed
-                # and the run does not die. That is the right behaviour and it was also
-                # invisible — a user watched "saved to the project's artifacts", found
-                # the row in the panel, and found nothing in Blob. Record the real
-                # outcome so the caller can say which of the two happened.
-                _uploaded = bool(getattr(_art, "blob_url", None))
+                # still writes the row so the document is listed and the run does not
+                # die. That is right, and it was also invisible — a user watched "saved
+                # to the project's artifacts", found the row in the panel, and found
+                # nothing in Blob. Record the real outcome so the caller can say which
+                # of the two happened.
+                #
+                # `upload_succeeded`, NOT `blob_url`. Since the approval gate, blob_url
+                # is None for every pending artifact — the URL is set when an admin
+                # approves and the bytes move out of the pending area — so reading it
+                # here would report a failed upload on every successful save.
+                _uploaded = bool(getattr(_art, "upload_succeeded", False))
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415
@@ -234,47 +226,3 @@ async def register_generated_file(
         logger.warning("register_generated_file: failed to persist %s", filename, exc_info=True)
 
 
-async def save_pending_artifacts(
-    session_id: str = "",
-) -> tuple[list[str], list[str], list[str]]:
-    """Store every file this session generated but has not yet saved.
-
-    Returns (stored, failed, stored_but_not_uploaded). The pending list is cleared for the
-    ones that stored, so a second call does not duplicate them; a failure stays pending
-    so the user can retry rather than being told nothing happened and losing the file.
-
-    `consented=True` is passed explicitly — reaching this function IS the consent, and
-    re-reading the per-turn flag here would refuse the very action it was granted for
-    when the user's approving message arrives on a later turn.
-    """
-    sid = session_id or get_session_id() or ""
-    pending = list(_PENDING.get(sid, []))
-    if not pending:
-        return [], [], []
-
-    stored: list[str] = []
-    failed: list[str] = []
-    # Recorded in the project but NOT uploaded — the row exists and the bytes do not.
-    # Reported separately because "saved" covers both and they need different actions:
-    # nothing for the first, an administrator for the second.
-    not_uploaded: list[str] = []
-    for entry in pending:
-        before = len(_PENDING.get(sid, []))  # noqa: F841 — readability at the call site
-        try:
-            await register_generated_file(
-                entry["filename"], entry["file_path"], entry["url"],
-                stage=entry["stage"], consented=True,
-            )
-            stored.append(entry["filename"])
-            if not _LAST_UPLOAD_OK.get(entry["filename"], True):
-                not_uploaded.append(entry["filename"])
-        except Exception:  # noqa: BLE001 — register_* never raises, but never say never
-            logger.warning("save_pending_artifacts: %s failed", entry["filename"], exc_info=True)
-            failed.append(entry["filename"])
-
-    remaining = [e for e in _PENDING.get(sid, []) if e["filename"] in failed]
-    if remaining:
-        _PENDING[sid] = remaining
-    else:
-        _PENDING.pop(sid, None)
-    return stored, failed, not_uploaded

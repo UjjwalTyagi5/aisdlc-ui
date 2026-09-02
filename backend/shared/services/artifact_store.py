@@ -205,6 +205,32 @@ def is_blob_path(blob_path: str | None, tenant_id: str) -> bool:
     return blob_path.startswith(f"{safe_leaf_name(str(tenant_id))}/")
 
 
+#: Marks the holding area for artifacts awaiting a project admin's decision. Sits
+#: immediately AFTER the tenant segment so the isolation boundary — and `is_blob_path`,
+#: which tests exactly that prefix — is unchanged. The leading underscore cannot collide
+#: with the workspace UUID that normally occupies this position.
+_PENDING_SEGMENT = "_pending"
+
+
+def pending_blob_path(final_path: str) -> str:
+    """Where an artifact's bytes wait before approval.
+
+    `{tenant}/{bu}/{project}/...` becomes `{tenant}/_pending/{bu}/{project}/...`, so
+    approval is a path transform rather than a second composition to keep in sync with
+    `blob_path_for`. The row always records the FINAL path — that is the artifact's
+    identity — and this derives the temporary one from it.
+    """
+    tenant, _, rest = final_path.partition("/")
+    if not rest:
+        return final_path
+    return f"{tenant}/{_PENDING_SEGMENT}/{rest}"
+
+
+def is_pending_path(blob_path: str) -> bool:
+    """True for a path inside the pending area — used to keep it out of listings."""
+    return f"/{_PENDING_SEGMENT}/" in (blob_path or "")
+
+
 async def _workspace_for_project(db: AsyncSession, project_id: str) -> Optional[str]:
     """The business unit owning `project_id`, or None if it cannot be resolved.
 
@@ -275,7 +301,17 @@ async def store_artifact(
         agent=agent,
     )
 
-    blob_url: Optional[str] = None
+    # THE BYTES GO TO THE PENDING AREA, NOT THE FINAL PATH. Until whoever runs the
+    # project accepts it, a generated document is not part of the project's shared
+    # record — so it is not written where the project's record lives. `blob_path` still
+    # records the FINAL path because that is the artifact's identity and the destination
+    # approval promotes it to; `pending_blob_path` derives where it is meanwhile.
+    #
+    # `blob_url` stays None while pending, which is what makes the download route refuse
+    # and the UI show it as awaiting approval rather than as a file to fetch.
+    upload_target = pending_blob_path(blob_name)
+
+    uploaded = False
     if blob_client is None:
         logger.info(
             "No blob client configured — recording %s for run %s with no blob",
@@ -283,9 +319,10 @@ async def store_artifact(
         )
     else:
         try:
-            blob_url = await blob_client.upload_bytes(
-                data, blob_name, content_type=content_type
+            await blob_client.upload_bytes(
+                data, upload_target, content_type=content_type
             )
+            uploaded = True
         except Exception as exc:  # noqa: BLE001 — a storage outage must not fail the run
             # type name only: an Azure error can carry a SAS token or an account URL.
             logger.warning(
@@ -298,11 +335,21 @@ async def store_artifact(
         run_id=run_id,
         tenant_id=tenant_id,
         artifact_type=artifact_type,
-        blob_url=blob_url,
+        # Set on APPROVAL, when the bytes reach the final path. A pending artifact with
+        # a URL would be downloadable before anybody agreed it should exist.
+        blob_url=None,
         blob_path=blob_name,
         content_type=content_type,
         size_bytes=len(data),
+        approval_status="pending",
     )
+    # WHETHER THE BYTES LANDED, for the caller that has to tell the user. It used to be
+    # readable from `blob_url`, which is now None for every pending artifact — so an
+    # upload failure and a normal pending upload would have looked identical, and the
+    # "could not be uploaded" warning would have fired on every single save.
+    #
+    # A transient attribute rather than a column: it describes this call, not the row.
+    artifact.upload_succeeded = uploaded  # type: ignore[attr-defined]
     db.add(artifact)
     await db.flush()
     return artifact

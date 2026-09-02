@@ -235,11 +235,16 @@ async def test_it_uploads_under_the_composed_path_and_records_the_row():
         blob_client=blob,
     )
     name, data, ctype = blob.uploads[0]
-    # No project_id passed, so the middle segments are placeholders.
-    assert name == f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
+    # Bytes go to the PENDING area; the ROW records the final path it will be promoted
+    # to. No project_id passed, so the middle segments are placeholders.
+    final = f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
+    assert name == f"{TENANT}/_pending/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
     assert data == b"hello"
-    assert art.blob_path == name
-    assert art.blob_url is not None
+    assert art.blob_path == final
+    # No URL until an admin approves and the bytes reach the final path.
+    assert art.blob_url is None
+    assert art.approval_status == "pending"
+    assert art.upload_succeeded is True
     assert art.size_bytes == 5
     assert art.tenant_id == TENANT
     assert db.added == [art]
@@ -270,6 +275,7 @@ async def test_no_blob_configured_records_the_row_and_does_not_raise():
         filename="brd.docx", data=b"hello", blob_client=None,
     )
     assert art.blob_url is None
+    assert art.upload_succeeded is False      # nowhere to upload to
     assert art.blob_path == (
         f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
     )
@@ -382,7 +388,7 @@ async def test_the_business_unit_is_looked_up_from_the_project():
         blob_client=blob,
     )
     assert blob.uploads[0][0] == (
-        f"{TENANT}/{WORKSPACE}/{PROJECT}/design/{RUN}/document/hld.docx"
+        f"{TENANT}/_pending/{WORKSPACE}/{PROJECT}/design/{RUN}/document/hld.docx"
     )
     assert db.queries == 1
 
@@ -408,8 +414,8 @@ async def test_an_unresolvable_project_still_stores_the_artifact():
         filename="hld.docx", data=b"x", project_id=PROJECT, agent="design",
         blob_client=blob,
     )
-    assert art.blob_url is not None
-    assert blob.uploads[0][0].startswith(f"{TENANT}/_no-business-unit/{PROJECT}/design/")
+    assert art.upload_succeeded is True
+    assert blob.uploads[0][0].startswith(f"{TENANT}/_pending/_no-business-unit/{PROJECT}/design/")
 
 
 @pytest.mark.unit
@@ -422,7 +428,7 @@ async def test_a_project_in_another_tenant_resolves_to_no_workspace():
         filename="hld.docx", data=b"x", project_id=PROJECT, agent="design",
         blob_client=blob,
     )
-    assert blob.uploads[0][0].startswith(f"{TENANT}/_no-business-unit/{PROJECT}/design/")
+    assert blob.uploads[0][0].startswith(f"{TENANT}/_pending/_no-business-unit/{PROJECT}/design/")
 
 
 @pytest.mark.unit

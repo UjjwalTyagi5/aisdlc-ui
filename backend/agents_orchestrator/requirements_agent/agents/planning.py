@@ -1443,43 +1443,9 @@ async def markdowntopdf(content: str = "", output_path: str = "requirements_docu
         f"Generated '{filename}'."
         + (f" Download it here: {url}" if url else "")
         + " It is NOT yet saved to the project's artifacts — ask the user whether to "
-          "save it, and call save_to_project_artifacts if they agree."
+          "It is awaiting a project admin's approval."
     )
 
-
-@tool
-async def save_to_project_artifacts() -> str:
-    """Store the documents generated in this chat into the project's artifacts.
-
-    Call this ONLY after the user has agreed. Generated files are downloadable straight
-    away; adding them to the project's artifacts uploads them to shared, durable
-    storage, which is the user's decision to make. Ask first, then call this on a yes.
-    """
-    from shared.services.chat_artifacts import save_pending_artifacts  # noqa: PLC0415
-
-    stored, failed, not_uploaded = await save_pending_artifacts(get_session_id() or "")
-    if not stored and not failed:
-        return "There are no generated documents waiting to be saved."
-    parts = []
-    if stored:
-        parts.append(f"Saved to the project's artifacts: {', '.join(stored)}.")
-    if not_uploaded:
-        # THE ROW EXISTS AND THE BYTES DO NOT. Saying only "saved" here is how a user
-        # finds the document listed in the artifacts panel and absent from storage,
-        # and has no way to tell which happened. Relay this verbatim.
-        parts.append(
-            f"WARNING: {', '.join(not_uploaded)} could not be uploaded to the "
-            "project's file storage — the artifact is recorded and listed, but the "
-            "file itself is not stored and cannot be downloaded from the artifacts "
-            "panel. The chat download link still works. An administrator needs to "
-            "check the storage configuration."
-        )
-    if failed:
-        parts.append(
-            f"Could not save: {', '.join(failed)} — they are still downloadable and "
-            "can be retried."
-        )
-    return " ".join(parts)
 
 
 @tool
@@ -2466,7 +2432,7 @@ _BOARD_TOOLS = [
 tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # PDF output, and the explicit save the user is asked for before
          # anything is written to the project's shared artifact storage.
-         markdowntopdf, save_to_project_artifacts,
+         markdowntopdf,
          export_document,
          generate_risk_register, general_query, update_response, markdowntodoc,
          generate_ppt, generate_diagram,
@@ -2789,15 +2755,15 @@ Post the gap report summary as a comment on the parent epic/item using add_board
 - NEVER say you cannot access files — always call read_uploaded_file.
 
 
-── SAVING DOCUMENTS TO THE PROJECT (ASK FIRST) ───────────────────────────────────
-A generated file is downloadable from chat immediately. Putting it in the PROJECT'S
-ARTIFACTS is a separate act — it uploads the document to shared, durable storage the
-whole project can see — and it is the user's decision, not yours.
-- After generating a document, tell the user it is ready, give the download link, and
-  ASK whether to add it to the project's artifacts.
-- Call save_to_project_artifacts ONLY after they say yes. Do not call it speculatively,
-  and never claim a document was added to the project unless that tool confirmed it.
-- If they say no, do nothing: the file stays downloadable from the chat.
+── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, THEN APPROVED) ────────────────────
+Every document you generate is recorded in the project's artifacts automatically, as
+AWAITING APPROVAL. You do NOT ask whether to save it, and there is no tool to call.
+- After generating a document, tell the user it is ready and give the download link.
+- Then say it has been submitted for approval, and that a project admin decides whether
+  it joins the project's shared record.
+- Do NOT claim it has been "added to the project" or "saved to artifacts" — it is
+  waiting on someone else's decision, and saying otherwise sets the wrong expectation.
+- The download link works immediately either way.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
 export_document produces EVERY document format — the format comes from the FILENAME

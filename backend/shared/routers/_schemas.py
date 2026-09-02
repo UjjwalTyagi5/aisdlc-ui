@@ -592,14 +592,30 @@ class ArtifactOut(BaseModel):
         # join on Run.tenant_id and streams the bytes; the BFF proxies it at the same
         # path under /api. Legacy rows, whose blob_path is a local filesystem path, keep
         # the static `/generated/…` URL because that endpoint deliberately refuses them.
+        # THE STATUS IS NOW A FACT, not a constant. It was the literal string "approved"
+        # for every artifact, because the table had no approval column — a placeholder
+        # that read like a decision. Migration 0040 gave it one.
+        _approval = getattr(artifact, "approval_status", None) or "approved"
+        status = {
+            "pending": "awaiting_approval",
+            "approved": "approved",
+            "rejected": "rejected",
+        }.get(_approval, "awaiting_approval")
+        _is_approved = _approval == "approved"
+
         is_blob = is_blob_path(stored_path, str(artifact.tenant_id))
         if is_blob:
             # NO URL WHEN THE BYTES ARE NOT THERE. store_artifact degrades on an upload
             # failure by writing the row with blob_url = None while still recording
             # blob_path, so the path alone proves nothing. Offering a link anyway is how
             # the list ends up with a download icon that 404s.
+            # NO LINK BEFORE APPROVAL. A pending artifact's bytes sit under the tenant's
+            # `_pending` prefix, not at this path — offering a download would 404, and
+            # offering it at all would make the gate look decorative.
             download_path = (
-                f"/api/artifacts/{artifact.id}/download" if artifact.blob_url else ""
+                f"/api/artifacts/{artifact.id}/download"
+                if (artifact.blob_url and _is_approved)
+                else ""
             )
         elif stored_path:
             download_path = f"/generated/{stored_path}"
@@ -615,7 +631,7 @@ class ArtifactOut(BaseModel):
             title=title,
             version=1,
             contentHash=content_hash,
-            status="approved",
+            status=status,
             # A DOCUMENT BODY, NOT A MARKDOWN LINK. This used to be
             # `{"kind": "raw", "markdown": "[Download artifact](…)"}`, which produced the
             # SAME link the list row already renders as an icon — two controls for one
@@ -627,11 +643,15 @@ class ArtifactOut(BaseModel):
                 "filename": filename,
                 "contentType": artifact.content_type or None,
                 "sizeBytes": artifact.size_bytes,
-                # False when the row exists but the upload FAILED. store_artifact still
-                # records blob_path in that case, so the path alone proves nothing —
-                # only blob_url says the bytes arrived. Saying so beats a dead button.
-                # A legacy local file has no blob_url and is nonetheless present.
+                # Whether there is a file to fetch RIGHT NOW. False while pending —
+                # the bytes exist but under the pending prefix, and nobody has agreed
+                # they belong to the project yet — and false when an approved
+                # artifact's upload failed. `awaitingApproval` separates those two, so
+                # the card can say "waiting for sign-off" rather than "not stored",
+                # which would read as a fault.
                 "stored": bool(download_path),
+                "awaitingApproval": _approval == "pending",
+                "rejected": _approval == "rejected",
             },
             downloadUrl=download_path or None,
             createdBy="agent",
