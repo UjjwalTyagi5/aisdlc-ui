@@ -73,8 +73,17 @@ export interface DocumentCardProps {
   filename: string;
   contentType?: string | null;
   sizeBytes?: number | null;
-  /** False when the row exists but the bytes never reached storage. */
+  /** False when there is nothing to fetch: the upload failed, OR it is still pending. */
   stored?: boolean;
+  /** Waiting on a project admin. Distinct from `!stored`, which would read as a fault. */
+  awaitingApproval?: boolean;
+  /** Declined by an admin; the file was deleted and the row kept as the record. */
+  rejected?: boolean;
+  /** Provided only for someone who may decide. Omit and no controls render — the
+   *  caller gates on permission, not this component. */
+  onApprove?: () => void;
+  onReject?: () => void;
+  deciding?: boolean;
   className?: string;
 }
 
@@ -84,6 +93,11 @@ export function DocumentCard({
   contentType,
   sizeBytes,
   stored = true,
+  awaitingApproval = false,
+  rejected = false,
+  onApprove,
+  onReject,
+  deciding = false,
   className,
 }: DocumentCardProps) {
   const Icon = iconFor(filename, contentType);
@@ -121,13 +135,62 @@ export function DocumentCard({
             Download
           </a>
         ) : (
-          // Not a disabled button: a control that looks clickable and is not reads as a
-          // bug. The reason is what the user needs, and it is an admin's problem.
-          <span className="text-muted-foreground shrink-0 text-xs">Not stored</span>
+          // THREE REASONS THERE IS NOTHING TO DOWNLOAD, and they need different words.
+          // "Not stored" on a pending artifact would read as a fault when the system is
+          // working exactly as intended.
+          //
+          // Not a disabled button either: a control that looks clickable and is not
+          // reads as a bug.
+          <span className="text-muted-foreground shrink-0 text-xs">
+            {awaitingApproval ? "Awaiting approval" : rejected ? "Rejected" : "Not stored"}
+          </span>
         )}
       </div>
 
-      {!stored && (
+      {awaitingApproval && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-muted-foreground text-xs">
+            Submitted to the project&apos;s artifacts. A project admin decides whether it
+            joins the shared record — the chat download link works either way.
+          </p>
+          {onApprove && onReject && (
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={onReject}
+                disabled={deciding}
+                className={cn(
+                  "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
+                  "hover:bg-surface-1 disabled:pointer-events-none disabled:opacity-50",
+                )}
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                onClick={onApprove}
+                disabled={deciding}
+                className={cn(
+                  "bg-primary text-primary-foreground rounded-md px-3 py-1.5",
+                  "text-xs font-medium transition-opacity hover:opacity-90",
+                  "disabled:pointer-events-none disabled:opacity-50",
+                )}
+              >
+                {deciding ? "Working\u2026" : "Approve"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {rejected && (
+        <p className="text-muted-foreground mt-3 text-xs">
+          A project admin declined this document, so its file was deleted. The record is
+          kept so the decision is visible.
+        </p>
+      )}
+
+      {!stored && !awaitingApproval && !rejected && (
         <p className="text-muted-foreground mt-3 text-xs">
           This artifact was recorded but its file never reached storage, so there is
           nothing to download. An administrator needs to check the storage configuration.

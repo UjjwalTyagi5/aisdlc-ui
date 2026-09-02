@@ -26,6 +26,7 @@ import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
+import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { getRunSteps, listRuns } from "@/lib/api/runs";
@@ -103,6 +104,8 @@ export default function DesignPage() {
     },
     [router, projectId, searchParams],
   );
+
+  const approval = useArtifactApproval(projectId);
 
   const deletion = useDeleteArtifact(projectId, {
     onDeleted: (a) => {
@@ -318,7 +321,7 @@ export default function DesignPage() {
                   </p>
                 </header>
 
-                <ArtifactViewer artifact={selected} />
+                <ArtifactViewer artifact={selected} approval={approval} />
 
                 <ApprovalCard
                   status={selected.status}
@@ -406,7 +409,13 @@ export default function DesignPage() {
 
 // ───────── Viewer switcher ─────────
 
-function ArtifactViewer({ artifact }: { artifact: Artifact }) {
+function ArtifactViewer({
+  artifact,
+  approval,
+}: {
+  artifact: Artifact;
+  approval: ReturnType<typeof useArtifactApproval>;
+}) {
   const { body } = artifact;
   switch (body.kind) {
     case "c4_diagram":
@@ -432,6 +441,13 @@ function ArtifactViewer({ artifact }: { artifact: Artifact }) {
           contentType={body.contentType}
           sizeBytes={body.sizeBytes}
           stored={body.stored}
+          awaitingApproval={body.awaitingApproval}
+          rejected={body.rejected}
+          // Handlers only for someone who may decide — the card renders no controls
+          // without them, so an unprivileged viewer never sees a button that 403s.
+          onApprove={approval.canDecide ? () => approval.approve(artifact.id) : undefined}
+          onReject={approval.canDecide ? () => approval.reject(artifact.id) : undefined}
+          deciding={approval.decidingId === artifact.id}
         />
       );
     case "raw":

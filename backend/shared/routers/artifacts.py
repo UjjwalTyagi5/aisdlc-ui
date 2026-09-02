@@ -347,8 +347,12 @@ async def approve_artifact(
             },
         )
     )
-    await db.commit()
-    await db.refresh(artifact)
+    # NO COMMIT HERE, and no refresh. `get_db_session` sets the RLS tenant with
+    # `set_config(..., true)` — TRANSACTION-local — and commits once at the end of the
+    # request. Committing mid-handler ends that transaction and drops the setting, so
+    # every subsequent statement in the request sees zero rows; `db.refresh()` then
+    # failed outright with "Could not refresh instance". The dependency's commit
+    # persists both the artifact and the audit event.
     logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
     return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
 
@@ -415,8 +419,7 @@ async def reject_artifact(
             },
         )
     )
-    await db.commit()
-    await db.refresh(artifact)
+    # See approve_artifact: the request-scoped dependency owns the commit.
     logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
     return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
 

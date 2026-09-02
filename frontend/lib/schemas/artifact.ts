@@ -194,8 +194,14 @@ export const DocumentBody = z.object({
   filename: z.string(),
   contentType: z.string().nullish(),
   sizeBytes: z.number().nullish(),
-  /** False when the row exists but the upload failed — listed, not downloadable. */
+  /** False when there is nothing to fetch right now — either the upload failed, or
+   *  the artifact is still awaiting approval and its bytes are in the pending area. */
   stored: z.boolean().default(true),
+  /** Waiting on a project admin's decision. Distinguishes "not yet approved" from
+   *  "approved but the upload failed", which look identical through `stored` alone. */
+  awaitingApproval: z.boolean().default(false),
+  /** An admin declined it; the file was deleted and the row kept as the record. */
+  rejected: z.boolean().default(false),
 });
 
 // ─── Deployment artifact bodies (Chunk 13) ────────────────────

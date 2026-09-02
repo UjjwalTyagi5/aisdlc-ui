@@ -35,6 +35,7 @@ import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
+import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { GATE_POLICY } from "@/lib/agents";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
@@ -126,6 +127,8 @@ export function StageWorkbench({
     },
     [router, projectId, routeSegment, searchParams],
   );
+
+  const approval = useArtifactApproval(projectId);
 
   const deletion = useDeleteArtifact(projectId, {
     onDeleted: (a) => {
@@ -344,7 +347,7 @@ export function StageWorkbench({
                   </p>
                 </header>
 
-                <ArtifactBody artifact={selected} />
+                <ArtifactBody artifact={selected} approval={approval} />
 
                 {gate.type === "auto_approve" ? (
                   // Documentation et al. auto-approve on completion (§7.1) — no
@@ -440,7 +443,13 @@ export function StageWorkbench({
 
 /** Generic artifact body renderer — raw markdown when present, else a readable
  * JSON fallback so any artifact type is at least viewable. */
-function ArtifactBody({ artifact }: { artifact: Artifact }) {
+function ArtifactBody({
+  artifact,
+  approval,
+}: {
+  artifact: Artifact;
+  approval: ReturnType<typeof useArtifactApproval>;
+}) {
   if (artifact.body.kind === "document") {
     return (
       <DocumentCard
@@ -449,6 +458,11 @@ function ArtifactBody({ artifact }: { artifact: Artifact }) {
         contentType={artifact.body.contentType}
         sizeBytes={artifact.body.sizeBytes}
         stored={artifact.body.stored}
+        awaitingApproval={artifact.body.awaitingApproval}
+        rejected={artifact.body.rejected}
+        onApprove={approval.canDecide ? () => approval.approve(artifact.id) : undefined}
+        onReject={approval.canDecide ? () => approval.reject(artifact.id) : undefined}
+        deciding={approval.decidingId === artifact.id}
       />
     );
   }

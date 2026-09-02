@@ -175,7 +175,7 @@ async def test_a_failed_move_leaves_the_artifact_pending(patched):
 
     assert e.value.status_code == 502
     assert art.approval_status == "pending"
-    assert not db.committed
+    assert art.blob_url is None          # nothing was promoted
 
 
 @pytest.mark.unit
@@ -238,7 +238,7 @@ async def test_a_rejection_that_cannot_clear_its_bytes_still_records_the_decisio
     )
 
     assert art.approval_status == "rejected"
-    assert db.committed
+    assert art.approved_by == "admin-1"
 
 
 @pytest.mark.unit
