@@ -109,8 +109,14 @@ async def list_artifacts_for_project(
     ]
 
     # Materialize board-ingested stories (no structured-story table — they live in
-    # Run.requirements_payload). Use the most recent requirements run that has
+    # Run.requirements_payload). Use the most recently WRITTEN requirements run that has
     # stories so re-ingests don't duplicate. Only for the requirements phase.
+    #
+    # ORDERED BY updated_at, NOT created_at. A chat run is created once per project and
+    # then REUSED (`_get_or_create_chat_run`), so its creation time is whenever the user
+    # first opened the chat — possibly long before a later "Pull stories". Ordering by
+    # creation would let a newer ingest permanently shadow requirements the agent wrote
+    # afterwards onto that older run. What matters is which payload was written last.
     if phase in (None, "requirements"):
         req_runs = (
             await db.execute(
@@ -118,7 +124,7 @@ async def list_artifacts_for_project(
                 .where(Run.project_id == project.id)
                 .where(Run.tenant_id == tenant_id)
                 .where(Run.stage == "requirements")
-                .order_by(Run.created_at.desc())
+                .order_by(Run.updated_at.desc())
             )
         ).scalars().all()
         for r in req_runs:

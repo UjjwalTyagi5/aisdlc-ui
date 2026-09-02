@@ -387,10 +387,15 @@ async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optio
     from shared.models.orm import Run
 
     async with get_db_session_for_tenant(tenant_id) as db:
+        # ORDERED BY updated_at, NOT created_at — see the same note in
+        # artifacts.py::list_artifacts_for_project. A chat run is created once per
+        # project and reused, so its creation time says when the user first opened the
+        # chat, not when its payload was written. What matters here is which payload is
+        # freshest.
         stmt = (
             select(Run)
             .where(Run.project_id == _uuid.UUID(project_id), Run.tenant_id == _uuid.UUID(tenant_id))
-            .order_by(Run.created_at.desc())
+            .order_by(Run.updated_at.desc())
             .limit(_PROJECT_RUN_LOOKBACK)
         )
         runs = (await db.execute(stmt)).scalars().all()

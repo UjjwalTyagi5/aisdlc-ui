@@ -41,6 +41,7 @@ DESIGN = {"hld": "an architecture"}
 def _run(minutes, **columns):
     return SimpleNamespace(
         created_at=T0 + timedelta(minutes=minutes),
+        updated_at=T0 + timedelta(minutes=minutes),
         requirements_payload=columns.get("requirements_payload"),
         design_artifacts=columns.get("design_artifacts"),
         development_artifacts=columns.get("development_artifacts"),
@@ -57,7 +58,7 @@ def _fetch(runs, monkeypatch):
     class _Result:
         @staticmethod
         def scalars():
-            return SimpleNamespace(all=lambda: sorted(runs, key=lambda r: r.created_at, reverse=True))
+            return SimpleNamespace(all=lambda: sorted(runs, key=lambda r: r.updated_at, reverse=True))
 
     class _Db:
         async def execute(self, _stmt):
