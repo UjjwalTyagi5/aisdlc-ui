@@ -471,11 +471,12 @@ class ArtifactOut(BaseModel):
     Field mappings (ORM-gap decision 1 in PLAN.md):
       artifact_type -> type
       run.stage     -> phase  (owning Run's stage; loaded by router via join)
-      artifact_type + blob filename -> title
+      blob filename -> title   (the LEAF only — the path's leading segments are the
+                                tenant/run routing, not a label anybody reads)
       1             -> version  (immutable blobs; version increments are deferred)
       sha256(blob_path||blob_url) -> contentHash
       "approved"    -> status  (blobs are approved artifacts)
-      {kind:"raw", markdown: download link} -> body
+      {kind:"document", filename, contentType, sizeBytes, stored} -> body
       "agent"       -> createdBy
       created_at    -> updatedAt  (immutable — no updated_at column on Artifact)
 
@@ -509,12 +510,40 @@ class ArtifactOut(BaseModel):
     def from_orm_artifact(cls, artifact: Any, run_stage: str, project_id: str) -> "ArtifactOut":
         """Build an ArtifactOut from an ORM Artifact + owning run_stage + project_id."""
         import hashlib
+        from shared.services.artifact_store import is_blob_path  # noqa: PLC0415
+
         raw = (artifact.blob_path or "") + (artifact.blob_url or "")
         content_hash = hashlib.sha256(raw.encode()).hexdigest()
-        download_path = artifact.blob_url or (
-            f"/generated/{artifact.blob_path}" if artifact.blob_path else ""
-        )
-        title = f"{artifact.artifact_type} ({artifact.blob_path or artifact.blob_url or 'no file'})"
+
+        stored_path = artifact.blob_path or ""
+        # THE FILENAME, NOT THE PATH. The title used to be the whole stored path —
+        # "document (81a736f4-…/67fbd232-…/document/sdlc-password-reset-design.pdf)" —
+        # which is two UUIDs of tenant/run routing in front of the only part a person
+        # reads. Those UUIDs are the tenant boundary, not a label.
+        filename = stored_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        title = filename or artifact.artifact_type
+
+        # THE RAW BLOB URL IS NOT A DOWNLOAD LINK. `blob_url` points straight at
+        # `https://<account>.blob.core.windows.net/…`, and the account has public access
+        # disabled — following it gets a 409/404 from Azure, never the file. The one
+        # authorised path is `/artifacts/{id}/download`, which resolves the id through a
+        # join on Run.tenant_id and streams the bytes; the BFF proxies it at the same
+        # path under /api. Legacy rows, whose blob_path is a local filesystem path, keep
+        # the static `/generated/…` URL because that endpoint deliberately refuses them.
+        is_blob = is_blob_path(stored_path, str(artifact.tenant_id))
+        if is_blob:
+            # NO URL WHEN THE BYTES ARE NOT THERE. store_artifact degrades on an upload
+            # failure by writing the row with blob_url = None while still recording
+            # blob_path, so the path alone proves nothing. Offering a link anyway is how
+            # the list ends up with a download icon that 404s.
+            download_path = (
+                f"/api/artifacts/{artifact.id}/download" if artifact.blob_url else ""
+            )
+        elif stored_path:
+            download_path = f"/generated/{stored_path}"
+        else:
+            download_path = ""
+
         return cls(
             id=str(artifact.id),
             projectId=project_id,
@@ -525,9 +554,22 @@ class ArtifactOut(BaseModel):
             version=1,
             contentHash=content_hash,
             status="approved",
+            # A DOCUMENT BODY, NOT A MARKDOWN LINK. This used to be
+            # `{"kind": "raw", "markdown": "[Download artifact](…)"}`, which produced the
+            # SAME link the list row already renders as an icon — two controls for one
+            # file — and rendered through AdrViewer, so every PDF was captioned
+            # "ADR · Architecture Decision Record". The fields below let the client show
+            # what the file IS and offer exactly one way to fetch it.
             body={
-                "kind": "raw",
-                "markdown": f"[Download artifact]({download_path})" if download_path else "_No file attached_",
+                "kind": "document",
+                "filename": filename,
+                "contentType": artifact.content_type or None,
+                "sizeBytes": artifact.size_bytes,
+                # False when the row exists but the upload FAILED. store_artifact still
+                # records blob_path in that case, so the path alone proves nothing —
+                # only blob_url says the bytes arrived. Saying so beats a dead button.
+                # A legacy local file has no blob_url and is nonetheless present.
+                "stored": bool(download_path),
             },
             downloadUrl=download_path or None,
             createdBy="agent",

@@ -13,6 +13,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 
 import { AdrViewer } from "@/components/app/adr-viewer";
+import { DocumentCard } from "@/components/app/document-card";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -22,10 +23,6 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
 import { MonacoViewer } from "@/components/app/monaco-viewer";
 import { OpenApiViewer } from "@/components/app/openapi-viewer";
-import {
-  InlineCommentThread,
-  type InlineComment,
-} from "@/components/app/inline-comment-thread";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
@@ -477,19 +474,6 @@ export default function DesignPage() {
                       : null
                   }
                 />
-
-                <section className="space-y-3">
-                  <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
-                    Comments
-                  </h3>
-                  <InlineCommentThread
-                    comments={DEMO_COMMENTS}
-                    currentUser={me}
-                    onReply={async () => {
-                      toast.message("Comments wire to the real thread API in Chunk 15");
-                    }}
-                  />
-                </section>
               </div>
             ) : (
               <EmptyState
@@ -554,7 +538,19 @@ function ArtifactViewer({ artifact }: { artifact: Artifact }) {
       );
     case "adr":
       return <AdrViewer markdown={body.markdown} />;
+    case "document":
+      return (
+        <DocumentCard
+          artifactId={artifact.id}
+          filename={body.filename}
+          contentType={body.contentType}
+          sizeBytes={body.sizeBytes}
+          stored={body.stored}
+        />
+      );
     case "raw":
+      // AdrViewer captions its output "Architecture Decision Record", which is right
+      // for an ADR and wrong for everything else that lands here.
       return <AdrViewer markdown={body.markdown} />;
     default:
       return (
@@ -567,12 +563,3 @@ function ArtifactViewer({ artifact }: { artifact: Artifact }) {
   }
 }
 
-const DEMO_COMMENTS: InlineComment[] = [
-  {
-    id: "c1",
-    author: "agent",
-    body: "Idempotency-Key is now required. Clients must persist keys until the replay completes or 409s.",
-    createdAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-    severity: "suggestion",
-  },
-];

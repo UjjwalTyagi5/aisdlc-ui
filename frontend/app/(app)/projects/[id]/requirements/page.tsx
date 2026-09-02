@@ -21,10 +21,6 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
-import {
-  InlineCommentThread,
-  type InlineComment,
-} from "@/components/app/inline-comment-thread";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
 
@@ -605,20 +601,6 @@ export default function RequirementsPage() {
                       : null
                   }
                 />
-
-                {/* Comments */}
-                <section className="space-y-3">
-                  <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
-                    Comments
-                  </h3>
-                  <InlineCommentThread
-                    comments={DEMO_COMMENTS}
-                    currentUser={me}
-                    onReply={async () => {
-                      toast.message("Comments wire to the real thread API in Chunk 15");
-                    }}
-                  />
-                </section>
               </div>
             ) : (
               <EmptyState
@@ -685,13 +667,3 @@ export default function RequirementsPage() {
   );
 }
 
-// Placeholder comments until Chunk 15 wires the real thread API.
-const DEMO_COMMENTS: InlineComment[] = [
-  {
-    id: "c1",
-    author: "agent",
-    body: "I split the original ticket into three stories — reply /merge to consolidate.",
-    createdAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    severity: "suggestion",
-  },
-];

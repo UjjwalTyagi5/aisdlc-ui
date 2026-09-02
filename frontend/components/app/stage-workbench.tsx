@@ -29,6 +29,7 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentCard } from "@/components/app/document-card";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
@@ -440,6 +441,17 @@ export function StageWorkbench({
 /** Generic artifact body renderer — raw markdown when present, else a readable
  * JSON fallback so any artifact type is at least viewable. */
 function ArtifactBody({ artifact }: { artifact: Artifact }) {
+  if (artifact.body.kind === "document") {
+    return (
+      <DocumentCard
+        artifactId={artifact.id}
+        filename={artifact.body.filename}
+        contentType={artifact.body.contentType}
+        sizeBytes={artifact.body.sizeBytes}
+        stored={artifact.body.stored}
+      />
+    );
+  }
   if (artifact.body.kind === "raw") {
     return (
       <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap text-sm">

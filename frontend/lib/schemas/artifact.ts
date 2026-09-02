@@ -179,6 +179,22 @@ export const RawBody = z.object({
   markdown: z.string(),
 });
 
+/** A stored file (PDF, DOCX, XLSX, PPTX, PNG…) rather than renderable content.
+ *
+ *  These used to arrive as a RawBody whose markdown was `[Download artifact](url)` —
+ *  the same link the list row already shows as an icon, rendered through AdrViewer so
+ *  every PDF was captioned "Architecture Decision Record". Describing the file lets the
+ *  client show what it IS and offer exactly one way to fetch it.
+ */
+export const DocumentBody = z.object({
+  kind: z.literal("document"),
+  filename: z.string(),
+  contentType: z.string().nullish(),
+  sizeBytes: z.number().nullish(),
+  /** False when the row exists but the upload failed — listed, not downloadable. */
+  stored: z.boolean().default(true),
+});
+
 // ─── Deployment artifact bodies (Chunk 13) ────────────────────
 
 export const PipelineProvider = z.enum(["github_actions", "azure_pipelines"]);
@@ -250,6 +266,7 @@ export const ArtifactBody = z.discriminatedUnion("kind", [
   PipelineBody,
   IacDiffBody,
   DeployPlanBody,
+  DocumentBody,
   RawBody,
 ]);
 export type ArtifactBody = z.infer<typeof ArtifactBody>;
