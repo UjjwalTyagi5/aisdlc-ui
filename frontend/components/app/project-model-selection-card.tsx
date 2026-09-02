@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Building2, Check } from "lucide-react";
+import { Building2, Check, KeyRound } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,11 +14,42 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { getProjectModelSelection, setProjectModelSelection } from "@/lib/api/models";
+import { getModelOptions, getProjectModelSelection, setProjectModelSelection } from "@/lib/api/models";
+import { qk } from "@/lib/api/query-keys";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { ModelAllowEntry } from "@/lib/schemas/model";
 
 const keyOf = (e: ModelAllowEntry) => `${e.provider}::${e.model_id}`;
+
+/** The identity a granted entry and a runnable offering are matched on. */
+type ModelIdentity = { provider: string; model_id: string };
+
+/**
+ * Which of the GRANTED entries nothing can actually run.
+ *
+ * The two inputs answer different questions and are easy to conflate:
+ *   `selected` — the grant cascade, what the org allowed down to this project.
+ *   `options`  — `/model/options`, offerings on a keyed and verified provider,
+ *                already intersected with that same cascade server-side.
+ *
+ * So "granted minus runnable" is exactly the set that will fail at the model call,
+ * and it is the normal state between an Org Admin granting models and a Business
+ * Unit Admin keying them.
+ *
+ * `options === undefined` means NOT YET KNOWN, and yields the empty set rather than
+ * marking everything unusable. An in-flight request is not evidence of a missing key,
+ * and a card that accuses every row while loading is worse than one that says nothing.
+ */
+export function unusableModelKeys(
+  selected: readonly ModelIdentity[],
+  options: readonly ModelIdentity[] | undefined,
+): Set<string> {
+  if (options === undefined) return new Set();
+  const runnable = new Set(options.map((o) => `${o.provider}::${o.model_id}`));
+  return new Set(
+    selected.map((e) => `${e.provider}::${e.model_id}`).filter((k) => !runnable.has(k)),
+  );
+}
 
 /**
  * Which of the models pushed to this project is its "master" key (PRD §34.2,
@@ -51,6 +82,32 @@ export function ProjectModelSelectionCard({
 
   const selectionQ = useQuery({ queryKey, queryFn: () => getProjectModelSelection(projectId) });
 
+  /**
+   * WHICH OF THESE CAN ACTUALLY RUN — a different question from which are granted,
+   * and the reason this card was misleading.
+   *
+   * `selected` is the GRANT cascade: what the Organization Admin allowed down to this
+   * project. `/model/options` is the RUNNABLE set: `model_offerings` joined to a
+   * provider that is keyed and verified, then intersected with that same cascade. A
+   * model can sit in the first and not the second — granted to the unit, but with no
+   * enabled offering under any provider connection that has a key.
+   *
+   * That is not a rare edge. It is the normal state between an Org Admin granting the
+   * models and a Business Unit Admin keying them, and this card rendered both cases
+   * identically under a heading claiming these are the models the project "actually
+   * runs on". Four rows, one of them real, no way to tell which.
+   *
+   * Same query key as the Overview picker, so the two screens cannot disagree and
+   * this costs no extra request.
+   */
+  const optionsQ = useQuery({
+    queryKey: qk.model.options(projectId),
+    queryFn: () => getModelOptions(projectId),
+    staleTime: 60_000,
+  });
+  // undefined until the query resolves — see unusableModelKeys on why that matters.
+  const runnableOptions = optionsQ.isSuccess ? (optionsQ.data?.options ?? []) : undefined;
+
   const [draftDefault, setDraftDefault] = React.useState<string | null>(null);
 
   const data = selectionQ.data;
@@ -73,6 +130,12 @@ export function ProjectModelSelectionCard({
       return true;
     });
   }, [data]);
+
+  const unusable = React.useMemo(
+    () => unusableModelKeys(selected, runnableOptions),
+    [selected, runnableOptions],
+  );
+  const unusableCount = unusable.size;
 
   // Reset the draft whenever the server's answer changes, so a Business Unit
   // Admin pushing another key mid-edit doesn't leave a stale pick behind.
@@ -164,15 +227,33 @@ export function ProjectModelSelectionCard({
             {selected.map((e) => {
               const k = keyOf(e);
               const isDefault = defaultKey === k;
+              // Granted, but nothing can run it yet. Unknown while the query is in
+              // flight, so a row is never accused of being unusable on no evidence.
+              const isUnusable = unusable.has(k);
               return (
                 <li key={k} className="flex flex-wrap items-center gap-3 px-3 py-2.5 text-sm">
                   <div className="min-w-0 flex-1">
-                    <span className="font-mono text-[12.5px]">{e.model_id}</span>
+                    <span
+                      className={
+                        isUnusable ? "text-muted-foreground font-mono text-[12.5px]" : "font-mono text-[12.5px]"
+                      }
+                    >
+                      {e.model_id}
+                    </span>
                     <span className="text-muted-foreground ml-2 text-[11.5px]">{e.provider}</span>
                     {e.credentialName && (
                       <span className="text-muted-foreground ml-2 text-[11px]">
                         via {e.credentialName}
                       </span>
+                    )}
+                    {isUnusable && (
+                      <Badge
+                        variant="outline"
+                        className="text-muted-foreground ml-2 gap-1 align-middle font-mono text-[10px]"
+                      >
+                        <KeyRound className="size-3" aria-hidden />
+                        needs a key
+                      </Badge>
                     )}
                   </div>
 
@@ -187,7 +268,15 @@ export function ProjectModelSelectionCard({
                         variant="ghost"
                         size="sm"
                         className="text-muted-foreground h-7 text-[11.5px]"
-                        disabled={saveM.isPending}
+                        // A model nothing can run must not become the default —
+                        // that is a run that fails at the model call for a reason
+                        // this screen already knew about.
+                        disabled={saveM.isPending || isUnusable}
+                        title={
+                          isUnusable
+                            ? "This model has no keyed provider behind it yet, so it cannot be the default."
+                            : undefined
+                        }
                         onClick={() => setDraftDefault(k)}
                       >
                         Make default
@@ -198,6 +287,20 @@ export function ProjectModelSelectionCard({
               );
             })}
           </ul>
+        )}
+
+        {/* Says what to DO about it, and names who does it. A badge alone leaves the
+            reader knowing something is wrong and not who to ask — the gap is between
+            an Org Admin granting a model and a Business Unit Admin keying it, and
+            neither of those people is necessarily looking at this screen. */}
+        {unusableCount > 0 && (
+          <p className="text-muted-foreground mt-3 text-xs">
+            {unusableCount === 1
+              ? "One model above is granted to this project but has no keyed provider behind it, so it cannot be selected or run."
+              : `${unusableCount} of the models above are granted to this project but have no keyed provider behind them, so they cannot be selected or run.`}{" "}
+            Your {BUSINESS_UNIT_LABEL} Admin fixes this by enabling the model on a
+            provider connection that has an API key.
+          </p>
         )}
 
         {!canManage && selected.length > 0 && (

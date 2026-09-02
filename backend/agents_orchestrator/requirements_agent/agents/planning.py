@@ -2363,7 +2363,13 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         # their default — see temperature_kwargs.
         **temperature_kwargs(model, 0.3),
         max_tokens=8096,
-        max_retries=2,
+        # 0, not langchain_litellm's own default -- guarded_completion
+        # (shared/services/model_call_wrapper.py) already retries the whole
+        # ainvoke call; ChatLiteLLM's own tenacity retry underneath it also
+        # retries on RateLimitError, uncoordinated with the outer loop. See
+        # dev_agent.py::_build_llm's identical fix and "desicions and
+        # issues.txt" Issue 14 for the live evidence.
+        max_retries=0,
         # Stream tokens so the copilot shows text live as it's generated (first
         # token in ~1.4s instead of a frozen wait for the whole response). Verified
         # to emit incremental chunks; LangChain still assembles the final message

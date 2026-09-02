@@ -46,7 +46,7 @@ class _Conn:
 
 
 def _factory(sink, failing=None):
-    async def _get(kind=None, tenant_id=None):
+    async def _get(kind=None, tenant_id=None, unrestricted=False):
         return _Conn(kind, sink, failing)
 
     return _get

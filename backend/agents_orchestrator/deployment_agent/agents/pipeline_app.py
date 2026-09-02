@@ -1982,6 +1982,30 @@ async def trigger_github_actions_workflow(state: PipelineState) -> PipelineState
     try:
         from config.connector_factory import get_connector_for_session
 
+        # KNOWN BROKEN, LEFT BROKEN ON PURPOSE — do not "fix" this by adding
+        # unrestricted=True without reading this first.
+        #
+        # This names neither a project nor a stage nor `unrestricted`, and the factory
+        # documents that combination as permitting NOTHING: it returns
+        # ScopedConnector(raw, None), and `permits(None, "write")` is False, so the
+        # dispatch below raises ConnectorAccessDenied every time. GitHub Actions
+        # dispatch from this graph therefore does not work today.
+        #
+        # WHY NOT unrestricted=True. That is the fail-open door. Dispatching a deploy
+        # workflow is an AGENT action taken on a project's behalf, not the org-level
+        # admin work the flag exists for (health probes, tenant setup) — the two other
+        # sites fixed alongside this one are that, and this is not. Opening it here
+        # would let any run dispatch a deploy with no access check at all.
+        #
+        # WHY NOT SCOPED EITHER, YET. `PipelineState` carries `tenant_id` but no
+        # project_id, and the deployment agent never sets the project_id ContextVar, so
+        # there is genuinely nothing to scope against without threading a project
+        # through this graph. That is the real fix, and it belongs with the deployment
+        # agent's rebuild — it is not in `builtAgents`, so nothing ships on this path.
+        #
+        # It fails LOUDLY (state["errors"], pipeline_trigger_status="failed", an ERROR
+        # broadcast), which is why leaving it is acceptable: it is visibly broken
+        # rather than silently dead.
         connector = await get_connector_for_session(
             kind="github_actions", tenant_id=tenant_id
         )
