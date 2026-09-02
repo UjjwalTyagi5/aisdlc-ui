@@ -244,6 +244,92 @@ async def _existing_plan(tenant_id: str, run_id: str) -> Optional[dict]:
         return None
 
 
+
+# ── Sequencing and levelling ─────────────────────────────────────────────────
+
+
+@tool
+async def build_schedule(tasks_json: str, sprints_json: str = "", team_json: str = "") -> str:
+    """Sequence estimated tasks into sprints, respecting dependencies and capacity.
+
+    `tasks_json`   [{"id", "title", "estimate", "depends_on": [ids]}]
+    `sprints_json` [{"id", "name", "start_date", "finish_date", "capacity"}] — pass the
+                   output of list_sprints, or your own dated phases.
+    `team_json`    [{"name", "capacity_per_day", "days_off"}] from read_team_capacity,
+                   used to work out each sprint's ceiling when the sprint has none.
+
+    THE ARITHMETIC IS DONE HERE, NOT BY YOU. Do not compute the packing yourself and
+    describe it — call this and report what it returns.
+
+    Anything it could not place comes back under `unscheduled` WITH A REASON: no
+    estimate, larger than any sprint, or stuck in a dependency cycle. Relay those to the
+    user; they are the decisions only a person can make.
+    """
+    from agents_orchestrator.pm_agent import scheduling  # noqa: PLC0415
+
+    try:
+        tasks = _as_list(tasks_json, "tasks")
+        sprints = _as_list(sprints_json, "sprints") or []
+        team = _as_list(team_json, "team") or []
+    except ValueError as exc:
+        return f"Could not build a schedule: {exc}"
+
+    if not tasks:
+        return "No tasks were given, so there is nothing to schedule."
+
+    result = scheduling.build_schedule(tasks, sprints, team)
+    return json.dumps(result, indent=2, default=str)
+
+
+@tool
+async def allocate_resources(schedule_json: str, team_json: str) -> str:
+    """Assign a schedule's work to people and report who is over-allocated.
+
+    `schedule_json` the `schedule` array build_schedule returned.
+    `team_json`     [{"name", "capacity_per_day", "sprint_days", "days_off"}] or
+                    [{"name", "hours"}].
+
+    Work already carrying `assigned_to` keeps that person — somebody decided it, and
+    reshuffling real assignments is how a plan stops being trusted.
+
+    OVER-ALLOCATION IS REPORTED, NOT SILENTLY AVOIDED. Tell the user who is over and by
+    how much; moving work or extending a sprint is their call, not yours.
+    """
+    from agents_orchestrator.pm_agent import scheduling  # noqa: PLC0415
+
+    try:
+        schedule = _as_list(schedule_json, "schedule") or []
+        team = _as_list(team_json, "team") or []
+    except ValueError as exc:
+        return f"Could not allocate: {exc}"
+
+    if not team:
+        return (
+            "No team capacity was given, so nothing can be assigned against it. On Azure "
+            "DevOps call read_team_capacity; on Jira ask the user who is available and "
+            "for how long — Jira has no capacity API."
+        )
+
+    return json.dumps(scheduling.allocate(schedule, team), indent=2, default=str)
+
+
+def _as_list(raw: str, field: str) -> Optional[list]:
+    """Parse a JSON array argument the model wrote, or say which one was malformed."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field} is not valid JSON: {exc}") from exc
+    if isinstance(value, dict):
+        # list_sprints and build_schedule both return objects with the array inside.
+        for key in ("schedule", "sprints", "tasks", "assignments", "value", "items"):
+            if isinstance(value.get(key), list):
+                return value[key]
+        return [value]
+    return value if isinstance(value, list) else [value]
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 _SHARED_TOOLS: List[Any] = []
@@ -261,6 +347,8 @@ tools = [
     read_project_inputs,
     list_sprints,
     read_team_capacity,
+    build_schedule,
+    allocate_resources,
     save_plan,
     *_SHARED_TOOLS,
 ]
@@ -285,17 +373,24 @@ requirements exist produces a plan for a system nobody asked for.
 Do NOT call it when the user describes the work themselves — their words are the input
 then.
 
-── WHAT YOU CAN DO TODAY ─────────────────────────────────────────────────────
-WORK BREAKDOWN and ESTIMATION. You turn the design's components into tasks, trace each
-back to the requirement that motivated it, and size them.
+── WHAT YOU DO ───────────────────────────────────────────────────────────────
+WORK BREAKDOWN, ESTIMATION, SCHEDULING and RESOURCE PLANNING. You turn the design's
+components into tasks traced back to the requirements that motivated them, size them,
+sequence them into sprints, and assign them against real capacity.
 
-You can also READ the board's sprints and, where the board supports it, team capacity.
+── THE ARITHMETIC IS NOT YOURS TO DO (CRITICAL) ──────────────────────────────
+Call `build_schedule` and `allocate_resources`. Do NOT work out the packing, the
+capacity sums or who is over-allocated yourself and describe the result.
 
-YOU DO NOT YET BUILD SCHEDULES OR ASSIGN PEOPLE. Sequencing into sprints and levelling
-against capacity are not built. If the user asks for a timeline or a resource plan, say
-plainly that you can produce the sized breakdown it would be built from, and that
-scheduling is not available yet. Do NOT improvise a sprint plan and present it as one —
-a plan that looks committed and is not is worse than no plan.
+A schedule you compute in your head LOOKS right — plausible sprint names, confident
+dates — and is wrong in ways nobody can see without redoing the arithmetic. The tools
+do the ordering and the sums; your job is to supply the inputs and explain what comes
+back.
+
+RELAY `unscheduled` AND `over_allocated` VERBATIM. They are the decisions only a person
+can make: an item with no estimate, an item too big for any sprint, a dependency cycle,
+somebody committed past their capacity. A schedule presented as complete while these
+are hidden is worse than no schedule.
 
 ── ESTIMATING HONESTLY ───────────────────────────────────────────────────────
 - Say what each estimate assumes. An unexplained number cannot be challenged.

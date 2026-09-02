@@ -224,12 +224,15 @@ async def test_saving_says_it_is_awaiting_approval(monkeypatch):
 
 
 @pytest.mark.unit
-def test_the_prompt_refuses_to_fake_a_schedule():
-    """THE HONESTY TEST. Sequencing and assignment are not built. An agent that
-    improvises a sprint plan and presents it as one is worse than one that declines."""
+def test_the_prompt_refuses_to_compute_the_schedule_itself():
+    """THE HONESTY TEST, moved rather than dropped. In phase 2 the agent could not
+    schedule at all and the prompt said so. Now it can, and the risk changed shape: a
+    model that does the packing in its head produces something that LOOKS like a plan —
+    plausible sprint names, confident dates — and is wrong in ways nobody sees without
+    redoing the arithmetic. See test_pm_scheduling.py for the rest."""
     p = " ".join(mod.PM_SYS_MESSAGE.split())
-    assert "YOU DO NOT YET BUILD SCHEDULES OR ASSIGN PEOPLE" in p
-    assert "Do NOT improvise a sprint plan and present it as one" in p
+    assert "THE ARITHMETIC IS NOT YOURS TO DO" in p
+    assert "YOU DO NOT YET BUILD SCHEDULES" not in p
 
 
 @pytest.mark.unit
