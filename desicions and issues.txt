@@ -846,3 +846,263 @@ load-bearing enough for this one allowed fix wave):
 
 Full ledger with every dispatch, finding, fix round, and ruling:
 .superpowers/sdd/2026-08-31-development-agent-chat-overhaul/progress.md
+
+--------------------------------------------------------------------
+POST-MERGE LIVE TESTING (2026-09-01) -- self-inflicted regressions and
+real bugs found while the user tested the merged PR through the real UI
+--------------------------------------------------------------------
+
+ISSUE 10 (FOUND + RESTORED, root cause NOT YET fixed): running the full
+backend pytest suite (1934 tests) as this session's own
+finishing-a-development-branch verification step wiped every role_binding
+on the entire platform, for every user, down to zero rows. The user hit
+this live as "Your account is waiting for a role" logging in as
+kapsarthak (org_admin).
+Root cause: 5 test files (test_can_perform.py, test_local_auth.py,
+test_project_business_unit.py, test_project_run_scope.py,
+test_run_approval_gate.py) each run an UNSCOPED `DELETE FROM
+role_bindings` with no WHERE clause in their setup/teardown, written
+assuming an isolated/ephemeral test database. This local dev environment
+has no such isolation -- POSTGRES_CONN_STRING, POSTGRES_SYNC_CONN_STRING,
+and POSTGRES_MIGRATIONS_CONN_STRING all point at the exact same
+`sdlc_product` database the running app actually uses. The user
+independently confirmed this is a RECURRING pattern ("whenever we worked
+on something all accounts... were going away except org admin") -- it has
+happened before this session, not just today, every time a broad test run
+fires.
+RESTORED: kapsarthak's org_admin (auto-restored by seed_org_admins on
+backend restart -- confirmed in the DB, not just the log's claim); all 14
+dev test personas re-seeded via scripts/seed_dev_personas, then REMOVED
+again per the user's explicit instruction once they clarified those were
+incidental to the repair, not wanted long-term (scripts/unseed_dev_personas.py,
+already sitting in the repo untracked for exactly this purpose); srk02804
+restored as bu_admin on Payments (had to first remove a re-seeded synthetic
+persona -- farah@abcbank.com -- that claimed the same BU-admin slot, since
+the product enforces exactly one BU admin per unit); sarthak2004 restored
+as project_admin on the TEST1 project. Both real-account restorations were
+reconstructed from this session's own conversation context (exact
+user_id/tenant_id/project_id already known from earlier live-verification
+work), not guessed.
+NOT YET FIXED: the actual root cause (test suite operating destructively
+against the shared dev DB) is still live and will recur on the next broad
+test run. Proposed fix, approved in principle by the user but not yet
+executed: stand up a real `sdlc_product_test` database on the same local
+Postgres, run the existing 45 Alembic migrations against it, and require
+POSTGRES_CONN_STRING/POSTGRES_SYNC_CONN_STRING/POSTGRES_MIGRATIONS_CONN_STRING
+be overridden to point there for every test invocation from now on
+(load_dotenv() never overrides an already-set env var, so this needs no
+application-code change, only a documented convention + exported env vars
+before `pytest`). migrations/env.py already enforces
+POSTGRES_MIGRATIONS_CONN_STRING != POSTGRES_CONN_STRING and was always
+written correctly for this -- only this machine's .env was ever
+misconfigured with both pointing at the same database.
+
+ISSUE 11 (FIXED, environmental, not a code bug): immediately after Issue
+10's restoration, the user hit "Internal Server Error" trying to save a
+role change for sarthak2004 via the Users page, and could not deactivate
+a Business Unit either. Investigated by checking the backend's live log
+first (found nothing there -- the request never reached FastAPI at all),
+then the frontend's own dev-server log, which showed the real cause:
+`Jest worker encountered 2 child process exceptions, exceeding retry
+limit` on both PATCH /api/admin/users/[id] and POST
+/api/workspaces/[id]/archive. This is Next.js's own internal Turbopack
+compile-worker pool crashing -- a known failure mode for a `next dev`
+process that has been running continuously for many hours (this one had
+been up since early in the session, through dozens of hot-reloads across
+the whole chat-overhaul plan), specifically triggered by the FIRST
+on-demand compilation of these two dynamic routes, which had never been
+hit before in this long-running dev session.
+FIX: killed and restarted the frontend dev server. Confirmed both routes
+compiled cleanly afterward with no crash in the log. No application code
+was touched -- this was never a regression from any of this session's
+changes, just an unrelated dev-server staleness issue that happened to
+surface at the same time as Issue 10.
+
+ISSUE 12 (FIXED, commit 17c7b49c): live-testing the just-merged diff-card
+feature (Issue 8, Part 1) for the first time ever in a real browser, the
+diff card rendered its header/toolbar correctly but the content area was
+permanently stuck on "Loading..." -- confirming the exact gap already
+flagged honestly in the merged PR's own description ("verified at the
+wire-event level... not visually confirmed in a browser").
+Root cause: `@monaco-editor/react` (the library backing DiffViewer)
+defaults to fetching its entire editor bundle (JS + CSS) from
+cdn.jsdelivr.net at runtime -- nothing in this codebase ever configured it
+to self-host instead. next.config.ts's CSP is deliberately locked down
+(script-src 'self' 'unsafe-inline' 'unsafe-eval', connect-src 'self' ws:
+wss: https://*.auth0.com in dev) with no CDN host in either directive, so
+the browser silently blocked the CDN fetch and the loader hung instead of
+failing with a clear error. This also explains why the final whole-branch
+review's reviewer independently found DiffViewer had never actually been
+a *live* code path anywhere in this app before -- this was the literal
+first time Monaco was ever exercised in a real browser in this project's
+history.
+Two fix options considered: self-host monaco-editor locally (the "proper"
+fix, but real risk given this dev server runs Turbopack, whose Monaco
+worker-bundling story is a known rough edge distinct from webpack's
+well-trodden monaco-editor-webpack-plugin path), or drop Monaco for this
+surface entirely in favour of a much simpler approach the user had
+already used successfully in an earlier project (a syntax-highlighted
+text block streamed by the LLM, no heavy editor library). Chose the
+latter, per the user's own explicit steer.
+FIX: DiffCard now computes a unified diff (the `diff` npm package's
+createTwoFilesPatch) and renders it as a ```diff fenced code block through
+the SAME MarkdownMessage/CodeBlock pipeline every other chat message
+already uses (react-markdown + rehype-highlight, which natively colors
+unified-diff +/- lines) -- proven, already-working infrastructure, zero
+CDN/CSP/worker surface at all. DiffViewer (the Monaco component itself)
+was left in the codebase untouched, just no longer used in the chat
+drawer. Test file rewritten (the old assertions tested Monaco-mount
+timing/props, which no longer apply); 5/5 pass, full frontend suite still
+466/466 green.
+INCIDENTAL FIX, discovered while installing the new `diff` dependency: an
+orphaned package-lock.json + node_modules sitting at the REPO ROOT (no
+package.json there to justify them, weeks old, containing entirely
+unrelated packages -- @exodus/bytes, electron, workerd) was crashing every
+`npm install` run from frontend/ with "Cannot read properties of null
+(reading 'matches')" -- an npm/arborist bug triggered by encountering a
+pnpm-style node_modules layout it can't reconcile. frontend/node_modules
+itself also had this same pnpm-style contamination mixed in from some
+earlier non-npm install. Removed both root-level artifacts and did one
+clean `npm install` from frontend/ -- this also produced a real
+frontend/package-lock.json for the first time (frontend never had one
+before; gitignored per this project's existing convention, so not
+committed).
+
+STILL OPEN, not yet investigated: the user separately reported, while
+logged in as sarthak2004 (project_admin) on a project's Integrations page,
+that "Save credential" stays disabled on the Azure DevOps credential
+dialog even after "Test connection" reports "Connected" -- confirmed via
+code read that the button's disabled state is gated by a `missingRequired`
+computation (integrations/page.tsx:471-475), not by the test result at
+all, but the exact reason it evaluates true in the user's specific case
+was not yet root-caused before the Monaco bug (Issue 12) took priority.
+Needs its own investigation pass.
+NOTE: the original TEST1 project (ba74c3dd-28a5-48e0-8b4f-36663b417232)
+referenced throughout Issues 1-9 no longer exists -- the user created a
+fresh project called "test" (03e8a3a7-08b4-4f68-bb39-99d2a92e7422, same
+Payments business unit) at some point after Issue 10's restoration.
+Confirmed live during Issue 13's investigation below when a stale
+project_id lookup failed with "unknown project". Any future live
+verification against "the test project" should use the new id.
+
+ISSUE 13 (FIXED, commit 752ede96): immediately after Issue 12's fix
+deployed, the user hit a NEW real bug on the very next real request (a
+CSS color-theme change) -- "Agent error: TimeoutError" -- and separately
+asked why the agent "feels so dull."
+Root-caused by direct reproduction against this project's own real,
+configured model (azure/gpt-5-mini), not by guessing: a single, TRIVIAL
+completion call with no tools bound and no system prompt took 28.1s --
+already at shared/services/model_call_wrapper.py's hardcoded 30-second
+per-attempt ceiling (_CALL_TIMEOUT_SECONDS), before accounting for the
+real chat flow's extra overhead (tool-call schemas, the full system
+prompt, actual file content already read into context). That module is
+shared by three agents (Development, Design/Architecture, Requirements),
+not just Development. The 30s figure traced to an earlier spec ("task
+#20") that simply predates this tenant ever being configured against a
+reasoning-capable model -- every attempt (all 3, per the existing 2s/4s
+retry backoff) was doomed before the retry loop even started, so retrying
+only added latency on top of latency instead of ever succeeding. This is
+very plausibly a real, direct contributor to the "why is it so slow" /
+"why does it time out" feedback given across this whole session, not a
+one-off.
+FIX: raised _CALL_TIMEOUT_SECONDS from 30.0 to 90.0, with the reasoning
+and the measured evidence recorded directly in the module's own docstring
+so a future reader doesn't just see a bare number change. Two regression
+tests added: one pins the new floor so it can't silently drift back down
+without someone re-confirming reasoning-model latency has changed, one
+confirms the constant is actually wired into asyncio.wait_for's timeout
+kwarg (not just that it exists as a constant). 14/14 tests in the module
+pass; 52/52 in the broader Development-agent suite pass.
+NOT ADDRESSED (separate, explicitly deferred): the "why is the agent so
+dull" complaint is real but distinct from this timeout bug -- looking at
+the transcript, the agent's prose is heavily procedural (long numbered
+plans, two separate confirmation questions before a one-line CSS color
+change, formal engineering phrasing) rather than feeling fast/decisive.
+This is a system-prompt tone/behavior question (dev_agent_prompt.py), not
+a bug with a single root cause -- needs the user's input on what "less
+dull" should actually look like before touching the prompt, matching this
+session's own established discipline (brainstorm before building) rather
+than guessing at a rewrite. User's answer, when asked: bring back emojis
+and richer formatting -- "it used to have emojis links etc." Still
+pending a full prompt-tuning pass.
+
+ISSUE 14 (FIXED, commit 3054c5c2): on the very next real request after
+Issue 13 deployed, the user hit "Agent error: RateLimitError" and asked
+directly whether this was Azure's fault or this codebase's fault --
+correctly refused to guess and pulled the real error text from the
+backend log instead of speculating.
+The proximate cause IS genuinely the provider: the real Azure error is
+"AzureException RateLimitError - Your requests to gpt-5-mini for
+gpt-5-mini in swedencentral have exceeded rate limit." -- real quota
+exhaustion from real traffic (a large share of it this session's own
+heavy live-testing today across the chat-overhaul verification work).
+But the log also showed something making it meaningfully worse, which IS
+a code bug: guarded_completion's own retry loop (shared/services/
+model_call_wrapper.py -- 3 attempts, 2s/4s backoff, deliberately NOT a
+tenacity wrapper per its own docstring, specifically so retries stay
+logged/controlled/cost-checked) was firing at the same time as a SECOND,
+completely uncoordinated retry layer: ChatLiteLLM's own built-in
+tenacity-based retry-on-RateLimitError, enabled because _build_llm passed
+max_retries=2 straight into its constructor across all three agents that
+share this pattern (Development, Design/Architecture, Requirements). A
+single guarded_completion call could therefore fire up to 3x3=9 real
+requests at Azure instead of the intended 3 -- piling more load onto an
+endpoint that was already telling every caller to back off, plausibly
+extending how long the rate limit stayed hot rather than helping recovery.
+FIX: max_retries=0 on ChatLiteLLM's constructor in all three agents --
+guarded_completion is now genuinely the only retry mechanism, matching
+what its own docstring already claimed it was. Regression test added for
+Development's _build_llm (the other two share the identical pattern with
+no prior dedicated unit coverage to extend). 53/53 tests pass across the
+affected Development-agent suites.
+ANSWER TO THE USER'S QUESTION: both, but in different senses -- the rate
+limit itself is a real, external, provider-side fact (not something this
+code controls), but this code was making the SYMPTOM worse by retrying
+harder than intended during the exact condition where backing off matters
+most. The fix doesn't raise or bypass Azure's quota (not something a code
+change can do) -- it stops this codebase from accidentally amplifying
+load against it.
+STILL OPEN: whether this specific gpt-5-mini/swedencentral deployment's
+quota is adequate for normal usage going forward, independent of today's
+unusually concentrated testing traffic, is not something a code fix can
+answer -- worth the user checking the deployment's actual RPM/TPM tier in
+the Azure portal if RateLimitError recurs under normal (non-testing)
+usage after today.
+
+ISSUE 15 (FIXED, commit 253cf79): the "why is the agent so dull" feedback
+from Issue 13's writeup. Asked the user directly what "less dull" should
+look like rather than guessing at a rewrite; answer: "it used to have
+emojis, links etc."
+Root cause, confirmed by reading the full prompt (dev_agent_prompt.py,
+~530 lines): it is a purely procedural instruction set -- extensive rules
+for WHAT to do and WHEN to stop (accuracy rules, phase-by-phase workflow,
+HITL confirmation gates), but not one line anywhere about HOW responses
+should read. The chat UI has rendered full rich markdown (bold, lists,
+links, syntax-highlighted code, emoji) since the diff-card overhaul
+(Issue 8 Part 1) -- the model was simply never told it could use any of
+that. The two confirmation questions visible in the user's own screenshot
+trace to the Phase 2 plan-approval ⛔ STOP gate -- a deliberate, reviewed
+HITL behavior, not a bug, and NOT touched by this fix.
+FIX: added a new, purely additive COMMUNICATION STYLE section right after
+the identity line, so it colors tone before all the procedural detail
+that follows. Covers: use markdown richly (bold/bullets/inline code),
+sparing/functional emoji as status markers (not decoration), always
+format URLs as markdown links instead of bare text, scale ceremony to the
+size of the change (a one-line CSS swap doesn't need a numbered plan with
+a "Questions:" section), skip throat-clearing preambles ("I will now
+proceed to..."), and phrase required confirmations as one direct friendly
+question instead of a formal bulleted report. Every existing ⛔ STOP gate
+and procedural rule is untouched -- this section only changes how the
+surrounding prose reads, not what the agent is required to do or when it
+must wait for the user.
+VERIFIED LIVE, not just asserted: restarted the backend, sent a real "hi"
+through a real WS connection to the real configured model (same
+azure/gpt-5-mini deployment as Issues 13-14), and confirmed the response
+now contains a real emoji (a magnifying-glass "investigating" marker) and markdown bold
+-- a visibly warmer, more concise greeting than the prior bland "take
+right away:" bullet dump from earlier transcripts. 53/53 tests in the
+Development-agent suite still pass (nothing asserts on the prompt's exact
+content).
+NOT ADDRESSED (separate, not requested): the credential "Save credential"
+button bug and the Issue-10 test-database root fix are both still open,
+listed further up this section.
