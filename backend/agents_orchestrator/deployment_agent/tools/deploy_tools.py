@@ -86,6 +86,9 @@ async def inspect_repo() -> str:
         "dockerfile": [], "k8s_manifests": [], "helm": [], "argocd": [],
         "azure_pipelines": [], "github_actions": [], "csproj": [], "package_json": [],
         "requirements_txt": [], "go_mod": [], "migrations": [],
+        # Java and Jenkins were not detected at all, so a Maven or Gradle repo
+        # reported an unknown stack and a Jenkins repo looked like it had no CI.
+        "pom_xml": [], "build_gradle": [], "jenkinsfile": [], "docker_compose": [],
     }
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -108,6 +111,15 @@ async def inspect_repo() -> str:
                 markers["requirements_txt"].append(rel)
             elif l == "go.mod":
                 markers["go_mod"].append(rel)
+            elif l == "pom.xml":
+                markers["pom_xml"].append(rel)
+            elif l in ("build.gradle", "build.gradle.kts"):
+                markers["build_gradle"].append(rel)
+            elif l == "jenkinsfile" or l.startswith("jenkinsfile."):
+                markers["jenkinsfile"].append(rel)
+            elif l in ("docker-compose.yml", "docker-compose.yaml", "compose.yml",
+                       "compose.yaml"):
+                markers["docker_compose"].append(rel)
             elif l in ("chart.yaml", "values.yaml"):
                 markers["helm"].append(rel)
             elif "azure-pipelines" in l and l.endswith((".yml", ".yaml")):
@@ -286,4 +298,43 @@ async def submit_release(release_json: str) -> str:
         f"Release assessment submitted: readiness={artifact.readiness}, risk={artifact.risk_score}, "
         f"decision={artifact.release_decision}. {len(s.staged_files)} deployment files staged — "
         f"the user can now review and open the deployment PR."
+    )
+
+
+@tool
+async def plan_deploy_package(also: str = "") -> str:
+    """Decide WHICH files this repo's deployment package needs. Call after inspect_repo
+    and before staging anything.
+
+    `also` is a comma-separated list of extras the USER explicitly asked for:
+    "helm", "compose", "jenkins". Do not pass extras nobody requested — a Helm chart
+    imposed on a repo that manages manifests directly is a migration nobody agreed to.
+
+    Returns `files` (each with create-or-refresh and why), `not_applicable` (deliberately
+    excluded, with the reason), and `undecided` — things that CANNOT be chosen from the
+    repo alone, such as a base image for an unrecognised stack or which CI file to write
+    when no deploy connector is bound.
+
+    RELAY `undecided` AND ASK. Do not fill those gaps in yourself: a Dockerfile built on
+    a guessed runtime and a pipeline written for the wrong CI system both look like work
+    and are worse than nothing.
+    """
+    from agents_orchestrator.deployment_agent.packaging import plan_package
+
+    s = get_session(get_session_id())
+    root = _work_dir()
+    if root is None or not root.exists():
+        return "ERROR: no workspace prepared. Ask the user to select a branch/PR first."
+
+    raw = json.loads(await inspect_repo.ainvoke({}))
+    if not isinstance(raw, dict) or "markers" not in raw:
+        return "ERROR: could not inspect the repo."
+
+    extras = [x.strip().lower() for x in (also or "").split(",") if x.strip()]
+    return json.dumps(
+        plan_package(
+            raw["markers"], s.deploy_via or "", environment=s.environment or "",
+            also=extras,
+        ),
+        indent=2, default=str,
     )
