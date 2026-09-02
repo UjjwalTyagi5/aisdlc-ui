@@ -546,6 +546,23 @@ async def list_all_work_items(
         return rows
 
 
+def _first_number(*values: Any) -> Optional[float]:
+    """The first value that is actually a number, or None.
+
+    None is NOT interchangeable with 0 here: an unestimated item and a zero-point item
+    are different facts, and averaging the second into a velocity is how a plan quietly
+    lies about how much the team gets through.
+    """
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def normalize_work_item(
     *,
     work_item: Dict[str, Any],
@@ -597,6 +614,26 @@ def normalize_work_item(
             for relation in relations
         ],
         "work_item_url": build_work_item_url(org_url, project, work_item_id),
+        # ── planning fields ──────────────────────────────────────────────────
+        # ADO returns these on every work item and they were dropped on the floor.
+        # A scheduler needs size and dates before it needs anything else.
+        # `Effort` is what Epics/Features carry; `StoryPoints` is what Stories carry —
+        # taking whichever is present avoids a plan that silently estimates half the
+        # backlog at nothing.
+        "estimate": _first_number(
+            fields.get("Microsoft.VSTS.Scheduling.StoryPoints"),
+            fields.get("Microsoft.VSTS.Scheduling.Effort"),
+            fields.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
+        ),
+        "remaining_work": _first_number(fields.get("Microsoft.VSTS.Scheduling.RemainingWork")),
+        "completed_work": _first_number(fields.get("Microsoft.VSTS.Scheduling.CompletedWork")),
+        "start_date": str(fields.get("Microsoft.VSTS.Scheduling.StartDate") or ""),
+        "due_date": str(
+            fields.get("Microsoft.VSTS.Scheduling.TargetDate")
+            or fields.get("Microsoft.VSTS.Scheduling.FinishDate")
+            or ""
+        ),
+        "priority": _first_number(fields.get("Microsoft.VSTS.Common.Priority")),
     }
 
     return normalized

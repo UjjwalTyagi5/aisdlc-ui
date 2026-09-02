@@ -1491,8 +1491,12 @@ async def export_document(content: str = "", filename: str = "requirements_docum
 
     try:
         await render_document(content, full_path, title=name.rsplit(".", 1)[0])
-    except ValueError as exc:
-        return f"Error: {exc}"
+    except ValueError:
+        # render_document refuses an extension it has no renderer for. Its message is
+        # ours, not a connector's, but the sweep in test_board_write_failures cannot
+        # tell those apart from source text — and the filename already names the
+        # offending extension, so interpolating the exception adds nothing.
+        return f"Error: '{name}' has an unsupported extension. Supported: {supported_list()}"
     except Exception as exc:  # noqa: BLE001
         return f"Error generating '{name}' ({type(exc).__name__}). Supported: {supported_list()}"
 

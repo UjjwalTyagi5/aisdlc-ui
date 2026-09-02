@@ -51,6 +51,68 @@ def _normalize_base_url(url: str) -> str:
     return u
 
 
+def _jira_planning(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the planning values out of a Jira issue's fields.
+
+    JIRA HAS NO FIXED FIELD ID FOR STORY POINTS. It is a custom field whose id differs
+    per site — customfield_10016 on most Jira Cloud sites, 10026 and 10002 on others —
+    so there is no single key to read and no way to know which one this site uses
+    without asking. Scanning the known ids in order is the pragmatic answer; a site
+    using something else simply yields no estimate, which is honest, rather than a
+    wrong number.
+
+    `timeoriginalestimate` and friends are in SECONDS. Converting to hours here keeps
+    one unit in the canonical item instead of leaving every caller to remember.
+
+    The sprint field is an array of sprint objects (or, on older sites, of strings with
+    the name embedded); the LAST entry is the current one, because Jira appends on each
+    move and keeps the history.
+    """
+    def _num(*keys: str) -> Optional[float]:
+        for key in keys:
+            value = fields.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    estimate = _num(
+        "customfield_10016", "customfield_10026", "customfield_10002", "story_points"
+    )
+    seconds = _num("timeoriginalestimate")
+    if estimate is None and seconds is not None:
+        estimate = round(seconds / 3600.0, 2)
+
+    remaining = _num("timeestimate")
+    spent = _num("timespent")
+
+    iteration = ""
+    sprints = fields.get("customfield_10020") or fields.get("sprint") or []
+    if isinstance(sprints, list) and sprints:
+        last = sprints[-1]
+        if isinstance(last, dict):
+            iteration = str(last.get("name") or "")
+        elif isinstance(last, str):
+            # Older Jira returns "...,name=Sprint 3,startDate=..." rather than an object.
+            for part in last.split(","):
+                if part.strip().startswith("name="):
+                    iteration = part.split("=", 1)[1]
+                    break
+
+    return {
+        "estimate": estimate,
+        "iteration": iteration,
+        "start_date": str(fields.get("customfield_10015") or ""),
+        "due_date": str(fields.get("duedate") or ""),
+        "remaining_work": round(remaining / 3600.0, 2) if remaining is not None else None,
+        "completed_work": round(spent / 3600.0, 2) if spent is not None else None,
+    }
+
+
+
 class JiraConnector(BaseConnector):
     """Full JiraConnector backed by Jira Cloud REST API v3 over httpx."""
 
@@ -508,6 +570,7 @@ class JiraConnector(BaseConnector):
             project=project,
             raw=row,
             priority=priority,
+            **_jira_planning(fields),
         )
 
     # ── Preserved helpers (test_board_provider_contracts.py compatibility) ──
