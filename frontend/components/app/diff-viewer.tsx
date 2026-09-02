@@ -139,6 +139,12 @@ export function DiffViewer({
             renderOverviewRuler: false,
             // Accessibility: screen readers read the *modified* content by default
             accessibilitySupport: "auto",
+            // Defense in depth: makes Monaco observe its container's size (via
+            // ResizeObserver) instead of only measuring once at mount. Safe,
+            // zero-behavior-change for existing always-visible callers; protects
+            // any future caller that mounts this inside a container whose size
+            // isn't stable at mount time (e.g. revealed from display:none).
+            automaticLayout: true,
           }}
         />
       </div>

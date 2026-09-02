@@ -7,10 +7,8 @@ import {
   ArrowRight,
   ArrowUpRight,
   BookText,
-  Check,
   ClipboardList,
   Code2,
-  Compass,
   Database,
   DraftingCompass,
   FileSearch,
@@ -38,7 +36,6 @@ const NAV_LINKS = [
   { label: "Capabilities", href: "#capabilities" },
   { label: "Agents", href: "#agents" },
   { label: "Tracks", href: "#tracks" },
-  { label: "Enterprise", href: "#enterprise" },
 ];
 
 const HIGHLIGHTS: { icon: LucideIcon; title: string; text: string }[] = [
@@ -49,8 +46,8 @@ const HIGHLIGHTS: { icon: LucideIcon; title: string; text: string }[] = [
   },
   {
     icon: KeyRound,
-    title: "Multi-tenant RBAC & SSO",
-    text: "Tenant isolation enforced at the database with row-level security. Default and custom roles, OIDC single sign-on.",
+    title: "Multi-tenant RBAC",
+    text: "Tenant isolation enforced at the database with row-level security. Default and custom roles, scoped to org, business unit, or project.",
   },
   {
     icon: ScrollText,
@@ -113,36 +110,6 @@ const AGENTS: { icon: LucideIcon; phase: string; title: string; text: string }[]
     title: "Documentation Agent",
     text: "Compiles every upstream artifact into consistent docs — BRD, API reference, runbooks, changelog, and a run summary.",
   },
-  {
-    icon: Compass,
-    phase: "Track 3 · 4",
-    title: "Discovery & Assessment Agent",
-    text: "Builds the as-is inventory and assessment that every later agent plans against — for modernization and RPA/infra migrations.",
-  },
-  {
-    icon: Map,
-    phase: "Track 3",
-    title: "Strategy Agent",
-    text: "Turns the assessment into a risk-sequenced execution plan with per-module equivalence criteria, for code modernization.",
-  },
-  {
-    icon: GitCompareArrows,
-    phase: "Track 4",
-    title: "Migration Mapping Agent",
-    text: "Maps each legacy bot or workload to its target platform item-by-item, escalating ambiguous mappings for sign-off.",
-  },
-  {
-    icon: FlaskConical,
-    phase: "Track 4",
-    title: "Validation Agent",
-    text: "Runs parallel-parity validation between old and new systems and accepts the result as cutover-ready.",
-  },
-  {
-    icon: Database,
-    phase: "Track 5",
-    title: "Data Engineering Agent",
-    text: "Builds and registers the data pipeline — ingestion, transform, and schema migrations — for data engineering projects.",
-  },
 ];
 
 const TRACK_ICONS: Record<string, LucideIcon> = {
@@ -152,15 +119,6 @@ const TRACK_ICONS: Record<string, LucideIcon> = {
   rpa_infra: GitCompareArrows,
   data_engineering: Database,
 };
-
-const CAPABILITIES = [
-  "Durable orchestration — runs survive restarts and resume exactly where they paused.",
-  "Tenant data isolated at the database with Postgres row-level security.",
-  "Every agent call logged: tokens, cost, latency, and an automated quality score.",
-  "Compose custom roles from individual permissions — no code change required.",
-  "Single sign-on via OIDC, with SCIM-ready user provisioning.",
-  "Bring your own LLM key; the platform runs inside your cloud.",
-];
 
 export function Landing({ authed, consoleHref }: { authed: boolean; consoleHref: string }) {
   const [loginOpen, setLoginOpen] = React.useState(false);
@@ -322,14 +280,13 @@ export function Landing({ authed, consoleHref }: { authed: boolean; consoleHref:
           <SectionEyebrow label="The pipeline" />
           <Reveal>
             <h2 className="font-display mt-3 max-w-2xl text-3xl font-bold tracking-tight sm:text-4xl">
-              Thirteen agents, one control plane.
+              Eight agents, one control plane.
             </h2>
           </Reveal>
           <Reveal delay={0.05}>
             <p className="text-muted-foreground mt-3 max-w-2xl text-sm">
               Eight agents run the core hand-off from Requirements to Documentation — with a human in
-              the loop at every gate. Five more specialize for modernization, RPA/infra migration, and
-              data engineering, picked up automatically by the delivery track you choose.
+              the loop at every gate.
             </p>
           </Reveal>
           <div className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -387,43 +344,6 @@ export function Landing({ authed, consoleHref }: { authed: boolean; consoleHref:
                 </Reveal>
               );
             })}
-          </div>
-        </section>
-
-        {/* Enterprise capabilities band */}
-        <section id="enterprise" className="mx-auto w-full px-6 py-20 md:px-10 lg:px-16">
-          <div className="border-line-soft from-panel-elevated/70 to-background overflow-hidden rounded-3xl border bg-gradient-to-br p-8 sm:p-12">
-            <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr]">
-              <div>
-                <SectionEyebrow label="Enterprise-ready" />
-                <Reveal>
-                  <h2 className="font-display mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
-                    Designed for regulated, high-scale delivery.
-                  </h2>
-                </Reveal>
-                <Reveal delay={0.05}>
-                  <p className="text-muted-foreground mt-3 text-sm">
-                    Governance, isolation, and observability are first-class — so platform teams can
-                    pilot fast and scale with confidence.
-                  </p>
-                </Reveal>
-                <Reveal delay={0.1}>
-                  <div className="mt-6">{primaryCta()}</div>
-                </Reveal>
-              </div>
-              <ul className="grid gap-3">
-                {CAPABILITIES.map((c, i) => (
-                  <Reveal key={c} delay={i * 0.06}>
-                    <li className="flex items-start gap-3">
-                      <span className="bg-brand-bright/15 text-brand-bright mt-0.5 grid size-6 shrink-0 place-items-center rounded-full">
-                        <Check className="size-3.5" aria-hidden />
-                      </span>
-                      <span className="text-sm">{c}</span>
-                    </li>
-                  </Reveal>
-                ))}
-              </ul>
-            </div>
           </div>
         </section>
 

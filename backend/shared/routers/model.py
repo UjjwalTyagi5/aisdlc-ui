@@ -2,6 +2,8 @@
 the run-creator options endpoint is run:create-gated. Keys are never returned."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
@@ -16,6 +18,9 @@ from shared.db import get_db_session
 from shared.services import model_config as mc
 from shared.services import model_grants as mg
 from shared.services.model_catalog import list_providers as catalog_providers
+from shared.services.secret_store import SecretWriteError
+
+logger = logging.getLogger(__name__)
 
 model_router = APIRouter(
     prefix="/model", dependencies=[Depends(require_permission("model:manage"))]
@@ -205,12 +210,26 @@ class ProbeProviderIn(BaseModel):
 
 
 class UpdateProviderIn(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # extra="forbid": the frontend was sending api_key/api_base/rpm_limit/tpm_limit/
+    # cost_limit_usd that this model did not declare. Pydantic's default extra="ignore"
+    # dropped them silently, so "rotate this key" returned 200 and changed NOTHING — an
+    # admin rotating a COMPROMISED key believed they had contained it. Forbidding extras
+    # turns any future frontend/backend drift into a 422 instead of a silent no-op.
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     display_name: str | None = Field(default=None, max_length=255)
     enabled_models: list[str] | None = None
     max_cost_per_call_usd: float | None = Field(default=None, ge=0, alias="maxCostPerCallUsd")
     clear_max_cost_per_call_usd: bool = Field(default=False, alias="clearMaxCostPerCallUsd")
+    # Three-state, matching the frontend contract in frontend/lib/api/models.ts:
+    #   absent/None -> leave the stored secret alone
+    #   ""          -> clear the stored secret (provider keeps existing, keyless)
+    #   value       -> rotate: overwrite under the SAME secret_ref
+    api_key: str | None = Field(default=None, max_length=512)
+    api_base: str | None = Field(default=None, max_length=512)
+    rpm_limit: int | None = Field(default=None, ge=0, alias="rpmLimit")
+    tpm_limit: int | None = Field(default=None, ge=0, alias="tpmLimit")
+    cost_limit_usd: float | None = Field(default=None, ge=0, alias="costLimitUsd")
 
 
 class SetDefaultIn(BaseModel):
@@ -338,6 +357,17 @@ async def create_provider_route(
         raise HTTPException(status_code=409, detail=str(exc))
     except mc.InvalidModelError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except SecretWriteError:
+        # The vault write failed, so no provider row was created. Say so plainly rather
+        # than reporting success on a connection that can never authenticate. The detail
+        # is deliberately operator-facing but carries no ref or vault name.
+        logger.error("provider create aborted: secret store write failed tenant=%s provider=%s",
+                     _tenant_id(request), body.provider)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not securely store the API key. The credential store is "
+                   "unavailable — no provider was created. Contact your administrator.",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -417,6 +447,21 @@ async def update_provider_route(request: Request, provider_id: str, body: Update
         _cost_kwargs["max_cost_per_call_usd"] = None
     elif body.max_cost_per_call_usd is not None:
         _cost_kwargs["max_cost_per_call_usd"] = body.max_cost_per_call_usd
+    # "field was not sent" and "field was sent as empty to clear it" are different
+    # instructions for the secret. Only forward api_key when the caller actually sent it.
+    if "api_key" in body.model_fields_set:
+        _cost_kwargs["api_key"] = body.api_key
+    if "api_base" in body.model_fields_set:
+        _cost_kwargs["api_base"] = body.api_base
+    # Per-model caps live on model_offerings, so they travel separately from the
+    # provider-row fields. Same sent/not-sent discipline as above.
+    _limits = {
+        name: getattr(body, name)
+        for name in ("rpm_limit", "tpm_limit", "cost_limit_usd")
+        if name in body.model_fields_set
+    }
+    if _limits:
+        _cost_kwargs["offering_limits"] = _limits
     try:
         d = await mc.update_provider(
             _tenant_id(request), provider_id,
@@ -429,6 +474,14 @@ async def update_provider_route(request: Request, provider_id: str, body: Update
         raise HTTPException(status_code=409, detail=str(exc))
     except mc.InvalidModelError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except SecretWriteError:
+        logger.error("provider key rotation aborted: secret store write failed tenant=%s id=%s",
+                     _tenant_id(request), provider_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not securely store the new API key. The credential store is "
+                   "unavailable — the previous key is unchanged.",
+        )
     return _to_provider_out(d)
 
 

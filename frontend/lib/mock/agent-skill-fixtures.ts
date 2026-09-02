@@ -78,6 +78,7 @@ function toListItem(record: SkillRecord): SkillListItem {
     deletable: true,
     version: record.activeVersion,
     active_version: record.activeVersion,
+    origin_scope: record.scope,
   };
 }
 

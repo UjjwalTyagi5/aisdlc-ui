@@ -10,8 +10,9 @@ SECURITY CONSTRAINTS:
 - message content is validated before sending (REQ-M6-15, T-m6-05-ID):
   * Over-length messages (> MAX_MESSAGE_LENGTH) raise ValueError.
   * Messages matching known secret patterns (API keys, tokens, passwords) raise ValueError.
-- Credentials (bot token) are loaded via load_secret() Key Vault-first, SLACK_BOT_TOKEN
-  env fallback.  The token is never stored on self as a persistent attribute (REQ-M6-14).
+- Credentials (bot token) resolve from the tenant secret store, then Key Vault
+  "{tenant}-slack-bot-token". Both rungs are tenant-scoped: no global or env
+  rung exists, so an unconnected tenant fails as "not connected".
 
 BOUNDARY RULE:
 slack_sdk is imported ONLY inside this connector file (and webhooks/verifiers/slack.py
@@ -38,7 +39,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import SLACK_BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -86,21 +86,20 @@ def _validate_message(message: str) -> None:
 class SlackConnector(BaseConnector):
     """Write-only Slack notification connector backed by slack_sdk AsyncWebClient.
 
-    Bot token is loaded ephemerally via auth_adapter() — KV-first, env fallback.
-    The token passed to the constructor (bot_token kwarg) is treated as a local-dev
-    override; in production the Key Vault value takes precedence.
+    Bot token is loaded ephemerally via auth_adapter() — tenant-scoped rungs only.
+    The bot token is resolved per-tenant inside auth_adapter() and never stored on
+    the instance. There is no constructor token, no global vault name and no env var:
+    a tenant that has not connected Slack has no token and fails as "not connected".
 
     Per-tenant rate-limit state is class-level to isolate tenants (REQ-M6-12).
     """
 
     _tenant_states: Dict[str, _TenantRateLimitState] = {}
 
-    def __init__(self, bot_token: str = "", org_url: str = "", tenant_id: str = "") -> None:
-        """Constructor stores only non-secret config hints.
+    def __init__(self, org_url: str = "", tenant_id: str = "") -> None:
+        """Constructor stores only non-secret run context — never a credential.
 
         Args:
-            bot_token: Optional dev-time token hint.  Key Vault takes precedence in
-                       auth_adapter().  Do NOT pass production tokens as constructor args.
             org_url:   Accepted and ignored — Slack has no org-URL concept.  Present so
                        the connector factory can construct every kind uniformly
                        (connector_factory.get_connector_for_session passes org_url= to
@@ -108,11 +107,15 @@ class SlackConnector(BaseConnector):
             tenant_id: Run context, NOT a credential.  The factory sets it so
                        auth_adapter()/health_check() can resolve the tenant-scoped bot
                        token without every call site threading it through (REQ-M7-01).
+
+        There was a `bot_token` kwarg here, documented as a local-dev hint that Key
+        Vault would override. Nothing in the application ever passed it — only tests
+        did — while it kept a credential alive on the instance for the lifetime of the
+        connector, which is the one thing REQ-M6-14 forbids. It is gone rather than
+        gated, for the same reason the env-var and global-vault rungs are.
         """
         # Slack has no org URL concept; workspace is determined by the bot token.
         self._org_url = ""
-        # Store hint under a neutral name — it is a fallback only.
-        self._bot_token_hint = bot_token
         self._tenant_id = tenant_id
 
     # ── Identity ──────────────────────────────────────────────────────────
@@ -128,14 +131,17 @@ class SlackConnector(BaseConnector):
     # ── Auth (ephemeral) ──────────────────────────────────────────────────
 
     async def auth_adapter(self, tenant_id: str = "") -> dict[str, Any]:
-        """Resolve bot token ephemerally: Key Vault first, env var, then constructor hint.
+        """Resolve the bot token ephemerally, tenant-scoped at every rung.
 
         tenant_id is required — raises ValueError when absent (REQ-M7-01, SC-02).
         An explicit argument wins; otherwise the instance tenant_id set by the factory
         is used, so health_check() and the convenience methods resolve per-tenant
         without threading it through every call site (mirrors AzureDevOpsConnector).
-        Credentials are resolved tenant-scoped first, then fall back to the global
-        KV name, then to env var / constructor hint (local development only).
+
+        Two rungs, both tenant-scoped: the project-scoped credential override, then
+        this tenant's `slack-bot-token` secret. No global-vault name, no env var and
+        no constructor hint — a tenant with no token of its own gets None here and
+        fails as "not connected" rather than borrowing the platform's workspace.
         Return value is never stored on self and must not be logged/persisted (REQ-M6-14).
         """
         tenant_id = tenant_id or self._tenant_id
@@ -158,12 +164,6 @@ class SlackConnector(BaseConnector):
             return {"bot_token": override.token}
 
         bot_token = await _keyvault.load_secret("slack-bot-token", tenant_id=tenant_id)
-        if not bot_token:
-            bot_token = await _keyvault.load_secret("slack-bot-token")
-        if not bot_token:
-            bot_token = SLACK_BOT_TOKEN
-        if not bot_token:
-            bot_token = self._bot_token_hint
         return {"bot_token": bot_token}
 
     # ── Capability declaration ────────────────────────────────────────────

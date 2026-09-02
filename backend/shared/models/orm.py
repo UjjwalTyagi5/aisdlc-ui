@@ -138,6 +138,11 @@ class Run(Base):
     # Orchestrator state â€” tracks which SDLC stage is active and whether a human gate is pending
     current_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gate_pending: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
+    # Who started this run. The left-hand side of the no-self-approval rule (0038):
+    # whoever ran the agent may not be the one who accepts its output. NULL means
+    # "unknown initiator" (webhook runs, and every run predating 0038) and is treated
+    # as not-proven-self rather than as a denial.
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -650,6 +655,58 @@ class AgentSkill(Base):
         UniqueConstraint("tenant_id", "agent_id", "scope", "scope_id", "skill_key", "version",
                          name="uq_agent_skill_version"),
     )
+
+
+class AgentDefaultEvaluation(Base):
+    """Durable PASS/FAIL record for one evaluation run against one specific
+    AgentProfile or AgentSkill draft VERSION (Phase 4 skills platform,
+    sub-project 4). Append-only — an evaluation is never edited, only superseded
+    by a fresh run (e.g. after the draft is edited into a new version, which gets
+    its own row here). Tenant-scoped under FORCE RLS, mirroring AgentSkill.
+    """
+    __tablename__ = "agent_default_evaluations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # 'profile' -> AgentProfile.id, 'skill' -> AgentSkill.id — mirrors effects.py's
+    # existing target_ref dual-resolution convention rather than a new one.
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)  # org | workspace | project
+    result: Mapped[str] = mapped_column(String(8), nullable=False)  # pass | fail
+    # Numeric(5,4), not Float — same "0.0000-1.0000 quality score, Float would
+    # drift" reasoning already documented on EvalRecord.score in this same file.
+    score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
+    signals: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    evaluator_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    evaluator_role: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ImportSourceAllowlist(Base):
+    """Org-Admin-governed allowlist of approved external import sources
+    (Agent Studio sub-project 5). A declared import source matches a pattern
+    via `agent_skills.py`'s `_matches_import_source` — a BOUNDARY-AWARE prefix
+    match (exact equality, or a prefix match landing on a real `/` boundary),
+    never a bare `str.startswith()` (that was a real subdomain-confusion
+    bypass, found and fixed during review — a no-trailing-slash pattern like
+    `https://trusted.example.com` would otherwise also match
+    `https://trusted.example.com.evil.com/...`) and never a regex (an
+    admin-typed pattern must never become a regex-injection surface). Mirrors
+    OrgModelGrant's "the Org Admin governs the catalogue" doctrine: a BU Admin
+    cannot self-approve their own import source, the same way they cannot
+    self-grant a model. Tenant-scoped under FORCE RLS, mirroring
+    AgentDefaultEvaluation.
+    """
+    __tablename__ = "import_source_allowlist"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    source_pattern: Mapped[str] = mapped_column(String(500), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AgentSkillToggle(Base):

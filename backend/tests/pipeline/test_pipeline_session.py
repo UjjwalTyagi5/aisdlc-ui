@@ -23,10 +23,14 @@ from workflows.activities.pipeline_session import PipelineSession, pipeline_sess
 @pytest.fixture
 def no_db(monkeypatch):
     """Isolate the Bridge from Postgres: stub the upstream read and the mirror write."""
-    async def _fake_read(run_id):
-        return {"requirements_payload": {"stories": []}}
-
     captured = {}
+
+    # `tenant_id` is now part of the signature and is load-bearing: `runs` is FORCE
+    # RLS, so an unscoped read returns zero rows and the mirror silently carries
+    # nothing across. Captured so a test can assert it was actually threaded.
+    async def _fake_read(run_id, tenant_id=None):
+        captured["read_tenant_id"] = tenant_id
+        return {"requirements_payload": {"stories": []}}
 
     async def _fake_upsert(session_id, **kwargs):
         captured["session_id"] = session_id
@@ -62,7 +66,7 @@ async def test_clears_session_on_error(no_db):
 @pytest.mark.asyncio
 async def test_mirror_passes_only_present_upstream(no_db, monkeypatch):
     """Only non-None upstream fields are mirrored; agent_type/current_stage carry agent_id."""
-    async def _fake_read(run_id):
+    async def _fake_read(run_id, tenant_id=None):
         return {"requirements_payload": {"stories": [1]}, "design_artifacts": None}
 
     monkeypatch.setattr(ps_mod, "_read_run_upstream", _fake_read)
@@ -80,7 +84,7 @@ async def test_mirror_passes_only_present_upstream(no_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_degrades_when_upstream_read_fails(monkeypatch):
     """needs_repo=False must work with zero usable DB: read returns {}, no crash."""
-    async def _empty_read(run_id):
+    async def _empty_read(run_id, tenant_id=None):
         return {}
 
     async def _noop_upsert(session_id, **kwargs):
@@ -155,3 +159,14 @@ async def test_binds_session_and_clears_live(db, seed_run):  # pragma: no cover
         assert get_session_id() == str(run_id)
         assert ps._upstream["requirements_payload"] == {"stories": []}
     assert get_session_id() is None
+
+
+@pytest.mark.asyncio
+async def test_the_upstream_read_is_given_the_tenant(no_db):
+    """`runs` is FORCE RLS: a read with no `app.tenant_id` GUC returns zero rows rather
+    than an error, so an unscoped read here made the Design agent receive no
+    requirements at all, silently. The tenant has to reach the read."""
+    inp = SimpleNamespace(run_id="abc-123", tenant_id="tenant-9", project_id="p1")
+    async with pipeline_session(inp, "design"):
+        pass
+    assert no_db["read_tenant_id"] == "tenant-9"

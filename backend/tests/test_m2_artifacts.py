@@ -105,8 +105,12 @@ def test_write_artifact_tools_exist():
         os.path.join(base, "agents_orchestrator", "development_agent", "agents", "dev_agent.py"),
         encoding="utf-8",
     ).read()
-    assert "write_development_artifact" in dev_agent, (
-        "write_development_artifact tool not found in dev_agent.py"
+    # write_development_artifact was removed 2026-08-31: it was dead code the
+    # LLM could still call (required a run_id it had no reliable way to supply,
+    # guaranteeing a UUID-cast failure) fully superseded by
+    # submit_development_artifacts, which sources everything from session state.
+    assert "submit_development_artifacts" in dev_agent, (
+        "submit_development_artifacts tool not found in dev_agent.py"
     )
 
 

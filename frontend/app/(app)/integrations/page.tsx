@@ -2,10 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Info,
   Loader2,
   Search,
   Unplug,
@@ -24,8 +24,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { listIntegrationAccess } from "@/lib/api/integration-access";
 import { AddMcpServerDialog } from "@/components/app/add-mcp-server-dialog";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -215,7 +217,6 @@ function chipLabel(kind: ConnectorKind): string {
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
   const session = useRawSession();
-  const searchParams = useSearchParams();
   const role = effectivePlatformRole(session);
 
   // The units this viewer is bound to. No id is passed to either query: the
@@ -267,20 +268,11 @@ export default function IntegrationsPage() {
     return m;
   }, [accessQ.data]);
 
-  // On mount: read ?connected={kind} param set by OAuthCallbackHandler and fire
-  // a success toast (Connect Flow step 5 — UI-SPEC Copywriting Contract).
-  React.useEffect(() => {
-    const connectedKind = searchParams.get("connected");
-    if (connectedKind) {
-      const label = KIND_LABEL[connectedKind as ConnectorKind] ?? connectedKind;
-      toast.success(`${label} connected`);
-    }
-    // searchParams reference is stable per Next.js App Router — run once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // REMOVED: the on-mount ?connected={kind} success toast. Its only producer was
+  // OAuthCallbackHandler, the page the OAuth provider redirected back to, and that
+  // page is gone along with the flow. Pasting a credential reports its own result
+  // inline, so nothing arrives here needing to be announced after a redirect.
 
-  // install / disconnect mutations — Wave C: replace setTimeout stub with real
-  // OAuth redirect handling (UI-SPEC Connect Flow steps 1-2).
   const disconnectMutation = useMutation({
     mutationFn: (kind: ConnectorKind) => disconnectConnector(kind),
     onSuccess: (c) => {
@@ -508,6 +500,14 @@ export default function IntegrationsPage() {
                   type: "connector_access",
                   title: `${KIND_LABEL[c.kind]} access`,
                   description: `Requesting ${KIND_LABEL[c.kind]} for our work. It isn't granted to us today.`,
+                  targetId: c.kind,
+                  // No level picker here yet, and NOT hardcoded to "read" — Slack
+                  // and MS Teams are write-only, so a flat "read" default made
+                  // their requests un-approvable (the manifest check in
+                  // _apply_connector_access refuses a level the connector can't
+                  // honour). Omitted deliberately: the backend fills in the
+                  // connector's own real default via default_access_for(kind) at
+                  // raise time, in shared/services/governance_requests.py.
                 }}
               />
             ))}
@@ -545,6 +545,10 @@ export default function IntegrationsPage() {
                 title: "New MCP server",
                 description:
                   "Which server, where it runs, and what our agents would call it for:",
+                // Deliberately no targetId: there is no server in view yet to
+                // name one — this is "stand one up", not a pick from a list.
+                // The effect that applies this request must handle a
+                // no-target mcp_server request gracefully.
               }}
             />
           )}
@@ -566,6 +570,23 @@ export default function IntegrationsPage() {
                 glyph={<GenericGlyph mark={r.name.slice(0, 2).toUpperCase()} />}
                 access={accessByKind.get(`mcp:${r.id}`)}
                 showUnitCount={isOrgAdmin}
+                // Same test the connector tiles use, asked of the row's own
+                // grant count rather than a catalogue of kinds — an MCP server
+                // has no kind to look up. Without this every tile rendered as
+                // granted, so a Business Unit Admin saw servers their unit was
+                // never given as though they held them.
+                //
+                // `grantedUnitCount` is already scoped server-side to the units
+                // this viewer can see, so "0" means "not to any unit of mine".
+                // An Org Admin governs the whole estate and holds everything.
+                granted={isOrgAdmin || r.grantedUnitCount > 0}
+                requestPrefill={{
+                  type: "mcp_server",
+                  title: `${r.name} access`,
+                  description: `Requesting the ${r.name} MCP server for our work. It isn't granted to us today.`,
+                  targetId: r.id,
+                }}
+                tools={r.tools}
               />
             ))}
           </ul>
@@ -640,6 +661,7 @@ function IntegrationCard({
   granted = true,
   requestPrefill,
   showUnitCount = false,
+  tools,
 }: {
   href: string;
   label: string;
@@ -650,6 +672,13 @@ function IntegrationCard({
   granted?: boolean;
   /** Seeds the request raised from an ungranted tile. */
   requestPrefill?: RaiseRequestPrefill;
+  /**
+   * MCP only — what the server answered with when it was last probed. Given
+   * (even empty) this renders the info button; omitted entirely, no button.
+   * That distinction is the point: `[]` means "asked, and it listed nothing
+   * yet", `undefined` means this integration has no tool list to speak of.
+   */
+  tools?: { name: string; description?: string }[];
   /**
    * Show the "N business units" clause. Only worth stating for someone who
    * oversees more than one — an Org Admin, comparing units against each
@@ -675,9 +704,14 @@ function IntegrationCard({
       >
         <div className="flex items-start justify-between gap-2">
           {glyph}
-          <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
-            {category}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground/80 bg-muted/40 rounded-full px-2 py-0.5 font-mono text-[9.5px] tracking-[0.08em] uppercase">
+              {category}
+            </span>
+            {/* Above the stretched link (z-10), or the card would swallow the
+                click and navigate instead of opening the list. */}
+            {tools && <ToolsInfoButton label={label} tools={tools} />}
+          </div>
         </div>
 
         <div className="min-w-0 flex-1">
@@ -734,6 +768,72 @@ function IntegrationCard({
             offered a step that belongs to somebody else. */}
       </Card>
     </li>
+  );
+}
+
+// ───────── Tools an MCP server offers ─────────
+
+/**
+ * What this server actually gives an agent, on the card rather than a click in.
+ *
+ * The reason to open an MCP server's page is to govern its reach; the reason to
+ * ask what tools it has is to decide whether to bother — a different question,
+ * asked while scanning, and one that shouldn't cost a navigation. So it is a
+ * popover on the tile.
+ *
+ * The list is the last PROBE's answer, not a live call: a grid of eight cards
+ * must not open eight MCP sessions to render. An empty snapshot therefore says
+ * "not probed yet", which is a different fact from "this server has no tools"
+ * and is reported as such.
+ */
+function ToolsInfoButton({
+  label,
+  tools,
+}: {
+  label: string;
+  tools: { name: string; description?: string }[];
+}) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Tools ${label} offers`}
+          className="text-muted-foreground/60 hover:text-brand-bright hover:border-brand-bright/40 border-line-soft focus-visible:ring-ring relative z-10 grid size-5 shrink-0 place-items-center rounded-full border transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <Info className="size-3" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 p-0">
+        <div className="border-line-soft border-b px-3 py-2">
+          <p className="text-[12.5px] font-semibold">{label}</p>
+          <p className="text-muted-foreground text-[11px]">
+            {tools.length === 0
+              ? "No tools recorded yet"
+              : `${tools.length} ${tools.length === 1 ? "tool" : "tools"} at last check`}
+          </p>
+        </div>
+        {tools.length === 0 ? (
+          <p className="text-muted-foreground px-3 py-2.5 text-[11.5px]">
+            Nobody has connected to this server since it was registered, so what it offers
+            isn&apos;t known yet. Testing it from its own screen records the list.
+          </p>
+        ) : (
+          <ul className="max-h-64 space-y-1.5 overflow-y-auto px-3 py-2.5">
+            {tools.map((t) => (
+              <li key={t.name}>
+                <p className="font-mono text-[11.5px] break-words">{t.name}</p>
+                {t.description && (
+                  <p className="text-muted-foreground text-[11px] break-words">{t.description}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -797,6 +897,11 @@ function CredentialsDialog({
   const isSonarQube = kind === "sonarqube";
   const isGithubActions = kind === "github_actions";
   const isFigma = kind === "figma";
+  // GitHub and Slack are pasteable now. Both used to be OAuth-only, so this dialog
+  // never had a shape for them; with the platform OAuth app gone, a tenant supplies
+  // its own GitHub App (id + private key + installation) or its own Slack bot token.
+  const isGithub = kind === "github";
+  const isSlack = kind === "slack";
   const mustChooseUnit = targetUnits.length > 1;
   const [unitId, setUnitId] = React.useState("");
   const targetUnitId = unitId || targetUnits[0]?.id || "";
@@ -811,6 +916,10 @@ function CredentialsDialog({
   const [figmaToken, setFigmaToken] = React.useState("");
   const [figmaFileUrl, setFigmaFileUrl] = React.useState("");
   const [confluenceSpaceKey, setConfluenceSpaceKey] = React.useState("");
+  const [ghAppId, setGhAppId] = React.useState("");
+  const [ghAppKey, setGhAppKey] = React.useState("");
+  const [ghInstallId, setGhInstallId] = React.useState("");
+  const [slackToken, setSlackToken] = React.useState("");
   const [pending, setPending] = React.useState(false);
 
   // Reset all fields whenever the dialog closes or switches connector.
@@ -826,6 +935,10 @@ function CredentialsDialog({
       setFigmaToken("");
       setFigmaFileUrl("");
       setConfluenceSpaceKey("");
+      setGhAppId("");
+      setGhAppKey("");
+      setGhInstallId("");
+      setSlackToken("");
       setUnitId("");
       setPending(false);
     }
@@ -837,7 +950,11 @@ function CredentialsDialog({
       ? Boolean(ghToken.trim())
       : isFigma
         ? Boolean(figmaToken.trim())
-        : Boolean(orgUrl.trim() && pat.trim());
+        : isGithub
+          ? Boolean(ghAppId.trim() && ghAppKey.trim() && ghInstallId.trim())
+          : isSlack
+            ? Boolean(slackToken.trim())
+            : Boolean(orgUrl.trim() && pat.trim());
   const canSubmit = fieldsValid && (!mustChooseUnit || Boolean(targetUnitId));
 
   const handleSubmit = async () => {
@@ -857,7 +974,15 @@ function CredentialsDialog({
           ? { pat: ghToken, owner: ghOwner.trim() || undefined }
           : isFigma
             ? { pat: figmaToken, file_url: figmaFileUrl.trim() || undefined }
-            : { org_url: orgUrl.trim(), pat };
+            : isGithub
+              ? {
+                  github_app_id: ghAppId.trim(),
+                  github_app_private_key: ghAppKey,
+                  github_app_installation_id: ghInstallId.trim(),
+                }
+              : isSlack
+                ? { pat: slackToken }
+                : { org_url: orgUrl.trim(), pat };
       const result = await setConnectorCredentials(kind, {
         ...fields,
         workspaceId: targetUnitId || undefined,
@@ -896,6 +1021,10 @@ function CredentialsDialog({
                 ? "Paste your Confluence site URL, account email, and an API token — the same kind of token Jira uses, configured separately here. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
                 : isGithubActions
                 ? "Paste a GitHub Personal Access Token (scopes: repo, workflow) and, optionally, the owner/org. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
+                : isGithub
+                  ? "Register a GitHub App in your own organization, then paste its App ID, private key, and the installation ID for this org. The platform no longer runs a shared GitHub App, so the App — and the access it has — is entirely yours. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
+                : isSlack
+                  ? "Create a Slack app in your own workspace with the chat:write and channels:read scopes, then paste its bot token (xoxb-…). Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
                 : isFigma
                   ? "Paste a Figma personal access token (Figma → Settings → Security → Personal access tokens). Read-only: the Design agent reads your screens and never writes to them. Stored in the tenant's secrets vault, verified with a live probe, and never shown again."
                   : isSonarQube
@@ -931,7 +1060,66 @@ function CredentialsDialog({
             </div>
           )}
 
-          {isGithubActions ? (
+          {isGithub ? (
+            <>
+              <div className="space-y-1.5">
+                <Label htmlFor="gh-app-id">App ID</Label>
+                <Input
+                  id="gh-app-id"
+                  value={ghAppId}
+                  onChange={(e) => setGhAppId(e.target.value)}
+                  placeholder="123456"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="gh-install-id">Installation ID</Label>
+                <Input
+                  id="gh-install-id"
+                  value={ghInstallId}
+                  onChange={(e) => setGhInstallId(e.target.value)}
+                  placeholder="87654321"
+                  autoComplete="off"
+                />
+                <p className="text-muted-foreground text-[11px]">
+                  From the URL when you install the App:
+                  github.com/settings/installations/<span className="font-mono">&lt;id&gt;</span>.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="gh-app-key">Private key (PEM)</Label>
+                <Textarea
+                  id="gh-app-key"
+                  value={ghAppKey}
+                  onChange={(e) => setGhAppKey(e.target.value)}
+                  placeholder="-----BEGIN RSA PRIVATE KEY-----"
+                  rows={4}
+                  autoComplete="off"
+                  className="font-mono text-[11px]"
+                />
+                <p className="text-muted-foreground text-[11px]">
+                  This key signs as the App across every repository it is installed on.
+                  It is stored in your tenant&apos;s vault and never shown again.
+                </p>
+              </div>
+            </>
+          ) : isSlack ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="slack-token">Bot token</Label>
+              <Input
+                id="slack-token"
+                type="password"
+                value={slackToken}
+                onChange={(e) => setSlackToken(e.target.value)}
+                placeholder="xoxb-••••••••••••"
+                autoComplete="off"
+              />
+              <p className="text-muted-foreground text-[11px]">
+                Slack app → OAuth &amp; Permissions → Bot User OAuth Token. Needs the
+                chat:write and channels:read scopes.
+              </p>
+            </div>
+          ) : isGithubActions ? (
             <>
               <div className="space-y-1.5">
                 <Label htmlFor="gha-token">Personal Access Token</Label>

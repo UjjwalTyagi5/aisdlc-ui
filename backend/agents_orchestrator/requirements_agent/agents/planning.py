@@ -115,6 +115,8 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
     # Same pattern as copilot_api.py's ChatLiteLLM import.
     import litellm
 
+    from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
+
     response = litellm.completion(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
@@ -122,7 +124,8 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
         api_base=resolved.base_url,
         messages=[{"role": "user", "content": content}],
         max_tokens=8192,  # client-facing BRD/PDD are long — 4096 truncated them mid-document
-        temperature=0.15,
+        # Omitted entirely for gpt-5-family models — see temperature_kwargs.
+        **temperature_kwargs(resolved.model, 0.15),
     )
     return response.choices[0].message.content or ""
 
@@ -1166,6 +1169,21 @@ async def write_requirements_artifact(
 from config.connectors.context import get_connector as _get_active_connector
 
 
+# ── The Consequential gate on board writes (§1.5) ──────────────────────────────
+# Every board WRITE tool reaches the connector through `_board_connector("write")`, so
+# the tier check goes there and covers all of them — including ones added later, which
+# is the point of putting it at the choke point rather than on each tool.
+# The rule itself lives in shared/authz/consequential.py; Design uses the same one.
+# `authorize_consequential` is BOTH halves: may this person authorise a board write
+# (the role), and did they actually say so on this turn (the consent). The role check
+# alone is not a gate here — a `ba` holds `artifact:approve_requirements` by
+# definition, so every board write a BA's chat produced would have passed it without
+# the human ever being asked. This mirrors the Development agent's per-turn push gate.
+from shared.authz.consequential import authorize_consequential as _authorize_consequential
+
+_CONSEQUENTIAL_STAGE = "requirements"
+
+
 async def _board_connector(mode: str = "read"):
     """Return (connector, None) for the run-injected connector, or (None, error_str).
 
@@ -1222,6 +1240,20 @@ async def _board_connector(mode: str = "read"):
                 f"Integrations page. You can still proceed with pasted or uploaded "
                 f"requirements."
             )
+
+    # The tier check, LAST — after the project is known to permit writing at all, so a
+    # project with no write grant hears about the grant rather than about approval.
+    if mode == "write":
+        ok, why = await _authorize_consequential(
+            _CONSEQUENTIAL_STAGE,
+            action="Writing to the project board",
+            ask=(
+                "ask the user to confirm the board change you are about to make, naming "
+                "the work items and what will happen to them."
+            ),
+        )
+        if not ok:
+            return None, why
     return connector, None
 
 
@@ -2320,12 +2352,16 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         return _ORCHESTRATOR_CACHE[cache_key]
     from langchain_litellm import ChatLiteLLM  # deferred — see above
 
+    from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
+
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,
         api_base=base_url,
         api_key=api_key,
-        temperature=0.3,
+        # Omitted entirely for gpt-5-family models, which reject any temperature but
+        # their default — see temperature_kwargs.
+        **temperature_kwargs(model, 0.3),
         max_tokens=8096,
         max_retries=2,
         # Stream tokens so the copilot shows text live as it's generated (first
@@ -2365,8 +2401,18 @@ async def agent(state: AgentState):
         orch = orch.bind_tools(tools + get_skill_tools("requirements") + get_mcp_tools())
         from shared.services.model_call_wrapper import guarded_completion
 
+        # Repair any tool_use/tool_result pair the checkpoint lost before replaying it.
+        # This graph is checkpointed (`app = workflow.compile(checkpointer=...)`) and
+        # tool-bound, so a turn stopped between the agent node committing an AIMessage
+        # with tool_calls and the tools node answering them persists an unanswered
+        # call — and then EVERY later turn on that session_id is rejected by the
+        # provider, with nothing in the error pointing back at the interruption. The
+        # Design agent hit exactly this in its chat; Requirements had no repair at all.
+        from shared.services.message_pairing import sanitize_tool_call_pairing  # noqa: PLC0415
+
         response = await guarded_completion(
-            resolved, orch, state["messages"], tenant_id=tenant_id, agent_type="requirements",
+            resolved, orch, sanitize_tool_call_pairing(state["messages"]),
+            tenant_id=tenant_id, agent_type="requirements",
             config={"metadata": {"user_api_key_alias": resolved.alias}},
         )
         # Carry the resolved model through state so the `tools` node can re-establish

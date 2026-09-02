@@ -11,7 +11,7 @@ Routes (mounted under the '/dev' prefix in process_api):
 
 {project_id} is the platform project UUID.
 Credentials resolve from the Azure DevOps connector (Integrations page) per tenant,
-falling back to env (ADO_ORG_URL / ADO_PAT).
+resolved per tenant (secret store "ado-org-url" / "ado-pat"); no env fallback.
 All routes are gated by the artifact:view floor applied at include_router() time.
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.project_scope import require_project_access
+from shared.authz.agent_access import require_agent_access
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
@@ -36,7 +37,12 @@ from shared.services import workspace_fs
 # was the artifact:view floor applied at include time — a permission `contributor`
 # holds. The router-level dependency covers all of them at once, and covers whatever
 # route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
-dev_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
+dev_workspace_router = APIRouter(
+    dependencies=[
+        Depends(require_project_access()),
+        Depends(require_agent_access("development")),
+    ]
+)
 
 
 class PullRequest(BaseModel):
@@ -47,20 +53,29 @@ class PullRequest(BaseModel):
 
 @dev_workspace_router.get("/{project_id}/ado/projects")
 async def get_ado_projects(project_id: str, request: Request) -> list[dict]:
-    return await ado_repos.list_projects(tenant_id=request.state.tenant_id)
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    return await ado_repos.list_projects(
+        tenant_id=request.state.tenant_id, project_id=project_id, owner_id=owner_id
+    )
 
 
 @dev_workspace_router.get("/{project_id}/ado/projects/{ado_project}/repos")
 async def get_ado_repos(project_id: str, ado_project: str, request: Request) -> list[dict]:
-    return await ado_repos.list_repos(ado_project, tenant_id=request.state.tenant_id)
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    return await ado_repos.list_repos(
+        ado_project, tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
+    )
 
 
 @dev_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/branches")
 async def get_ado_branches(
     project_id: str, ado_project: str, repo: str, request: Request
 ) -> list[dict]:
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
     return await ado_repos.list_branches(
-        ado_project, repo, tenant_id=request.state.tenant_id
+        ado_project, repo, tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
     )
 
 
@@ -69,7 +84,9 @@ async def pull_workspace(project_id: str, body: PullRequest, request: Request) -
     tenant_id: str = request.state.tenant_id
     pulled_by = str(uid) if (uid := getattr(request.state, "user_id", None)) else None
 
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id, project_id=project_id, owner_id=pulled_by or ""
+    )
     remote_url = await ado_repos.resolve_clone_url(
         body.ado_project, body.repo_name, pat=pat, org_url=org_url
     )

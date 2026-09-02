@@ -25,6 +25,7 @@ class DevSessionState:
     system_injected: bool = False
     dev_artifacts: DevelopmentArtifacts = field(default_factory=DevelopmentArtifacts)
     ado_repos: Dict[str, str] = field(default_factory=dict)  # repo_name → clone_url
+    ado_org_url: str = ""    # resolved from the tenant connector, not env
     ado_project: str = ""
     ado_repo_id: str = ""
     ado_repo_name: str = ""

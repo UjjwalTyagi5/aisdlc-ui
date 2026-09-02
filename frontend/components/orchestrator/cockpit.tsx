@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { LoadingState } from "@/components/ui/loading-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { ModelPicker, type ProjectModelOption } from "@/components/orchestrator/model-picker";
 import { ProjectPicker } from "@/components/orchestrator/project-picker";
 import { SessionRail } from "@/components/orchestrator/session-rail";
@@ -414,7 +415,28 @@ export function OrchestratorCockpit({
                     {project?.name ?? "this project"}
                   </span>
                   . Reaching an agent elsewhere isn&apos;t standing to run it on this team&apos;s
-                  work; ask its Project Admin to add you.
+                  work; ask its Project Admin to add you, or{" "}
+                  <RequestAccessButton
+                    variant="ghost"
+                    size="sm"
+                    label="request access"
+                    prefill={{
+                      type: "access_request",
+                      title: `Access to ${project?.name ?? "this project"}`,
+                      description: "Requesting to join this project as a contributor.",
+                      // Not `project?.id`: `project` comes from GET /projects/:id,
+                      // which 404s for exactly the person this button is for — not
+                      // a member, so the detail fetch is refused before the name
+                      // or id in the response body ever reaches them. `projectId`
+                      // (the route param, resolved above independently of that
+                      // fetch) is what's actually known good here; falling back to
+                      // the fetched object would silently raise a project-less
+                      // request, which is the one thing this button exists to not do.
+                      projectId: projectId ?? undefined,
+                      workspaceId: project?.workspaceId ?? undefined,
+                    }}
+                  />
+                  .
                 </>
               )}
             </p>

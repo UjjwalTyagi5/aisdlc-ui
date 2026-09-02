@@ -4,8 +4,8 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Boxes,
   HelpCircle,
+  Info,
   Lock,
   MessageSquare,
   PanelLeftClose,
@@ -131,11 +131,9 @@ function NavLink({
 function SectionLabel({
   label,
   collapsed,
-  dimmed,
 }: {
   label: string;
   collapsed: boolean;
-  dimmed?: boolean;
 }) {
   if (collapsed) {
     return (
@@ -148,10 +146,7 @@ function SectionLabel({
   }
   return (
     <div
-      className={cn(
-        "font-display mb-0.5 mt-2 px-2 text-[10px] font-semibold tracking-widest uppercase",
-        dimmed ? "text-muted-foreground/40" : "text-muted-foreground",
-      )}
+      className="font-display text-muted-foreground mb-0.5 mt-2 px-2 text-[10px] font-semibold tracking-widest uppercase"
     >
       {label}
     </div>
@@ -386,20 +381,15 @@ export function Sidebar() {
       <nav className="flex-1 overflow-y-auto p-2" aria-label="Main navigation">
 
         {/* ── Build — the work itself ───────────────────────────────────── */}
-        {/* Named for what the group IS, not for a Business Unit. This label
-            used to carry the active unit's name, which was a lie for anyone
-            bound to more than one — see components/app/org-header.tsx. */}
-        {/* The heading only when there is something under it. Control plane and
-            Observability below already work this way; Build did not, so a
-            Contributor — who has no working surface until their unit admin
-            gives them a role — got a "BUILD" label over nothing at all. */}
-        {showBuild && (
-          <SectionLabel
-            label="Build"
-            collapsed={collapsed}
-            dimmed={!hasWorkspace && !wsPending}
-          />
-        )}
+        {/* DELIBERATELY UNLABELLED. The groups below earn their headings by
+            separating things you would otherwise confuse — governance from
+            delivery, observability from both. The first group needs no such
+            distinction: it is what the sidebar opens on, so a heading over it
+            only names the thing already in front of you.
+
+            `showBuild` still gates the ITEMS (below) — a Contributor with no
+            working surface yet gets no empty group, which is what that flag
+            was really for. */}
 
         {/* No scope chip here.
 
@@ -520,8 +510,8 @@ export function Sidebar() {
             deliberately — see its entry in lib/nav.ts::utilityNav. */}
         <SidebarFooterLink
           href="/catalogue"
-          label="Agent Catalogue"
-          icon={Boxes}
+          label="About"
+          icon={Info}
           collapsed={collapsed}
         />
         <SidebarFooterLink href="/help" label="Help & docs" icon={HelpCircle} collapsed={collapsed} />

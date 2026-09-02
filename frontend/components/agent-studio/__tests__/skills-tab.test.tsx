@@ -1,0 +1,622 @@
+// @vitest-environment jsdom
+/**
+ * SkillsTab cascade awareness (spec: agent-studio-1-skills-cascade-inheritance,
+ * Task 9). SkillsTab used to be hardcoded to the workspace (Business Unit)
+ * tier — see the "Skills tab is a separate, BU-scoped system" comment this
+ * task removes from agent-editor.tsx. These tests pin down the three
+ * observable behaviors that changed:
+ *
+ *   - it now requests skills at whichever tier scopeContext names (was always
+ *     "workspace" before, regardless of what tier the viewer had drilled into)
+ *   - "read-only" is now driven by scopeContext.isOwner, not the old flat
+ *     session-capability check
+ *   - an inherited custom skill (origin_scope !== the requested scope) now
+ *     shows an origin badge and an "Override" action instead of Edit/Delete
+ *
+ * Follows the mocking convention from
+ * components/app/__tests__/add-model-dialog.test.tsx: this repo has no wired
+ * MSW server for component tests (frontend/mocks/node.ts exists but nothing
+ * calls server.listen() — vitest.config.ts has no setupFiles), so API modules
+ * are mocked directly with vi.mock, and (per
+ * __tests__/app/provider-detail-rbac-gate.test.tsx, needed here because
+ * SkillsTab uses useQuery/useMutation) the component is wrapped in a fresh
+ * QueryClientProvider.
+ */
+import "@testing-library/jest-dom/vitest";
+
+import * as React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { toast } from "sonner";
+
+// jsdom implements neither of these, and Radix's Select (used by the Import
+// dialog's same-BU workspace picker below) calls them on pointer interaction
+// — without these no-op stubs, opening/selecting throws
+// "target.hasPointerCapture is not a function" instead of exercising the
+// picker.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {};
+}
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
+vi.mock("@/lib/api/agent-skills", () => ({
+  listAgentSkills: vi.fn(),
+  getAgentSkill: vi.fn(),
+  createAgentSkill: vi.fn(),
+  updateAgentSkill: vi.fn(),
+  toggleAgentSkill: vi.fn(),
+  deleteAgentSkill: vi.fn(),
+  listAgentSkillVersions: vi.fn(),
+  proposeAgentSkill: vi.fn(),
+  evaluateAgentSkill: vi.fn(),
+  importAgentSkill: vi.fn(),
+}));
+// Populates the Import dialog's same-BU source picker (final whole-branch
+// review, sub-project 5: the field used to be a free-text UUID input with no
+// way to discover a real workspace id — see the "Import (creates a new
+// custom skill…" describe block below).
+vi.mock("@/lib/api/workspaces", () => ({
+  listWorkspaces: vi.fn(),
+}));
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
+
+// Signed-in viewer's own id — mocked per-test, matching behavior-tab.test.tsx's
+// convention (session-provider isn't wired in component tests).
+let mockSession: { user: { id: string } } | null = null;
+vi.mock("@/components/auth/session-provider", () => ({
+  useRawSession: () => mockSession,
+}));
+
+import {
+  evaluateAgentSkill,
+  getAgentSkill,
+  importAgentSkill,
+  listAgentSkills,
+  listAgentSkillVersions,
+  proposeAgentSkill,
+  updateAgentSkill,
+} from "@/lib/api/agent-skills";
+import { listWorkspaces } from "@/lib/api/workspaces";
+import { ApiRequestError } from "@/lib/api/client";
+import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
+import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
+import type { Workspace } from "@/lib/schemas/workspace";
+
+import { SkillsTab } from "../skills-tab";
+import type { ScopeContext } from "../agent-editor";
+
+afterEach(() => {
+  cleanup();
+  mockSession = null;
+  vi.clearAllMocks();
+});
+
+const mockedListAgentSkills = vi.mocked(listAgentSkills);
+
+function orgScopeContext(isOwner = true): ScopeContext {
+  return {
+    scope: "org",
+    scopeId: null,
+    scopeLabel: "Organization",
+    chain: { workspaceId: null, projectId: null, userId: null },
+    isOwner,
+    canPropose: !isOwner,
+    ownerRoleLabel: "Organization Admin",
+  };
+}
+
+function workspaceScopeContext(isOwner: boolean): ScopeContext {
+  return {
+    scope: "workspace",
+    scopeId: "ws-1",
+    scopeLabel: "Acme BU",
+    chain: { workspaceId: "ws-1", projectId: null, userId: null },
+    isOwner,
+    canPropose: !isOwner,
+    ownerRoleLabel: "Business Unit Admin",
+    workspaceId: "ws-1",
+    workspaceName: "Acme BU",
+  };
+}
+
+function projectScopeContext(isOwner: boolean): ScopeContext {
+  return {
+    scope: "project",
+    scopeId: "proj-1",
+    scopeLabel: "Payments",
+    chain: { workspaceId: "ws-1", projectId: "proj-1", userId: null },
+    isOwner,
+    canPropose: !isOwner,
+    ownerRoleLabel: "Project Admin",
+    workspaceId: "ws-1",
+    workspaceName: "Acme BU",
+    projectId: "proj-1",
+    projectName: "Payments",
+  };
+}
+
+function renderSkillsTab(scopeContext: ScopeContext) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <SkillsTab agentId="requirements" agentLabel="Requirements" scopeContext={scopeContext} />
+    </QueryClientProvider>,
+  );
+}
+
+describe("SkillsTab cascade awareness", () => {
+  it("requests skills at the org tier when scopeContext.scope is org (was hardcoded to workspace before)", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [] } satisfies SkillList);
+
+    renderSkillsTab(orgScopeContext());
+
+    await waitFor(() => expect(mockedListAgentSkills).toHaveBeenCalled());
+    expect(mockedListAgentSkills).toHaveBeenCalledWith("requirements", "org", null, {
+      workspaceId: null,
+      projectId: null,
+    });
+  });
+
+  it("read-only when scopeContext.isOwner is false, not the old flat permission check", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [
+        {
+          origin: "custom",
+          skill_key: "k",
+          agent_id: "requirements",
+          display_name: "A Skill",
+          description: null,
+          when_to_use: null,
+          runtime: "llm",
+          enabled: true,
+          editable: true,
+          deletable: true,
+          version: 1,
+          active_version: 1,
+          origin_scope: "workspace",
+        },
+      ],
+    } satisfies SkillList);
+
+    renderSkillsTab(workspaceScopeContext(false));
+
+    await screen.findByText("A Skill");
+    expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new skill/i })).not.toBeInTheDocument();
+  });
+
+  it("shows an origin badge and Override action for an inherited skill", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [
+        {
+          origin: "custom",
+          skill_key: "shared-key",
+          agent_id: "requirements",
+          display_name: "Org Skill",
+          description: null,
+          when_to_use: null,
+          runtime: "llm",
+          enabled: true,
+          editable: true,
+          deletable: true,
+          version: 1,
+          active_version: 1,
+          origin_scope: "org",
+        },
+      ],
+    } satisfies SkillList);
+
+    renderSkillsTab(workspaceScopeContext(true));
+
+    await screen.findByText("Org Skill");
+    expect(screen.getByText(/From Organization/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /override/i })).toBeInTheDocument();
+  });
+
+  it("keeps the skill_key locked to the inherited value when overriding, even after editing the display name", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [
+        {
+          origin: "custom",
+          skill_key: "shared-key",
+          agent_id: "requirements",
+          display_name: "Org Skill",
+          description: null,
+          when_to_use: null,
+          runtime: "llm",
+          enabled: true,
+          editable: false,
+          deletable: false,
+          version: 1,
+          active_version: 1,
+          origin_scope: "org",
+        },
+      ],
+    } satisfies SkillList);
+
+    const user = userEvent.setup();
+    renderSkillsTab(workspaceScopeContext(true));
+
+    await screen.findByText("Org Skill");
+    await user.click(screen.getByRole("button", { name: /override/i }));
+
+    const keyField = await screen.findByLabelText("Skill key");
+    expect(keyField).toHaveValue("shared-key");
+
+    const nameField = screen.getByLabelText("Display name");
+    await user.clear(nameField);
+    await user.type(nameField, "Our BU's Version");
+
+    expect(keyField).toHaveValue("shared-key");
+  });
+
+  it("shows a Propose action for a non-owner viewing their own (non-inherited) custom skill, gated on a passing evaluation, and calls the API on click", async () => {
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "team-skill", agent_id: "requirements",
+        display_name: "Team Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "project",
+      }],
+    } satisfies SkillList);
+    const mockedPropose = vi.mocked(proposeAgentSkill);
+    mockedPropose.mockResolvedValue({ id: "req-1" } as any);
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-1", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "pass", score: 0.9, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await screen.findByText("Team Skill");
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+    // Import (like "New skill") is gated canManage-only, deliberately NOT
+    // extended to canPropose — see the comment beside the button in
+    // skills-tab.tsx: Import always creates a brand-new skill_key, which
+    // lands invisibly for a non-owner the same way a brand-new custom skill
+    // would (list_skills_merged only ever surfaces the ACTIVE row).
+    expect(screen.queryByRole("button", { name: /^import$/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: /propose/i }));
+    await waitFor(() => expect(mockedPropose).toHaveBeenCalled());
+  });
+
+  it("keeps Propose disabled when Evaluate returns fail", async () => {
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-2", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "fail", score: 0.1, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "team-skill", agent_id: "requirements",
+        display_name: "Team Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: null, origin_scope: "project",
+      }],
+    } satisfies SkillList);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await user.click(await screen.findByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+    expect(await screen.findByText(/fail/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+  });
+
+  it("clears a cached PASS evaluation after a non-owner edits the skill again, so Propose goes back to disabled", async () => {
+    // A visible custom-skill row's `version` is always its ACTIVE version
+    // (list_skills_merged only ever surfaces active rows) — it does NOT
+    // change across a non-owner's successive inactive-draft edits. So this
+    // fixture intentionally returns the SAME version (1) from updateAgentSkill
+    // as the original list row: if the fix didn't explicitly clear the
+    // evaluation cache on save, the evalKey (skill_key + version) would stay
+    // identical across the edit and the stale PASS would silently survive.
+    const skillRow = {
+      origin: "custom" as const, skill_key: "team-skill", agent_id: "requirements",
+      display_name: "Team Skill", description: null, when_to_use: null,
+      runtime: "llm" as const, enabled: true, editable: false, deletable: false,
+      version: 1, active_version: null, origin_scope: "project" as const,
+    };
+    mockedListAgentSkills.mockResolvedValue({ skills: [skillRow] } satisfies SkillList);
+    const mockedEvaluate = vi.mocked(evaluateAgentSkill);
+    mockedEvaluate.mockResolvedValue({
+      id: "eval-1", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
+      scope: "project", result: "pass", score: 0.9, signals: {},
+      evaluator_id: "user-1", evaluator_role: "developer", created_at: null,
+    });
+    const mockedGetSkill = vi.mocked(getAgentSkill);
+    mockedGetSkill.mockResolvedValue({
+      ...skillRow,
+      body: "Some instructions",
+      created_by: "other-1",
+      created_at: null,
+      updated_at: null,
+    } satisfies SkillDetail);
+    const mockedUpdate = vi.mocked(updateAgentSkill);
+    mockedUpdate.mockResolvedValue({
+      ...skillRow,
+      body: "Updated instructions",
+      created_by: "other-1",
+      created_at: null,
+      updated_at: null,
+    } satisfies SkillDetail);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(false));
+
+    await screen.findByText("Team Skill");
+    await user.click(screen.getByRole("button", { name: /evaluate/i }));
+    await waitFor(() => expect(mockedEvaluate).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /propose/i })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: /^edit team skill$/i }));
+    await screen.findByLabelText("Display name");
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+
+    // Dialog closes and the list re-renders after the save — Propose must be
+    // disabled again until Evaluate is re-run against the new draft.
+    await screen.findByText("Team Skill");
+    expect(screen.getByRole("button", { name: /propose/i })).toBeDisabled();
+  });
+
+  it("R3: disables Evaluate with a tooltip when the PENDING DRAFT's author (not the active row's) is the signed-in viewer", async () => {
+    // Regression: the self-block check must read the PENDING (inactive)
+    // draft's author, not the currently-active version's — evaluate_skill()
+    // evaluates the newest inactive version, which can have a different
+    // author than the published one (final whole-branch review, sub-project
+    // 4, Important #4). The active version here is authored by someone else
+    // ("prior-owner") to prove the check isn't accidentally reading that row.
+    mockSession = { user: { id: "author-1" } };
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+        display_name: "Org Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: 1, origin_scope: "org",
+      }],
+    } satisfies SkillList);
+    const mockedListVersions = vi.mocked(listAgentSkillVersions);
+    mockedListVersions.mockResolvedValue({
+      versions: [
+        { version: 2, is_active: false, display_name: "Org Skill", created_by: "author-1", created_at: null },
+        { version: 1, is_active: true, display_name: "Org Skill", created_by: "prior-owner", created_at: null },
+      ],
+    });
+
+    renderSkillsTab(orgScopeContext(false));
+
+    await screen.findByText("Org Skill");
+    const evaluateButton = await screen.findByRole("button", { name: /evaluate/i });
+    await waitFor(() => expect(evaluateButton).toBeDisabled());
+    expect(evaluateButton).toHaveAttribute(
+      "title",
+      "An organization-wide default must be evaluated by someone other than its author.",
+    );
+    expect(vi.mocked(evaluateAgentSkill)).not.toHaveBeenCalled();
+  });
+
+  it("R3: does not block Evaluate for a different viewer than the pending draft's author at org scope", async () => {
+    mockSession = { user: { id: "reviewer-2" } };
+    mockedListAgentSkills.mockResolvedValue({
+      skills: [{
+        origin: "custom", skill_key: "org-skill", agent_id: "requirements",
+        display_name: "Org Skill", description: null, when_to_use: null,
+        runtime: "llm", enabled: true, editable: false, deletable: false,
+        version: 1, active_version: 1, origin_scope: "org",
+      }],
+    } satisfies SkillList);
+    const mockedListVersions = vi.mocked(listAgentSkillVersions);
+    mockedListVersions.mockResolvedValue({
+      versions: [
+        { version: 2, is_active: false, display_name: "Org Skill", created_by: "author-1", created_at: null },
+        { version: 1, is_active: true, display_name: "Org Skill", created_by: "author-1", created_at: null },
+      ],
+    });
+
+    renderSkillsTab(orgScopeContext(false));
+
+    await screen.findByText("Org Skill");
+    await waitFor(() => expect(mockedListVersions).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: /evaluate/i })).toBeEnabled();
+  });
+});
+
+describe("SkillsTab import action", () => {
+  // A non-empty list keeps the empty-state's own "Import" button out of the
+  // DOM, so `getByRole(..., { name: /^import$/i })` matches only the header
+  // instance — see skills-tab.tsx, where both instances share the gate.
+  const existingSkill = {
+    origin: "custom" as const,
+    skill_key: "existing",
+    agent_id: "requirements",
+    display_name: "Existing Skill",
+    description: null,
+    when_to_use: null,
+    runtime: "llm" as const,
+    enabled: true,
+    editable: true,
+    deletable: true,
+    version: 1,
+    active_version: 1,
+    origin_scope: "project" as const,
+  };
+
+  const importedSkill = {
+    origin: "custom" as const,
+    skill_key: "imported",
+    agent_id: "requirements",
+    display_name: "Imported",
+    description: null,
+    when_to_use: null,
+    runtime: "llm" as const,
+    enabled: true,
+    editable: true,
+    deletable: true,
+    version: 1,
+    active_version: 1,
+    origin_scope: "project" as const,
+    body: "x",
+    created_by: "user-1",
+    created_at: null,
+    updated_at: null,
+  } satisfies SkillDetail;
+
+  const mockedListWorkspaces = vi.mocked(listWorkspaces);
+
+  function makeWorkspace(id: string, displayName: string) {
+    return {
+      id,
+      organizationId: "org-1",
+      slug: id,
+      displayName,
+      businessUnit: null,
+      costCenter: null,
+      status: "active",
+      isActive: true,
+      memberCount: 1,
+      projectCount: 1,
+      monthlySpendUsd: 0,
+      monthlyBudgetUsd: null,
+      budgetStartDate: null,
+      budgetEndDate: null,
+      buAdminName: null,
+      createdAt: null,
+    };
+  }
+
+  it("shows an Import action for a manager, and calls the API with the declared same-BU source on submit", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockResolvedValue(importedSkill);
+    mockedListWorkspaces.mockResolvedValue([
+      makeWorkspace("11111111-1111-4111-8111-111111111111", "Acme BU"),
+      makeWorkspace("22222222-2222-4222-8222-222222222222", "Widgets BU"),
+    ] as unknown as Workspace[]);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    // Source picker defaults to "same_tenant_bu" — the workspace dropdown is
+    // visible without switching the radio. It is a real <select>-style
+    // dropdown (Radix Select combobox), not a free-text UUID input (final
+    // whole-branch review, sub-project 5, Important finding): it's populated
+    // from listWorkspaces() and shows each workspace's display name, but the
+    // value submitted as source.workspace_id is the real UUID `id`, never the
+    // display name or a placeholder.
+    await user.type(await screen.findByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+
+    const workspaceTrigger = await screen.findByRole("combobox", { name: BUSINESS_UNIT_LABEL });
+    expect(
+      screen.queryByPlaceholderText("ws-1234"),
+    ).not.toBeInTheDocument();
+    await user.click(workspaceTrigger);
+    await user.click(await screen.findByRole("option", { name: "Widgets BU" }));
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    expect(mockedImport).toHaveBeenCalledWith({
+      agent_id: "requirements",
+      scope: "project",
+      scope_id: "proj-1",
+      skill_key: "imported",
+      display_name: "Imported",
+      description: "",
+      when_to_use: "",
+      body: "x",
+      source: {
+        kind: "same_tenant_bu",
+        workspace_id: "22222222-2222-4222-8222-222222222222",
+      },
+    });
+  });
+
+  it("switches to an external source and submits a URL instead of a workspace id", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockResolvedValue(importedSkill);
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    await user.click(await screen.findByRole("radio", { name: /external source/i }));
+    await user.type(screen.getByLabelText("Source URL"), "https://example.com/skill.md");
+    await user.type(screen.getByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    expect(mockedImport.mock.calls[0]![0]!.source).toEqual({
+      kind: "external",
+      url: "https://example.com/skill.md",
+    });
+  });
+
+  it("surfaces a SOURCE_NOT_ALLOWED screening rejection as its own message, not a generic error", async () => {
+    mockedListAgentSkills.mockResolvedValue({ skills: [existingSkill] } satisfies SkillList);
+    const mockedImport = vi.mocked(importAgentSkill);
+    mockedImport.mockRejectedValue(
+      new ApiRequestError(422, {
+        detail: {
+          code: "SOURCE_NOT_ALLOWED",
+          message: "That source isn't on the org's approved allowlist.",
+        },
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSkillsTab(projectScopeContext(true));
+
+    await screen.findByText("Existing Skill");
+    await user.click(screen.getByRole("button", { name: /^import$/i }));
+
+    await user.click(await screen.findByRole("radio", { name: /external source/i }));
+    await user.type(screen.getByLabelText("Source URL"), "https://not-allowed.example.com/skill.md");
+    await user.type(screen.getByLabelText("Display name"), "Imported");
+    await user.type(screen.getByLabelText(/instructions/i), "x");
+
+    await user.click(screen.getByRole("button", { name: /^import skill$/i }));
+
+    await waitFor(() => expect(mockedImport).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        "Source not allowed",
+        expect.objectContaining({
+          description: "That source isn't on the org's approved allowlist.",
+        }),
+      ),
+    );
+  });
+});

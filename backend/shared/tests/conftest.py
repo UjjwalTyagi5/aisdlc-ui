@@ -20,6 +20,19 @@ def redis_url_str():
     return REDIS_URL
 
 
+def _is_loop_teardown_noise(exc: BaseException) -> bool:
+    """Is this the known Windows event-loop-vs-asyncpg teardown race, and only that?
+
+    Matched on the message so that a real RuntimeError or AttributeError raised while
+    closing a session still fails the test. The two shapes the race takes:
+
+        RuntimeError:   Event loop is closed
+        AttributeError: 'NoneType' object has no attribute 'send'   (transport gone)
+    """
+    msg = str(exc)
+    return "Event loop is closed" in msg or "'NoneType' object has no attribute 'send'" in msg
+
+
 @pytest_asyncio.fixture
 async def db_session(pg_conn_string):
     # NullPool prevents connection pooling between tests — each test gets a fresh connection
@@ -29,17 +42,25 @@ async def db_session(pg_conn_string):
     try:
         yield session
     finally:
-        # RuntimeError("Event loop is closed") here is Windows ProactorEventLoop
-        # teardown noise, not a real failure: pytest-asyncio's per-test loop can
-        # finish closing before asyncpg's connection-close callback (scheduled via
-        # loop.create_task inside engine.dispose()) gets to run. The test's own
-        # assertions have already completed by this point either way.
+        # Windows ProactorEventLoop teardown noise, not a real failure: pytest-asyncio's
+        # per-test loop can finish closing before asyncpg's connection-close callback
+        # (scheduled via loop.create_task inside engine.dispose()) gets to run. The
+        # test's own assertions have already completed by this point either way.
+        #
+        # THE SAME RACE HAS TWO FACES. Catching only RuntimeError left the other one
+        # escaping as a teardown ERROR on a test that had already passed: once the loop
+        # is gone asyncpg's transport is None, and the close path reaches
+        # `self._transport.send(...)` -> AttributeError: 'NoneType' object has no
+        # attribute 'send'. Same cause, different exception type.
+        #
+        # Both are matched on their MESSAGE, not just their type, so a genuine
+        # AttributeError in teardown still fails loudly instead of being swallowed.
         try:
             await session.rollback()
             await session.close()
             await engine.dispose()
-        except RuntimeError as exc:
-            if "Event loop is closed" not in str(exc):
+        except (RuntimeError, AttributeError) as exc:
+            if not _is_loop_teardown_noise(exc):
                 raise
 
 
@@ -53,8 +74,8 @@ async def redis_client(redis_url_str):
         # Same Windows ProactorEventLoop teardown race as db_session above.
         try:
             await client.aclose()
-        except RuntimeError as exc:
-            if "Event loop is closed" not in str(exc):
+        except (RuntimeError, AttributeError) as exc:
+            if not _is_loop_teardown_noise(exc):
                 raise
 
 

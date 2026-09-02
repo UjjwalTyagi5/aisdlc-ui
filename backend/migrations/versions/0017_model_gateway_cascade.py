@@ -155,6 +155,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # A provider with no secret_ref cannot exist in the older schema, so it goes before
+    # the column is tightened. Postgres validates SET NOT NULL against existing rows at
+    # ALTER time, and this database had 107 of them — the upgrade made the column
+    # nullable precisely so a provider could be recorded before its credential was
+    # stored, which is a state 0016 has no way to represent.
+    #
+    # Both foreign keys pointing at model_providers (model_offerings.provider_id,
+    # org_model_grants.credential_id) are ON DELETE CASCADE, so the dependent rows go
+    # with them rather than blocking the delete.
+    op.execute("DELETE FROM model_providers WHERE secret_ref IS NULL")
     op.alter_column("model_providers", "secret_ref", nullable=False)
     op.drop_column("model_providers", "approval_reason")
     op.drop_column("model_providers", "approval_decided_at")
@@ -174,8 +184,19 @@ def downgrade() -> None:
         "TYPE varchar(36) USING credential_id::text"
     )
     op.execute("ALTER TABLE org_model_grants ALTER COLUMN business_unit_ids DROP DEFAULT")
+    # jsonb '["a","b"]' -> uuid[] '{a,b}' WITHOUT a subquery.
+    #
+    # The obvious form, `USING ARRAY(SELECT jsonb_array_elements_text(...))`, is
+    # rejected outright: Postgres answers "cannot use subquery in transform
+    # expression" for any subquery in a USING clause, so this downgrade could never
+    # have run — it is a syntax-level defect, not something a particular row triggered.
+    #
+    # translate() does the same job as a scalar expression: '[' and ']' become '{' and
+    # '}', and '"' has no counterpart in the target so it is deleted, turning the jsonb
+    # text into array literal syntax that casts directly. NULL and '[]' both pass
+    # through correctly ('[]' -> '{}' -> an empty uuid[]).
     op.execute(
         "ALTER TABLE org_model_grants ALTER COLUMN business_unit_ids "
-        "TYPE uuid[] USING ARRAY(SELECT jsonb_array_elements_text(business_unit_ids)::uuid)"
+        "TYPE uuid[] USING translate(business_unit_ids::text, '[]\"', '{}')::uuid[]"
     )
     op.execute("ALTER TABLE org_model_grants ALTER COLUMN business_unit_ids SET DEFAULT '{}'::uuid[]")

@@ -172,6 +172,11 @@ export const ProjectCreateInput = z.object({
   /** The Business Unit this project belongs to — required so a Project
    *  Admin's creation routes to the right BU Admin for approval. */
   workspaceId: z.string().min(1),
+  /** Who owns this project — bound as `project_admin` at project scope on
+   *  creation. Chosen from the Business Unit's existing Project Admins.
+   *  Omitted → the creator becomes owner if they cannot already reach the
+   *  project (see backend POST /projects). */
+  ownerId: z.string().optional(),
   /** Contributors assigned at creation time — {email, roleName} pairs; each
    *  gets that role's agent access on this project automatically via
    *  AGENT_OWNERSHIP. Reuses the same onboarding primitive as the Members

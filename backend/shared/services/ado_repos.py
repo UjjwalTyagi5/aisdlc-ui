@@ -1,11 +1,10 @@
 ﻿"""Shared helper for ADO projects / repos / branches — consumed by the dev-workspace
 REST endpoints and the development-agent git tools (DRY source).
 
-Credentials come from config.env (ADO_ORG_URL, ADO_PAT) — global env vars, not
-per-tenant connectors.  Per-tenant / GitHub connector resolution is a post-v1
-follow-up (tracked separately); for now only env-based ADO is supported.
-# NOTE: GitHub / Jira connector resolution will route through get_connector_for_session
-# once those connectors are activated — intentionally deferred (post-v1).
+Credentials are PER-TENANT and resolve through resolve_auth() below: the connector
+bound to the running stage first, then an explicit tenant_id. There is no process-wide
+ADO_ORG_URL / ADO_PAT fallback — a platform-wide PAT would let a tenant that never
+connected Azure DevOps transact as the platform, against another tenant's projects.
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ import urllib.parse
 
 import httpx
 
-from config.env import ADO_ORG_URL, ADO_PAT, DEV_WORKSPACE_ROOT
+from config.env import DEV_WORKSPACE_ROOT
 
 WORKSPACE_ROOT = pathlib.Path(DEV_WORKSPACE_ROOT)
 
@@ -44,7 +43,7 @@ def _git_env() -> dict:
 
 
 def _auth_header(pat: str | None = None) -> dict[str, str]:
-    token = base64.b64encode(f":{pat or ADO_PAT}".encode()).decode()
+    token = base64.b64encode(f":{pat or ''}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
 
@@ -55,35 +54,74 @@ async def _get_json(url: str, pat: str | None = None) -> dict:
         return r.json()
 
 
-async def resolve_auth(tenant_id: str = "") -> tuple[str, str]:
-    """Resolve (org_url, pat) for Azure DevOps from the configured connector.
+async def resolve_auth(
+    tenant_id: str = "", *, project_id: str = "", owner_id: str = ""
+) -> tuple[str, str]:
+    """Resolve (org_url, pat) for Azure DevOps for THIS TENANT.
 
-    Credentials entered on the Integrations page live in the per-tenant secret
-    store (`ado-org-url` / `ado-pat`); the connector's auth_adapter reads them and
-    falls back to Key Vault / config.env. Never raises — returns env values on any
-    failure so callers can surface a clean "not configured" error.
+    Two tenant-scoped sources, in order:
+      1. the connector bound to the running stage (config.connectors.context) — this
+         is the path a pipeline run takes, and it carries the run's tenant;
+      2. an explicit tenant_id, for callers outside a stage (REST endpoints).
+
+    `project_id`/`owner_id`, when both given, let source 2 additionally check
+    for a project-scoped personal credential this caller saved for themselves
+    on this project (`project_integration_credentials`) BEFORE falling back to
+    a tenant-wide credential — see `config.connector_factory.get_connector_for_session`'s
+    own docstring. Omitted, behavior is unchanged: tenant-wide only. This is what
+    the REST browsing routes in `shared/routers/dev_workspace.py` need — a project
+    admin can save an Azure DevOps PAT for just their own project (the Integrations
+    page supports this today) without an org-wide connector existing at all, and
+    without this, that saved credential is never found.
+
+    Returns ("", "") when neither answers. Never raises and never falls back to a
+    process-wide credential: callers surface a clean "not configured" instead.
     """
     try:
-        from config.connector_factory import get_connector_for_session
+        from config.connectors.context import get_connector as _active_connector
 
-        # unrestricted: this resolves CREDENTIALS via auth_adapter, which is
-        # neither a read nor a write of connector data and is never gated. The
-        # operations performed with those credentials are gated where they happen.
-        conn = await get_connector_for_session(
-            "azure_devops", tenant_id=tenant_id, unrestricted=True,
-        )
-        auth = await conn.auth_adapter(tenant_id)
-        return (auth.get("org_url") or ADO_ORG_URL, auth.get("pat") or ADO_PAT)
-    except Exception:
-        return (ADO_ORG_URL, ADO_PAT)
+        active = _active_connector()
+        # The bound connector is whatever THIS stage needs — often Jira or GitHub.
+        # Only an ADO one can answer for ADO; asking any other kind would read a
+        # "pat" key it does not have and silently return an empty credential.
+        if active.connector_name in ("azure_devops", "azure_repos"):
+            auth = await active.auth_adapter()
+            org, pat = (auth.get("org_url") or "").rstrip("/"), auth.get("pat") or ""
+            if pat:
+                return org, pat
+    except Exception:  # noqa: BLE001 — no connector bound to this run
+        pass
+
+    if tenant_id:
+        try:
+            from config.connector_factory import get_connector_for_session
+
+            # unrestricted: this resolves CREDENTIALS via auth_adapter, which is
+            # neither a read nor a write of connector data and is never gated. The
+            # operations performed with those credentials are gated where they happen.
+            conn = await get_connector_for_session(
+                "azure_devops", tenant_id=tenant_id, unrestricted=True,
+                project_id=project_id, owner_id=owner_id,
+            )
+            auth = await conn.auth_adapter(tenant_id)
+            return (auth.get("org_url") or "").rstrip("/"), auth.get("pat") or ""
+        except Exception:  # noqa: BLE001
+            pass
+
+    return "", ""
 
 
-async def _resolve(org_url: str | None, pat: str | None, tenant_id: str) -> tuple[str, str]:
-    """Return (base_url, pat). Explicit args win; otherwise resolve from the
-    connector (Integrations creds), then env. Raises if no org URL is configured
-    so the endpoint returns a clear message instead of a malformed-URL 500."""
+async def _resolve(
+    org_url: str | None, pat: str | None, tenant_id: str,
+    *, project_id: str = "", owner_id: str = "",
+) -> tuple[str, str]:
+    """Return (base_url, pat). Explicit args win; otherwise resolve from this
+    tenant's connector (Integrations creds), checking a project-scoped personal
+    credential first when project_id/owner_id are given — see resolve_auth's
+    docstring. Raises if no org URL is configured so the endpoint returns a clear
+    message instead of a malformed-URL 500."""
     if not (org_url and pat):
-        c_org, c_pat = await resolve_auth(tenant_id)
+        c_org, c_pat = await resolve_auth(tenant_id, project_id=project_id, owner_id=owner_id)
         org_url = org_url or c_org
         pat = pat or c_pat
     base = (org_url or "").rstrip("/")
@@ -98,13 +136,16 @@ async def list_projects(
     pat: str | None = None,
     org_url: str | None = None,
     tenant_id: str = "",
+    *, project_id: str = "", owner_id: str = "",
 ) -> list[dict]:
     """Return all ADO projects as [{id, name}].
 
     Credentials resolve from the connector (Integrations page) unless *pat* /
     *org_url* are passed explicitly (e.g. a per-session PAT from the agent).
+    project_id/owner_id let this check a project-scoped personal credential
+    first — see resolve_auth's docstring.
     """
-    base, pat = await _resolve(org_url, pat, tenant_id)
+    base, pat = await _resolve(org_url, pat, tenant_id, project_id=project_id, owner_id=owner_id)
     data = await _get_json(f"{base}/_apis/projects?{_API_VER}", pat=pat)
     return [{"id": p["id"], "name": p["name"]} for p in data.get("value", [])]
 
@@ -114,12 +155,15 @@ async def list_repos(
     pat: str | None = None,
     org_url: str | None = None,
     tenant_id: str = "",
+    *, project_id: str = "", owner_id: str = "",
 ) -> list[dict]:
     """Return all Git repos in *project* as [{id, name, default_branch, remote_url}].
 
     Credentials resolve from the connector unless *pat* / *org_url* are explicit.
+    project_id/owner_id let this check a project-scoped personal credential
+    first — see resolve_auth's docstring.
     """
-    base, pat = await _resolve(org_url, pat, tenant_id)
+    base, pat = await _resolve(org_url, pat, tenant_id, project_id=project_id, owner_id=owner_id)
     data = await _get_json(
         f"{base}/{urllib.parse.quote(project, safe='')}/_apis/git/repositories?{_API_VER}",
         pat=pat,
@@ -141,6 +185,7 @@ async def list_branches(
     pat: str | None = None,
     org_url: str | None = None,
     tenant_id: str = "",
+    *, project_id: str = "", owner_id: str = "",
 ) -> list[dict]:
     """Return all branches in a repo as [{name, is_default}].
 
@@ -153,9 +198,11 @@ async def list_branches(
     is_default is always False.
 
     *pat* and *org_url* override the module-level env vars when provided.
+    project_id/owner_id let this check a project-scoped personal credential
+    first — see resolve_auth's docstring.
     """
     default_branch: str = ""
-    base, pat = await _resolve(org_url, pat, tenant_id)
+    base, pat = await _resolve(org_url, pat, tenant_id, project_id=project_id, owner_id=owner_id)
 
     if _UUID_RE.match(repo_id_or_name):
         repo_id = repo_id_or_name
@@ -190,9 +237,17 @@ async def resolve_clone_url(
     pat: str | None = None,
     org_url: str | None = None,
     tenant_id: str = "",
+    *, project_id: str = "", owner_id: str = "",
 ) -> str | None:
-    """Return the HTTPS remote URL for *repo_name* in *project*, or None if not found."""
-    repos = await list_repos(project, pat=pat, org_url=org_url, tenant_id=tenant_id)
+    """Return the HTTPS remote URL for *repo_name* in *project*, or None if not found.
+
+    project_id/owner_id let this check a project-scoped personal credential
+    first — see resolve_auth's docstring.
+    """
+    repos = await list_repos(
+        project, pat=pat, org_url=org_url, tenant_id=tenant_id,
+        project_id=project_id, owner_id=owner_id,
+    )
     matched = next((r for r in repos if r["name"] == repo_name), None)
     return matched["remote_url"] if matched else None
 

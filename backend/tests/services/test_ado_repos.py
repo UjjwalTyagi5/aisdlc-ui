@@ -93,8 +93,10 @@ async def test_list_projects_returns_id_and_name(monkeypatch):
     from shared.services import ado_repos
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient(_PROJECTS_RESPONSE))
-    monkeypatch.setattr(ado_repos, "ADO_ORG_URL", "https://dev.azure.com/testorg")
-    monkeypatch.setattr(ado_repos, "ADO_PAT", "secret-pat")
+    async def _fake_resolve_auth(tenant_id="", **kwargs):
+        return "https://dev.azure.com/testorg", "secret-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
 
     result = await ado_repos.list_projects()
 
@@ -110,8 +112,10 @@ async def test_list_repos_parses_camel_fields(monkeypatch):
     from shared.services import ado_repos
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient(_REPOS_RESPONSE))
-    monkeypatch.setattr(ado_repos, "ADO_ORG_URL", "https://dev.azure.com/testorg")
-    monkeypatch.setattr(ado_repos, "ADO_PAT", "secret-pat")
+    async def _fake_resolve_auth(tenant_id="", **kwargs):
+        return "https://dev.azure.com/testorg", "secret-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
 
     result = await ado_repos.list_repos("AlphaProject")
 
@@ -154,8 +158,10 @@ async def test_list_branches_strips_refs_prefix_and_marks_default(monkeypatch):
             return _FakeResponse(_REFS_RESPONSE)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _SequentialClient())
-    monkeypatch.setattr(ado_repos, "ADO_ORG_URL", "https://dev.azure.com/testorg")
-    monkeypatch.setattr(ado_repos, "ADO_PAT", "secret-pat")
+    async def _fake_resolve_auth(tenant_id="", **kwargs):
+        return "https://dev.azure.com/testorg", "secret-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
 
     result = await ado_repos.list_branches("AlphaProject", "alpha-service")
 
@@ -195,8 +201,10 @@ async def test_list_branches_accepts_repo_id_directly(monkeypatch):
             return _FakeResponse(_REFS_RESPONSE)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _RepoIdClient())
-    monkeypatch.setattr(ado_repos, "ADO_ORG_URL", "https://dev.azure.com/testorg")
-    monkeypatch.setattr(ado_repos, "ADO_PAT", "secret-pat")
+    async def _fake_resolve_auth(tenant_id="", **kwargs):
+        return "https://dev.azure.com/testorg", "secret-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
 
     result = await ado_repos.list_branches("AlphaProject", _REAL_UUID)
 
@@ -264,8 +272,48 @@ async def test_scrub_redacts_raw_and_encoded_pat():
     assert "***" in scrubbed
 
 
-async def test_list_branches_uses_override_pat_not_module_env(monkeypatch):
-    """list_branches() uses the caller-supplied pat, not the module-level ADO_PAT.
+async def test_resolve_auth_forwards_project_id_and_owner_id_to_the_connector_factory(monkeypatch):
+    """resolve_auth(tenant_id, project_id=, owner_id=) must forward both through to
+    get_connector_for_session so a project-scoped personal credential
+    (project_integration_credentials) can be found — not just the tenant-wide one.
+
+    Regression for a real bug found during live verification: a project admin
+    saved an Azure DevOps PAT for their own project via the Integrations page
+    (which writes project_integration_credentials + the matching app_secrets
+    row), but the "Pull repo" dialog still failed with "Couldn't reach Azure
+    DevOps" — resolve_auth only ever passed tenant_id to
+    get_connector_for_session, so the project-scoped credential was never
+    looked up and it fell through to the (nonexistent) tenant-wide one.
+    """
+    from config import connector_factory
+    from shared.services import ado_repos
+
+    captured: dict = {}
+
+    class _FakeConn:
+        async def auth_adapter(self, tenant_id):
+            return {"org_url": "https://dev.azure.com/srk02804", "pat": "resolved-pat"}
+
+    async def _fake_get_connector_for_session(kind, tenant_id="", **kwargs):
+        captured.update(kwargs)
+        return _FakeConn()
+
+    monkeypatch.setattr(
+        connector_factory, "get_connector_for_session", _fake_get_connector_for_session
+    )
+
+    org, pat = await ado_repos.resolve_auth(
+        "tenant-1", project_id="project-1", owner_id="owner-1"
+    )
+
+    assert org == "https://dev.azure.com/srk02804"
+    assert pat == "resolved-pat"
+    assert captured.get("project_id") == "project-1"
+    assert captured.get("owner_id") == "owner-1"
+
+
+async def test_list_branches_uses_override_pat_not_connector_default(monkeypatch):
+    """list_branches() uses the caller-supplied pat, not the connector-resolved one.
 
     This proves that per-session PAT overrides (s.pat) injected by git_tools Path B
     are forwarded through ado_repos helpers and not silently dropped.
@@ -289,8 +337,10 @@ async def test_list_branches_uses_override_pat_not_module_env(monkeypatch):
             return _FakeResponse(_REFS_RESPONSE)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _CapturingClient())
-    monkeypatch.setattr(ado_repos, "ADO_ORG_URL", "https://dev.azure.com/testorg")
-    monkeypatch.setattr(ado_repos, "ADO_PAT", "module-level-pat")
+    async def _fake_resolve_auth(tenant_id="", **kwargs):
+        return "https://dev.azure.com/testorg", "connector-resolved-pat"
+
+    monkeypatch.setattr(ado_repos, "resolve_auth", _fake_resolve_auth)
 
     import base64
     session_pat = "session-override-pat"

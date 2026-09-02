@@ -248,6 +248,27 @@ so moving is configuration, not code.
 
 ## Troubleshooting
 
+### A backend fix doesn't show up when you re-test it live, even with `--reload` running
+
+`--reload`'s `watchfiles` warning above covers a DIFFERENT failure mode (slow CPU-bound
+polling) — it does not warn that reload can simply not have caught up yet, or that a
+long-running process from an earlier session is still the one actually listening on the
+port. Hit twice independently in one session: a commit's fix didn't take effect against a
+dev server that had been running for 16+ minutes since the fix landed, and separately, a
+stale non-reload instance reproduced an already-fixed data-corruption bug during live
+verification. Both times, restarting the process immediately produced the correct
+behavior on the identical request.
+
+Before trusting a live-verification result against a fix you just made, confirm the
+running backend's start time postdates the commit under test:
+
+```powershell
+Get-Process -Id <pid> | Select-Object StartTime
+git log -1 --format=%ci <commit>
+```
+
+If in doubt, just restart it — cheaper than chasing a false negative.
+
 ### Code Review agent: Semgrep scans always return zero findings, or crash with `FileNotFoundError`
 
 Semgrep isn't a declared project dependency yet (see `docs/help/portfolio-1-agent-status.md`

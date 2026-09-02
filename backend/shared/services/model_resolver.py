@@ -122,7 +122,8 @@ async def _load_enabled(tenant_id: str) -> list[dict]:
         rows = (await s.execute(text(
             "SELECT o.id AS offering_id, o.model_id, o.is_default, "
             "o.rpm_limit, o.tpm_limit, o.cost_limit_usd, o.input_price_per_million, "
-            "p.id AS provider_id, p.provider, p.display_name, p.secret_ref, p.max_cost_per_call_usd "
+            "p.id AS provider_id, p.provider, p.display_name, p.secret_ref, p.api_base, "
+            "p.max_cost_per_call_usd "
             "FROM model_offerings o JOIN model_providers p ON p.id = o.provider_id "
             "WHERE o.enabled = true AND p.status = 'valid' AND p.tenant_id = :t AND o.tenant_id = :t "
             "ORDER BY p.display_name, p.provider, o.model_id"
@@ -130,7 +131,7 @@ async def _load_enabled(tenant_id: str) -> list[dict]:
     return [
         {"offering_id": str(r.offering_id), "model_id": r.model_id, "is_default": bool(r.is_default),
          "provider_id": str(r.provider_id), "provider": r.provider,
-         "display_name": r.display_name, "secret_ref": r.secret_ref,
+         "display_name": r.display_name, "secret_ref": r.secret_ref, "api_base": r.api_base,
          "rpm_limit": r.rpm_limit, "tpm_limit": r.tpm_limit,
          "cost_limit_usd": float(r.cost_limit_usd) if r.cost_limit_usd is not None else None,
          "max_cost_per_call_usd": float(r.max_cost_per_call_usd) if r.max_cost_per_call_usd is not None else None,
@@ -226,7 +227,10 @@ async def resolve_model_for_run(
         litellm_provider=_LITELLM_PROVIDER.get(chosen["provider"], chosen["provider"]),
         model=chosen["model_id"],
         api_key=api_key,
-        base_url=None,
+        # The provider's custom endpoint (self-hosted / OpenAI-compatible gateway).
+        # Previously hard-coded None, so a custom provider VERIFIED against its own
+        # api_base and then sent live traffic to the vendor default instead.
+        base_url=chosen.get("api_base") or None,
         alias=_alias(tenant_id, chosen["provider_id"]),
         offering_id=chosen["offering_id"],
         display_name=chosen["display_name"],
@@ -240,3 +244,106 @@ async def resolve_model_for_run(
     logger.debug("model resolved tenant=%s model=%s offering=%s alias=%s",
                  tenant_id, resolved.model, resolved.offering_id, resolved.alias)
     return resolved
+
+
+def invalidate_key_cache(tenant_id: str, secret_ref: str | None = None) -> None:
+    """Drop cached BYOK key(s) so a rotated or revoked key stops working immediately.
+
+    Without this the 300s TTL above keeps a REVOKED key usable in-process for up to
+    five minutes after an admin rotates it — which defeats the point of rotating a
+    compromised credential. Call on every rotate and every delete.
+    """
+    if secret_ref is not None:
+        _KEY_CACHE.pop((tenant_id, secret_ref), None)
+        return
+    for key in [k for k in _KEY_CACHE if k[0] == tenant_id]:
+        _KEY_CACHE.pop(key, None)
+
+
+def temperature_kwargs(model: str, temperature: float) -> dict:
+    """`{"temperature": ...}`, or `{}` for a model that structurally cannot take it.
+
+    gpt-5-family models (including gpt-5-codex) accept only the default temperature of
+    1, and litellm raises `UnsupportedParamsError` BEFORE the call rather than clamping
+    the value — so a tenant on azure/gpt-5-mini got a failed turn every time, with only
+    the exception type in the log (never `str(exc)`, which routinely echoes credentials
+    back). The Development agent hit this live on 2026-08-31 and fixed it in
+    `dev_agent._build_llm`; Requirements and Design had the same hardcoded temperature
+    in four more places, two `ChatLiteLLM` builds and two direct `litellm` calls.
+
+    A HELPER RATHER THAN A FIFTH COPY, and deliberately NOT `litellm.drop_params=True`.
+    Dropping params globally would silently swallow every other unsupported parameter
+    for every model everywhere, turning a loud, fixable error into a quiet behaviour
+    change. This is the narrow, verified exception for the one family that cannot take
+    the parameter; every other model keeps the low, determinism-favouring temperature
+    its agent chose.
+    """
+    return {} if "gpt-5" in (model or "").lower() else {"temperature": temperature}
+
+
+def resolve_chat_model(
+    *,
+    model_id: str | None = None,
+    offering_id: str | None = None,
+    tools: list | None = None,
+    system_prompt: str | None = None,  # noqa: ARG001 — caller owns prompt assembly
+):
+    """Build a tool-bound chat model from the run's BYOK-resolved model.
+
+    Reads the ResolvedModel the run's primary node stashed via set_resolved_model().
+    Mirrors testing_agent/config/shared.py:build_llm, which is the canonical shape.
+
+    Fails CLOSED under AGENT_RUNTIME_MODE == "enterprise": there is no platform-key
+    fallback (spec D-4). Local dev falls back to ANTHROPIC_API_KEY, same as every
+    other agent.
+
+    `system_prompt` is accepted for call-site compatibility but deliberately NOT
+    injected — each agent_node already prepends its own SystemMessage, and applying
+    it here too would duplicate the prompt.
+
+    `model_id` / `offering_id` are advisory: resolution for the run already happened
+    up front (that is what enforces budgets, grants and rate limits). They are used
+    only to detect a node asking for a DIFFERENT model than the run resolved, which
+    is a caller bug worth surfacing in logs.
+    """
+    resolved = get_resolved_model()
+    tools = tools or []
+
+    if resolved is not None:
+        if model_id and resolved.model != model_id:
+            logger.debug("node requested model=%s but run resolved %s — using the run's",
+                         model_id, resolved.model)
+        if offering_id and resolved.offering_id and resolved.offering_id != offering_id:
+            logger.debug("node requested offering=%s but run resolved %s — using the run's",
+                         offering_id, resolved.offering_id)
+        from langchain_litellm import ChatLiteLLM  # noqa: PLC0415 — importing litellm costs ~7s
+        llm = ChatLiteLLM(
+            model=resolved.model,
+            custom_llm_provider=resolved.litellm_provider,
+            api_base=resolved.base_url or None,
+            api_key=resolved.api_key,
+            max_retries=2,
+            max_tokens=8192,
+            **resolved.extra_kwargs,
+        )
+        return llm.bind_tools(tools) if tools else llm
+
+    # No model resolved for this run. The run resolves + stashes up front, but a node
+    # re-entering asyncio in an executor thread can drop the contextvar, so this path
+    # is reachable legitimately in local dev.
+    from config.env import AGENT_RUNTIME_MODE, ANTHROPIC_API_KEY, ANTHROPIC_MODEL  # noqa: PLC0415
+
+    if AGENT_RUNTIME_MODE == "enterprise" or not ANTHROPIC_API_KEY:
+        raise NoModelConfiguredError(
+            "No BYOK model resolved for this run. An administrator must configure and "
+            "verify a model provider in Org Settings -> Model Providers."
+        )
+    from langchain_litellm import ChatLiteLLM  # noqa: PLC0415
+    llm = ChatLiteLLM(
+        model=ANTHROPIC_MODEL,
+        custom_llm_provider="anthropic",
+        api_key=ANTHROPIC_API_KEY,
+        max_retries=2,
+        max_tokens=8192,
+    )
+    return llm.bind_tools(tools) if tools else llm

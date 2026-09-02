@@ -57,6 +57,23 @@ async def _name_exists(s, tenant_id: str, display_name: str, exclude_id: str | N
     return (await s.execute(text(q), params)).first() is not None
 
 
+def _invalidate_resolver_cache(tenant_id: str, secret_ref: str | None) -> None:
+    """Evict the resolver's in-process key cache for this credential.
+
+    model_resolver caches the plaintext key for 300s to avoid a Key Vault hop per agent
+    turn. Without this eviction a key that has just been rotated or revoked keeps working
+    in-process for up to five minutes — which defeats the point of rotating a compromised
+    credential. Imported lazily to keep the config->resolver direction one-way.
+    """
+    if not secret_ref:
+        return
+    try:
+        from shared.services.model_resolver import invalidate_key_cache  # noqa: PLC0415
+        invalidate_key_cache(tenant_id, secret_ref)
+    except Exception:  # noqa: BLE001 — cache eviction must never fail the write itself
+        logger.warning("could not invalidate resolver key cache tenant=%s", tenant_id)
+
+
 def _secret_ref(provider_id: str) -> str:
     return f"model-{provider_id}"
 
@@ -397,10 +414,23 @@ async def update_provider(
     tenant_id: str, provider_id: str, *,
     display_name: str | None = None, enabled_models: list[str] | None = None,
     max_cost_per_call_usd: float | None = "__unset__",  # type: ignore[assignment]
+    api_key: str | None = "__unset__",  # type: ignore[assignment]
+    api_base: str | None = "__unset__",  # type: ignore[assignment]
+    offering_limits: dict | None = None,
 ) -> dict:
     """max_cost_per_call_usd defaults to a sentinel (not None) so "not provided" and
     "explicitly clearing the cap" are distinguishable — None is a valid, meaningful
-    value (no per-call cap) that a caller must be able to set."""
+    value (no per-call cap) that a caller must be able to set.
+
+    api_key uses the same sentinel for the same reason, with three states:
+      "__unset__" -> leave the stored secret alone
+      "" or None  -> clear it (delete from the store, null the ref, provider stays)
+      value       -> rotate: overwrite under the SAME secret_ref
+
+    Rotation writes the store BEFORE the row and invalidates the resolver's key cache
+    after, so a revoked key stops working immediately rather than lingering for the
+    cache's 300s TTL.
+    """
     async with get_db_session_for_tenant(tenant_id) as s:
         row = await _provider_row(s, provider_id)
         if row is None:
@@ -410,6 +440,48 @@ async def update_provider(
                 text("UPDATE model_providers SET max_cost_per_call_usd = :v, updated_at = now() WHERE id = :id"),
                 {"v": max_cost_per_call_usd, "id": provider_id},
             )
+        if api_base != "__unset__":
+            await s.execute(
+                text("UPDATE model_providers SET api_base = :v, updated_at = now() WHERE id = :id"),
+                {"v": (api_base or "").strip() or None, "id": provider_id},
+            )
+        if offering_limits:
+            # The dialog's "Usage limits" section states these apply "to every model in
+            # this subscription", so they fan out across the provider's offerings. Only
+            # the keys the caller actually sent are touched; None means "no limit".
+            for col in ("rpm_limit", "tpm_limit", "cost_limit_usd"):
+                if col in offering_limits:
+                    await s.execute(
+                        text(f"UPDATE model_offerings SET {col} = :v "  # noqa: S608 — col is from the fixed tuple above
+                             "WHERE provider_id = :pid AND tenant_id = :t"),
+                        {"v": offering_limits[col], "pid": provider_id, "t": tenant_id},
+                    )
+        if api_key != "__unset__":
+            new_key = (api_key or "").strip()
+            old_ref = row.secret_ref
+            if new_key:
+                # Reuse the existing ref so nothing else has to change; mint one only
+                # when re-keying a provider that was onboarded keyless.
+                ref = old_ref or _secret_ref(provider_id)
+                await secret_store.put_secret(tenant_id, ref, new_key)
+                if ref != old_ref:
+                    await s.execute(
+                        text("UPDATE model_providers SET secret_ref = :r, updated_at = now() WHERE id = :id"),
+                        {"r": ref, "id": provider_id},
+                    )
+                _invalidate_resolver_cache(tenant_id, ref)
+                logger.info("model provider key rotated tenant=%s id=%s", tenant_id, provider_id)
+            elif old_ref:
+                # Explicit clear: drop the secret and the pointer. secret_ref is nullable
+                # (0017_model_gateway_cascade) precisely so a provider can outlive its key.
+                await secret_store.delete_secret(tenant_id, old_ref)
+                await s.execute(
+                    text("UPDATE model_providers SET secret_ref = NULL, status = 'unverified', "
+                         "updated_at = now() WHERE id = :id"),
+                    {"id": provider_id},
+                )
+                _invalidate_resolver_cache(tenant_id, old_ref)
+                logger.info("model provider key cleared tenant=%s id=%s", tenant_id, provider_id)
         if display_name is not None:
             new_name = display_name.strip()
             if new_name and await _name_exists(s, tenant_id, new_name, exclude_id=provider_id):
@@ -485,6 +557,8 @@ async def delete_provider(tenant_id: str, provider_id: str, workspace_id: str | 
         await s.execute(text("DELETE FROM model_providers WHERE id = :id"), {"id": provider_id})
     if secret_ref:
         await secret_store.delete_secret(tenant_id, secret_ref)
+        # Otherwise the deleted key stays usable in-process for the cache's 300s TTL.
+        _invalidate_resolver_cache(tenant_id, secret_ref)
     logger.info("model provider deleted tenant=%s id=%s", tenant_id, provider_id)
 
 

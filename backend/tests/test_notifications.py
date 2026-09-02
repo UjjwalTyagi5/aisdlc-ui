@@ -266,6 +266,12 @@ async def test_raising_a_request_notifies_the_queue_it_landed_in(org):
 @pytest.mark.asyncio
 async def test_deciding_a_request_notifies_the_person_who_raised_it(org):
     """The outcome follows the INITIATOR, wherever the request climbed to."""
+    # decide()'s gate-integrity check (sub-project B) now verifies the decider's own
+    # role_bindings row covers the request's scope, not just their role name — "pa" needs
+    # a real project_admin binding (this request carries no project_id, so it lands on
+    # the documented project-less fallback: any project_admin within the request's own
+    # business unit).
+    await bind(org["org"], "pa", "project_admin", "project", org["project"])
     async with get_db_session_for_tenant(org["org"]) as s:
         req = await governance.create_request(
             s, tenant_id=org["org"], initiator_id="dev", initiator_name="Dev",

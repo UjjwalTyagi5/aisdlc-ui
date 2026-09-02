@@ -115,6 +115,8 @@ export function listIntegrationAccess(
       description: null,
       origin: "organization",
       onboarded: Boolean(connection?.installed),
+      // Connectors have no tool list — that is an MCP server's answer.
+      tools: [],
       units: entries,
       grantedUnitCount: entries.filter((u) => u.via !== "none").length,
       // Counts projects USING it, not projects that could — the figure on the
@@ -147,6 +149,9 @@ export function listIntegrationAccess(
       description: server.description ?? null,
       origin: "organization",
       onboarded: server.is_active,
+      // The fixture's own snapshot, if it carries one. Mock mode never probes,
+      // so an absent list means "not probed" here exactly as it does live.
+      tools: server.tools_snapshot ?? [],
       units: entries,
       grantedUnitCount: entries.filter((u) => u.via !== "none").length,
       // Counts projects USING it, not projects that could — the figure on the

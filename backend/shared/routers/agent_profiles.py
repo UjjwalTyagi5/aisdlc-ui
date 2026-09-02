@@ -14,26 +14,92 @@ Serialization convention: snake_case in responses, matching the sibling capabili
 router (shared/routers/capabilities.py) and the resource routers. The frontend BFF reads
 these keys verbatim.
 
-RBAC (design §3.5): reads gate on the "artifact:view" floor (router-level, matching the
-capabilities router). draft/preview require "skill:edit"; publish/unpublish require
-"workspace:manage". Every route therefore carries a require_permission sentinel so the
-process_api D-05 boot scan stays green.
+RBAC (design §3.5, extended by sub-project 2, then made real by sub-project 3): reads
+gate on the "artifact:view" floor (router-level, matching the capabilities router)
+PLUS, at the personal ("user") scope only, `assert_own_user_scope` — the same
+tenant-wide `GET .../summary`/`.../versions` reads that anyone can run against
+org/workspace/project also accept `scope=user`, and without this extra check any
+authenticated caller could read another user's personal default by supplying their
+`scope_id`. draft/preview/publish/unpublish use the in-body, scope-aware
+`assert_can_write_agent_scope` check instead of a route-level Depends(); `propose()`
+calls the `resolve_actor_tier_access` helper underneath that check directly (it has
+already ruled out scope=="user" itself, so it does not need that wrapper's personal-
+scope branch). For the personal scope, `assert_can_write_agent_scope` allows any role
+except org_admin/bu_admin to write ONLY their own scope_id; for org/workspace/project
+scope, both paths defer to `resolve_actor_tier_access` (see that function's docstring
+for the full per-scope rules) for a real per-resource tier-ownership lookup instead of
+a blanket permission string — at a high level: org is owned via the admin:* wildcard,
+workspace via a live bu_admin binding scoped to that workspace, project via a live
+project_admin binding scoped to that project, and each tier also reports "may_propose"
+for the role one tier up (bu_admin/project_admin/any project member respectively).
+"publish"/"unpublish" require ownership; "draft" and `propose()` accept ownership OR
+propose-eligibility — a non-owner may draft something and then file it via `propose()`
+for the owner to publish, using the `agent_default_org`/`agent_default_workspace`/
+`agent_default_project` governance request types and approval machinery that predate
+this sub-project (sub-project 3 only changed WHO is allowed to call `propose()`, via
+`resolve_actor_tier_access`, not the request types or approval flow it files into).
+`propose()` has no route-level "skill:edit" gate — it never did; it is, and was,
+just another scope-aware in-body caller. Every route still carries a
+require_permission sentinel (the router-level floor) so the process_api D-05 boot
+scan stays green.
+
+EVALUATION GATE (sub-project 4, spec §3.3): a second, independent axis layered
+ALONGSIDE the tier-ownership RBAC above, not a replacement for it — authorization
+answers "may this actor act here at all"; evaluation answers "has this specific
+draft passed a quality gate". `propose()` now requires a PASSING
+`AgentDefaultEvaluation` row for the EXACT draft version being proposed, checked via
+`latest_passing_evaluation(tenant_id, "profile", target.id)`
+(shared/services/eval_gate.py) — it matches on the draft's own id, never "this
+profile has ever passed at some point", so re-editing a previously-passing draft
+re-opens the gate. Missing or failing, `propose()` refuses with 422
+`EVALUATION_REQUIRED` before it ever reaches the governance-request filing.
+`evaluate()` (POST .../evaluate) is the only way to close that gate: it runs the
+deterministic, no-LLM `evaluate_agent_default` rubric
+(shared/eval/agent_studio_scoring.py) against the draft row's OWN three prompt
+slots (prompt_prepend/prompt_append/output_contract_extra — not composed with any
+ancestor tier's content; see that module's own docstring for why that is a real,
+disclosed limitation) and records a PASS/FAIL row via `run_evaluation`. It also
+requires the same `owns or may_propose` tier standing `propose()` itself requires
+(via `resolve_actor_tier_access`) — router-level `artifact:view` alone would let
+any tenant member evaluate any draft regardless of standing at that tier, which
+would let literally anyone supply R3's "someone other than the author" blessing
+(final whole-branch review, sub-project 4, Important #1, fixed). scope=="user" is
+rejected outright (422 `NOT_A_SHARED_TIER`) — a personal draft is never proposed,
+so it is never evaluated either. For scope=="org" specifically (R3 — every
+workspace/project in the tenant inherits from an org default, the highest-blast-
+radius tier), the evaluator may not be the draft's own author (403
+`SELF_EVALUATION_BLOCKED`); workspace/project scope (R2) has no such restriction
+and may self-evaluate. The owner's direct
+`publish()`/rollback path is deliberately NOT gated by any of this — only the
+propose-to-approval path a non-owner uses is; an owner publishing their own work was
+never routed through evaluation and sub-project 4 did not add that restriction.
+
+Note: `assert_can_write_agent_scope`/`assert_own_user_scope` do NOT emit the
+RBAC_DENIALS metric or an access-denied audit row that the route-level
+`Depends(require_permission(...))` gates they replaced used to on a 403 — a disclosed,
+accepted gap (see the sub-project 2 final review), not an oversight. Also: a published
+personal-tier default is fully persisted and readable/writable per the rules above, but
+is NOT yet applied at actual agent-run time — `resolve_profile` in
+`agent_profile_store.py` only resolves org/workspace/project. Wiring the runtime is
+tracked as separate follow-up work, not part of this sub-project's scope.
 """
 from __future__ import annotations
 
 import re
 import uuid
-from typing import Iterable, Optional
+from datetime import datetime, timezone
+from typing import Iterable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.agent_registry import AGENT_REGISTRY
 from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service
 from shared.authz.dependency import require_permission
+from shared.authz.read_scope import live_binding
 from shared.authz.workspace import active_workspace_for_request
 from shared.db import get_db_session
 from shared.models.orm import AgentProfile
@@ -47,8 +113,38 @@ PIPELINE_ORDER: tuple[str, ...] = (
     "security", "testing", "deployment", "documentation",
 )
 
-SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project")
+SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project", "user")
 SCOPE_ORDER: dict[str, int] = {"org": 0, "workspace": 1, "project": 2}
+
+
+def ancestor_chain(
+    scope: str, scope_id: str | None, workspace_id: str | None, project_id: str | None = None,
+) -> list[tuple[str, str | None]]:
+    """Nearest-first ancestor (scope, scope_id) pairs above `scope`, for inheritance
+    resolution. `workspace_id` is the project's own parent BU — required to resolve a
+    project's WORKSPACE ancestor specifically; omitted, a project-scope request still
+    resolves its org ancestor, just not its workspace ancestor. `project_id` is
+    additionally needed to resolve a PERSONAL (user) scope's project ancestor — the
+    only scope whose full chain is longer than one hop. Never errors on a missing id.
+    Shared with skill_store.py's list_skills_merged, which needs the identical chain
+    shape.
+    """
+    if scope == "org":
+        return []
+    if scope == "workspace":
+        return [("org", None)]
+    if scope == "project":
+        return [("workspace", workspace_id), ("org", None)] if workspace_id else [("org", None)]
+    if scope == "user":
+        chain: list[tuple[str, str | None]] = []
+        if project_id:
+            chain.append(("project", project_id))
+        if workspace_id:
+            chain.append(("workspace", workspace_id))
+        chain.append(("org", None))
+        return chain
+    return []
+
 
 VENDOR_LAYER_NAME = "Vendor base prompt (identity, tools, safety, HANDOFF contract)"
 
@@ -140,32 +236,61 @@ def apply_publish_flip(rows: Iterable, target_id) -> Optional[int]:
     return previous_active_version
 
 
-def build_agent_summary(agent_id: str, rows: Iterable) -> dict:
-    """Summarize all version rows for one agent+scope into the summary[] shape."""
+def _active_content(row) -> dict:
+    return {
+        "prompt_prepend": row.prompt_prepend or "",
+        "prompt_append": row.prompt_append or "",
+        "output_contract_extra": row.output_contract_extra or "",
+    }
+
+
+def _nearest_ancestor_active(ancestor_active: list[tuple[str, object]]) -> tuple[str | None, object | None]:
+    for anc_scope, row in ancestor_active:
+        if row is not None:
+            return anc_scope, row
+    return None, None
+
+
+def build_agent_summary(
+    agent_id: str, rows: Iterable, ancestor_active: list[tuple[str, object]] | None = None,
+) -> dict:
+    """Summarize all version rows for one agent+scope into the summary[] shape.
+
+    `ancestor_active` (nearest-first) is consulted ONLY when this tier has no active
+    row of its own — draft_count/latest_version always describe THIS tier's own
+    history, never an ancestor's; only `active`/`inherited_from` fall through.
+    """
     rows = list(rows)
+    ancestor_active = ancestor_active or []
     if not rows:
+        inherited_from, inherited_row = _nearest_ancestor_active(ancestor_active)
         return {
-            "agent_id": agent_id,
-            "active_version": None,
-            "latest_version": None,
-            "draft_count": 0,
-            "updated_at": None,
-            "active": None,
+            "agent_id": agent_id, "active_version": None, "latest_version": None,
+            "draft_count": 0, "updated_at": None,
+            "active": _active_content(inherited_row) if inherited_row is not None else None,
+            "inherited_from": inherited_from,
         }
     active_rows = [r for r in rows if r.is_active]
     active = max(active_rows, key=lambda r: r.version) if active_rows else None
     updated_candidates = [r.updated_at for r in rows if r.updated_at is not None]
+
+    inherited_from = None
+    active_content = None
+    if active is not None:
+        active_content = _active_content(active)
+    else:
+        inherited_from, inherited_row = _nearest_ancestor_active(ancestor_active)
+        if inherited_row is not None:
+            active_content = _active_content(inherited_row)
+
     return {
         "agent_id": agent_id,
         "active_version": active.version if active else None,
         "latest_version": max(r.version for r in rows),
         "draft_count": sum(1 for r in rows if not r.is_active),
         "updated_at": _iso(max(updated_candidates)) if updated_candidates else None,
-        "active": {
-            "prompt_prepend": active.prompt_prepend or "",
-            "prompt_append": active.prompt_append or "",
-            "output_contract_extra": active.output_contract_extra or "",
-        } if active else None,
+        "active": active_content,
+        "inherited_from": inherited_from,
     }
 
 
@@ -252,8 +377,202 @@ def _user_id(request: Request) -> str:
 def _validate_scope(scope: str, scope_id: str | None) -> None:
     if scope not in SCOPE_VALUES:
         raise HTTPException(status_code=422, detail=f"scope must be one of {SCOPE_VALUES}")
-    if scope in ("workspace", "project") and not scope_id:
+    if scope in ("workspace", "project", "user") and not scope_id:
         raise HTTPException(status_code=422, detail=f"scope_id is required for {scope} scope")
+
+
+def _same_actor(a: str | None, b: str | None) -> bool:
+    """True when both ids are present and, compared as strings, identical.
+
+    Both the write-side ownership check (below) and the read-side one
+    (`assert_own_user_scope`) need the exact same "is this really you" test —
+    centralized so the two can't silently drift into different normalization
+    rules (e.g. one comparing raw strings, the other comparing parsed UUIDs).
+    """
+    return bool(a) and bool(b) and str(a) == str(b)
+
+
+async def assert_can_write_agent_scope(
+    tenant_id: str,
+    perms: list[str],
+    role: str | None,
+    scope: str,
+    scope_id: str | None,
+    actor_user_id: str,
+    *,
+    action: Literal["draft", "publish"],
+) -> None:
+    """Scope-aware authorization for an Agent Studio write (Behavior draft/publish/
+    propose; Skills create/update/delete/toggle/activate/propose). Raises
+    HTTPException(403) on denial.
+
+    user: self-service, unchanged from sub-project 2 — allowed only when `role` is
+    neither "org_admin" nor "bu_admin" AND `scope_id` equals the caller's own user id.
+
+    org/workspace/project: real tier ownership + "propose one tier up," via
+    `resolve_actor_tier_access` — NOT the old blanket permission-string check
+    (sub-project 3 replaces it deliberately; see the sub-project 3 spec's
+    "Existing state" section for why the old check was a real bug, not just
+    incomplete). "publish" requires ownership. "draft" requires ownership OR
+    propose-eligibility — a non-owner may still draft, to have something to
+    propose.
+    """
+    if scope == "user":
+        if role is None or role in ("org_admin", "bu_admin"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if not _same_actor(scope_id, actor_user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, actor_user_id, perms, scope, scope_id,
+    )
+    if action == "publish":
+        if not owns:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def assert_own_user_scope(scope: str, scope_id: str | None, actor_user_id: str) -> None:
+    """Read-side twin of `assert_can_write_agent_scope`'s personal-tier ownership rule.
+
+    The GET routes (`summary`, `versions`, and Skills' `list`/`detail`) have no
+    permission gate to piggyback on for this — only the router's blanket
+    `artifact:view` floor, which every tenant member holds. Without this check,
+    `scope=user&scope_id=<anyone>` would let any authenticated caller read another
+    user's personal Behavior/Skills content (final whole-branch review finding C1).
+    Every OTHER scope is left exactly as broadly readable as before — org/workspace/
+    project are deliberately SHARED tiers everyone in the cascade needs to see (that
+    is the entire point of the inheritance-visibility work in sub-project 1); `user`
+    is the one tier that is genuinely private to a single person, which is why it
+    alone needs this extra check.
+    """
+    if scope == "user" and not _same_actor(scope_id, actor_user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+async def resolve_actor_tier_access(
+    tenant_id: str, actor_user_id: str, perms: list[str], scope: str, scope_id: str | None,
+) -> tuple[bool, bool]:
+    """(owns, may_propose) for `actor_user_id` on this EXACT (scope, scope_id) — a
+    real per-resource lookup, never the global "highest standing" role
+    (`effective_platform_role`/`resolve_platform_role_for_user` are scope-blind and
+    must not be reused here — a bu_admin on Workspace X must not pass an ownership
+    check for Workspace Y just because they're "a bu_admin" tenant-wide).
+
+    owns: may publish/unpublish/activate this tier directly.
+    may_propose: may draft-and-file-for-approval at this tier. Irrelevant once
+    `owns` is True, but reported independently — callers decide precedence.
+
+    org: owns via the admin:* wildcard alone (org_admin always carries it; no
+    role_bindings lookup needed for a role that IS the wildcard). may_propose via
+    a live bu_admin binding ANYWHERE in the tenant — org is the tenant's one
+    instance, so "one tier up from workspace" needs no specific workspace id.
+
+    workspace: owns via the admin:* wildcard (an org_admin owns every tier — see
+    below) OR a live bu_admin binding scoped to this exact workspace. may_propose
+    via a live project_admin binding on ANY project whose workspace_id is this
+    workspace (one tier up from "some project in this BU").
+
+    project: owns via the admin:* wildcard OR a live project_admin binding scoped
+    to this exact project. may_propose via ANY live role_binding scoped to this
+    exact project, excluding role_name='contributor' (via `grants_scope()`,
+    read_scope.py's canonical "confers reach, not merely membership" predicate —
+    NOT a bare `!=`, which drops every custom role: `role_name` is NULL for one,
+    and `NULL != 'contributor'` is NULL, not true) — contributor is documented
+    elsewhere as "not enough to open an agent"; membership alone earns propose
+    access for every other role.
+
+    The admin:* shortcut at every tier (not just org) is deliberate, not an
+    oversight: an org_admin's role_bindings row is written at
+    scope_kind='organization', which never matches the workspace/project
+    branches' own scope_kind predicates — omitting the shortcut here would 403 an
+    org_admin on every workspace/project-tier write, contradicting this sub-
+    project's own spec ("Org Admin: unaffected — wildcard already covered every
+    case") and silently revoking access `has_permission`'s wildcard shortcut used
+    to grant everywhere before this function existed (final whole-branch review,
+    sub-project 3, Critical #1).
+    """
+    from shared.authz.permissions import has_permission as _has_perm  # noqa: PLC0415 - kept local for symmetry with other lazy imports here (the module-level import this comment used to describe was removed by sub-project 3 Task 2)
+    from shared.authz.read_scope import grants_scope  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    is_org_admin = _has_perm(perms, "admin:*")
+
+    if scope == "org":
+        async with get_db_session_for_tenant(tenant_id) as session:
+            hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'business_unit' AND rb.role_name = 'bu_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        return is_org_admin, hit is not None
+
+    if scope == "workspace":
+        async with get_db_session_for_tenant(tenant_id) as session:
+            owns_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'business_unit' AND rb.scope_id = :w "
+                    f"AND rb.role_name = 'bu_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "w": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+            propose_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.role_name = 'project_admin' "
+                    f"AND rb.scope_id IN (SELECT id FROM projects WHERE workspace_id = CAST(:w AS uuid)) "
+                    f"LIMIT 1"
+                ),
+                {"u": actor_user_id, "w": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        owns = is_org_admin or owns_hit is not None
+        return owns, owns or propose_hit is not None
+
+    if scope == "project":
+        async with get_db_session_for_tenant(tenant_id) as session:
+            owns_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.scope_id = :p "
+                    f"AND rb.role_name = 'project_admin' LIMIT 1"
+                ),
+                {"u": actor_user_id, "p": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+            propose_hit = (await session.execute(
+                text(
+                    f"SELECT 1 FROM role_bindings rb WHERE {live_binding()} "
+                    f"AND rb.scope_kind = 'project' AND rb.scope_id = :p "
+                    f"AND {grants_scope()} LIMIT 1"
+                ),
+                {"u": actor_user_id, "p": scope_id, "now": datetime.now(tz=timezone.utc)},
+            )).first()
+        owns = is_org_admin or owns_hit is not None
+        return owns, owns or propose_hit is not None
+
+    return False, False
+
+
+async def _project_workspace_id(tenant_id: str, project_id: str) -> Optional[str]:
+    """The workspace a project belongs to — for filing a project-scope proposal
+    against the RIGHT unit. `target.scope_id`/`body.scope_id` at project scope is
+    the PROJECT id, not the workspace id; using it directly as `workspace_id`
+    (the bug this fixes) files the request under an id that is never a real
+    workspace, so `allowed_workspace_ids`' `IN (:allowed)` filter never matches it
+    — the request becomes invisible in every approver's queue except the
+    initiator's own (final whole-branch review, sub-project 3, Important #5)."""
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as session:
+        row = (await session.execute(
+            text("SELECT workspace_id FROM projects WHERE id = :p"),
+            {"p": project_id},
+        )).first()
+    return str(row[0]) if row else None
 
 
 def _validate_agent(agent_id: str) -> None:
@@ -290,10 +609,13 @@ async def get_summary(
     request: Request,
     scope: str,
     scope_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    project_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db_session),
 ):
     _tenant_id(request)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     stmt = select(AgentProfile).where(
         AgentProfile.agent_id.in_(PIPELINE_ORDER),
         *_scope_filters(scope, scope_id),
@@ -302,7 +624,23 @@ async def get_summary(
     by_agent: dict[str, list] = {a: [] for a in PIPELINE_ORDER}
     for r in rows:
         by_agent.setdefault(r.agent_id, []).append(r)
-    return {"agents": [build_agent_summary(a, by_agent.get(a, [])) for a in PIPELINE_ORDER]}
+
+    ancestor_by_agent: dict[str, list[tuple[str, object]]] = {a: [] for a in PIPELINE_ORDER}
+    for anc_scope, anc_scope_id in ancestor_chain(scope, scope_id, workspace_id, project_id):
+        anc_rows = list((await db.execute(
+            select(AgentProfile).where(
+                AgentProfile.agent_id.in_(PIPELINE_ORDER),
+                AgentProfile.is_active.is_(True),
+                *_scope_filters(anc_scope, anc_scope_id),
+            )
+        )).scalars().all())
+        for r in anc_rows:
+            ancestor_by_agent.setdefault(r.agent_id, []).append((anc_scope, r))
+
+    return {"agents": [
+        build_agent_summary(a, by_agent.get(a, []), ancestor_by_agent.get(a))
+        for a in PIPELINE_ORDER
+    ]}
 
 
 @agent_profiles_router.get("/versions")
@@ -316,6 +654,7 @@ async def get_versions(
     _tenant_id(request)
     _validate_agent(agent_id)
     _validate_scope(scope, scope_id)
+    assert_own_user_scope(scope, scope_id, _user_id(request))
     stmt = (
         select(AgentProfile)
         .where(AgentProfile.agent_id == agent_id, *_scope_filters(scope, scope_id))
@@ -325,18 +664,22 @@ async def get_versions(
     return {"versions": [_version_dict(r) for r in rows]}
 
 
-@agent_profiles_router.post(
-    "/draft",
-    dependencies=[Depends(require_permission("skill:edit"))],
-)
+@agent_profiles_router.post("/draft")
 async def create_draft(
     body: DraftIn,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415 - avoids an import cycle, matches propose()'s existing pattern
+
     tenant_id = _tenant_id(request)
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
+    role = await effective_platform_role(db, request)
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
+        body.scope, body.scope_id, _user_id(request), action="draft",
+    )
 
     violations = lint_profile_fields(
         body.prompt_prepend, body.prompt_append, body.output_contract_extra
@@ -368,17 +711,22 @@ async def create_draft(
     return _version_dict(row)
 
 
-@agent_profiles_router.post(
-    "/{profile_id}/publish",
-    dependencies=[Depends(require_permission("workspace:manage"))],
-)
+@agent_profiles_router.post("/{profile_id}/publish")
 async def publish(
     profile_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
+    role = await effective_platform_role(db, request)
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
+        target.scope, str(target.scope_id) if target.scope_id else None,
+        _user_id(request), action="publish",
+    )
 
     siblings = list((await db.execute(
         select(AgentProfile).where(
@@ -409,17 +757,22 @@ async def publish(
     return _version_dict(target)
 
 
-@agent_profiles_router.post(
-    "/{profile_id}/unpublish",
-    dependencies=[Depends(require_permission("workspace:manage"))],
-)
+@agent_profiles_router.post("/{profile_id}/unpublish")
 async def unpublish(
     profile_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
     tenant_id = _tenant_id(request)
     target = await _load_or_404(db, profile_id)
+    role = await effective_platform_role(db, request)
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
+        target.scope, str(target.scope_id) if target.scope_id else None,
+        _user_id(request), action="publish",
+    )
 
     target.is_active = False
     await db.flush()
@@ -445,7 +798,6 @@ async def unpublish(
 @agent_profiles_router.post(
     "/{profile_id}/propose",
     status_code=201,
-    dependencies=[Depends(require_permission("skill:edit"))],
 )
 async def propose(
     profile_id: str,
@@ -489,6 +841,23 @@ async def propose(
             },
         )
 
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, _user_id(request), perms, target.scope,
+        str(target.scope_id) if target.scope_id else None,
+    )
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from shared.services.eval_gate import latest_passing_evaluation  # noqa: PLC0415
+
+    passing = await latest_passing_evaluation(tenant_id, "profile", str(target.id))
+    if passing is None:
+        raise HTTPException(status_code=422, detail={
+            "code": "EVALUATION_REQUIRED",
+            "message": "Run an evaluation before proposing this change.",
+        })
+
     request_type = f"agent_default_{target.scope}"
     scope_label = {"org": "organization", "workspace": "business unit", "project": "project"}[
         target.scope
@@ -499,9 +868,15 @@ async def propose(
     # The unit the proposal is filed against. An org-scoped profile has no
     # workspace of its own, so it is filed against the caller's active unit — the
     # request still has to belong somewhere for the queue's scope filter to work.
-    workspace_id = str(target.scope_id) if target.scope_id else await active_workspace_for_request(
-        db, request
-    )
+    # A project-scoped profile's scope_id is the PROJECT id, not a workspace id —
+    # it must be resolved through the project row, not used as-is (see
+    # _project_workspace_id's docstring).
+    if target.scope == "project":
+        workspace_id = await _project_workspace_id(tenant_id, str(target.scope_id))
+    elif target.scope_id:
+        workspace_id = str(target.scope_id)
+    else:
+        workspace_id = await active_workspace_for_request(request, tenant_id)
     if not workspace_id:
         raise HTTPException(
             status_code=422,
@@ -540,32 +915,99 @@ async def propose(
         )
 
 
-@agent_profiles_router.post(
-    "/preview",
-    dependencies=[Depends(require_permission("skill:edit"))],
-)
+@agent_profiles_router.post("/{profile_id}/evaluate", status_code=201)
+async def evaluate(
+    profile_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Run the deterministic golden-task rubric against this draft and record the
+    result — a precondition for propose() (see Global Constraints and the
+    sub-project 4 spec). For scope=="org" (R3 — every workspace/project in the
+    tenant inherits from an org default), the evaluator must not be the draft's
+    own author (SELF_EVALUATION_BLOCKED) — R2 (workspace/project) may self-evaluate.
+    """
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415 - avoids an import cycle, matches propose()'s existing pattern
+    from shared.services.eval_gate import run_evaluation  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    target = await _load_or_404(db, profile_id)
+    if target.scope == "user":
+        raise HTTPException(status_code=422, detail={
+            "code": "NOT_A_SHARED_TIER",
+            "message": "A personal default has nothing to evaluate against.",
+        })
+
+    actor_id = _user_id(request)
+    perms = getattr(request.state, "permissions", []) or []
+    owns, may_propose = await resolve_actor_tier_access(
+        tenant_id, actor_id, perms, target.scope, str(target.scope_id) if target.scope_id else None,
+    )
+    # Router-level artifact:view alone would let ANY tenant member evaluate ANY
+    # draft, including one they have no standing on at all — that would make
+    # R3's "someone other than the author" requirement satisfiable by literally
+    # any other logged-in account in the tenant, degrading its only real human
+    # control to a formality. Requiring the same owns-or-may_propose standing
+    # propose()/propose_skill() already require keeps the evaluator someone who
+    # could plausibly have written or proposed at this tier (final whole-branch
+    # review, sub-project 4, Important #1).
+    if not (owns or may_propose):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if target.scope == "org" and target.created_by == actor_id:
+        raise HTTPException(status_code=403, detail={
+            "code": "SELF_EVALUATION_BLOCKED",
+            "message": "An organization-wide default must be evaluated by someone other than its author.",
+        })
+
+    role = await effective_platform_role(db, request)
+    body = "\n".join(filter(None, [
+        target.prompt_prepend, target.prompt_append, target.output_contract_extra,
+    ]))
+    row = await run_evaluation(
+        tenant_id=tenant_id, target_type="profile", target_id=str(target.id),
+        agent_id=target.agent_id, scope=target.scope, body=body,
+        evaluator_id=actor_id, evaluator_role=role,
+    )
+    return row
+
+
+@agent_profiles_router.post("/preview")
 async def preview(
     body: DraftIn,
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    _tenant_id(request)
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
     _validate_agent(body.agent_id)
     _validate_scope(body.scope, body.scope_id)
+    role = await effective_platform_role(db, request)
+    await assert_can_write_agent_scope(
+        tenant_id, getattr(request.state, "permissions", []) or [], role,
+        body.scope, body.scope_id, _user_id(request), action="draft",
+    )
 
-    # Active lower-scope layers the draft stacks on. Only the org layer is reliably
-    # resolvable from a draft payload (which carries no workspace id); a project-scoped
-    # draft's workspace layer is therefore omitted (documented deviation).
+    # Active layers from every ancestor tier the draft would stack on. `DraftIn`
+    # doesn't carry workspace_id/project_id (draft-create genuinely doesn't need
+    # them — a draft only ever belongs to its own tier), but preview's frontend
+    # caller (behavior-tab.tsx) already sends them via a superset body; FastAPI
+    # ignores fields DraftIn doesn't declare, so read them off the raw request
+    # body instead of widening DraftIn's contract for every other caller.
+    raw = await request.json()
+    workspace_id = raw.get("workspace_id")
+    project_id = raw.get("project_id")
     lower_rows: list = []
-    if SCOPE_ORDER.get(body.scope, 0) > 0:
-        lower_rows = list((await db.execute(
+    for anc_scope, anc_scope_id in ancestor_chain(body.scope, body.scope_id, workspace_id, project_id):
+        anc_rows = list((await db.execute(
             select(AgentProfile).where(
                 AgentProfile.agent_id == body.agent_id,
-                AgentProfile.scope == "org",
-                AgentProfile.scope_id.is_(None),
                 AgentProfile.is_active.is_(True),
+                *_scope_filters(anc_scope, anc_scope_id),
             )
         )).scalars().all())
+        lower_rows.extend(anc_rows)
 
     layers = build_preview_layers(
         lower_rows,

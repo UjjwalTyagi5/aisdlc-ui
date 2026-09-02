@@ -376,7 +376,7 @@ async def test_sc08_slack_empty_channel_raises():
     """SC-08: notify_slack raises ValueError for empty channel (no fallback channel)."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="", message="test message")
 
@@ -386,7 +386,7 @@ async def test_sc08_slack_over_length_message_raises():
     """SC-08: notify_slack raises ValueError for messages exceeding max length."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     long_message = "A" * 4001  # over 4000-char limit
     with pytest.raises(ValueError):
         await connector.notify_slack(channel="#general", message=long_message)
@@ -397,7 +397,7 @@ async def test_sc08_slack_secret_pattern_raises():
     """SC-08: notify_slack raises ValueError when message contains ANTHROPIC_API_KEY pattern."""
     from config.connectors.slack import SlackConnector
 
-    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     with pytest.raises(ValueError):
         await connector.notify_slack(
             channel="#alerts",
@@ -412,7 +412,7 @@ async def test_sc08_slack_clean_message_accepted():
 
     # tenant_id is required by auth_adapter() (REQ-M7-01) — connector credentials
     # are per-tenant, so a connector built with none can never authenticate.
-    connector = SlackConnector(bot_token="xoxb-fake-token", tenant_id="test-tenant")
+    connector = SlackConnector(tenant_id="test-tenant")
     mock_response = MagicMock()
     with patch(
         "slack_sdk.web.async_client.AsyncWebClient.chat_postMessage",

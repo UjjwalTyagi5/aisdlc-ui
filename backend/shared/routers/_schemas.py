@@ -52,6 +52,14 @@ def _slugify(name: str) -> str:
 
 # ── ProjectOut ──────────────────────────────────────────────────────────────
 
+class BudgetIncreaseIn(BaseModel):
+    """Shared by workspaces.py's and projects.py's budget-increase-request routes —
+    same shape at both tiers, so one schema rather than two copies to keep in sync."""
+
+    requestedAmountUsd: float = Field(gt=0)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
 class ProjectOut(BaseModel):
     """ORM Project -> Zod Project shape.
 

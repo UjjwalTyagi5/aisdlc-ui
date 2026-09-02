@@ -43,12 +43,14 @@ import { AssignBusinessUnitRoleDialog } from "@/components/app/assign-bu-role-di
 import { ChangeAppointmentDialog } from "@/components/app/change-appointment-dialog";
 import { BulkOnboardDialog } from "@/components/app/bulk-onboard-dialog";
 import { RequestCrossBuMemberDialog } from "@/components/app/request-cross-bu-member-dialog";
+import { RequestOnboardingDialog } from "@/components/app/request-onboarding-dialog";
 import { listProjects } from "@/lib/api/projects";
 import { OnboardUserDialog } from "@/components/app/onboard-user-dialog";
 import { hasPermission } from "@/lib/auth/permissions";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { listCrossBuGrants, listUserDirectory, revokeCrossBuGrant } from "@/lib/api/users";
 import { qk } from "@/lib/api/query-keys";
+import { canRaiseType } from "@/lib/requests/routing";
 import { awaitsBusinessUnitRole, ROLE_META, type PlatformRole } from "@/lib/roles";
 import { RoleHistoryDialog } from "@/components/app/role-history-dialog";
 import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
@@ -139,6 +141,7 @@ export default function UsersPage() {
 
   const [query, setQuery] = React.useState("");
   const [onboarding, setOnboarding] = React.useState(false);
+  const [requestingOnboard, setRequestingOnboard] = React.useState(false);
   const [bulkOpen, setBulkOpen] = React.useState(false);
   const [borrowOpen, setBorrowOpen] = React.useState(false);
   const queryClient = useQueryClient();
@@ -150,11 +153,38 @@ export default function UsersPage() {
   const isOrgAdmin = viewerRole === "org_admin";
   const isBuAdmin = viewerRole === "bu_admin";
 
-  const { managedBusinessUnitIds } = useAccessScope();
+  const { managedBusinessUnitIds, isLoading: scopeLoading } = useAccessScope();
   const workspacesQ = useWorkspaces();
   const units = React.useMemo(
     () => (workspacesQ.data ?? []).filter((w) => w.status === "active"),
     [workspacesQ.data],
+  );
+  // A Business Unit Admin reads the whole organisation on this page but writes in
+  // their own units only, so the onboarding dialog is handed those and nothing else.
+  // Narrowing here is a courtesy, not the control — POST /onboarding calls
+  // assert_can_write_workspace and answers 404 for any other unit however it is asked.
+  // May this viewer onboard WITHOUT asking anybody? A Business Unit Admin with at
+  // least one unit can: the person lands in a unit they administer, holding a role
+  // they were going to grant anyway. With no unit there is nowhere to put anyone, so
+  // the button would open a dialog whose only field has no valid answer.
+  const canOnboardDirectly = isBuAdmin && managedBusinessUnitIds.length > 0;
+
+  // THREE STATES, NOT TWO — the mistake use-access-scope.ts's own docstring warns
+  // about, and one this page made until an end-to-end run caught it. The scope
+  // arrives from a query, so `managedBusinessUnitIds` is [] for the first frames.
+  // Reading that as "administers nothing" rendered Request onboarding to a Business
+  // Unit Admin and then swapped it for Onboard someone a moment later — the wrong
+  // affordance, offered first, for the exact flow this change was meant to remove.
+  //
+  // While pending we know neither answer, so we offer neither. An Org Admin is
+  // unaffected: their standing comes from `admin:*` on the session, not from a
+  // membership row, so there is nothing to wait for.
+  const onboardingAnswerKnown = isOrgAdmin || !isBuAdmin || !scopeLoading;
+  const onboardableUnits = React.useMemo(
+    () =>
+      (isOrgAdmin ? units : units.filter((u) => managedBusinessUnitIds.includes(String(u.id))))
+        .map((u) => ({ id: u.id, displayName: u.displayName })),
+    [isOrgAdmin, units, managedBusinessUnitIds],
   );
 
   // ONE query. The old page fanned out over every unit plus every project —
@@ -421,18 +451,47 @@ export default function UsersPage() {
             </Button>
           )}
 
-          {isOrgAdmin && (
+          {/* The non-Org-Admin way to ask for the same handover — POST /onboarding
+              itself is Org-Admin-only, and the generic "Raise a request" dialog has
+              no email field to name who. Shown to whoever may raise
+              `user_onboarding` (a Business Unit Admin or Project Admin, per
+              raisableTypesFor) but never to the Organization Admin, who onboards
+              directly with the button above/below instead. */}
+          {/* Now only for a Project Admin. A Business Unit Admin who can onboard
+              directly has nothing to ask anybody for, and leaving the button beside
+              the one that does the thing offered two routes to one outcome, one of
+              which needed somebody else to press a button. */}
+          {onboardingAnswerKnown &&
+            !isOrgAdmin &&
+            !canOnboardDirectly &&
+            canRaiseType(viewerRole, "user_onboarding") && (
+            <Button
+              variant="outline"
+              className="border-line-soft gap-2"
+              onClick={() => setRequestingOnboard(true)}
+            >
+              <UserPlus className="size-4" aria-hidden />
+              Request onboarding
+            </Button>
+          )}
+
+          {onboardingAnswerKnown && (isOrgAdmin || canOnboardDirectly) && (
             <div className="flex flex-wrap items-center gap-2">
               {/* Secondary, and deliberately so: a roster arrives a few times a
-                  year and one person arrives most weeks. */}
-              <Button
-                variant="outline"
-                className="border-line-soft gap-2"
-                onClick={() => setBulkOpen(true)}
-              >
-                <Upload className="size-4" aria-hidden />
-                Bulk upload
-              </Button>
+                  year and one person arrives most weeks.
+
+                  Org Admin only: a roster spans units, and a unit admin importing one
+                  would be naming people into units that are not theirs. */}
+              {isOrgAdmin && (
+                <Button
+                  variant="outline"
+                  className="border-line-soft gap-2"
+                  onClick={() => setBulkOpen(true)}
+                >
+                  <Upload className="size-4" aria-hidden />
+                  Bulk upload
+                </Button>
+              )}
               <Button className="gap-2" onClick={() => setOnboarding(true)}>
                 <UserPlus className="size-4" aria-hidden />
                 Onboard someone
@@ -798,12 +857,22 @@ export default function UsersPage() {
         </div>
       )}
 
+      {canOnboardDirectly && !isOrgAdmin && (
+        <OnboardUserDialog
+          open={onboarding}
+          onOpenChange={setOnboarding}
+          businessUnits={onboardableUnits}
+          onOnboarded={() => void directoryQ.refetch()}
+          scope="business_unit"
+        />
+      )}
+
       {isOrgAdmin && (
         <>
           <OnboardUserDialog
             open={onboarding}
             onOpenChange={setOnboarding}
-            businessUnits={units.map((u) => ({ id: u.id, displayName: u.displayName }))}
+            businessUnits={onboardableUnits}
             onOnboarded={() => void directoryQ.refetch()}
           />
           <BulkOnboardDialog
@@ -833,6 +902,14 @@ export default function UsersPage() {
           onOpenChange={setBorrowOpen}
           projects={(projectsQ.data?.items ?? []).map((p) => ({ id: String(p.id), name: p.name }))}
           onRaised={() => queryClient.invalidateQueries({ queryKey: ["governance-approvals"] })}
+        />
+      )}
+
+      {!isOrgAdmin && canRaiseType(viewerRole, "user_onboarding") && (
+        <RequestOnboardingDialog
+          open={requestingOnboard}
+          onOpenChange={setRequestingOnboard}
+          requesterRole={viewerRole}
         />
       )}
 

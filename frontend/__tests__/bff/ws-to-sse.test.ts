@@ -109,6 +109,78 @@ describe("mapWsToSseEvent", () => {
     });
   });
 
+  // ── file_diff → code.diff ──────────────────────────────────────────────────
+  describe("file_diff", () => {
+    it("maps a created-file file_diff to code.diff and passes StreamEvent.safeParse", () => {
+      const wsMsg = {
+        type: "file_diff",
+        session_id: "sess_abc",
+        path: "src/foo.ts",
+        original: "",
+        modified: "export const foo = 1;\n",
+        change_kind: "created",
+      };
+      const result = mapWsToSseEvent(wsMsg, RUN_ID);
+      expect(result).not.toBeNull();
+      const parsed = StreamEvent.safeParse(result);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.type).toBe("code.diff");
+        const evt = parsed.data as Extract<typeof parsed.data, { type: "code.diff" }>;
+        expect(evt.runId).toBe(RUN_ID);
+        expect(evt.path).toBe("src/foo.ts");
+        expect(evt.original).toBe("");
+        expect(evt.modified).toBe("export const foo = 1;\n");
+        expect(evt.changeKind).toBe("created");
+        expect(typeof evt.at).toBe("string");
+      }
+    });
+
+    it("maps an edited-file file_diff to code.diff with changeKind edited", () => {
+      const wsMsg = {
+        type: "file_diff",
+        session_id: "sess_abc",
+        path: "src/bar.ts",
+        original: "export const bar = 1;\n",
+        modified: "export const bar = 2;\n",
+        change_kind: "edited",
+      };
+      const result = mapWsToSseEvent(wsMsg, RUN_ID);
+      expect(result).not.toBeNull();
+      const parsed = StreamEvent.safeParse(result);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        const evt = parsed.data as Extract<typeof parsed.data, { type: "code.diff" }>;
+        expect(evt.changeKind).toBe("edited");
+        expect(evt.original).toBe("export const bar = 1;\n");
+        expect(evt.modified).toBe("export const bar = 2;\n");
+      }
+    });
+
+    it("returns null when change_kind is missing (fails the enum, fails closed)", () => {
+      const wsMsg = {
+        type: "file_diff",
+        session_id: "sess_abc",
+        path: "src/bar.ts",
+        original: "a",
+        modified: "b",
+      };
+      expect(mapWsToSseEvent(wsMsg, RUN_ID)).toBeNull();
+    });
+
+    it("returns null when change_kind is an unrecognized value", () => {
+      const wsMsg = {
+        type: "file_diff",
+        session_id: "sess_abc",
+        path: "src/bar.ts",
+        original: "a",
+        modified: "b",
+        change_kind: "renamed",
+      };
+      expect(mapWsToSseEvent(wsMsg, RUN_ID)).toBeNull();
+    });
+  });
+
   // ── agent_completed (failure) → run.completed (failed) ────────────────────
   describe("agent_completed", () => {
     it("maps agent_completed with success=false to run.completed with status failed", () => {

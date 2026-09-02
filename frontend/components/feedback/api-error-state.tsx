@@ -17,6 +17,9 @@ export interface ApiErrorStateProps {
   onRetry?: () => void;
   retryLabel?: string;
   className?: string;
+  /** Rendered below the message, ONLY in the forbidden branch — "request access"
+   *  makes no sense for a genuine error, only for a permission limit. */
+  action?: React.ReactNode;
 }
 
 /**
@@ -35,6 +38,7 @@ export function ApiErrorState({
   onRetry,
   retryLabel = "Try again",
   className,
+  action,
 }: ApiErrorStateProps) {
   const forbidden = error?.code === "forbidden";
 
@@ -104,6 +108,8 @@ export function ApiErrorState({
           {retryLabel}
         </Button>
       )}
+
+      {forbidden && action}
     </div>
   );
 }

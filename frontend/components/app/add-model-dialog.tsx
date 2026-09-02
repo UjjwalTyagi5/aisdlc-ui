@@ -778,6 +778,37 @@ export function AddModelDialog({
               </div>
 
               <div className="space-y-1.5">
+                <Label htmlFor="api-base">
+                  API base{" "}
+                  <span className="text-muted-foreground/60 font-normal normal-case">
+                    {endpoint ? "(required)" : "(optional)"}
+                  </span>
+                </Label>
+                <Input
+                  id="api-base"
+                  value={apiBase}
+                  onChange={(e) => setApiBase(e.target.value)}
+                  placeholder={
+                    endpoint?.placeholder ??
+                    "https://your-gateway.internal/v1 — for self-hosted / gateway"
+                  }
+                  aria-invalid={!endpointValid}
+                  autoComplete="off"
+                  className="font-mono"
+                />
+                {endpoint && (
+                  <p
+                    className={cn(
+                      "text-[11.5px]",
+                      endpointValid ? "text-muted-foreground" : "text-warning",
+                    )}
+                  >
+                    {endpoint.why}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
                 <Label htmlFor="api-key">
                   API key{" "}
                   <span className="text-muted-foreground/60 font-normal normal-case">
@@ -840,37 +871,6 @@ export function AddModelDialog({
                     {apiKey.trim().length > 0
                       ? "The platform pays for these models — no business unit needs a key."
                       : "Registers the provider without a key: its models can be granted, but stay inert until a business unit onboards its own."}
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="api-base">
-                  API base{" "}
-                  <span className="text-muted-foreground/60 font-normal normal-case">
-                    {endpoint ? "(required)" : "(optional)"}
-                  </span>
-                </Label>
-                <Input
-                  id="api-base"
-                  value={apiBase}
-                  onChange={(e) => setApiBase(e.target.value)}
-                  placeholder={
-                    endpoint?.placeholder ??
-                    "https://your-gateway.internal/v1 — for self-hosted / gateway"
-                  }
-                  aria-invalid={!endpointValid}
-                  autoComplete="off"
-                  className="font-mono"
-                />
-                {endpoint && (
-                  <p
-                    className={cn(
-                      "text-[11.5px]",
-                      endpointValid ? "text-muted-foreground" : "text-warning",
-                    )}
-                  >
-                    {endpoint.why}
                   </p>
                 )}
               </div>

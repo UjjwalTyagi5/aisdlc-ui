@@ -42,7 +42,6 @@ from config.connectors.models import (
     ConnectorHealth,
     make_board_item,
 )
-from config.env import ADO_ORG_URL, ADO_PAT
 from shared.keyvault import load_secret
 
 logger = logging.getLogger(__name__)
@@ -80,7 +79,7 @@ class AzureDevOpsConnector(BaseConnector):
         An explicit tenant_id argument wins; otherwise the instance tenant_id set
         by the factory is used, so convenience methods can call auth_adapter() with
         no argument and still resolve per-tenant. Credentials are resolved
-        tenant-scoped first, then fall back to the global KV name, then to the env
+        tenant-scoped only: the tenant secret store, then this tenant's Key Vault
         var (local development only). Return value is never stored on self and must
         not be logged/persisted.
         """
@@ -107,9 +106,9 @@ class AzureDevOpsConnector(BaseConnector):
 
         # Resolution order: tenant secret store (Key Vault in prod, Fernet-encrypted
         # DB in local dev — the path the Integrations "Add credentials" form writes
-        # to) → global KV name → env var (local fallback). The secret_store read is
-        # skipped for the health-probe sentinel (not a real tenant UUID) and never
-        # allowed to raise — it degrades to the KV/env tiers.
+        # to) → Key Vault "{tenant}-ado-pat". Both rungs are tenant-scoped; there
+        # is no global-KV or env rung. The secret_store read is skipped for the
+        # health-probe sentinel and never allowed to raise.
         pat = None
         disconnected = False
         if tid != "__health_probe__":
@@ -125,10 +124,6 @@ class AzureDevOpsConnector(BaseConnector):
         if not disconnected:
             if not pat:
                 pat = await load_secret("ado-pat", tenant_id=tid)
-            if not pat:
-                pat = await load_secret("ado-pat")
-            if not pat:
-                pat = ADO_PAT
         return {"org_url": self._org_url, "pat": pat or ""}
 
     # ── Capability declaration ────────────────────────────────────────────

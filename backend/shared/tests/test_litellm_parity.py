@@ -14,7 +14,7 @@ import pytest
 
 from config.env import (
     ANTHROPIC_API_KEY,
-    ANTHROPIC_MODEL_STANDARD,
+    ANTHROPIC_MODEL,
     ENABLE_LITELLM,
     LITELLM_BASE_URL,
     LITELLM_API_KEY,
@@ -88,7 +88,7 @@ _PARALLEL_PROMPT = (
     "Please generate both a BRD and user stories for this project simultaneously."
 )
 
-_MODEL = ANTHROPIC_MODEL_STANDARD or "claude-sonnet-4-6"
+_MODEL = ANTHROPIC_MODEL or "claude-sonnet-4-6"
 
 
 def _call_direct(prompt: str, tools: list, tool_choice: dict | None = None) -> dict:

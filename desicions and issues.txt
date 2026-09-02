@@ -1,0 +1,848 @@
+DEVELOPMENT AGENT VERIFICATION — DECISIONS, ISSUES & DEFERRED ITEMS
+====================================================================
+Plan: docs/superpowers/plans/2026-08-31-development-agent-verification.md
+Spec: docs/superpowers/specs/2026-08-31-development-agent-verification-design.md
+Branch: feature/development-agent-verification (pushed to origin)
+Full raw ledger (every dispatch, every review verdict): .superpowers/sdd/2026-08-31-development-agent-verification/progress.md
+This file is the human-readable summary of that ledger — decisions, issues, and
+anything postponed, organized by task. Updated as execution proceeds.
+
+--------------------------------------------------------------------
+SETUP / PRE-EXECUTION DECISIONS
+--------------------------------------------------------------------
+
+DECISION: Deferred Task 1 (real project + real ADO connector + real Azure BYOK key)
+and Task 10 (final manual browser verification) to run together at the very end,
+executing Tasks 2-9 first.
+WHY: Verified none of Tasks 2-9 actually need live external credentials — Task 5
+mocks the connector, Task 7's live test clones a real LOCAL git repo (not a real
+ADO org) and mocks only the model call, Task 8's load tests are local/mocked,
+Tasks 2/3/6 create synthetic orgs/projects via raw SQL. Only Task 10 genuinely
+needs a live human-driven browser session with credentials only the user holds.
+COST IF WRONG: a later task's implementer would report NEEDS_CONTEXT if it turned
+out to secretly need real infra — cheap to recover. This never happened; the
+ruling held for all of Tasks 2-9.
+
+ENVIRONMENT FACT (not a decision, but load-bearing): every `pytest` invocation
+from backend/ needs `PYTHONPATH=.` set explicitly, or it fails at collection with
+`ModuleNotFoundError: No module named 'config'`. Confirmed by running the baseline
+suite before Task 1. Fixed in the plan file itself (all 16 Run: commands) before
+any task was dispatched, so every implementer/reviewer got it right from the start.
+
+--------------------------------------------------------------------
+TASK 2 — Fix require_agent_access project-membership gap
+--------------------------------------------------------------------
+Commits: 1297e6e0, c5a39016 (fix round 1). Status: COMPLETE, review clean.
+
+ISSUE FOUND: require_agent_access() resolved role via platform_role_for, which
+picks up a role held ANYWHERE in the tenant, not scoped to the project in the
+URL — a cross-project RBAC leak. Fixed by adding the same visible_project_ids
+membership check assert_agent_access_for_chat already uses for chat routes.
+SIDE EFFECT: this single fix also silently repairs the same pre-existing latent
+gap in security_workspace_router (already shipped, gated with this same
+dependency) — no changes needed to that router's own code.
+
+DEVIATION DURING IMPLEMENTATION: the implementer changed an existing test's
+expected status from 403 to 404 (test_require_agent_access_denies_by_slug...).
+VERIFIED: this was mechanically correct, not a masked regression — the test used
+the "contributor" placeholder role, which grants_scope() filters out of
+visible_project_ids, so the new membership check now fires first (404) instead of
+the old role-reach check (403).
+ISSUE FOUND IN REVIEW (Important, fixed in round 1): that test change lost the
+original 403-via-role-reach coverage at the require_agent_access dependency level
+— nothing proved a genuine project member being denied purely by role-reach
+anymore. FIXED: restored using "scrum_master", a real role not filtered by
+grants_scope() and absent from AGENT_DEFAULT_REACH["security"].
+
+--------------------------------------------------------------------
+TASK 3 — Gate dev_workspace_router with require_agent_access
+--------------------------------------------------------------------
+Commits: 40b16d01, ea0998af (fix round 1). Status: COMPLETE, review clean.
+
+ISSUE FOUND: dev_workspace_router (pull/tree/file/changes/PRs) was gated only by
+generic require_project_access() — any project member of any role could browse
+and pull a project's repo. FIXED: added require_agent_access("development")
+alongside it.
+
+CRITICAL ISSUE FOUND IN REVIEW (fixed in round 1): the implementer went beyond
+brief scope and added an autouse=True fixture to backend/tests/routers/conftest.py
+that monkeypatched assert_can_read_project and assert_agent_access to always
+succeed, for EVERY @pytest.mark.unit test in that whole directory (not just the
+one file that needed it) — an unrequested, package-wide bypass of the RBAC layer
+this whole plan exists to verify. Root-cause misdiagnosis in the original report
+too: assert_can_read_project never needed patching (it already passed via Mock
+truthiness); the real failure was check_agent_access's _is_uuid guard on a bogus
+mock project id.
+FIX: reverted conftest.py entirely; added a file-scoped fix inside
+test_dev_prs.py only, mirroring that file's own existing local autouse pattern
+(_mock_workspace_resolution) — zero blast radius outside that one file.
+DECISION/LESSON CARRIED FORWARD: every implementer dispatched after this (Tasks
+5, 6) was explicitly warned in its dispatch prompt not to repeat this pattern —
+stay within named files, report DONE_WITH_CONCERNS instead of silently
+patching around a regression in unrelated infrastructure.
+
+--------------------------------------------------------------------
+TASK 4 — Frontend page-level access gate
+--------------------------------------------------------------------
+Commit: 7dee00fa. Status: COMPLETE, review clean, 1 finding parked by ruling.
+
+Extracted BUILT_AGENTS as a single shared constant (frontend/lib/agents.ts) so the
+project page's tile grid and the Development page's own gate can never drift
+apart. Gated the standalone Development page itself using the existing
+tileStateFor() function (no new/duplicate access-logic invented). Deliberately
+did NOT add "development" to BUILT_AGENTS yet — that's Task 9, last, after every
+backend task passes.
+
+FINDING (Important, PLAN-MANDATED — ruled on directly, not looped):
+development-page-access.test.tsx exercises tileStateFor() directly rather than
+rendering the actual page component, so none of this task's own new wiring
+(role/project.track/BUILT_AGENTS threading, the early-return placement) is
+exercised by an automated test — only by tsc and manual reading.
+RULING: parked, not fixed. This was the brief's own explicit, reasoned design
+choice (avoid pulling in QueryClient/router/API-mock harness weight for one
+task). tileStateFor itself is already thoroughly tested elsewhere. tsc catches
+type/wiring mistakes though not behavioral ones. Task 10's final manual browser
+pass will exercise this exact page-render path live as a real user, providing a
+check a unit test would duplicate.
+DEFERRED FOR FUTURE WORK: a real component-render test for this page's gate
+wiring is a genuine, real coverage gap for future refactors — flagged for the
+final whole-branch review's minor-findings triage, not fixed in this pass.
+
+--------------------------------------------------------------------
+TASK 5 — Gate the three ungated Consequential-tier tools
+--------------------------------------------------------------------
+Commit: 1faf7ccf. Status: COMPLETE, review clean, no fix round needed.
+
+create_ado_repo, update_work_item_state, add_pr_comment_to_work_items executed
+immediately on any model tool call with zero approval check — PRD groups these
+under the same Consequential tier as push_branch/create_pr (one Architect
+approver), which already had a real code-level HITL gate
+(push_gate_enabled/push_approved). Extended that exact same mechanism to the
+other three rather than inventing a second gate.
+Stayed within the two named files (learned from Task 3). Review found only one
+Minor, harmless finding (an overdefensive test assertion fallback) — deferred,
+never entered the fix loop.
+
+--------------------------------------------------------------------
+TASK 6 — Fix upstream context: header text + project-scoped resolution
+--------------------------------------------------------------------
+Commit: 4e7e7f75. Status: COMPLETE, review clean, no fix round needed.
+
+Fixed _fmt_design's header from "[DESIGN ARTIFACTS]" to "[DESIGN CONTEXT]" to
+match what the system prompt tells the model to look for (_fmt_requirements's
+header already matched, no change needed there).
+Added build_context_for_project() — resolves upstream Requirements/Design by the
+project's most recent Run row instead of by session id, since a fresh
+standalone-page conversation mints a brand-new session id unrelated to whatever
+session Requirements/Design used, so the old session-keyed lookup found nothing
+even on a fully-baselined project. Run (not AgentSession) chosen as canonical,
+matching Documentation agent's already-established read_upstream_artifacts
+precedent. Wired into both call sites in development_agent_api.py (WS + REST),
+with a fallback to the old session-keyed lookup only when no project is known yet.
+
+VERIFIED IN REVIEW: the implementer's claim that a separate, unrelated
+"[DESIGN ARTIFACTS]" string exists in deployment_agent_api.py's own independent
+formatter (correctly left untouched) — confirmed true, that's a genuinely
+separate code path, not a missed fix.
+
+MINOR FINDINGS, DEFERRED (never entered fix loop):
+- build_context_for_project's formatter-assembly loop duplicates build_context's
+  loop body (6 lines) — individual formatters ARE correctly reused, only the
+  orchestration loop itself wasn't factored out. This exact duplication was
+  specified verbatim in the plan's brief, so it's a brief-level nit, not an
+  implementer deviation. Worth factoring into one shared helper in a future pass.
+- build_context_for_project is imported locally inside _build_dev_session_context
+  while build_context is imported at module scope — inconsistent style, no
+  functional effect, no circular-import risk.
+- context_broker.py's module docstring still says "Single public API:
+  build_context(...)" — now stale since build_context_for_project is a second
+  public entry point. Worth updating in a future pass.
+
+--------------------------------------------------------------------
+TASK 7 — Live end-to-end tool verification
+--------------------------------------------------------------------
+Commits: a0726569, afea7410 (fix round 1). Status: COMPLETE, review clean.
+The most technically complex task in the plan — dispatched on the most capable
+model (opus) given the stakes.
+
+Drives the REAL compiled dev_agent.app LangGraph graph against a REAL local git
+repo (not a mock), with only resolve_model_for_run/guarded_completion scripted.
+Proves: real clone, real branch creation, real file edit, real lint invocation,
+real local commit, real push refusal without approval (with actual diff content
+shown), real push success with approval (content genuinely lands on the origin),
+create_ado_repo's refusal gate, path_guard traversal-escape blocked,
+sandbox_policy/run_command shell-operator and allowlist checks.
+
+THREE TEST-SIDE CORRECTIONS AGAINST VERIFIED REAL PRODUCTION BEHAVIOR (no
+production bugs found — all three were the plan's own planning-time assumptions,
+written before this test file existed):
+1. clone_repo rejects file:// URLs — anything not starting with "http" is treated
+   as a repo NAME to resolve from the session's ado_repos cache, not a URL. Fixed
+   by registering the fixture repo under a name and cloning by name — which is
+   also the actually-correct real production path.
+2. validate_command("rm -rf /") returns None, not non-None — it only polices
+   shell metacharacters (&&, ;, |, backticks, $()); the allowlist-prefix half of
+   the policy lives separately in run_command. Fixed by asserting both halves at
+   the function that actually owns each.
+3. Setting s.work_dir before the run is pointless — clone_repo computes and
+   overwrites its own destination path. Fixed by predicting the same path the
+   tool computes and asserting equality after the run (which independently
+   proves the tool did what it says).
+Plus: a Windows-specific rmtree bug found and fixed (git writes loose objects
+read-only; ignore_errors=True was silently leaving 18 leftover object files per
+run — needed a chmod-then-retry helper).
+
+RIGOR ADDED BEYOND THE BRIEF: ran a genuine negative/mutation control — disabled
+the push_gate_enabled flag and confirmed EXACTLY the two gate-dependent tests
+failed, for exactly the right reason (a real git push actually executed and
+created the branch), proving the passing test is load-bearing, not tautological.
+That control also surfaced a real finding: create_ado_repo makes a genuine live
+HTTPS request to dev.azure.com once past a disabled gate — hardened the test's
+org URL to the reserved .invalid TLD so a future gate regression fails locally
+instead of reaching a real Azure endpoint.
+
+CRITICAL-ADJACENT ISSUE FOUND IN REVIEW, FIXED IN ROUND 1 (Important x2):
+The original report claimed submit_development_artifacts (the PRD's Sign-off-tier
+"accept the implementation" tool) was "covered elsewhere" by
+tests/development/test_pr_persistence.py. CONTROLLER + REVIEWER independently
+verified this claim was FALSE — that file tests a completely different function
+(_persist_pr_to_run, writes to the runs table) not submit_development_artifacts
+(writes to AgentSession via patch_session_artifacts). grep across all of
+backend/tests/ found ZERO references to submit_development_artifacts anywhere.
+FIXED: (1) the false claim was struck through and explicitly retracted in the
+report rather than silently corrected — the record shows the mistake was made
+and caught; (2) real hermetic test coverage added, patching
+artifact_tools.patch_session_artifacts at its point-of-use import, asserting on
+the actual payload/status computation (pr_created vs validated), not just the
+tool's return string (which is identical whether persistence succeeds or
+silently fails — an assertion only on the string would have been a false-positive
+risk). The negative control was extended to cover these new tests too: disabling
+the gate + clearing pr_url broke exactly the 4 tests that should break.
+
+MINOR FOUND IN REVIEW, ALSO FIXED IN ROUND 1: create_pr's HITL refusal gate was
+untested and undisclosed, despite create_ado_repo's structurally identical gate
+being tested. Added test_create_pr_is_refused_without_approval for symmetry —
+stays fully offline since the gate fires before any network call.
+
+DELIBERATE, DISCLOSED OMISSION (not fixed, judged reasonable): a full
+create_pr SUCCESS-path test (opening a real PR) was not added — it requires a
+real ADO/GitHub HTTP endpoint, not feasible against the local file-based fixture
+repo without further mocking infrastructure. Only the refusal-gate path is
+tested for create_pr.
+
+--------------------------------------------------------------------
+TASK 8 — Load & concurrency testing
+--------------------------------------------------------------------
+Commit: 023c99c8. Status: COMPLETE, review clean, no fix round needed.
+
+Three tests added: (1) 20 concurrent writers into one shared project workspace —
+proves no corruption, git status stays parseable; (2) 40 concurrent
+sandbox_policy.validate_command calls, alternating allowed/disallowed — proves no
+cross-call state leakage; (3) 10 concurrent guarded_completion calls against a
+deliberately tiny per-call cost cap — proves the Model Gateway's cap degrades
+legibly (a typed error) under concurrency, not a hang or unhandled exception.
+
+TWO TEST-SIDE CORRECTIONS AGAINST VERIFIED REAL PRODUCTION BEHAVIOR (no
+production bugs found):
+1. Sandbox test's original disallowed command ("rm -rf /" alone) would have
+   passed validate_command cleanly — it only checks shell metacharacters/
+   operators, not command names. Corrected to "npm test && rm -rf /", the actual
+   shell-injection/chaining attack shape this check exists to catch.
+2. IMPORTANT CATCH: the Model Gateway test's original setup (missing
+   input_price_per_million, empty messages=[]) would have made the cap check
+   silently no-op — the deliberately-expensive fake model's ainvoke would
+   actually run, hit its own canary AssertionError, and the test's original loose
+   assertion ("all 10 calls raise the same exception type name") would have
+   turned GREEN FOR THE WRONG REASON — proving nothing about the real cost cap.
+   Verified independently by the reviewer against shared/services/
+   model_call_wrapper.py and model_rate_limit.py — confirmed genuinely true, not
+   just claimed. FIXED: set input_price_per_million=15.0 and a real 100k-char
+   prompt (mirroring the exact shape of an already-verified single-caller test in
+   this codebase), and TIGHTENED the final assertion to require the specific
+   ModelCostLimitError type, not just "any single type" — closing the exact hole
+   that would have let the original version pass vacuously.
+
+MINOR FINDINGS, DEFERRED: an unused monkeypatch fixture parameter (harmless,
+carried over from the brief); the shared-workspace test proves 20 concurrent
+writes to DISTINCT filenames rather than true overlapping/git-index contention
+(.git/index.lock races) — still real concurrency and a real (if shallower) proof
+than the other two tests achieve for their own constraints.
+
+--------------------------------------------------------------------
+TASK 9 — Rollout: flip BUILT_AGENTS
+--------------------------------------------------------------------
+Commit: 1b768920. Status: COMPLETE, review clean after 1 report-correction round.
+
+Flipped BUILT_AGENTS to ["security", "documentation", "development"] — the single
+flag that unlocks both the project page's tile grid and the Development page's
+own gate simultaneously (both read this one shared constant, per Task 4's
+design). Updated the one test assertion that depended on the constant staying
+un-flipped (rewritten to construct an explicit array without "development"
+instead, keeping the coverage meaningful rather than deleting it).
+
+Diff itself reviewed and APPROVED — contains exactly the flag flip and the one
+sanctioned test fix, nothing else. Verified non-tautological (the rewritten test
+still proves a real behavioral difference: same role, different builtAgents
+membership → different tileState outcome).
+
+ISSUE FOUND IN REVIEW, FIXED IN ROUND 1: the report's Step-1 per-file test count
+breakdown had two files' counts swapped (test_development_agent_tools.py
+reported as 3, actually 4; tests/load/test_development_agent_load.py reported as
+4, actually 3) — the total of 32 was still arithmetically correct, but the swap
+suggested the breakdown may have been reconstructed from memory rather than
+transcribed from an actual pytest -v run. Since this is the rollout gate itself,
+dispatched a fix round demanding a fresh, real -v run with output pasted
+verbatim rather than parking it given the stakes. RESOLVED: implementer re-ran
+the exact command and appended the full, real -v output (32 test names, correct
+4/3 split, final line "32 passed, 221 warnings in 13.77s") — controller
+personally verified this output is complete and matches the reviewer's
+independently-counted split exactly. No code changed by this fix (report-only),
+so no re-review dispatch was needed for it.
+
+MINOR FOUND, DEFERRED (out of this task's scope): two pre-existing sibling tests
+in development-page-access.test.tsx construct builtWithDev as
+[...BUILT_AGENTS, "development"] — now that BUILT_AGENTS already contains
+"development" post-flip, this produces a harmless duplicate array entry.
+Functionally inert (Array.includes doesn't care about duplicates); worth a
+cleanup pass later.
+
+--------------------------------------------------------------------
+TASK 1 & TASK 10 — Environment provisioning + final manual verification
+--------------------------------------------------------------------
+Status: BLOCKED on real credentials from the user — checked the live DB directly
+(workspace_connectors, model_providers, projects tables) before asking, to avoid
+asking for something that might already exist. Confirmed: zero real connectors,
+no real test project (all rows found are synthetic fixtures left behind by the
+test suites — "Mobile App", "Empty Ctx Project", "conn-XXXXX", etc.), and no
+Azure/OpenAI model provider entry matching what the user described adding.
+NEEDED TO PROCEED: a real Azure DevOps org URL + PAT (Code Read&Write, Work
+Items Read&Write scope), and confirmation the Azure model key has been added via
+Org Settings → Model Providers. Task 10 is a manual, human-witnessed browser
+pass proving the whole loop works end-to-end for real — not something a
+subagent can complete unsupervised, since it needs live credentials only the
+user holds and a real judgment call on the model's actual output quality.
+
+--------------------------------------------------------------------
+OPEN ITEMS CARRIED FORWARD TO THE FINAL WHOLE-BRANCH REVIEW
+--------------------------------------------------------------------
+(Everything below is a Minor finding, deferred by design, not a blocker — listed
+here so the final review's triage has the complete list in one place.)
+
+1. Task 4: no automated component-render test for the Development page's own
+   gate wiring (only tileStateFor is tested directly) — a real coverage gap for
+   future refactors, mitigated by Task 10's manual pass this round.
+2. Task 6: build_context_for_project's formatter loop duplicates build_context's
+   loop body; local vs. module-level import inconsistency; stale module
+   docstring naming only one public API function.
+3. Task 5: one overdefensive (harmless) test assertion fallback.
+4. Task 8: unused monkeypatch fixture parameter; shared-workspace concurrency
+   test proves distinct-file writes rather than true index-lock contention.
+5. Task 9: harmless duplicate "development" entry in two pre-existing sibling
+   tests' constructed arrays, post-flip.
+6. Task 3's fixed-but-narrowed test_dev_prs.py fixture pattern is now the
+   established local-autouse template for future RBAC-adjacent unit tests in
+   that directory — worth pointing future contributors at it explicitly so
+   nobody reaches for a package-wide conftest patch again.
+
+--------------------------------------------------------------------
+OUT-OF-PLAN BUGS FOUND DURING TASK 10 LIVE VERIFICATION
+--------------------------------------------------------------------
+Neither of these was in the original 10-task plan's scope -- both were found
+because Task 10 is the first time this agent's ADO integration was exercised
+against a REAL connector instead of synthetic fixtures/a local git repo.
+
+ISSUE 1 (FIXED, commit d291651c): dev_workspace.py's ADO routes never checked
+project-scoped personal credentials. A project admin can save an Azure DevOps
+PAT for just their own project via the Integrations page
+(project_integration_credentials table), but every route in dev_workspace.py
+resolved credentials via ado_repos.resolve_auth(tenant_id) alone, which only
+checks a TENANT-WIDE connector -- it never passed project_id/owner_id to
+get_connector_for_session, so the project-scoped override
+(config/connectors/base.py::_resolve_credential_override) was never even
+attempted, despite that mechanism already existing in the codebase for
+exactly this purpose. Root-caused with systematic-debugging: confirmed
+resolve_auth(tenant_id) alone returns ("", "") for a real project with a
+saved credential, confirmed passing project_id+owner_id resolves it
+correctly, then fixed by threading project_id/owner_id through resolve_auth,
+_resolve, list_projects, list_repos, list_branches, and resolve_clone_url
+(all optional/keyword-only, backward compatible), updating dev_workspace.py's
+five route handlers to pass them from the path project_id and
+request.state.user_id they already have. One new regression test added
+(test_resolve_auth_forwards_project_id_and_owner_id_to_the_connector_factory).
+
+ISSUE 2 (ENVIRONMENT, not code -- worked around, not "fixed"): port 8001 had
+a phantom Windows/Hyper-V NAT entry -- netstat/Get-NetTCPConnection showed it
+"LISTENING" under a PID that Get-Process/tasklist both confirmed did not
+exist, yet it silently answered some real HTTP requests with a bare 500
+"Internal Server Error" (no JSON, no application log entry at all -- proven
+by reproducing the identical request in-process via FastAPI TestClient, which
+returned a correct 200 with real data every time, proving the actual
+application code was already correct). This is a known class of issue when
+Docker Desktop's Hyper-V networking is involved; the proper fix
+(`net stop winnat` / `net start winnat`) needs admin rights not available in
+this session. WORKAROUND: moved the backend from port 8001 to port 8002
+entirely (backend/.env's AGENTIC_BASE_URL/AGENTIC_WS_URL, frontend/.env.local's
+FASTAPI_INTERNAL_URL) and restarted both servers cleanly. Also found and
+killed several duplicate backend/frontend process trees that had accumulated
+across this session's earlier restarts, going orphaned when the session's
+underlying MCP connection recycled mid-conversation (visible from separate
+task-notification output-file paths before/after) -- background `&` processes
+started without the harness's own run_in_background tracking do not survive
+that boundary, even though they keep running as real orphans afterward.
+FOLLOW-UP FOR THE USER: if this recurs on a future machine restart, running
+`net stop winnat && net start winnat` as Administrator is the real fix; the
+port-8002 workaround is durable for this session but not a root-cause fix.
+
+ISSUE 3 (FOUND, NOT FIXED -- reported to user, scope decision pending): the
+"Pull repos" dialog and its backend (dev_workspace.py + ado_repos.py) are
+Azure-DevOps-only by construction, not provider-agnostic. Confirmed: the
+dialog is unconditionally titled "Pull from Azure Repos"
+(repo-picker-dialog.tsx:155), its API client only calls /dev/{id}/ado/...
+endpoints (lib/api/dev-workspace.ts), and dev_workspace.py has zero branching
+on connector/provider kind -- every route calls ado_repos.* directly, with no
+shared/services/github_repos.py equivalent existing. If a project's
+Development connector were GitHub instead of Azure DevOps, this exact dialog
+would still say "Pull from Azure Repos" and still fail with "Couldn't reach
+Azure DevOps" permanently -- not fixable by a credential change, only by
+making this whole surface provider-aware.
+CONTRAST: the CHAT-driven agent flow (git_tools.py) already has full GitHub
+parity today -- get_github_context, list_github_repos, list_github_branches,
+create_github_pr_tool, all routed through the same provider_kind context the
+agent already honors. The gap is specifically in the direct-browse "Pull
+repos" UI surface, not the agent's own tool-calling capability.
+Not fixed in this session -- flagged for the user to decide whether this is
+in scope now or a follow-up piece of work, since making dev_workspace.py
+provider-aware (a github_repos.py service + dev_workspace.py branching on
+connector kind + a provider-aware frontend dialog) is a real, multi-file
+feature addition, not a small fix like Issue 1.
+
+ISSUE 4 (FIXED, commit 3e6d9c8): chat never worked in local auth mode,
+platform-wide, not just for Development. Sending a message in the chat
+drawer showed the user's own bubble and then nothing -- no response, no
+visible error. Root-caused with systematic-debugging: the frontend's own dev
+log (not the backend's -- the backend never even saw the request) showed
+`[chat-bridge] failed to open WS connection: Error: mintBffToken is not
+permitted in local mode.` frontend/lib/bff/ws-ticket.ts::mintWsTicket()
+called mintBffToken() directly, which throws BY DESIGN in local mode
+(lib/bff/jwt.ts -- a documented, deliberate security guard from an earlier
+RBAC audit: a local session's permissions come from a client-writable cookie
+and must never be signed into a trusted JWT claim). Every OTHER BFF->FastAPI
+call already goes through bearerForRequest() (lib/bff/client.ts, already
+tested in __tests__/bff/client.test.ts), which correctly forwards the real
+FastAPI-issued login token in local mode instead of minting a new one --
+mintWsTicket was simply the one call site never updated to that established,
+already-correct pattern.
+BLAST RADIUS: mintWsTicket is the single shared ticket-minting function
+behind app/api/chat/route.ts (every agent's chat drawer, all 8 agents, not
+just Development), app/api/copilot/ws-ticket/route.ts (the Orchestrator
+Copilot), and app/api/runs/[id]/stream/route.ts (run SSE streaming) -- this
+one bug broke real-time chat and streaming platform-wide in local auth mode.
+Never caught before because every prior chat-access test (this session's
+Tasks 2-9 included) exercised the backend WS handler directly, bypassing
+this Next.js bridge entirely -- this is the first time any of this work was
+exercised through the real browser UI.
+FIX: one-line change -- mintWsTicket now calls bearerForRequest(session)
+instead of mintBffToken(session). Regression test added
+(__tests__/bff/ws-ticket.test.ts, 2 tests: local mode forwards the real
+token and never mints; enterprise OIDC mode still resolves via the Auth0
+token path) mirroring the existing, already-passing bearerForRequest test
+suite's exact mocking pattern.
+
+ISSUE 5 (FIXED, commit 30ea0115): after Issue 4's fix got the chat WS
+connection genuinely open, the very first real message to a project
+configured with an azure/gpt-5-mini model failed every time with
+"Agent error: UnsupportedParamsError" -- the log deliberately carries only
+the exception type (never str(exc), which routinely echoes credentials back
+for auth-related errors), so the real message needed reproducing directly
+against the live deployment to see. Confirmed:
+`litellm.UnsupportedParamsError: gpt-5 models (including gpt-5-codex) don't
+support temperature=0.1. Only temperature=1 is supported.`
+Root cause: agents/dev_agent.py::_build_llm() hardcoded temperature=0.1
+unconditionally for every model, every provider. gpt-5-family models reject
+any temperature other than their own default (1) outright rather than
+clamping it -- confirmed by reproducing the identical ChatLiteLLM call twice
+against the real azure/gpt-5-mini endpoint: fails with temperature=0.1 set,
+succeeds the instant it's omitted.
+FIX: _build_llm now skips the temperature kwarg specifically when the model
+string contains "gpt-5", leaving the provider's own default in effect.
+Every other model keeps the existing low, determinism-favoring 0.1 this
+agent wants for code generation. Deliberately NOT litellm's global
+`drop_params=True` escape hatch, which would silently swallow any other
+unsupported param for every model everywhere -- this is a narrow, verified
+exception for the one model family that structurally cannot take the
+parameter. Regression tests added (test_dev_agent_build_llm.py): gpt-5 and
+gpt-5-codex get no temperature kwarg, other models keep 0.1, the
+alias/model cache still dedupes correctly.
+FOLLOW-UP NOTED, NOT FIXED: Security/Documentation/Code Review/other agents
+likely each have their own equivalent _build_llm-shaped function with the
+same hardcoded-temperature pattern (not yet checked/confirmed) -- worth
+auditing if any project ever configures a gpt-5-family model for those
+agents too. Out of scope for this Development-agent-focused session.
+
+ISSUE 6 (FIXED, commit 51656b70): after Issues 1/2/4/5 got the chat agent
+genuinely running end-to-end against a real repo, the user reported
+create_pr consistently failing with a 302 redirect to Azure DevOps' sign-in
+page (visible in the pasted chat transcript as "Please reply with 1, 2, 3,
+or 4" after repeated PR-creation failures), despite push already succeeding
+earlier in the same session and the user having confirmed their PAT had
+full read+write scope.
+Root-caused with systematic-debugging: git_tools.py::_create_ado_pr() uses
+s.pat (a session attribute) directly, not the already-fixed
+ado_repos.resolve_auth() call path used by REST browsing. s.pat's only
+relevant assignment site is _bind_pulled_workspace() in
+development_agent_api.py -- which has its OWN separate call to
+ado_repos.resolve_auth(tenant_id), WITHOUT project_id/owner_id. This is the
+exact same bug class as Issue 1, but a DIFFERENT call site: Issue 1's fix
+only touched dev_workspace.py's REST routes (the "Pull repos" browsing
+dialog), and this one lives in the chat/WS agent flow, so it was missed in
+that earlier pass even though the underlying resolve_auth/_resolve chain
+had already been made project_id/owner_id-aware.
+Confirmed directly via a standalone Python script, before and after: calling
+resolve_auth(tenant_id) alone (pre-fix behaviour) returns an empty PAT for
+this project/user despite a real saved project-scoped credential; after the
+fix, s.pat resolves to a real 84-character PAT for the same project/user.
+Every ADO write the chat agent attempted after a workspace pull (create_pr
+in particular) was therefore sending a Basic-auth header with an empty
+password -- Azure DevOps answers that with a 302 to its sign-in page rather
+than a clean 401, which is exactly the symptom the user saw and initially
+suspected was a PAT-scope or connector read/write-toggle problem. It was
+neither -- the credential itself was correct and fully scoped; the bug was
+that this one code path never looked it up with enough identity to find it.
+FIX: _bind_pulled_workspace now accepts an optional user_id parameter and
+forwards project_id/owner_id to resolve_auth, same shape as Issue 1's fix.
+Regression test added (test_workspace_binding.py) asserting resolve_auth is
+called with the real project_id/owner_id, not just tenant_id. Full
+regression suite re-run clean (11 tests in test_workspace_binding.py, 9
+across the other Development-agent test files touched this session).
+NOT YET RE-VERIFIED LIVE THROUGH THE BROWSER: this fix is proven correct at
+the function/unit level (script reproduction + regression test) but has not
+yet been re-tested through an actual chat message asking the agent to
+create a PR against a real repo, since the backend needed a clean restart
+(moved from port 8003 to port 8004 -- port 8003 hit the same phantom-listener
+NAT symptom as Issue 2, on a PID that tasklist confirmed no longer existed)
+to pick the fix up. Both backend (8004) and frontend were restarted clean
+and self-verified (direct curl request confirmed to reach the server and
+appear in its own log) before this entry was written. Next step is for the
+user to retry the PR-creation flow through the real UI.
+FOLLOW-UP, NOT INVESTIGATED YET: the user separately flagged, via
+screenshots, that Project Settings -> Connectors shows "No connectors
+installed" and is missing an expected "Read + Write" toggle button, even
+though the org-level Azure DevOps integration page shows the connection as
+granted. Not yet determined whether this is related to the
+workspace_connectors/project_integration_credentials split documented under
+Task 6's setup decisions, or a separate frontend regression. Deferred until
+after this PR-creation fix is confirmed live.
+UPDATE (2026-08-31, later same day): CONFIRMED LIVE by the user. Created a
+real feature branch + draft PR (https://dev.azure.com/srk02804/Company/_git/
+Company/pullrequest/29) through the actual chat UI against the real ADO
+repo -- push succeeded, PR creation succeeded, no 302 redirect. This fix is
+no longer "not yet re-verified" -- it is confirmed working end-to-end.
+
+ISSUE 7 (FIXED, commit 5657bf24): immediately after PR #29's successful
+creation (Issue 6, confirmed above), the same chat turn threw a second,
+unrelated error: "invalid input for query argument $1: '' (invalid UUID
+'': length must be between 32..36 characters, got 0)". User asked what this
+was and whether any work was lost.
+Root cause: dev_agent.py had TWO separate, similarly-named "finalize
+development" tools registered on the agent -- submit_development_artifacts
+(the real one, added earlier this session, sources everything from
+get_session(session_id).dev_artifacts, no LLM-supplied ID needed) and a
+leftover write_development_artifact, which required the model to invent a
+raw run_id string out of thin air. Nothing in the system prompt or context
+ever told the model a real run_id -- the tool's own docstring claim that
+one is "provided in the system context" was never true. It was dead code,
+never referenced anywhere in dev_agent_prompt.py, and guaranteed to fail
+the instant the model called it (empty string -> invalid UUID cast at the
+DB layer). No data was lost: submit_development_artifacts had already
+succeeded earlier in the same turn; this was a second, broken tool being
+called on top of an already-successful one.
+FIX: removed write_development_artifact entirely -- the tool function, its
+registry entry in dev_agent.py's tools list, its native_tags.py
+capability-tag mapping (artifact.write is still covered by
+submit_development_artifacts), and its dispatch-log case. Updated
+test_m2_artifacts.py's stale smoke-check (which asserted the dead tool's
+name appeared in the file) to assert on the real tool instead. Also very
+plausibly a contributor to the user's earlier "why does it keep asking/
+repeating itself" complaint -- two similarly-named "finish up" tools in the
+registry, one broken, is exactly the kind of thing that produces confused,
+repetitive tool-calling. 23 tests across the affected suites pass.
+
+ISSUE 8 (FIXED, commits 0a3dd69d..686f49d0, plan: docs/superpowers/plans/
+2026-08-31-development-agent-chat-overhaul.md): after Issues 1-7 got the
+agent genuinely working end-to-end, the user gave broad qualitative
+feedback that the chat experience itself needed to be "enterprise-grade":
+it never showed the code it was changing, it felt slow, and it seemed to
+"ask again and again." Brainstormed properly (superpowers:brainstorming,
+bounded path) before touching code -- research first established that the
+rich chat-rendering stack (markdown, syntax highlighting, a Monaco-based
+DiffViewer) already existed and was already wired into every agent's chat
+drawer, including Development's -- so this was NOT a rebuild, it was
+wiring three specific, already-diagnosed gaps shut. Executed via
+superpowers:subagent-driven-development (dispatch -> review -> fix-loop
+per task, full ledger at .superpowers/sdd/2026-08-31-development-agent-
+chat-overhaul/progress.md) per the user's explicit "run in loops and
+completely fix this agent."
+
+Part 1 -- "never shows the code" (commits 0a3dd69d, 45eff623 fix):
+Root cause: dev_agent_prompt.py had an explicit instruction forbidding the
+model from ever pasting code in its chat text (a real, deliberate rule --
+not a bug -- meant to stop the model wastefully duplicating code between
+prose and tool arguments), but nothing filled the resulting gap: the
+already-built DiffViewer component existed but was never wired into the
+Development chat drawer (only the Code Review page used it). Fix:
+write_file/edit_file (file_tools.py) now broadcast a structured file_diff
+WS event (path, full original content, full modified content, change_kind)
+alongside their existing activity-log broadcast; the frontend maps this
+through the same Zod-validated allowlist pattern already used for every
+other WS event type (ws-to-sse.ts) into a new code.diff StreamEvent, and
+agent-chat-drawer.tsx renders it as a collapsed-by-default diff card using
+the existing DiffViewer, unmodified. The prompt rule was relaxed (not
+removed) to explain why: the user now sees the code via the card, so the
+model's text stays a short summary. One real bug caught in review before
+merge: write_file's change_kind was initially derived from whether the
+pre-write content string was empty, which mislabeled overwriting an
+existing-but-empty file as "created" instead of "edited" -- fixed to derive
+from an actual file-existed boolean instead.
+CONFIRMED LIVE (2026-08-31): sent a real WS message asking the agent to
+edit a real file in the real pulled Company/RadAuthPortal repo; the
+file_diff event fired with the exact real before/after content, and the
+model's own prose contained no pasted code. Frontend rendering (the actual
+collapsed Monaco card appearing on screen) was NOT independently verified
+this session -- the browser automation tool was unavailable, so this half
+was confirmed at the wire-event level (real event, real shape, real
+content) but not by looking at the rendered page. Recommend the user do one
+visual pass in the browser to confirm the card renders as expected.
+
+Part 2 -- "it should only know about the repo I imported" (commit
+55248e1f): Root cause: every Development chat session injected the FULL
+upstream Requirements/Design payload (HLD, LLD, API contracts, DB schema,
+ADRs, security checklist) on its first message, regardless of whether the
+task was a small brownfield tweak to an already-pulled repo. Fix:
+_build_dev_session_context now takes a workspace_bound flag -- when a
+project already has a ready, pulled workspace (the exact case
+_bind_pulled_workspace already detects), it returns a short "call
+read_design_artifact on demand" guidance string instead of the full
+payload; fresh/greenfield sessions with no bound workspace are unaffected
+and still get full context.
+CONFIRMED LIVE: inserted a temporary Run row with a real, distinctive
+requirements/design payload for the real TEST1 project, called the actual
+live _build_dev_session_context function directly against it twice --
+workspace_bound=False returned the full payload (canary marker present),
+workspace_bound=True returned only the short guidance string (canary
+marker absent). Temporary row deleted after.
+
+Part 3 -- "asks again and again" / duplicate replies (commits 2688406d,
+2f38f01f, 6d1e6fab, 686f49d0): Root-caused via systematic-debugging to a
+real race, not a scripted repeat: the frontend force-closes its WS/SSE
+bridge after 45s of no new event (chat/route.ts's IDLE_FALLBACK_MS), but
+development_agent_api.py had no per-session in-flight guard and never
+cancelled the backend's turn when that happened -- it kept running
+detached, and a second message for the same session could race with it,
+producing what read as a duplicated reply. This matches the pasted
+transcript's back-to-back "Plan:" / "Phase 2 -- Plan" messages around a
+24-minute gap and an "Agent error: TimeoutError".
+FIX (4 commits across 2 fix rounds plus one live-verification-discovered
+follow-up):
+  1. A module-level per-session in-flight guard (_INFLIGHT_SESSIONS) now
+     rejects a second concurrent turn for the same session_id with a clear
+     wait message, without touching agent state.
+  2. websocket_endpoint now dispatches each turn as a tracked, cancellable
+     asyncio.Task instead of an inline await, and cancels tracked tasks for
+     a connection on every disconnect/error teardown path.
+  3. Review caught a real defect this fix itself introduced: a mid-graph
+     cancel can leave the LangGraph checkpoint with a dangling
+     AIMessage.tool_calls entry that has no matching ToolMessage -- every
+     major LLM provider rejects that shape on the next turn.
+     _sanitize_messages (which already repaired the OPPOSITE drift --
+     orphan ToolMessages) was extended to repair this direction too: strip
+     the dangling tool_calls (never synthesize a fake response). A second
+     review round then caught that the FIRST version of that fix set
+     additional_kwargs["tool_calls"] = [] instead of deleting the key --
+     langchain_litellm's real conversion path checks for the key's
+     presence, not its truthiness, so an empty array still reached the
+     wire and OpenAI's schema rejects an empty tool_calls array just as
+     hard as a dangling one. Final fix deletes the key entirely and drops
+     the whole message when it also has no text content left, mirroring an
+     existing precedent already in design_architecture_agent's own
+     _sanitize_messages.
+  4. Found during THIS session's own live verification (not by a
+     reviewer): the in-flight guard's rejection path sent stream_chunk +
+     stream_end but never activity_update{type:"complete"} -- and the
+     frontend's SSE bridge only closes a request immediately on that exact
+     signal (stream_end alone just arms the 45s idle-fallback). A rejected
+     message's own request would therefore hang "busy" for up to 45
+     seconds instead of closing right away -- directly undermining this
+     whole fix's purpose. Fixed with one more send matching the existing
+     completion-signal shape; reviewed clean.
+CONFIRMED LIVE (all of the following via real WS scripts against the real
+running backend, not mocks): (a) two messages sent back-to-back on one
+connection/session -- the second is correctly rejected, no duplicate
+graph execution; (b) the rejection's own event sequence now runs
+stream_chunk -> stream_end -> activity_update{complete}, confirmed via raw
+frame capture after the final fix landed; (c) a connection killed 1.5s into
+a real turn, followed by a fresh connection on the same session_id, runs a
+clean uncontested turn immediately (5.7s, not rejected) -- proving the
+orphaned turn's in-flight marker was genuinely cleared, not left stuck; the
+backend's own log shows "Task was destroyed but it is pending!" for a task
+sitting inside LangGraph's internal queue wait at the exact moment of the
+reconnect, direct evidence the orphaned turn was really interrupted
+mid-execution, not left running silently in the background.
+FOLLOW-UP, NOT FIXED (deliberately out of scope, each individually minor):
+  - The fire-and-forget task.cancel() approach (an explicit, reviewed
+    design choice) produces a noisy ERROR-level asyncio "Task was
+    destroyed but it is pending!" log line on every cancellation. Not a
+    correctness issue -- confirmed the actual behavior is correct -- but
+    worth a follow-up for log/alerting hygiene in production.
+  - design_architecture_agent's own, separate _sanitize_messages
+    implementation has the identical additional_kwargs-mirror gap this
+    session's fix closed for the Development agent -- a different agent,
+    a real live bug, out of scope for this Development-agent-focused plan.
+  - The session_cleanup WS message type could in principle race a
+    still-running turn and pop its session state out from under it
+    (a split-brain) -- confirmed real as a mechanism, but also confirmed
+    UNREACHABLE today (grepped the whole frontend: nothing ever sends
+    session_cleanup on a live connection; the chat bridge is strictly
+    one-WS-per-turn, one-message-per-WS). Backlog note: cancel the tracked
+    task before popping the session, whenever this socket ever becomes
+    multi-message.
+  - Several smaller Minor findings parked in the SDD ledger (guard-comment
+    wording vs. the REST endpoint bypassing the in-flight set entirely,
+    rejected-message drop-vs-queue semantics, a private third-party import
+    in one new test) -- see .superpowers/sdd/2026-08-31-development-agent-
+    chat-overhaul/progress.md for the full list with reasoning.
+NOT ADDRESSED IN THIS PLAN (explicitly triaged out, per the user's own
+broader feedback list): overall response latency beyond the context-
+trimming fix in Part 2, and a full visual/UX pass on the new diff cards
+and rich formatting. These were flagged during brainstorming as needing
+their own separate scoping conversation rather than being bundled into
+this reactive fix pass.
+
+ISSUE 9 (FIXED, commits 46fa7765, a3855271, 66801a1b): after all 5 tasks of
+Issue 8's plan were individually reviewed clean, a mandatory final
+whole-branch review (superpowers:subagent-driven-development's process,
+dispatched on the most capable available model specifically because
+per-task reviews cannot see cross-task interactions) was run across the
+full plan's diff. It found one Critical and four Important issues that no
+single task's reviewer could have caught, because each depends on how two
+or more of the plan's separate pieces interact. Assessment: "Ready to
+merge WITH FIXES." One additional fix wave was dispatched (the process
+allows exactly one), re-reviewed, and confirmed clean.
+
+C1 (CRITICAL, fixed 46fa7765) -- cross-tenant source-code disclosure. The
+new file_diff broadcast (Issue 8, Part 1) carries a real session_id, but
+ConnectionManager.broadcast (config/connection_manager.py) silently falls
+back to sending a message to EVERY currently-open WebSocket connection on
+the process whenever that session_id is present but has no registered
+connections. This fallback already existed before this session and already
+leaked lower-value metadata (broadcast_log's activity messages never set a
+top-level session_id at all, so they've always gone to everyone) -- but it
+was never exercised with a HIGH-value payload until file_diff, which
+carries a project's actual full source code. The Copilot/pipeline surface
+(agents_orchestrator/orchestrator/copilot_api.py) runs the same Development
+agent tools but never registers its sockets with the shared
+ConnectionManager, so any file_diff fired from a Copilot-driven development
+turn was falling through this exact gap -- broadcasting real source code to
+every other user's and every other tenant's open chat drawer on the same
+process, which would render it as a diff card containing someone else's
+code.
+FIX: added a new ConnectionManager.broadcast_to_session() method that
+sends ONLY to registered connections for a session and does nothing (no
+fallback) when none are registered; broadcast_file_diff now routes through
+it instead of the general-purpose broadcast. The existing broadcast
+method and every one of its other callers (broadcast_log included) are
+completely untouched -- confirmed via diff stat showing zero deletions in
+that method. A security-property test asserts the actual property that
+matters: with other connections present but none registered for the
+session, a file_diff carrying a marked "TOP_SECRET" payload reaches nobody
+(not just "the right people got it," which wouldn't have caught the
+original bug).
+NOT FIXED (deliberately, separate follow-up): copilot_api.py itself still
+doesn't register its sockets with ConnectionManager, so its own diff cards
+now go to nobody instead of leaking to everyone -- correct per the
+recommended fix shape, but making that surface's cards actually render for
+its own user is a real, separate feature gap, not addressed here.
+
+I1 (Important, fixed a3855271) -- the SAME 45-second chat-hang bug Issue
+8 Part 3's item 4 fixed for the in-flight-guard's rejection path also
+existed, identically, in the sibling exception handler for a genuine
+agent/tool/DB error during a turn -- it never sent the terminal
+activity_update{complete} signal either, so every real error left the
+user's chat looking "busy" for the full 45-second idle-fallback instead of
+failing fast. The earlier task's reviewer correctly left this out of that
+task's scope (it wasn't the reported bug); the final whole-branch review
+correctly overturned that as a whole-branch judgment -- a real error is far
+more common than a rejected duplicate, so the case for fixing it was at
+least as strong. FIX: same shape as the rejection-path fix, with an honest,
+distinct message ("An error occurred while processing your request").
+
+I2 (Important, fixed a3855271) -- a genuinely safety-relevant race this
+session's own cancellation mechanism (Issue 8 Part 3) made meaningfully
+more likely to hit: s.system_injected was set to True BEFORE the LangGraph
+turn actually ran (several awaits -- DB persistence, MCP tool-scope setup
+which can involve real network connections -- sat between the flag and the
+real work). If a turn got cancelled anywhere in that window, the session
+was left believing its system prompt had been delivered when the
+checkpoint had none -- every later turn on that session would then run
+with NO tool-safety instructions and, critically, NO push/PR approval-gate
+description, silently, until the process restarted. FIX: moved the flag
+assignment to after the graph call returns successfully. Traced carefully
+(this is the most safety-critical of the final review's findings): every
+path where the graph's response function swallows an exception rather than
+re-raising is a path where the graph demonstably already ran and streamed
+successfully, so there is no route to a false-positive flag set.
+
+I3+I4 (Important, fixed 66801a1b) -- two related frontend issues in the
+new diff cards (Issue 8 Part 1): the Monaco-based DiffViewer stayed
+mounted (merely hidden) even while a card was collapsed, with no
+automaticLayout option set, risking a 0x0 layout that Monaco isn't
+guaranteed to recover from when later revealed -- and because every card
+stayed mounted for the life of the conversation, a multi-file, multi-turn
+session could accumulate an unbounded number of live Monaco editor
+instances plus full file contents retained in memory. FIX: DiffCard now
+lazy-mounts DiffViewer only on first expand, latched so re-collapsing
+doesn't unmount it again -- this makes the accumulation bounded to only
+diffs the user actually opened, and makes the 0x0-at-mount problem
+unreachable by construction. automaticLayout:true was also added as
+defense in depth.
+NOT independently re-verified in an actual browser this session (the
+browser automation extension was unavailable throughout) -- the lazy-mount
+fix is judged to make the failure mode structurally unreachable, so this
+is not treated as a blocker, but this branch's diff-card rendering should
+NOT be described as "visually confirmed" until someone actually opens one
+in a real browser.
+
+PARKED, NOT FIXED (adjudicated by the controller as real but not
+load-bearing enough for this one allowed fix wave):
+  - I5: a turn's sync file-write tool can complete AFTER cancellation was
+    requested (fire-and-forget cancel cannot interrupt already-executing
+    sync code), and its file_diff can arrive after a reconnect and get
+    merged into the NEW turn's diff card with the wrong baseline. Real,
+    narrow (small window), and the reviewer's own assessment is
+    "cosmetic/confusing rather than corrupting" -- not data loss, and the
+    core "no more duplicate replies" promise stays intact. The reviewer's
+    suggested cheap mitigation (check cancellation-requested before
+    broadcasting) is non-trivial to get right from inside a sync tool that
+    may be running off the main event loop thread -- judged too risky to
+    rush in a final, one-shot fix wave. Proper fix for a future session:
+    stamp a turn/attempt id into file_diff and filter mismatched turns in
+    the frontend reducer.
+  - Several Minor findings (a shared _sanitize_messages helper between this
+    agent and design_architecture_agent's own copy; code.diff silently
+    no-op on the Run/pipeline SSE feed -- arguably correct, wants an
+    explicit comment; diff cards don't survive a page reload since the
+    plan never asked for persistence; _INFLIGHT_SESSIONS being
+    process-local, fine for single-worker local dev, needs an ops note for
+    multi-worker/multi-pod production) -- full list with reasoning in
+    .superpowers/sdd/2026-08-31-development-agent-chat-overhaul/
+    progress.md.
+  - Two smaller residuals surfaced by the fix wave's own re-review: the
+    REST POST /chat/ path has the same system_injected-before-graph shape
+    I2 fixed on the WS path, but has no cancellation trigger today (that
+    mechanism is WS-only) -- backlog note, not urgent. An errored turn's
+    SSE stream still closes reporting status:"approved" with the actual
+    error text dropped by the frontend's WS-event allowlist -- pre-existing
+    behavior, unrelated to and not worsened by I1's fix (which only added
+    the missing terminal signal, not error detail).
+
+Full ledger with every dispatch, finding, fix round, and ruling:
+.superpowers/sdd/2026-08-31-development-agent-chat-overhaul/progress.md

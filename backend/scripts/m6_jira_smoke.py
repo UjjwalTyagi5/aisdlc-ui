@@ -15,15 +15,20 @@ import sys
 import httpx
 
 from config.connectors.jira import JiraConnector
-from config.env import JIRA_URL
 
 
 async def main() -> None:
-    target_project = sys.argv[1] if len(sys.argv) > 1 else ""
-    conn = JiraConnector(org_url=JIRA_URL)
+    # Credentials are per-tenant, so the tenant is an argument — there is no
+    # process-wide Jira URL or token to fall back on.
+    if len(sys.argv) < 2:
+        print("Usage: m6_jira_smoke.py <TENANT_ID> [PROJECT_KEY]")
+        sys.exit(2)
+    tenant_id = sys.argv[1]
+    target_project = sys.argv[2] if len(sys.argv) > 2 else ""
+    conn = JiraConnector(org_url="", tenant_id=tenant_id)
 
-    print("→ Resolving Jira credentials (Key Vault → env fallback)...")
-    auth = await conn.auth_adapter()
+    print(f"→ Resolving Jira credentials for tenant {tenant_id}...")
+    auth = await conn.auth_adapter(tenant_id)
     print(f"  ✓ url={auth['jira_url']}  email={auth['email']}  token_len={len(auth['token'])}")
 
     print("\n→ list_projects()...")

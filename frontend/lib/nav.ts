@@ -7,7 +7,9 @@ import {
   Building2,
   Coins,
   FolderKanban,
+  Import,
   Inbox,
+  Info,
   KeyRound,
   LayoutDashboard,
   Plug,
@@ -279,6 +281,31 @@ export const governNav: NavItem[] = [
     requireScope: "business_unit",
     prdSection: "§34.3, §34.4",
   },
+  {
+    /**
+     * The org's approved external Skill-import sources (Agent Studio import +
+     * supply-chain screening). The PAGE's own read is open to any tenant
+     * member — matches the backend's `GET /agent-skills/import-sources` floor
+     * (`artifact:view` only, no Org-Admin gate) — but the SIDEBAR entry still
+     * carries `requireScope: "business_unit"`, same as every governNav
+     * sibling above (Business Units, Users, Roles & Access, Model Management,
+     * Integrations). `artifact:view` alone is held by every platform role
+     * (developer, QA, architect, BA, …), so gating the link on it with no
+     * scope would surface a Control-plane entry to every contributor, not
+     * just the tier that actually administers the allowlist. Someone without
+     * a governNav-worthy scope can still reach the page directly (e.g. a
+     * future link from the Skills tab's Import dialog) — this only controls
+     * sidebar discoverability. Adding to the list is Org-Admin-only
+     * (`is_org_wide` on the POST route), enforced inside the page itself —
+     * see `components/agent-studio/import-source-allowlist.tsx`.
+     */
+    label: "Import Sources",
+    href: "/admin/agent-import-sources",
+    icon: Import,
+    segment: "agent-import-sources",
+    requirePermission: "artifact:view",
+    requireScope: "business_unit",
+  },
 ];
 
 // ─── Observability — the evidence surface (PRD §34.8, §34.9) ──────────────────
@@ -419,9 +446,9 @@ export const utilityNav: NavItem[] = [
      * `hiddenInSidebar` keeps it out of the main nav loop; the footer renders
      * it explicitly (components/app/sidebar.tsx).
      */
-    label: "Agent Catalogue",
+    label: "About",
     href: "/catalogue",
-    icon: Boxes,
+    icon: Info,
     segment: "catalogue",
     hiddenInSidebar: true,
     prdSection: "§20, §21–§25",
@@ -516,8 +543,9 @@ export const segmentLabels: Record<string, string> = {
   // "Models", not "Model Management" — the segment is now shared with the
   // project-scoped page, and both screens title themselves Models anyway.
   models: "Models",
+  "agent-import-sources": "Import Sources",
   cost: "Cost & Budget",
-  catalogue: "Agent Catalogue",
+  catalogue: "About",
   activity: "Activity",
   "my-access": "My access",
   traces: "Traces",
@@ -598,7 +626,7 @@ function visibleTo(item: NavItem, perms: string[], ctx?: NavContext): boolean {
    * Handled here rather than as `hideForRoles: ["contributor"]` on each entry,
    * because the rule is about the ROLE holding nothing — not about these four
    * pages — so the next entry added must inherit it without anyone remembering.
-   * What stays reachable is the utility rail (Agent Catalogue, Help & docs),
+   * What stays reachable is the utility rail (About, Help & docs),
    * which is exactly what someone waiting to be given work can usefully read.
    */
   if (ctx?.role === "contributor") return false;

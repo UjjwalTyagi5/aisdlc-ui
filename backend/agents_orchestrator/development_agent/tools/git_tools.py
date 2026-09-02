@@ -26,10 +26,8 @@ from agents_orchestrator.development_agent.tools.sandbox_policy import (
     validate_command,
 )
 from config.connection_manager import manager
-from config.connector_client import ConnectorNotInstalledError, get_connector
 from config.connectors.context import get_connector as get_active_connector
 from config.connectors.base import ConnectorNotAvailableError
-from config.env import ADO_PAT
 from config.ws_helper import broadcast_log, get_session_id, get_user_id, get_provider_kind
 from shared.models.development import CommandResult, ValidationResult
 
@@ -148,13 +146,12 @@ def _sanitize_branch_name(name: str) -> str:
 
 def _set_ado_default_branch(s, project: str, repo_id: str, branch: str) -> None:
     """PATCH the ADO repo to set the default branch so the Files tab shows content."""
-    from config.env import ADO_ORG_URL
-    pat = s.pat or ADO_PAT
-    if not pat or not ADO_ORG_URL:
+    pat, org_url = s.pat, s.ado_org_url
+    if not pat or not org_url:
         return
     import urllib.parse
     encoded_project = urllib.parse.quote(project, safe="")
-    url = f"{ADO_ORG_URL.rstrip('/')}/{encoded_project}/_apis/git/repositories/{repo_id}?api-version=7.0"
+    url = f"{org_url.rstrip('/')}/{encoded_project}/_apis/git/repositories/{repo_id}?api-version=7.0"
     auth = base64.b64encode(f":{pat}".encode()).decode()
     try:
         resp = httpx.patch(
@@ -175,8 +172,8 @@ async def _active_ado_creds() -> tuple[str, str]:
     """Resolve (org_url, pat) for ADO, preferring the per-run tenant connector the
     orchestrator bound (config.connectors.context) over the global env vars. This is
     what lets a pipeline run use the tenant's Integrations-page ADO credentials
-    (secret store) instead of a process-wide PAT — the standalone/local path still
-    falls back to ADO_ORG_URL / ADO_PAT env."""
+    (secret store). With no connector bound, this returns ("", "") — there is no
+    process-wide PAT to fall back on."""
     try:
         conn = get_active_connector()  # AzureDevOpsConnector bound for this run's stage
         auth = await conn.auth_adapter()  # {org_url, pat} — tenant secret store
@@ -184,10 +181,9 @@ async def _active_ado_creds() -> tuple[str, str]:
         pat = auth.get("pat") or ""
         if pat:
             return org, pat
-    except Exception:  # noqa: BLE001 — no active connector (standalone) → env fallback
+    except Exception:  # noqa: BLE001 — no active connector (standalone)
         pass
-    from config.env import ADO_ORG_URL, ADO_PAT
-    return (ADO_ORG_URL or "").rstrip("/"), (ADO_PAT or "")
+    return "", ""
 
 
 @tool
@@ -210,6 +206,7 @@ async def get_ado_context() -> str:
     session_id = get_session_id()
     s = get_session(session_id)
     s.pat = pat
+    s.ado_org_url = org_url
 
     return _json.dumps({
         "org_url": org_url,
@@ -329,12 +326,11 @@ async def list_ado_branches(repo_name: str = "") -> str:
         )
 
     # ── Path B: repo not yet cloned — call ADO API via shared helper ─────────
-    from config.env import ADO_ORG_URL, ADO_PAT
     from shared.services import ado_repos as _ado_repos
 
-    pat = s.pat or ADO_PAT
+    pat = s.pat
     project = s.ado_project
-    if not pat or not ADO_ORG_URL or not project:
+    if not pat or not s.ado_org_url or not project:
         return (
             "Cannot list branches yet — repo not cloned and ADO context not set. "
             "Call get_ado_context and list_ado_repos first."
@@ -353,7 +349,7 @@ async def list_ado_branches(repo_name: str = "") -> str:
         )
 
     try:
-        branch_items = await _ado_repos.list_branches(project, repo_id, pat=pat, org_url=ADO_ORG_URL)
+        branch_items = await _ado_repos.list_branches(project, repo_id, pat=pat, org_url=s.ado_org_url)
     except Exception as exc:
         return f"Error listing branches: {exc}"
 
@@ -385,12 +381,19 @@ async def create_ado_repo(project: str, repo_name: str) -> str:
         repo_name: Name for the new repository (kebab-case recommended)
     """
     import urllib.parse
-    from config.env import ADO_ORG_URL, ADO_PAT
 
     session_id = get_session_id()
     s = get_session(session_id)
-    pat = s.pat or ADO_PAT
-    org_url = ADO_ORG_URL.rstrip("/") if ADO_ORG_URL else ""
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT CREATED — this is NOT an error. Creating a repository is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I create the "
+            f"'{repo_name}' repository in ADO project '{project}'?\". Do NOT call "
+            "create_ado_repo again until the user replies with approval."
+        )
+    pat = s.pat
+    org_url = (s.ado_org_url or "").rstrip("/")
 
     if not org_url or not pat:
         return "ADO credentials not available. Call get_ado_context() first."
@@ -435,7 +438,7 @@ async def create_ado_repo(project: str, repo_name: str) -> str:
 
 
 @tool
-def get_github_context() -> str:
+async def get_github_context() -> str:
     """Bootstrap a GitHub session — load credentials from the GitHub connector and confirm access.
 
     Call this BEFORE list_github_repos / clone_repo for GitHub repositories.
@@ -446,15 +449,24 @@ def get_github_context() -> str:
     session_id = get_session_id()
     s = get_session(session_id)
 
+    # GitHub credentials are per-tenant: they come from the connector bound to this
+    # run (tenant secret store / that tenant's Key Vault). There is no process-wide
+    # GitHub PAT, so an unconnected tenant gets a clean instruction instead.
+    gh_org_url, gh_token = "", ""
     try:
-        connector = get_connector("github")
-    except ConnectorNotInstalledError as e:
+        auth = await get_active_connector().auth_adapter()
+        gh_token = auth.get("pat") or auth.get("token") or ""
+        gh_org_url = auth.get("org_url", "")
+    except Exception:  # noqa: BLE001 — no connector bound to this run
+        gh_token = ""
+
+    if not gh_token:
         return _json.dumps({
-            "error": str(e),
-            "action": "Go to Connectors in the sidebar and add a GitHub connector (org URL + PAT with repo, workflow scopes).",
+            "error": "GitHub is not connected for your organization.",
+            "action": "Open Integrations in the sidebar and connect GitHub (PAT with repo, workflow scopes).",
         })
 
-    s.pat = connector["pat"]
+    s.pat = gh_token
     s.repo_type = "github"
 
     try:
@@ -467,7 +479,7 @@ def get_github_context() -> str:
             login = resp.json().get("login", "unknown")
             return _json.dumps({
                 "authenticated_as": login,
-                "org_url": connector.get("org_url", ""),
+                "org_url": gh_org_url,
                 "credentials_stored": True,
                 "note": "GitHub credentials stored. Call list_github_repos next to show available repos.",
             })
@@ -661,13 +673,10 @@ def clone_repo(repo_url: str, pat_or_token: Optional[str] = None) -> str:
 
     # Resolve PAT by repo type if not already set
     if not pat_or_token:
-        if s.repo_type == "github":
-            try:
-                pat_or_token = get_connector("github")["pat"]
-            except Exception:
-                pass
-        if not pat_or_token:
-            pat_or_token = ADO_PAT
+        # The session already holds THIS TENANT's credential: get_ado_context /
+        # get_github_context resolved it from the run's connector and stored it.
+        # There is no process-wide PAT to fall back on if they were never called.
+        pat_or_token = s.pat
 
     s.pat = pat_or_token
     s.build_attempts = 0
@@ -992,7 +1001,7 @@ def _create_ado_pr(s, title, description, work_item_ids, target_branch):
         f"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}"
         f"/pullrequests?api-version=7.1"
     )
-    pat = s.pat or ADO_PAT
+    pat = s.pat
     auth = base64.b64encode(f":{pat}".encode()).decode()
 
     body: dict = {
@@ -1067,7 +1076,7 @@ async def mark_pr_ready(pr_url: str) -> str:
     """
     session_id = get_session_id()
     s = get_session(session_id)
-    pat = s.pat or ADO_PAT
+    pat = s.pat
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _mark_pr_ready_sync, pr_url, s.repo_type, pat)
 
@@ -1211,6 +1220,16 @@ async def update_work_item_state(
     'To Do', 'In Progress', 'In Review', or 'Done'. Provider fallback maps
     'In Development' to Jira's 'In Progress' when needed.
     """
+    session_id = get_session_id()
+    s = get_session(session_id)
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT UPDATED — this is NOT an error. Moving work items is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I move "
+            f"{work_item_ids} to '{target_state}'?\". Do NOT call "
+            "update_work_item_state again until the user replies with approval."
+        )
     if not work_item_ids:
         return "No work item IDs provided - skipping."
     try:
@@ -1238,6 +1257,16 @@ async def add_pr_comment_to_work_items(
     pr_url: str,
 ) -> str:
     """Post a comment with the PR URL on each linked PM work item."""
+    session_id = get_session_id()
+    s = get_session(session_id)
+    if getattr(s, "push_gate_enabled", False) and not getattr(s, "push_approved", False):
+        return (
+            "⛔ NOT ADDED — this is NOT an error. Commenting on work items is a "
+            "Consequential action and must be approved before it happens.\n"
+            "Do this now, then STOP: ask the user \"Shall I comment the PR link "
+            f"on {work_item_ids}?\". Do NOT call add_pr_comment_to_work_items "
+            "again until the user replies with approval."
+        )
     if not work_item_ids:
         return "No work item IDs provided - skipping."
     try:

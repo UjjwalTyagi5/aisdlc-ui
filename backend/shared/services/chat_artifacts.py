@@ -10,6 +10,19 @@ lightweight per-project "chat" Run for the stage, then inserts an Artifact row
 panel live-refreshes. Purely additive — the existing WS download is unchanged.
 
 Best-effort: every failure is swallowed so file generation is never broken by it.
+
+STORED IN BLOB, NOT ON LOCAL DISK. The row used to carry `blob_url` = a
+`/generated/...` static-mount URL and `blob_path` = a local filesystem path. That mount
+(`process_api.py`: `app.mount("/generated", StaticFiles(directory=FILES_DIR))`) is in
+the JWT middleware's exempt list, so those documents were readable by anyone who knew
+the path, across tenants. Files now go through
+`shared/services/artifact_store.store_artifact`, which writes them under
+`{tenant_id}/{run_id}/{artifact_type}/{filename}` — the prefix IS the tenant boundary —
+and the row carries real blob coordinates.
+
+The live in-chat `file_generated` WS event still carries the local `url` so the existing
+download keeps working while the static mount is still mounted; retiring that mount is
+a separate change.
 """
 from __future__ import annotations
 
@@ -77,18 +90,61 @@ async def register_generated_file(filename: str, file_path: str, url: str, *, st
             logger.debug("register_generated_file: no tenant/project in context — skip persist (%s)", filename)
             return
 
-        size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None
         content_type = _CONTENT_TYPES.get(os.path.splitext(filename)[1].lower())
         artifact_type = _artifact_type_for(filename)
+
+        # Read the bytes ONCE, here, before opening a session. The file is on local
+        # disk because the generating tool put it there; blob storage is where it goes
+        # to become durable and tenant-isolated.
+        data: bytes | None = None
+        if file_path and os.path.exists(file_path):
+            try:
+                with open(file_path, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:
+                logger.warning("register_generated_file: unreadable %s (%s)",
+                               file_path, type(exc).__name__)
 
         async with get_db_session_for_tenant(tenant_id) as session:
             run_id = await _get_or_create_chat_run(session, tenant_id, project_id, stage)
             if not run_id:
                 return
-            session.add(Artifact(
-                run_id=run_id, tenant_id=tenant_id, artifact_type=artifact_type,
-                blob_url=url, blob_path=file_path, content_type=content_type, size_bytes=size,
-            ))
+
+            if data is None:
+                # Nothing to upload — record what we know so the panel still lists it.
+                # `blob_path=None` so the download route reports "no stored file"
+                # rather than handing a dead local path to Azure.
+                session.add(Artifact(
+                    run_id=run_id, tenant_id=tenant_id, artifact_type=artifact_type,
+                    blob_url=None, blob_path=None,
+                    content_type=content_type, size_bytes=None,
+                ))
+            else:
+                # THE CHANGE: the row now carries BLOB coordinates, not local ones.
+                #
+                # It used to store `blob_url=url` (a `/generated/...` static-mount URL)
+                # and `blob_path=file_path` (a Windows path). Both are local, neither
+                # is tenant-isolated, and `/generated` is served by StaticFiles with no
+                # authentication at all — so the "blob" columns described a file anyone
+                # who guessed the path could read.
+                #
+                # store_artifact composes `{tenant_id}/{run_id}/{artifact_type}/{file}`,
+                # which is the only thing separating tenants in blob storage, and
+                # degrades to `blob_url=None` when blob storage is unconfigured rather
+                # than failing the generation.
+                from shared.services.artifact_store import (  # noqa: PLC0415
+                    get_blob_client, store_artifact,
+                )
+                await store_artifact(
+                    session,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    artifact_type=artifact_type,
+                    filename=filename,
+                    data=data,
+                    content_type=content_type or "application/octet-stream",
+                    blob_client=get_blob_client(),
+                )
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415

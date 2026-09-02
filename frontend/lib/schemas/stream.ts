@@ -45,6 +45,19 @@ export const ArtifactUpdatedEvent = z.object({
   at: Timestamp,
 });
 
+export const CodeDiffEvent = z.object({
+  type: z.literal("code.diff"),
+  runId: RunId,
+  /** Relative file path (forward-slash separated), as written by the agent. */
+  path: z.string(),
+  /** Full previous file content, or "" when the file was newly created. */
+  original: z.string(),
+  /** Full new file content after the write/edit. */
+  modified: z.string(),
+  changeKind: z.enum(["created", "edited"]),
+  at: Timestamp,
+});
+
 export const HitlPendingEvent = z.object({
   type: z.literal("hitl.pending"),
   runId: RunId,
@@ -81,6 +94,7 @@ export const StreamEvent = z.discriminatedUnion("type", [
   StepProgressEvent,
   StepOutputDeltaEvent,
   ArtifactUpdatedEvent,
+  CodeDiffEvent,
   HitlPendingEvent,
   CostUpdateEvent,
   GuardrailHitEvent,

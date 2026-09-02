@@ -46,6 +46,13 @@ export const SkillListItem = z.object({
   deletable: z.boolean(),
   version: z.number().int().nullable(),
   active_version: z.number().int().nullable(),
+  /** Which tier this item's content actually lives at — null for vendor skills
+   *  (no scope of their own). Differs from the requested scope when the item is
+   *  inherited from an ancestor tier rather than authored at this one.
+   *  `.default(null)` is defensive, not load-bearing: the backend always sends
+   *  this key now, but a future regression there should degrade gracefully
+   *  rather than fail every skill request. */
+  origin_scope: SkillScope.nullable().default(null),
 });
 export type SkillListItem = z.infer<typeof SkillListItem>;
 
@@ -93,6 +100,49 @@ export const SkillCreateInput = z.object({
 });
 export type SkillCreateInput = z.infer<typeof SkillCreateInput>;
 
+/** Where an imported skill's content comes from — a BU the caller administers
+ *  within the same tenant, or a declared external source (checked against the
+ *  org's import-source allowlist). */
+export const ImportSourceInput = z.object({
+  kind: z.enum(["same_tenant_bu", "external"]),
+  workspace_id: z.string().nullish(),
+  url: z.string().nullish(),
+});
+export type ImportSourceInput = z.infer<typeof ImportSourceInput>;
+
+/** POST /agent-skills/import body — import a Skill through the backend's
+ *  prompt-injection/credential/provenance screens before it lands via the
+ *  same path a create would. */
+export const ImportSkillInput = z.object({
+  agent_id: z.string(),
+  scope: SkillScope,
+  scope_id: z.string().nullish(),
+  skill_key: z.string(),
+  display_name: z.string(),
+  description: z.string().optional(),
+  when_to_use: z.string().optional(),
+  body: z.string(),
+  source: ImportSourceInput,
+});
+export type ImportSkillInput = z.infer<typeof ImportSkillInput>;
+
+/** One row in the org's approved external import-source allowlist
+ *  (GET /agent-skills/import-sources item shape). */
+export const ImportSourceEntry = z.object({
+  id: z.string(),
+  source_pattern: z.string(),
+  label: z.string(),
+  created_by: z.string().nullable(),
+  created_at: z.string().nullable(),
+});
+export type ImportSourceEntry = z.infer<typeof ImportSourceEntry>;
+
+/** GET /agent-skills/import-sources response. */
+export const ImportSourceList = z.object({
+  sources: z.array(ImportSourceEntry),
+});
+export type ImportSourceList = z.infer<typeof ImportSourceList>;
+
 /** PUT /agent-skills/{skill_key} body — publish a new active version. */
 export const SkillUpdateInput = z.object({
   agent_id: z.string(),
@@ -105,7 +155,10 @@ export const SkillUpdateInput = z.object({
 });
 export type SkillUpdateInput = z.infer<typeof SkillUpdateInput>;
 
-/** POST /agent-skills/toggle body — enable/disable a vendor or custom skill. */
+/** POST /agent-skills/toggle body — enable/disable a vendor or custom skill.
+ *  `workspace_id` lets the backend find a CUSTOM skill that's inherited from an
+ *  ancestor tier (its existence check walks the same chain list_skills_merged
+ *  does) — the toggle itself still always writes at `scope`. */
 export const SkillToggleInput = z.object({
   agent_id: z.string(),
   scope: SkillScope,
@@ -113,6 +166,8 @@ export const SkillToggleInput = z.object({
   origin: SkillOrigin,
   skill_key: z.string(),
   enabled: z.boolean(),
+  workspace_id: z.string().nullish(),
+  project_id: z.string().nullish(),
 });
 export type SkillToggleInput = z.infer<typeof SkillToggleInput>;
 
@@ -123,6 +178,17 @@ export const SkillToggleResult = z.object({
   enabled: z.boolean(),
 });
 export type SkillToggleResult = z.infer<typeof SkillToggleResult>;
+
+// No target_ref/version here — the backend resolves its own target server-side
+// (the newest inactive version at this scope), mirroring Behavior's propose(),
+// which likewise never accepts a client-suppliable target. See the sub-project 3
+// spec for why: a client-suppliable target could be pointed at an arbitrary row.
+export const SkillProposeInput = z.object({
+  agent_id: z.string(),
+  scope: SkillScope,
+  scope_id: z.string().nullish(),
+});
+export type SkillProposeInput = z.infer<typeof SkillProposeInput>;
 
 /** DELETE /agent-skills/{skill_key} response — soft delete (custom only). */
 export const SkillDeleteResult = z.object({

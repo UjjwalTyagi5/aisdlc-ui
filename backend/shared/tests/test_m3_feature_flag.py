@@ -13,15 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 @pytest.mark.unit
 def test_enable_worker_pool_importable():
-    """The three M3 worker-pool env vars import with correct types."""
+    """The M3 worker-pool env vars import with correct types."""
     from config.env import (
         ENABLE_WORKER_POOL,
-        WORKER_POOL_CONCURRENCY,
         WORKER_RECLAIM_TIMEOUT_MS,
     )
 
     assert isinstance(ENABLE_WORKER_POOL, bool)
-    assert isinstance(WORKER_POOL_CONCURRENCY, int)
     assert isinstance(WORKER_RECLAIM_TIMEOUT_MS, int)
 
 

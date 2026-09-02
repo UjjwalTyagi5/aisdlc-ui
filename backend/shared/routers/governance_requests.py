@@ -68,6 +68,22 @@ class RequestCreateIn(BaseModel):
     projectId: Optional[str] = None
     attachments: list[AttachmentIn] = Field(default_factory=list, max_length=10)
     phase: Optional[str] = None
+    # WHAT is being asked for, when the type needs a specific one — a
+    # connector kind, an MCP server row id, or a model provider id. Content,
+    # not routing, exactly like `phase` above: the requester names the thing,
+    # the platform still derives who decides it.
+    targetId: Optional[str] = Field(default=None, max_length=255)
+    # connector_access's access level (read/write/read_write) — required by
+    # _apply_connector_access's existing payload.get("access") read (see that
+    # function in effects.py). Only meaningful alongside targetId for this
+    # one type; unused by mcp_server (which has no level, per migration 0024
+    # — see _apply_connector_access's own "no level on the row" comment).
+    accessLevel: Optional[str] = Field(default=None, max_length=16)
+    # model_credential's target: a project needs BOTH a provider and a model
+    # id, not one opaque id.
+    providerModel: Optional[dict[str, str]] = None
+    # user_onboarding's target: who is being asked about.
+    onboardEmail: Optional[str] = Field(default=None, max_length=320)
 
 
 class DecisionIn(BaseModel):
@@ -157,6 +173,10 @@ async def create_request(
             priority=body.priority,
             attachments=[a.model_dump() for a in body.attachments],
             phase=body.phase,
+            target_id=body.targetId,
+            access_level=body.accessLevel,
+            provider_model=body.providerModel,
+            onboard_email=body.onboardEmail,
         )
     except GovernanceError as exc:
         raise _http(exc)

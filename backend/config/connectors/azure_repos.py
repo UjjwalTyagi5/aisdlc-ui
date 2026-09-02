@@ -2,7 +2,7 @@
 
 Handles PR webhook normalization and branch operations for Azure Repos
 (part of Azure DevOps). Reuses the same ADO credentials as AzureDevOpsConnector
-(load_secret("ado-pat") with ADO_ORG_URL/ADO_PAT env fallback — REQ-M6-14).
+(tenant secret store, then Key Vault "{tenant}-ado-pat" — REQ-M6-14).
 
 SECURITY NOTE (no HMAC):
 ADO service hooks do NOT send a cryptographic signature header.  Authentication
@@ -18,6 +18,7 @@ dedup event_id.  This shape has been assumed from ADO service hook documentation
 Must be verified against a real ADO service hook payload before production use.
 """
 from __future__ import annotations
+
 
 import asyncio
 import logging
@@ -40,7 +41,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import ADO_ORG_URL, ADO_PAT
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +103,6 @@ class AzureReposConnector(BaseConnector):
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
         pat = await _keyvault.load_secret("ado-pat", tenant_id=tenant_id)
-        if not pat:
-            pat = await _keyvault.load_secret("ado-pat")
-        if not pat:
-            pat = ADO_PAT
         return {"org_url": self._org_url, "pat": pat}
 
     # ── Capability declaration ────────────────────────────────────────────

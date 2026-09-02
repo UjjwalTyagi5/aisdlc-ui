@@ -47,7 +47,7 @@ import {
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { BUILT_AGENTS, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -113,13 +113,12 @@ export default function ProjectOverviewPage() {
     const track = projectQ.data?.track;
     if (!viewerRole || !track) return undefined;
     // TODO(next task): read the project's actually-verified agent list once that
-    // signal exists server-side; until then, this list is seeded with only the
-    // agent this plan actually rebuilt and verified end-to-end (Security, via
-    // Tasks 5-7's REST/WS/workspace RBAC enforcement). The other 7 Portfolio-1
-    // agents keep their old, unverified code per the design doc's "assume broken
-    // until properly rebuilt" framing (multi-track-agent-access-design.md) — grow
-    // this list one entry at a time as each agent gets the same Task 5-7 treatment.
-    const builtAgents: Phase[] = ["security", "documentation"];
+    // signal exists server-side. Until then BUILT_AGENTS is the single source of
+    // truth, shared with each agent's own standalone page gate — see lib/agents.ts
+    // for which agents are on it and what "verified" meant for each. Agents not on
+    // it keep their old, unverified code per the design doc's "assume broken until
+    // properly rebuilt" framing (multi-track-agent-access-design.md).
+    const builtAgents: readonly Phase[] = BUILT_AGENTS;
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 

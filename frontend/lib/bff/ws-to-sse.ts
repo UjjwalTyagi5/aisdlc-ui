@@ -11,6 +11,7 @@
  *   stream_chunk        → step.output.delta  (delta=content, synthetic stepId)
  *   stream_end          → run.completed      (status="approved")
  *   file_generated      → artifact.updated   (status="approved", synthetic artifactId)
+ *   file_diff           → code.diff         (path/original/modified/changeKind passthrough)
  *   agent_completed     → run.completed      (status="failed"  — only when success=false)
  *   activity_update     → run.completed      (status="approved" — only when activity.type="complete")
  *   message_received    → null (discard — ack only, no UI value)
@@ -93,6 +94,23 @@ export function mapWsToSseEvent(wsMsg: unknown, runId: string): StreamEvent | nu
         status: "approved" as const,
         name: filename,
         url: typeof wsMsg.url === "string" ? wsMsg.url : undefined,
+        at: now,
+      };
+      return validateOrNull(event);
+    }
+
+    case "file_diff": {
+      const changeKind =
+        wsMsg.change_kind === "created" || wsMsg.change_kind === "edited"
+          ? wsMsg.change_kind
+          : undefined;
+      const event = {
+        type: "code.diff" as const,
+        runId,
+        path: typeof wsMsg.path === "string" ? wsMsg.path : "",
+        original: typeof wsMsg.original === "string" ? wsMsg.original : "",
+        modified: typeof wsMsg.modified === "string" ? wsMsg.modified : "",
+        changeKind,
         at: now,
       };
       return validateOrNull(event);

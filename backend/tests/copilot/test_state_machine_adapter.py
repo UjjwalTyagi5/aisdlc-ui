@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from types import SimpleNamespace
@@ -67,6 +68,30 @@ async def test_state_machine_adapter_invokes_with_user_prompt_and_streams_final_
     assert resolve_calls == [("tenant-1", "m1", "o1")]
 
 
+# THE ONLY TEST HERE THAT NEEDS A LIVE MODEL, and it needs one genuinely: it asserts
+# that the graph's INTENT CLASSIFICATION routed a second turn correctly, which is the
+# model's judgement rather than the adapter's plumbing. Mocking the model would leave
+# the name intact and the meaning gone.
+#
+# GATED ON AN EXPLICIT OPT-IN, not on the key being present. The repo's usual
+# `skipif(not SOME_SETTING)` shape does not work here: ANTHROPIC_API_KEY was SET on the
+# machine where this failed, and stale — so the run made a real Anthropic request, got
+# `AuthenticationError: API key is invalid`, and reported a state-machine regression
+# that had not happened. A key-presence check would have skipped none of that.
+#
+# A live-model test also costs money and needs a network, so firing it on every
+# developer's machine by default is wrong even when the credential works.
+#
+#     RUN_LIVE_LLM_TESTS=1 pytest tests/copilot/test_state_machine_adapter.py
+_skip_no_live_llm = pytest.mark.skipif(
+    not os.environ.get("RUN_LIVE_LLM_TESTS"),
+    reason="needs a WORKING model credential and makes a real API call — "
+           "set RUN_LIVE_LLM_TESTS=1 to run it",
+)
+
+
+@pytest.mark.integration
+@_skip_no_live_llm
 @pytest.mark.asyncio
 async def test_testing_graph_carries_state_across_turns():
     from langgraph.checkpoint.memory import MemorySaver

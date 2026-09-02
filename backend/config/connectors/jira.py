@@ -1,8 +1,8 @@
 """Jira connector implementing the full BaseConnector contract.
 
 Replaces the stub from Plan 03. Credentials are resolved ephemerally inside
-auth_adapter() via Key Vault first, env var fallback — never stored on self
-(REQ-M6-14). Per-tenant rate-limit backoff with retry_count auditing wired
+auth_adapter() from the tenant secret store then Key Vault "{tenant}-<ref>" —
+both rungs tenant-scoped, never stored on self (REQ-M6-14). Per-tenant
 per REQ-M6-10 / REQ-M6-12.
 
 NOTE (A3 — ASSUMED): Jira Retry-After header presence and format have NOT been
@@ -11,6 +11,7 @@ header if present; falls back to exponential backoff otherwise. Must be
 validated against a real tenant before production use.
 """
 from __future__ import annotations
+
 
 import asyncio
 import logging
@@ -35,7 +36,6 @@ from config.connectors.rate_limit import (
     await_backoff,
     record_rate_limit_hit,
 )
-from config.env import JIRA_API_TOKEN, JIRA_EMAIL, JIRA_URL
 from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
@@ -78,20 +78,14 @@ class JiraConnector(BaseConnector):
     # ── Auth (ephemeral) ──────────────────────────────────────────────────
 
     async def auth_adapter(self, tenant_id: str = "") -> dict[str, Any]:
-        """Resolve credentials ephemerally: OAuth Bearer first, then Basic Auth fallback.
+        """Resolve credentials ephemerally: Basic Auth (email + API token), tenant-scoped.
 
         tenant_id is required — raises ValueError when absent (REQ-M7-01, SC-02).
 
-        OAuth-first path (REQ-M7-20, SC#9):
-          When jira-access-token is present in tenant KV, returns an OAuth-mode
-          dict with mode="oauth", bearer=<token>, jira_url=api.atlassian.com/ex/jira/{cloud_id}.
-          _jira_request() then sends Authorization: Bearer {token} against the
-          Atlassian API gateway — no Basic Auth tuple (Pitfall 6, T-7.4-22).
-
-        Basic Auth fallback (M6 backward-compat):
-          When jira-access-token is absent, falls through to the existing tenant-scoped
-          KV → global KV → env-var resolution path (mode="basic").
-          M6 operator-provisioned Basic-Auth tenants keep working unchanged.
+        Rungs, in order, all tenant-scoped: the project member's own credential
+        override, then the tenant secret store, then Key Vault "{tenant}-<ref>".
+        The returned dict always has mode="basic"; the key is kept so call sites and
+        stored fixtures do not have to change shape.
 
         Return value is never stored on self and must not be logged/persisted (T-7.4-22).
         """
@@ -123,15 +117,11 @@ class JiraConnector(BaseConnector):
                 jira_url = jira_url or (
                     stored_url
                     or await _keyvault.load_secret("jira-url", tenant_id=tenant_id)
-                    or await _keyvault.load_secret("jira-url")
-                    or JIRA_URL
                     or self._org_url
                 )
                 email = email or (
                     stored_email
                     or await _keyvault.load_secret("jira-email", tenant_id=tenant_id)
-                    or await _keyvault.load_secret("jira-email")
-                    or JIRA_EMAIL
                 )
             return {
                 "mode": "basic",
@@ -140,20 +130,15 @@ class JiraConnector(BaseConnector):
                 "token": override.token,
             }
 
-        # ── OAuth-first: check for tenant-provisioned OAuth 3LO token (REQ-M7-20) ──
-        oauth_token = await _keyvault.load_secret("jira-access-token", tenant_id=tenant_id)
-        if oauth_token:
-            cloud_id = await _keyvault.load_secret("jira-cloud-id", tenant_id=tenant_id)
-            # api.atlassian.com/ex/jira/{cloud_id} is the correct gateway for OAuth 3LO
-            # tokens. CRUD paths already start with /rest/api/3/... so they append cleanly.
-            gateway_url = f"https://api.atlassian.com/ex/jira/{cloud_id}"
-            return {
-                "mode": "oauth",
-                "jira_url": gateway_url,
-                "bearer": oauth_token,  # T-7.4-22: never log this value
-            }
+        # REMOVED: the OAuth 3LO branch that read jira-access-token / jira-cloud-id and
+        # returned mode="oauth" against api.atlassian.com/ex/jira/{cloud_id}. Those
+        # secrets were only ever written by /connectors/jira/oauth/callback, and that
+        # callback could only exchange a code by presenting the PLATFORM's Atlassian
+        # client_id and client_secret. Removing the flow removes the reason for the
+        # platform to hold an Atlassian credential; Basic Auth below reaches the same
+        # API with a token the tenant owns.
 
-        # ── Basic Auth fallback: tenant secret store → tenant KV → global KV → env ──
+        # ── Basic Auth: tenant secret store → Key Vault "{tenant}-<ref>" ──
         # The secret store (Fernet-DB in local dev / Key Vault in prod) is the path the
         # Integrations "Add credentials" form writes to. Skipped for the health-probe
         # sentinel; never allowed to raise.
@@ -169,14 +154,10 @@ class JiraConnector(BaseConnector):
         jira_url = await _tenant_secret("jira-url")
         if not jira_url:
             jira_url = await _keyvault.load_secret("jira-url", tenant_id=tenant_id)
-        if not jira_url:
-            jira_url = await _keyvault.load_secret("jira-url")
 
         email = await _tenant_secret("jira-email")
         if not email:
             email = await _keyvault.load_secret("jira-email", tenant_id=tenant_id)
-        if not email:
-            email = await _keyvault.load_secret("jira-email")
 
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
         token_raw = await _tenant_secret("jira-api-token")
@@ -185,17 +166,6 @@ class JiraConnector(BaseConnector):
         if not disconnected:
             if not token:
                 token = await _keyvault.load_secret("jira-api-token", tenant_id=tenant_id)
-            if not token:
-                token = await _keyvault.load_secret("jira-api-token")
-
-        # Env-var fallbacks for local development — never use in production.
-        # Skipped when explicitly disconnected so a disconnected tenant gets no creds.
-        if not jira_url:
-            jira_url = JIRA_URL or self._org_url
-        if not email:
-            email = JIRA_EMAIL
-        if not token and not disconnected:
-            token = JIRA_API_TOKEN
 
         return {
             "mode": "basic",
@@ -399,23 +369,15 @@ class JiraConnector(BaseConnector):
         url = f"{base_url}{path}"
 
         client = get_async_client(timeout=30)
-        if auth.get("mode") == "oauth":
-            # OAuth 3LO: Authorization: Bearer {token} — no Basic Auth tuple.
-            # T-7.4-22: auth["bearer"] is never logged; error paths use type(exc).__name__.
-            resp = await client.request(
-                method,
-                url,
-                headers={"Authorization": f"Bearer {auth['bearer']}"},
-                **kwargs,
-            )
-        else:
-            # Basic Auth: existing M6 operator-provisioned path (backward-compat).
-            resp = await client.request(
-                method,
-                url,
-                auth=(auth["email"], auth["token"]),
-                **kwargs,
-            )
+        # Basic Auth is the only mode now — the OAuth 3LO branch that sent
+        # Authorization: Bearer went with the platform Atlassian app. auth["token"] is
+        # never logged; error paths use type(exc).__name__.
+        resp = await client.request(
+            method,
+            url,
+            auth=(auth["email"], auth["token"]),
+            **kwargs,
+        )
 
         if resp.status_code == 429:
             # Honor Retry-After header if present (A3 — ASSUMED; verify against live tenant).

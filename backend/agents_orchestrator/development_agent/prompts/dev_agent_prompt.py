@@ -144,10 +144,14 @@ CRITICAL — PATHS ARE ALWAYS RELATIVE:
 
 CRITICAL — DO NOT PASTE CODE IN CHAT TEXT:
   Pass code directly as a tool argument — never write code blocks in your message.
-  The sequence for each file:
+  A diff card showing exactly what changed renders automatically in the chat UI for
+  every file you write or edit — the user already sees the code, so pasting it again
+  in your text response is pure waste. The sequence for each file:
     a) One sentence: "Implementing: <component name>"
     b) Call the tool immediately with code_content=<the complete code as a string>.
-  The code MUST be in the tool argument, not in your text response.
+  The code MUST be in the tool argument, not in your text response. Your text
+  response should stay a brief plain-language summary only (e.g. "Added the login
+  form validation").
 
 CRITICAL — code_content IS REQUIRED. NEVER OMIT IT:
   generate_component, generate_api_endpoint, and write_file all require

@@ -65,6 +65,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The upgrade widened uniqueness from (tenant_id, name) to
+    # (tenant_id, scope_id, name), so two units may each own a role called "Reviewer".
+    # Narrowing back cannot succeed while both exist — keep one per (tenant_id, name)
+    # and drop the rest, or CREATE UNIQUE fails and the whole downgrade with it.
+    #
+    # Latent rather than currently failing: this database has no such pair today, which
+    # is exactly why it would have surprised whoever first ran a downgrade after two
+    # units happened to pick the same name.
+    #
+    # `ctid` is Postgres's physical row identifier — used here because custom_roles has
+    # no ordering column that would make "which duplicate survives" meaningful. Any
+    # choice is arbitrary; this one is at least deterministic within a single run.
+    op.execute(
+        "DELETE FROM custom_roles a USING custom_roles b "
+        " WHERE a.tenant_id = b.tenant_id AND a.name = b.name AND a.ctid > b.ctid"
+    )
     op.drop_constraint("uq_custom_role_scope_name", "custom_roles", type_="unique")
     op.create_unique_constraint(
         "uq_custom_role_tenant_name", "custom_roles", ["tenant_id", "name"]

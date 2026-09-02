@@ -4,6 +4,7 @@ import { PageTitle } from "@/components/app/page-title";
 import { CostDashboard } from "@/components/app/cost-dashboard";
 import { BudgetHub } from "@/components/app/budget-hub";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
+import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
@@ -20,7 +21,18 @@ export default function CostPage() {
   // (Phase 6: developer has artifact:view but NOT cost:view).
   if (!hasPermission(session, "cost:view")) {
     return (
-      <RestrictedAccess description="Cost visibility requires the cost:view permission. Ask your admin for access." />
+      <RestrictedAccess
+        description="Cost visibility requires the cost:view permission. Ask your admin for access."
+        action={
+          <RequestAccessButton
+            prefill={{
+              type: "access_request",
+              title: "Access to Cost & Budget",
+              description: "Requesting access to view cost and budget data.",
+            }}
+          />
+        }
+      />
     );
   }
 

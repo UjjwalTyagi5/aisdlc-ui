@@ -30,6 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
+from shared.authz.effective_role import actor_display_name, effective_platform_role
 from shared.authz.grant_guard import assert_can_grant_role
 from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.permissions import ALL_ROLES
@@ -60,6 +61,18 @@ class MemberCreateIn(BaseModel):
 class MemberPatchIn(BaseModel):
     roleName: Optional[str] = Field(default=None, min_length=1, max_length=64)
     extraAgents: Optional[list[str]] = None
+
+
+class CrossBuRequestIn(BaseModel):
+    """Ask another business unit to lend one of its people to THIS project.
+
+    By email, not a picker — see request-cross-bu-member-dialog.tsx: the people
+    directory is scoped to your own unit, so there is no list to choose from.
+    """
+
+    email: EmailStr
+    roleName: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=2000)
 
 
 def _tenant_id(request: Request) -> str:
@@ -263,6 +276,113 @@ async def add_project_member(
     if match is None:
         raise HTTPException(status_code=500, detail="membership was not created")
     return match
+
+
+@project_members_router.post(
+    "/{project_id}/access-requests",
+    status_code=201,
+    dependencies=[Depends(require_permission("member:manage"))],
+)
+async def request_cross_bu_member(
+    project_id: str,
+    body: CrossBuRequestIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """File a `cross_bu_assignment` request: THE ROUTE THE FRONTEND ALREADY CALLED
+    AND NEVER EXISTED. RequestCrossBuMemberDialog has posted here since it was
+    built; nothing ever answered, so every attempt to raise this request failed.
+
+    `cross_bu_assignment` is SYSTEM_RAISED (shared/governance/routing.py) —
+    filed by clicking "Send request" in this dialog, never chosen from the
+    generic request picker — so this route builds the payload and calls
+    `create_request` directly with `system_raised=True`, the same pattern
+    `_queue_settings_change` in projects.py uses for `project_settings_change`.
+
+    THE WORKSPACE ON THE REQUEST IS THE TARGET'S HOME UNIT, NOT THE CALLER'S.
+    `routing.initial_approver_role`'s one documented exception routes
+    `cross_bu_assignment` by the request's `workspace_id` to that unit's own
+    Business Unit Admin — the person with standing to lend their own report,
+    not the org admin and not the requester's own unit.
+    """
+    tenant_id = _tenant_id(request)
+    project = await _project_or_404(db, tenant_id, project_id)
+    await _assert_can_write_project(db, request, project)
+
+    if body.roleName not in ALL_ROLES:
+        raise HTTPException(status_code=422, detail=f"Unknown role '{body.roleName}'")
+
+    target = (
+        await db.execute(
+            text(
+                "SELECT id FROM users WHERE lower(email) = :e AND tenant_id = CAST(:t AS uuid)"
+            ),
+            {"e": body.email.lower(), "t": tenant_id},
+        )
+    ).first()
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "no_such_person",
+                "message": (
+                    f"Nobody in this organisation uses {body.email}. They have to be "
+                    "onboarded before they can be borrowed."
+                ),
+            },
+        )
+
+    home = (
+        await db.execute(
+            text(
+                "SELECT w.id, w.display_name FROM role_bindings rb "
+                "JOIN workspaces w ON w.id = rb.scope_id "
+                "WHERE rb.scope_kind = 'business_unit' AND rb.status <> 'deactivated' "
+                "  AND rb.user_id = :u LIMIT 1"
+            ),
+            {"u": target.id},
+        )
+    ).first()
+    if home is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "no_home_unit",
+                "message": f"{body.email} isn't a member of any business unit, so there's no admin to ask.",
+            },
+        )
+    if str(home.id) == str(project.workspace_id):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "same_unit",
+                "message": "They're already in this project's business unit — add them directly from Members instead.",
+            },
+        )
+
+    from shared.services import governance_requests as gov  # noqa: PLC0415 - avoids an import cycle
+
+    initiator_id = getattr(request.state, "user_id", "") or ""
+    req = await gov.create_request(
+        db,
+        tenant_id=tenant_id,
+        initiator_id=initiator_id,
+        initiator_name=await actor_display_name(db, request),
+        initiator_role=await effective_platform_role(db, request),
+        request_type="cross_bu_assignment",
+        title=f"Borrow {body.email} for {project.display_name}",
+        description=(
+            body.reason.strip()
+            or f"Requesting {body.email} join {project.display_name} as {body.roleName}."
+        ),
+        workspace_id=str(home.id),
+        project_id=str(project.id),
+        target_ref=target.id,
+        payload={"email": body.email, "roleName": body.roleName, "reason": body.reason},
+        system_raised=True,
+    )
+    await db.flush()
+    return req
 
 
 @project_members_router.patch(

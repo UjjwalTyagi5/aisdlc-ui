@@ -32,7 +32,7 @@ from config.connection_manager import manager
 from config.context_broker import build_context
 from config.orchestrator_state_client import set_state as _set_orchestrator_state, fetch_session_artifacts
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
-from config.env import AGENT_RUNTIME_MODE, ADO_PAT
+from config.env import AGENT_RUNTIME_MODE
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import broadcast_log, set_session_id, set_user_id, set_provider_kind
 from langchain_core.messages import ToolMessage
@@ -54,11 +54,27 @@ from shared.services import dev_workspace_store
 from shared.db import get_db_session_for_tenant
 from shared.models.orm import Run
 
+
+def _ctx_user_id():
+    """The user in session context, or None. Never raises: these paths also run in a
+    worker, where no user was ever set."""
+    from config.ws_helper import get_user_id  # noqa: PLC0415 — import cycle at module load
+
+    return get_user_id() or None
+
+
 _FILES_DIR = str(pathlib.Path(__file__).resolve().parents[2] / "files")
 
 development_router_orchestrator = APIRouter()
 
 SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar("session_id", default=None)
+
+# Per-session in-flight guard — defense in depth against two concurrent turns for the
+# SAME session_id driving the SAME LangGraph checkpoint (thread_id: session_id) at once
+# (e.g. a reconnect racing an orphaned turn that hasn't been cancelled yet). Cleared in
+# _process_ws_message's finally block on every exit path: success, exception, or
+# cancellation. See development_agent-chat-overhaul task 4.
+_INFLIGHT_SESSIONS: set[str] = set()
 
 def _project_id_from_message(message_data: dict) -> str | None:
     pc = parse_pipeline_context(message_data.get("pipeline_context") or {})
@@ -113,8 +129,39 @@ def _extract_text(content) -> str:
     return ""
 
 
-async def _build_dev_session_context(session_id: str) -> str:
-    """Delegate to the shared context broker so all agents use one formatting path."""
+async def _build_dev_session_context(
+    session_id: str, *, tenant_id: str = "", project_id: str | None = None,
+    workspace_bound: bool = False,
+) -> str:
+    """Delegate to the shared context broker so all agents use one formatting path.
+
+    Resolved by PROJECT (most recent Run), not by session id, when a project is
+    known: a fresh standalone-page conversation mints a brand-new session id
+    unrelated to whatever session Requirements/Design used for theirs, so a
+    session-keyed lookup finds nothing even on a project with baselined upstream
+    artifacts. Falls back to the session-keyed lookup only when no project is
+    bound yet. See
+    docs/superpowers/specs/2026-08-31-development-agent-verification-design.md Part 4.3.
+
+    When `workspace_bound` is True, the session already has a bound/pulled repo
+    workspace, so the full upstream payload is skipped in favour of a short
+    on-demand pointer — this keeps the session fast and scoped to the imported
+    repo instead of front-loading Requirements/Design the agent may not need.
+    """
+    if workspace_bound:
+        return (
+            "[UPSTREAM CONTEXT — AVAILABLE ON DEMAND]\n"
+            "This project already has a bound repository workspace, so the full "
+            "Requirements/Design payload is not preloaded here — this keeps the session "
+            "fast and scoped to the imported repo. Call read_design_artifact if a task "
+            "genuinely needs the upstream requirements, HLD/LLD, or ADRs."
+        )
+    if project_id and tenant_id:
+        from config.context_broker import build_context_for_project
+
+        ctx = await build_context_for_project(project_id, tenant_id, "development")
+        if ctx:
+            return ctx
     return await build_context(session_id, "development")
 
 
@@ -164,7 +211,9 @@ async def _load_dev_mcp_tools(tenant_id: str, project_id: str | None) -> list:
         return []
 
 
-async def _bind_pulled_workspace(s, message_data: dict, tenant_id: str) -> str:
+async def _bind_pulled_workspace(
+    s, message_data: dict, tenant_id: str, user_id: str = ""
+) -> str:
     """Bind the session to a pre-pulled workspace if one exists for the given project.
 
     Returns a guidance string that the caller should append to sys_content so the
@@ -194,9 +243,22 @@ async def _bind_pulled_workspace(s, message_data: dict, tenant_id: str) -> str:
     if not s.pat:
         try:
             from shared.services import ado_repos
-            _, s.pat = await ado_repos.resolve_auth(tenant_id)
+            # project_id/owner_id let this check the project-scoped personal
+            # credential a project admin saved via the Integrations page
+            # (project_integration_credentials) BEFORE falling back to a
+            # tenant-wide connector -- omitted here, resolve_auth silently
+            # found nothing and left s.pat empty, so every ADO write the
+            # chat agent attempted (create_pr in particular) sent an empty
+            # Basic-auth password and ADO answered with a 302 to its sign-in
+            # page instead of a clean 401. Same root cause and same fix
+            # shape as dev_workspace.py's REST routes (2026-08-31, commit
+            # d291651c) -- this call site was missed in that pass because it
+            # lives in the chat/WS agent flow, not the REST browsing routes.
+            _, s.pat = await ado_repos.resolve_auth(
+                tenant_id, project_id=project_id, owner_id=user_id
+            )
         except Exception:
-            s.pat = ADO_PAT
+            s.pat = ""
 
     repo_name = ws.get("repo_name", "")
     branch = ws.get("branch", "")
@@ -277,6 +339,19 @@ async def websocket_endpoint(websocket: WebSocket):
     set_agent_folder("orchestrator")
     await manager.connect(websocket)
     user_id = claims.get("user_id", "")
+    # Tasks dispatched for THIS connection's turns — tracked so that if the connection
+    # drops mid-turn (reconnect, network blip, frontend idle-fallback) we can cancel the
+    # now-orphaned turn instead of letting it keep running unsupervised against the same
+    # session state / LangGraph checkpoint a new connection is about to drive. A single
+    # connection can only have one in-flight turn at a time given the in-flight guard in
+    # _process_ws_message, but this is tracked as a set defensively in case that changes.
+    _inflight_tasks: set[asyncio.Task] = set()
+
+    def _cancel_inflight_tasks() -> None:
+        for _t in list(_inflight_tasks):
+            if not _t.done():
+                _t.cancel()
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -294,7 +369,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 if _pk:
                     set_provider_kind(_pk)
                     _s.provider_kind = _pk
-                await _process_ws_message(message_data, websocket, user_id, tenant_id=claims.get("tenant_id", "") if claims else "")
+                _task = asyncio.create_task(
+                    _process_ws_message(
+                        message_data, websocket, user_id,
+                        tenant_id=claims.get("tenant_id", "") if claims else "",
+                    )
+                )
+                _inflight_tasks.add(_task)
+                _task.add_done_callback(_inflight_tasks.discard)
             elif msg_type == "clear_agents":
                 await manager.clear_agents()
             elif msg_type == "session_cleanup":
@@ -304,6 +386,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     json.dumps({"type": "echo", "message": data}), websocket
                 )
     except WebSocketDisconnect:
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
     except RuntimeError as e:
         # Starlette raises RuntimeError("WebSocket is not connected") when receive_text()
@@ -311,9 +394,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # disconnect, not a failure. Only real RuntimeErrors are worth logging.
         if "not connected" not in str(e).lower() and "disconnect" not in str(e).lower():
             print(f"Dev agent WebSocket error: {e}")
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
     except Exception as e:
         print(f"Dev agent WebSocket error: {e}")
+        _cancel_inflight_tasks()
         manager.disconnect(websocket)
 
 
@@ -341,6 +426,41 @@ def _is_push_approval(*texts) -> bool:
 
 async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id, tenant_id: str = ""):
     session_id = message_data.get("session_id", str(uuid4()))
+
+    if session_id in _INFLIGHT_SESSIONS:
+        # A turn for this session is already running (orphaned turn not yet cancelled,
+        # or a genuine double-send) — reject without touching agent/session state so we
+        # never let two turns drive the same LangGraph checkpoint concurrently.
+        await manager.send_personal_message(
+            json.dumps({
+                "type": "stream_chunk",
+                "content": (
+                    "\n\n> ⏳ Still processing your previous message — please wait "
+                    "for it to finish before sending another."
+                ),
+                "session_id": session_id,
+            }),
+            websocket,
+        )
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}),
+            websocket,
+        )
+        await manager.send_personal_message(
+            json.dumps({
+                "type": "activity_update",
+                "activity": {
+                    "id": str(uuid4()), "type": "complete",
+                    "session_id": session_id,
+                    "message": "Rejected — previous turn still in progress",
+                    "time": "Just now",
+                },
+            }),
+            websocket,
+        )
+        return
+
+    _INFLIGHT_SESSIONS.add(session_id)
     try:
         files_data = message_data.get("files", [])
         input_directory = f"{_FILES_DIR}/{user_id}/orchestrator/{session_id}/input"
@@ -402,8 +522,11 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             state_messages = [HumanMessage(content=text)]
 
         if first_message:
-            workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id)
-            session_context = await _build_dev_session_context(session_id)
+            workspace_guidance = await _bind_pulled_workspace(s, message_data, tenant_id, str(user_id))
+            session_context = await _build_dev_session_context(
+                session_id, tenant_id=tenant_id, project_id=project_id,
+                workspace_bound=bool(workspace_guidance),
+            )
             sys_content = DEV_SYS_MESSAGE
             if session_context:
                 sys_content = DEV_SYS_MESSAGE + "\n\n" + session_context
@@ -419,7 +542,12 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 "tenant_id": tenant_id,
                 "model_id": message_data.get("model_id"),
             }
-            s.system_injected = True
+            # NOTE: s.system_injected is deliberately NOT set here. It is set only
+            # after _stream_agent_response returns successfully below — setting it
+            # this early left a window (broadcast/persist_turn/MCP scope awaits)
+            # where a cancelled turn would strand the session thinking a system
+            # prompt had been delivered when the checkpoint never got one. See
+            # final-review.md I2.
         else:
             state = {
                 "messages": state_messages,
@@ -463,6 +591,12 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         ), skill_context_scope("development", _dev_skills):
             _final_response = await _stream_agent_response(state, config, websocket, session_id)
 
+        if first_message:
+            # Only mark the system prompt as delivered once the graph has actually
+            # consumed it successfully — see the NOTE above where this used to be
+            # set before the run.
+            s.system_injected = True
+
         # Persist the agent turn to the conversation transcript (§11A) — best-effort.
         await persist_turn(
             session_id, "agent", _final_response, tenant_id=tenant_id or None,
@@ -491,9 +625,33 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             )
         except Exception:
             pass
+        # Terminal "complete" activity signal so the frontend chat bridge (which
+        # only closes its SSE stream immediately on activity_update/complete —
+        # stream_end alone just arms a 45s idle-fallback timer) doesn't leave a
+        # genuine agent/tool/DB error sitting "busy" for the full 45s. Same shape
+        # as the in-flight-guard rejection branch's fix above.
+        try:
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "activity_update",
+                    "activity": {
+                        "id": str(uuid4()), "type": "complete",
+                        "session_id": session_id,
+                        "message": "An error occurred while processing your request",
+                        "time": "Just now",
+                    },
+                }),
+                websocket,
+            )
+        except Exception:
+            pass
     finally:
         from shared.tools.mcp_runtime import clear_mcp_tools
         clear_mcp_tools()
+        # Always release the in-flight marker — success, exception, or task
+        # cancellation (asyncio.CancelledError propagates through this finally
+        # normally; verified directly, see task 4 report).
+        _INFLIGHT_SESSIONS.discard(session_id)
 
 
 async def _handle_cleanup_ws(message_data: dict, websocket: WebSocket):
@@ -567,7 +725,9 @@ async def chat(
     incoming = [HumanMessage(content=text)]
 
     if first_message:
-        session_context = await _build_dev_session_context(session_id)
+        session_context = await _build_dev_session_context(
+            session_id, tenant_id=real_tenant_id, project_id=_lf_pid
+        )
         sys_content = DEV_SYS_MESSAGE
         if session_context:
             sys_content = DEV_SYS_MESSAGE + "\n\n" + session_context
@@ -822,6 +982,12 @@ async def _persist_pr_to_run(session_id: str, project_id: str | None, tenant_id:
                             trigger="manual",
                             current_stage="development",
                             development_artifacts=dev_artifacts,
+                            # Whoever is in session context, so this run is not exempt from the
+                            # no-self-approval rule (0038). These rows are created already-completed
+                            # with no gate pending, so the rule is not reachable through them today —
+                            # recorded anyway, because "it cannot gate yet" is a property of this call
+                            # site that a later change could quietly remove.
+                            created_by=_ctx_user_id(),
                         )
                     )
             except Exception as dup_exc:

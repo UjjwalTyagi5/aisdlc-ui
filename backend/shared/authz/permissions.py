@@ -111,6 +111,22 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_requirements",
         "connector:view",
+        # AGENT_OWNER_ROLE.requirements is ba, so this is stage two's approver for
+        # an agent_access request on that phase. Scoped by decide()'s own
+        # decider_role != currentApproverRole check — routing.py never routes any
+        # OTHER request type's currentApproverRole to a delivery role, so this does
+        # not let ba decide anything OTHER THAN an agent_access stage-two request.
+        # See test_agent_access_stage_two_owner_roles_hold_governance_decide.
+        #
+        # NOT project-scoped, though: decide()'s check compares role NAMES only
+        # (`decider_role != request["currentApproverRole"]`), with no comparison
+        # against the request's projectId. Any `ba` bound anywhere in the tenant
+        # can decide any requirements-phase agent_access stage two, including on a
+        # project they hold nothing on — the same class of gap as
+        # cross_bu_assignment's wrong-unit-admin bypass (see
+        # backend/.superpowers-findings/2026-08-29-request-type-baseline-audit.md,
+        # Finding 5), parked for sub-project B ("gate integrity hardening").
+        "governance:decide",
     ],
     "architect": [
         "run:create", "run:view",
@@ -123,6 +139,12 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # passable only via the admin:* wildcard.
         "artifact:approve_code_review",
         "connector:view",
+        # AGENT_OWNER_ROLE names architect as owner of design/development/review/
+        # discovery/strategy/migration_mapping — stage two's approver for an
+        # agent_access request on any of those phases. Same scoping note as ba's
+        # grant above: decide()'s own role-match check, not this permission, is
+        # what limits what a decider may act on.
+        "governance:decide",
     ],
     "developer": [
         "run:create", "run:view",
@@ -137,6 +159,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_testing",
         "connector:view",
+        # AGENT_OWNER_ROLE names qa as owner of testing/validation — stage two's
+        # approver for an agent_access request on either phase. Same scoping note
+        # as ba's grant above.
+        "governance:decide",
     ],
     "security_engineer": [
         "run:view",
@@ -148,6 +174,10 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "artifact:approve_security",
         "connector:view",
         "audit:view", "cost:view", "trace:view",
+        # AGENT_OWNER_ROLE.security is security_engineer — stage two's approver
+        # for an agent_access request on that phase. Same scoping note as ba's
+        # grant above.
+        "governance:decide",
     ],
     "devops_engineer": [
         "run:view",
@@ -155,12 +185,20 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_deployment",
         "connector:view",
+        # AGENT_OWNER_ROLE.deployment is devops_engineer — stage two's approver
+        # for an agent_access request on that phase. Same scoping note as ba's
+        # grant above.
+        "governance:decide",
     ],
     "data_engineer": [
         "run:create", "run:view",
         "artifact:view", "artifact:export",
         "agent:invoke", "approve",
         "connector:view",
+        # AGENT_OWNER_ROLE.data_engineering is data_engineer — stage two's
+        # approver for an agent_access request on that phase. Same scoping note as
+        # ba's grant above.
+        "governance:decide",
     ],
     "scrum_master": [
         "run:view",

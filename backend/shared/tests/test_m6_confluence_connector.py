@@ -35,17 +35,9 @@ _PAGE_LIST_FIXTURE = {
 _PAGE_DETAIL_FIXTURE = _PAGE_LIST_FIXTURE["results"][0]
 
 
-@pytest.fixture(autouse=True)
-def _isolate_confluence_env(monkeypatch):
-    """Keep these tests hermetic regardless of a developer's local .env.
-
-    auth_adapter() prefers the env CONFLUENCE_URL/EMAIL/TOKEN over the constructor's
-    org_url, so a populated .env would redirect requests off the respx mock.
-    """
-    import config.connectors.confluence as _confluence_mod
-    monkeypatch.setattr(_confluence_mod, "CONFLUENCE_URL", "")
-    monkeypatch.setattr(_confluence_mod, "CONFLUENCE_EMAIL", "")
-    monkeypatch.setattr(_confluence_mod, "CONFLUENCE_API_TOKEN", "")
+# The autouse fixture that blanked CONFLUENCE_URL/EMAIL/API_TOKEN is gone: auth_adapter
+# no longer reads them, so a developer's .env can no longer redirect these requests off
+# the respx mock.
 
 
 def _make_connector() -> ConfluenceConnector:

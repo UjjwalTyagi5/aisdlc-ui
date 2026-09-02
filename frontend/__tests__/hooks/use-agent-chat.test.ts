@@ -58,6 +58,33 @@ function emptySseResponse(): Response {
   return new Response(stream, { status: 200 });
 }
 
+/**
+ * Formats a StreamEvent-shaped payload as one `data: ...\n\n` SSE frame,
+ * matching what /api/chat's real handler writes and what useAgentChat's
+ * `send()` reader loop parses (splits on "\n\n", strips the "data: "
+ * prefix, JSON.parses the rest).
+ */
+function sseFrame(event: Record<string, unknown>): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+/**
+ * A response whose body streams the given already-formatted frames as
+ * SEPARATE chunks (one `enqueue` per frame) — exercises the reader loop's
+ * buffering across multiple `reader.read()` calls, not just a single
+ * chunk containing everything.
+ */
+function sseResponse(frames: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(encoder.encode(frame));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200 });
+}
+
 describe("useAgentChat context channel", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -117,5 +144,146 @@ describe("useAgentChat context channel", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.context.requirements.selected_story_refs).toEqual([]);
     expect(body.context.requirements.all_story_refs).toEqual(["1234"]);
+  });
+});
+
+/**
+ * Task 2 code review (task-2-review.md, Important finding #1): the per-turn
+ * `code.diff` merge rule in `applyEvent` — keyed by `path`, `original`
+ * pinned to the FIRST event seen for that path this turn, `modified`
+ * overwritten by the LATEST — had no test driving actual `code.diff`
+ * StreamEvents through the reducer; `agent-chat-drawer.test.tsx` only ever
+ * constructed pre-built `diffs` arrays as props. These tests close that gap
+ * by streaming real SSE frames through `send()` (the same path a live
+ * backend `file_diff` → `mapWsToSseEvent` → SSE frame takes) and asserting
+ * on the resulting `AgentChatMessage.diffs`.
+ */
+describe("useAgentChat — code.diff per-turn merge (applyEvent)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  function agentDiffs(messages: ReturnType<typeof useAgentChat>["messages"]) {
+    const agentMsg = messages.find((m) => m.role === "agent");
+    return (agentMsg as { diffs?: unknown[] } | undefined)?.diffs as
+      | Array<{ path: string; original: string; modified: string; changeKind: string }>
+      | undefined;
+  }
+
+  it("a single code.diff event produces one diff entry with matching fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame({
+          type: "code.diff",
+          runId: "run_test_001",
+          path: "src/a.ts",
+          original: "export const a = 1;\n",
+          modified: "export const a = 2;\n",
+          changeKind: "created",
+          at: "2026-08-31T00:00:00.000Z",
+        }),
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+
+    await act(async () => {
+      await result.current.send("write a file");
+    });
+
+    expect(agentDiffs(result.current.messages)).toEqual([
+      {
+        path: "src/a.ts",
+        original: "export const a = 1;\n",
+        modified: "export const a = 2;\n",
+        changeKind: "created",
+      },
+    ]);
+  });
+
+  it("two code.diff events for the SAME path keep the first original, take the latest modified, and pin changeKind to the first event", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame({
+          type: "code.diff",
+          runId: "run_test_001",
+          path: "src/b.ts",
+          original: "orig-1",
+          modified: "mod-1",
+          changeKind: "edited",
+          at: "2026-08-31T00:00:00.000Z",
+        }),
+        sseFrame({
+          type: "code.diff",
+          runId: "run_test_001",
+          path: "src/b.ts",
+          // A distinct original/changeKind on the repeat event proves these
+          // are NOT re-read from the second event — the merge must ignore them.
+          original: "orig-2-should-be-ignored",
+          modified: "mod-2",
+          changeKind: "created",
+          at: "2026-08-31T00:00:01.000Z",
+        }),
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+
+    await act(async () => {
+      await result.current.send("edit_file called twice on the same file");
+    });
+
+    expect(agentDiffs(result.current.messages)).toEqual([
+      {
+        path: "src/b.ts",
+        original: "orig-1", // pinned to the FIRST event
+        modified: "mod-2", // overwritten by the LATEST event
+        changeKind: "edited", // pinned to the FIRST event
+      },
+    ]);
+  });
+
+  it("code.diff events for two DIFFERENT paths produce two separate diff entries", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame({
+          type: "code.diff",
+          runId: "run_test_001",
+          path: "src/one.ts",
+          original: "1-orig",
+          modified: "1-mod",
+          changeKind: "created",
+          at: "2026-08-31T00:00:00.000Z",
+        }),
+        sseFrame({
+          type: "code.diff",
+          runId: "run_test_001",
+          path: "src/two.ts",
+          original: "2-orig",
+          modified: "2-mod",
+          changeKind: "edited",
+          at: "2026-08-31T00:00:01.000Z",
+        }),
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+
+    await act(async () => {
+      await result.current.send("touch two files");
+    });
+
+    const diffs = agentDiffs(result.current.messages);
+    expect(diffs).toHaveLength(2);
+    expect(diffs).toEqual(
+      expect.arrayContaining([
+        { path: "src/one.ts", original: "1-orig", modified: "1-mod", changeKind: "created" },
+        { path: "src/two.ts", original: "2-orig", modified: "2-mod", changeKind: "edited" },
+      ]),
+    );
   });
 });

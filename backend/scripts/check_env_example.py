@@ -27,76 +27,93 @@ ENV_EXAMPLE = AGENTIC_APP_DIR / ".env.example"
 # Keys read by env.py that are INTENTIONALLY excluded from .env.example.
 # .env.example documents only what an operator must set; these are sourced elsewhere.
 
-# Connector / OAuth / webhook secrets — populated in Azure Key Vault at connect-time
-# (store_secret), resolved KV-first. Operators never put these in .env.
-KV_MANAGED = {
-    "ADO_PAT", "ADO_WEBHOOK_USER", "ADO_WEBHOOK_PASSWORD",
-    "JIRA_API_TOKEN", "JIRA_EMAIL", "JIRA_URL", "JIRA_WEBHOOK_SECRET",
-    "JIRA_OAUTH_CLIENT_ID", "JIRA_OAUTH_CLIENT_SECRET",
-    "CONFLUENCE_API_TOKEN", "CONFLUENCE_EMAIL", "CONFLUENCE_URL",
-    "SONARQUBE_URL", "SONARQUBE_TOKEN",
-    "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY",
-    "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_OAUTH_CLIENT_SECRET", "GITHUB_WEBHOOK_SECRET",
-    "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET",
-    "GHA_PAT", "GHA_OWNER", "GHA_WEBHOOK_SECRET",
-    "MSGRAPH_TENANT_ID", "MSGRAPH_CLIENT_ID", "MSGRAPH_CLIENT_SECRET",
-    "MSGRAPH_WEBHOOK_CLIENT_STATE",
-    "FIGMA_PAT", "FIGMA_OAUTH_CLIENT_ID", "FIGMA_OAUTH_CLIENT_SECRET",
-    "LITELLM_API_KEY",
-}
+# KV_MANAGED is now EMPTY, and that is the point. It used to list the connector OAuth
+# client ids, the GitHub App id and key paths, and the inbound webhook secrets — all
+# "populated in Azure Key Vault at connect-time, operators never put these in .env".
+# None of them are read by env.py any more: the OAuth flow is gone and the webhook
+# secrets are per-tenant. An operator configures no connector value of any kind, so
+# there is nothing left for this set to excuse. It stays as a named empty set rather
+# than being deleted so that adding an entry is a visible, deliberate act.
+KV_MANAGED: set[str] = set()
+
+# Everything hydrated from Key Vault when ENV != dev is Key-Vault-managed by definition.
+# Derived from the single source of truth rather than restated here, so adding a secret
+# to PLATFORM_SECRETS can never silently make this gate demand it in .env.example.
+try:
+    sys.path.insert(0, str(AGENTIC_APP_DIR))
+    from config.secret_bootstrap import PLATFORM_SECRETS as _PLATFORM_SECRETS
+    KV_MANAGED |= set(_PLATFORM_SECRETS)
+except Exception:  # noqa: BLE001 — the gate must still run without the app importable
+    pass
+
+# Not configuration: read from the ambient process environment, never set by an operator.
+AMBIENT = {"PATH"}
 
 # Optional / advanced knobs with code defaults — operator rarely overrides.
 OPTIONAL_DEFAULTS = {
-    "AGENTIC_INTERNAL_BASE_URL", "ANTHROPIC_MODEL_FAST", "ANTHROPIC_MODEL_STANDARD",
-    "ANTHROPIC_MODEL_EXTENDED", "JWT_ALGORITHM", "ENABLE_OIDC", "OIDC_ISSUER_URL",
+    "AGENTIC_INTERNAL_BASE_URL",
+    "JWT_ALGORITHM", "ENABLE_OIDC", "OIDC_ISSUER_URL",
     "AUTH0_AUDIENCE", "OIDC_PROVIDER", "ENABLE_SCIM", "ENABLE_LITELLM", "LITELLM_BASE_URL",
-    "LLM_TENANT_BUDGET_USD_DEFAULT", "LLM_TENANT_BUDGET_OVERRIDES", "WORKER_POOL_CONCURRENCY",
-    "WORKER_RECLAIM_TIMEOUT_MS", "SLA_REQUIREMENTS_HOURS",
-    "SLA_DESIGN_HOURS", "SLA_DEVELOPMENT_HOURS", "SLA_TESTING_HOURS", "SLA_GRACE_MINUTES",
-    "SLA_CLARIFICATION_HOURS", "GOOGLE_API_KEY_design",
+    "LLM_TENANT_BUDGET_USD_DEFAULT", "LLM_TENANT_BUDGET_OVERRIDES",
+    "WORKER_RECLAIM_TIMEOUT_MS",
     # KV secret NAME overrides — have sensible defaults derived from AGENT_RUNTIME_MODE;
     # operators only set these when a vault uses non-standard secret naming.
     "KV_SECRET_POSTGRES_CONN", "KV_SECRET_POSTGRES_SYNC_CONN", "KV_SECRET_POSTGRES_MIGRATIONS_CONN",
 }
 
-# Legacy keys still referenced by env.py but slated for removal (AzureOpenAI).
 # SQLSERVER_CONN_STRING is gone — it fed the Django-era SQL Server database, whose
 # one-shot Postgres importer was removed along with the Django dependency.
+# The AzureOpenAI keys that used to sit here were "slated for removal" and have now
+# been removed from env.py outright (zero consumers), along with OPENAI_API_KEY —
+# which LiteLLM would otherwise read as an implicit platform-key fallback.
 LEGACY = {
     "AGENTIC_APP_PATH",
-    "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT",
-    "AZURE_OPENAI_API_VERSION", "OPENAI_API_KEY",
 }
 
-EXCLUDED = KV_MANAGED | OPTIONAL_DEFAULTS | LEGACY
+EXCLUDED = KV_MANAGED | OPTIONAL_DEFAULTS | LEGACY | AMBIENT
 
 
 def extract_env_py_keys(path: Path) -> set[str]:
-    """Extract all os.environ[...] and os.environ.get(...) keys from env.py.
+    """Extract every environment key env.py reads.
 
-    Handles both:
-      os.environ["KEY"]        — required (raises KeyError if absent)
+    Handles all three spellings:
+      os.environ["KEY"]           — required (raises KeyError if absent)
       os.environ.get("KEY", ...)  — optional with default
+      os.getenv("KEY", ...)       — the same thing under a different name
 
-    Uses mixed-case pattern to catch GOOGLE_API_KEY_design and similar
-    non-all-uppercase keys that match the actual variable name exactly.
+    os.getenv was missing from this pattern, which left the gate blind to the whole
+    single-organization bootstrap block — DEFAULT_ORG_SLUG, DEFAULT_ORG_NAME,
+    ORG_ADMIN_EMAILS, ORG_ADMIN_PASSWORD. Four operator-facing settings, one of them
+    the initial admin password, that this completeness check silently never covered.
+
+    Mixed case is still accepted so a non-all-uppercase key cannot slip past.
     """
     src = path.read_text(encoding="utf-8")
-    # Match both os.environ["KEY"] and os.environ.get("KEY", default)
-    pattern = r'os\.environ(?:\.get)?\(\s*["\']([A-Za-z][A-Za-z0-9_]+)["\']'
+    pattern = r'os\.(?:environ(?:\.get)?|getenv)\(\s*["\']([A-Za-z][A-Za-z0-9_]+)["\']'
     return set(re.findall(pattern, src))
 
 
 def extract_env_example_keys(path: Path) -> set[str]:
     """Extract KEY names from KEY=value lines in .env.example.
 
-    Ignores blank lines and comment lines (starting with #).
+    A COMMENTED example (`# SMTP_USE_TLS=true`) counts as documented. That is the
+    file's own convention for "optional — here is the value if you want it", used for
+    most of the SMTP, MCP and token-TTL settings. Treating those as missing made this
+    gate report 21 false positives against a file that documents every one of them,
+    which is why it was not wired into CI.
+
+    Prose comments are excluded by requiring the commented line to look like an
+    assignment to a plausible env-var name.
     """
     keys: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             continue
+        if stripped.startswith("#"):
+            stripped = stripped.lstrip("#").strip()
+            if not re.match(r'^[A-Za-z][A-Za-z0-9_]*\s*=', stripped):
+                continue  # prose, not a commented setting
         if "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
             if key:
