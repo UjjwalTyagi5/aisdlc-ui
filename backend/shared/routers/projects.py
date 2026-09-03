@@ -750,10 +750,6 @@ async def list_board_projects(
     }
 
 
-@projects_router.post(
-    "/{project_id}/ingest-board",
-    dependencies=[Depends(require_permission("run:create"))],
-)
 def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -> str:
     """A browsable URL for a work item, or "" if this provider is not known.
 
@@ -783,6 +779,16 @@ def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -
         return ""
 
 
+@projects_router.post(
+    "/{project_id}/ingest-board",
+    dependencies=[Depends(require_permission("run:create"))],
+)
+# THE DECORATOR BELONGS TO THIS FUNCTION, and used to sit above _board_item_url —
+# the helper directly beneath it. FastAPI happily registered the helper as the
+# route, so POST /ingest-board tried to resolve `connector: Any`, `board`,
+# `source_key` and `detail` from the request and blew up, while `ingest_board`
+# below was never routed at all. "Pull stories" returned a 500 for every board and
+# every project; the picker worked because listing boards is a different route.
 async def ingest_board(
     project_id: str,
     request: Request,
