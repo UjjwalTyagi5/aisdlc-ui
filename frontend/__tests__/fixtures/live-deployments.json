@@ -1,0 +1,80 @@
+[
+  {
+    "id": "816ad139-e413-4702-8550-0be568c0e3b9",
+    "projectId": "52234768-4a20-4a71-82b4-eb13d11c52c0",
+    "runId": null,
+    "action": "run_pipeline",
+    "targetKind": "azure_pipelines",
+    "environment": "prod",
+    "request": {
+      "branch": "main",
+      "ado_project": "Acme",
+      "pipeline_id": 77
+    },
+    "requestedBy": "someone-else",
+    "requestedAt": "2026-09-03T05:32:28.372967+00:00",
+    "approvalStatus": "approved",
+    "approvedBy": "fef68e19-0056-40d1-920a-6d6a6c358cf4",
+    "approvedAt": "2026-09-03T05:32:29.397022+00:00",
+    "rejectionReason": null,
+    "executionStatus": "error",
+    "executedAt": "2026-09-03T05:32:30.396619+00:00",
+    "externalId": null,
+    "externalUrl": null,
+    "outcome": {
+      "detail": "Azure DevOps credentials are not configured or not usable.",
+      "what_to_do": "Nothing was sent, so nothing has been deployed. Fix the cause and raise a new request.",
+      "started_unknown": false
+    }
+  },
+  {
+    "id": "1940978f-d04c-41f0-8401-2810dfa0bf82",
+    "projectId": "52234768-4a20-4a71-82b4-eb13d11c52c0",
+    "runId": null,
+    "action": "run_pipeline",
+    "targetKind": "azure_pipelines",
+    "environment": "prod",
+    "request": {
+      "pipeline_id": 5
+    },
+    "requestedBy": "fef68e19-0056-40d1-920a-6d6a6c358cf4",
+    "requestedAt": "2026-09-03T05:31:01.142164+00:00",
+    "approvalStatus": "pending",
+    "approvedBy": null,
+    "approvedAt": null,
+    "rejectionReason": null,
+    "executionStatus": "not_started",
+    "executedAt": null,
+    "externalId": null,
+    "externalUrl": null,
+    "outcome": null
+  },
+  {
+    "id": "adf9d158-c753-4d68-9c2e-f9ef700a23cc",
+    "projectId": "52234768-4a20-4a71-82b4-eb13d11c52c0",
+    "runId": null,
+    "action": "run_pipeline",
+    "targetKind": "azure_pipelines",
+    "environment": "prod",
+    "request": {
+      "branch": "release/2.1",
+      "ado_project": "AcmeProject",
+      "pipeline_id": 12
+    },
+    "requestedBy": "agent-operator",
+    "requestedAt": "2026-09-03T05:30:52.298619+00:00",
+    "approvalStatus": "approved",
+    "approvedBy": "fef68e19-0056-40d1-920a-6d6a6c358cf4",
+    "approvedAt": "2026-09-03T05:30:55.129194+00:00",
+    "rejectionReason": null,
+    "executionStatus": "error",
+    "executedAt": "2026-09-03T05:30:56.207850+00:00",
+    "externalId": null,
+    "externalUrl": null,
+    "outcome": {
+      "detail": "Azure DevOps credentials are not configured or not usable.",
+      "what_to_do": "Check Azure DevOps before retrying. The request may have been received and only the reply lost, and redeploying on top of a running deployment is worse than waiting.",
+      "started_unknown": true
+    }
+  }
+]
