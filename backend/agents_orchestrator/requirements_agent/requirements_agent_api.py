@@ -143,7 +143,22 @@ async def _persist_session_artifacts(
     current_stage: str = "design",
     tenant_id: str | None = None,
 ) -> None:
-    """Patch AgentSession artifact fields via the in-process Postgres store."""
+    """Patch AgentSession artifact fields, and mirror the payload onto the project's Run.
+
+    TWO TABLES, AND ONLY ONE OF THEM WAS WRITTEN. The chat persisted requirements to
+    `AgentSession.requirements_payload`; everything that reads a project's requirements
+    reads `Run.requirements_payload` instead — `story_artifacts_from_run` (the
+    Requirements list), `_fetch_artifacts_for_project` (what the Design agent's
+    `read_project_requirements` returns), and the pipeline hand-off.
+
+    So a user could ask the agent to create stories on Jira, watch it succeed, and see
+    the Requirements screen unchanged: the payload existed, in a table nothing on that
+    path consults. Only `ingest_board` — the "Pull stories" button — ever wrote the Run,
+    which is why re-pulling was the only way to make agent-authored work appear.
+
+    The AgentSession write stays: it is session-scoped and is what `build_context`
+    resolves for an orchestrated run. The Run write is the project-scoped mirror.
+    """
     from shared.services.agent_session_store import patch_session_artifacts
     patch: Dict[str, Any] = {}
     if requirements_payload is not None:
@@ -156,6 +171,49 @@ async def _persist_session_artifacts(
         await patch_session_artifacts(session_id, patch, tenant_id=tenant_id)
     except Exception as exc:
         logger.warning("AgentSession patch failed: %s", exc)
+
+    if requirements_payload is None:
+        return
+    await _mirror_requirements_onto_run(requirements_payload, tenant_id)
+
+
+async def _mirror_requirements_onto_run(payload: Any, tenant_id: str | None) -> None:
+    """Write the payload onto this project's chat Run so the UI and Design can see it.
+
+    BEST EFFORT, NEVER RAISES. The turn has already produced its answer by the time this
+    runs; failing here would turn a successful conversation into an error over a
+    visibility concern.
+
+    Reuses `_get_or_create_chat_run` so the payload lands on the SAME run the chat's
+    generated files attach to — one run per project and stage — rather than minting a
+    second one the list would then have to choose between.
+    """
+    from config.ws_helper import get_project_id  # noqa: PLC0415
+
+    project_id = get_project_id()
+    if not project_id or not tenant_id:
+        # A conversation outside any project has no Run to mirror onto; the
+        # AgentSession copy above is the whole record in that case.
+        return
+
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.services.artifact_service import persist_artifact  # noqa: PLC0415
+        from shared.services.chat_artifacts import _get_or_create_chat_run  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(tenant_id) as session:
+            run_id = await _get_or_create_chat_run(
+                session, tenant_id, project_id, "requirements"
+            )
+            await session.commit()
+        if not run_id:
+            return
+        await persist_artifact(run_id, "requirements", payload, tenant_id=tenant_id)
+        logger.info(
+            "Mirrored requirements payload onto run %s for project %s", run_id, project_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Run mirror of requirements payload failed: %s", type(exc).__name__)
 
 
 def _extract_requirements_payload(final_state: dict) -> Any:

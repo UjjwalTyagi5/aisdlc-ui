@@ -188,7 +188,7 @@ export const ROLE_META: Record<PlatformRole, RoleMeta> = {
     scope: "project",
     tier: "delivery",
     oneLiner:
-      "Coordinates the team's flow across every agent stage; observes but owns no single gate.",
+      "Coordinates the team's flow across every agent stage, and owns the plan: schedule, estimates and who is on what.",
     governanceOnly: false,
     prdSection: "— (platform addition, beyond the original PRD §33.1 roster)",
   },
@@ -314,6 +314,7 @@ export type Involvement = "owner" | "primary" | "build" | "requests" | "use" | "
 const ALL_NONE: Record<Phase, Involvement> = {
   requirements: "none",
   design: "none",
+  plan: "none",
   development: "none",
   review: "none",
   security: "none",
@@ -330,6 +331,7 @@ const ALL_NONE: Record<Phase, Involvement> = {
 const ALL_OWNER: Record<Phase, Involvement> = {
   requirements: "owner",
   design: "owner",
+  plan: "owner",
   development: "owner",
   review: "owner",
   security: "owner",
@@ -391,6 +393,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "primary",
     design: "use",
+    plan: "use",
     development: "use",
     review: "use",
     security: "use",
@@ -411,6 +414,8 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     ...ALL_NONE,
     requirements: "use",
     design: "primary",
+    // Reads the plan its design is scheduled against; scrum_master drives it.
+    plan: "use",
     development: "primary",
     review: "primary",
     security: "use",
@@ -426,6 +431,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // `primary` — never self-approval.
   developer: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     development: "build",
     review: "requests",
@@ -438,6 +444,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Development because that is what it tests.
   qa: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     development: "use",
     security: "use",
@@ -470,6 +477,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // Owns Data Engineering. Reads Development for the pipelines' surroundings.
   data_engineer: {
     ...ALL_NONE,
+    plan: "use",
     requirements: "use",
     design: "use",
     security: "use",
@@ -485,6 +493,10 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   scrum_master: {
     ...ALL_NONE,
     requirements: "use",
+    // The one gate this role owns. AGENT_OWNER_ROLE.plan is scrum_master, and an
+    // owner who cannot open the agent they sign off for is a gate with nobody
+    // behind it — the rule the invariant test above enforces.
+    plan: "owner",
     documentation: "use",
   },
 
@@ -500,6 +512,8 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
 export const AGENT_OWNER_ROLE: Record<Phase, PlatformRole> = {
   requirements: "ba",
   design: "architect",
+  // The one agent scrum_master owns rather than merely uses.
+  plan: "scrum_master",
   development: "architect", // Developer builds; Architect approves — never self-approval.
   review: "architect",
   security: "security_engineer",

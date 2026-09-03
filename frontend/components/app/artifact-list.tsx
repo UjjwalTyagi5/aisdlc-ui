@@ -15,6 +15,7 @@ import {
   Presentation,
   Rocket,
   TestTubes,
+  Trash2,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -55,6 +56,22 @@ const TYPE_ICON: Record<ArtifactType, LucideIcon> = {
   diagram: ImageIcon,
 };
 
+/** A stored artifact's id is a UUID. A SYNTHESISED one is not.
+ *
+ *  `story_artifacts_from_run` materialises the Requirements list straight out of a run's
+ *  `requirements_payload` — there is no structured-story table — giving ids shaped
+ *  `{run_id}:story:{source_key}`. Those name no row, so every write route answers 404
+ *  for them. Offering a delete button on one is offering an action that cannot work.
+ *
+ *  Testing the id shape rather than `type === "story"` means the check corrects itself:
+ *  if stories ever get real rows, they become deletable without touching this.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isStoredArtifact(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 /** Artifact types that have a generated blob available for download. */
 const BLOB_TYPES = new Set<ArtifactType>([
   "adr", "hld", "lld", "story", "acceptance_criteria",
@@ -89,6 +106,13 @@ export interface ArtifactListProps {
   selectedIds?: Set<string>;
   /** When provided, each row renders a round selector checkbox. */
   onToggleSelect?: (artifact: Artifact) => void;
+  /** When provided, each row renders a delete button. Omit it to hide deletion
+   *  entirely — the caller gates on the `artifact:delete` permission, not this
+   *  component, so an unprivileged user never renders a control they cannot use. */
+  onDelete?: (artifact: Artifact) => void;
+  /** Id currently being deleted — its row shows a pending state and stops accepting
+   *  clicks, so an impatient second click cannot fire a second DELETE. */
+  deletingId?: string | null;
   isLoading?: boolean;
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
@@ -103,6 +127,8 @@ export function ArtifactList({
   onSelect,
   selectedIds,
   onToggleSelect,
+  onDelete,
+  deletingId,
   isLoading,
   emptyTitle = "No artifacts yet",
   emptyDescription = "Artifacts appear here once the agent runs.",
@@ -244,7 +270,7 @@ export function ArtifactList({
                   type="button"
                   onClick={() => onSelect?.(a)}
                   className={cn(
-                    "group flex w-full flex-1 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
+                    "group flex min-w-0 flex-1 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
                     "hover:bg-surface-1 hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
                     active
@@ -298,6 +324,28 @@ export function ArtifactList({
                     )}
                   </div>
                 </button>
+
+                {onDelete && isStoredArtifact(a.id) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(a);
+                    }}
+                    disabled={deletingId === a.id}
+                    className={cn(
+                      "text-muted-foreground hover:text-destructive shrink-0 rounded-md p-1.5",
+                      "transition-colors focus-visible:outline-none focus-visible:ring-2",
+                      "focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
+                    )}
+                    // The label names the artifact: a screen-reader user hears which
+                    // one they are about to destroy, not just "Delete".
+                    aria-label={`Delete ${a.title}`}
+                    title="Delete artifact"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                )}
               </li>
             );
           })}

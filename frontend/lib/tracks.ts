@@ -98,6 +98,7 @@ const TRACK_AGENTS: Record<DeliveryTrack, readonly Phase[]> = {
   greenfield: [
     "requirements",
     "design",
+    "plan",
     "development",
     "review",
     "security",
@@ -105,10 +106,11 @@ const TRACK_AGENTS: Record<DeliveryTrack, readonly Phase[]> = {
     "deployment",
     "documentation",
   ],
-  // PRD §8 — the identical eight-agent portfolio; only the entry point differs.
+  // PRD §8 — the identical nine-agent portfolio; only the entry point differs.
   enhancement: [
     "requirements",
     "design",
+    "plan",
     "development",
     "review",
     "security",

@@ -1,12 +1,15 @@
 from config.agent_registry import AGENT_DEFAULT_REACH, AGENT_REGISTRY, TRACK_PORTFOLIOS
 
+# A deliberate second copy, not an import: restating the roster here is what makes a
+# change to it fail a test rather than pass silently. The PM agent (0041/0042) sits
+# between design and development.
 _PORTFOLIO_1 = [
-    "requirements", "design", "development", "code_review",
+    "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
 ]
 
 
-def test_greenfield_and_enhancement_share_the_same_eight_agent_portfolio():
+def test_greenfield_and_enhancement_share_the_same_nine_agent_portfolio():
     assert TRACK_PORTFOLIOS["greenfield"] == _PORTFOLIO_1
     assert TRACK_PORTFOLIOS["enhancement"] == _PORTFOLIO_1
 
@@ -26,7 +29,7 @@ def test_every_portfolio_1_agent_has_a_default_reach_row():
 def test_ba_owns_requirements_and_uses_everything_else_in_portfolio_1():
     row = {a: AGENT_DEFAULT_REACH[a]["ba"] for a in _PORTFOLIO_1}
     assert row == {
-        "requirements": "owner", "design": "use", "development": "use",
+        "requirements": "owner", "design": "use", "plan": "use", "development": "use",
         "code_review": "use", "security": "use", "testing": "use",
         "deployment": "use", "documentation": "use",
     }
@@ -36,6 +39,8 @@ def test_security_engineer_owns_only_security_and_reaches_six_others():
     row = {a: AGENT_DEFAULT_REACH[a]["security_engineer"] for a in _PORTFOLIO_1}
     assert row == {
         "requirements": "use", "design": "use", "development": "use",
+        # The planner schedules work; a security engineer neither owns nor drives it.
+        "plan": "none",
         "code_review": "use", "security": "owner", "testing": "none",
         "deployment": "use", "documentation": "none",
     }

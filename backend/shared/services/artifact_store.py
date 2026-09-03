@@ -87,17 +87,63 @@ def safe_leaf_name(filename: str) -> str:
     return leaf
 
 
-def blob_path_for(tenant_id: str, run_id: str, artifact_type: str, filename: str) -> str:
-    """`{tenant_id}/{run_id}/{artifact_type}/{filename}` — the isolation boundary.
+#: Stand-ins for a missing segment. A run need not belong to a project (Run.project_id
+#: is nullable), and without a project there is no business unit either. Substituting a
+#: literal keeps the path DEPTH CONSTANT, so "the fourth segment is the agent" stays
+#: true for every blob in the container; collapsing the segment instead would shift
+#: every level below it and make the layout unreadable exactly where it is least
+#: obvious. The leading underscore cannot collide with a UUID.
+_NO_WORKSPACE = "_no-business-unit"
+_NO_PROJECT = "_no-project"
+_NO_AGENT = "_no-agent"
 
-    Every segment is sanitised, not just the filename. `artifact_type` comes from the
+
+def blob_path_for(
+    tenant_id: str,
+    run_id: str,
+    artifact_type: str,
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    project_id: str | None = None,
+    agent: str | None = None,
+) -> str:
+    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{filename}`.
+
+    THE FIRST SEGMENT IS THE ISOLATION BOUNDARY and everything after it is
+    organisation. Blob storage has no rows and no row-level security — it is a flat
+    key-value namespace — so the tenant prefix is the only thing separating one
+    tenant's documents from another's, and `is_blob_path` tests exactly that prefix.
+    Keep it first.
+
+    THE MIDDLE SEGMENTS MIRROR THE PRODUCT'S OWN HIERARCHY: organisation → business
+    unit → project → agent. The layout used to be `{tenant}/{run}/{type}/{file}`, which
+    is correct but scatters everything a project ever produced across unrelated run
+    ids — there was no way to see one project's documents, or one agent's, without
+    resolving every run first.
+
+    IDS, NOT DISPLAY NAMES, at every level. A path built from names breaks the moment
+    somebody renames a project or a business unit: the blobs already written keep the
+    old name and are orphaned from the row that points at them. Ids never change. The
+    cost is a container that is hard to read by eye in the portal, which is the right
+    trade because the UI never shows these paths — it shows the filename and downloads
+    by artifact id.
+
+    RUN ID STAYS, below the agent. Two runs of the same agent routinely produce the
+    same filename (`brd.docx`), and `upload_bytes` overwrites by default, so without it
+    the second run silently destroys the first one's document.
+
+    EVERY SEGMENT IS SANITISED, not just the filename. `artifact_type` comes from the
     agent rather than the user today, but it is one refactor away from being
-    caller-supplied, and a `..` there escapes the run prefix exactly as it would in the
-    leaf.
+    caller-supplied, and a `..` in any segment escapes the tenant prefix exactly as it
+    would in the leaf.
     """
     return "/".join(
         (
             safe_leaf_name(str(tenant_id)),
+            safe_leaf_name(str(workspace_id)) if workspace_id else _NO_WORKSPACE,
+            safe_leaf_name(str(project_id)) if project_id else _NO_PROJECT,
+            safe_leaf_name(str(agent)) if agent else _NO_AGENT,
             safe_leaf_name(str(run_id)),
             safe_leaf_name(artifact_type),
             safe_leaf_name(filename),
@@ -159,6 +205,58 @@ def is_blob_path(blob_path: str | None, tenant_id: str) -> bool:
     return blob_path.startswith(f"{safe_leaf_name(str(tenant_id))}/")
 
 
+#: Marks the holding area for artifacts awaiting a project admin's decision. Sits
+#: immediately AFTER the tenant segment so the isolation boundary — and `is_blob_path`,
+#: which tests exactly that prefix — is unchanged. The leading underscore cannot collide
+#: with the workspace UUID that normally occupies this position.
+_PENDING_SEGMENT = "_pending"
+
+
+def pending_blob_path(final_path: str) -> str:
+    """Where an artifact's bytes wait before approval.
+
+    `{tenant}/{bu}/{project}/...` becomes `{tenant}/_pending/{bu}/{project}/...`, so
+    approval is a path transform rather than a second composition to keep in sync with
+    `blob_path_for`. The row always records the FINAL path — that is the artifact's
+    identity — and this derives the temporary one from it.
+    """
+    tenant, _, rest = final_path.partition("/")
+    if not rest:
+        return final_path
+    return f"{tenant}/{_PENDING_SEGMENT}/{rest}"
+
+
+def is_pending_path(blob_path: str) -> bool:
+    """True for a path inside the pending area — used to keep it out of listings."""
+    return f"/{_PENDING_SEGMENT}/" in (blob_path or "")
+
+
+async def _workspace_for_project(db: AsyncSession, project_id: str) -> Optional[str]:
+    """The business unit owning `project_id`, or None if it cannot be resolved.
+
+    NEVER RAISES. A path segment is not worth failing a generated document over: an
+    unresolvable project yields `_no-business-unit` and the artifact is still stored,
+    still listed and still downloadable. The query runs under the caller's session, so
+    RLS applies and a project in another tenant resolves to None rather than leaking a
+    workspace id.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.models.orm import Project  # noqa: PLC0415
+
+    try:
+        row = (
+            await db.execute(select(Project.workspace_id).where(Project.id == project_id))
+        ).scalar_one_or_none()
+        return str(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not resolve business unit for project %s (%s)",
+            project_id, type(exc).__name__,
+        )
+        return None
+
+
 async def store_artifact(
     db: AsyncSession,
     *,
@@ -167,6 +265,8 @@ async def store_artifact(
     artifact_type: str,
     filename: str,
     data: bytes,
+    project_id: str | None = None,
+    agent: str | None = None,
     content_type: str = "application/octet-stream",
     blob_client: Any = None,
 ) -> Artifact:
@@ -186,9 +286,32 @@ async def store_artifact(
         # two tenants' documents into one prefix.
         raise ValueError("store_artifact requires a tenant_id and a run_id")
 
-    blob_name = blob_path_for(tenant_id, run_id, artifact_type, filename)
+    # The business unit is DERIVED, never passed in. A caller that supplied both a
+    # project and a workspace could supply a mismatched pair, and the resulting path
+    # would file the artifact under a unit that does not own it.
+    workspace_id = await _workspace_for_project(db, project_id) if project_id else None
 
-    blob_url: Optional[str] = None
+    blob_name = blob_path_for(
+        tenant_id,
+        run_id,
+        artifact_type,
+        filename,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        agent=agent,
+    )
+
+    # THE BYTES GO TO THE PENDING AREA, NOT THE FINAL PATH. Until whoever runs the
+    # project accepts it, a generated document is not part of the project's shared
+    # record — so it is not written where the project's record lives. `blob_path` still
+    # records the FINAL path because that is the artifact's identity and the destination
+    # approval promotes it to; `pending_blob_path` derives where it is meanwhile.
+    #
+    # `blob_url` stays None while pending, which is what makes the download route refuse
+    # and the UI show it as awaiting approval rather than as a file to fetch.
+    upload_target = pending_blob_path(blob_name)
+
+    uploaded = False
     if blob_client is None:
         logger.info(
             "No blob client configured — recording %s for run %s with no blob",
@@ -196,9 +319,10 @@ async def store_artifact(
         )
     else:
         try:
-            blob_url = await blob_client.upload_bytes(
-                data, blob_name, content_type=content_type
+            await blob_client.upload_bytes(
+                data, upload_target, content_type=content_type
             )
+            uploaded = True
         except Exception as exc:  # noqa: BLE001 — a storage outage must not fail the run
             # type name only: an Azure error can carry a SAS token or an account URL.
             logger.warning(
@@ -211,11 +335,21 @@ async def store_artifact(
         run_id=run_id,
         tenant_id=tenant_id,
         artifact_type=artifact_type,
-        blob_url=blob_url,
+        # Set on APPROVAL, when the bytes reach the final path. A pending artifact with
+        # a URL would be downloadable before anybody agreed it should exist.
+        blob_url=None,
         blob_path=blob_name,
         content_type=content_type,
         size_bytes=len(data),
+        approval_status="pending",
     )
+    # WHETHER THE BYTES LANDED, for the caller that has to tell the user. It used to be
+    # readable from `blob_url`, which is now None for every pending artifact — so an
+    # upload failure and a normal pending upload would have looked identical, and the
+    # "could not be uploaded" warning would have fired on every single save.
+    #
+    # A transient attribute rather than a column: it describes this call, not the row.
+    artifact.upload_succeeded = uploaded  # type: ignore[attr-defined]
     db.add(artifact)
     await db.flush()
     return artifact

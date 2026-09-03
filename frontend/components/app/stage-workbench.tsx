@@ -29,10 +29,13 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentCard } from "@/components/app/document-card";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
+import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { GATE_POLICY } from "@/lib/agents";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
@@ -124,6 +127,21 @@ export function StageWorkbench({
     },
     [router, projectId, routeSegment, searchParams],
   );
+
+  const approval = useArtifactApproval(projectId);
+
+  const deletion = useDeleteArtifact(projectId, {
+    onDeleted: (a) => {
+      // Drop ?artifact= when the deleted one was open, so a copied link does not point
+      // at an artifact that no longer exists.
+      if (searchParams.get("artifact") === a.id) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/${routeSegment}${qs ? `?${qs}` : ""}`);
+      }
+    },
+  });
 
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
@@ -279,10 +297,13 @@ export function StageWorkbench({
             items={artifactsQ.isLoading ? null : items}
             selectedId={selected?.id}
             onSelect={selectArtifact}
+            onDelete={deletion.onDelete}
+            deletingId={deletion.deletingId}
             isLoading={artifactsQ.isLoading}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
           />
+          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
@@ -326,7 +347,7 @@ export function StageWorkbench({
                   </p>
                 </header>
 
-                <ArtifactBody artifact={selected} />
+                <ArtifactBody artifact={selected} approval={approval} />
 
                 {gate.type === "auto_approve" ? (
                   // Documentation et al. auto-approve on completion (§7.1) — no
@@ -422,7 +443,29 @@ export function StageWorkbench({
 
 /** Generic artifact body renderer — raw markdown when present, else a readable
  * JSON fallback so any artifact type is at least viewable. */
-function ArtifactBody({ artifact }: { artifact: Artifact }) {
+function ArtifactBody({
+  artifact,
+  approval,
+}: {
+  artifact: Artifact;
+  approval: ReturnType<typeof useArtifactApproval>;
+}) {
+  if (artifact.body.kind === "document") {
+    return (
+      <DocumentCard
+        artifactId={artifact.id}
+        filename={artifact.body.filename}
+        contentType={artifact.body.contentType}
+        sizeBytes={artifact.body.sizeBytes}
+        stored={artifact.body.stored}
+        awaitingApproval={artifact.body.awaitingApproval}
+        rejected={artifact.body.rejected}
+        onApprove={approval.canDecide ? () => approval.approve(artifact.id) : undefined}
+        onReject={approval.canDecide ? () => approval.reject(artifact.id) : undefined}
+        deciding={approval.decidingId === artifact.id}
+      />
+    );
+  }
   if (artifact.body.kind === "raw") {
     return (
       <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap text-sm">

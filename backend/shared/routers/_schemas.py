@@ -323,6 +323,7 @@ class StepOut(BaseModel):
 _STAGE_TO_AGENT = {
     "requirements": "requirements",
     "design": "design",
+    "plan": "plan",
     "development": "development",
     "testing": "testing",
     "deployment": "deployment",
@@ -331,16 +332,34 @@ _STAGE_TO_AGENT = {
 _JSONB_COLUMNS = [
     ("requirements", "requirements_payload"),
     ("design", "design_artifacts"),
+    ("plan", "plan_artifacts"),
     ("development", "development_artifacts"),
     ("testing", "testing_artifacts"),
 ]
 
 
-def derive_steps_from_run(run: Any) -> List[StepOut]:
-    """Derive a Step[] from Run JSONB stage columns.
+def derive_steps_from_run(run: Any, artifacts: Optional[List[Any]] = None) -> List[StepOut]:
+    """Derive a Step[] from what the run actually produced.
 
-    One synthetic Step per populated stage column. StepId is deterministic:
-    f"{run_id}:{stage}". There is no steps table; a step is derived from the run.
+    TWO SOURCES, because the run has two ways of producing things and only one of them
+    used to be visible here.
+
+      1. THE JSONB STAGE COLUMNS — the PIPELINE hand-off, how one agent passes
+         structured output to the next. One step per populated column.
+
+      2. THE ARTIFACT ROWS — every file the run generated. THIS IS THE ADDITION.
+         Chat-driven work never touches the JSONB columns: `register_generated_file`
+         writes an `artifacts` row and nothing else. So a run where somebody asked the
+         Design agent for a PDF, approved it and downloaded it reported "No activity
+         yet" — the panel looked broken standing next to a document that plainly
+         existed. The artifacts are the evidence the work happened; not reading them
+         was the bug.
+
+    Steps are ordered by when they happened and indexed afterwards, so the two sources
+    interleave by time rather than appearing as two blocks.
+
+    StepIds stay deterministic — `{run_id}:{stage}` for a stage, `{run_id}:artifact:{id}`
+    for a file — so a client can key on them across refetches.
     """
     steps: List[StepOut] = []
     run_id = str(run.id)
@@ -367,6 +386,51 @@ def derive_steps_from_run(run: Any) -> List[StepOut]:
                 error=None,
             )
         )
+
+    run_agent = _STAGE_TO_AGENT.get(getattr(run, "stage", "") or "", "orchestrator")
+    for artifact in artifacts or []:
+        # The FILENAME is the leaf of the stored path. A row with no path (blob storage
+        # unconfigured, or an upload that never got that far) still describes a real
+        # event, so it becomes a step named by its type rather than being dropped.
+        stored_path = getattr(artifact, "blob_path", None) or ""
+        leaf = stored_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        atype = getattr(artifact, "artifact_type", "artifact")
+        created = getattr(artifact, "created_at", None)
+
+        # SAY WHETHER THE BYTES ARRIVED. "Generated" reads as success, and this is the
+        # one place a reader would otherwise never learn that an upload failed.
+        stored = bool(getattr(artifact, "blob_url", None))
+        size = getattr(artifact, "size_bytes", None)
+        detail = f"{size:,} bytes" if size else atype
+        summary = (
+            f"{detail} stored" if stored
+            else f"{detail} — recorded, but the file did not reach storage"
+        )
+
+        steps.append(
+            StepOut(
+                id=f"{run_id}:artifact:{artifact.id}",
+                runId=run_id,
+                index=0,  # replaced below, once everything is in time order
+                kind="artifact_write",
+                agent=run_agent,
+                title=leaf or f"{atype} generated",
+                status="approved" if stored else "failed",
+                startedAt=_iso(created),
+                completedAt=_iso(created),
+                durationMs=None,
+                cost=None,
+                model=None,
+                summary=summary,
+                error=None,
+            )
+        )
+
+    # Time order, then index — so stage steps and file steps interleave as they
+    # happened rather than appearing as two blocks.
+    steps.sort(key=lambda s: s.startedAt)
+    for position, step in enumerate(steps):
+        step.index = position
     return steps
 
 
@@ -471,11 +535,12 @@ class ArtifactOut(BaseModel):
     Field mappings (ORM-gap decision 1 in PLAN.md):
       artifact_type -> type
       run.stage     -> phase  (owning Run's stage; loaded by router via join)
-      artifact_type + blob filename -> title
+      blob filename -> title   (the LEAF only — the path's leading segments are the
+                                tenant/run routing, not a label anybody reads)
       1             -> version  (immutable blobs; version increments are deferred)
       sha256(blob_path||blob_url) -> contentHash
       "approved"    -> status  (blobs are approved artifacts)
-      {kind:"raw", markdown: download link} -> body
+      {kind:"document", filename, contentType, sizeBytes, stored} -> body
       "agent"       -> createdBy
       created_at    -> updatedAt  (immutable — no updated_at column on Artifact)
 
@@ -509,12 +574,56 @@ class ArtifactOut(BaseModel):
     def from_orm_artifact(cls, artifact: Any, run_stage: str, project_id: str) -> "ArtifactOut":
         """Build an ArtifactOut from an ORM Artifact + owning run_stage + project_id."""
         import hashlib
+        from shared.services.artifact_store import is_blob_path  # noqa: PLC0415
+
         raw = (artifact.blob_path or "") + (artifact.blob_url or "")
         content_hash = hashlib.sha256(raw.encode()).hexdigest()
-        download_path = artifact.blob_url or (
-            f"/generated/{artifact.blob_path}" if artifact.blob_path else ""
-        )
-        title = f"{artifact.artifact_type} ({artifact.blob_path or artifact.blob_url or 'no file'})"
+
+        stored_path = artifact.blob_path or ""
+        # THE FILENAME, NOT THE PATH. The title used to be the whole stored path —
+        # "document (81a736f4-…/67fbd232-…/document/sdlc-password-reset-design.pdf)" —
+        # which is two UUIDs of tenant/run routing in front of the only part a person
+        # reads. Those UUIDs are the tenant boundary, not a label.
+        filename = stored_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        title = filename or artifact.artifact_type
+
+        # THE RAW BLOB URL IS NOT A DOWNLOAD LINK. `blob_url` points straight at
+        # `https://<account>.blob.core.windows.net/…`, and the account has public access
+        # disabled — following it gets a 409/404 from Azure, never the file. The one
+        # authorised path is `/artifacts/{id}/download`, which resolves the id through a
+        # join on Run.tenant_id and streams the bytes; the BFF proxies it at the same
+        # path under /api. Legacy rows, whose blob_path is a local filesystem path, keep
+        # the static `/generated/…` URL because that endpoint deliberately refuses them.
+        # THE STATUS IS NOW A FACT, not a constant. It was the literal string "approved"
+        # for every artifact, because the table had no approval column — a placeholder
+        # that read like a decision. Migration 0040 gave it one.
+        _approval = getattr(artifact, "approval_status", None) or "approved"
+        status = {
+            "pending": "awaiting_approval",
+            "approved": "approved",
+            "rejected": "rejected",
+        }.get(_approval, "awaiting_approval")
+        _is_approved = _approval == "approved"
+
+        is_blob = is_blob_path(stored_path, str(artifact.tenant_id))
+        if is_blob:
+            # NO URL WHEN THE BYTES ARE NOT THERE. store_artifact degrades on an upload
+            # failure by writing the row with blob_url = None while still recording
+            # blob_path, so the path alone proves nothing. Offering a link anyway is how
+            # the list ends up with a download icon that 404s.
+            # NO LINK BEFORE APPROVAL. A pending artifact's bytes sit under the tenant's
+            # `_pending` prefix, not at this path — offering a download would 404, and
+            # offering it at all would make the gate look decorative.
+            download_path = (
+                f"/api/artifacts/{artifact.id}/download"
+                if (artifact.blob_url and _is_approved)
+                else ""
+            )
+        elif stored_path:
+            download_path = f"/generated/{stored_path}"
+        else:
+            download_path = ""
+
         return cls(
             id=str(artifact.id),
             projectId=project_id,
@@ -524,10 +633,27 @@ class ArtifactOut(BaseModel):
             title=title,
             version=1,
             contentHash=content_hash,
-            status="approved",
+            status=status,
+            # A DOCUMENT BODY, NOT A MARKDOWN LINK. This used to be
+            # `{"kind": "raw", "markdown": "[Download artifact](…)"}`, which produced the
+            # SAME link the list row already renders as an icon — two controls for one
+            # file — and rendered through AdrViewer, so every PDF was captioned
+            # "ADR · Architecture Decision Record". The fields below let the client show
+            # what the file IS and offer exactly one way to fetch it.
             body={
-                "kind": "raw",
-                "markdown": f"[Download artifact]({download_path})" if download_path else "_No file attached_",
+                "kind": "document",
+                "filename": filename,
+                "contentType": artifact.content_type or None,
+                "sizeBytes": artifact.size_bytes,
+                # Whether there is a file to fetch RIGHT NOW. False while pending —
+                # the bytes exist but under the pending prefix, and nobody has agreed
+                # they belong to the project yet — and false when an approved
+                # artifact's upload failed. `awaitingApproval` separates those two, so
+                # the card can say "waiting for sign-off" rather than "not stored",
+                # which would read as a fault.
+                "stored": bool(download_path),
+                "awaitingApproval": _approval == "pending",
+                "rejected": _approval == "rejected",
             },
             downloadUrl=download_path or None,
             createdBy="agent",
@@ -580,7 +706,20 @@ def story_artifacts_from_run(run: Any, project_id: str) -> List["ArtifactOut"]:
             # `kind` stays "story" because that is the ARTIFACT shape the frontend
             # renders; workItemType is what the item actually is on the board.
             "workItemType": s.get("work_item_type") or s.get("type") or "",
-            "traceability": {"jiraIssueKey": source_key} if source_key else {},
+            # `boardUrl` is the browsable link to the item, resolved at ingest because
+            # that is the only place holding both the connector and the item. Without it
+            # the Requirements page rendered the work-item key as inert text: nothing in
+            # the payload said which Jira site or ADO organisation the key belonged to.
+            # Absent on items ingested before that, and on providers with no known URL
+            # template — the key still shows, it just does not link.
+            "traceability": (
+                {
+                    "jiraIssueKey": source_key,
+                    **({"boardUrl": s["url"]} if s.get("url") else {}),
+                }
+                if source_key
+                else {}
+            ),
         }
         content_hash = hashlib.sha256(
             (source_key + title + description).encode()
