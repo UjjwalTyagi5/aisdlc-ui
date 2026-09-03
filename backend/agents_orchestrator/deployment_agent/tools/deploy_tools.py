@@ -89,6 +89,9 @@ async def inspect_repo() -> str:
         # Java and Jenkins were not detected at all, so a Maven or Gradle repo
         # reported an unknown stack and a Jenkins repo looked like it had no CI.
         "pom_xml": [], "build_gradle": [], "jenkinsfile": [], "docker_compose": [],
+        # Infrastructure-as-code. Found, not evaluated — what these would change
+        # needs a plan, which this platform does not run.
+        "terraform": [], "bicep": [], "arm_templates": [],
     }
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -120,6 +123,12 @@ async def inspect_repo() -> str:
             elif l in ("docker-compose.yml", "docker-compose.yaml", "compose.yml",
                        "compose.yaml"):
                 markers["docker_compose"].append(rel)
+            elif l.endswith(".tf") or l == "terraform.tfvars":
+                markers["terraform"].append(rel)
+            elif l.endswith(".bicep"):
+                markers["bicep"].append(rel)
+            elif l.endswith(".json") and ("azuredeploy" in l or "arm" in low_dir):
+                markers["arm_templates"].append(rel)
             elif l in ("chart.yaml", "values.yaml"):
                 markers["helm"].append(rel)
             elif "azure-pipelines" in l and l.endswith((".yml", ".yaml")):
@@ -583,3 +592,70 @@ async def sync_repo(accept_rewrite: bool = False) -> str:
             "depended on the files listed."
         )
     return json.dumps(result, indent=2, default=str)
+
+
+@tool
+async def read_infrastructure_plan(plan_json: str = "", path: str = "") -> str:
+    """Summarise a Terraform plan or Azure what-if result so it can be APPROVED.
+
+    Give it either the JSON directly (`plan_json`) or a repo-relative `path` to a file
+    holding it — the output of `terraform show -json` or `az deployment ... what-if
+    --no-pretty-print`.
+
+    THE ANSWER THAT MATTERS IS WHAT DISAPPEARS. A replace is a delete wearing an
+    update's clothes: Terraform reports it as ["delete", "create"], and any summary
+    that counts actions naively calls it an update. Relay `destructive`,
+    `destroys_state` and every entry in `warnings` verbatim — the difference between
+    "3 updates" and "1 deletion and 2 updates" is the difference between a routine
+    approval and somebody losing data.
+
+    An unreadable plan is an ERROR, never an empty one. "Nothing will change" and
+    "nobody looked" are different sentences.
+
+    This does not run anything. Provisioning is not yet something this platform
+    performs; the summary exists so a human can read a plan before that changes.
+    """
+    from agents_orchestrator.deployment_agent.provisioning import (
+        PlanUnreadable, summarise_plan,
+    )
+
+    body = plan_json or ""
+    if not body and path:
+        root = _work_dir()
+        if root is None or not root.exists():
+            return "ERROR: no workspace prepared."
+        try:
+            target = (root / path).resolve()
+            target.relative_to(root.resolve())
+        except ValueError:
+            return "ERROR: path traversal denied."
+        if not target.exists() or not target.is_file():
+            return f"ERROR: no plan file at {path}"
+        body = target.read_text(encoding="utf-8", errors="replace")
+
+    try:
+        return json.dumps(summarise_plan(body), indent=2, default=str)
+    except PlanUnreadable as exc:
+        return json.dumps({
+            "error": "plan_unreadable",
+            "detail": str(exc),
+            "note": "This is NOT an empty plan. Nothing can be approved from it.",
+        }, indent=2)
+
+
+@tool
+async def find_infrastructure_code() -> str:
+    """Report which infrastructure-as-code lives in this repo — Terraform, Bicep, ARM.
+
+    REPORTS WHAT IS THERE, NOT WHAT IT WOULD DO. Reading the files is not the same as
+    knowing their effect; that needs a plan. Say what was found and ask for a plan
+    rather than describing what you think the templates create.
+    """
+    from agents_orchestrator.deployment_agent.provisioning import detect_iac
+
+    root = _work_dir()
+    if root is None or not root.exists():
+        return "ERROR: no workspace prepared."
+    raw = json.loads(await inspect_repo.ainvoke({}))
+    markers = raw.get("markers", {}) if isinstance(raw, dict) else {}
+    return json.dumps(detect_iac(markers), indent=2, default=str)
