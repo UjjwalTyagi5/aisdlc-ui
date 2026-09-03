@@ -295,3 +295,47 @@ async def test_a_deployment_with_no_run_has_nothing_to_follow(world):
     out = await ex.refresh_status(deployment_id=str(world["dep"].id), tenant_id=TENANT)
     assert out["unchanged"] is True
     assert "no run to follow" in out["detail"]
+
+
+# -- the ambiguity is real only when the call went out -------------------------
+
+
+@pytest.mark.unit
+async def test_a_missing_credential_is_not_ambiguous(world):
+    """It fails BEFORE anything is sent, so nothing can have started. Warning that it
+    might have is a false alarm, and false alarms are how people learn to skim the
+    warning on the day it is real.
+
+    Found by running the whole flow against a real project with no ADO credential —
+    the honest-degradation path fired correctly and then over-warned.
+    """
+    from config.connectors.base import ConnectorNotAvailableError
+
+    world["raises"] = ConnectorNotAvailableError("no pat")
+    world["raise_on_connect"] = True
+    with pytest.raises(DeploymentExecutionError):
+        await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    outcome = _last(world)["outcome"]
+    assert outcome["started_unknown"] is False
+    assert "Nothing was sent" in outcome["what_to_do"]
+
+
+@pytest.mark.unit
+async def test_an_ungranted_connector_is_not_ambiguous_either(world):
+    from config.connectors.scoped import ConnectorAccessDenied
+
+    world["raises"] = ConnectorAccessDenied("azure_pipelines", "write", None)
+    world["raise_on_connect"] = True
+    with pytest.raises(DeploymentExecutionError):
+        await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert _last(world)["outcome"]["started_unknown"] is False
+
+
+@pytest.mark.unit
+async def test_a_call_that_really_went_out_is_still_ambiguous(world):
+    """The case the flag exists for: the request may have been received and the reply
+    lost. This must NOT be narrowed away by the fix above."""
+    world["raises"] = TimeoutError("read timeout")
+    with pytest.raises(DeploymentExecutionError):
+        await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert _last(world)["outcome"]["started_unknown"] is True

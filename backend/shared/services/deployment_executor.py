@@ -120,7 +120,15 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
             status, outcome = "running", {"run": result}
     except Exception as exc:  # noqa: BLE001
         logger.error("deployment %s failed: %s", deployment_id, type(exc).__name__)
-        started_unknown = action == "run_pipeline"
+        # DID THE REQUEST EVER LEAVE? Only a run can be ambiguous, and only when the
+        # call actually went out. A missing credential or an ungranted connector fails
+        # BEFORE anything is sent, so nothing can have started — and saying "it might
+        # have" there is a false alarm, which is how people learn to skim the warning
+        # on the day it is real.
+        never_sent = type(exc).__name__ in (
+            "ConnectorAccessDenied", "ConnectorNotAvailableError", "ValueError",
+        )
+        started_unknown = action == "run_pipeline" and not never_sent
         await _record(deployment_id, tenant_id, "error", outcome={
             "detail": _explain(exc),
             "started_unknown": started_unknown,
@@ -128,7 +136,10 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
                 "Check Azure DevOps before retrying. The request may have been "
                 "received and only the reply lost, and redeploying on top of a running "
                 "deployment is worse than waiting."
-            ) if started_unknown else "Nothing was created.",
+            ) if started_unknown else (
+                "Nothing was sent, so nothing has been deployed. Fix the cause and "
+                "raise a new request."
+            ),
         })
         raise DeploymentExecutionError(_explain(exc), code="connector_failed") from None
 
