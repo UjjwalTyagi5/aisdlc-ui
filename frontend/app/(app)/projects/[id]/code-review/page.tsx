@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   Check,
   ChevronDown,
@@ -35,6 +36,7 @@ import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useSession } from "@/hooks/use-session";
+import { unchangedReviewNotice } from "@/lib/code-review/prepare-outcome";
 import { getProject } from "@/lib/api/projects";
 import { listReviews, getReview } from "@/lib/api/code-review";
 import { qk } from "@/lib/api/query-keys";
@@ -86,13 +88,13 @@ export default function CodeReviewPage() {
   const [prepared, setPrepared] = React.useState<PrepareResult | null>(null);
   const [activeReviewId, setActiveReviewId] = React.useState<string | null>(null);
 
-  // Default to the most recent review once they load (unless a fresh diff is staged).
-  React.useEffect(() => {
-    const newest = reviewsQ.data?.[0]?.id;
-    if (!prepared && !activeReviewId && newest) {
-      setActiveReviewId(newest);
-    }
-  }, [reviewsQ.data, prepared, activeReviewId]);
+  // NO AUTO-OPEN. The page starts clean and the reader chooses: past reviews are in
+  // the switcher, a new one starts from Select target. Opening the newest review by
+  // itself made arriving at the agent look like a review had just run — findings and a
+  // merge recommendation on screen that nobody asked for on this visit, against a
+  // commit that may no longer be the one in hand. Selecting a review is one click; the
+  // page asserting a stale one is a wrong first impression that cannot be clicked away.
+  // A finished run still opens its own result — see the busy→idle effect below.
 
   const reviewQ = useQuery({
     queryKey: qk.codeReview.review(id, activeReviewId ?? ""),
@@ -124,9 +126,22 @@ export default function CodeReviewPage() {
   }, [chat.busy, id, queryClient, reviewsQ]);
 
   const onPrepared = (result: PrepareResult) => {
+    // Always a clean slate for the newly picked target — same flow as the Security
+    // agent's Select target: the staged diff, nothing else, past reviews left in the
+    // switcher. An already-reviewed commit only raises a notice (PRD §21.4); it never
+    // takes the decision to re-review away from the reader.
     setPrepared(result);
     setActiveReviewId(null);
     setTab("diff");
+
+    const notice = unchangedReviewNotice(result);
+    if (notice) {
+      toast.info(
+        notice.matchedBranch
+          ? `Already reviewed: ${result.source_branch} is at the same commit as ${notice.matchedBranch}. That review is under Past reviews.`
+          : "This exact diff was already reviewed — see Past reviews.",
+      );
+    }
   };
 
   const runReview = () => {
@@ -232,13 +247,36 @@ export default function CodeReviewPage() {
       </div>
 
       {/* ── Body: tabs + content ─────────────────────────── */}
-      {!prepared && !hasReview && !reviewsQ.isLoading ? (
+      {/* A FAILED LOAD IS NOT AN EMPTY ONE. `reviews` falls back to [] on error, so
+          without this branch a backend that is down, a 403, or a schema mismatch all
+          render as the cheerful "No review yet" — the past-reviews switcher silently
+          missing, with nothing on screen saying why. Cost a real debugging session. */}
+      {!prepared && !hasReview && reviewsQ.isError ? (
+        <div className="w-full p-4 md:px-10 md:py-8">
+          <ErrorState
+            title="Couldn't load this project's reviews"
+            description={
+              reviewsQ.error instanceof Error
+                ? reviewsQ.error.message
+                : "Something went wrong loading past reviews."
+            }
+            onRetry={() => reviewsQ.refetch()}
+          />
+        </div>
+      ) : !prepared && !hasReview && !reviewsQ.isLoading ? (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
+            {/* Two different empty pages. With reviews on file the reader is not
+                stuck, they simply have none OPEN — saying "No review yet" there is
+                false and hides the switcher holding their history. */}
             <EmptyState
               icon={FileDiff}
-              title="No review yet"
-              description="Select a branch-vs-base diff or an open PR, then run the review. Findings, a summary, and a merge recommendation appear here."
+              title={reviews.length > 0 ? "No review open" : "No review yet"}
+              description={
+                reviews.length > 0
+                  ? `Pick one of the ${reviews.length} past reviews from the switcher above, or select a new target and run a fresh review.`
+                  : "Select a branch-vs-base diff or an open PR, then run the review. Findings, a summary, and a merge recommendation appear here."
+              }
               action={
                 <Button onClick={() => setPickerOpen(true)}>
                   <FileDiff className="size-4" aria-hidden />

@@ -109,6 +109,20 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
  *     (backend/tests/test_gate_self_approval.py)
  *   · one tenant's MCP servers do not reach another tenant
  *     (backend/tests/test_mcp_tenant_isolation.py)
+ *
+ * review (Code Review) — help/portfolio-1-agent-status.md's real-logic pass already
+ * proved the graph→tools→graph loop, real Semgrep execution, and real
+ * `submit_code_review` persistence (backend/tests/test_code_review_agent_live_e2e.py).
+ * What was added to close it out:
+ *   · the workspace router (review/prepare, reviews, reviews/{id}, the ADO PR list)
+ *     was gated only by project membership, not by AGENT_DEFAULT_REACH["code_review"]
+ *     — a QA/Data Engineer/DevOps project member could reach it despite the PRD
+ *     ownership matrix (§14.7) marking them "none"
+ *     (backend/tests/test_code_review_workspace_agent_access.py)
+ *   · "skips redundant re-review when nothing changed since the last pass" (PRD
+ *     §21.4) had no implementation — review/prepare now checks the diff's head+base
+ *     sha against the project's past reviews before staging a fresh one
+ *     (backend/tests/test_code_review_workspace_unchanged_diff.py)
  */
 export const BUILT_AGENTS: readonly Phase[] = [
   "requirements",
@@ -117,6 +131,7 @@ export const BUILT_AGENTS: readonly Phase[] = [
   "security",
   "documentation",
   "development",
+  "review",
   "deployment",
 ];
 

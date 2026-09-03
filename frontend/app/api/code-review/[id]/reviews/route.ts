@@ -1,10 +1,20 @@
 import { type NextRequest } from "next/server";
 
+import { bffFetch } from "@/lib/bff/client";
 import { getSession } from "@/lib/auth/session";
 
-// DUMMY-DATA SEAM: no review has been prepared for any fixture project yet, so
-// an empty list is the correct default. When the backend code-review service
-// lands, replace the body with bffFetch(`/code-review/${id}/reviews`, { session }).
+/**
+ * Past reviews for a project, newest first — what the "Past reviews" switcher lists
+ * and what the page auto-opens on load.
+ *
+ * Was a DUMMY-DATA SEAM returning a hardcoded `[]` long after the backend route it
+ * stands in front of (`GET /code-review/{id}/reviews`) started answering with real
+ * rows. Nothing about the failure looked like a stub: reviews really were being
+ * persisted, the sibling `reviews/[runId]` route really did fetch them, and the page
+ * rendered a perfectly ordinary "No review yet" — so the review history looked lost
+ * rather than never asked for. The backend access log is what settled it: this
+ * request never appeared there at all.
+ */
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -12,6 +22,7 @@ export async function GET(
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
 
-  await params;
-  return Response.json([]);
+  const { id } = await params;
+  const data = await bffFetch(`/code-review/${encodeURIComponent(id)}/reviews`, { session });
+  return Response.json(data);
 }
