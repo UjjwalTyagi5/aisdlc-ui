@@ -87,7 +87,13 @@ async def list_deploy_connectors(project_id: str, request: Request) -> dict:
     tenant_id: str = request.state.tenant_id
     azure = False
     try:
-        org_url, pat = await ado_repos.resolve_auth(tenant_id)
+        # AS THE VIEWER. Azure DevOps credentials are per person, per project — a bare
+        # resolve_auth(tenant_id) finds nothing now that the shared rung is gone, and
+        # this tile would report "not available" to somebody who has a credential.
+        org_url, pat = await ado_repos.resolve_auth(
+            tenant_id, project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+        )
         azure = bool(org_url and pat)
     except Exception:
         azure = False
@@ -125,7 +131,26 @@ class PrepareDeployRequest(BaseModel):
 async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: Request) -> dict:
     """Clone the branch (or PR source) read-only and detect the deploy connector."""
     tenant_id: str = request.state.tenant_id
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    # AS THE PERSON PREPARING IT. This clones the repo with whoever's PAT is resolved,
+    # so it has to be the caller's own — a bare resolve_auth(tenant_id) returns nothing
+    # since the shared rung was removed, and the clone then failed with a 500 the
+    # dialog swallowed silently.
+    owner_id = getattr(request.state, "user_id", "") or ""
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id, project_id=project_id, owner_id=owner_id
+    )
+    if not (org_url and pat):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "no_credential",
+                "message": (
+                    "You have no Azure DevOps credential on this project. Add one under "
+                    "Integrations — it is yours alone, and the deployment is prepared "
+                    "and recorded as you."
+                ),
+            },
+        )
 
     branch = (body.branch or "").strip()
     pr_title = ""
