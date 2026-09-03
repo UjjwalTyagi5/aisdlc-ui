@@ -59,3 +59,11 @@ DEV_LOGINS.txt
 .claude/settings.local.json
 .DS_Store
 Thumbs.db
+
+# Database dumps taken before risky merges — real tenant data, never committed.
+backups/
+
+# Hand-made .env backups (e.g. .env.bak.premerge) carry the same live credentials
+# the ignored .env does; the suffix must not be what decides whether they leak.
+backend/.env.bak*
+backend/.env.*.bak
