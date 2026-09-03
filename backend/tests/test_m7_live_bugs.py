@@ -279,25 +279,37 @@ class TestConnectorAuthAdapterTenantRequired:
             await connector.auth_adapter(tenant_id="")
 
     @pytest.mark.asyncio
-    async def test_jira_auth_adapter_calls_load_secret_with_tenant_id(self):
-        """JiraConnector.auth_adapter(tenant_id='t1') calls load_secret with tenant_id='t1'."""
+    async def test_jira_scopes_its_credential_lookup_to_the_tenant(self):
+        """The property this has always been about: a credential lookup is tenant-scoped.
+
+        It used to be checked on load_secret(). Jira no longer calls that at all — the
+        tenant-wide rung was removed (config.connectors.base.PERSONAL_CREDENTIAL_KINDS),
+        because it made the connector work for a project whose members never configured
+        it and attributed the work to whoever minted the shared token. The ONE lookup
+        that remains must still carry the tenant, which is what this now asserts.
+        """
         from config.connectors.jira import JiraConnector
         connector = JiraConnector("https://test.atlassian.net")
 
-        captured_calls: list[tuple] = []
+        seen: list[tuple] = []
+
+        # Patched on the CLASS, so it is an unbound function and receives self.
+        async def fake_override(_self, tenant_id, target_id):
+            seen.append((tenant_id, target_id))
+            return None
 
         async def fake_load_secret(name, tenant_id=None):
-            captured_calls.append((name, tenant_id))
-            return None  # triggers global fallback
+            raise AssertionError(
+                "the tenant-wide rung must not be consulted for a personal connector"
+            )
 
-        with patch("shared.keyvault.load_secret", side_effect=fake_load_secret), \
+        with patch.object(JiraConnector, "_resolve_credential_override", fake_override), \
+             patch("shared.keyvault.load_secret", side_effect=fake_load_secret), \
              patch("config.connectors.jira._keyvault.load_secret", side_effect=fake_load_secret):
-            await connector.auth_adapter(tenant_id="t1")
+            auth = await connector.auth_adapter(tenant_id="t1")
 
-        tenant_scoped = [(n, tid) for (n, tid) in captured_calls if tid == "t1"]
-        assert tenant_scoped, (
-            f"auth_adapter must call load_secret(..., tenant_id='t1'). Calls: {captured_calls}"
-        )
+        assert seen == [("t1", "jira")], f"credential lookup was not tenant-scoped: {seen}"
+        assert auth["token"] == "", "no personal credential must mean NOT connected"
 
     @pytest.mark.asyncio
     async def test_azure_devops_auth_adapter_raises_without_tenant_id(self):

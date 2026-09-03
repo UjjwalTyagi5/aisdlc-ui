@@ -102,6 +102,24 @@ class AzureReposConnector(BaseConnector):
                 "tenant_id is required for AzureReposConnector.auth_adapter() — "
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
+        # This connector never consulted the project-scoped credential at all — it
+        # only ever read the tenant-wide PAT, so it could not act as a person even
+        # when that person had saved one.
+        override = await self._resolve_credential_override(tenant_id, "azure_devops")
+        if override and override.token:
+            return {
+                "org_url": (override.base_url or self._org_url or "").rstrip("/"),
+                "pat": override.token,
+            }
+
+        if not self._tenant_fallback_allowed():
+            # NO TENANT FALLBACK. This connector's credential belongs to a
+            # person (base.PERSONAL_CREDENTIAL_KINDS). Without one for the
+            # acting user it is NOT connected — borrowing a shared token would
+            # make the connector work for a project that never configured it,
+            # and record the work against whoever minted that token.
+            return {"org_url": self._org_url, "pat": ""}
+
         pat = await _keyvault.load_secret("ado-pat", tenant_id=tenant_id)
         return {"org_url": self._org_url, "pat": pat}
 

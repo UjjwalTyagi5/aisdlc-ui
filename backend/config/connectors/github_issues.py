@@ -145,6 +145,15 @@ class GitHubIssuesConnector(BaseConnector):
         if override and override.token:
             return override.token
 
+        if not self._tenant_fallback_allowed():
+            # NO SHARED-APP FALLBACK. GitHub records whoever's credential made the
+            # call, and the App installation is one identity for the whole
+            # organisation — so a project that never configured GitHub would still
+            # transact, and every action would be attributed to the App rather than
+            # to the person. Returning empty makes it "not connected", which is the
+            # honest answer and the one somebody can act on.
+            return ""
+
         # Every rung tenant-scoped. The untenanted load_secret(...) global-vault rung
         # and the env fallback that used to sit under each of these are gone: they made
         # ONE App registration serve every tenant, so a tenant that never connected

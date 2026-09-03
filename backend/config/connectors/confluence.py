@@ -133,6 +133,18 @@ class ConfluenceConnector(BaseConnector):
                 "token": override.token,
             }
 
+        if not self._tenant_fallback_allowed():
+        # NO TENANT FALLBACK. This credential belongs to a person
+        # (base.PERSONAL_CREDENTIAL_KINDS). Without one for the acting user
+        # this connector is NOT connected — borrowing a shared token would make
+        # it work for a project that never configured it, and record the work
+        # against whoever minted that token.
+            return {
+                "confluence_url": _normalize_base_url(site_url or self._org_url),
+                "email": email or "",
+                "token": "",
+            }
+
         from shared.services import secret_store as _ss  # lazy: avoid import cycle
         token_raw = await _tenant_secret("confluence-api-token")
         disconnected = token_raw == _ss.DISCONNECTED_MARKER  # explicitly disconnected

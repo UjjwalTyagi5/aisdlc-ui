@@ -149,6 +149,14 @@ class AzurePipelinesConnector(BaseConnector):
                 "pat": override.token,
             }
 
+        if not self._tenant_fallback_allowed():
+            # NO TENANT FALLBACK. This connector's credential belongs to a
+            # person (base.PERSONAL_CREDENTIAL_KINDS). Without one for the
+            # acting user it is NOT connected — borrowing a shared token would
+            # make the connector work for a project that never configured it,
+            # and record the work against whoever minted that token.
+            return {"org_url": self._org_url, "pat": ""}
+
         pat = await _keyvault.load_secret("ado-pat", tenant_id=tenant_id)
         return {"org_url": self._org_url, "pat": pat}
 

@@ -104,7 +104,9 @@ class TestJiraAuthAdapter:
                 "jira-api-token": "basic-api-token",
             }.get(name)
 
-        with patch.object(_kv, "load_secret", side_effect=fake_load):
+        # The tenant rung is no longer consulted at all; the credential now comes
+        # from the acting user's own project-scoped one.
+        with patch.object(_kv, "load_secret", side_effect=fake_load),              patch.object(JiraConnector, "_resolve_credential_override", _personal()):
             auth = await connector.auth_adapter(tenant_id="t1")
 
         assert auth["mode"] == "basic"
@@ -173,8 +175,14 @@ class TestJiraAuthAdapter:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.request = mock_request
 
+        # SCOPED, not started-and-forgotten. An earlier version called .start() with a
+        # cleanup that never ran on a plain pytest class, so the patch leaked for the
+        # whole session and five unrelated Jira tests failed later — passing in
+        # isolation, failing in the full run.
         with (
             patch.object(_kv, "load_secret", side_effect=fake_load),
+            patch.object(JiraConnector, "_resolve_credential_override",
+                         _personal(token="api-tok", account="me@example.com")),
             patch("config.connectors.jira.httpx.AsyncClient", return_value=mock_client),
         ):
             await connector._jira_request("GET", "/rest/api/3/project", tenant_id="t1")
@@ -208,3 +216,19 @@ class TestJiraAuthAdapter:
                 logging.getLogger().removeHandler(handler)
 
         assert "SUPER-SECRET-TOKEN-12345" not in stream.getvalue()
+
+
+def _personal(token="basic-api-token", base_url="https://example.atlassian.net",
+              account="user@example.com"):
+    """A credential the acting user saved on this project.
+
+    THE ONLY RUNG LEFT for a personal connector. The tenant-wide fallback was removed
+    (config.connectors.base.PERSONAL_CREDENTIAL_KINDS) because it made a connector work
+    for a project whose members never configured it, and attributed the work to whoever
+    minted the shared token.
+    """
+    from shared.authz.project_credential import ProjectCredentialFields
+    from unittest.mock import AsyncMock
+
+    return AsyncMock(return_value=ProjectCredentialFields(
+        base_url=base_url, account=account, token=token))

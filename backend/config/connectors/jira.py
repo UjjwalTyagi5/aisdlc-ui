@@ -201,6 +201,16 @@ class JiraConnector(BaseConnector):
         # platform to hold an Atlassian credential; Basic Auth below reaches the same
         # API with a token the tenant owns.
 
+        if not self._tenant_fallback_allowed():
+            # NO TENANT FALLBACK. This credential belongs to a person
+            # (base.PERSONAL_CREDENTIAL_KINDS). Without one for the acting user this
+            # connector is NOT connected — borrowing a shared token would make it work
+            # for a project that never configured it, and record the work against
+            # whoever minted that token. The URL below is left resolvable because it
+            # is configuration, not a credential.
+            return {"mode": "basic", "jira_url": _normalize_base_url(self._org_url or ""),
+                    "email": "", "token": ""}
+
         # ── Basic Auth: tenant secret store → Key Vault "{tenant}-<ref>" ──
         # The secret store (Fernet-DB in local dev / Key Vault in prod) is the path the
         # Integrations "Add credentials" form writes to. Skipped for the health-probe

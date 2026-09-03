@@ -362,24 +362,30 @@ async def test_the_override_is_looked_up_under_the_tile_that_owns_it(monkeypatch
 
 
 @pytest.mark.unit
-async def test_the_tenant_wide_credential_still_works_when_there_is_no_override(monkeypatch):
+async def test_no_personal_credential_means_NOT_CONNECTED_not_a_borrowed_one(monkeypatch):
+    """The tenant-wide rung is gone on purpose (base.PERSONAL_CREDENTIAL_KINDS).
+
+    It used to make this connector work for a project whose members never gave it a
+    credential — the Integrations page said "Needs a credential" and the agent reached
+    Azure DevOps anyway, recording the work against whoever minted the shared token.
+    """
     c = AzurePipelinesConnector("https://dev.azure.com/acme", "t1")
 
     async def _none(_tid, _target):
         return None
 
     async def _load(name, tenant_id=""):
-        return "tenant-pat"
+        raise AssertionError("the tenant rung must not be consulted at all")
 
     monkeypatch.setattr(c, "_resolve_credential_override", _none)
     monkeypatch.setattr("shared.keyvault.load_secret", _load)
     auth = await c.auth_adapter()
-    assert auth["pat"] == "tenant-pat"
-    assert auth["org_url"] == "https://dev.azure.com/acme"
+    assert auth["pat"] == ""
+    assert auth["org_url"] == "https://dev.azure.com/acme"   # config, not a credential
 
 
 @pytest.mark.unit
-async def test_an_override_with_no_token_falls_through_rather_than_authenticating_as_nobody(
+async def test_an_override_with_no_token_does_not_authenticate_as_anybody(
     monkeypatch,
 ):
     c = AzurePipelinesConnector("https://dev.azure.com/acme", "t1")
@@ -397,7 +403,9 @@ async def test_an_override_with_no_token_falls_through_rather_than_authenticatin
     monkeypatch.setattr(c, "_resolve_credential_override", _override)
     monkeypatch.setattr("shared.keyvault.load_secret", _load)
     auth = await c.auth_adapter()
-    assert auth["pat"] == "tenant-pat"
+    # Falls THROUGH the empty override — and then finds nothing, because there is no
+    # tenant rung left to find. Not connected beats connected as somebody else.
+    assert auth["pat"] == ""
 
 
 @pytest.mark.unit
