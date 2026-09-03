@@ -239,7 +239,10 @@ async def test_a_missing_grant_is_not_reported_as_missing_credentials(monkeypatc
 
 
 @pytest.mark.unit
-async def test_a_missing_credential_says_so(monkeypatch, session):
+async def test_a_missing_credential_says_it_is_YOURS_that_is_missing(monkeypatch, session):
+    """One PAT, per user, per project. "Credentials are not configured" reads as a
+    tenant-level problem for an administrator; the truth is that THIS person has not
+    saved one, and only they can."""
     from config.connectors.base import ConnectorNotAvailableError
 
     async def _boom(_ctx):
@@ -247,7 +250,23 @@ async def test_a_missing_credential_says_so(monkeypatch, session):
 
     monkeypatch.setattr(pt, "_pipelines_connector", _boom)
     out = json.loads(await pt.list_pipelines.ainvoke({}))
-    assert "not configured or not usable" in out["detail"]
+    assert "You have no Azure DevOps credential" in out["detail"]
+    assert "does not fall back to a shared token" in out["detail"]
+
+
+@pytest.mark.unit
+async def test_the_session_user_is_who_the_connector_authenticates_as(monkeypatch, session):
+    """Azure DevOps records whoever's credential made the call. Passing no owner means
+    the platform can never act as a person, only as a shared identity."""
+    seen = {}
+
+    async def _capture(ctx):
+        seen["owner"] = ctx.get("user_id")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(pt, "_pipelines_connector", _capture)
+    await pt.list_pipelines.ainvoke({})
+    assert seen["owner"] == "alice"
 
 
 # -- following a request -------------------------------------------------------

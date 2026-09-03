@@ -39,6 +39,8 @@ class _Dep:
             "pipeline_id": 12, "branch": "main", "ado_project": "AcmeProject"})
         self.external_id = kw.get("external_id")
         self.execution_status = kw.get("execution_status", "not_started")
+        # Azure DevOps authenticates as the person who ASKED for the deployment.
+        self.requested_by = kw.get("requested_by", "alice")
 
 
 @pytest.fixture
@@ -93,7 +95,10 @@ def world(monkeypatch):
                 raise state["raises"]
             return state["responses"].get(op, {})
 
-    async def _conn(_t, _p):
+    async def _conn(_t, _p, _owner=""):
+        # The owner is the REQUESTER: Azure DevOps authenticates as the person whose
+        # deployment this is, so the tests record it and assert on it below.
+        state["connected_as"] = _owner
         if state["raises"] and state.get("raise_on_connect"):
             raise state["raises"]
         return _Conn()
@@ -339,3 +344,71 @@ async def test_a_call_that_really_went_out_is_still_ambiguous(world):
     with pytest.raises(DeploymentExecutionError):
         await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
     assert _last(world)["outcome"]["started_unknown"] is True
+
+
+# -- whose credential Azure DevOps sees ----------------------------------------
+
+
+@pytest.mark.unit
+async def test_it_authenticates_as_the_person_who_asked(world):
+    """ONE PAT, PER USER, PER PROJECT. Azure DevOps records whoever's credential made
+    the call. A shared tenant token makes every action show the same service identity,
+    and "who did this" stops having an answer — which is the whole reason the platform
+    threads the requester through to the connector."""
+    world["dep"] = _Dep(requested_by="srk02")
+    await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert world["connected_as"] == "srk02"
+
+
+@pytest.mark.unit
+async def test_the_approver_is_not_who_azure_devops_sees(world):
+    """The approver is recorded in THIS platform's audit. Using their credential in
+    ADO would record work against somebody who only authorised it."""
+    world["dep"] = _Dep(requested_by="srk02")
+    await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert world["connected_as"] != "bob"
+
+
+@pytest.mark.unit
+async def test_following_a_run_uses_the_same_identity(world):
+    """A refresh that authenticated as somebody else could read a run the requester
+    cannot see, and report on it as though they could."""
+    world["dep"] = _Dep(external_id="4417", execution_status="running",
+                        requested_by="srk02")
+    world["responses"]["get_run"] = {"id": 4417, "finished": False}
+    await ex.refresh_status(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert world["connected_as"] == "srk02"
+
+
+@pytest.mark.unit
+async def test_a_missing_credential_names_the_person_who_must_add_one(world, monkeypatch):
+    """"Credentials are not configured" leaves everybody looking at each other. The
+    message has to say WHO."""
+    from config.connectors.base import ConnectorNotAvailableError
+
+    async def _describe(_tenant, user_id):
+        return "srk02804@gmail.com" if user_id == "srk02" else user_id
+
+    monkeypatch.setattr(ex, "_describe", _describe)
+    world["dep"] = _Dep(requested_by="srk02")
+    world["raises"] = ConnectorNotAvailableError("no pat")
+    world["raise_on_connect"] = True
+    with pytest.raises(DeploymentExecutionError, match="srk02804@gmail.com"):
+        await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+
+
+@pytest.mark.unit
+async def test_it_says_it_will_not_borrow_somebody_elses_credential(world, monkeypatch):
+    from config.connectors.base import ConnectorNotAvailableError
+
+    async def _describe(_tenant, user_id):
+        return "srk02804@gmail.com"
+
+    monkeypatch.setattr(ex, "_describe", _describe)
+    world["raises"] = ConnectorNotAvailableError("no pat")
+    world["raise_on_connect"] = True
+    with pytest.raises(DeploymentExecutionError) as e:
+        await ex.execute_deployment(deployment_id=str(world["dep"].id), tenant_id=TENANT)
+    assert "wrong person" in str(e.value)
+    # and it is unambiguous: nothing was sent, so nothing can have started
+    assert _last(world)["outcome"]["started_unknown"] is False

@@ -38,6 +38,8 @@ def _ctx() -> Dict[str, Any]:
     return {
         "tenant_id": s.tenant_id or "",
         "project_id": s.project_id or "",
+        # Whose Azure DevOps credential this conversation authenticates with.
+        "user_id": str(get_user_id() or ""),
         "ado_project": s.ado_project or s.repo_name or "",
         "repo_name": s.repo_name or "",
         "environment": s.environment or "",
@@ -72,11 +74,21 @@ def _unsupported(via: str) -> Optional[str]:
 
 
 async def _pipelines_connector(ctx: Dict[str, Any]):
+    """The connector, authenticating as the person in this conversation.
+
+    ONE PLACE FOR A PAT, AND IT IS PER-USER-PER-PROJECT. Azure DevOps records whoever's
+    credential made the call, so a shared tenant token makes every action show the same
+    service identity and "who did this" stops having an answer. The session's user is
+    passed as `owner_id` so their own saved credential is used.
+
+    No fallback to a shared credential, deliberately: running as somebody else and
+    recording it as them is worse than not running.
+    """
     from config.connector_factory import get_connector_for_session
 
     return await get_connector_for_session(
         "azure_pipelines", ctx["tenant_id"], project_id=ctx["project_id"],
-        agent_id="deployment",
+        agent_id="deployment", owner_id=ctx.get("user_id") or "",
     )
 
 
@@ -87,8 +99,12 @@ def _connector_problem(exc: Exception) -> str:
         detail = ("This project has not granted the Deployment agent access to Azure "
                   "Pipelines. Grant it rather than reconnecting Azure DevOps.")
     elif kind == "ConnectorNotAvailableError":
-        detail = ("Azure DevOps credentials are not configured or not usable for this "
-                  "tenant.")
+        detail = (
+            "You have no Azure DevOps credential saved on this project, so there is no "
+            "identity to act as. Add one under Integrations. It deliberately does not "
+            "fall back to a shared token — Azure DevOps records whoever's credential "
+            "made the call, and running as somebody else would record it against them."
+        )
     else:
         detail = f"Azure Pipelines call failed ({kind})."
     return json.dumps({"error": kind, "detail": detail}, indent=2)

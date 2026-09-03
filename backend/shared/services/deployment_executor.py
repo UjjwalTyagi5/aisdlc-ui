@@ -44,21 +44,63 @@ class DeploymentExecutionError(Exception):
         self.code = code
 
 
-async def _connector(tenant_id: str, project_id: str):
+async def _connector(tenant_id: str, project_id: str, owner_id: str = ""):
+    """The connector, authenticating as the person whose deployment this is.
+
+    THE CREDENTIAL IS THE REQUESTER'S, and that is the whole point. A shared
+    tenant-wide PAT makes every action in Azure DevOps show the same service
+    identity, so when a deployment goes wrong the one question anybody asks — who
+    did this — has no answer. Passing `owner_id` resolves that person's own
+    project-scoped credential, and ADO records them as the one who queued the build.
+
+    There is deliberately NO fallback to a shared credential. A fallback would run
+    the deployment under somebody else's identity and record it as theirs, silently,
+    which is worse than not running at all: it produces an audit trail that is
+    confidently wrong.
+    """
     from config.connector_factory import get_connector_for_session
 
     return await get_connector_for_session(
         "azure_pipelines", tenant_id, project_id=project_id, agent_id="deployment",
+        owner_id=owner_id,
     )
 
 
-def _explain(exc: Exception) -> str:
+async def _describe(tenant_id: str, user_id: str) -> str:
+    """A person's email if we have one, else their id.
+
+    Best-effort and never raises: the failure this whole change fixes is an error
+    message that names nobody, so the naming must not become a new way to fail.
+    """
+    if not user_id:
+        return "the person who requested this deployment"
+    try:
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from shared.models.orm import User  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(tenant_id) as db:
+            email = (await db.execute(
+                select(User.email).where(User.id == user_id)
+            )).scalar_one_or_none()
+        return email or user_id
+    except Exception:  # noqa: BLE001
+        return user_id
+
+
+def _explain(exc: Exception, requester: str = "") -> str:
     kind = type(exc).__name__
     if kind == "ConnectorAccessDenied":
         return ("This project has not granted the Deployment agent access to Azure "
                 "Pipelines.")
     if kind == "ConnectorNotAvailableError":
-        return "Azure DevOps credentials are not configured or not usable."
+        who = requester or "the person who requested this deployment"
+        return (
+            f"{who} has no Azure DevOps credential saved on this project, so there is "
+            "no identity to run the deployment as. They must add one under "
+            "Integrations. It is deliberately not run under anybody else's credential "
+            "— that would record the deployment against the wrong person."
+        )
     return f"The Azure DevOps call failed ({kind})."
 
 
@@ -76,6 +118,9 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
         claimed = {
             "action": dep.action, "request": dict(dep.request or {}),
             "project_id": str(dep.project_id), "environment": dep.environment,
+            # Azure DevOps authenticates as the person who ASKED for this deployment.
+            # The approver is recorded separately, in this platform's own audit.
+            "requested_by": dep.requested_by or "",
         }
 
     action = claimed["action"]
@@ -96,7 +141,8 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
 
     # ── 2. the network call, with no transaction held open ────────────────
     try:
-        conn = await _connector(tenant_id, claimed["project_id"])
+        conn = await _connector(
+            tenant_id, claimed["project_id"], claimed["requested_by"])
         if action == "create_pipeline":
             result = await conn.write_adapter(
                 "create_pipeline", project=ado_project, name=request.get("name") or "",
@@ -129,8 +175,9 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
             "ConnectorAccessDenied", "ConnectorNotAvailableError", "ValueError",
         )
         started_unknown = action == "run_pipeline" and not never_sent
+        requester = await _describe(tenant_id, claimed["requested_by"])
         await _record(deployment_id, tenant_id, "error", outcome={
-            "detail": _explain(exc),
+            "detail": _explain(exc, requester),
             "started_unknown": started_unknown,
             "what_to_do": (
                 "Check Azure DevOps before retrying. The request may have been "
@@ -141,7 +188,8 @@ async def execute_deployment(*, deployment_id: str, tenant_id: str) -> Dict[str,
                 "raise a new request."
             ),
         })
-        raise DeploymentExecutionError(_explain(exc), code="connector_failed") from None
+        raise DeploymentExecutionError(
+            _explain(exc, requester), code="connector_failed") from None
 
     # ── 3. record ─────────────────────────────────────────────────────────
     await _record(deployment_id, tenant_id, status, external_id=external_id,
@@ -175,6 +223,7 @@ async def refresh_status(*, deployment_id: str, tenant_id: str) -> Dict[str, Any
             "action": dep.action, "request": dict(dep.request or {}),
             "project_id": str(dep.project_id), "external_id": dep.external_id,
             "execution_status": dep.execution_status,
+            "requested_by": dep.requested_by or "",
         }
 
     if snapshot["execution_status"] in ("succeeded", "failed", "canceled"):
@@ -185,7 +234,8 @@ async def refresh_status(*, deployment_id: str, tenant_id: str) -> Dict[str, Any
 
     request = snapshot["request"]
     try:
-        conn = await _connector(tenant_id, snapshot["project_id"])
+        conn = await _connector(
+            tenant_id, snapshot["project_id"], snapshot["requested_by"])
         run = await conn.read_adapter(
             "get_run", project=request.get("ado_project") or "",
             pipeline_id=int(request.get("pipeline_id") or 0),
