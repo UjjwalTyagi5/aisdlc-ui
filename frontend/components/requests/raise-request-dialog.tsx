@@ -94,8 +94,10 @@ export interface RaiseRequestPrefill {
   targetId?: string;
   /** connector_access: the access level being asked for. */
   accessLevel?: string;
-  /** model_credential / model_provider_access: the (provider, model) pair. */
-  providerModel?: { provider: string; modelId: string };
+  /** model_credential / model_provider_access: the provider, and the model when
+   *  one is named. `model_provider_access` may ask for a PROVIDER on its own —
+   *  that is the grant an Organization Admin makes — so `modelId` is optional. */
+  providerModel?: { provider: string; modelId?: string };
   /** user_onboarding: who is being asked about. */
   onboardEmail?: string;
 }
@@ -141,7 +143,7 @@ export function RaiseRequestDialog({
   const [targetId, setTargetId] = React.useState<string | undefined>(undefined);
   const [accessLevel, setAccessLevel] = React.useState<string | undefined>(undefined);
   const [providerModel, setProviderModel] = React.useState<
-    { provider: string; modelId: string } | undefined
+    { provider: string; modelId?: string } | undefined
   >(undefined);
   const [onboardEmail, setOnboardEmail] = React.useState<string | undefined>(undefined);
   const [error, setError] = React.useState<string | null>(null);

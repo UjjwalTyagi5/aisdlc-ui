@@ -39,6 +39,10 @@ backend/.temporal-dev.db-journal
 # credentials. backend/.env.example carries the shape instead.
 backend/.env
 
+# Same class of local credentials, for the isolated test database
+# (docs/local-setup.md, "Test database"). backend/.env.test.example carries the shape.
+backend/.env.test
+
 # A root-level .env (used by some worktrees for local overrides) can hold the
 # same class of live secrets — never let it slip in un-ignored.
 /.env

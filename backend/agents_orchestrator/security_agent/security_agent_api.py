@@ -178,24 +178,19 @@ async def _persist_scan_to_run(session_id: str, project_id: str | None, tenant_i
     s = get_session(session_id)
     if not s.last_artifact or not project_id or not tenant_id:
         return
-    from sqlalchemy import select
     from shared.models.orm import Run
 
     artifact = dict(s.last_artifact)
-    head = (artifact.get("context") or {}).get("head_sha", "")
+    # EVERY COMPLETED SCAN IS SAVED — same fix, same reasoning as
+    # code_review_agent_api._persist_review_to_run: skipping the insert when a run
+    # already carried this head_sha silently discarded a scan the reader had just
+    # deliberately run. Not yet observed here only because scanning the same commit
+    # twice is rarer than reviewing it twice; the latent bug is identical.
+    #
+    # Idempotency never depended on that guard: `last_artifact` is falsy-checked
+    # above and cleared below, so the two call sites cannot persist one artifact twice.
     try:
         async with get_db_session_for_tenant(tenant_id) as db:
-            if head:
-                existing = (
-                    await db.execute(
-                        select(Run).where(
-                            Run.project_id == uuid.UUID(project_id),
-                            Run.security_artifacts["context"]["head_sha"].astext == head,
-                        )
-                    )
-                ).scalars().first()
-                if existing:
-                    return
             db.add(
                 Run(
                     project_id=uuid.UUID(project_id),
@@ -306,16 +301,30 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 or "Please run the security scan and submit your review."
             )
 
+        # project_id is load-bearing for model resolution, not just logging:
+        # resolve_model_for_run filters the tenant's offerings through
+        # effective_project_offerings(tenant, project), and a None project filters
+        # EVERY offering out ("grants configured but none apply to this project").
+        # This agent attaches AuditCallbackHandler directly rather than going through
+        # shared/observability/callbacks.py, which is the only thing that threads the
+        # run's project into the contextvar the resolver otherwise reads.
+        # offering_id likewise: AgentState declared it but nothing ever filled it, so a
+        # project pinned to a specific provider connection was silently ignored.
+        _model_state = {
+            "tenant_id": tenant_id,
+            "project_id": project_id or s.project_id,
+            "model_id": message_data.get("model_id"),
+            "offering_id": message_data.get("offering_id"),
+        }
+
         first = not s.system_injected
         if first:
             ctx = _scan_context_block(s)
             content = (ctx + "\n" + user_text) if ctx else user_text
-            state = {"messages": [HumanMessage(content=content)], "tenant_id": tenant_id,
-                     "model_id": message_data.get("model_id")}
+            state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
         else:
-            state = {"messages": [HumanMessage(content=user_text)], "tenant_id": tenant_id,
-                     "model_id": message_data.get("model_id")}
+            state = {"messages": [HumanMessage(content=user_text)], **_model_state}
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="security", project_id=_project_id_from_message(message_data))
@@ -397,13 +406,21 @@ async def chat(
     s.tenant_id = s.tenant_id or real_tenant_id
     first = not s.system_injected
     user_text = text or "Please run the security scan and submit your review."
+    # Same tenant/project the WS path passes. This route used to send neither, so
+    # model resolution had no tenant context at all and could only ever fail — the
+    # agent node's own resolution is what makes that visible instead of silently
+    # falling back to a platform key.
+    _model_state = {
+        "tenant_id": s.tenant_id or str(real_tenant_id),
+        "project_id": s.project_id or project_id,
+    }
     if first:
         ctx = _scan_context_block(s)
         content = (ctx + "\n" + user_text) if ctx else user_text
-        state = {"messages": [HumanMessage(content=content)]}
+        state = {"messages": [HumanMessage(content=content)], **_model_state}
         s.system_injected = True
     else:
-        state = {"messages": [HumanMessage(content=user_text)]}
+        state = {"messages": [HumanMessage(content=user_text)], **_model_state}
 
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140}
     _injected, _skills = await resolve_agent_turn(

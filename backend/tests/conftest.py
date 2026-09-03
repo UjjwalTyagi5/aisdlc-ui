@@ -15,10 +15,36 @@ Provides:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-import pytest
+# MUST run before any import below (and before anything any of THEM imports) pulls in
+# config.env or shared.db — both resolve their Postgres connection string at import
+# time. Load .env.test with override=True here first, so config.env's own
+# load_dotenv(".env") call (override=False by default) can never win: the test suite
+# is physically incapable of reaching the real dev database from this point on,
+# regardless of what any fixture's cleanup logic gets wrong.
+#
+# See docs/local-setup.md, "Test database", for why this exists: a diff-based test
+# cleanup fixture (purge_created_orgs, below) once misattributed the real dev
+# database's own default organization to a test and deleted it -- cascading through
+# every tenant-scoped table -- because it ran against the SAME database the live app
+# used. This file makes that class of bug impossible rather than merely fixed once.
+_ENV_TEST_PATH = Path(__file__).resolve().parents[1] / ".env.test"
+if not _ENV_TEST_PATH.exists():
+    raise RuntimeError(
+        f"{_ENV_TEST_PATH} is missing. The test suite refuses to run without it -- "
+        "without an isolated test database, test cleanup can reach and delete real "
+        "dev data (see docs/local-setup.md, 'Test database'). Copy "
+        "backend/.env.test.example to backend/.env.test, create the database it "
+        "points at, and run `alembic upgrade head` against it."
+    )
+from dotenv import load_dotenv  # noqa: E402
 
-from config.env import JWT_SECRET_KEY
+load_dotenv(_ENV_TEST_PATH, override=True)
+
+import pytest  # noqa: E402
+
+from config.env import JWT_SECRET_KEY  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +75,24 @@ async def _purge_tenants(conn, org_ids: set[str]) -> None:
     Requires a BYPASSRLS role: the app role is NOBYPASSRLS and these tables are
     FORCE RLS, so rows would be invisible to the DELETE without the tenant GUC set
     per table.
+
+    NEVER purges the default org (config.env.DEFAULT_ORG_SLUG, "pwc"), whatever
+    the caller's diff computed. Belt and suspenders alongside .env.test's DSN
+    isolation above: the default org gets recreated with a fresh id every time boot
+    finds the table empty, and a diff-based "what's new since this test started"
+    check has no way to tell that apart from a test's own throwaway org if both
+    happen inside the same test's window. One misattributed real deletion, not a
+    hypothetical -- see docs/local-setup.md, "Test database".
     """
+    if not org_ids:
+        return
+    from config.env import DEFAULT_ORG_SLUG
+    protected = {
+        str(r["id"]) for r in await conn.fetch(
+            "SELECT id FROM organizations WHERE slug = $1", DEFAULT_ORG_SLUG
+        )
+    }
+    org_ids = org_ids - protected
     if not org_ids:
         return
     ids = list(org_ids)

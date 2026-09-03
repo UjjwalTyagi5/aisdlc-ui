@@ -589,6 +589,106 @@ async def _apply_model_provider_access(db: AsyncSession, request: dict[str, Any]
     logger.info(
         "model_provider_access approved: unit %s -> provider %s", workspace_id, provider,
     )
+
+    # REGISTER THE PROVIDER SO IT HAS A CARD TO BE GRANTED ON.
+    #
+    # The grant above and the Org Admin's Models grid answer to two different tables:
+    # the grant is a row in `integration_grants`, the grid renders `model_providers`
+    # connections. Approving therefore wrote a grant against a provider that had no
+    # connection to hang it on — the approval "succeeded", the request closed, and the
+    # Models page looked exactly as it had before, with no OpenAI anywhere and nothing
+    # saying why. This is the same keyless registration the "Add provider" button
+    # performs (AddProviderDialog -> create_provider with no api_key), which is the
+    # step a human would otherwise have to know to go and repeat by hand.
+    #
+    # Keyless on purpose: a connection needs a credential before it can run, and the
+    # approver does not necessarily hold one. Registering it keyless is what makes the
+    # card exist, with the requesting unit already granted on it, so curating models
+    # and adding a key are the only steps left.
+    existing_connection = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM model_providers "
+                " WHERE tenant_id = CAST(:t AS uuid) AND provider = :p LIMIT 1"
+            ),
+            {"t": request["tenantId"], "p": provider},
+        )
+    ).scalar()
+    if existing_connection is None:
+        label = next(
+            (p["label"] for p in catalog_providers() if p["provider"] == provider), provider
+        )
+        try:
+            from shared.services.model_config import (  # noqa: PLC0415
+                DuplicateProviderNameError, create_provider,
+            )
+
+            await create_provider(
+                request["tenantId"], provider=provider, display_name=label,
+                api_key=None, created_by=request.get("decidedBy") or "system",
+                workspace_id=None,
+            )
+            logger.info("model_provider_access approved: registered %s connection", provider)
+        except DuplicateProviderNameError:
+            # A connection under that display name already exists — nothing to add.
+            logger.info("model_provider_access: %s already registered by name", provider)
+        except Exception:  # noqa: BLE001 — the GRANT is the approval; registration is convenience
+            logger.exception(
+                "model_provider_access: could not register a %s connection", provider
+            )
+
+    # THE REQUESTED MODEL, NOT JUST ITS PROVIDER. These requests name one model
+    # ("bedrock/ap-southeast-3/deepseek.v3.2 access"), and that name is what the
+    # requester reads on the approval. Granting only the provider left the Models page
+    # — which lists `org_model_grants`, a different table — exactly as it was: the BU
+    # Admin was told their model was approved and then could not find it anywhere.
+    # `integration_grants` above is the provider gate; both layers must say yes
+    # (`get_bu_allowed` intersects them), so the provider grant alone reaches nothing.
+    #
+    # Additive on purpose. `set_bu_grants` would have been the obvious helper and is
+    # the wrong shape here: it REPLACES the unit's set, so approving one model would
+    # have silently revoked every other model the unit already had.
+    model_id = (payload.get("providerModel") or {}).get("modelId")
+    if model_id:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT id, visibility, business_unit_ids FROM org_model_grants "
+                    " WHERE tenant_id = CAST(:t AS uuid) AND provider = :p AND model_id = :m"
+                ),
+                {"t": request["tenantId"], "p": provider, "m": model_id},
+            )
+        ).first()
+        if row is None:
+            await db.execute(
+                text(
+                    "INSERT INTO org_model_grants "
+                    "  (id, tenant_id, provider, model_id, visibility, business_unit_ids, created_by) "
+                    "VALUES (CAST(:id AS uuid), CAST(:t AS uuid), :p, :m, 'specific', :bus, :by)"
+                ),
+                {
+                    "id": str(_uuid.uuid4()), "t": request["tenantId"], "p": provider,
+                    "m": model_id, "bus": json.dumps([str(workspace_id)]),
+                    "by": request.get("decidedBy") or "system",
+                },
+            )
+        elif row.visibility == "specific":
+            # A `global` row already reaches every unit — adding to it would be a no-op.
+            current = row.business_unit_ids or []
+            if isinstance(current, str):
+                current = json.loads(current)
+            units = {str(u) for u in current}
+            if str(workspace_id) not in units:
+                units.add(str(workspace_id))
+                await db.execute(
+                    text("UPDATE org_model_grants SET business_unit_ids = :bus WHERE id = :id"),
+                    {"bus": json.dumps(sorted(units)), "id": row.id},
+                )
+        logger.info(
+            "model_provider_access approved: unit %s -> model %s", workspace_id, model_id,
+        )
+        return f"{model_id} granted to this business unit."
+
     return f"{provider} granted to this business unit."
 
 
@@ -900,10 +1000,37 @@ async def _apply_connector_access(db: AsyncSession, request: dict[str, Any]) -> 
         )
     ).scalar()
     if granted is None:
-        raise EffectNotAvailable(
-            "connector_access",
-            f"This project's business unit has not been given {target_ref}. "
-            "An Organization Admin has to grant it to the unit first.",
+        # AN ORG ADMIN APPROVING *IS* THE UNIT GRANT. Refusing here told the one person
+        # with the authority to widen the unit's reach that somebody with that authority
+        # had to act first — the Org Admin was reading their own permission back as a
+        # blocker, on a request routed to them precisely because they hold it. A BU Admin
+        # asking for Slack on their project could never be approved by anyone: the org
+        # admin's only route was to leave the request, grant the unit by hand elsewhere,
+        # and come back. Approving now does both steps, in the order they were always
+        # meant to happen. Same INSERT and same reach-only semantics as the unit branch
+        # above; the project narrowing below still applies the requested level.
+        if decided_by_tier != "org_admin":
+            raise EffectNotAvailable(
+                "connector_access",
+                f"This project's business unit has not been given {target_ref}. "
+                "An Organization Admin has to grant it to the unit first.",
+            )
+        await db.execute(
+            text(
+                "INSERT INTO integration_grants "
+                "  (tenant_id, kind, target_ref, workspace_id, granted_by) "
+                "VALUES (CAST(:t AS uuid), :k, :r, CAST(:w AS uuid), :by) "
+                "ON CONFLICT (tenant_id, kind, target_ref, workspace_id) DO UPDATE "
+                "  SET granted_by = EXCLUDED.granted_by"
+            ),
+            {
+                "t": tenant_id, "k": kind, "r": target_ref, "w": str(workspace_id),
+                "by": request.get("decidedBy"),
+            },
+        )
+        logger.info(
+            "connector_access approved: unit %s -> %s %s (implied by a project request)",
+            workspace_id, kind, target_ref,
         )
     # THE CEILING CHECK THAT STOOD HERE IS GONE with migration 0024. It refused an
     # approval that handed a project more than the unit's grant allowed; the grant

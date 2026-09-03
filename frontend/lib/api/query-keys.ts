@@ -70,6 +70,8 @@ export const qk = {
     orgGrants: () => ["model", "allowed", "org"] as const,
     buAllowed: (workspaceId: string) => ["model", "allowed", "bu", workspaceId] as const,
     availability: (workspaceId: string) => ["model", "availability", workspaceId] as const,
+    grantedProviders: (workspaceId: string) =>
+      ["model", "granted-providers", workspaceId] as const,
     /** Org Admin only: every model crossed with every business unit. */
     grantMatrix: () => ["model", "grant-matrix"] as const,
     /** Org Admin only: which business units may use which provider. */
