@@ -15,12 +15,22 @@ from tests.conftest import _migrations_dsn, _purge_tenants
 
 
 async def test_the_default_org_survives_even_when_included_in_the_purge_set():
-    real_org = str(_uuid.uuid4())
+    # Reuse the default org if one is already there. `slug` is unique, and a previous
+    # run of this test (or any boot against this database) leaves one behind — inserting
+    # unconditionally failed on the constraint rather than on the behaviour under test.
     async with get_db_session_superuser() as s:
-        await s.execute(
-            text("INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'PWC')"),
-            {"i": real_org, "s": DEFAULT_ORG_SLUG},
-        )
+        existing = (await s.execute(
+            text("SELECT id FROM organizations WHERE slug = :s"), {"s": DEFAULT_ORG_SLUG},
+        )).scalar()
+        if existing is None:
+            real_org = str(_uuid.uuid4())
+            await s.execute(
+                text("INSERT INTO organizations (id, slug, display_name) VALUES (:i, :s, 'PWC')"),
+                {"i": real_org, "s": DEFAULT_ORG_SLUG},
+            )
+            created = True
+        else:
+            real_org, created = str(existing), False
 
     dsn = _migrations_dsn()
     assert dsn is not None, "POSTGRES_MIGRATIONS_CONN_STRING must be set for this test"
@@ -32,7 +42,8 @@ async def test_the_default_org_survives_even_when_included_in_the_purge_set():
         )
         assert still_there == 1
     finally:
-        await conn.execute("DELETE FROM organizations WHERE id = $1", _uuid.UUID(real_org))
+        if created:
+            await conn.execute("DELETE FROM organizations WHERE id = $1", _uuid.UUID(real_org))
         await conn.close()
 
 
