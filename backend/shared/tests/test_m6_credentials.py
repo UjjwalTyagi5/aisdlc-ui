@@ -40,17 +40,30 @@ CREDENTIAL_ATTRS = {
 
 
 @pytest.mark.unit
-async def test_jira_auth_adapter_reads_from_key_vault():
-    """JiraConnector.auth_adapter() resolves through load_secret(), tenant-scoped."""
+async def test_jira_resolves_only_the_acting_users_own_credential():
+    """Jira no longer reads a tenant-wide credential at all.
+
+    That rung was removed (config.connectors.base.PERSONAL_CREDENTIAL_KINDS): it made
+    the connector work for a project whose members never configured it, and attributed
+    the work to whoever minted the shared token. The lookup that remains is still
+    tenant-scoped, which is the property this file has always guarded.
+    """
     connector = JiraConnector("https://test.atlassian.net")
-    with patch("shared.keyvault.load_secret", new_callable=AsyncMock, return_value="kv-api-token") as kv:
-        await connector.auth_adapter(tenant_id="test-tenant")
-    assert kv.called, "auth_adapter must call load_secret() for credentials"
-    assert all(
-        call.kwargs.get("tenant_id") == "test-tenant" for call in kv.call_args_list
-    ), (
-        f"every load_secret() call must be tenant-scoped; got {kv.call_args_list}"
-    )
+    seen: list[tuple] = []
+
+    # Patched on the CLASS, so it is an unbound function and receives self.
+    async def fake_override(_self, tenant_id, target_id):
+        seen.append((tenant_id, target_id))
+        return None
+
+    with patch.object(JiraConnector, "_resolve_credential_override", fake_override), \
+         patch("shared.keyvault.load_secret", new_callable=AsyncMock,
+               return_value="kv-api-token") as kv:
+        auth = await connector.auth_adapter(tenant_id="test-tenant")
+
+    assert seen == [("test-tenant", "jira")], f"lookup not tenant-scoped: {seen}"
+    assert not kv.called, "the tenant-wide rung must not be consulted"
+    assert auth["token"] == "", "no personal credential must mean NOT connected"
 
 
 @pytest.mark.unit

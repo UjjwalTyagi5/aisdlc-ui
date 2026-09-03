@@ -276,12 +276,18 @@ async def test_auth_uses_token_as_basic_username_with_empty_password(monkeypatch
     )
     import config.connectors.sonarqube as _sq_mod
 
-    # The token now has exactly one source: this tenant's own Key Vault secret.
-    # (The secret-store rung above it degrades to None with no DB in a unit test.)
-    async def _fake_load_secret(ref, tenant_id=None):
-        return "my-token" if ref == "sonarqube-token" and tenant_id else None
+    # The token now has exactly one source: the acting user's own project-scoped
+    # credential. The tenant-wide rung was removed
+    # (config.connectors.base.PERSONAL_CREDENTIAL_KINDS) because it made SonarQube
+    # work for a project whose members never configured it, and recorded the analysis
+    # against whoever minted the shared token.
+    from shared.authz.project_credential import ProjectCredentialFields
 
-    monkeypatch.setattr(_sq_mod._keyvault, "load_secret", _fake_load_secret)
+    async def _mine(_self, _tenant, _target):
+        return ProjectCredentialFields(base_url=SONAR_BASE, account=None,
+                                       token="my-token")
+
+    monkeypatch.setattr(SonarQubeConnector, "_resolve_credential_override", _mine)
     connector = SonarQubeConnector(SONAR_BASE, tenant_id="tenant-a")
     await connector.list_projects()
     sent_auth = route.calls.last.request.headers["Authorization"]

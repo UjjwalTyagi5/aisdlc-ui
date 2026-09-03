@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   Boxes, CheckCircle2, FileCode2, GitBranch, GitPullRequest, MessageSquare,
-  Rocket, ScrollText, ShieldCheck, Sparkles,
+  Rocket, ScrollText, ShieldCheck, ShieldAlert, Sparkles,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -17,6 +17,7 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { CodeViewer } from "@/components/app/code-viewer";
 import { DeployTargetDialog } from "@/components/app/deploy-target-dialog";
+import { DeploymentApprovals } from "@/components/app/deployment-approvals";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -27,7 +28,7 @@ import { qk } from "@/lib/api/query-keys";
 import type { PrepareDeployResult, DeploymentArtifact } from "@/lib/schemas/deployment";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "readiness" | "artifacts" | "runbooks" | "compliance";
+type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments";
 
 const RISK: Record<string, string> = {
   critical: "bg-destructive/15 text-destructive border-destructive/30",
@@ -139,10 +140,19 @@ export default function DeploymentPage() {
 
       {!prepared ? (
         <div className="flex-1 overflow-auto">
-          <div className="mx-auto max-w-xl px-4 py-12">
-            <EmptyState icon={Rocket} title="No deployment yet"
-              description="Set up a deployment: pick a branch/PR + environment. The agent detects your deploy connector, generates the package, assesses readiness, and prepares a deployment PR."
-              action={<Button onClick={() => setPickerOpen(true)}><Rocket className="size-4" aria-hidden />Set up deployment</Button>} />
+          <div className="mx-auto max-w-3xl px-4 py-12">
+            <div className="mx-auto max-w-xl">
+              <EmptyState icon={Rocket} title="No deployment yet"
+                description="Set up a deployment: pick a branch/PR + environment. The agent detects your deploy connector, generates the package, assesses readiness, and prepares a deployment PR."
+                action={<Button onClick={() => setPickerOpen(true)}><Rocket className="size-4" aria-hidden />Set up deployment</Button>} />
+            </div>
+            {/* Anything already waiting on an approver is waiting whether or not this
+                browser has prepared a target. Hiding it behind the empty state would
+                hide the one thing on this page that needs somebody to act. */}
+            <div className="mt-10">
+              <h2 className="mb-3 text-sm font-medium">Deployment requests</h2>
+              <DeploymentApprovals projectId={id} />
+            </div>
           </div>
         </div>
       ) : (
@@ -154,6 +164,7 @@ export default function DeploymentPage() {
             </TabBtn>
             <TabBtn active={tab === "runbooks"} onClick={() => setTab("runbooks")} icon={ScrollText}>Runbooks</TabBtn>
             <TabBtn active={tab === "compliance"} onClick={() => setTab("compliance")} icon={Boxes}>Compliance</TabBtn>
+            <TabBtn active={tab === "deployments"} onClick={() => setTab("deployments")} icon={ShieldAlert}>Deployments</TabBtn>
             {rel?.pr_url && (
               <a className="ml-auto" href={rel.pr_url} target="_blank" rel="noreferrer">
                 <Button variant="outline" size="sm"><GitPullRequest className="size-4" aria-hidden />View deployment PR</Button>
@@ -161,7 +172,9 @@ export default function DeploymentPage() {
             )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
-            {!rel && chat.busy ? (
+            {tab === "deployments" ? (
+              <div className="p-4"><DeploymentApprovals projectId={id} /></div>
+            ) : !rel && chat.busy ? (
               <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={Sparkles} title="Assessing…"
                 description="Cloning, detecting the connector, generating the deployment package, and scoring release risk. This takes a moment." variant="plain" /></div>
             ) : !rel ? (

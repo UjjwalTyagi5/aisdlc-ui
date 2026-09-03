@@ -151,6 +151,13 @@ async def project_override(
     return row.access if row is not None else None
 
 
+#: Connector kinds that have no Integrations tile of their own, mapped to the tile
+#: whose credential and grant they share. See the note in `effective_access`.
+_CONNECTOR_TILE: dict[str, str] = {
+    "azure_pipelines": "azure_devops",
+}
+
+
 async def effective_access(
     db: AsyncSession,
     *,
@@ -173,6 +180,17 @@ async def effective_access(
     """
     if not tenant_id or not project_id:
         return None
+
+    # Kinds with no tile of their own inherit the decision made about the tile they
+    # belong to. `azure_pipelines` is deliberately absent from the Integrations
+    # catalogue because one ado-pat covers boards, repos and CI/CD — so there is no
+    # tile to grant it and no entry for the stage picker to wire, and it would be
+    # denied for every project forever while looking like a configuration mistake.
+    #
+    # This widens nothing that matters: it is the same credential against the same ADO
+    # organisation as the grant it inherits, and every pipeline WRITE is still behind
+    # the deployment approval gate.
+    target_ref = _CONNECTOR_TILE.get(target_ref, target_ref) if kind == "connector"         else target_ref
 
     row = (
         await db.execute(

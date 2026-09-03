@@ -15,9 +15,12 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents_orchestrator.deployment_agent.config.session_state import set_prepared
+from shared.authz.dependency import require_permission
 from shared.authz.project_scope import require_project_access
+from shared.db import get_db_session
 from shared.services import ado_repos
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Was bare APIRouter() — the only
@@ -169,3 +172,201 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
         "image_registry": body.image_registry or "", "image_name": body.image_name or body.repo_name,
         "namespace": body.namespace or "",
     }
+
+
+# ── The approval gate (deployment agent phase 1) ──────────────────────────────
+#
+# NOTHING REACHES AN ENVIRONMENT WITHOUT A NAMED HUMAN APPROVING IT. Generating
+# deployment files needs no gate; creating a pipeline, starting a run, or applying to a
+# cluster each become a `pending` deployment row that somebody has to accept.
+#
+# TWO CHECKS, as everywhere else in this codebase. `require_project_access()` on the
+# router says the caller reaches THIS project; `require_permission` on the route says
+# they take deployment decisions at all.
+#
+# NOT assert_can_administer_project, which the artifact gate uses. That one demands
+# project administration, and `artifact:approve_deployment` is held by devops_engineer —
+# the role whose job this is and which is deliberately not a project admin. Requiring
+# both would leave the permission granted to nobody who could use it.
+
+
+def deployment_gate_error() -> tuple:
+    """The two refusals these routes translate into HTTP.
+
+    Both carry `.code` and `.reason`; a gate refusal ("not approved") and an execution
+    refusal ("ADO would not answer") are different failures with the same shape, and
+    the caller needs to be told which.
+    """
+    from shared.services.deployment_executor import DeploymentExecutionError
+    from shared.services.deployment_gate import DeploymentGateError
+
+    return (DeploymentGateError, DeploymentExecutionError)
+
+
+class DeploymentDecisionIn(BaseModel):
+    """A rejection may carry a reason; an approval needs nothing."""
+
+    reason: str | None = None
+
+
+def _deployment_out(dep) -> dict:
+    return {
+        "id": str(dep.id),
+        "projectId": str(dep.project_id),
+        "runId": str(dep.run_id) if dep.run_id else None,
+        "action": dep.action,
+        "targetKind": dep.target_kind,
+        "environment": dep.environment,
+        "request": dep.request,
+        "requestedBy": dep.requested_by,
+        "requestedAt": dep.requested_at.isoformat() if dep.requested_at else None,
+        "approvalStatus": dep.approval_status,
+        "approvedBy": dep.approved_by,
+        "approvedAt": dep.approved_at.isoformat() if dep.approved_at else None,
+        "rejectionReason": dep.rejection_reason,
+        "executionStatus": dep.execution_status,
+        "executedAt": dep.executed_at.isoformat() if dep.executed_at else None,
+        "externalId": dep.external_id,
+        "externalUrl": dep.external_url,
+        "outcome": dep.outcome,
+    }
+
+
+@deployment_workspace_router.get("/{project_id}/deployments")
+async def list_project_deployments(
+    project_id: str,
+    request: Request,
+    pending_only: bool = False,
+    db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    """Deployments for this project, newest first."""
+    from shared.services import deployment_gate
+
+    rows = await deployment_gate.list_deployments(
+        db, tenant_id=request.state.tenant_id, project_id=project_id,
+        pending_only=pending_only,
+    )
+    return [_deployment_out(d) for d in rows]
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/approve",
+    dependencies=[Depends(require_permission("artifact:approve_deployment"))],
+)
+async def approve_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Release a pending deployment to run.
+
+    NO COMMIT HERE. `get_db_session` sets the RLS tenant transaction-locally and owns
+    the commit at request end; committing mid-request drops the tenant and the next
+    statement reads an empty table.
+    """
+    from shared.services import deployment_gate
+
+    try:
+        dep = await deployment_gate.approve_deployment(
+            db, deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+            approver=getattr(request.state, "user_id", "") or "",
+        )
+    except deployment_gate.DeploymentGateError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None
+    if str(dep.project_id) != str(project_id):
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    return _deployment_out(dep)
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/reject",
+    dependencies=[Depends(require_permission("artifact:approve_deployment"))],
+)
+async def reject_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+    body: DeploymentDecisionIn | None = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Refuse a pending deployment."""
+    from shared.services import deployment_gate
+
+    try:
+        dep = await deployment_gate.reject_deployment(
+            db, deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+            approver=getattr(request.state, "user_id", "") or "",
+            reason=(body.reason if body else "") or "",
+        )
+    except deployment_gate.DeploymentGateError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None
+    if str(dep.project_id) != str(project_id):
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    return _deployment_out(dep)
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/execute",
+    dependencies=[Depends(require_permission("artifact:approve_deployment"))],
+)
+async def execute_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+) -> dict:
+    """Perform an approved deployment. This is the call that actually deploys.
+
+    SEPARATE FROM APPROVAL, and not an accident. Approval is a decision recorded in the
+    database; execution is a network call to Azure DevOps that can be slow and can
+    fail. Running it inside the approve request would mean an approval that could not
+    be committed because a deploy timed out.
+
+    NO `db` PARAMETER. The executor opens and closes its own short transactions around
+    the network call — see shared/services/deployment_executor. Passing the
+    request-scoped session would hold a pooled connection open for as long as ADO takes
+    to answer.
+    """
+    from shared.services import deployment_executor
+
+    try:
+        return await deployment_executor.execute_deployment(
+            deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+        )
+    except deployment_gate_error() as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None
+
+
+@deployment_workspace_router.post(
+    "/{project_id}/deployments/{deployment_id}/refresh",
+)
+async def refresh_deployment_route(
+    project_id: str,
+    deployment_id: str,
+    request: Request,
+) -> dict:
+    """Re-read a running deployment from Azure DevOps.
+
+    Reading a status is not a deployment decision, so this needs no approval
+    permission — the router's project scoping is the whole gate.
+    """
+    from shared.services import deployment_executor
+
+    try:
+        return await deployment_executor.refresh_status(
+            deployment_id=deployment_id, tenant_id=request.state.tenant_id,
+        )
+    except deployment_gate_error() as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "not_found" else 409,
+            detail={"code": exc.code, "message": exc.reason},
+        ) from None

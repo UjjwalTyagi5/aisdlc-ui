@@ -81,3 +81,66 @@ export const ReleaseResponse = z.object({
   staged_files: z.array(z.object({ path: z.string(), language: z.string().default("yaml") })).default([]),
 });
 export type ReleaseResponse = z.infer<typeof ReleaseResponse>;
+
+/**
+ * A requested deployment action and the human decision about it (backend phase 1).
+ *
+ * `approvalStatus` and `executionStatus` are separate on purpose: an approved
+ * deployment that failed is not a rejected one, and collapsing the two loses the fact
+ * that somebody said yes.
+ */
+export const DeploymentAction = z.enum([
+  "create_pipeline",
+  "run_pipeline",
+  "direct_apply",
+]);
+export type DeploymentAction = z.infer<typeof DeploymentAction>;
+
+export const DeploymentRequest = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  runId: z.string().nullable().optional(),
+  action: DeploymentAction,
+  targetKind: z.string(),
+  environment: z.string(),
+  request: z.record(z.string(), z.unknown()).default({}),
+  requestedBy: z.string(),
+  requestedAt: z.string().nullable().optional(),
+  approvalStatus: z.enum(["pending", "approved", "rejected"]),
+  approvedBy: z.string().nullable().optional(),
+  approvedAt: z.string().nullable().optional(),
+  rejectionReason: z.string().nullable().optional(),
+  executionStatus: z.enum([
+    "not_started", "running", "succeeded", "failed", "canceled", "error",
+  ]),
+  executedAt: z.string().nullable().optional(),
+  externalId: z.string().nullable().optional(),
+  externalUrl: z.string().nullable().optional(),
+  outcome: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+export type DeploymentRequest = z.infer<typeof DeploymentRequest>;
+
+/** One stage of a pipeline run that failed, as the backend timeline reports it. */
+export const FailedStage = z.object({
+  name: z.string().nullable().optional(),
+  type: z.string().nullable().optional(),
+  result: z.string().nullable().optional(),
+  issues: z.array(z.object({
+    type: z.string().nullable().optional(),
+    message: z.string().nullable().optional(),
+  })).default([]),
+});
+export type FailedStage = z.infer<typeof FailedStage>;
+
+/** What POST .../execute and .../refresh answer. Loose on purpose — both return a
+ *  handful of shapes (unchanged, running, failed-with-stages) and the UI branches on
+ *  executionStatus, not on the envelope. */
+export const DeploymentActionResult = z.object({
+  deployment_id: z.string().optional(),
+  execution_status: z.string().optional(),
+  external_url: z.string().nullable().optional(),
+  unchanged: z.boolean().optional(),
+  detail: z.string().optional(),
+  failed_stages: z.array(FailedStage).optional(),
+});
+export type DeploymentActionResult = z.infer<typeof DeploymentActionResult>;

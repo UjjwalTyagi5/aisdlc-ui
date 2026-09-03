@@ -23,6 +23,9 @@ _CONNECTOR_REGISTRY: dict[str, str] = {
     # for the kind the UI actually stores raised ConnectorNotAvailableError.
     "github":        "config.connectors.github_issues.GitHubIssuesConnector",
     "azure_repos":   "config.connectors.azure_repos.AzureReposConnector",
+    # Registered as a kind but NOT in _CATALOG_KINDS: one ado-pat covers boards,
+    # repos and CI/CD, so it belongs to the consolidated Azure DevOps tile.
+    "azure_pipelines": "config.connectors.azure_pipelines.AzurePipelinesConnector",
     "slack":         "config.connectors.slack.SlackConnector",
     "github_actions": "config.connectors.github_actions.GitHubActionsConnector",
     "ms_teams":       "config.connectors.msteams.MSTeamsConnector",
@@ -82,6 +85,7 @@ async def _build_connector(kind: str = "azure_devops", tenant_id: str = "") -> B
     url_ref = {
         "azure_devops": "ado-org-url",
         "azure_repos": "ado-org-url",
+        "azure_pipelines": "ado-org-url",
         "jira": "jira-url",
         "confluence": "confluence-url",
         "sonarqube": "sonarqube-url",
