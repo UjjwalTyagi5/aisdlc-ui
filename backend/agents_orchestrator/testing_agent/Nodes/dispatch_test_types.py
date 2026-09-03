@@ -5,10 +5,12 @@ edge from the pre-Phase-10 graph.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import re
 import shutil
+import subprocess
 import traceback
 from typing import Any, Dict
 
@@ -499,6 +501,24 @@ def _remove_brittle_dotnet_default_value_tests(code: str) -> str:
     return method_pattern.sub(repl, code)
 
 
+
+@functools.lru_cache(maxsize=1)
+def _dotnet_sdk_available() -> bool:
+    """True when `dotnet` can actually build, not merely when the binary exists.
+
+    `dotnet --list-sdks` prints one line per installed SDK and nothing at all when
+    only runtimes are present. Cached because it shells out and the answer cannot
+    change within a run.
+    """
+    try:
+        proc = subprocess.run(
+            ["dotnet", "--list-sdks"], capture_output=True, text=True, timeout=60,
+        )
+    except Exception:  # noqa: BLE001 — no toolchain is the same answer as no SDK
+        return False
+    return proc.returncode == 0 and bool((proc.stdout or "").strip())
+
+
 def _dotnet_build_generated_tests(work_dir: str, timeout_s: int = 300):
     from agents_orchestrator.testing_agent.tools.sandbox.base import (
         get_default_sandbox,
@@ -512,6 +532,19 @@ def _dotnet_build_generated_tests(work_dir: str, timeout_s: int = 300):
         raise RuntimeError(
             "dotnet SDK not found on PATH or in a well-known install dir — install "
             "the .NET SDK (or add it to PATH) to run .NET unit test generation."
+        )
+    # THE BINARY EXISTING IS NOT THE SDK EXISTING. A machine with only the .NET
+    # *runtime* installed has dotnet.exe on PATH, so the check above passes, and then
+    # every `dotnet build` exits non-zero with "No .NET SDKs were found". Each chunk
+    # is rejected as uncompilable and the run ends on "generated .NET unit files
+    # contained no compilable xUnit test methods" — the model blamed for a missing
+    # toolchain, and the one action that would fix it never mentioned. Observed on a
+    # host carrying runtimes 8.0.19 and 9.0.7 with no SDK.
+    if not _dotnet_sdk_available():
+        raise RuntimeError(
+            "The .NET runtime is installed but no .NET SDK is — `dotnet build` cannot "
+            "run, so generated unit tests cannot be compiled. Install the .NET SDK "
+            "(https://aka.ms/dotnet/download) on the machine running the agent."
         )
 
     target = _find_dotnet_test_project(work_dir)
@@ -616,6 +649,17 @@ def _dotnet_unit_prompt(work_dir: str, functions: list, chunk_index: int) -> str
 
 
 async def _run_dotnet_unit_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
+    # Check the toolchain BEFORE spending model calls. Every generated chunk is
+    # validated by compiling it, so with no SDK the run generates five files, has all
+    # five rejected, and reports the model's output as the problem — minutes and
+    # tokens spent to arrive at the wrong answer. Ask the cheap question first.
+    if not _dotnet_sdk_available():
+        raise RuntimeError(
+            "This repository needs the .NET SDK to compile and run generated unit "
+            "tests, and no SDK is installed on the machine running the agent (only "
+            "the .NET runtime). Install it from https://aka.ms/dotnet/download, then "
+            "run the tests again."
+        )
     code_analysis = state.get("code_analysis")
     functions = list(getattr(code_analysis, "functions", None) or [])
     if not functions:
@@ -783,6 +827,79 @@ async def _run_shell_skill(state: SuperAgentState, skill: Skill) -> Dict[str, An
     }
 
 
+
+# A served OpenAPI document is the one input here with no upper bound — it comes
+# from whatever the target happens to be. A real application's spec is routinely
+# hundreds of thousands of characters (this platform's own is ~337k), and passing
+# it through verbatim put ~84k tokens in a single call: enough to exceed a modest
+# deployment's per-minute token budget on its own, so API testing failed with a
+# provider rate-limit error and never generated a case. Observed live against a
+# local FastAPI target on azure/gpt-5-mini.
+_OPENAPI_INLINE_LIMIT = 60_000
+
+
+def _condense_openapi_spec(spec_text: str, limit: int = _OPENAPI_INLINE_LIMIT) -> str:
+    """Return the spec unchanged when small, else an endpoint inventory.
+
+    The inventory keeps what writing API tests actually needs — method, path,
+    summary, parameter names and the response codes to expect — and drops the
+    schema bodies, which are the bulk of a large document. Degrading to a smaller
+    description beats failing the run: a truncated JSON blob would be unparseable,
+    and sending nothing loses the endpoint list the skill is built around.
+    """
+    import json as _json  # noqa: PLC0415 — matches the local-import style here
+
+    if len(spec_text) <= limit:
+        return spec_text
+    try:
+        spec = _json.loads(spec_text)
+        paths = spec.get("paths") or {}
+    except Exception:  # noqa: BLE001 — an unparseable spec is no better than none
+        logger.warning("Functional API: served spec is %d chars and not valid JSON; skipping it",
+                       len(spec_text))
+        return "{}"
+
+    endpoints = []
+    for path, ops in paths.items():
+        if not isinstance(ops, dict):
+            continue
+        for method, op in ops.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options"}:
+                continue
+            op = op if isinstance(op, dict) else {}
+            entry = {"method": method.upper(), "path": path}
+            if op.get("summary"):
+                entry["summary"] = op["summary"]
+            params = [
+                p.get("name") for p in (op.get("parameters") or [])
+                if isinstance(p, dict) and p.get("name")
+            ]
+            if params:
+                entry["parameters"] = params
+            responses = list((op.get("responses") or {}).keys())
+            if responses:
+                entry["responses"] = responses
+            entry["requires_body"] = bool(op.get("requestBody"))
+            endpoints.append(entry)
+
+    condensed = {
+        "note": (
+            "Condensed endpoint inventory — the served OpenAPI document was too large "
+            "to include in full. Schemas are omitted; method, path, parameter names and "
+            "expected response codes are preserved."
+        ),
+        "info": (spec.get("info") or {}),
+        "servers": spec.get("servers") or [],
+        "endpoint_count": len(endpoints),
+        "endpoints": endpoints,
+    }
+    out = _json.dumps(condensed)
+    blog(
+        f"Functional API: condensed a {len(spec_text)}-char OpenAPI spec to "
+        f"{len(out)} chars ({len(endpoints)} endpoints) to stay within model limits"
+    )
+    return out
+
 async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
     # Phase 11.4 — shell-runtime branch. When a skill declares runtime: shell,
     # bypass the LLM entirely and dispatch through the sandbox + registered parser.
@@ -816,7 +933,7 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(f"{base_url}/openapi.json")
                 if resp.status_code == 200:
-                    openapi_spec_json = resp.text
+                    openapi_spec_json = _condense_openapi_spec(resp.text)
                     blog("Functional API: loaded OpenAPI spec from /openapi.json")
         except Exception as exc:
             logger.info("Functional API: OpenAPI discovery skipped: %s", exc)

@@ -123,6 +123,26 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
  *     §21.4) had no implementation — review/prepare now checks the diff's head+base
  *     sha against the project's past reviews before staging a fresh one
  *     (backend/tests/test_code_review_workspace_unchanged_diff.py)
+ *
+ * testing — all three testing types were driven end to end against real targets
+ * before this was added, because "the graph runs" and "the agent tests something"
+ * are different claims:
+ *   · unit — a real Azure DevOps clone, then 17 generated pytest cases actually
+ *     executed with coverage (not just generated)
+ *   · functional — Chrome driven against a running app, 10 cases generated from
+ *     the live DOM and run, with screenshots and an HTML/PDF report
+ *   · api — 39 HTTP tests generated from the target's served OpenAPI document and
+ *     run against it
+ * Four things had to be fixed to get there, each of which made the agent report a
+ * problem that was not the real one:
+ *   · Azure DevOps credentials resolve per person per project; the clone asked with
+ *     a tenant alone and told the user the connector was unconfigured
+ *   · neither chat entrypoint resolved a BYOK model, so every run silently used a
+ *     local .env key instead of the org's verified provider, ungoverned and unmetered
+ *   · a hardcoded temperature that the gpt-5 family rejects pre-call, surfacing as
+ *     "could not analyze the codebase"
+ *   · the served OpenAPI document went into the prompt whole (~336k chars here),
+ *     exhausting the model's per-minute budget by itself
  */
 export const BUILT_AGENTS: readonly Phase[] = [
   "requirements",
@@ -133,6 +153,7 @@ export const BUILT_AGENTS: readonly Phase[] = [
   "development",
   "review",
   "deployment",
+  "testing",
 ];
 
 /** Label per agent (phases + the orchestrator meta-agent). */

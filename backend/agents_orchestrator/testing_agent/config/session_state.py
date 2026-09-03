@@ -51,6 +51,11 @@ class SuperAgentState(TypedDict, total=False):
     # BYOK (P3.6) — tenant + requested model threaded from the stage runner
     # so the run resolves the org's BYOK model (no platform-key fallback).
     tenant_id: Optional[str]
+    # Azure DevOps credentials are stored per person per project, so a clone needs
+    # all three of these — a tenant alone resolves nothing and the run reports the
+    # connector as unconfigured. Threaded in by both chat entrypoints.
+    project_id: Optional[str]
+    owner_id: Optional[str]
     model_id: Optional[str]
     offering_id: Optional[str]
     user_prompt: Optional[str]

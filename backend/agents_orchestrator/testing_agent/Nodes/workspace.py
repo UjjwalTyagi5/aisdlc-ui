@@ -70,6 +70,8 @@ async def setup_workspace(state: SuperAgentState):
             repo=clone_target["repo"],
             branch=clone_target["branch"],
             tenant_id=state.get("tenant_id") or "",
+            project_id=state.get("project_id") or "",
+            owner_id=state.get("owner_id") or "",
         )
 
     # Phase 5 — fall back to upstream development_artifacts.repo_url if dev agent
@@ -82,8 +84,12 @@ async def setup_workspace(state: SuperAgentState):
         if parsed:
             project, repo = parsed
             logger.info(f"Phase 5: cloning upstream dev repo {project}/{repo}@{branch}")
-            return await _clone_into_workspace(project=project, repo=repo, branch=branch,
-                                               tenant_id=state.get("tenant_id") or "")
+            return await _clone_into_workspace(
+                project=project, repo=repo, branch=branch,
+                tenant_id=state.get("tenant_id") or "",
+                project_id=state.get("project_id") or "",
+                owner_id=state.get("owner_id") or "",
+            )
         else:
             logger.warning(f"upstream repo_url is not an ADO URL ({repo_url!r}); falling through to upload path")
 
@@ -237,7 +243,10 @@ def _local_clone_from_dev(branch: str, dest_dir: str, sid: Optional[str], uid: O
         return False
 
 
-async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id: str = "") -> dict:
+async def _clone_into_workspace(
+    project: str, repo: str, branch: str, tenant_id: str = "",
+    project_id: str = "", owner_id: str = "",
+) -> dict:
     """Phase B.1 — clone an ADO branch into a fresh tmpdir.
 
     Returns a partial state dict with `work_dir` (and `repo_workspace` for
@@ -277,7 +286,9 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
             from agents_orchestrator.testing_agent.tools.pr_diff import fetch_base_branch
             from shared.services.ado_repos import resolve_auth
 
-            _org, _pat = await resolve_auth(tenant_id or "")
+            _org, _pat = await resolve_auth(
+                tenant_id or "", project_id=project_id or "", owner_id=owner_id or "",
+            )
             ado_url = _build_ado_remote_url(_org, project, repo, _pat) if _pat else ""
             if ado_url:
                 await loop.run_in_executor(
@@ -309,7 +320,14 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
     org_url = pat = ""
     try:
         from shared.services import ado_repos
-        org_url, pat = await ado_repos.resolve_auth(tenant_id or "")
+        # project_id + owner_id are load-bearing, not optional detail: Azure DevOps
+        # credentials live per person per project and the tenant-wide shared fallback
+        # was removed, so resolving on tenant alone finds nothing and reports the
+        # connector as unconfigured on an org where it is connected. Dev and
+        # code-review pass all three; this was the last caller that did not.
+        org_url, pat = await ado_repos.resolve_auth(
+            tenant_id or "", project_id=project_id or "", owner_id=owner_id or "",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.info("ado_clone: connector resolve_auth failed (%s)", exc)
     if not (org_url and pat):
