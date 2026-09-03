@@ -313,3 +313,88 @@ async def test_service_connections_come_back_named(conn):
 async def test_service_connections_use_the_preview_api_they_require(conn):
     await conn.list_service_connections(project="P")
     assert conn._calls[-1]["api_version"] == "7.1-preview.4"
+
+
+# -- where the credential actually lives ---------------------------------------
+
+
+@pytest.mark.unit
+async def test_a_project_scoped_credential_is_found(monkeypatch):
+    """WHERE REAL TENANTS KEEP IT. The Integrations page saves an Azure DevOps PAT
+    against a project, and a tenant-wide "ado-pat" often does not exist at all.
+    Reading only the tenant rung reports "credentials are not configured" while the
+    credential sits in the database — working as designed, and completely misleading.
+    """
+    c = AzurePipelinesConnector("https://dev.azure.com/fallback", "t1")
+
+    class _Override:
+        token = "project-pat"
+        base_url = "https://dev.azure.com/acme"
+
+    async def _override(_tid, target_id):
+        assert target_id == "azure_devops", target_id
+        return _Override()
+
+    monkeypatch.setattr(c, "_resolve_credential_override", _override)
+    auth = await c.auth_adapter()
+    assert auth["pat"] == "project-pat"
+    assert auth["org_url"] == "https://dev.azure.com/acme"
+
+
+@pytest.mark.unit
+async def test_the_override_is_looked_up_under_the_tile_that_owns_it(monkeypatch):
+    """No row is ever written under "azure_pipelines" — it has no Integrations tile.
+    Asking for one looks up a credential that can never exist."""
+    c = AzurePipelinesConnector("https://dev.azure.com/acme", "t1")
+    seen = {}
+
+    async def _override(_tid, target_id):
+        seen["target_id"] = target_id
+        return None
+
+    monkeypatch.setattr(c, "_resolve_credential_override", _override)
+    monkeypatch.setattr(
+        "shared.keyvault.load_secret",
+        lambda *a, **k: __import__("asyncio").sleep(0, result="tenant-pat"),
+    )
+    await c.auth_adapter()
+    assert seen["target_id"] == "azure_devops"
+
+
+@pytest.mark.unit
+async def test_the_tenant_wide_credential_still_works_when_there_is_no_override(monkeypatch):
+    c = AzurePipelinesConnector("https://dev.azure.com/acme", "t1")
+
+    async def _none(_tid, _target):
+        return None
+
+    async def _load(name, tenant_id=""):
+        return "tenant-pat"
+
+    monkeypatch.setattr(c, "_resolve_credential_override", _none)
+    monkeypatch.setattr("shared.keyvault.load_secret", _load)
+    auth = await c.auth_adapter()
+    assert auth["pat"] == "tenant-pat"
+    assert auth["org_url"] == "https://dev.azure.com/acme"
+
+
+@pytest.mark.unit
+async def test_an_override_with_no_token_falls_through_rather_than_authenticating_as_nobody(
+    monkeypatch,
+):
+    c = AzurePipelinesConnector("https://dev.azure.com/acme", "t1")
+
+    class _Empty:
+        token = ""
+        base_url = "https://dev.azure.com/other"
+
+    async def _override(_tid, _target):
+        return _Empty()
+
+    async def _load(name, tenant_id=""):
+        return "tenant-pat"
+
+    monkeypatch.setattr(c, "_resolve_credential_override", _override)
+    monkeypatch.setattr("shared.keyvault.load_secret", _load)
+    auth = await c.auth_adapter()
+    assert auth["pat"] == "tenant-pat"

@@ -127,6 +127,28 @@ class AzurePipelinesConnector(BaseConnector):
                 "tenant_id is required for AzurePipelinesConnector.auth_adapter() — "
                 "connector credentials are per-tenant (REQ-M7-01)."
             )
+
+        # THE PROJECT-SCOPED CREDENTIAL COMES FIRST, and reading it is not optional.
+        # The Integrations page lets a project member save an Azure DevOps PAT against
+        # their own project, and that is where a real tenant's credential usually
+        # lives — a tenant-wide "ado-pat" may not exist at all. Skipping this rung
+        # means every pipeline call reports "credentials are not configured" while the
+        # credential sits in the database, which is the most misleading form of
+        # working-as-designed there is.
+        #
+        # The override is looked up under "azure_devops", NOT "azure_pipelines". Same
+        # reasoning as the grant alias in shared/authz/connector_grants: pipelines has
+        # no Integrations tile of its own, so no row is ever written under its name,
+        # and asking for one looks up a credential that can never exist.
+        override = await self._resolve_credential_override(tenant_id, "azure_devops")
+        if override and override.token:
+            # base_url travels with the token: a PAT pointing at somebody else's
+            # organisation authenticates against the wrong ADO.
+            return {
+                "org_url": (override.base_url or self._org_url or "").rstrip("/"),
+                "pat": override.token,
+            }
+
         pat = await _keyvault.load_secret("ado-pat", tenant_id=tenant_id)
         return {"org_url": self._org_url, "pat": pat}
 
