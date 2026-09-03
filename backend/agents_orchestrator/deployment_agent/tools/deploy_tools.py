@@ -17,7 +17,7 @@ from langchain_core.tools import tool
 
 from agents_orchestrator.deployment_agent.config.session_state import get_session
 from config.connection_manager import manager
-from config.ws_helper import broadcast_log, get_session_id
+from config.ws_helper import broadcast_log, get_session_id, get_user_id
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "bin", "obj", "dist", "build"}
 _MAX_FILE_BYTES = 200_000
@@ -379,9 +379,12 @@ async def plan_security_scans(sonar_project_key: str = "") -> str:
     try:
         from config.connector_factory import get_connector_for_session
 
+        # AS THE PERSON, NOT AS THE PLATFORM. SonarQube records whoever's token made
+        # the call, so resolving without an owner borrows whatever shared credential
+        # happens to exist and records the work against it.
         conn = await get_connector_for_session(
             "sonarqube", s.tenant_id or "", project_id=s.project_id or "",
-            agent_id="deployment",
+            agent_id="deployment", owner_id=str(get_user_id() or ""),
         )
         # Being able to BUILD the connector is not the same as it working. Ask it for
         # something cheap; a tenant with no Sonar URL or token fails here, and that is
@@ -450,9 +453,12 @@ async def read_quality_gate(project_key: str = "", create_if_missing: bool = Fal
     try:
         from config.connector_factory import get_connector_for_session
 
+        # AS THE PERSON, NOT AS THE PLATFORM. SonarQube records whoever's token made
+        # the call, so resolving without an owner borrows whatever shared credential
+        # happens to exist and records the work against it.
         conn = await get_connector_for_session(
             "sonarqube", s.tenant_id or "", project_id=s.project_id or "",
-            agent_id="deployment",
+            agent_id="deployment", owner_id=str(get_user_id() or ""),
         )
         existing = await conn.read_adapter("list_projects", project=key)
         if not any(p.get("key") == key for p in existing):
