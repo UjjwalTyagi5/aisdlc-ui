@@ -268,9 +268,16 @@ async def ask_gemini_for_testcases(page_html, url, n=10, user_goal: str = "", pl
     When *planned_cases* is None the legacy single-goal path is used.
     """
     loop = asyncio.get_running_loop()
-    # Build the BYOK client in the async body (contextvar is visible here) so the
-    # resolved key crosses safely into the executor thread below.
-    llm = _build_ui_llm()
+    # BUILT WHERE IT IS USED, not here. `_build_ui_llm` fails closed when no model has
+    # been resolved, and building it up front made that failure reach the one path that
+    # needs no model at all: a form-flow goal returns a fixed
+    # `complete_requested_form_flow` case below without ever sending a prompt, and was
+    # raising "No BYOK model resolved" on the way to a hard-coded answer.
+    #
+    # Both remaining uses are mutually exclusive branches, so this still builds at most
+    # once per call, and both sites are in the async body — which is the actual
+    # constraint: `get_resolved_model()` reads a contextvar that is not visible from the
+    # executor thread the client is later handed to.
 
     if planned_cases:
         cases_block = "\n".join(
@@ -300,6 +307,7 @@ async def ask_gemini_for_testcases(page_html, url, n=10, user_goal: str = "", pl
         )
         try:
             await broadcast_log(f"Generating execution steps for {len(planned_cases)} pre-approved test case(s)...")
+            llm = _build_ui_llm()
             resp = await loop.run_in_executor(None, llm.invoke, prompt)
             data = extract_json_from_text(resp.content)
             if isinstance(data, list) and len(data) > 0:
@@ -355,6 +363,7 @@ async def ask_gemini_for_testcases(page_html, url, n=10, user_goal: str = "", pl
     )
     try:
         await broadcast_log("Generating test cases from page HTML...")
+        llm = _build_ui_llm()
         resp = await loop.run_in_executor(None, llm.invoke, prompt)
         data = extract_json_from_text(resp.content)
         if isinstance(data, list) and len(data) > 0:

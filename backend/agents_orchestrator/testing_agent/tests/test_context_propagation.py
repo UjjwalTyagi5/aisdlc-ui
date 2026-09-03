@@ -163,36 +163,61 @@ async def test_run_skill_threads_upstream_design_into_render_kwargs():
 # --- _emit_testing_handoff context_keys ----------------------------------
 
 @pytest.mark.asyncio
-async def test_emit_testing_handoff_publishes_full_context_keys():
-    """Pre-Phase-11.2, only 3 keys advertised. Now we publish the full set
-    so the deployment agent / context_broker know what's in the artifact."""
-    from agents_orchestrator.testing_agent.testing_agent_api import _emit_testing_handoff
+async def test_emit_testing_handoff_persists_an_artifact_the_deployment_gate_can_read():
+    """The hand-off is a PERSISTED ARTIFACT, not a published context-key list.
 
-    captured_handoff = {}
+    This pinned `_handoff_handle` and `payload.context_keys` — a context-broker
+    design that has since been replaced. `_emit_testing_handoff` now writes
+    `testing_artifacts` through `patch_session_artifacts`, and that row is what the
+    deployment agent actually reads: `pipeline_app._testing_gate` blocks unless
+    `testing_artifacts.status` is "executed" or "pipeline_completed" (and blocks
+    outright when the artifact is missing). So the contract worth pinning is the
+    shape of the row, not the advertisement that used to precede it.
+    """
+    from agents_orchestrator.testing_agent import testing_agent_api
 
-    async def fake_handoff_handle(session_id, handoff, **kwargs):
-        captured_handoff["payload"] = handoff
-        captured_handoff["kwargs"] = kwargs
+    captured = {}
 
-    with patch(
-        "agents_orchestrator.testing_agent.testing_agent_api._handoff_handle",
-        new=fake_handoff_handle,
-    ):
-        # Use a minimal final_outputs that triggers the fallback artifact path
-        await _emit_testing_handoff("session-XYZ", {"final_user_message": "Test"})
+    async def fake_patch(session_id, artifacts, **kwargs):
+        captured["session_id"] = session_id
+        captured["artifacts"] = artifacts
 
-    assert "payload" in captured_handoff, "handoff_handle was never invoked"
-    payload = captured_handoff["payload"]
-    keys = payload.context_keys
-    # Pre-fix keys
-    assert "testing_artifact" in keys
-    assert "test_execution" in keys
-    assert "coverage" in keys
-    # Phase 11.2 additions
-    assert "functional_results" in keys
-    assert "defect_log" in keys
-    assert "security_findings" in keys
-    assert "pr_coverage" in keys
-    assert "pipeline_run" in keys
-    assert "qa_report_html_path" in keys
-    assert "qa_report_pdf_path" in keys
+    with patch.object(testing_agent_api, "patch_session_artifacts", new=fake_patch):
+        await testing_agent_api._emit_testing_handoff("session-XYZ", {"final_user_message": "Test"})
+
+    assert captured, "nothing was persisted — the deployment gate would find no artifact"
+    assert captured["session_id"] == "session-XYZ"
+    artifact = captured["artifacts"]["testing_artifacts"]
+
+    # The gate reads `status` first and blocks on anything outside its pass set. A run
+    # that produced nothing must still leave a row saying so, or deployment cannot tell
+    # "testing failed" from "testing never ran".
+    assert artifact["status"] == "failed"
+    assert artifact["summary_md"] == "Test"
+    assert artifact["plan_test_case_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_emit_testing_handoff_prefers_the_real_artifact_over_the_fallback():
+    """A finished run persists what it produced; the synthesized "failed" row is only
+    for the case where the graph ended without an artifact at all."""
+    from agents_orchestrator.testing_agent import testing_agent_api
+    from shared.models import TestingArtifact
+
+    real = TestingArtifact(
+        plan_test_case_count=3, test_cases=[], status="executed",
+        language="python", summary_md="ran 3", artifact_files=[],
+    )
+    captured = {}
+
+    async def fake_patch(session_id, artifacts, **kwargs):
+        captured["artifacts"] = artifacts
+
+    with patch.object(testing_agent_api, "patch_session_artifacts", new=fake_patch):
+        await testing_agent_api._emit_testing_handoff(
+            "s-1", {"testing_artifact_json": real.model_dump_json()},
+        )
+
+    artifact = captured["artifacts"]["testing_artifacts"]
+    assert artifact["status"] == "executed", "the real artifact was replaced by the fallback"
+    assert artifact["plan_test_case_count"] == 3
