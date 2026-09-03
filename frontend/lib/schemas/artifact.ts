@@ -12,6 +12,19 @@ export const StoryBody = z.object({
   kind: z.literal("story"),
   title: z.string(),
   description: z.string(),
+  /**
+   * What the item actually is ON THE BOARD — "User Story", "Epic", "Task", "Bug".
+   *
+   * `kind` above is the ARTIFACT shape this renders as; this is the work item type.
+   * Board ingestion pulls every item on the board, so this list routinely mixes Epics
+   * and Tasks in with real stories — and without this field they all arrived at the
+   * Design agent labelled "user stories", which is how three board-configuration
+   * chores became requirements to design a system for.
+   *
+   * Optional: artifacts synthesised before this existed have no type, and a project
+   * on a board whose items are genuinely all stories will not miss it.
+   */
+  workItemType: z.string().optional(),
   acceptanceCriteria: z.array(
     z.object({
       given: z.string(),
@@ -22,6 +35,9 @@ export const StoryBody = z.object({
   traceability: z
     .object({
       jiraIssueKey: z.string().optional(),
+      /** Browsable link to the item on its board, resolved at ingest. Absent on
+       *  items ingested before it existed, and on providers with no URL template. */
+      boardUrl: z.string().url().optional(),
       designArtifactId: ArtifactId.optional(),
       prUrl: z.string().url().optional(),
     })
@@ -166,6 +182,28 @@ export const RawBody = z.object({
   markdown: z.string(),
 });
 
+/** A stored file (PDF, DOCX, XLSX, PPTX, PNG…) rather than renderable content.
+ *
+ *  These used to arrive as a RawBody whose markdown was `[Download artifact](url)` —
+ *  the same link the list row already shows as an icon, rendered through AdrViewer so
+ *  every PDF was captioned "Architecture Decision Record". Describing the file lets the
+ *  client show what it IS and offer exactly one way to fetch it.
+ */
+export const DocumentBody = z.object({
+  kind: z.literal("document"),
+  filename: z.string(),
+  contentType: z.string().nullish(),
+  sizeBytes: z.number().nullish(),
+  /** False when there is nothing to fetch right now — either the upload failed, or
+   *  the artifact is still awaiting approval and its bytes are in the pending area. */
+  stored: z.boolean().default(true),
+  /** Waiting on a project admin's decision. Distinguishes "not yet approved" from
+   *  "approved but the upload failed", which look identical through `stored` alone. */
+  awaitingApproval: z.boolean().default(false),
+  /** An admin declined it; the file was deleted and the row kept as the record. */
+  rejected: z.boolean().default(false),
+});
+
 // ─── Deployment artifact bodies (Chunk 13) ────────────────────
 
 export const PipelineProvider = z.enum(["github_actions", "azure_pipelines"]);
@@ -237,6 +275,7 @@ export const ArtifactBody = z.discriminatedUnion("kind", [
   PipelineBody,
   IacDiffBody,
   DeployPlanBody,
+  DocumentBody,
   RawBody,
 ]);
 export type ArtifactBody = z.infer<typeof ArtifactBody>;

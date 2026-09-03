@@ -31,7 +31,7 @@ import os
 
 from sqlalchemy import select
 
-from config.ws_helper import get_project_id, get_run_id, get_tenant_id
+from config.ws_helper import get_project_id, get_run_id, get_session_id, get_tenant_id
 from shared.db import get_db_session_for_tenant
 from shared.models.orm import Artifact, Run
 
@@ -43,6 +43,11 @@ _CONTENT_TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
     ".svg": "image/svg+xml",
+    # jpg/jpeg were already classified as "diagram" by _artifact_type_for but had no
+    # content type here, so a browser was handed application/octet-stream and offered
+    # a download instead of showing the image. Figma renders jpg on request.
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
@@ -81,14 +86,46 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
     return str(run.id)
 
 
-async def register_generated_file(filename: str, file_path: str, url: str, *, stage: str) -> None:
-    """Persist a chat-generated file as an Artifact row (+ notify). Never raises."""
+#: filename -> did the BYTES reach Blob on the last store attempt. Separate from the
+#: row being written, because those two succeed independently and the difference is
+#: exactly what a user cannot see from the artifacts panel.
+_LAST_UPLOAD_OK: dict[str, bool] = {}
+
+async def register_generated_file(
+    filename: str, file_path: str, url: str, *, stage: str, consented: bool | None = None
+) -> None:
+    """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
+
+    STORING IS THE PROJECT ADMIN'S CALL. A generated document is downloadable from chat
+    the moment it is written — the tool broadcasts a `/generated/...` link. Becoming
+    part of the project's shared, durable record is a separate act with a separate
+    consequence, and since migration 0040 that decision belongs to whoever runs the
+    project rather than to whoever happened to be chatting.
+
+    So this records the artifact immediately, as PENDING, with its bytes under the
+    tenant's `_pending` prefix. `POST /artifacts/{id}/approve` promotes them to the
+    project's hierarchy path; `/reject` deletes them and keeps the decision.
+
+    `consented` is vestigial — kept in the signature for callers that still pass it,
+    and no longer consulted.
+    """
     try:
         tenant_id = get_tenant_id()
         project_id = get_project_id()
         if not tenant_id or not project_id:
             logger.debug("register_generated_file: no tenant/project in context — skip persist (%s)", filename)
             return
+
+        # NO PER-TURN CONSENT STEP ANY MORE. It used to stage the file and have the
+        # agent ask "shall I save this?", because storing put the document straight into
+        # the project's shared record. Migration 0040 moved that decision to whoever
+        # RUNS the project: every generated file is recorded immediately as PENDING,
+        # its bytes parked under the tenant's `_pending` prefix, and a project admin
+        # approves or rejects it.
+        #
+        # Asking the person chatting as well would be a question whose answer no longer
+        # decides anything on its own — the admin's does. `consented` is retained in the
+        # signature for callers that still pass it; it no longer gates anything.
 
         content_type = _CONTENT_TYPES.get(os.path.splitext(filename)[1].lower())
         artifact_type = _artifact_type_for(filename)
@@ -104,6 +141,13 @@ async def register_generated_file(filename: str, file_path: str, url: str, *, st
             except OSError as exc:
                 logger.warning("register_generated_file: unreadable %s (%s)",
                                file_path, type(exc).__name__)
+
+        # Initialised HERE, not in the branch that sets it. It was assigned only where
+        # bytes were uploaded, so the "no readable file" path fell through to
+        # `_LAST_UPLOAD_OK[filename] = _uploaded` and raised UnboundLocalError — which
+        # the enclosing try swallowed, silently skipping the notify and the log line
+        # too. False is also the honest value: nothing was uploaded.
+        _uploaded = False
 
         async with get_db_session_for_tenant(tenant_id) as session:
             run_id = await _get_or_create_chat_run(session, tenant_id, project_id, stage)
@@ -128,23 +172,44 @@ async def register_generated_file(filename: str, file_path: str, url: str, *, st
                 # authentication at all — so the "blob" columns described a file anyone
                 # who guessed the path could read.
                 #
-                # store_artifact composes `{tenant_id}/{run_id}/{artifact_type}/{file}`,
-                # which is the only thing separating tenants in blob storage, and
-                # degrades to `blob_url=None` when blob storage is unconfigured rather
-                # than failing the generation.
+                # store_artifact composes
+                # `{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{file}`.
+                # The leading tenant segment is the only thing separating tenants in
+                # blob storage; the rest mirrors the product's own hierarchy so a
+                # project's or an agent's output can be found without resolving every
+                # run first. It degrades to `blob_url=None` when blob storage is
+                # unconfigured rather than failing the generation.
+                #
+                # `project_id` and `stage` are passed because THIS caller already knows
+                # both — the business unit is derived from the project inside
+                # store_artifact, so the two can never disagree.
                 from shared.services.artifact_store import (  # noqa: PLC0415
                     get_blob_client, store_artifact,
                 )
-                await store_artifact(
+                _art = await store_artifact(
                     session,
                     tenant_id=tenant_id,
                     run_id=run_id,
                     artifact_type=artifact_type,
                     filename=filename,
                     data=data,
+                    project_id=project_id,
+                    agent=stage,
                     content_type=content_type or "application/octet-stream",
                     blob_client=get_blob_client(),
                 )
+                # store_artifact DEGRADES rather than raising: on an upload failure it
+                # still writes the row so the document is listed and the run does not
+                # die. That is right, and it was also invisible — a user watched "saved
+                # to the project's artifacts", found the row in the panel, and found
+                # nothing in Blob. Record the real outcome so the caller can say which
+                # of the two happened.
+                #
+                # `upload_succeeded`, NOT `blob_url`. Since the approval gate, blob_url
+                # is None for every pending artifact — the URL is set when an admin
+                # approves and the bytes move out of the pending area — so reading it
+                # here would report a failed upload on every successful save.
+                _uploaded = bool(getattr(_art, "upload_succeeded", False))
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415
@@ -152,6 +217,12 @@ async def register_generated_file(filename: str, file_path: str, url: str, *, st
         except Exception:
             logger.debug("register_generated_file: artifact_ready notify failed", exc_info=True)
 
-        logger.info("register_generated_file: persisted %s (%s) for run %s", filename, artifact_type, run_id)
+        _LAST_UPLOAD_OK[filename] = _uploaded
+        logger.info(
+            "register_generated_file: persisted %s (%s) for run %s (blob upload %s)",
+            filename, artifact_type, run_id, "ok" if _uploaded else "FAILED",
+        )
     except Exception:
         logger.warning("register_generated_file: failed to persist %s", filename, exc_info=True)
+
+

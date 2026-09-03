@@ -25,7 +25,10 @@ from config.ado_ingestion import (
     get_wiki_page,
     list_all_work_items,
     list_projects,
+    list_item_types,
     list_states,
+    list_iterations as _list_iterations,
+    team_capacity as _team_capacity,
     list_stories_by_state,
     list_teams,
     list_wiki_pages,
@@ -104,6 +107,14 @@ class AzureDevOpsConnector(BaseConnector):
                 "pat": override.token,
             }
 
+        if not self._tenant_fallback_allowed():
+            # NO TENANT FALLBACK. This connector's credential belongs to a
+            # person (base.PERSONAL_CREDENTIAL_KINDS). Without one for the
+            # acting user it is NOT connected — borrowing a shared token would
+            # make the connector work for a project that never configured it,
+            # and record the work against whoever minted that token.
+            return {"org_url": self._org_url, "pat": ""}
+
         # Resolution order: tenant secret store (Key Vault in prod, Fernet-encrypted
         # DB in local dev — the path the Integrations "Add credentials" form writes
         # to) → Key Vault "{tenant}-ado-pat". Both rungs are tenant-scoped; there
@@ -135,6 +146,15 @@ class AzureDevOpsConnector(BaseConnector):
                 "list_projects": CapabilityEntry(status="implemented"),
                 "list_teams": CapabilityEntry(status="implemented"),
                 "list_states": CapabilityEntry(status="implemented"),
+                "list_sprints": CapabilityEntry(
+                    status="implemented",
+                    description="Team iterations with their date ranges and ADO's own past/current/future classification",
+                ),
+                "team_capacity": CapabilityEntry(
+                    status="implemented",
+                    description="Per-person hours per day for a sprint, net of personal and team days off",
+                ),
+                "list_item_types": CapabilityEntry(status="implemented"),
                 "list_stories": CapabilityEntry(status="implemented"),
                 "list_all_items": CapabilityEntry(status="implemented"),
                 "fetch_item_detail": CapabilityEntry(status="implemented"),
@@ -265,10 +285,13 @@ class AzureDevOpsConnector(BaseConnector):
             "list_projects": self.list_projects,
             "list_teams": self.list_teams,
             "list_states": self.list_states,
+            "list_item_types": self.list_item_types,
             "list_stories": self.list_stories,
             "list_all_items": self.list_all_items,
             "fetch_item_detail": self.fetch_item_detail,
             "fetch_hierarchy": self.fetch_hierarchy,
+            "list_sprints": self.list_sprints,
+            "team_capacity": self.team_capacity,
             "list_wikis": self.list_wikis,
             "get_wiki_page": self.get_wiki_page,
             "list_wiki_pages": self.list_wiki_pages,
@@ -308,6 +331,13 @@ class AzureDevOpsConnector(BaseConnector):
             url=row.get("url") or row.get("work_item_url", ""),
             project=project,
             team=team,
+            estimate=row.get("estimate"),
+            iteration=row.get("iteration_path", ""),
+            start_date=row.get("start_date", ""),
+            due_date=row.get("due_date", ""),
+            remaining_work=row.get("remaining_work"),
+            completed_work=row.get("completed_work"),
+            priority=row.get("priority"),
             raw=row,
         )
 
@@ -326,6 +356,13 @@ class AzureDevOpsConnector(BaseConnector):
             url=row.get("work_item_url") or row.get("url", ""),
             project=project,
             team=row.get("team", ""),
+            estimate=row.get("estimate"),
+            iteration=row.get("iteration_path", ""),
+            start_date=row.get("start_date", ""),
+            due_date=row.get("due_date", ""),
+            remaining_work=row.get("remaining_work"),
+            completed_work=row.get("completed_work"),
+            priority=row.get("priority"),
             raw=row,
             organization_url=row.get("organization_url", self._org_url),
             area_path=row.get("area_path", ""),
@@ -343,6 +380,42 @@ class AzureDevOpsConnector(BaseConnector):
     async def list_teams(self, project: str) -> List[Dict[str, Any]]:
         auth = await self.auth_adapter()
         return await list_teams(org_url=auth["org_url"], project=project, pat=auth["pat"])
+
+    async def list_sprints(self, project: str, team: str = "") -> List[Dict[str, Any]]:
+        """The team's iterations. TEAM-SCOPED, because that is how ADO models them —
+        a project with three teams has three sprint sets and there is no project-level
+        answer. Falls back to the project's first team so a caller that does not know
+        or care about teams still gets the common single-team case."""
+        auth = await self.auth_adapter()
+        team = team or await self._default_team(project, auth)
+        return await _list_iterations(
+            org_url=auth["org_url"], project=project, team=team, pat=auth["pat"]
+        )
+
+    async def team_capacity(
+        self, project: str, iteration_id: str, team: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Per-person capacity for one sprint, with days off already subtracted."""
+        auth = await self.auth_adapter()
+        team = team or await self._default_team(project, auth)
+        return await _team_capacity(
+            org_url=auth["org_url"], project=project, team=team,
+            iteration_id=iteration_id, pat=auth["pat"],
+        )
+
+    async def _default_team(self, project: str, auth: Dict[str, Any]) -> str:
+        """The project's first team. ADO names it "<Project> Team" by default, but that
+        is a convention rather than a guarantee, so ask rather than construct it."""
+        teams = await list_teams(org_url=auth["org_url"], project=project, pat=auth["pat"])
+        return teams[0]["name"] if teams else project
+
+    async def list_item_types(self, project: str) -> List[Dict[str, Any]]:
+        """Work item types this project's PROCESS TEMPLATE defines — not a fixed list.
+        Agile has "User Story", Scrum "Product Backlog Item", Basic "Issue"."""
+        auth = await self.auth_adapter()
+        return await list_item_types(
+            org_url=auth["org_url"], project=project, pat=auth["pat"]
+        )
 
     async def list_states(
         self, project: str, item_type: str = "User Story"
@@ -423,6 +496,8 @@ class AzureDevOpsConnector(BaseConnector):
         title: str,
         description: str = "",
         acceptance_criteria: str = "",
+        parent_id: str = "",
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         auth = await self.auth_adapter()
         created = await create_work_item(
@@ -432,6 +507,7 @@ class AzureDevOpsConnector(BaseConnector):
             title=title,
             description=description,
             acceptance_criteria=acceptance_criteria,
+            parent_id=str(parent_id or ""),
             pat=auth["pat"],
         )
         return make_board_item(

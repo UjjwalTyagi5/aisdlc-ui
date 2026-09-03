@@ -13,6 +13,10 @@ from typing import Iterable
 CAPABILITIES: frozenset[str] = frozenset({
     # board.*
     "board.read", "board.write", "board.comment", "board.hierarchy",
+    # Sprint and capacity reads (PM agent). Azure DevOps implements both; Jira has
+    # sprints but NO capacity API, which is why the planner lists capacity as
+    # optional rather than required — see the connector manifests.
+    "board.sprints.read", "board.capacity.read",
     # repo.* / vcs.*
     "repo.read", "repo.write", "repo.clone", "repo.search",
     "vcs.branch.create", "vcs.commit", "vcs.pr.create", "vcs.pr.comment", "vcs.pr.ready",
@@ -29,6 +33,11 @@ CAPABILITIES: frozenset[str] = frozenset({
     "design.hld.generate", "design.lld.generate", "design.adr.generate", "design.diagram.render",
     "design.schema.validate", "design.api.contract.generate", "design.api.lint",
     "design.system.analyze", "design.tech.stack.recommend", "design.security.design.checklist",
+
+    # plan.*
+    "plan.wbs.generate", "plan.estimate", "plan.schedule.build",
+    "plan.resource.allocate", "plan.risk.track", "plan.report.status", "plan.rebaseline",
+    "plan.cost.estimate", "plan.budget.read",
     # code.*
     "code.generate", "code.edit", "code.lint", "code.format", "code.build",
     "code.execute", "code.search",

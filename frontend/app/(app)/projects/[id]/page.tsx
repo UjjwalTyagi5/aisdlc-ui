@@ -8,9 +8,7 @@ import { toast } from "sonner";
 import {
   Clock,
   FolderOpen,
-  Plug,
   Play,
-  ShieldAlert,
   XCircle,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
@@ -31,12 +29,11 @@ import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
 import { ProjectCostPanel } from "@/components/app/project-cost-panel";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
 import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
+import { isStoredArtifact } from "@/components/app/artifact-list";
 import { RequireRole } from "@/components/auth/require-role";
 import { OutOfScope } from "@/components/auth/scope-empty-state";
 import { ApiRequestError } from "@/lib/api/client";
 import { listArtifacts } from "@/lib/api/artifacts";
-import { listConnectors } from "@/lib/api/connectors";
-import { connectorStatusLabel } from "@/lib/connectors";
 import { getProject, updateProject } from "@/lib/api/projects";
 import { useCanSeeProjectCost } from "@/hooks/use-can-see-project-cost";
 import { useRawSession } from "@/components/auth/session-provider";
@@ -55,7 +52,7 @@ import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-
 import { canRaiseType } from "@/lib/requests/routing";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
-import type { Artifact, Connector, Project, ProjectId } from "@/lib/schemas";
+import type { Artifact, Project, ProjectId } from "@/lib/schemas";
 import type { Phase } from "@/lib/schemas/enums";
 
 const TEMPLATE_LABEL: Record<Project["template"], string> = {
@@ -146,11 +143,6 @@ export default function ProjectOverviewPage() {
     queryFn: () => listArtifacts(id),
   });
 
-  const connectorsQ = useQuery({
-    queryKey: qk.connectors.list(),
-    queryFn: () => listConnectors(),
-  });
-
   if (projectQ.isLoading) {
     return (
       <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -206,7 +198,18 @@ export default function ProjectOverviewPage() {
   const artifacts = artifactsQ.data ?? [];
 
   const recentRuns = runs.slice(0, 10);
-  const recentArtifacts = [...artifacts]
+
+  // FILES THE PROJECT PRODUCED, not board rows. `listArtifacts` with no phase filter
+  // also returns the SYNTHESISED story artifacts materialised from a run's
+  // requirements_payload, and a board pull yields one per work item — all sharing the
+  // ingest run's timestamp. Fifteen of those buried the project's only real document
+  // below the fold, so this panel showed no artifacts at all while being full of rows.
+  //
+  // The test is the id shape (`isStoredArtifact`): a stored artifact's id is a UUID, a
+  // synthesised one is `{run_id}:story:{key}`. That corrects itself if stories ever get
+  // real rows. Stories have their own screen and their own count.
+  const recentArtifacts = artifacts
+    .filter((a) => isStoredArtifact(a.id))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 8);
 
@@ -407,32 +410,6 @@ export default function ProjectOverviewPage() {
               trend badge's "258000%" with it: a week-over-week percentage off a
               near-zero base is arithmetic, not information. */}
 
-          {/* Connectors */}
-          <ConnectorsPanel
-            connectors={connectorsQ.data ?? null}
-            isLoading={connectorsQ.isLoading}
-          />
-
-          {/* Guardrails placeholder — wired to SSE in Chunk 15 */}
-          <section aria-labelledby="guardrails-heading" className="space-y-2">
-            <h2
-              id="guardrails-heading"
-              className="text-muted-foreground text-xs font-semibold uppercase tracking-wider"
-            >
-              Guardrail hits (7d)
-            </h2>
-            <Card>
-              <CardContent className="flex items-center gap-3 p-4">
-                <ShieldAlert className="text-muted-foreground size-5" aria-hidden />
-                <div className="flex flex-col">
-                  <span className="text-xl font-semibold">0</span>
-                  <span className="text-muted-foreground text-xs">
-                    PII + injection + policy
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
         </aside>
       </div>
 
@@ -479,8 +456,11 @@ function RecentArtifactsList({
   if (artifacts.length === 0) {
     return (
       <EmptyState
-        title="No artifacts yet"
-        description="Run an agent to generate stories, designs, code, or tests."
+        title="No documents yet"
+        // Stories are deliberately not counted here — they are board rows, not files,
+        // and they have their own screen. Promising them would explain an empty panel
+        // with something that will never fill it.
+        description="Ask an agent to generate a document, diagram, or deck."
         variant="card"
       />
     );
@@ -516,84 +496,6 @@ function RecentArtifactsList({
         </ul>
       </CardContent>
     </Card>
-  );
-}
-
-function ConnectorsPanel({
-  connectors,
-  isLoading,
-}: {
-  connectors: Connector[] | null;
-  isLoading?: boolean;
-}) {
-  return (
-    <section aria-labelledby="connectors-heading" className="space-y-2">
-      <div className="flex items-baseline justify-between">
-        <h2
-          id="connectors-heading"
-          className="text-muted-foreground text-xs font-semibold uppercase tracking-wider"
-        >
-          Connectors
-        </h2>
-        <Button variant="link" size="sm" asChild className="h-auto p-0 text-xs">
-          <Link href="/integrations">Manage</Link>
-        </Button>
-      </div>
-      <Card>
-        <CardContent className="p-3">
-          {isLoading || connectors === null ? (
-            <div className="space-y-2">
-              <Skeleton className="h-6 w-full" />
-              <Skeleton className="h-6 w-full" />
-              <Skeleton className="h-6 w-full" />
-            </div>
-          ) : connectors.filter((c) => c.installed).length === 0 ? (
-            <div className="flex flex-col items-start gap-2 p-2">
-              <p className="text-muted-foreground text-sm">No connectors installed.</p>
-              <Button variant="outline" size="sm" asChild>
-                <Link href="/integrations">
-                  <Plug className="size-3.5" />
-                  Connect a tool
-                </Link>
-              </Button>
-            </div>
-          ) : (
-            <ul className="space-y-1.5">
-              {connectors
-                .filter((c) => c.installed)
-                .map((c) => (
-                  <li
-                    key={c.id}
-                    className="flex items-center justify-between gap-2 text-sm"
-                  >
-                    <span className="truncate">{c.name}</span>
-                    <HealthDot health={c.health} />
-                  </li>
-                ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
-function HealthDot({ health }: { health: Connector["health"] }) {
-  const tone =
-    health === "healthy"
-      ? "bg-success"
-      : health === "degraded"
-        ? "bg-warning"
-        : "bg-destructive";
-  const label = connectorStatusLabel(health);
-  return (
-    <span className="flex items-center gap-1.5">
-      <span
-        className={cn("inline-block size-2 rounded-full", tone)}
-        aria-label={`Connector ${label}`}
-      />
-      <span className="text-muted-foreground text-xs">{label}</span>
-    </span>
   );
 }
 

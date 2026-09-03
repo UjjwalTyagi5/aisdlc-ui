@@ -32,6 +32,39 @@ class RequirementsArtifact(BaseModel):
     version: int = 1
 
 
+class PlanArtifact(BaseModel):
+    """The PM agent's output: what the work is, when it happens, and who does it.
+
+    A BASELINE FROM THE FIRST SAVE. Answering "how far have we slipped" needs what was
+    originally committed to, and a baseline added after plans already exist leaves every
+    earlier plan with no history to compare against. It costs one field now and cannot
+    be retrofitted later.
+
+    Every field is optional because a plan is built up over a conversation — a work
+    breakdown with no schedule yet is a legitimate intermediate state, not an invalid
+    one.
+    """
+
+    agent_session_id: str = ""
+    #: Work items with estimates, in the canonical board-item shape.
+    tasks: Optional[List[dict]] = None
+    #: Sprints or dated phases, each with its items.
+    schedule: Optional[List[dict]] = None
+    #: Who is on what, against real capacity where the board exposes it (ADO does,
+    #: Jira does not — see the connector manifests).
+    assignments: Optional[List[dict]] = None
+    #: Blockers and cross-team dependencies, with what each one threatens.
+    risks: Optional[List[dict]] = None
+    milestones: Optional[List[dict]] = None
+    #: The first committed version of `schedule`, kept unchanged for comparison.
+    baseline: Optional[dict] = None
+    #: Board and provider the plan was built against, so a later re-plan knows where
+    #: the items live without asking again.
+    board_project: Optional[str] = None
+    provider_kind: Optional[str] = None
+    version: int = 1
+
+
 class DesignArtifact(BaseModel):
     hld: Optional[str] = None
     lld: Optional[str] = None

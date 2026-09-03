@@ -16,7 +16,45 @@ from config.orchestrator_state_client import fetch_session_artifacts
 
 # ── Artifact formatters ───────────────────────────────────────────────────────
 
+def _clip(label: str, text: str, limit: int) -> str:
+    """`label: text`, truncated with the truncation STATED.
+
+    The BRD used to be cut to 600 characters silently — roughly the first paragraph of
+    a document that runs to thousands of words — so Design received an opening
+    sentence and had no way to know the rest existed. Saying "truncated, N characters
+    total" at least lets it ask, and stops it treating a fragment as the whole brief.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return f"{label}: {text}"
+    return (
+        f"{label} (TRUNCATED — showing {limit} of {len(text)} characters; "
+        f"ask the user for the rest if you need it): {text[:limit]}"
+    )
+
+
 def _fmt_requirements(req: Dict[str, Any]) -> str:
+    """The Requirements payload as Design reads it.
+
+    THIS FORMATTER IS THE HANDOFF. Design's registry entry declares exactly one input
+    (`requirements_payload`), so whatever this drops, Design never learns — the JSONB
+    row keeps it, but nothing downstream looks. It was dropping most of the payload:
+    `work_items`, `scope_summary`, `assumptions` and `out_of_scope` were all built by
+    `build_requirements_payload`, stored, and then silently discarded here.
+
+    Two of those matter beyond tidiness:
+
+      work_items    the board ids. Without them there is NO traceability from a design
+                    back to the stories it serves, and Design's registry entry lists
+                    `traceability.map` as a REQUIRED capability with nothing able to
+                    satisfy it. `DesignArtifacts.linked_work_item_ids` had no source.
+      out_of_scope  what Requirements explicitly EXCLUDED. Dropping it lets Design
+                    architect something the user already ruled out, which is a
+                    correctness failure rather than a missing nicety.
+
+    Truncation is now ANNOUNCED. Silently showing 20 of 47 stories lets Design produce
+    a confident design for a third of the backlog with nothing indicating it.
+    """
     project = req.get("project", "")
     provider_kind = req.get("provider_kind", "azure_devops")
     # Stories live under "stories" (board shape) or "user_stories" (artifact shape).
@@ -25,19 +63,58 @@ def _fmt_requirements(req: Dict[str, Any]) -> str:
     gap = req.get("gap_report", "")
     brd = req.get("brd_content", "")
     risks = req.get("risk_register") or []
+    scope = req.get("scope_summary", "")
+    assumptions = req.get("assumptions") or []
+    out_of_scope = req.get("out_of_scope") or []
+    work_items = req.get("work_items") or []
 
     header = f"[REQUIREMENTS CONTEXT — Project: {project} | PM Provider: {provider_kind}]"
     lines = [header]
+    if scope:
+        lines.append(f"Scope: {scope}")
     if brd:
-        lines.append(f"BRD: {str(brd)[:600]}")
+        lines.append(_clip("BRD", str(brd), 4000))
     if stories:
-        lines.append(f"User Stories ({len(stories)}):")
+        # "Work items", not "User Stories" — the list is whatever the board holds.
+        lines.append(f"Requirement items ({len(stories)}" + (", showing first 20" if len(stories) > 20 else "") + "):")
         for s in stories[:20]:
             title = s.get("title", "") if isinstance(s, dict) else str(s)
+            # The BOARD's type, when the payload carries one. Ingestion pulls every
+            # work item, so this list routinely holds Epics and chore Tasks — one
+            # project's four "stories" were an Epic and three Tasks about configuring
+            # the board itself. Labelling them all "User Stories" is what let a
+            # board-setup chore be read as a system to design.
+            wtype = s.get("work_item_type") or s.get("type") or "" if isinstance(s, dict) else ""
+            if wtype and wtype.lower() not in ("user story", "story"):
+                title = f"[{wtype}] {title}"
             ac = s.get("acceptance_criteria", "") if isinstance(s, dict) else ""
+            # AC is a list on the board shape and a string on the artifact shape;
+            # f-string on a list renders a Python repr into the model's context.
+            if isinstance(ac, (list, tuple)):
+                ac = "; ".join(str(a) for a in ac)
             lines.append(f"  - {title}" + (f"\n    AC: {ac}" if ac else ""))
+    if work_items:
+        # THE TRACEABILITY LINK. Ids exactly as the board reported them, so Design can
+        # cite them and `update_ado_epic_design_complete` has something to point at.
+        lines.append(f"Board Work Items ({len(work_items)}" + (", showing first 50" if len(work_items) > 50 else "") + "):")
+        for w in work_items[:50]:
+            if not isinstance(w, dict):
+                continue
+            wid = w.get("source_key") or w.get("id", "")
+            lines.append(f"  - #{wid} [{w.get('type', '')}] {w.get('title', '')}".rstrip())
     if nfrs:
-        lines.append(f"Non-Functional Requirements: {', '.join(str(n) for n in nfrs)}")
+        # dict on the payload shape ({} by default), list on others. Iterating a dict
+        # yields KEYS, so the values were being dropped when it was populated.
+        if isinstance(nfrs, dict):
+            rendered = ", ".join(f"{k}: {v}" for k, v in nfrs.items())
+        else:
+            rendered = ", ".join(str(n) for n in nfrs)
+        if rendered:
+            lines.append(f"Non-Functional Requirements: {rendered}")
+    if assumptions:
+        lines.append("Assumptions: " + "; ".join(str(a) for a in assumptions))
+    if out_of_scope:
+        lines.append("OUT OF SCOPE (do not design these): " + "; ".join(str(o) for o in out_of_scope))
     if risks:
         lines.append(f"Risk Register ({len(risks)}):")
         for r in risks[:10]:
@@ -46,7 +123,7 @@ def _fmt_requirements(req: Dict[str, Any]) -> str:
             else:
                 lines.append(f"  - {r}")
     if gap:
-        lines.append(f"Gap Report: {str(gap)[:500]}")
+        lines.append(_clip("Gap Report", str(gap), 2000))
     return "\n".join(lines)
 
 
@@ -269,11 +346,39 @@ async def build_context(session_id: str, agent_id: str) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+#: How many of the project's runs to look back through. Each stage's payload is taken
+#: from the newest run that HAS one, so this only needs to span the runs since the
+#: oldest stage of interest — not the project's whole history.
+_PROJECT_RUN_LOOKBACK = 100
+
+_ARTIFACT_FIELDS = (
+    "requirements_payload",
+    "design_artifacts",
+    "development_artifacts",
+    "testing_artifacts",
+    "code_review_artifacts",
+    "security_artifacts",
+)
+
+
 async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
-    """The project's most recent Run row's artifact columns, or None if the project
-    has no runs yet. `Run`, not `AgentSession`, is canonical for project-scoped
-    upstream reads — matches Documentation's read_upstream_artifacts precedent
-    (help/portfolio-1-agent-status.md's Documentation section)."""
+    """The project's latest artifact payload PER STAGE, or None if it has no runs.
+
+    EACH COLUMN COMES FROM THE NEWEST RUN THAT HAS ONE, which is not the same as
+    "every column from the newest run" — and reading it the second way was a bug. This
+    took the single most recent Run and returned its columns wholesale, so any later run
+    SHADOWED the earlier stages: a project whose Requirements had been baselined, and
+    which then had one Design chat, reported no requirements at all, because the newest
+    run was the design one and its requirements_payload is NULL. The requirements had
+    not gone anywhere; the query stopped one row short of them.
+
+    That is the normal shape of a project, not an edge case — stages run in sequence, so
+    by the time anything downstream asks for upstream context there is always a newer
+    run than the one holding it.
+
+    `Run`, not `AgentSession`, is canonical for project-scoped upstream reads — matches
+    Documentation's read_upstream_artifacts precedent (help/portfolio-1-agent-status.md).
+    """
     import uuid as _uuid
 
     from sqlalchemy import select
@@ -282,23 +387,29 @@ async def _fetch_artifacts_for_project(project_id: str, tenant_id: str) -> Optio
     from shared.models.orm import Run
 
     async with get_db_session_for_tenant(tenant_id) as db:
+        # ORDERED BY updated_at, NOT created_at — see the same note in
+        # artifacts.py::list_artifacts_for_project. A chat run is created once per
+        # project and reused, so its creation time says when the user first opened the
+        # chat, not when its payload was written. What matters here is which payload is
+        # freshest.
         stmt = (
             select(Run)
             .where(Run.project_id == _uuid.UUID(project_id), Run.tenant_id == _uuid.UUID(tenant_id))
-            .order_by(Run.created_at.desc())
-            .limit(1)
+            .order_by(Run.updated_at.desc())
+            .limit(_PROJECT_RUN_LOOKBACK)
         )
-        run = (await db.execute(stmt)).scalars().first()
-        if run is None:
+        runs = (await db.execute(stmt)).scalars().all()
+        if not runs:
             return None
-        return {
-            "requirements_payload": run.requirements_payload,
-            "design_artifacts": run.design_artifacts,
-            "development_artifacts": run.development_artifacts,
-            "testing_artifacts": run.testing_artifacts,
-            "code_review_artifacts": run.code_review_artifacts,
-            "security_artifacts": run.security_artifacts,
-        }
+
+        artifacts: Dict[str, Any] = {}
+        for field in _ARTIFACT_FIELDS:
+            # Newest first, so the first non-empty value wins.
+            artifacts[field] = next(
+                (value for run in runs if (value := getattr(run, field, None))),
+                None,
+            )
+        return artifacts
 
 
 async def build_context_for_project(project_id: str, tenant_id: str, agent_id: str) -> str:

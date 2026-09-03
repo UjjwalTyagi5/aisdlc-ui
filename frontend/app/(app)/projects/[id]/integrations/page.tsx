@@ -332,11 +332,22 @@ const CREDENTIAL_FIELDS: Record<
   },
   azure_devops: {
     baseUrl: { label: "Organization URL", placeholder: "https://dev.azure.com/your-org" },
+    // WHICH Azure DevOps ACCOUNT this token belongs to, declared rather than guessed.
+    // Azure DevOps attributes a build to whoever MINTED the PAT, not to whoever saved
+    // it here — so a token pasted from a colleague's account records their name on
+    // every deployment, and nothing in the platform could tell. Asking makes the
+    // mismatch visible; it cannot be inferred from the signed-in user's email.
+    // Without this field people typed their email into Organization URL, because it
+    // was the only box that looked like it wanted one.
+    account: { label: "Azure DevOps account email", placeholder: "you@company.com" },
     secretLabel: "Personal Access Token",
-    hint: "One connection powers boards, repos and CI/CD.",
+    hint: "One connection powers boards, repos and CI/CD. The account is whose name appears on builds this token starts.",
   },
   sonarqube: {
     baseUrl: { label: "Server URL", placeholder: "https://sonar.your-company.com" },
+    // Same reason as Azure DevOps: SonarQube records the token's owner, not the
+    // person who saved it.
+    account: { label: "SonarQube account", placeholder: "you@company.com", optional: true },
     secretLabel: "User token",
     hint: "SonarQube → My Account → Security → Generate Token.",
   },
@@ -352,12 +363,16 @@ const CREDENTIAL_FIELDS: Record<
     // No URL: api.figma.com is fixed. `account` carries the default file — a
     // share URL or a bare key; extract_file_key() on the backend accepts either.
     account: {
-      label: "Default file",
+      // NOT an account, despite sharing the `account` slot every other connector
+      // uses for one — the label says so because somebody typed their email here
+      // and it stored cleanly, then surfaced a session later as "no default file is
+      // configured". The backend now rejects an unparseable value outright.
+      label: "Default Figma file URL (not an account)",
       placeholder: "https://www.figma.com/design/abc123/Product",
       optional: true,
     },
     secretLabel: "Personal access token",
-    hint: "Figma → Settings → Security → Personal access tokens. Read-only: the Design agent reads your screens and never writes to them.",
+    hint: "Figma → Settings → Security → Personal access tokens. Read-only: the Design agent reads your screens and never writes to them. Leave the file blank to pass a file URL to the agent per request.",
   },
   github: {
     // No URL: api.github.com is fixed. `account` carries owner/repo, which is

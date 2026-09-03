@@ -116,9 +116,13 @@ class ConnectorCredentialsMissing(RuntimeError):
 def extract_file_key(url_or_key: str) -> str:
     """Return the Figma file key from a share URL, or the key unchanged.
 
-    Accepts https://www.figma.com/design/AbC123/My-File?node-id=1-2 and the bare
-    "AbC123". Returns "" when neither shape matches, so callers can give a specific
-    error instead of sending a doomed request.
+    Accepts https://www.figma.com/design/AbC123/My-File?node-id=1-2 and a bare key.
+
+    A BARE KEY NEEDS 10+ ALPHANUMERICS (`_BARE_KEY_RE`). The example here used to be
+    "AbC123", which is six and does not match its own regex — real Figma keys are
+    around 22 characters, and the floor exists so an ordinary word is not mistaken for
+    a key. Returns "" when neither shape matches, so callers can give a specific error
+    instead of sending a doomed request.
     """
     value = (url_or_key or "").strip()
     if not value:
@@ -280,6 +284,18 @@ class FigmaConnector(BaseConnector):
                 "scheme": "pat",
                 "file_key": extract_file_key(override.account or "")
                 or (extract_file_key(self._org_url) if self._org_url else ""),
+            }
+
+        if not self._tenant_fallback_allowed():
+        # NO TENANT FALLBACK. This credential belongs to a person
+        # (base.PERSONAL_CREDENTIAL_KINDS). Without one for the acting user
+        # this connector is NOT connected — borrowing a shared token would make
+        # it work for a project that never configured it, and record the work
+        # against whoever minted that token.
+            return {
+                "token": "",
+                "scheme": "pat",
+                "file_key": extract_file_key(self._org_url) if self._org_url else "",
             }
 
         cached = _auth_cache.get(tid)

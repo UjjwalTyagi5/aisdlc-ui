@@ -51,6 +51,19 @@ def make_board_item(
     team: str = "",
     parent_id: Any = None,
     children: Optional[List[Dict[str, Any]]] = None,
+    # ── planning fields ──────────────────────────────────────────────────────
+    # Everything a schedule is built from. They were absent, so the canonical item
+    # described WHAT a piece of work is and nothing about how big it is, when it is
+    # due, or which sprint it belongs to — the questions a project manager asks first.
+    # Both providers already fetch the underlying values; ADO's `iteration_path` in
+    # particular was being read off the row and then dropped here.
+    estimate: Optional[float] = None,
+    iteration: str = "",
+    start_date: str = "",
+    due_date: str = "",
+    remaining_work: Optional[float] = None,
+    completed_work: Optional[float] = None,
+    priority: Any = None,
     raw: Optional[Dict[str, Any]] = None,
     **extra: Any,
 ) -> Dict[str, Any]:
@@ -80,6 +93,15 @@ def make_board_item(
         "children": children,
         "project": project or "",
         "team": team or "",
+        # None, not 0. An unestimated item and a zero-point item are different facts,
+        # and averaging the second into a velocity is how a plan quietly lies.
+        "estimate": estimate,
+        "iteration": iteration or "",
+        "start_date": start_date or "",
+        "due_date": due_date or "",
+        "remaining_work": remaining_work,
+        "completed_work": completed_work,
+        "priority": priority,
         "raw": raw or {},
     }
 

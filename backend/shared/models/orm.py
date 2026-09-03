@@ -129,6 +129,9 @@ class Run(Base):
     requirements_payload: Mapped[dict | None] = mapped_column(JSONB)
     requirements_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     design_artifacts: Mapped[dict | None] = mapped_column(JSONB)
+    # The PM agent's output (0041): tasks, schedule, assignments, risks, baseline.
+    # Sits between design and development because that is where it runs.
+    plan_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     development_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     testing_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     code_review_artifacts: Mapped[dict | None] = mapped_column(JSONB)
@@ -162,10 +165,89 @@ class Artifact(Base):
     blob_path: Mapped[str | None] = mapped_column(Text)
     content_type: Mapped[str | None] = mapped_column(String(100))
     size_bytes: Mapped[int | None] = mapped_column(Integer)
-    # No updated_at â€” immutable after creation
+    # Approval gate (migration 0040). "pending" until whoever runs the project accepts
+    # it; the bytes sit under the tenant's _pending prefix until then. The default is
+    # deliberately the UNAPPROVED value so a writer that has not been taught about this
+    # column fails closed rather than adding to the project's shared record silently.
+    approval_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    # No updated_at â€” the CONTENT is immutable after creation; the approval columns
+    # above are the one thing that changes, and they are decisions about the artifact
+    # rather than edits to it.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="artifacts")
+
+
+class Deployment(Base):
+    """One requested deployment action, and the human decision about it.
+
+    NOTHING REACHES AN ENVIRONMENT WITHOUT A NAMED HUMAN APPROVING IT. Generating
+    deployment files is free and needs no row here. Creating a pipeline, starting a run,
+    or applying to a cluster each change something outside the platform, and each one
+    becomes a row that starts `pending`.
+
+    THE REQUEST IS FROZEN AT APPROVAL. `request` holds exactly what was asked for -
+    which pipeline, which branch, which environment, which variables. It is what the
+    approver read. Letting it change after approval would mean somebody approves a
+    staging deploy and a production one runs, which is the whole attack this table
+    exists to prevent.
+
+    ONE APPROVAL IS ONE DEPLOYMENT. `executed_at` is set the moment the action fires,
+    and an already-executed row can never fire again. Without that, a single approval is
+    a standing licence to deploy for as long as the row exists.
+
+    `approval_status` defaults to the UNAPPROVED value so a writer that has not been
+    taught about this column fails closed - the same reasoning as Artifact.
+    """
+    __tablename__ = "deployments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    #: The agent run that proposed this. Nullable: a deploy triggered from the UI has
+    #: no agent run behind it, and inventing one would corrupt the run's history.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"), index=True)
+
+    #: "create_pipeline" | "run_pipeline" | "direct_apply"
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    #: "azure_pipelines" | "github_actions" | "kubernetes"
+    target_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    environment: Mapped[str] = mapped_column(String(100), nullable=False)
+    #: Exactly what was asked for - what the approver read. Immutable once approved.
+    request: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    approval_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+
+    #: "not_started" | "running" | "succeeded" | "failed" | "canceled" | "error".
+    #: Kept apart from approval_status: an approved deployment that failed is not a
+    #: rejected one, and collapsing the two loses the fact a human said yes.
+    execution_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="not_started", server_default="not_started"
+    )
+    #: Set the instant the action fires. Non-null means this approval is spent.
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    external_id: Mapped[str | None] = mapped_column(String(100))
+    external_url: Mapped[str | None] = mapped_column(Text)
+    #: What actually happened - failing stage, error, timings.
+    outcome: Mapped[dict | None] = mapped_column(JSONB)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class AuditEvent(Base):
@@ -784,6 +866,7 @@ class AgentSession(Base):
     # Typed artifacts â€” strict superset of Django's columns (adds code_review/security/deployment)
     requirements_payload: Mapped[dict | None] = mapped_column(JSONB)
     design_artifacts: Mapped[dict | None] = mapped_column(JSONB)
+    plan_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     development_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     testing_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     code_review_artifacts: Mapped[dict | None] = mapped_column(JSONB)

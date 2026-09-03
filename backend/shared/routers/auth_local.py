@@ -39,7 +39,7 @@ from shared.auth.denylist import add_jti_to_user_denylist
 from shared.auth.passwords import hash_password, verify_password
 from shared.authz.dependency import public
 from shared.authz.effective_role import resolve_platform_role_for_user
-from shared.authz.resolver import resolve_permissions_for_user
+from shared.authz.resolver import PermissionResolutionError, resolve_permissions_for_user
 from shared.authz.token_epoch import bump_user_epoch
 from shared.db import get_db_session_superuser
 from shared.services import email_templates, password_setup
@@ -109,12 +109,44 @@ async def login_endpoint(body: LoginIn) -> LoginOut:
 
 @auth_local_router.get("/auth/me", response_model=LoginOut, dependencies=[Depends(public())])
 async def me(request: Request) -> LoginOut:
-    perms = getattr(request.state, "permissions", []) or []
+    """Report what is true for this caller NOW, not what was true at login.
+
+    THE PERMISSIONS ARE RE-RESOLVED FROM THE DATABASE, and that is the whole point of
+    the endpoint. It previously read `request.state.permissions`, which the JWT
+    middleware fills from the token's own claim — so it echoed the login-time snapshot
+    back while its comment claimed the opposite. A role or permission granted since the
+    token was minted was invisible here, which is precisely the question this endpoint
+    is asked. Found when `artifact:delete` was added by migration 0039: the permission
+    existed in the database and resolved correctly, and this endpoint still reported the
+    stale set.
+
+    Note this changes what `/auth/me` REPORTS, not what the caller may DO.
+    `require_permission` reads the token claim, so a permission granted after login is
+    not usable until the token is re-minted (login or refresh). Reporting the current
+    truth is still right: a client can now SEE that it needs to refresh, which it could
+    not before.
+
+    Mirrors `GET /auth/permissions` (process_api.py), including its error contract — a
+    DB outage must not answer "no permissions", because a client cannot distinguish that
+    from a genuine empty set and would render an admin as powerless.
+    """
     tid = getattr(request.state, "tenant_id", "") or ""
     uid = getattr(request.state, "user_id", "")
-    # Re-resolved rather than read off the token: this endpoint exists to tell a
-    # client what is true NOW, and a role assigned since the token was minted is
-    # exactly the case it is asked about.
+
+    if not uid or not tid:
+        # Fail closed, matching the resolver's own contract. public() opts out of the
+        # permission check but the JWT middleware still ran, so absent identity here
+        # means an unauthenticated caller rather than an authorisation decision.
+        perms: list[str] = []
+    else:
+        try:
+            perms = await resolve_permissions_for_user(uid, tid)
+        except PermissionResolutionError:
+            raise HTTPException(
+                status_code=503,
+                detail="Permission resolution temporarily unavailable",
+            )
+
     return LoginOut(token="", tier="org", user_id=uid, tenant_id=tid or None,
                     permissions=perms,
                     platform_role=await resolve_platform_role_for_user(uid, tid, perms))

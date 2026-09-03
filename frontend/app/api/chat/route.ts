@@ -48,6 +48,8 @@ function agentWsPath(agent?: string): string {
       return "/sdlc/agent/requirement/ws";
     case "design":
       return "/sdlc/agent/design/ws";
+    case "plan":
+      return "/sdlc/agent/plan/ws";
     case "development":
       return "/sdlc/agent/development/ws";
     case "code_review":

@@ -29,6 +29,40 @@ class ConnectorNotAvailableError(Exception):
     """Raised when no connector is configured for the requested kind."""
 
 
+#: Connectors whose credential belongs to a PERSON, not to an organisation.
+#:
+#: For these there is exactly ONE place a credential may come from: the project-scoped
+#: credential the acting user saved for themselves. No tenant-wide rung, no key-vault
+#: rung, no environment rung.
+#:
+#: WHY THE FALLBACK HAD TO GO. A tenant-wide token makes a connector work for a project
+#: whose members never gave it one — the Integrations page says "Needs a credential"
+#: and the agent reaches the system anyway. Worse, the external system then records the
+#: work against whoever minted that shared token, so the audit trail names the wrong
+#: person confidently. "It works but attributes wrongly" is a harder failure to notice
+#: than "it does not work".
+#:
+#: DELIBERATELY NOT HERE, and each for a reason that is not laziness:
+#:   ms_teams, sharepoint, msgraph  an app registration, not a person. There is no
+#:                                  personal credential to fall back TO.
+#:   slack                          a bot token identifies an APP in a workspace; every
+#:                                  member would paste the same value. It is also what
+#:                                  notify_dispatch sends with, and that has no user at
+#:                                  all — removing the rung would delete notifications.
+PERSONAL_CREDENTIAL_KINDS = frozenset({
+    "azure_devops",
+    "azure_repos",
+    "azure_pipelines",
+    "jira",
+    "confluence",
+    "github",
+    "github_issues",
+    "github_actions",
+    "sonarqube",
+    "figma",
+})
+
+
 class BaseConnector(ABC):
     """Full enterprise connector contract. 10 abstract members."""
 
@@ -60,6 +94,15 @@ class BaseConnector(ABC):
         """
 
     # ── Project-scoped credential override ───────────────────────────────
+
+    def _tenant_fallback_allowed(self) -> bool:
+        """May this connector fall back to a tenant-wide credential?
+
+        False for anything in PERSONAL_CREDENTIAL_KINDS. A connector with no personal
+        credential for the acting user must fail as "not connected" rather than borrow
+        one — see that constant for why.
+        """
+        return self.connector_name not in PERSONAL_CREDENTIAL_KINDS
 
     async def _resolve_credential_override(
         self, tenant_id: str, target_id: str

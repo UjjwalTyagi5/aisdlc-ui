@@ -635,16 +635,32 @@ async def get_run_steps(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Return a synthetic Step[] derived from the Run's JSONB stage columns.
+    """Return a synthetic Step[] describing what this run produced.
 
-    No 'steps' table exists in the ORM. Steps are derived from the populated
-    JSONB columns: requirements_payload, design_artifacts, development_artifacts,
-    testing_artifacts. One synthetic Step per populated stage column. Deterministic
-    StepId: f"{run_id}:{stage}". There is no steps table; a step is derived from the run.
+    No 'steps' table exists in the ORM. Steps are derived from two places: the
+    populated JSONB stage columns (the pipeline hand-off) and the run's artifact rows
+    (every file it generated).
+
+    THE ARTIFACTS ARE LOADED HERE, and that is what makes chat-driven work visible.
+    `register_generated_file` writes an `artifacts` row and never touches the JSONB
+    columns, so a run whose whole output came through the chat drawer derived no steps
+    at all and the Activity panel read "No activity yet" beside a document the user had
+    just downloaded.
+
+    The query is tenant-safe without an explicit filter: `_get_run_or_404` has already
+    resolved the run against `request.state.tenant_id`, so `Artifact.run_id == run.id`
+    cannot reach another tenant's rows — and RLS applies to this session regardless.
     """
     tenant_id = request.state.tenant_id
     run = await _get_run_or_404(db, run_id, tenant_id, request=request)
-    steps = derive_steps_from_run(run)
+    artifacts = (
+        await db.execute(
+            select(Artifact)
+            .where(Artifact.run_id == run.id)
+            .order_by(Artifact.created_at)
+        )
+    ).scalars().all()
+    steps = derive_steps_from_run(run, artifacts)
     return steps
 
 

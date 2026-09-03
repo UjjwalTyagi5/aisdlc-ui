@@ -69,13 +69,13 @@ describe("AGENT_OWNERSHIP invariants", () => {
     const reach = (role: PlatformRole) => roleAgentSplit(role).reachable.sort();
 
     expect(reach("ba")).toEqual(
-      ["requirements", "design", "development", "review", "security", "testing", "deployment", "documentation"].sort(),
+      ["requirements", "design", "plan", "development", "review", "security", "testing", "deployment", "documentation"].sort(),
     );
     expect(reach("developer")).toEqual(
-      ["requirements", "development", "review", "security", "testing", "documentation"].sort(),
+      ["requirements", "plan", "development", "review", "security", "testing", "documentation"].sort(),
     );
     expect(reach("qa")).toEqual(
-      ["requirements", "development", "security", "testing", "documentation", "validation"].sort(),
+      ["requirements", "plan", "development", "security", "testing", "documentation", "validation"].sort(),
     );
     expect(reach("devops_engineer")).toEqual(
       ["development", "security", "testing", "deployment", "documentation"].sort(),
@@ -86,6 +86,7 @@ describe("AGENT_OWNERSHIP invariants", () => {
       [
         "requirements",
         "design",
+        "plan",
         "development",
         "review",
         "security",

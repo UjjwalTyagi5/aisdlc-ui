@@ -140,6 +140,14 @@ class GitHubActionsConnector(BaseConnector):
             # wins over the tenant-wide `gha-owner` resolved above.
             return {"pat": override.token, "owner": override.account or owner or ""}
 
+        if not self._tenant_fallback_allowed():
+        # NO TENANT FALLBACK. This credential belongs to a person
+        # (base.PERSONAL_CREDENTIAL_KINDS). Without one for the acting user
+        # this connector is NOT connected — borrowing a shared token would make
+        # it work for a project that never configured it, and record the work
+        # against whoever minted that token.
+            return {"pat": "", "owner": owner or ""}
+
         pat, disconnected = await self._resolve_ref(tid, "gha-pat")
         if disconnected:
             return {"pat": "", "owner": ""}

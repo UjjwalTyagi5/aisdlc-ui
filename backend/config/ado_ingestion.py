@@ -1,6 +1,7 @@
 import html
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -97,6 +98,30 @@ async def list_states(
         ]
 
 
+async def list_item_types(
+    *, org_url: str, project: str, pat: str
+) -> List[Dict[str, Any]]:
+    """The work item types this PROJECT actually has.
+
+    NOT a fixed list, and that is the whole point. Azure DevOps types come from the
+    project's process template and differ per project: Agile has "User Story", Scrum
+    has "Product Backlog Item", Basic has neither — it has "Issue". An agent that
+    assumes one gets VS402323 ("Work item type X does not exist in project Y"), which
+    is what a real run hit on a Basic project.
+    """
+    org_url = org_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(
+            f"{org_url}/{project}/_apis/wit/workitemtypes?api-version=7.1"
+        )
+        r.raise_for_status()
+        return [
+            {"name": t.get("name", ""), "description": t.get("description", "")}
+            for t in r.json().get("value", [])
+            if t.get("name")
+        ]
+
+
 async def list_wikis(*, org_url: str, project: str, pat: str) -> List[Dict[str, Any]]:
     org_url = org_url.rstrip("/")
     async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
@@ -162,9 +187,20 @@ async def create_work_item(
     title: str,
     description: str = "",
     acceptance_criteria: str = "",
+    parent_id: str = "",
     pat: str,
 ) -> Dict[str, Any]:
-    """Create a new work item in ADO. Returns the created work item."""
+    """Create a new work item in ADO. Returns the created work item.
+
+    `parent_id` links the new item UNDER an existing one. Without it items are created
+    unparented — which is what happened when an agent reported creating Tasks "linked
+    under Epic #1" and the board showed three orphans, because the only trace of the
+    parent was a sentence somebody had typed into a description.
+
+    The link goes in THIS request, not a follow-up PATCH, so it is atomic: either the
+    item exists parented or it does not exist. A second call could leave an orphan
+    behind on failure, which is the state we are trying to stop producing.
+    """
     org_url = org_url.rstrip("/")
     api_url = f"{org_url}/{project}/_apis/wit/workitems/${work_item_type}?api-version=7.1"
     ops = [
@@ -176,6 +212,21 @@ async def create_work_item(
         ops.append({"op": "add", "path": "/fields/System.Description", "value": description})
     if acceptance_criteria:
         ops.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", "value": acceptance_criteria})
+    if parent_id:
+        # Hierarchy-REVERSE is the child->parent direction. Hierarchy-Forward would
+        # declare the new item the PARENT of the id given, which is the same call with
+        # the tree upside down and no error to tell you.
+        #
+        # The URL is org-level (no project segment) — that is what the API returns in
+        # `relations` and what it expects here.
+        ops.append({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "System.LinkTypes.Hierarchy-Reverse",
+                "url": f"{org_url}/_apis/wit/workItems/{parent_id}",
+            },
+        })
     async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
         r = await client.post(api_url, json=ops, headers={"Content-Type": "application/json-patch+json"})
         r.raise_for_status()
@@ -496,6 +547,23 @@ async def list_all_work_items(
         return rows
 
 
+def _first_number(*values: Any) -> Optional[float]:
+    """The first value that is actually a number, or None.
+
+    None is NOT interchangeable with 0 here: an unestimated item and a zero-point item
+    are different facts, and averaging the second into a velocity is how a plan quietly
+    lies about how much the team gets through.
+    """
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def normalize_work_item(
     *,
     work_item: Dict[str, Any],
@@ -547,6 +615,26 @@ def normalize_work_item(
             for relation in relations
         ],
         "work_item_url": build_work_item_url(org_url, project, work_item_id),
+        # ── planning fields ──────────────────────────────────────────────────
+        # ADO returns these on every work item and they were dropped on the floor.
+        # A scheduler needs size and dates before it needs anything else.
+        # `Effort` is what Epics/Features carry; `StoryPoints` is what Stories carry —
+        # taking whichever is present avoids a plan that silently estimates half the
+        # backlog at nothing.
+        "estimate": _first_number(
+            fields.get("Microsoft.VSTS.Scheduling.StoryPoints"),
+            fields.get("Microsoft.VSTS.Scheduling.Effort"),
+            fields.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
+        ),
+        "remaining_work": _first_number(fields.get("Microsoft.VSTS.Scheduling.RemainingWork")),
+        "completed_work": _first_number(fields.get("Microsoft.VSTS.Scheduling.CompletedWork")),
+        "start_date": str(fields.get("Microsoft.VSTS.Scheduling.StartDate") or ""),
+        "due_date": str(
+            fields.get("Microsoft.VSTS.Scheduling.TargetDate")
+            or fields.get("Microsoft.VSTS.Scheduling.FinishDate")
+            or ""
+        ),
+        "priority": _first_number(fields.get("Microsoft.VSTS.Common.Priority")),
     }
 
     return normalized
@@ -732,3 +820,125 @@ def build_ingestion_summary(normalized: Dict[str, Any]) -> str:
         f"Description:\n{normalized.get('description') or 'No description provided.'}\n\n"
         f"Acceptance Criteria:\n{criteria_lines}"
     )
+
+
+# ── Iterations and capacity (PM agent, phase 0b) ─────────────────────────────
+#
+# These answer the two questions a schedule is built from — what sprints exist, and
+# how much time each person actually has — and neither had an adapter. Both live under
+# the TEAM, not the project: iterations and capacity are per-team settings in ADO, so a
+# project with three teams has three different answers and "the project's capacity" is
+# not a thing that exists.
+
+
+async def list_iterations(
+    *, org_url: str, project: str, team: str, pat: str
+) -> List[Dict[str, Any]]:
+    """The team's sprints, oldest first, with their date ranges.
+
+    `timeFrame` is ADO's own past/current/future classification. Deriving it from the
+    dates here would mean re-implementing its notion of "current" and getting the
+    boundary wrong on the changeover day.
+    """
+    org_url = org_url.rstrip("/")
+    team_seg = quote(team, safe="")
+    project_seg = quote(project, safe="")
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(
+            f"{org_url}/{project_seg}/{team_seg}/_apis/work/teamsettings/iterations"
+            "?api-version=7.1"
+        )
+        r.raise_for_status()
+        out: List[Dict[str, Any]] = []
+        for it in r.json().get("value", []):
+            attrs = it.get("attributes") or {}
+            out.append(
+                {
+                    "id": it.get("id", ""),
+                    "name": it.get("name", ""),
+                    "path": it.get("path", ""),
+                    "start_date": str(attrs.get("startDate") or ""),
+                    "finish_date": str(attrs.get("finishDate") or ""),
+                    "time_frame": attrs.get("timeFrame", ""),
+                }
+            )
+        return out
+
+
+async def team_capacity(
+    *, org_url: str, project: str, team: str, iteration_id: str, pat: str
+) -> List[Dict[str, Any]]:
+    """Per-person capacity for one sprint: hours a day, days off, and the net total.
+
+    `capacityPerDay` is PER ACTIVITY, and a person can be listed against several
+    (Development 4h, Testing 2h). Summing them is what "this person's daily capacity"
+    means; taking the first would understate anyone who splits their time.
+
+    DAYS OFF ARE SUBTRACTED, because a capacity number that ignores leave is the one
+    thing worse than no capacity number — it looks authoritative and overcommits the
+    person. Team-wide days off (public holidays) come from a separate endpoint and are
+    applied to everybody.
+    """
+    org_url = org_url.rstrip("/")
+    team_seg = quote(team, safe="")
+    project_seg = quote(project, safe="")
+    base = f"{org_url}/{project_seg}/{team_seg}/_apis/work/teamsettings/iterations/{iteration_id}"
+
+    async with httpx.AsyncClient(timeout=30.0, auth=("", pat)) as client:
+        r = await client.get(f"{base}/capacities?api-version=7.1")
+        r.raise_for_status()
+        rows = r.json().get("value", [])
+
+        team_days_off = 0
+        try:
+            rd = await client.get(f"{base}/teamdaysoff?api-version=7.1")
+            rd.raise_for_status()
+            team_days_off = _count_days_off(rd.json().get("daysOff", []))
+        except httpx.HTTPError:
+            # A team with no days-off record 404s. Treating that as "no holidays" is
+            # correct; failing the whole capacity read over it is not.
+            team_days_off = 0
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        member = row.get("teamMember") or {}
+        per_day = sum(
+            float(a.get("capacityPerDay") or 0)
+            for a in (row.get("activities") or [])
+        )
+        personal_days_off = _count_days_off(row.get("daysOff") or [])
+        out.append(
+            {
+                "member_id": member.get("id", ""),
+                "name": member.get("displayName", ""),
+                "capacity_per_day": per_day,
+                "days_off": personal_days_off + team_days_off,
+                "activities": [
+                    {"name": a.get("name", ""), "capacity_per_day": float(a.get("capacityPerDay") or 0)}
+                    for a in (row.get("activities") or [])
+                ],
+            }
+        )
+    return out
+
+
+def _count_days_off(ranges: List[Dict[str, Any]]) -> int:
+    """Total days across ADO's {start, end} ranges, both ends INCLUSIVE.
+
+    A single day off is returned as start == end, which is one day and not zero — the
+    off-by-one that would silently hand every part-time day back to the plan.
+    """
+    from datetime import datetime as _dt
+
+    total = 0
+    for rng in ranges or []:
+        start, end = rng.get("start"), rng.get("end")
+        if not start or not end:
+            continue
+        try:
+            s = _dt.fromisoformat(str(start).replace("Z", "+00:00")).date()
+            e = _dt.fromisoformat(str(end).replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        total += (e - s).days + 1
+    return total

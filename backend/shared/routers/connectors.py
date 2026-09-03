@@ -64,6 +64,7 @@ _KNOWN_KINDS = {
     "jira",
     "github",
     "azure_repos",
+    "azure_pipelines",
     "github_actions",
     "slack",
     "ms_teams",
@@ -101,6 +102,7 @@ _KIND_KV_SECRETS: Dict[str, List[str]] = {
     "github": ["github-access-token"],
     "slack": ["slack-bot-token"],
     "azure_repos": ["ado-pat"],
+    "azure_pipelines": ["ado-pat"],
     "figma": ["figma-access-token"],
 }
 
@@ -759,6 +761,33 @@ async def set_connector_credentials(kind: str, body: SetCredentialsIn, request: 
             status_code=400,
             detail=f"Connector '{kind}' does not support pasted credentials. "
             f"Supported: {sorted(_CREDENTIAL_KINDS)}",
+        )
+
+    # NO ORG-WIDE CREDENTIAL FOR A PERSONAL CONNECTOR.
+    #
+    # These connectors no longer read a tenant-wide secret at all — the rung was
+    # removed (config.connectors.base.PERSONAL_CREDENTIAL_KINDS) because it let a
+    # project whose members configured nothing still reach the system, and made the
+    # external tool record the work against whoever minted the shared token.
+    #
+    # Accepting the write anyway would be the worse half of the fix: the form would
+    # report success, the secret would sit encrypted in the database, and nothing
+    # would ever read it. Refusing here is what makes "removed" true rather than
+    # merely "unused", and the message says where the credential does belong.
+    from config.connectors.base import PERSONAL_CREDENTIAL_KINDS  # noqa: PLC0415
+
+    if kind in PERSONAL_CREDENTIAL_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "personal_credential_only",
+                "message": (
+                    f"'{kind}' is authenticated per person, per project. Add your own "
+                    "credential on the project's Integrations page instead — an "
+                    "organisation-wide one would be used by nobody and would record "
+                    "every action against whoever created it."
+                ),
+            },
         )
 
     from shared.services import secret_store

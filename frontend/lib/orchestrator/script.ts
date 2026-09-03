@@ -23,6 +23,7 @@ export interface StageScriptContext {
 const STAGE_ARTIFACTS: Record<Phase, string[]> = {
   requirements: ["requirements.md", "user-stories.json", "traceability-matrix.csv"],
   design: ["hld.md", "lld.md", "c4-container.mmd", "openapi.yaml", "adr-001.md"],
+  plan: ["work-breakdown.md", "sprint-plan.json", "resource-allocation.csv"],
   development: ["src/ (24 files changed)", "migration-0007.sql", "PR #482"],
   review: ["review-report.md", "12 inline comments"],
   security: ["sast-findings.json", "sbom.spdx.json", "risk-score.md"],
@@ -57,6 +58,14 @@ No requirement is left without a story, and no story without a parent — the tr
 
 Every requirement from the previous stage is satisfied by at least one component of ${c.projectName}.`,
 
+  plan: (c) =>
+    `Turned the accepted design for **${c.projectName}** into a plan.
+
+- **Work breakdown** from the design's components, every task traced to the story that asked for it.
+- **Estimates** on each item, with anything too large to size honestly split out.
+- **Three sprints** sequenced against dependencies, staffed to the team's real capacity.
+
+Nothing is scheduled against a person who is not available for it.`,
   development: () =>
     `Implemented the design in a sandboxed runtime with command allowlists and secret redaction on.
 

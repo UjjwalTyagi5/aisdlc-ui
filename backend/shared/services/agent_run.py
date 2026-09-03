@@ -62,6 +62,41 @@ def _pick_board_kind(assigned: list[str]) -> Optional[str]:
     return (non_ado or assigned or [None])[0]
 
 
+async def stage_board_kinds(
+    tenant_id: Optional[str], project_id: Optional[str], agent_id: str
+) -> list[str]:
+    """EVERY board kind wired to this stage, in the order the stage picker stored them.
+
+    `_stage_board_kind` below answers "which ONE board does this stage run on by
+    default"; this answers "which boards may it reach at all". They are different
+    questions, and conflating them is what made a project with both Jira and Azure
+    DevOps reachable only through whichever one the picker happened to choose — an
+    agent asked to write to the other had no way to say so.
+
+    Same read, same filter, no fallback to the legacy project-wide `provider_kind`,
+    for the same reason: that column defaults to azure_devops for nearly every project.
+    An empty list means the stage has no board, which is a real answer.
+    """
+    if not (tenant_id and project_id):
+        return []
+    try:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.models.orm import Project  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(tenant_id) as session:
+            project = await session.get(Project, _uuid.UUID(str(project_id)))
+            conns = (getattr(project, "connectors", None) if project else None) or {}
+            return [k for k in (conns.get(agent_id) or []) if k in _BOARD_KINDS]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stage_board_kinds: lookup failed (project=%s agent=%s): %s",
+            project_id, agent_id, type(exc).__name__,
+        )
+        return []
+
+
 async def _stage_board_kind(
     tenant_id: Optional[str], project_id: Optional[str], agent_id: str
 ) -> Optional[str]:

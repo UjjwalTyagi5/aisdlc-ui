@@ -108,8 +108,12 @@ from shared.services.prompt_runtime import invalidate_profile_cache
 # ── Fixed presentation order (frozen API contract). Differs from AGENT_REGISTRY
 #    dict order — the contract puts code_review + security BEFORE testing — so it is
 #    declared explicitly here rather than derived from pipeline_position. ────────────
+# A third copy of the roster, and the reason a test asserts it against the registry:
+# `AgentProfile.agent_id.in_(PIPELINE_ORDER)` filters profile rows, so an agent missing
+# here has no profile layer at all — it would run with the base prompt and no org,
+# workspace or project customisation, silently.
 PIPELINE_ORDER: tuple[str, ...] = (
-    "requirements", "design", "development", "code_review",
+    "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
 )
 

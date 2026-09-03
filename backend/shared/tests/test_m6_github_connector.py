@@ -49,14 +49,42 @@ def _make_connector(app_id="1234", installation_id="5678") -> GitHubIssuesConnec
 
 @pytest.mark.unit
 @respx.mock
-async def test_installation_token_exchange():
-    """Connector calls POST /app/installations/{id}/access_tokens with GitHub App JWT."""
+async def test_the_shared_app_installation_is_no_longer_used():
+    """The GitHub App installation is an ORGANISATION identity, not a person's.
+
+    It was the last shared-credential rung on this connector, and it is now closed
+    (config.connectors.base.PERSONAL_CREDENTIAL_KINDS): a project whose members never
+    configured GitHub would still transact, and every action was attributed to the App
+    rather than to whoever asked for it.
+
+    NOTE FOR WHOEVER READS THIS NEXT. The exchange machinery below the guard is now
+    unreachable. Either GitHub belongs in the exemption list beside ms_teams and
+    sharepoint — all three are app registrations — or that machinery should be deleted.
+    Leaving it reachable-looking but dead is the one option worth avoiding.
+    """
     respx.post(f"{GH_API}/app/installations/5678/access_tokens").mock(
         return_value=httpx.Response(201, json=_TOKEN_FIXTURE)
     )
     connector = _make_connector()
-    token = await connector._get_installation_token()
-    assert token == "ghs_faketoken"
+    token = await connector._get_installation_token(tenant_id="t-1")
+    assert token == "", "the shared App installation must not be borrowed"
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_a_members_own_pat_is_what_authenticates():
+    """The one rung that remains: the acting user's project-scoped credential."""
+    from unittest.mock import patch
+
+    from shared.authz.project_credential import ProjectCredentialFields
+
+    async def _mine(_self, _tenant, _target):
+        return ProjectCredentialFields(base_url=None, account=None, token="ghp_mine")
+
+    connector = _make_connector()
+    with patch.object(GitHubIssuesConnector, "_resolve_credential_override", _mine):
+        token = await connector._get_installation_token(tenant_id="t-1")
+    assert token == "ghp_mine"
 
 
 @pytest.mark.unit

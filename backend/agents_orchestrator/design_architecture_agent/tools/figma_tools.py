@@ -333,15 +333,86 @@ async def export_figma_frames(
             "come from this file and name renderable nodes."
         )
 
+    # DOWNLOAD THEM. Figma's render URLs expire in about 30 days, so a design document
+    # that hotlinks one reviews perfectly and is broken by the next quarter. This used
+    # to end with a NOTE telling the caller to "download and store any image that needs
+    # to persist" — advice with no tool behind it, which is the same prompt-only
+    # enforcement this codebase keeps finding elsewhere. Now the tool does it.
+    stored, failed_dl = await _persist_rendered(images, image_format)
+
     lines = [f"Rendered {len(images)} frame(s) as {image_format.lower()}:"]
-    lines += [f"- {nid}: {url}" for nid, url in images.items()]
+    for nid, url in images.items():
+        durable = stored.get(nid)
+        lines.append(f"- {nid}: {durable or url}" + ("" if durable else "  (temporary Figma URL)"))
     missing = [i for i in ids if i not in images]
     if missing:
         lines.append(f"({len(missing)} node(s) did not render: {', '.join(missing)})")
-    # Stated because it changes what a caller should do with these: a design doc that
-    # hotlinks them looks fine in review and breaks a month later.
-    lines.append(
-        "\nNOTE: these URLs are temporary (Figma expires them in ~30 days). Download "
-        "and store any image that needs to persist in a document."
-    )
+    if stored:
+        lines.append(
+            f"\n{len(stored)} image(s) stored with the project and safe to embed in a "
+            "document — use the URLs above."
+        )
+    if failed_dl:
+        # Named, because the remaining URLs still work TODAY and letting the agent embed
+        # them silently is how the expiry problem comes back.
+        lines.append(
+            f"\nWARNING: {failed_dl} image(s) could not be stored and are still "
+            "temporary Figma URLs (they expire in ~30 days). Do not embed those in a "
+            "document that needs to last; ask the user to re-run the export."
+        )
     return "\n".join(lines)
+
+
+async def _persist_rendered(images: dict, image_format: str) -> tuple[dict, int]:
+    """Download each rendered frame and register it as a project artifact.
+
+    Returns ({node_id: durable_url}, failed_count). NEVER raises: a rendering that
+    could not be stored is still a rendering, and the caller reports which is which.
+    """
+    import os  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    from config import sdlcSettings  # noqa: PLC0415
+    from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+    from config.ws_helper import get_session_id, get_user_id  # noqa: PLC0415
+
+    stored: dict = {}
+    failed = 0
+    user_id, session_id = get_user_id() or "", get_session_id() or ""
+    if not (user_id and session_id):
+        # No chat context: nowhere to write that the download route could serve.
+        return stored, len(images)
+
+    ext = (image_format or "png").lower().strip(".")
+    out_dir = os.path.join(
+        str(sdlcSettings().FILES), user_id, "orchestrator", session_id, "output"
+    )
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError:
+        return stored, len(images)
+
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        for nid, url in images.items():
+            # Figma node ids look like "1:23", and ':' is illegal in a Windows filename.
+            safe_nid = "".join(c if c.isalnum() else "-" for c in str(nid))
+            filename = f"figma-{safe_nid}.{ext}"
+            path = os.path.join(out_dir, filename)
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                with open(path, "wb") as fh:
+                    fh.write(resp.content)
+            except Exception:  # noqa: BLE001 — one bad frame must not lose the others
+                failed += 1
+                continue
+            try:
+                from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+
+                dl = f"{AGENTIC_BASE_URL}/generated/{user_id}/orchestrator/{session_id}/output/{filename}"
+                await register_generated_file(filename, path, dl, stage="design")
+                stored[nid] = dl
+            except Exception:  # noqa: BLE001 — best-effort; the file is on disk either way
+                failed += 1
+    return stored, failed
