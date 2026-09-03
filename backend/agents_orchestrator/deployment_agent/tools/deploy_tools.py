@@ -486,3 +486,100 @@ async def read_quality_gate(project_key: str = "", create_if_missing: bool = Fal
         "quality_gate": quality_gate,
         **gate_verdict(quality_gate, tests_passing=tests_passing),
     }, indent=2, default=str)
+
+
+@tool
+async def sync_repo(accept_rewrite: bool = False) -> str:
+    """Refresh the cloned repo to the current tip of its branch, and say what moved.
+
+    The clone is taken once when the target is prepared and never refreshed, so a long
+    session can end up reasoning about code that changed hours ago — and staging a
+    Dockerfile "refresh" against a file somebody has already replaced.
+
+    WHAT COMES BACK MATTERS MORE THAN THE FETCH:
+
+    `staged_now_stale` names files you already staged whose source changed underneath
+    them. Those were written against the old code. RE-READ AND RE-STAGE THEM, and tell
+    the user which — opening a PR from a stale base is how a generated file quietly
+    reverts somebody's change.
+
+    `history_rewritten` means somebody force-pushed or rebased: the commit this clone
+    was sitting on is no longer in the branch, so anything already generated was based
+    on code that no longer exists. Nothing is applied in that case. Say so and ask
+    before re-running with accept_rewrite=true — it discards work that may no longer
+    make sense.
+    """
+    from shared.services import ado_repos
+
+    s = get_session(get_session_id())
+    if not s.work_dir or not s.source_branch:
+        return "ERROR: no workspace prepared. Ask the user to select a branch/PR first."
+    if s.mode == "pr":
+        return json.dumps({
+            "synced": False,
+            "detail": "This session is bound to a pull request, not a branch. Syncing "
+                      "would move it off the PR's head commit, which is the thing "
+                      "being assessed.",
+        }, indent=2)
+
+    try:
+        out = await asyncio.to_thread(
+            ado_repos.sync_clone, s.work_dir, s.source_branch, s.pat,
+            accept_rewrite=bool(accept_rewrite),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({
+            "synced": False,
+            "error": type(exc).__name__,
+            "detail": f"Could not sync the repo: {str(exc)[:300]}. The working copy is "
+                      "unchanged, which means it is still as stale as it was.",
+        }, indent=2)
+
+    if out.get("history_rewritten") and not out.get("applied"):
+        return json.dumps({
+            "synced": False,
+            "history_rewritten": True,
+            "before": out["before"], "remote": out["after"],
+            "detail": (
+                "The branch history was rewritten — a force-push or a rebase. The "
+                "commit this clone is on is no longer in the branch, so anything "
+                "already generated was written against code that no longer exists. "
+                "Nothing has been changed. Ask the user before re-running with "
+                "accept_rewrite=true; it will discard the current base."
+            ),
+        }, indent=2)
+
+    if not out.get("changed"):
+        return json.dumps({
+            "synced": True, "changed": False, "commit": out["after"],
+            "detail": "Already up to date with the branch.",
+        }, indent=2)
+
+    changed = set(out.get("files") or [])
+    stale = [f["path"] for f in s.staged_files if f.get("path") in changed]
+    s.head_sha = out["after"]
+
+    result = {
+        "synced": True,
+        "changed": True,
+        "commits": out["commits"],
+        "before": out["before"],
+        "after": out["after"],
+        "files_changed": sorted(changed)[:80],
+        "history_rewritten": bool(out.get("history_rewritten")),
+        "staged_now_stale": stale,
+    }
+    if stale:
+        result["detail"] = (
+            f"{len(stale)} staged file(s) were written against code that has since "
+            "changed. Re-read the sources and re-stage them before opening a PR, and "
+            "tell the user which ones — a generated file built on a stale base quietly "
+            "reverts whatever moved underneath it."
+        )
+    else:
+        result["detail"] = (
+            "None of the staged files were affected by these changes, but the "
+            "assessment was made against the older code — re-check anything that "
+            "depended on the files listed."
+        )
+    return json.dumps(result, indent=2, default=str)
