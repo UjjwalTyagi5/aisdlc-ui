@@ -398,3 +398,31 @@ async def test_an_override_with_no_token_falls_through_rather_than_authenticatin
     monkeypatch.setattr("shared.keyvault.load_secret", _load)
     auth = await c.auth_adapter()
     assert auth["pat"] == "tenant-pat"
+
+
+@pytest.mark.unit
+async def test_get_pipeline_surfaces_the_repository_id_ado_actually_sends(conn):
+    """CONFIRMED AGAINST A REAL ORGANISATION: configuration.repository carries id and
+    type only, never name. Reading `name` returned None for every YAML pipeline, which
+    reads as "this pipeline has no repository" rather than "the API did not say"."""
+    conn._responses["pipelines/1"] = {
+        "id": 1, "name": "deploy-web", "folder": "\\",
+        "configuration": {
+            "path": "/azure-pipelines.yml", "type": "yaml",
+            "repository": {"id": "59e1403f-0c47-4975-ac5c-1d6e37c24d6a",
+                           "type": "azureReposGit"},
+        },
+    }
+    out = await conn.get_pipeline(project="P", pipeline_id=1)
+    assert out["repository_id"] == "59e1403f-0c47-4975-ac5c-1d6e37c24d6a"
+    assert out["repository_type"] == "azureReposGit"
+    assert out["yaml_path"] == "/azure-pipelines.yml"
+
+
+@pytest.mark.unit
+async def test_a_missing_repository_name_is_not_mistaken_for_a_missing_repository(conn):
+    conn._responses["pipelines/1"] = {
+        "id": 1, "configuration": {"repository": {"id": "r1", "type": "azureReposGit"}}}
+    out = await conn.get_pipeline(project="P", pipeline_id=1)
+    assert out["repository_name"] is None
+    assert out["repository_id"] == "r1"      # the useful field is still there

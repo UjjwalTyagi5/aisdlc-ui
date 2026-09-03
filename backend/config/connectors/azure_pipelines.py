@@ -364,12 +364,21 @@ class AzurePipelinesConnector(BaseConnector):
     async def get_pipeline(self, project: str, pipeline_id: int) -> Dict[str, Any]:
         data = await self._request("GET", f"pipelines/{pipeline_id}", project=project)
         cfg = data.get("configuration") or {}
+        repo = cfg.get("repository") or {}
+        # ADO SENDS ONLY id AND type HERE — never the repository name, confirmed
+        # against a real organisation. Reading `name` gave None for every YAML
+        # pipeline, which reads as "this pipeline has no repository" rather than
+        # "the API did not say". The id is what is actually present, and it is the
+        # field `create_pipeline` needs back, so it is the one surfaced.
         return {
             "id": data.get("id"),
             "name": data.get("name"),
             "folder": data.get("folder"),
             "yaml_path": cfg.get("path"),
-            "repository": (cfg.get("repository") or {}).get("name"),
+            "repository_id": repo.get("id"),
+            "repository_type": repo.get("type"),
+            # Present only when ADO happens to include it; absent is normal.
+            "repository_name": repo.get("name"),
             "type": cfg.get("type"),
         }
 
