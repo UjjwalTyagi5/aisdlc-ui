@@ -19,6 +19,7 @@ production.
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import sys
 
@@ -68,6 +69,15 @@ _KNOWN_GAPS = {
         "reads Figma as the platform",
     "agents_orchestrator/orchestrator/copilot_api.py":
         "one of two call sites still ownerless",
+    # The queue workers. Fixing these is NOT a one-line change: the task payload
+    # carries model_id and project_id and no user at all, so the enqueuing side has to
+    # start recording who asked before the worker can act as them. Until then a board
+    # write from a queued run is attributed to whatever shared credential is
+    # configured. `agent_run_scope` already accepts owner_id — the plumbing exists,
+    # the value does not.
+    "workers/design_worker.py": "queued task payload carries no user",
+    "workers/development_worker.py": "queued task payload carries no user",
+    "workers/requirements_worker.py": "queued task payload carries no user",
 }
 
 
@@ -78,13 +88,23 @@ def _call_sites() -> list[tuple[str, int, bool]]:
     to a line-based search, and this test exists precisely to be hard to fool.
     """
     found: list[tuple[str, int, bool]] = []
-    # Only the source trees. Globbing from the repo root walks .venv first — thousands
-    # of files, and slow enough that the test stops being run.
-    sources = ("agents_orchestrator", "shared", "config")
-    for top in sources:
-        for path in (ROOT / top).rglob("*.py"):
+    # THE WHOLE TREE, pruned during the walk rather than filtered after it.
+    #
+    # This started as a scan of three source directories, for speed. That hid
+    # workers/ entirely — three ownerless call sites the test reported as clean. A
+    # guard with a blind spot is worse than no guard: it says the rule holds.
+    # os.walk with dirs[:] prunes .venv before descending into it, which is what
+    # made the full scan slow enough to be tempting to narrow.
+    skip = {".venv", "__pycache__", ".git", "node_modules", ".pytest_cache",
+            ".mypy_cache", "migrations"}
+    for dirpath, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d not in skip]
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = pathlib.Path(dirpath) / fn
             rel = path.relative_to(ROOT).as_posix()
-            if "tests/" in rel or "__pycache__" in rel:
+            if rel.startswith("tests/") or "/tests/" in rel:
                 continue
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
@@ -163,3 +183,13 @@ def test_slack_is_documented_as_impossible_rather_than_merely_unfinished():
     discovering why it cannot be done."""
     assert "impossible" in _ALLOWED["shared/services/notify_dispatch.py"]
     assert "shared/services/notify_dispatch.py" not in _KNOWN_GAPS
+
+
+def test_the_scan_reaches_outside_the_obvious_source_directories():
+    """THE BUG THIS TEST ONCE HAD. Scanning only agents_orchestrator/shared/config for
+    speed hid workers/ completely, and the guard reported the rule as holding while
+    three call sites broke it. A guard with a blind spot is worse than no guard."""
+    scanned = {rel.split("/")[0] for rel, _l, _o in _call_sites()}
+    assert "workers" in scanned, (
+        "workers/ is not being scanned — the guard has a blind spot again"
+    )
