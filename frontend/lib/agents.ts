@@ -117,6 +117,7 @@ export const BUILT_AGENTS: readonly Phase[] = [
   "security",
   "documentation",
   "development",
+  "deployment",
 ];
 
 /** Label per agent (phases + the orchestrator meta-agent). */
