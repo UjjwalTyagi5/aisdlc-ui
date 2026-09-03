@@ -4,6 +4,8 @@ import type { ProjectId } from "@/lib/schemas";
 import { AdoPr } from "@/lib/schemas/code-review";
 import {
   DeployConnector,
+  DeploymentActionResult,
+  DeploymentRequest,
   PrepareDeployResult,
   ReleaseResponse,
 } from "@/lib/schemas/deployment";
@@ -47,4 +49,41 @@ export const prepareDeploy = (projectId: ProjectId, body: PrepareDeployBody) =>
 export const getRelease = (projectId: ProjectId, sessionId: string) =>
   api(`/deployment/${enc(projectId)}/release/${enc(sessionId)}`, {
     schema: ReleaseResponse,
+  });
+
+// ── The approval gate (backend phases 1–4) ───────────────────────────────────
+
+export const listDeployments = (projectId: ProjectId, pendingOnly = false) =>
+  api(
+    `/deployment/${enc(projectId)}/deployments${pendingOnly ? "?pending_only=true" : ""}`,
+    { schema: z.array(DeploymentRequest) },
+  );
+
+export const approveDeployment = (projectId: ProjectId, deploymentId: string) =>
+  api(`/deployment/${enc(projectId)}/deployments/${enc(deploymentId)}/approve`, {
+    method: "POST",
+    schema: DeploymentRequest,
+  });
+
+export const rejectDeployment = (
+  projectId: ProjectId, deploymentId: string, reason?: string,
+) =>
+  api(`/deployment/${enc(projectId)}/deployments/${enc(deploymentId)}/reject`, {
+    method: "POST",
+    body: { reason: reason ?? "" },
+    schema: DeploymentRequest,
+  });
+
+/** Performs the deployment. Separate from approval because it is a network call to
+ *  Azure DevOps that can be slow and can fail — see the backend route's note. */
+export const executeDeployment = (projectId: ProjectId, deploymentId: string) =>
+  api(`/deployment/${enc(projectId)}/deployments/${enc(deploymentId)}/execute`, {
+    method: "POST",
+    schema: DeploymentActionResult,
+  });
+
+export const refreshDeployment = (projectId: ProjectId, deploymentId: string) =>
+  api(`/deployment/${enc(projectId)}/deployments/${enc(deploymentId)}/refresh`, {
+    method: "POST",
+    schema: DeploymentActionResult,
   });

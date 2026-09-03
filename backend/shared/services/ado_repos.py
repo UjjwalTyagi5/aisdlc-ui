@@ -550,3 +550,83 @@ async def create_pull_request(
     if not pr_id:
         return None
     return f"{base}/{encoded_project}/_git/{urllib.parse.quote(repo_id_or_name, safe='')}/pullrequest/{pr_id}"
+
+
+def sync_clone(
+    work_dir: str, branch: str, pat: str, *, accept_rewrite: bool = False,
+) -> dict:
+    """Bring an existing clone up to date with the remote tip of *branch*.
+
+    The clone is made once when a target is prepared and then never refreshed, so an
+    agent can spend a long session reasoning about code that moved hours ago.
+
+    TWO KINDS OF MOVEMENT, and they are not the same event:
+
+      fast-forward      New commits on top of what we have. Safe to apply, and applied.
+      rewritten history Somebody force-pushed or rebased, so the commit this clone is
+                        sitting on is no longer in the branch at all. Anything already
+                        generated was written against a base that does not exist. That
+                        is not something to fix silently, so it is reported and NOT
+                        applied unless the caller says `accept_rewrite`.
+
+    Returns the shas, the commits and files that moved, and `history_rewritten`.
+    """
+    work_path = pathlib.Path(work_dir)
+    if not work_path.exists():
+        raise RuntimeError("no clone to sync")
+
+    def _git(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *_GIT_NO_HELPER, *args], cwd=str(work_path), capture_output=True,
+            text=True, timeout=timeout, env=_git_env(),
+        )
+
+    before = _git(["rev-parse", "HEAD"], timeout=30).stdout.strip()
+
+    fetched = _git(["fetch", "origin", branch])
+    if fetched.returncode != 0:
+        raise RuntimeError(_scrub(fetched.stderr.strip() or fetched.stdout.strip(), pat))
+
+    remote = _git(["rev-parse", "FETCH_HEAD"], timeout=30).stdout.strip()
+    if not remote:
+        raise RuntimeError("could not resolve the remote tip")
+
+    if before == remote:
+        return {"changed": False, "before": before, "after": remote,
+                "commits": 0, "files": [], "history_rewritten": False}
+
+    # Is what we have still part of the branch? If not, the base is gone.
+    rewritten = _git(
+        ["merge-base", "--is-ancestor", before, remote], timeout=30
+    ).returncode != 0
+
+    files = [
+        f for f in _git(
+            ["diff", "--name-only", f"{before}..{remote}"]
+        ).stdout.splitlines() if f.strip()
+    ] if not rewritten else []
+    commits = _git(
+        ["rev-list", "--count", f"{before}..{remote}"], timeout=30
+    ).stdout.strip()
+
+    if rewritten and not accept_rewrite:
+        return {
+            "changed": False, "applied": False, "before": before, "after": remote,
+            "commits": 0, "files": [], "history_rewritten": True,
+        }
+
+    reset = _git(["reset", "--hard", remote])
+    if reset.returncode != 0:
+        raise RuntimeError(_scrub(reset.stderr.strip() or reset.stdout.strip(), pat))
+
+    if rewritten:
+        files = [
+            f for f in _git(["diff", "--name-only", f"{before}..{remote}"]
+                            ).stdout.splitlines() if f.strip()
+        ]
+
+    return {
+        "changed": True, "applied": True, "before": before, "after": remote,
+        "commits": int(commits) if commits.isdigit() else 0,
+        "files": files[:200], "history_rewritten": rewritten,
+    }

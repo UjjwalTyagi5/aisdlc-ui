@@ -286,6 +286,18 @@ class FigmaConnector(BaseConnector):
                 or (extract_file_key(self._org_url) if self._org_url else ""),
             }
 
+        if not self._tenant_fallback_allowed():
+        # NO TENANT FALLBACK. This credential belongs to a person
+        # (base.PERSONAL_CREDENTIAL_KINDS). Without one for the acting user
+        # this connector is NOT connected — borrowing a shared token would make
+        # it work for a project that never configured it, and record the work
+        # against whoever minted that token.
+            return {
+                "token": "",
+                "scheme": "pat",
+                "file_key": extract_file_key(self._org_url) if self._org_url else "",
+            }
+
         cached = _auth_cache.get(tid)
         if cached is not None and cached[1] > time.time():
             auth = dict(cached[0])  # a copy — callers must not mutate the cache

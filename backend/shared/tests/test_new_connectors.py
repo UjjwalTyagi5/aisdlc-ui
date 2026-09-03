@@ -86,22 +86,45 @@ async def test_auth_adapter_requires_tenant(cls):
 
 
 @pytest.mark.unit
-async def test_github_actions_auth_prefers_secret_store():
+async def test_github_actions_ignores_the_tenant_store_entirely():
+    """The tenant-wide rung is gone (config.connectors.base.PERSONAL_CREDENTIAL_KINDS).
+
+    It let this connector work for a project whose members never gave it a credential,
+    and GitHub then recorded the work against whoever minted the shared PAT. A stored
+    tenant token must now be ignored rather than borrowed.
+    """
     store = _Store({"gha-pat": "ghp_from_store", "gha-owner": "acme"})
     with _patch_store(store), patch("shared.keyvault.load_secret", return_value=None):
         auth = await GitHubActionsConnector().auth_adapter("t-1")
-    assert auth == {"pat": "ghp_from_store", "owner": "acme"}
+    assert auth["pat"] == "", "a tenant-wide PAT must not be used"
 
 
 @pytest.mark.unit
-async def test_github_actions_auth_honours_disconnect_tombstone():
-    """A disconnected connector must NOT fall through to a global credential."""
+async def test_github_actions_uses_the_acting_users_own_credential():
+    """The one rung that remains."""
+    from shared.authz.project_credential import ProjectCredentialFields
+
+    async def _mine(_self, _tenant, _target):
+        return ProjectCredentialFields(base_url=None, account="acme", token="ghp_mine")
+
+    with patch.object(GitHubActionsConnector, "_resolve_credential_override", _mine):
+        auth = await GitHubActionsConnector().auth_adapter("t-1")
+    assert auth == {"pat": "ghp_mine", "owner": "acme"}
+
+
+@pytest.mark.unit
+async def test_github_actions_never_falls_through_to_a_global_credential():
+    """What the disconnect tombstone used to be the only guard against.
+
+    There is now no rung below the personal credential at all, so a global PAT cannot
+    win whether the tenant is disconnected or was never connected.
+    """
     store = _Store({"gha-pat": _Store.DISCONNECTED_MARKER})
     with _patch_store(store), patch(
         "shared.keyvault.load_secret", return_value="ghp_global_should_not_win"
     ):
         auth = await GitHubActionsConnector().auth_adapter("t-1")
-    assert auth == {"pat": "", "owner": ""}
+    assert auth["pat"] == ""
 
 
 # ── health_check must never raise ─────────────────────────────────────────────

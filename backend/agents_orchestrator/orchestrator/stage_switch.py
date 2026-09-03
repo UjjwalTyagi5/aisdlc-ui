@@ -27,6 +27,13 @@ STAGE_ALIASES: dict[str, list[str]] = {
     "design": ["design agent", "architecture", "design"],
     "development": ["development agent", "development", "developer", "coding", "implementation", "dev"],
     "requirements": ["requirements agent", "requirement agent", "requirements", "requirement", "user stories", "backlog"],
+    # The PM agent. Added to STAGE_ORDER when the stage shipped but missed here, so
+    # the orchestrator could route to every stage except this one — "switch to
+    # planning" fell through as if the stage did not exist. STAGE_ALIASES and
+    # STAGE_IDS are asserted equal by tests/copilot/test_stage_switch.py, which is
+    # what caught it.
+    "plan": ["pm agent", "project manager", "planning agent", "planning", "plan",
+             "schedule", "sprint plan", "resource plan", "timeline"],
 }
 
 SWITCH_VERBS: list[str] = [
