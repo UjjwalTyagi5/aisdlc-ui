@@ -144,3 +144,23 @@ export const DeploymentActionResult = z.object({
   failed_stages: z.array(FailedStage).optional(),
 });
 export type DeploymentActionResult = z.infer<typeof DeploymentActionResult>;
+
+/** What GET /deploy/prepared answers. Identical to PrepareDeployResult except that
+ *  `status` is null when nothing is prepared — the honest answer after a backend
+ *  restart, since the prepared session lives in memory. */
+export const PreparedDeployState = z.object({
+  status: z.string().nullable(),
+  mode: z.enum(["branch", "pr"]).optional(),
+  repo_name: z.string().optional(),
+  ado_project: z.string().optional(),
+  branch: z.string().optional(),
+  pr_id: z.string().nullable().optional(),
+  pr_title: z.string().nullable().optional(),
+  head_sha: z.string().optional(),
+  environment: z.string().optional(),
+  deploy_via: z.string().optional(),
+  image_registry: z.string().optional(),
+  image_name: z.string().optional(),
+  namespace: z.string().optional(),
+});
+export type PreparedDeployState = z.infer<typeof PreparedDeployState>;

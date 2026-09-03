@@ -199,6 +199,47 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
     }
 
 
+@deployment_workspace_router.get("/{project_id}/deploy/prepared")
+async def get_prepared_deploy(project_id: str, request: Request) -> dict:
+    """The deployment target already prepared for this project, or nulls.
+
+    WHY THIS EXISTS. The Deployment page kept `prepared` in React state alone, so a
+    refresh threw it away and the screen said "No deployment yet" while the backend
+    held a fully prepared clone. Chat is gated on that state, so the agent became
+    unreachable until somebody pressed Set up deployment again in the same browser
+    session — for a target that was already prepared.
+
+    IT NEVER RETURNS THE CREDENTIAL. The stored record carries `pat` and `repo_url`
+    (which has the PAT injected into it) because the agent needs them server-side.
+    Only the descriptive fields are projected here — returning the record as stored
+    would hand the browser a token that has no business leaving the server.
+
+    A null `status` is the honest answer after a backend restart: the prepared session
+    lives in memory, so the clone on disk is orphaned and the agent could not use it
+    anyway.
+    """
+    from agents_orchestrator.deployment_agent.config.session_state import get_prepared
+
+    data = get_prepared(request.state.tenant_id, project_id)
+    if not data:
+        return {"status": None}
+    return {
+        "status": "ready",
+        "mode": data.get("mode") or "branch",
+        "repo_name": data.get("repo_name") or "",
+        "ado_project": data.get("ado_project") or "",
+        "branch": data.get("source_branch") or "",
+        "pr_id": data.get("pr_id") or None,
+        "pr_title": "",
+        "head_sha": data.get("head_sha") or "",
+        "environment": data.get("environment") or "",
+        "deploy_via": data.get("deploy_via") or "unknown",
+        "image_registry": data.get("image_registry") or "",
+        "image_name": data.get("image_name") or "",
+        "namespace": data.get("namespace") or "",
+    }
+
+
 # ── The approval gate (deployment agent phase 1) ──────────────────────────────
 #
 # NOTHING REACHES AN ENVIRONMENT WITHOUT A NAMED HUMAN APPROVING IT. Generating
