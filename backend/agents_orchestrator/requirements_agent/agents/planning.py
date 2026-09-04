@@ -2872,11 +2872,19 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
 
     from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
 
+    from shared.services.model_resolver import (  # noqa: PLC0415
+        litellm_key_kwargs,
+        temperature_kwargs,
+    )
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,
         api_base=base_url,
         api_key=api_key,
+        # The BYOK key must be the one litellm actually uses; without this the
+        # provider-specific field defaulted from the environment wins. See
+        # shared/services/model_resolver.litellm_key_kwargs.
+        **litellm_key_kwargs(litellm_provider, api_key),
         # Omitted entirely for gpt-5-family models, which reject any temperature but
         # their default — see temperature_kwargs.
         **temperature_kwargs(model, 0.3),

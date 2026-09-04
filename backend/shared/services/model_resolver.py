@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -246,6 +247,44 @@ async def resolve_model_for_run(
     return resolved
 
 
+# ChatLiteLLM keeps a SEPARATE field per provider — `anthropic_api_key`,
+# `azure_api_key`, ... — each defaulted from the matching environment variable, and
+# `_client_params` writes whichever are truthy onto the litellm module as
+# `litellm.anthropic_key` and friends AFTER assigning the generic `api_key`. The
+# provider-specific value therefore WINS over the BYOK key we pass, and because
+# `client` is the litellm module itself, that write is process-global: one instance
+# built from the environment poisons every later call.
+#
+# The effect is a BYOK isolation failure. Here the platform's ANTHROPIC_API_KEY was
+# stale, so a tenant's valid key produced "authentication_error: API key is invalid"
+# — loud, and blamed on the tenant's key. Had that environment key been VALID the
+# failure would have been silent and worse: every tenant's run served by the
+# platform's own credential, billed to the platform account, their key never used.
+_LITELLM_NAMED_KEY_FIELD: dict[str, str] = {
+    "openai": "openai_api_key",
+    "azure": "azure_api_key",
+    "azure_ai": "azure_api_key",
+    "anthropic": "anthropic_api_key",
+    "replicate": "replicate_api_key",
+    "cohere": "cohere_api_key",
+    "cohere_chat": "cohere_api_key",
+    "openrouter": "openrouter_api_key",
+}
+
+
+def litellm_key_kwargs(litellm_provider: str | None, api_key: str | None) -> dict:
+    """Extra ChatLiteLLM kwargs that make the BYOK key actually be the one used.
+
+    Pass alongside `api_key=` at construction. Returns {} for a provider with no
+    named field (litellm then reads the generic `api_key`, which is correct), and for
+    a call with no key at all.
+    """
+    field = _LITELLM_NAMED_KEY_FIELD.get((litellm_provider or "").lower())
+    if not field or not api_key:
+        return {}
+    return {field: api_key}
+
+
 def credential_fingerprint(api_key: str | None, base_url: str | None = None) -> str:
     """Short, non-reversible tag for a credential, for use in cache keys.
 
@@ -300,7 +339,42 @@ def temperature_kwargs(model: str, temperature: float) -> dict:
     the parameter; every other model keeps the low, determinism-favouring temperature
     its agent chose.
     """
-    return {} if "gpt-5" in (model or "").lower() else {"temperature": temperature}
+    return {} if _rejects_temperature(model) else {"temperature": temperature}
+
+
+def _rejects_temperature(model: str | None) -> bool:
+    """True for a model that refuses any non-default temperature.
+
+    A VERIFIED LIST, because the providers' own metadata is wrong: litellm's
+    `get_supported_openai_params` reports temperature as supported for every model
+    below, including `azure/gpt-5-mini`, which raises `UnsupportedParamsError` before
+    the call. There is nothing to query, so this is measured.
+
+    Measured live on 2026-09-04 against the real Anthropic API, one 16-token call per
+    model with temperature=0.1:
+
+        REJECTS   claude-opus-4-7, claude-opus-4-8, claude-sonnet-5
+        ACCEPTS   claude-opus-4-5, claude-haiku-4-5, claude-sonnet-4-5
+
+    The thresholds below are the smallest ones consistent with those six results, and
+    they lean toward DROPPING when a newer model is unknown: dropping temperature for
+    a model that would have accepted it costs a little determinism, while keeping it
+    for a model that rejects it fails the request outright. That asymmetry is why the
+    comparison is ">=" against a boundary rather than an exact-match list — a
+    claude-opus-4-9 or claude-sonnet-6 lands on the safe side by default.
+    """
+    name = (model or "").lower()
+    if "gpt-5" in name:
+        # gpt-5 family (including gpt-5-codex): accepts only the default of 1.
+        return True
+    m = re.search(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", name)
+    if not m:
+        return False
+    family, major, minor = m.group(1), int(m.group(2)), int(m.group(3) or 0)
+    if family == "opus":
+        return (major, minor) >= (4, 6)
+    # sonnet and haiku: the 5 generation onward.
+    return major >= 5
 
 
 def resolve_chat_model(
@@ -346,6 +420,9 @@ def resolve_chat_model(
             api_key=resolved.api_key,
             max_retries=2,
             max_tokens=8192,
+            # Without this the provider-specific field defaulted from the
+            # environment wins over the BYOK key above — see litellm_key_kwargs.
+            **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
             **resolved.extra_kwargs,
         )
         return llm.bind_tools(tools) if tools else llm
@@ -367,5 +444,6 @@ def resolve_chat_model(
         api_key=ANTHROPIC_API_KEY,
         max_retries=2,
         max_tokens=8192,
+        **litellm_key_kwargs("anthropic", ANTHROPIC_API_KEY),
     )
     return llm.bind_tools(tools) if tools else llm

@@ -1558,9 +1558,12 @@ async def _classify_switch(text: str, current_stage: str, run_id: str) -> dict:
         from langchain_core.messages import HumanMessage as _Human, SystemMessage as _System
         from langchain_litellm import ChatLiteLLM
 
+        from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
         llm = ChatLiteLLM(
             model=resolved.model, custom_llm_provider=resolved.litellm_provider,
             api_base=resolved.base_url or None, api_key=resolved.api_key,
+            # See shared/services/model_resolver.litellm_key_kwargs.
+            **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
             temperature=0.0, max_tokens=64, max_retries=1,
         )
         system = (

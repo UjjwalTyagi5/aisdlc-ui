@@ -760,13 +760,20 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
         return _ORCHESTRATOR_CACHE[cache_key]
     from langchain_litellm import ChatLiteLLM  # noqa: PLC0415
 
-    from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
+    from shared.services.model_resolver import (  # noqa: PLC0415
+        litellm_key_kwargs,
+        temperature_kwargs,
+    )
 
     instance = ChatLiteLLM(
         model=model,
         custom_llm_provider=litellm_provider,
         api_base=base_url,
         api_key=api_key,
+        # The BYOK key must be the one litellm actually uses; without this the
+        # provider-specific field defaulted from the environment wins. See
+        # shared/services/model_resolver.litellm_key_kwargs.
+        **litellm_key_kwargs(litellm_provider, api_key),
         max_tokens=8192,
         **temperature_kwargs(model, 0.2),
         # 0, not the library default: guarded_completion already retries the whole

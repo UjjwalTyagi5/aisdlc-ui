@@ -118,7 +118,9 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
     Phase 1 mandated `max_tokens=8192` because `with_structured_output(TestPlan)`
     truncates without it — keep that default; callers may override.
     """
-    from shared.services.model_resolver import get_resolved_model, temperature_kwargs
+    from shared.services.model_resolver import (
+        get_resolved_model, litellm_key_kwargs, temperature_kwargs,
+    )
 
     resolved = get_resolved_model()
     if resolved is not None:
@@ -141,6 +143,8 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
             max_retries=2,
             max_tokens=max_tokens,
             **temperature_kwargs(resolved.model, 0.2),
+            # See shared/services/model_resolver.litellm_key_kwargs.
+            **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
         )
         params.update(kwargs)
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
@@ -164,6 +168,7 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
         max_retries=2,
         max_tokens=max_tokens,
         **temperature_kwargs(ANTHROPIC_MODEL, 0.2),
+        **litellm_key_kwargs("anthropic", ANTHROPIC_API_KEY),
     )
     params.update(kwargs)
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.

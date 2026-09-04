@@ -183,17 +183,28 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
         # Stream tokens so the copilot shows the dev agent's replies live.
         "streaming": True,
     }
-    # gpt-5-family models (including gpt-5-codex) reject any temperature other
-    # than the default 1 -- litellm raises UnsupportedParamsError pre-call if
-    # we pass one. Confirmed live against a real azure/gpt-5-mini deployment
-    # (2026-08-31): identical call succeeds the instant temperature is omitted.
-    # Every other model keeps the low, determinism-favoring temperature this
-    # agent wants for code generation -- this is a narrow exception for the one
-    # model family that structurally cannot take the parameter, not a
-    # litellm.drop_params=True escape hatch that would silently swallow
-    # unsupported params for every model everywhere.
-    if "gpt-5" not in model.lower():
-        kwargs["temperature"] = 0.1
+    from shared.services.model_resolver import (  # noqa: PLC0415
+        litellm_key_kwargs,
+        temperature_kwargs,
+    )
+
+    # Some models reject ANY non-default temperature and fail the call pre-flight:
+    # the gpt-5 family (litellm's UnsupportedParamsError, confirmed live against
+    # azure/gpt-5-mini on 2026-08-31) and the newest Claude models, which answer
+    # "`temperature` is deprecated for this model" — hit live here on
+    # claude-opus-4-8 (2026-09-04). Which models those are is measured, not guessed,
+    # and lives in one place rather than as a local check per agent. Every other
+    # model keeps the low, determinism-favouring temperature this agent wants for
+    # code generation; this is NOT litellm.drop_params=True, which would silently
+    # swallow every unsupported parameter for every model everywhere.
+    kwargs.update(temperature_kwargs(model, 0.1))
+
+    # THE BYOK KEY MUST BE THE ONE LITELLM ACTUALLY USES. ChatLiteLLM keeps a
+    # separate field per provider, defaulted from the environment, and it wins over
+    # the `api_key` above — so this agent authenticated with the platform's stale
+    # ANTHROPIC_API_KEY and reported the tenant's valid key as invalid. See
+    # shared/services/model_resolver.litellm_key_kwargs.
+    kwargs.update(litellm_key_kwargs(litellm_provider, api_key))
     instance = ChatLiteLLM(**kwargs)
     _LLM_CACHE[cache_key] = instance
     return instance
