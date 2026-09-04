@@ -811,6 +811,9 @@ export function AddModelDialog({
                     {endpoint ? "(required)" : "(optional)"}
                   </span>
                 </Label>
+                {/* Same reason as the API key below: this is the field Chrome fills
+                    with the account username when it mistakes the dialog for a
+                    sign-in form. */}
                 <Input
                   id="api-base"
                   value={apiBase}
@@ -821,6 +824,9 @@ export function AddModelDialog({
                   }
                   aria-invalid={!endpointValid}
                   autoComplete="off"
+                  data-1p-ignore
+                  data-lpignore="true"
+                  data-form-type="other"
                   className="font-mono"
                 />
                 {endpoint && (
@@ -843,6 +849,17 @@ export function AddModelDialog({
                   </span>
                 </Label>
                 <div className="flex gap-2">
+                  {/* CHROME IGNORES autocomplete="off" ON A PASSWORD FIELD. It sees a
+                      masked input, decides this is a sign-in form, and fills a saved
+                      password here AND the account's username into the nearest text
+                      input above — which is the API base. A user reported exactly that:
+                      their email address auto-filled into API base, which was then sent
+                      as the endpoint, so their (valid) Anthropic key was tested against
+                      a URL built from an email and came back rejected.
+
+                      "new-password" is the documented way to say "this is not a
+                      credential you have stored"; the data- attributes do the same for
+                      1Password and LastPass, which have their own heuristics. */}
                   <Input
                     id="api-key"
                     type="password"
@@ -851,7 +868,10 @@ export function AddModelDialog({
                     placeholder={
                       isBuAddKey ? "sk-…" : "sk-… — leave blank to let each unit bring its own"
                     }
-                    autoComplete="off"
+                    autoComplete="new-password"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
                     aria-invalid={isBuAddKey && testStatus === "invalid"}
                     className="flex-1"
                   />

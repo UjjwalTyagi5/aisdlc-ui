@@ -2853,14 +2853,19 @@ import logging as _logging
 _req_agent_logger = _logging.getLogger(__name__)
 
 # Per-alias orchestrator cache — avoids per-call re-construction while supporting BYOK (Pitfall 4).
-_ORCHESTRATOR_CACHE: dict[tuple[str, str], object] = {}
+_ORCHESTRATOR_CACHE: dict[tuple[str, str, str, str], object] = {}
 
 
 def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
                         base_url: str | None, alias: str) -> object:
     """Build (or return cached) ChatLiteLLM orchestrator. Direct-provider BYOK call.
     Cached by (alias, model) — alias is non-secret (SC#5); key never stored outside scope."""
-    cache_key = (alias, model)
+    # The credential is part of what this instance IS, so it belongs in the key —
+    # the alias alone is stable across a key rotation and kept handing back a
+    # client built with the old secret for the life of the process. See
+    # shared/services/model_resolver.credential_fingerprint.
+    from shared.services.model_resolver import credential_fingerprint  # noqa: PLC0415
+    cache_key = (alias, model, credential_fingerprint(api_key, base_url), base_url or "")
     if cache_key in _ORCHESTRATOR_CACHE:
         return _ORCHESTRATOR_CACHE[cache_key]
     from langchain_litellm import ChatLiteLLM  # deferred — see above

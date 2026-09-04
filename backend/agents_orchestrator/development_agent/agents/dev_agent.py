@@ -125,19 +125,37 @@ _tool_map = {t.name: t for t in tools}
 
 # ── LLM — Claude (Anthropic) ──────────────────────────────────────────────────
 
-# Per-alias LLM cache — keyed by (alias, model). Avoids per-call re-construction
-# while supporting per-tenant BYOK keys (Pitfall 4 / architecture.py pattern).
-_LLM_CACHE: dict[tuple[str, str], object] = {}
+# LLM cache — keyed by (alias, model, credential fingerprint, base). Avoids
+# per-call re-construction while supporting per-tenant BYOK keys (Pitfall 4 /
+# architecture.py pattern), and a rotated key becomes a different entry
+# instead of silently reusing a client built with the old secret.
+_LLM_CACHE: dict[tuple[str, str, str, str], object] = {}
 
 
 def _build_llm(model: str, litellm_provider: str, api_key: str,
                base_url: str | None, alias: str) -> object:
     """Build (or return cached) ChatLiteLLM. Direct-provider BYOK call.
-    Cached by (alias, model); alias is non-secret (SC#5).
+
+    THE CREDENTIAL IS PART OF THE CACHE KEY, not just the alias. The alias is
+    `tenant:<tid>:<provider_id>`, which is stable across a key rotation — so a
+    client built with a bad or superseded key was handed back for the life of the
+    PROCESS, and every run kept authenticating with a credential the database no
+    longer held. `invalidate_key_cache` clears the resolver's key cache on rotation
+    but knows nothing about instances already built from it, so fixing a key in the
+    UI could not fix the agent: the fix took effect only after a restart, which is
+    exactly the kind of thing that reads as "the new key doesn't work".
+
+    Observed live: an Anthropic key that succeeded against the real API when called
+    with the stored credential still failed the dev agent with
+    "authentication_error: API key is invalid".
+
+    Both parts are non-secret — the alias by construction (SC#5), the fingerprint by
+    being a truncated digest.
 
     Returns the UNBOUND model — tools are bound per-call in agent_node so that
     per-run MCP tools (which vary by run) are never baked into the shared cache."""
-    cache_key = (alias, model)
+    from shared.services.model_resolver import credential_fingerprint  # noqa: PLC0415
+    cache_key = (alias, model, credential_fingerprint(api_key, base_url), base_url or "")
     if cache_key in _LLM_CACHE:
         return _LLM_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.

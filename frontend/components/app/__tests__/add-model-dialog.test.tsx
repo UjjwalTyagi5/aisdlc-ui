@@ -367,3 +367,38 @@ describe("a failed test reports the server's reason", () => {
     expect(await screen.findByText(/rejected this key/i)).toBeInTheDocument();
   });
 });
+
+/**
+ * Chrome ignores autocomplete="off" on a password field: it sees the masked API key
+ * input, decides the dialog is a sign-in form, and fills a saved password there plus
+ * the account's username into the nearest text input above — the API base. Reported
+ * live: an email address auto-filled into API base, sent as the endpoint, and a valid
+ * Anthropic key was rejected for it.
+ */
+describe("browser password managers are kept out of the credential fields", () => {
+  it("tells Chrome the API key is not a stored credential", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    await pickFirstModel(user);
+
+    const key = screen.getByLabelText(/api key/i);
+
+    // "off" is the value Chrome overrides on password inputs; "new-password" is the
+    // documented way to suppress filling a saved one.
+    expect(key).toHaveAttribute("autocomplete", "new-password");
+    expect(key).toHaveAttribute("data-1p-ignore");
+    expect(key).toHaveAttribute("data-lpignore", "true");
+  });
+
+  it("keeps the username out of the API base, which is the field that got filled", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    await pickFirstModel(user);
+
+    const base = screen.getByLabelText(/api base/i);
+
+    expect(base).toHaveAttribute("autocomplete", "off");
+    expect(base).toHaveAttribute("data-1p-ignore");
+    expect(base).toHaveAttribute("data-lpignore", "true");
+  });
+});

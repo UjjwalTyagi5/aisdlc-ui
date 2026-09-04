@@ -246,6 +246,28 @@ async def resolve_model_for_run(
     return resolved
 
 
+def credential_fingerprint(api_key: str | None, base_url: str | None = None) -> str:
+    """Short, non-reversible tag for a credential, for use in cache keys.
+
+    WHY THIS EXISTS. Every agent caches its built ChatLiteLLM by `(alias, model)`,
+    and the alias — `tenant:<tid>:<provider_id>` — does NOT change when a key is
+    rotated. So an instance built with a superseded or simply wrong key was handed
+    back for the life of the PROCESS: `invalidate_key_cache` below drops the resolver's
+    copy of the secret, but knows nothing about clients already constructed from it.
+    Correcting a key in the UI therefore could not correct the agent, and the symptom
+    was a live "authentication_error: API key is invalid" from a key that succeeded
+    when called directly. Including this in the cache key makes a changed credential a
+    different entry, which is what the cache should have been saying all along.
+
+    Never the key itself — a cache key can surface in a repr, a debugger or a crash
+    dump, so this is a truncated SHA-256 rather than any part of the secret.
+    """
+    import hashlib  # noqa: PLC0415 — cheap; keeps module import time flat
+
+    material = "|".join([api_key or "", base_url or ""]).encode()
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 def invalidate_key_cache(tenant_id: str, secret_ref: str | None = None) -> None:
     """Drop cached BYOK key(s) so a rotated or revoked key stops working immediately.
 
