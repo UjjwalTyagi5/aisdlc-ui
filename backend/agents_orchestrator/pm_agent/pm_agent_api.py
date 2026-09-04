@@ -42,6 +42,10 @@ from config.env import AGENT_RUNTIME_MODE
 from config.websocket_utils import set_websocket_context
 from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.errors import classify_error
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from shared.db import get_db_session_for_tenant
 from shared.observability.callbacks import langfuse_langchain_extras
 from shared.services.budget_store import workspace_id_for_project
@@ -127,6 +131,20 @@ async def pm_chat(
         messages.append(SystemMessage(content=PM_SYS_MESSAGE))
         _initialized_sessions.add(session_id)
     messages.append(HumanMessage(content=text))
+
+    # ATTACHMENTS WERE DROPPED ENTIRELY HERE. The socket message is literally typed
+    # `user_message_with_files`, and this route read everything on it EXCEPT the
+    # files — so a BRD attached to the Plan agent showed as a chip in the transcript
+    # while the agent replied "I don't see a BRD attached to your message", asking
+    # for the document the user had just given it. Requirements and Design each read
+    # theirs; Plan was written without that block and nothing failed loudly.
+    _attachment_contents = attachment_message_contents(
+        attachment_paths_from_context(message_data.get("pipeline_context"))
+        + [f.get("path") for f in (message_data.get("files") or [])
+           if isinstance(f, dict) and f.get("path")]
+    )
+    for _content in _attachment_contents:
+        messages.append(HumanMessage(content=_content))
 
     state = {
         "messages": messages,

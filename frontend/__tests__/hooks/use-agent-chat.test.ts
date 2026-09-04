@@ -287,3 +287,89 @@ describe("useAgentChat — code.diff per-turn merge (applyEvent)", () => {
     );
   });
 });
+
+/**
+ * The artifactId from `file_generated` is deliberately deterministic —
+ * `artifact:<runId>:<filename>`, so the same file always maps to the same artifact
+ * (lib/bff/ws-to-sse.ts). Agents emit that event more than once for one file (a
+ * re-broadcast, or a document written and then registered), and citations appended
+ * unconditionally, so the same id landed in the list twice. The chips key on it, so
+ * React reported "Encountered two children with the same key" and reserved the right
+ * to drop or duplicate one. Seen live with QuickLink_URL_Shortener_Architecture.docx.
+ */
+describe("useAgentChat — repeated artifact.updated for one file", () => {
+  function agentCitations(messages: unknown[]): string[] | undefined {
+    const agentMsg = (messages as Array<{ role: string; citations?: string[] }>).find(
+      (m) => m.role === "agent",
+    );
+    return agentMsg?.citations;
+  }
+
+  const ARTIFACT = "artifact:run_test_001:QuickLink_URL_Shortener_Architecture.docx";
+
+  it("records one citation when the same artifact is announced twice", async () => {
+    const frame = () =>
+      sseFrame({
+        type: "artifact.updated",
+        runId: "run_test_001",
+        artifactId: ARTIFACT,
+        status: "approved",
+        name: "QuickLink_URL_Shortener_Architecture.docx",
+        at: "2026-09-04T00:00:00.000Z",
+      });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([frame(), frame()])));
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+    await act(async () => {
+      await result.current.send("create the architecture doc");
+    });
+
+    expect(agentCitations(result.current.messages)).toEqual([ARTIFACT]);
+  });
+
+  it("still records both when two different artifacts are produced", async () => {
+    const other = "artifact:run_test_001:Sprint_Plan.docx";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          sseFrame({
+            type: "artifact.updated", runId: "run_test_001", artifactId: ARTIFACT,
+            status: "approved", at: "2026-09-04T00:00:00.000Z",
+          }),
+          sseFrame({
+            type: "artifact.updated", runId: "run_test_001", artifactId: other,
+            status: "approved", at: "2026-09-04T00:00:01.000Z",
+          }),
+        ]),
+      ),
+    );
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+    await act(async () => {
+      await result.current.send("create both docs");
+    });
+
+    expect(agentCitations(result.current.messages)).toEqual([ARTIFACT, other]);
+  });
+
+  it("keys stay unique, which is what React actually requires", async () => {
+    const frame = () =>
+      sseFrame({
+        type: "artifact.updated", runId: "run_test_001", artifactId: ARTIFACT,
+        status: "approved", at: "2026-09-04T00:00:00.000Z",
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(sseResponse([frame(), frame(), frame()])),
+    );
+
+    const { result } = renderHook(() => useAgentChat(), { wrapper: withQueryClient() });
+    await act(async () => {
+      await result.current.send("regenerate");
+    });
+
+    const citations = agentCitations(result.current.messages) ?? [];
+    expect(new Set(citations).size).toBe(citations.length);
+  });
+});
