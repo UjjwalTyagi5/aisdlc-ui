@@ -3,7 +3,7 @@ name = "sdlc"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiofiles==24.1.0",
     "aiohappyeyeballs==2.6.1",
@@ -22,7 +22,7 @@ dependencies = [
     "certifi==2025.8.3",
     "cffi==2.0.0",
     "charset-normalizer==3.4.3",
-    "click==8.2.1",
+    "click==8.4.2",
     "cryptography==46.0.1",
     "cssselect2==0.8.0",
     "docx2pdf==0.1.8",
@@ -171,6 +171,7 @@ dependencies = [
     "psycopg[binary]==3.3.4",
     "psycopg-pool==3.3.1",
     "psycopg2-binary==2.9.12",
+    "semgrep==1.173.0",
 ]
 
 [tool.uv]

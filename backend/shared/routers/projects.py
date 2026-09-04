@@ -750,10 +750,6 @@ async def list_board_projects(
     }
 
 
-@projects_router.post(
-    "/{project_id}/ingest-board",
-    dependencies=[Depends(require_permission("run:create"))],
-)
 def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -> str:
     """A browsable URL for a work item, or "" if this provider is not known.
 
@@ -783,6 +779,10 @@ def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -
         return ""
 
 
+@projects_router.post(
+    "/{project_id}/ingest-board",
+    dependencies=[Depends(require_permission("run:create"))],
+)
 async def ingest_board(
     project_id: str,
     request: Request,

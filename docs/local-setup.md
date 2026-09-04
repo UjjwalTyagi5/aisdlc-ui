@@ -363,6 +363,77 @@ Legitimate when no provider is onboarded. If one *is* onboarded, check
 
 ---
 
+## Test database
+
+**Never run `pytest` against the database `.env`'s `POSTGRES_CONN_STRING` points at.**
+The full backend suite creates and deletes hundreds of organizations/projects/runs per
+run (RBAC and tenant-isolation coverage needs a real Postgres), and its cleanup fixture
+(`tests/conftest.py::purge_created_orgs`) is diff-based: it deletes whatever
+organizations appeared during a test's run window. That is not the same question as
+"which organizations did this test create."
+
+**What actually happened, 2026-09-02**: a live project with real runs and artifacts
+was being used through the app while the full suite ran against that same database.
+The app's own default organization (`pwc`) gets recreated with a fresh id on boot
+whenever it finds `organizations` empty — and a backend `--reload` restart during the
+test run did exactly that. `purge_created_orgs` saw the new `pwc` id appear during
+some test's window, attributed it to that test, and deleted it — cascading through
+every table scoped by `tenant_id`: organizations, workspaces, projects, runs, users.
+The live project's entire run history was destroyed. Two fixes went in the same day:
+
+1. `tests/conftest.py` now loads `backend/.env.test` — with `override=True`, before
+   importing anything that touches the database — so `POSTGRES_CONN_STRING` (and the
+   sync/migrations variants) resolve to a **physically separate** database for the
+   entire pytest process. The real dev database becomes unreachable from a test run,
+   full stop, regardless of what any fixture's cleanup logic gets wrong.
+2. `purge_created_orgs`'s underlying `_purge_tenants` helper additionally refuses to
+   delete `config.env.DEFAULT_ORG_SLUG` ("pwc") under any circumstances, as a second,
+   independent layer — belt and suspenders, not a substitute for (1).
+
+### One-time setup
+
+```powershell
+cd backend
+copy .env.test.example .env.test
+# edit .env.test: same host/port/credentials as your .env, DBNAME swapped for
+# something that is NOT the database your app uses (this repo uses sdlc_product_test
+# alongside sdlc_product — same server, same role, different database).
+
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -p 5432 -U postgres `
+    -c "CREATE DATABASE sdlc_product_test;"
+
+$env:POSTGRES_MIGRATIONS_CONN_STRING = "postgresql+asyncpg://postgres:<password>@localhost:5432/sdlc_product_test"
+uv run alembic upgrade head
+
+# One-time, and only on a BRAND NEW test database: pre-build the LangGraph Postgres
+# checkpointer's tables/indexes in isolation, nothing else connected. Its setup()
+# issues CREATE INDEX CONCURRENTLY, which waits for every other open transaction in
+# the database to finish — harmless once the index exists (IF NOT EXISTS short-
+# circuits instantly, which is why this was never a problem against the long-lived
+# real database), but the first build can hang for the length of the full suite if it
+# lands while some other test's session is open. Building it here, alone, avoids that.
+uv run python -c "
+import psycopg
+from psycopg.rows import dict_row
+from langgraph.checkpoint.postgres import PostgresSaver
+conn = psycopg.connect('postgresql://postgres:<password>@localhost:5432/sdlc_product_test', autocommit=True, row_factory=dict_row)
+PostgresSaver(conn).setup()
+conn.close()
+"
+```
+
+`pytest` refuses to run at all if `backend/.env.test` is missing (a `RuntimeError` at
+collection time names exactly what to do) — this is deliberate, so "I forgot to set
+this up" fails loudly on a fresh machine instead of silently testing against whatever
+`.env` happens to point at.
+
+**Keep it re-migrated.** Same rule as the real database (see "3. Grants for the app
+role" and the migration-lineage troubleshooting above): after `alembic upgrade head`
+adds tables, re-run it against `sdlc_product_test` too, or newer tests that touch those
+tables will fail with relation-does-not-exist instead of a real assertion failure.
+
+---
+
 ## Full rebuild, in order
 
 ```powershell
