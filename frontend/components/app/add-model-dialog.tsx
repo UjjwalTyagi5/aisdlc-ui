@@ -197,6 +197,8 @@ export function AddModelDialog({
   const [testStatus, setTestStatus] = React.useState<"idle" | "testing" | "valid" | "invalid">(
     "idle",
   );
+  /** The server's diagnosis for a failed test — why it failed, not just that it did. */
+  const [testReason, setTestReason] = React.useState<string | null>(null);
   const [enabled, setEnabled] = React.useState<Record<string, boolean>>({});
   const [modelQuery, setModelQuery] = React.useState("");
   const [pending, setPending] = React.useState(false);
@@ -246,6 +248,7 @@ export function AddModelDialog({
       setApiKey("");
       setApiBase("");
       setTestStatus("idle");
+      setTestReason(null);
       setEnabled({});
       setModelQuery("");
       setCustomModels([]);
@@ -274,11 +277,27 @@ export function AddModelDialog({
     if (initialProvider) setProvider(initialProvider);
   }, [initialProvider]);
 
+  // AN ENDPOINT BELONGS TO ONE VENDOR, so it cannot survive changing vendor.
+  // Keyed on `provider` rather than cleared inside the combobox handler because
+  // the provider changes THREE ways — the combobox, a change of `initialProvider`
+  // (clicking "Add key" on a different row while this long-lived dialog is still
+  // mounted), and a change of target unit — and only the last of those was ever
+  // near a reset. Azure/Bedrock/Vertex REQUIRE an endpoint and the dialog invites
+  // one; Anthropic needs none and shows the same field as an optional override, so
+  // a leftover Azure URL was sent with an Anthropic key. Every test then hit Azure's
+  // endpoint, returned 404 "Resource not found", and the dialog called it
+  // "Key rejected" — a correct key that could not be added, with the stale field
+  // the only evidence and nothing pointing at it.
+  React.useEffect(() => {
+    setApiBase("");
+  }, [provider]);
+
   // A passing Test is a claim about ONE exact (key, base) pair. Edit either
   // afterward and the claim is stale — re-idle rather than let a proven-good
   // result silently vouch for a key that was never actually tested.
   React.useEffect(() => {
     setTestStatus("idle");
+    setTestReason(null);
     // apiKey/apiBase are exactly what a Test result is a claim about — no
     // other identifier is read here, so there's nothing else for the deps
     // array to name.
@@ -374,6 +393,7 @@ export function AddModelDialog({
   const handleTest = async () => {
     if (!provider || !apiKey.trim() || !probeModel || testStatus === "testing") return;
     setTestStatus("testing");
+    setTestReason(null);
     try {
       const result = await probeModelProvider({
         provider,
@@ -382,11 +402,18 @@ export function AddModelDialog({
         model: probeModel,
       });
       setTestStatus(result.status === "valid" ? "valid" : "invalid");
+      setTestReason(result.reason ?? null);
       if (result.status !== "valid") {
-        toast.error("Key rejected — verification failed");
+        // Headline the CAUSE. "Key rejected" was shown for failures that never
+        // reached the provider at all, so a wrong API base looked like a bad
+        // credential and the key got blamed.
+        toast.error(result.reason ?? "Verification failed", {
+          description: result.reason ? "The key itself may be fine." : undefined,
+        });
       }
     } catch (err) {
       setTestStatus("invalid");
+      setTestReason(null);
       toast.error("Couldn't test this key", {
         description: err instanceof Error ? err.message : undefined,
       });
@@ -863,7 +890,12 @@ export function AddModelDialog({
                       : testStatus === "valid"
                         ? "Key verified — this can now be saved."
                         : testStatus === "invalid"
-                          ? "Key rejected — check it and test again."
+                          ? // The server's diagnosis when it has one. Every failure used to
+                            // read "Key rejected", including the ones where the request never
+                            // reached the provider — an API base with no scheme, or one
+                            // pointing at another vendor — which sends someone to re-issue a
+                            // credential that was never the problem.
+                            (testReason ?? "Key rejected — check it and test again.")
                           : "This business unit's own key. Test it before Save enables."}
                   </p>
                 ) : (

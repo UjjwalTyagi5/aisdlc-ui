@@ -13,6 +13,7 @@ export const CONNECTOR_KIND_LABEL: Record<ConnectorKind, string> = {
   azure_devops: "Azure DevOps",
   github: "GitHub",
   azure_repos: "Azure Repos",
+  azure_pipelines: "Azure Pipelines",
   github_actions: "GitHub Actions",
   slack: "Slack",
   ms_teams: "Microsoft Teams",
@@ -33,9 +34,9 @@ export function connectorKindLabel(kind: string): string {
  * page, and the "N available" any count must be measured against.
  *
  * Narrower than `ConnectorKind`, which is the set the API accepts: `azure_repos`
- * is folded into the consolidated Azure DevOps tile (one credential covers
- * boards, repos and CI/CD), and the two SSO kinds are identity plumbing rather
- * than something a project connects.
+ * and `azure_pipelines` are folded into the consolidated Azure DevOps tile (one
+ * credential covers boards, repos and CI/CD), and the two SSO kinds are identity
+ * plumbing rather than something a project connects.
  *
  * Anything that counts connectors reads this, because the alternative is
  * counting whatever a given source happens to hold — which is how the dashboard

@@ -745,6 +745,7 @@ const KIND_LABEL: Record<ConnectorKind, string> = {
   azure_devops: "Azure DevOps",
   github: "GitHub",
   azure_repos: "Azure Repos",
+  azure_pipelines: "Azure Pipelines",
   github_actions: "GitHub Actions",
   slack: "Slack",
   ms_teams: "Microsoft Teams",

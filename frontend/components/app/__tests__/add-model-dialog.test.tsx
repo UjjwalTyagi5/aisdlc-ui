@@ -13,7 +13,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -271,5 +271,99 @@ describe("bu-add-key mode — long-lived instance whose initialProvider changes"
     );
 
     expect(await screen.findByRole("checkbox", { name: /gpt-5\.1/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * An API base belongs to ONE vendor, so it must not survive changing vendor.
+ *
+ * Azure/Bedrock/Vertex REQUIRE an endpoint and the dialog invites one; Anthropic
+ * needs none and renders the same field as an optional override. Switching
+ * provider cleared the model selection but left the URL sitting there, so a
+ * correct Anthropic key was tested against the Azure endpoint, came back 404
+ * "Resource not found", and the dialog reported "Key rejected — verification
+ * failed". Reported live: a valid key that could not be added.
+ */
+describe("switching provider clears the endpoint", () => {
+  const twoProviders: CatalogProvider[] = [
+    {
+      provider: "azure",
+      label: "Azure OpenAI",
+      models: [
+        {
+          model_id: "azure/gpt-5-mini",
+          label: "GPT-5 mini",
+          input_price_per_million: 1,
+          output_price_per_million: 4,
+        },
+      ],
+    },
+    ...catalog,
+  ];
+
+  it("does not carry an Azure endpoint over to Anthropic", async () => {
+    const user = userEvent.setup();
+    const props = {
+      open: true,
+      onOpenChange: vi.fn(),
+      catalog: twoProviders,
+      catalogLoading: false,
+      targetUnits: null,
+      allowedByUnit: {},
+      fullCatalog: twoProviders,
+      needsApproval: false,
+      grantableWorkspaces: null,
+      mode: "bu-add-key" as const,
+      onAdded: vi.fn(),
+    };
+    // "Add key" on the Azure row: the dialog is long-lived, so this is a prop
+    // change on a mounted component, not a fresh mount.
+    const { rerender } = render(<AddModelDialog {...props} initialProvider="azure" />);
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-5-mini/ }));
+    const base = await screen.findByLabelText(/api base/i);
+    await user.type(base, "https://agenticaimodel.services.ai.azure.com");
+    expect(base).toHaveValue("https://agenticaimodel.services.ai.azure.com");
+
+    // "Add key" on the Anthropic row without ever closing the dialog — the exact
+    // path that reached a real user, whose Anthropic key was then tested against
+    // Azure's endpoint and reported as rejected.
+    rerender(<AddModelDialog {...props} initialProvider="anthropic" />);
+
+    await user.click(await screen.findByRole("checkbox", { name: /claude-sonnet-5/ }));
+    await waitFor(() => expect(screen.getByLabelText(/api base/i)).toHaveValue(""));
+  });
+});
+
+describe("a failed test reports the server's reason", () => {
+  it("shows the endpoint diagnosis rather than blaming the key", async () => {
+    vi.mocked(probeModelProvider).mockResolvedValue({
+      status: "invalid",
+      reason: "The API base is not a URL. Leave it blank to use the provider's own API.",
+    } as Awaited<ReturnType<typeof probeModelProvider>>);
+
+    const user = userEvent.setup();
+    renderDialog();
+    await pickFirstModel(user);
+    await user.type(screen.getByLabelText(/api key/i), "sk-ant-whatever");
+    await user.click(testButton());
+
+    expect(await screen.findByText(/API base is not a URL/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Key rejected/)).not.toBeInTheDocument();
+  });
+
+  it("still says the key was rejected when that is what happened", async () => {
+    vi.mocked(probeModelProvider).mockResolvedValue({
+      status: "invalid",
+      reason: "The provider rejected this key.",
+    } as Awaited<ReturnType<typeof probeModelProvider>>);
+
+    const user = userEvent.setup();
+    renderDialog();
+    await pickFirstModel(user);
+    await user.type(screen.getByLabelText(/api key/i), "sk-ant-bad");
+    await user.click(testButton());
+
+    expect(await screen.findByText(/rejected this key/i)).toBeInTheDocument();
   });
 });
