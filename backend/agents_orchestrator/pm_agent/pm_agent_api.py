@@ -300,6 +300,17 @@ async def _process_turn_ws(
         _initialized_sessions.add(session_id)
     messages.append(HumanMessage(content=text))
 
+    # THIS is the path the chat drawer uses — the REST handler above got the same
+    # block first and the socket kept dropping attachments, so the agent went on
+    # answering "I don't see any document attached to your message" about a file
+    # sitting in the transcript. Reading it in one handler is not reading it.
+    for _content in attachment_message_contents(
+        attachment_paths_from_context(message_data.get("pipeline_context"))
+        + [f.get("path") for f in (message_data.get("files") or [])
+           if isinstance(f, dict) and f.get("path")]
+    ):
+        messages.append(HumanMessage(content=_content))
+
     error: Optional[str] = None
     try:
         final = await planning_app.ainvoke(

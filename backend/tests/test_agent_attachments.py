@@ -93,15 +93,31 @@ def test_attachment_paths_are_read_off_the_pipeline_context():
     assert attachment_paths_from_context({"attachments": None}) == []
 
 
-def test_every_chat_route_that_takes_files_reads_them():
-    """The three chat routes that accept attachments must all use the shared
-    helper — a fourth written without it would repeat the Plan bug silently."""
-    root = pathlib.Path(__file__).resolve().parents[1] / "agents_orchestrator"
-    routes = [
-        root / "pm_agent" / "pm_agent_api.py",
-        root / "requirements_agent" / "requirements_agent_api.py",
-        root / "design_architecture_agent" / "design_architecture_agent_api.py",
-    ]
-    for path in routes:
-        src = path.read_text(encoding="utf-8")
-        assert "attachment_message_contents(" in src, f"{path.name} ignores attachments"
+# The WEBSOCKET turn handler of each chat agent — the path the chat drawer actually
+# uses. Named individually because "the module mentions attachments somewhere" is not
+# the property that matters, and asserting only that is how this bug survived a fix:
+# the Plan agent got the block in its REST handler while the socket the UI talks to
+# kept dropping every file.
+_WS_TURN_HANDLERS = [
+    ("agents_orchestrator.pm_agent.pm_agent_api", "_process_turn_ws"),
+    ("agents_orchestrator.requirements_agent.requirements_agent_api",
+     "_process_user_message_ws"),
+    ("agents_orchestrator.design_architecture_agent.design_architecture_agent_api",
+     "_process_user_message_ws"),
+]
+
+
+@pytest.mark.parametrize("module_name,handler_name", _WS_TURN_HANDLERS)
+def test_every_websocket_turn_handler_reads_its_attachments(module_name, handler_name):
+    import importlib
+    import inspect
+
+    module = importlib.import_module(module_name)
+    handler = getattr(module, handler_name, None)
+    assert handler is not None, f"{module_name} has no {handler_name}"
+
+    source = inspect.getsource(handler)
+    assert "attachment_message_contents(" in source, (
+        f"{module_name}.{handler_name} does not read attachments — a file attached "
+        f"in the chat drawer will be silently dropped"
+    )
