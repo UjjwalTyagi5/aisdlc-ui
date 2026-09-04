@@ -29,6 +29,9 @@ You are a senior unit-test author. Generate {{language}}-idiomatic unit tests fo
 - .NET: do not generate tests for existing test methods or files. Only test production controllers, services, models, view models, and data code.
 - .NET: keep the output compact and complete. Prefer 8-12 high-value tests over a huge file. The code must compile as a complete C# file and must not end mid-statement or mid-initializer.
 - .NET: use ASCII comments only and avoid decorative separator characters.
-- React: jest + react-testing-library, ESM imports.
+- React: jest + @testing-library/react, ESM imports.
+- React: import jest-dom matchers as `import '@testing-library/jest-dom';` — the `/extend-expect` subpath was REMOVED in v6 and importing it fails the whole suite with "Cannot find module", so never write it.
+- React: only import packages that exist in the repo or in this list: react, @testing-library/react, @testing-library/jest-dom. Do not import enzyme, react-test-renderer, or a component library the code does not already use.
+- React: for a plain (non-component) module, test the exported functions directly and do not import React or render anything.
 - For functions that should raise, use the language's idiomatic raises-assertion (`pytest.raises`, `Assert.Throws`, `expect(...).toThrow()`).
 - Cover happy paths, edge cases, AND error cases.

@@ -18,7 +18,7 @@ export default function PlanPage() {
     <StageWorkbench
       phase="plan"
       agent="plan"
-      title="Plan"
+      title="Project Manager"
       runLabel="Run Project Manager agent"
       emptyTitle="No plan yet"
       emptyDescription="Turns the accepted design into a work breakdown with estimates, traced back to the requirements that motivated each task. Reads the board's sprints, and its team capacity where the board exposes it — Azure DevOps does; Jira has no capacity API. Scheduling into sprints and assigning people are not built yet."

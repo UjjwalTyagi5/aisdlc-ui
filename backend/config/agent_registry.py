@@ -256,61 +256,48 @@ TRACK_PORTFOLIOS: dict[str, list[str]] = {
     "data_engineering": [],
 }
 
-# ── Default role -> agent reach (multi-track-agent-access-design.md Appendix) ──
+# ── Default role -> agent reach ───────────────────────────────────────────────
 #
-# Transcribed directly from PRD §14.7. "owner" = approves this agent's Consequential
-# actions and Sign-offs. "build"/"requests" = does the hands-on work or asks for a
-# specific action; a separate owner approves it. "use" = may chat/run Safe
-# capabilities only. "none" = no default reach (an override can still grant it,
-# per Task 3/4). project_admin is "owner" everywhere by design — the universal
-# fallback approver — expressed as real data here, not a code special-case, so
-# there is exactly one source of truth for who reaches what.
+# ONE AGENT, ONE ROLE. A delivery role reaches exactly the agents it OWNS. There is
+# no softer "use" tier any more: it let a role open an agent it did not own, and it
+# had spread until a BA reached all nine, which is least privilege that never
+# actually bites. "owner" = reaches it and approves its Consequential actions and
+# Sign-offs. "none" = no default reach.
+#
+# EXTRA ACCESS IS A DELIBERATE ACT. `agent_access_overrides` is consulted BEFORE this
+# table (shared/authz/agent_access.py), so a project admin grants an agent to a
+# specific person on a specific project — visible, revocable and attributable, which
+# a blanket "use" never was.
+#
+# project_admin is "owner" everywhere by design — the universal fallback approver —
+# expressed as data here, not a code special-case, so there is exactly one source of
+# truth for who reaches what.
+#
+# MUST MATCH `AGENT_OWNERSHIP` in frontend/lib/roles.ts. The UI greys out what this
+# table denies; if they disagree, a user is either shown an agent the API will refuse
+# or refused one the UI offered. `tests/test_agent_reach_matches_frontend.py` pins
+# them together.
+_OWNER_OF: dict[str, str] = {
+    "requirements": "ba",
+    "documentation": "ba",
+    "design": "architect",
+    "code_review": "architect",
+    "development": "developer",
+    "testing": "qa",
+    "security": "security_engineer",
+    "deployment": "devops_engineer",
+    "plan": "scrum_master",
+}
+
+_DELIVERY_ROLES = (
+    "ba", "architect", "developer", "qa", "security_engineer",
+    "devops_engineer", "data_engineer", "scrum_master",
+)
+
 AGENT_DEFAULT_REACH: dict[str, dict[str, str]] = {
-    "requirements": {
-        "project_admin": "owner", "ba": "owner", "architect": "use",
-        "developer": "use", "qa": "use", "security_engineer": "use",
-        "devops_engineer": "none", "data_engineer": "use", "scrum_master": "use",
-    },
-    # The PM agent is the first place `scrum_master` owns rather than merely uses: it
-    # is the role whose actual job this is. project_admin is owner everywhere by design.
-    "plan": {
-        "project_admin": "owner", "scrum_master": "owner",
-        "ba": "use", "architect": "use", "developer": "use", "qa": "use",
-        "security_engineer": "none", "devops_engineer": "none", "data_engineer": "use",
-    },
-    "design": {
-        "project_admin": "owner", "ba": "use", "architect": "owner",
-        "developer": "none", "qa": "none", "security_engineer": "use",
-        "devops_engineer": "none", "data_engineer": "use",
-    },
-    "development": {
-        "project_admin": "owner", "ba": "use", "architect": "owner",
-        "developer": "build", "qa": "use", "security_engineer": "use",
-        "devops_engineer": "requests", "data_engineer": "none",
-    },
-    "code_review": {
-        "project_admin": "owner", "ba": "use", "architect": "owner",
-        "developer": "requests", "qa": "none", "security_engineer": "use",
-        "devops_engineer": "none", "data_engineer": "none",
-    },
-    "security": {
-        "project_admin": "owner", "ba": "use", "architect": "use",
-        "developer": "use", "qa": "use", "security_engineer": "owner",
-        "devops_engineer": "use", "data_engineer": "use",
-    },
-    "testing": {
-        "project_admin": "owner", "ba": "use", "architect": "use",
-        "developer": "use", "qa": "owner", "security_engineer": "none",
-        "devops_engineer": "use", "data_engineer": "use",
-    },
-    "deployment": {
-        "project_admin": "owner", "ba": "use", "architect": "use",
-        "developer": "none", "qa": "none", "security_engineer": "use",
-        "devops_engineer": "owner", "data_engineer": "none",
-    },
-    "documentation": {
-        "project_admin": "owner", "ba": "use", "architect": "use",
-        "developer": "use", "qa": "use", "security_engineer": "none",
-        "devops_engineer": "use", "data_engineer": "use", "scrum_master": "use",
-    },
+    agent: {
+        "project_admin": "owner",
+        **{role: ("owner" if role == owner else "none") for role in _DELIVERY_ROLES},
+    }
+    for agent, owner in _OWNER_OF.items()
 }

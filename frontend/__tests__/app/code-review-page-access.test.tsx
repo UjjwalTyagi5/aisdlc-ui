@@ -24,8 +24,11 @@ describe("Code Review page access gate", () => {
     expect(tileStateFor("devops_engineer", "review", "greenfield", BUILT_AGENTS)).toBe("locked");
   });
 
-  it("use (not owner) for the Developer, who requests review but never approves it", () => {
-    expect(tileStateFor("developer", "review", "greenfield", BUILT_AGENTS)).toBe("use");
+  it("locked for the Developer, who owns Development and not Code Review", () => {
+    // Was `use` — the Developer could open a review it never approved. Under
+    // one-agent-one-role the tile locks and offers "Request access" instead, so
+    // reaching it is a grant somebody made rather than a default nobody chose.
+    expect(tileStateFor("developer", "review", "greenfield", BUILT_AGENTS)).toBe("locked");
   });
 
   it("would fall back to coming_soon if review were ever pulled off BUILT_AGENTS", () => {

@@ -51,7 +51,11 @@ export const PHASE_ALL: readonly Phase[] = [
 export const PHASE_LABEL: Record<Phase, string> = {
   requirements: "Requirements",
   design: "Design",
-  plan: "Plan",
+  // "Project Manager", not "Plan" — the agent is named for the job it does, and the
+  // backend registry has called it "Project Manager Agent" all along. The KEY stays
+  // `plan`: it is in route paths, artifact rows and the API contract, and renaming
+  // an identifier to fix a label would be a migration for a display string.
+  plan: "Project Manager",
   development: "Development",
   review: "Code Review",
   security: "Security",
@@ -123,6 +127,26 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
  *     §21.4) had no implementation — review/prepare now checks the diff's head+base
  *     sha against the project's past reviews before staging a fresh one
  *     (backend/tests/test_code_review_workspace_unchanged_diff.py)
+ *
+ * testing — all three testing types were driven end to end against real targets
+ * before this was added, because "the graph runs" and "the agent tests something"
+ * are different claims:
+ *   · unit — a real Azure DevOps clone, then 17 generated pytest cases actually
+ *     executed with coverage (not just generated)
+ *   · functional — Chrome driven against a running app, 10 cases generated from
+ *     the live DOM and run, with screenshots and an HTML/PDF report
+ *   · api — 39 HTTP tests generated from the target's served OpenAPI document and
+ *     run against it
+ * Four things had to be fixed to get there, each of which made the agent report a
+ * problem that was not the real one:
+ *   · Azure DevOps credentials resolve per person per project; the clone asked with
+ *     a tenant alone and told the user the connector was unconfigured
+ *   · neither chat entrypoint resolved a BYOK model, so every run silently used a
+ *     local .env key instead of the org's verified provider, ungoverned and unmetered
+ *   · a hardcoded temperature that the gpt-5 family rejects pre-call, surfacing as
+ *     "could not analyze the codebase"
+ *   · the served OpenAPI document went into the prompt whole (~336k chars here),
+ *     exhausting the model's per-minute budget by itself
  */
 export const BUILT_AGENTS: readonly Phase[] = [
   "requirements",
@@ -133,6 +157,7 @@ export const BUILT_AGENTS: readonly Phase[] = [
   "development",
   "review",
   "deployment",
+  "testing",
 ];
 
 /** Label per agent (phases + the orchestrator meta-agent). */
@@ -275,8 +300,12 @@ export const GATE_POLICY: Record<Phase, GatePolicy> = {
     capabilityClass: "consequential",
     ownerLabel: owner("development"),
     title: "Gate: push / open PR",
+    // Was "The Architect approves". That stopped being true when the ownership table
+    // became one-agent-one-role: the Architect no longer reaches the Development
+    // agent, so its gate moved to the Developer. Separation of duties is now
+    // per-PERSON rather than per-role — whoever ran the push cannot approve it.
     description:
-      "The Architect approves — a Developer never approves their own push or PR (separation of duties, PRD §14.7).",
+      "A Developer approves — never the one who made the push or PR themselves, which escalates to another Developer or the Project Admin (separation of duties, PRD §14.6).",
     mandatory: false,
   },
   review: {

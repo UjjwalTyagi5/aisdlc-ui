@@ -28,7 +28,10 @@ async def _fake_access_check(db, *, tenant_id, project_id, user_id, agent_id):
     return None
 
 
-async def _fake_stage_kind(tenant_id, project_id, agent_id):
+async def _fake_stage_kind(tenant_id, project_id, agent_id, owner_id=None):
+    # owner_id: which of the stage's boards this PERSON can authenticate against —
+    # the real one probes credentials so a stage with two boards cannot resolve to
+    # one nobody connected. Irrelevant to this test, which pins the scope wiring.
     return "azure_devops"
 
 

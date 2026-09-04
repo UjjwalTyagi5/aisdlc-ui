@@ -125,19 +125,37 @@ _tool_map = {t.name: t for t in tools}
 
 # ── LLM — Claude (Anthropic) ──────────────────────────────────────────────────
 
-# Per-alias LLM cache — keyed by (alias, model). Avoids per-call re-construction
-# while supporting per-tenant BYOK keys (Pitfall 4 / architecture.py pattern).
-_LLM_CACHE: dict[tuple[str, str], object] = {}
+# LLM cache — keyed by (alias, model, credential fingerprint, base). Avoids
+# per-call re-construction while supporting per-tenant BYOK keys (Pitfall 4 /
+# architecture.py pattern), and a rotated key becomes a different entry
+# instead of silently reusing a client built with the old secret.
+_LLM_CACHE: dict[tuple[str, str, str, str], object] = {}
 
 
 def _build_llm(model: str, litellm_provider: str, api_key: str,
                base_url: str | None, alias: str) -> object:
     """Build (or return cached) ChatLiteLLM. Direct-provider BYOK call.
-    Cached by (alias, model); alias is non-secret (SC#5).
+
+    THE CREDENTIAL IS PART OF THE CACHE KEY, not just the alias. The alias is
+    `tenant:<tid>:<provider_id>`, which is stable across a key rotation — so a
+    client built with a bad or superseded key was handed back for the life of the
+    PROCESS, and every run kept authenticating with a credential the database no
+    longer held. `invalidate_key_cache` clears the resolver's key cache on rotation
+    but knows nothing about instances already built from it, so fixing a key in the
+    UI could not fix the agent: the fix took effect only after a restart, which is
+    exactly the kind of thing that reads as "the new key doesn't work".
+
+    Observed live: an Anthropic key that succeeded against the real API when called
+    with the stored credential still failed the dev agent with
+    "authentication_error: API key is invalid".
+
+    Both parts are non-secret — the alias by construction (SC#5), the fingerprint by
+    being a truncated digest.
 
     Returns the UNBOUND model — tools are bound per-call in agent_node so that
     per-run MCP tools (which vary by run) are never baked into the shared cache."""
-    cache_key = (alias, model)
+    from shared.services.model_resolver import credential_fingerprint  # noqa: PLC0415
+    cache_key = (alias, model, credential_fingerprint(api_key, base_url), base_url or "")
     if cache_key in _LLM_CACHE:
         return _LLM_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
@@ -165,17 +183,28 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
         # Stream tokens so the copilot shows the dev agent's replies live.
         "streaming": True,
     }
-    # gpt-5-family models (including gpt-5-codex) reject any temperature other
-    # than the default 1 -- litellm raises UnsupportedParamsError pre-call if
-    # we pass one. Confirmed live against a real azure/gpt-5-mini deployment
-    # (2026-08-31): identical call succeeds the instant temperature is omitted.
-    # Every other model keeps the low, determinism-favoring temperature this
-    # agent wants for code generation -- this is a narrow exception for the one
-    # model family that structurally cannot take the parameter, not a
-    # litellm.drop_params=True escape hatch that would silently swallow
-    # unsupported params for every model everywhere.
-    if "gpt-5" not in model.lower():
-        kwargs["temperature"] = 0.1
+    from shared.services.model_resolver import (  # noqa: PLC0415
+        litellm_key_kwargs,
+        temperature_kwargs,
+    )
+
+    # Some models reject ANY non-default temperature and fail the call pre-flight:
+    # the gpt-5 family (litellm's UnsupportedParamsError, confirmed live against
+    # azure/gpt-5-mini on 2026-08-31) and the newest Claude models, which answer
+    # "`temperature` is deprecated for this model" — hit live here on
+    # claude-opus-4-8 (2026-09-04). Which models those are is measured, not guessed,
+    # and lives in one place rather than as a local check per agent. Every other
+    # model keeps the low, determinism-favouring temperature this agent wants for
+    # code generation; this is NOT litellm.drop_params=True, which would silently
+    # swallow every unsupported parameter for every model everywhere.
+    kwargs.update(temperature_kwargs(model, 0.1))
+
+    # THE BYOK KEY MUST BE THE ONE LITELLM ACTUALLY USES. ChatLiteLLM keeps a
+    # separate field per provider, defaulted from the environment, and it wins over
+    # the `api_key` above — so this agent authenticated with the platform's stale
+    # ANTHROPIC_API_KEY and reported the tenant's valid key as invalid. See
+    # shared/services/model_resolver.litellm_key_kwargs.
+    kwargs.update(litellm_key_kwargs(litellm_provider, api_key))
     instance = ChatLiteLLM(**kwargs)
     _LLM_CACHE[cache_key] = instance
     return instance

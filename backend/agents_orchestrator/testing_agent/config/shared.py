@@ -118,7 +118,9 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
     Phase 1 mandated `max_tokens=8192` because `with_structured_output(TestPlan)`
     truncates without it — keep that default; callers may override.
     """
-    from shared.services.model_resolver import get_resolved_model
+    from shared.services.model_resolver import (
+        get_resolved_model, litellm_key_kwargs, temperature_kwargs,
+    )
 
     resolved = get_resolved_model()
     if resolved is not None:
@@ -127,14 +129,22 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
         # gateway). Otherwise call the provider directly — mirrors every
         # other agent's build_llm and removes the hard dependency on a
         # locally-running LiteLLM proxy for direct-BYOK models (e.g. Anthropic).
+        # temperature_kwargs, not a hardcoded value: the gpt-5 family accepts only the
+        # default temperature and litellm raises UnsupportedParamsError BEFORE the call
+        # rather than clamping, so every analysis call on a tenant running
+        # azure/gpt-5-mini failed and the run reported "could not analyze the codebase"
+        # — a model-parameter problem wearing the costume of an unreadable repo. Dev,
+        # Requirements and Design already route through this helper.
         params = dict(
             model=resolved.model,
             custom_llm_provider=resolved.litellm_provider,
             api_base=resolved.base_url or None,
             api_key=resolved.api_key,
-            temperature=0.2,
             max_retries=2,
             max_tokens=max_tokens,
+            **temperature_kwargs(resolved.model, 0.2),
+            # See shared/services/model_resolver.litellm_key_kwargs.
+            **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
         )
         params.update(kwargs)
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
@@ -155,9 +165,10 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
         model=ANTHROPIC_MODEL,
         custom_llm_provider="anthropic",
         api_key=ANTHROPIC_API_KEY,
-        temperature=0.2,
         max_retries=2,
         max_tokens=max_tokens,
+        **temperature_kwargs(ANTHROPIC_MODEL, 0.2),
+        **litellm_key_kwargs("anthropic", ANTHROPIC_API_KEY),
     )
     params.update(kwargs)
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.

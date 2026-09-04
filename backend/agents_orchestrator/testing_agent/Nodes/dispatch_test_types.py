@@ -5,10 +5,12 @@ edge from the pre-Phase-10 graph.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import re
 import shutil
+import subprocess
 import traceback
 from typing import Any, Dict
 
@@ -187,6 +189,74 @@ def _output_path_for(work_dir: str, skill_name: str, language: str) -> str:
     # python (default)
     return os.path.join(work_dir, f"test_generated_{skill_name}.py")
 
+
+
+_JSDOM_DOCBLOCK = "/**\n * @jest-environment jsdom\n */\n"
+
+
+def _ensure_react_jsdom_docblock(code: str) -> str:
+    """Prepend jest's jsdom environment docblock to a generated React test file.
+
+    Jest defaults to the `node` environment, which has no `document`, so every
+    component test in a generated suite failed with "ReferenceError: document is
+    not defined" while the pure-function tests beside them passed. Set per file via
+    the documented docblock rather than a CLI `--env=jsdom` or a config edit: the
+    override then applies only to the file we generated, and a repo whose own suite
+    deliberately runs in the node environment is left exactly as it was.
+
+    Idempotent, and a no-op when the model already emitted a docblock — its own
+    `@jest-environment` line wins over one we would add above it.
+    """
+    if "@jest-environment" in code[:500]:
+        return code
+    return _JSDOM_DOCBLOCK + code.lstrip("\n")
+
+
+def _react_import_hint(work_dir: str, code_analysis) -> str:
+    """Exact import specifiers for a React test file, computed not guessed.
+
+    `_output_path_for` writes React tests to `<work_dir>/src/`, but code_analysis
+    reports paths from the repo root (`src/pricing.js`). The model sees the latter
+    and writes `import ... from './src/pricing.js'` — one directory too high, so
+    jest fails the suite with "Cannot find module './src/Hi.jsx'" and the run
+    reports "No tests collected". The Python runner already hands the model exact
+    import lines for the same reason; React was left to infer them.
+    """
+    functions = list(getattr(code_analysis, "functions", None) or [])
+    test_dir = os.path.join(work_dir, "src")
+    by_file: dict[str, list[str]] = {}
+    for fn in functions:
+        fp = getattr(fn, "file_path", None)
+        name = getattr(fn, "function_name", None)
+        if not fp or not name:
+            continue
+        by_file.setdefault(fp, [])
+        if name not in by_file[fp]:
+            by_file[fp].append(name)
+    if not by_file:
+        return ""
+
+    lines = []
+    for fp, names in by_file.items():
+        abs_src = fp if os.path.isabs(fp) else os.path.join(work_dir, fp)
+        try:
+            rel = os.path.relpath(abs_src, test_dir).replace(os.sep, "/")
+        except ValueError:  # different drive — leave this one out rather than guess
+            continue
+        if not rel.startswith("."):
+            rel = "./" + rel
+        lines.append(f"import {{ {', '.join(names)} }} from '{rel}';")
+    if not lines:
+        return ""
+    joined = "\n".join(lines)
+    return (
+        "\n\n## CRITICAL IMPORT RULES — read carefully\n"
+        "Your test file is saved in the `src/` directory. Import the code under test "
+        "using EXACTLY these specifiers — they are relative to your test file, and any "
+        "other path (including one starting `./src/`) will fail to resolve:\n\n"
+        f"```\n{joined}\n```\n"
+        "Adjust only between named and default imports if the module exports a default."
+    )
 
 def _csharp_looks_complete(code: str) -> bool:
     stripped = code.strip()
@@ -499,6 +569,24 @@ def _remove_brittle_dotnet_default_value_tests(code: str) -> str:
     return method_pattern.sub(repl, code)
 
 
+
+@functools.lru_cache(maxsize=1)
+def _dotnet_sdk_available() -> bool:
+    """True when `dotnet` can actually build, not merely when the binary exists.
+
+    `dotnet --list-sdks` prints one line per installed SDK and nothing at all when
+    only runtimes are present. Cached because it shells out and the answer cannot
+    change within a run.
+    """
+    try:
+        proc = subprocess.run(
+            ["dotnet", "--list-sdks"], capture_output=True, text=True, timeout=60,
+        )
+    except Exception:  # noqa: BLE001 — no toolchain is the same answer as no SDK
+        return False
+    return proc.returncode == 0 and bool((proc.stdout or "").strip())
+
+
 def _dotnet_build_generated_tests(work_dir: str, timeout_s: int = 300):
     from agents_orchestrator.testing_agent.tools.sandbox.base import (
         get_default_sandbox,
@@ -512,6 +600,19 @@ def _dotnet_build_generated_tests(work_dir: str, timeout_s: int = 300):
         raise RuntimeError(
             "dotnet SDK not found on PATH or in a well-known install dir — install "
             "the .NET SDK (or add it to PATH) to run .NET unit test generation."
+        )
+    # THE BINARY EXISTING IS NOT THE SDK EXISTING. A machine with only the .NET
+    # *runtime* installed has dotnet.exe on PATH, so the check above passes, and then
+    # every `dotnet build` exits non-zero with "No .NET SDKs were found". Each chunk
+    # is rejected as uncompilable and the run ends on "generated .NET unit files
+    # contained no compilable xUnit test methods" — the model blamed for a missing
+    # toolchain, and the one action that would fix it never mentioned. Observed on a
+    # host carrying runtimes 8.0.19 and 9.0.7 with no SDK.
+    if not _dotnet_sdk_available():
+        raise RuntimeError(
+            "The .NET runtime is installed but no .NET SDK is — `dotnet build` cannot "
+            "run, so generated unit tests cannot be compiled. Install the .NET SDK "
+            "(https://aka.ms/dotnet/download) on the machine running the agent."
         )
 
     target = _find_dotnet_test_project(work_dir)
@@ -616,6 +717,17 @@ def _dotnet_unit_prompt(work_dir: str, functions: list, chunk_index: int) -> str
 
 
 async def _run_dotnet_unit_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
+    # Check the toolchain BEFORE spending model calls. Every generated chunk is
+    # validated by compiling it, so with no SDK the run generates five files, has all
+    # five rejected, and reports the model's output as the problem — minutes and
+    # tokens spent to arrive at the wrong answer. Ask the cheap question first.
+    if not _dotnet_sdk_available():
+        raise RuntimeError(
+            "This repository needs the .NET SDK to compile and run generated unit "
+            "tests, and no SDK is installed on the machine running the agent (only "
+            "the .NET runtime). Install it from https://aka.ms/dotnet/download, then "
+            "run the tests again."
+        )
     code_analysis = state.get("code_analysis")
     functions = list(getattr(code_analysis, "functions", None) or [])
     if not functions:
@@ -783,6 +895,79 @@ async def _run_shell_skill(state: SuperAgentState, skill: Skill) -> Dict[str, An
     }
 
 
+
+# A served OpenAPI document is the one input here with no upper bound — it comes
+# from whatever the target happens to be. A real application's spec is routinely
+# hundreds of thousands of characters (this platform's own is ~337k), and passing
+# it through verbatim put ~84k tokens in a single call: enough to exceed a modest
+# deployment's per-minute token budget on its own, so API testing failed with a
+# provider rate-limit error and never generated a case. Observed live against a
+# local FastAPI target on azure/gpt-5-mini.
+_OPENAPI_INLINE_LIMIT = 60_000
+
+
+def _condense_openapi_spec(spec_text: str, limit: int = _OPENAPI_INLINE_LIMIT) -> str:
+    """Return the spec unchanged when small, else an endpoint inventory.
+
+    The inventory keeps what writing API tests actually needs — method, path,
+    summary, parameter names and the response codes to expect — and drops the
+    schema bodies, which are the bulk of a large document. Degrading to a smaller
+    description beats failing the run: a truncated JSON blob would be unparseable,
+    and sending nothing loses the endpoint list the skill is built around.
+    """
+    import json as _json  # noqa: PLC0415 — matches the local-import style here
+
+    if len(spec_text) <= limit:
+        return spec_text
+    try:
+        spec = _json.loads(spec_text)
+        paths = spec.get("paths") or {}
+    except Exception:  # noqa: BLE001 — an unparseable spec is no better than none
+        logger.warning("Functional API: served spec is %d chars and not valid JSON; skipping it",
+                       len(spec_text))
+        return "{}"
+
+    endpoints = []
+    for path, ops in paths.items():
+        if not isinstance(ops, dict):
+            continue
+        for method, op in ops.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options"}:
+                continue
+            op = op if isinstance(op, dict) else {}
+            entry = {"method": method.upper(), "path": path}
+            if op.get("summary"):
+                entry["summary"] = op["summary"]
+            params = [
+                p.get("name") for p in (op.get("parameters") or [])
+                if isinstance(p, dict) and p.get("name")
+            ]
+            if params:
+                entry["parameters"] = params
+            responses = list((op.get("responses") or {}).keys())
+            if responses:
+                entry["responses"] = responses
+            entry["requires_body"] = bool(op.get("requestBody"))
+            endpoints.append(entry)
+
+    condensed = {
+        "note": (
+            "Condensed endpoint inventory — the served OpenAPI document was too large "
+            "to include in full. Schemas are omitted; method, path, parameter names and "
+            "expected response codes are preserved."
+        ),
+        "info": (spec.get("info") or {}),
+        "servers": spec.get("servers") or [],
+        "endpoint_count": len(endpoints),
+        "endpoints": endpoints,
+    }
+    out = _json.dumps(condensed)
+    blog(
+        f"Functional API: condensed a {len(spec_text)}-char OpenAPI spec to "
+        f"{len(out)} chars ({len(endpoints)} endpoints) to stay within model limits"
+    )
+    return out
+
 async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
     # Phase 11.4 — shell-runtime branch. When a skill declares runtime: shell,
     # bypass the LLM entirely and dispatch through the sandbox + registered parser.
@@ -816,7 +1001,7 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(f"{base_url}/openapi.json")
                 if resp.status_code == 200:
-                    openapi_spec_json = resp.text
+                    openapi_spec_json = _condense_openapi_spec(resp.text)
                     blog("Functional API: loaded OpenAPI spec from /openapi.json")
         except Exception as exc:
             logger.info("Functional API: OpenAPI discovery skipped: %s", exc)
@@ -848,6 +1033,8 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
     # what the skill actually declares to keep prompts tight.
     declared = {k: v for k, v in render_kwargs.items() if k in skill.inputs}
     prompt = skill.render(**declared)
+    if language == "react" and skill.name != "functional_api":
+        prompt += _react_import_hint(state["work_dir"], code_analysis)
 
     blog(f"Skill {skill.name}: prompting LLM ({language}, {len(prompt)} chars)")
     chain = get_llm() | StrOutputParser()
@@ -888,6 +1075,8 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
                 f"{skill.name}: generated C# was incomplete or syntactically unbalanced; "
                 f"saved diagnostic copy to {diagnostic_path}"
             )
+    if language == "react" and skill.name != "functional_api":
+        code = _ensure_react_jsdom_docblock(code)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(code)
     if language == "dotnet":

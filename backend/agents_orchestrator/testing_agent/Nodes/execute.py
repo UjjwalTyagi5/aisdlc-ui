@@ -124,6 +124,7 @@ async def run_code_testing_agent(state: SuperAgentState):
                 "function_names": fn_names_py,
                 "plan_test_case_count": plan_count_py,
                 "plan_summary": plan_summary_py or "",
+                "skill_failures": state.get("skill_failures") or [],
             },
         )
         summary = final_testing_state.get(

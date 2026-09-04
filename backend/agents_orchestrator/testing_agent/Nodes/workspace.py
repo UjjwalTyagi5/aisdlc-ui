@@ -53,7 +53,12 @@ async def setup_workspace(state: SuperAgentState):
     if isinstance(prepared_work_dir, str) and prepared_work_dir and os.path.isdir(prepared_work_dir):
         logger.info(f"setup_workspace: reusing prepared work_dir {prepared_work_dir}")
         blog("Reusing the shared run workspace (already cloned for this run)")
-        return {"work_dir": prepared_work_dir}
+        # NOT OURS TO DELETE. This is the Copilot's shared run clone (`ps.work_dir`),
+        # which Code Review, Security, Deployment and Documentation all read from the
+        # same run. cleanup_workspace rmtree'd whatever work_dir pointed at, so running
+        # testing in a pipeline destroyed the checkout every later stage still needed.
+        # See cleanup_workspace, which now honours this flag.
+        return {"work_dir": prepared_work_dir, "workspace_is_ephemeral": False}
 
     # Phase B.1 — explicit clone_target wins over everything else.
     clone_target = state.get("clone_target")
@@ -70,6 +75,8 @@ async def setup_workspace(state: SuperAgentState):
             repo=clone_target["repo"],
             branch=clone_target["branch"],
             tenant_id=state.get("tenant_id") or "",
+            project_id=state.get("project_id") or "",
+            owner_id=state.get("owner_id") or "",
         )
 
     # Phase 5 — fall back to upstream development_artifacts.repo_url if dev agent
@@ -82,8 +89,12 @@ async def setup_workspace(state: SuperAgentState):
         if parsed:
             project, repo = parsed
             logger.info(f"Phase 5: cloning upstream dev repo {project}/{repo}@{branch}")
-            return await _clone_into_workspace(project=project, repo=repo, branch=branch,
-                                               tenant_id=state.get("tenant_id") or "")
+            return await _clone_into_workspace(
+                project=project, repo=repo, branch=branch,
+                tenant_id=state.get("tenant_id") or "",
+                project_id=state.get("project_id") or "",
+                owner_id=state.get("owner_id") or "",
+            )
         else:
             logger.warning(f"upstream repo_url is not an ADO URL ({repo_url!r}); falling through to upload path")
 
@@ -92,7 +103,7 @@ async def setup_workspace(state: SuperAgentState):
     if selected_types and "unit" not in selected_types and not state.get("input_file_path"):
         work_dir = tempfile.mkdtemp(prefix="testing_agent_api_")
         blog("Prepared lightweight workspace for API testing")
-        return {"work_dir": work_dir}
+        return {"work_dir": work_dir, "workspace_is_ephemeral": True}
 
     logger.info(f"Setting up workspace and unzipping {state['input_file_path']}")
     blog("Setting up workspace and extracting files...")
@@ -103,7 +114,7 @@ async def setup_workspace(state: SuperAgentState):
 
     logger.info(f"Code unzipped to: {work_dir}")
     blog("Files extracted to workspace")
-    return {"work_dir": work_dir}
+    return {"work_dir": work_dir, "workspace_is_ephemeral": True}
 
 
 def _find_dev_workspace_path(sid: Optional[str], uid: Optional[str]) -> Optional[pathlib.Path]:
@@ -237,7 +248,10 @@ def _local_clone_from_dev(branch: str, dest_dir: str, sid: Optional[str], uid: O
         return False
 
 
-async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id: str = "") -> dict:
+async def _clone_into_workspace(
+    project: str, repo: str, branch: str, tenant_id: str = "",
+    project_id: str = "", owner_id: str = "",
+) -> dict:
     """Phase B.1 — clone an ADO branch into a fresh tmpdir.
 
     Returns a partial state dict with `work_dir` (and `repo_workspace` for
@@ -277,7 +291,9 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
             from agents_orchestrator.testing_agent.tools.pr_diff import fetch_base_branch
             from shared.services.ado_repos import resolve_auth
 
-            _org, _pat = await resolve_auth(tenant_id or "")
+            _org, _pat = await resolve_auth(
+                tenant_id or "", project_id=project_id or "", owner_id=owner_id or "",
+            )
             ado_url = _build_ado_remote_url(_org, project, repo, _pat) if _pat else ""
             if ado_url:
                 await loop.run_in_executor(
@@ -293,6 +309,8 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
             "work_dir": fast_dest,
             "repo_workspace": fast_dest,
             "reused_dev_workspace": True,
+            # A fresh `git clone --local` into our own tmpdir — ours to remove.
+            "workspace_is_ephemeral": True,
             # Phase 8.1 — was missing; without pr_branch downstream PR-scoped
             # filter + coverage are silently skipped on the reuse path.
             "pr_branch": branch,
@@ -309,7 +327,14 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
     org_url = pat = ""
     try:
         from shared.services import ado_repos
-        org_url, pat = await ado_repos.resolve_auth(tenant_id or "")
+        # project_id + owner_id are load-bearing, not optional detail: Azure DevOps
+        # credentials live per person per project and the tenant-wide shared fallback
+        # was removed, so resolving on tenant alone finds nothing and reports the
+        # connector as unconfigured on an org where it is connected. Dev and
+        # code-review pass all three; this was the last caller that did not.
+        org_url, pat = await ado_repos.resolve_auth(
+            tenant_id or "", project_id=project_id or "", owner_id=owner_id or "",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.info("ado_clone: connector resolve_auth failed (%s)", exc)
     if not (org_url and pat):
@@ -322,6 +347,7 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
         blog(friendly, level="ERROR")
         return {
             "work_dir": tempfile.mkdtemp(prefix="testing_agent_no_creds_"),
+            "workspace_is_ephemeral": True,
             "clone_error_message": friendly,
         }
 
@@ -350,6 +376,7 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
         return {
             "work_dir": work_dir,
             "clone_error_message": friendly,
+            "workspace_is_ephemeral": True,
         }
 
     logger.info(f"ADO clone successful — work_dir={work_dir}")
@@ -367,7 +394,8 @@ async def _clone_into_workspace(project: str, repo: str, branch: str, tenant_id:
                 logger.info(f"Phase 7: fetched origin/{base} for PR-scoped diff")
     except Exception as exc:
         logger.warning(f"Phase 7: base-branch fetch failed (PR-scoped features will skip): {exc}")
-    return {"work_dir": work_dir, "repo_workspace": work_dir, "pr_branch": branch}
+    return {"work_dir": work_dir, "repo_workspace": work_dir, "pr_branch": branch,
+            "workspace_is_ephemeral": True}
 
 
 def _parse_ado_repo_url(repo_url: str):
@@ -416,4 +444,4 @@ async def setup_single_file_workspace(state: SuperAgentState):
         dst = os.path.join(work_dir, os.path.basename(src))
         shutil.copy(src, dst)
 
-    return {"work_dir": work_dir}
+    return {"work_dir": work_dir, "workspace_is_ephemeral": True}

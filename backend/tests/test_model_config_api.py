@@ -107,17 +107,23 @@ async def test_probe_provider_valid_then_invalid_creates_no_row(monkeypatch):
 
     tenant = str(uuid.uuid4())
 
+    # probe_provider needs the REASON as well as the verdict, so it calls the
+    # (ok, reason) primitive; _probe_model is the bool wrapper over this.
     async def _ok(provider, model, api_key, api_base=None):
-        return True
-    monkeypatch.setattr(mc, "_probe_model", _ok)
+        return True, ""
+    monkeypatch.setattr(mc, "_probe_model_with_reason", _ok)
     res = await mc.probe_provider("anthropic", "sk-test", model="claude-sonnet-4-6")
-    assert res == {"status": "valid"}
+    assert res["status"] == "valid"
+    assert "reason" not in res  # nothing to explain when it worked
 
     async def _bad(provider, model, api_key, api_base=None):
-        return False
-    monkeypatch.setattr(mc, "_probe_model", _bad)
+        return False, "The provider rejected this key."
+    monkeypatch.setattr(mc, "_probe_model_with_reason", _bad)
     res = await mc.probe_provider("anthropic", "sk-test", model="claude-sonnet-4-6")
-    assert res == {"status": "invalid"}
+    # A failure now also carries a human-readable `reason` — assert the status
+    # and that the diagnosis is present, not an exact dict.
+    assert res["status"] == "invalid"
+    assert res.get("reason")
 
     # Stateless: probing never wrote a model_providers row for this tenant.
     assert await mc.list_providers(tenant) == []
@@ -129,10 +135,13 @@ async def test_probe_provider_empty_key_is_invalid_without_probing(monkeypatch):
 
     async def _boom(provider, model, api_key, api_base=None):
         raise AssertionError("must not probe with an empty key")
-    monkeypatch.setattr(mc, "_probe_model", _boom)
+    monkeypatch.setattr(mc, "_probe_model_with_reason", _boom)
 
     res = await mc.probe_provider("anthropic", "   ", model="claude-sonnet-4-6")
-    assert res == {"status": "invalid"}
+    # A failure now also carries a human-readable `reason` — assert the status
+    # and that the diagnosis is present, not an exact dict.
+    assert res["status"] == "invalid"
+    assert res.get("reason")
 
 
 @pytest.mark.asyncio
@@ -145,11 +154,12 @@ async def test_probe_provider_falls_back_to_first_catalog_model(monkeypatch):
 
     async def _ok(provider, model, api_key, api_base=None):
         seen["model"] = model
-        return True
-    monkeypatch.setattr(mc, "_probe_model", _ok)
+        return True, ""
+    monkeypatch.setattr(mc, "_probe_model_with_reason", _ok)
 
     res = await mc.probe_provider("anthropic", "sk-test")  # no model passed
-    assert res == {"status": "valid"}
+    assert res["status"] == "valid"
+    assert "reason" not in res  # nothing to explain when it worked
     assert seen["model"], "expected a fallback model id from the catalog"
 
 
@@ -367,15 +377,15 @@ async def test_probe_endpoint_via_api_creates_no_provider_row(monkeypatch):
     app = _model_app(["model:manage"], tenant)
 
     async def _ok(provider, model, api_key, api_base=None):
-        return True
-    monkeypatch.setattr(mc, "_probe_model", _ok)
+        return True, ""
+    monkeypatch.setattr(mc, "_probe_model_with_reason", _ok)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/model/providers/probe", json={
             "provider": "anthropic", "api_key": "sk-test", "model": "claude-sonnet-4-6",
         })
         assert r.status_code == 200, r.text
-        assert r.json() == {"status": "valid"}
+        assert r.json()["status"] == "valid"
         r2 = await c.get("/model/providers")
     assert r2.status_code == 200
     assert r2.json() == []
