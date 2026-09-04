@@ -41,10 +41,10 @@ describe("who decides an agent-access request", () => {
   it("uses the same owner map the agent gates use", () => {
     expect(agentOwnerRole("requirements")).toBe("ba");
     expect(agentOwnerRole("design")).toBe("architect");
-    // Development is BUILT by the Developer and APPROVED by the Architect —
-    // a fact the involvement table cannot express, which is why this reads the
-    // canonical map rather than re-deriving one.
-    expect(agentOwnerRole("development")).toBe("architect");
+    // Development is owned — built AND approved — by the Developer since the
+    // ownership table became one-agent-one-role. It reads the canonical map rather
+    // than re-deriving one, which is what makes a move like that show up here.
+    expect(agentOwnerRole("development")).toBe("developer");
     expect(agentOwnerRole("deployment")).toBe("devops_engineer");
   });
 
@@ -57,12 +57,20 @@ describe("who decides an agent-access request", () => {
     expect(nextAgentAccessStage("agent_owner", "requirements")).toBeNull();
   });
 
-  it("has no second stage where the Project Admin IS the agent's owner", () => {
-    // Documentation's acceptance is automatic and the Project Admin owns it,
-    // so stage one already was the owner's decision. Advancing would hand the
-    // request back to whoever just decided it.
-    expect(agentOwnerRole("documentation")).toBe("project_admin");
-    expect(nextAgentAccessStage("project_admin", "documentation")).toBeNull();
+  it("gives every agent a delivery owner to route stage two to", () => {
+    // Documentation used to be the exception: the Project Admin owned it, so stage
+    // one already WAS the owner's decision and advancing would have handed the
+    // request back to whoever just decided it. It belongs to the BA now, so no
+    // phase short-circuits any more and every request has both stages.
+    expect(agentOwnerRole("documentation")).toBe("ba");
+    expect(nextAgentAccessStage("project_admin", "documentation")).toBe("agent_owner");
+  });
+
+  it("still refuses to route a stage back to the role that just decided it", () => {
+    // The guard above is now unreachable through AGENT_OWNER_ROLE, since every
+    // phase has a delivery owner. Keep testing it directly: it is the reason the
+    // chain cannot loop, and a future owner move could make it live again.
+    expect(nextAgentAccessStage("agent_owner", "documentation")).toBeNull();
   });
 });
 
@@ -135,13 +143,15 @@ describe("the two-stage chain", () => {
     expect(after?.currentApproverRole).toBe("architect");
   });
 
-  it("closes at stage one when the Project Admin owns the agent outright", () => {
+  it("routes a Documentation request on to the BA, its new owner", () => {
+    // This used to close at stage one, back when the Project Admin owned
+    // Documentation. It is the BA's agent now, so the request advances like any
+    // other rather than being approved by the same person twice.
     const docsId = raise("documentation").id;
     const after = decideGovernanceApproval(docsId, "approve", "Ada Lovelace");
 
-    expect(after?.status).toBe("approved");
-    expect(after?.approvalStage).toBeNull();
-    expect(after?.currentApproverRole).toBeNull();
+    expect(after?.status).toBe("pending_review");
+    expect(after?.currentApproverRole).toBe("ba");
   });
 });
 

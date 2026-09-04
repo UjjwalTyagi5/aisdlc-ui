@@ -11,9 +11,12 @@ describe("Development page access gate", () => {
     expect(tileStateFor("data_engineer", "development", "greenfield", builtWithDev)).toBe("locked");
   });
 
-  it("owner for the Architect once development is verified", () => {
+  it("owner for the Developer once development is verified", () => {
+    // The Development agent belongs to the Developer now; AGENT_OWNER_ROLE moved
+    // with it, so the Architect — which no longer reaches Development — is locked.
     const builtWithDev: readonly (typeof BUILT_AGENTS)[number][] = [...BUILT_AGENTS, "development"];
-    expect(tileStateFor("architect", "development", "greenfield", builtWithDev)).toBe("owner");
+    expect(tileStateFor("developer", "development", "greenfield", builtWithDev)).toBe("owner");
+    expect(tileStateFor("architect", "development", "greenfield", builtWithDev)).toBe("locked");
   });
 
   it("coming_soon before development is verified, regardless of role", () => {

@@ -371,133 +371,86 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
 
   // ── Delivery roles ──────────────────────────────────────────────────────
   //
-  // SPREAD FROM `ALL_NONE`, NOT `ALL_USE`. Every delivery role used to start
-  // from "use everything" and subtract, which made least privilege something
-  // you had to remember to apply — and mostly it wasn't: a BA reached all
-  // thirteen agents. Starting from nothing and adding makes each role's list
-  // exactly what it is allowed to touch, and makes an omission fail closed.
+  // ONE AGENT, ONE ROLE. A delivery role reaches exactly the agents it OWNS and
+  // nothing else. The previous table had a second, softer tier — `use` — that let a
+  // role open an agent it did not own, and it had spread until a BA reached all
+  // nine: least privilege that never actually bit. There is no `use` tier here any
+  // more, so "which agents does this role reach" and "which agents does this role
+  // own" are the same question with the same answer.
+  //
+  // Extra access is a DELIBERATE act, not a default. A project admin grants it per
+  // person per project (agent_access_overrides, checked ahead of this table in
+  // shared/authz/agent_access.py), which is how someone gets an agent outside their
+  // role — visible, revocable, and attributable, unlike a blanket `use`.
   //
   // TWO INVARIANTS hold this table together, and `agent-ownership.test.ts`
   // enforces both:
   //
-  //   1. A phase's owner (`AGENT_OWNER_ROLE`) always reaches its own agent.
-  //      An owner who cannot open the agent they sign off for is a gate with
-  //      nobody behind it.
-  //   2. Documentation is reachable by every delivery role. Its acceptance is
-  //      automatic and every role writes into it; it is the one genuinely
-  //      shared surface.
+  //   1. A phase's owner (`AGENT_OWNER_ROLE`) always reaches its own agent. An
+  //      owner who cannot open the agent they sign off for is a gate with nobody
+  //      behind it. Under one-agent-one-role this is now true by construction.
+  //   2. Project Admin reaches everything, as the fallback approver (§14.5).
+  //
+  // Documentation is NO LONGER shared by every delivery role. It used to be, on the
+  // reasoning that acceptance is automatic and everyone writes into it; it now
+  // belongs to the BA like any other owned agent.
 
-  // Requirements is the BA's. Design is downstream of their output and they
-  // stay in it; nothing else is theirs to drive.
+  // Owns Requirements and Documentation.
   ba: {
     ...ALL_NONE,
-    requirements: "primary",
-    design: "use",
-    plan: "use",
-    development: "use",
-    review: "use",
-    security: "use",
-    testing: "use",
-    deployment: "use",
-    documentation: "use",
+    requirements: "owner",
+    documentation: "owner",
   },
 
-  // The broadest delivery role, because it owns the most gates — Design,
-  // Development and Code Review, plus the three modernization-track agents.
-  //
-  // Code Review is here as OWNER even though it was not in the requested list:
-  // `AGENT_OWNER_ROLE.review` is `architect`, so removing it would leave Code
-  // Review's sign-off routed to a role that cannot open it. Reassigning that
-  // gate is a separate decision from narrowing access, and not one to make as
-  // a side effect.
+  // Owns Design and Code Review.
   architect: {
     ...ALL_NONE,
-    requirements: "use",
-    design: "primary",
-    // Reads the plan its design is scheduled against; scrum_master drives it.
-    plan: "use",
-    development: "primary",
-    review: "primary",
-    security: "use",
-    testing: "use",
-    deployment: "use",
-    documentation: "use",
-    discovery: "primary",
-    strategy: "primary",
-    migration_mapping: "primary",
+    design: "owner",
+    review: "owner",
+    // Modernization-track agents this role owns on their own tracks; they are not
+    // in the greenfield pipeline, so they never appear on a Track 1 project.
+    discovery: "owner",
+    strategy: "owner",
+    migration_mapping: "owner",
   },
 
-  // Builds Development; the Architect approves it, so this is `build` and not
-  // `primary` — never self-approval.
+  // Owns Development. NOTE: `AGENT_OWNER_ROLE.development` moved to this role to
+  // keep invariant 1 true — see the comment there for what that means for who
+  // approves a development gate.
   developer: {
     ...ALL_NONE,
-    plan: "use",
-    requirements: "use",
-    development: "build",
-    review: "requests",
-    security: "use",
-    testing: "use",
-    documentation: "use",
+    development: "owner",
   },
 
-  // Owns Testing, and Validation on the modernization tracks. Reads
-  // Development because that is what it tests.
+  // Owns Testing.
   qa: {
     ...ALL_NONE,
-    plan: "use",
-    requirements: "use",
-    development: "use",
-    security: "use",
-    testing: "primary",
-    documentation: "use",
-    validation: "primary",
+    testing: "owner",
+    validation: "owner",
   },
 
-  // Owns Security. Reads the code it assesses and the review it feeds.
+  // Owns Security.
   security_engineer: {
     ...ALL_NONE,
-    requirements: "use",
-    design: "use",
-    development: "use",
-    review: "use",
-    security: "primary",
-    deployment: "use",
+    security: "owner",
   },
 
-  // Owns Deployment. Reads Development because that is what it ships.
+  // Owns Deployment.
   devops_engineer: {
     ...ALL_NONE,
-    development: "requests",
-    security: "use",
-    testing: "use",
-    deployment: "primary",
-    documentation: "use",
+    deployment: "owner",
   },
 
-  // Owns Data Engineering. Reads Development for the pipelines' surroundings.
+  // Owns Data Engineering, on the tracks that run it.
   data_engineer: {
     ...ALL_NONE,
-    plan: "use",
-    requirements: "use",
-    design: "use",
-    security: "use",
-    testing: "use",
-    documentation: "use",
-    data_engineering: "primary",
+    data_engineering: "owner",
   },
 
-  // Cross-cutting coordinator who owns no gate. Coordination is not agent
-  // operation, so visibility into the two stages that describe the work is
-  // the whole of it — the run history and approvals queue are where a Scrum
-  // Master actually watches progress, and neither needs agent access.
+  // Project Manager — owns Plan.
   scrum_master: {
     ...ALL_NONE,
-    requirements: "use",
-    // The one gate this role owns. AGENT_OWNER_ROLE.plan is scrum_master, and an
-    // owner who cannot open the agent they sign off for is a gate with nobody
-    // behind it — the rule the invariant test above enforces.
     plan: "owner",
-    documentation: "use",
   },
 
   // Composed per assignment — the builder picks exact agent access (PRD §14.9).
@@ -514,12 +467,24 @@ export const AGENT_OWNER_ROLE: Record<Phase, PlatformRole> = {
   design: "architect",
   // The one agent scrum_master owns rather than merely uses.
   plan: "scrum_master",
-  development: "architect", // Developer builds; Architect approves — never self-approval.
+  // MOVED FROM `architect` when the table above became one-agent-one-role. The old
+  // split — Developer builds, Architect approves — required the Architect to reach
+  // Development, which it no longer does; leaving the gate there would have routed
+  // every development sign-off to a role that cannot open the agent.
+  //
+  // CONSEQUENCE WORTH KNOWING: role-level separation between building and approving
+  // Development is gone. Per-PERSON self-approval prevention still applies (§14.6:
+  // the individual who ran a consequential action cannot approve their own; it
+  // escalates), so one developer's work can be approved by another, or by the
+  // Project Admin fallback — but two different ROLES no longer have to be involved.
+  development: "developer",
   review: "architect",
   security: "security_engineer",
   testing: "qa",
   deployment: "devops_engineer",
-  documentation: "project_admin", // Acceptance is automatic; override exists.
+  // The BA owns Documentation in the new matrix, so the gate follows the access.
+  // Project Admin remains the fallback approver on every agent regardless.
+  documentation: "ba",
   discovery: "architect",
   strategy: "architect",
   migration_mapping: "architect",
