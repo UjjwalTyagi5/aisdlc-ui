@@ -53,7 +53,12 @@ async def setup_workspace(state: SuperAgentState):
     if isinstance(prepared_work_dir, str) and prepared_work_dir and os.path.isdir(prepared_work_dir):
         logger.info(f"setup_workspace: reusing prepared work_dir {prepared_work_dir}")
         blog("Reusing the shared run workspace (already cloned for this run)")
-        return {"work_dir": prepared_work_dir}
+        # NOT OURS TO DELETE. This is the Copilot's shared run clone (`ps.work_dir`),
+        # which Code Review, Security, Deployment and Documentation all read from the
+        # same run. cleanup_workspace rmtree'd whatever work_dir pointed at, so running
+        # testing in a pipeline destroyed the checkout every later stage still needed.
+        # See cleanup_workspace, which now honours this flag.
+        return {"work_dir": prepared_work_dir, "workspace_is_ephemeral": False}
 
     # Phase B.1 — explicit clone_target wins over everything else.
     clone_target = state.get("clone_target")
@@ -98,7 +103,7 @@ async def setup_workspace(state: SuperAgentState):
     if selected_types and "unit" not in selected_types and not state.get("input_file_path"):
         work_dir = tempfile.mkdtemp(prefix="testing_agent_api_")
         blog("Prepared lightweight workspace for API testing")
-        return {"work_dir": work_dir}
+        return {"work_dir": work_dir, "workspace_is_ephemeral": True}
 
     logger.info(f"Setting up workspace and unzipping {state['input_file_path']}")
     blog("Setting up workspace and extracting files...")
@@ -109,7 +114,7 @@ async def setup_workspace(state: SuperAgentState):
 
     logger.info(f"Code unzipped to: {work_dir}")
     blog("Files extracted to workspace")
-    return {"work_dir": work_dir}
+    return {"work_dir": work_dir, "workspace_is_ephemeral": True}
 
 
 def _find_dev_workspace_path(sid: Optional[str], uid: Optional[str]) -> Optional[pathlib.Path]:
@@ -304,6 +309,8 @@ async def _clone_into_workspace(
             "work_dir": fast_dest,
             "repo_workspace": fast_dest,
             "reused_dev_workspace": True,
+            # A fresh `git clone --local` into our own tmpdir — ours to remove.
+            "workspace_is_ephemeral": True,
             # Phase 8.1 — was missing; without pr_branch downstream PR-scoped
             # filter + coverage are silently skipped on the reuse path.
             "pr_branch": branch,
@@ -340,6 +347,7 @@ async def _clone_into_workspace(
         blog(friendly, level="ERROR")
         return {
             "work_dir": tempfile.mkdtemp(prefix="testing_agent_no_creds_"),
+            "workspace_is_ephemeral": True,
             "clone_error_message": friendly,
         }
 
@@ -368,6 +376,7 @@ async def _clone_into_workspace(
         return {
             "work_dir": work_dir,
             "clone_error_message": friendly,
+            "workspace_is_ephemeral": True,
         }
 
     logger.info(f"ADO clone successful — work_dir={work_dir}")
@@ -385,7 +394,8 @@ async def _clone_into_workspace(
                 logger.info(f"Phase 7: fetched origin/{base} for PR-scoped diff")
     except Exception as exc:
         logger.warning(f"Phase 7: base-branch fetch failed (PR-scoped features will skip): {exc}")
-    return {"work_dir": work_dir, "repo_workspace": work_dir, "pr_branch": branch}
+    return {"work_dir": work_dir, "repo_workspace": work_dir, "pr_branch": branch,
+            "workspace_is_ephemeral": True}
 
 
 def _parse_ado_repo_url(repo_url: str):
@@ -434,4 +444,4 @@ async def setup_single_file_workspace(state: SuperAgentState):
         dst = os.path.join(work_dir, os.path.basename(src))
         shutil.copy(src, dst)
 
-    return {"work_dir": work_dir}
+    return {"work_dir": work_dir, "workspace_is_ephemeral": True}

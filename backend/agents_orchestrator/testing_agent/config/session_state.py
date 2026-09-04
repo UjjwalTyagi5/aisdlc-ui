@@ -67,6 +67,9 @@ class SuperAgentState(TypedDict, total=False):
     ]
     input_content: Optional[str]
     work_dir: Optional[str]
+    # Whether THIS run created work_dir. False for the Copilot's shared run clone,
+    # which several other stages read — cleanup_workspace must not delete it.
+    workspace_is_ephemeral: Optional[bool]
     code_analysis: Optional[CodeAnalysis]
     requirement_analysis: Optional[RequirementAnalysis]
     test_plan: Optional[TestPlan]

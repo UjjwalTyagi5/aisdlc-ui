@@ -190,6 +190,74 @@ def _output_path_for(work_dir: str, skill_name: str, language: str) -> str:
     return os.path.join(work_dir, f"test_generated_{skill_name}.py")
 
 
+
+_JSDOM_DOCBLOCK = "/**\n * @jest-environment jsdom\n */\n"
+
+
+def _ensure_react_jsdom_docblock(code: str) -> str:
+    """Prepend jest's jsdom environment docblock to a generated React test file.
+
+    Jest defaults to the `node` environment, which has no `document`, so every
+    component test in a generated suite failed with "ReferenceError: document is
+    not defined" while the pure-function tests beside them passed. Set per file via
+    the documented docblock rather than a CLI `--env=jsdom` or a config edit: the
+    override then applies only to the file we generated, and a repo whose own suite
+    deliberately runs in the node environment is left exactly as it was.
+
+    Idempotent, and a no-op when the model already emitted a docblock — its own
+    `@jest-environment` line wins over one we would add above it.
+    """
+    if "@jest-environment" in code[:500]:
+        return code
+    return _JSDOM_DOCBLOCK + code.lstrip("\n")
+
+
+def _react_import_hint(work_dir: str, code_analysis) -> str:
+    """Exact import specifiers for a React test file, computed not guessed.
+
+    `_output_path_for` writes React tests to `<work_dir>/src/`, but code_analysis
+    reports paths from the repo root (`src/pricing.js`). The model sees the latter
+    and writes `import ... from './src/pricing.js'` — one directory too high, so
+    jest fails the suite with "Cannot find module './src/Hi.jsx'" and the run
+    reports "No tests collected". The Python runner already hands the model exact
+    import lines for the same reason; React was left to infer them.
+    """
+    functions = list(getattr(code_analysis, "functions", None) or [])
+    test_dir = os.path.join(work_dir, "src")
+    by_file: dict[str, list[str]] = {}
+    for fn in functions:
+        fp = getattr(fn, "file_path", None)
+        name = getattr(fn, "function_name", None)
+        if not fp or not name:
+            continue
+        by_file.setdefault(fp, [])
+        if name not in by_file[fp]:
+            by_file[fp].append(name)
+    if not by_file:
+        return ""
+
+    lines = []
+    for fp, names in by_file.items():
+        abs_src = fp if os.path.isabs(fp) else os.path.join(work_dir, fp)
+        try:
+            rel = os.path.relpath(abs_src, test_dir).replace(os.sep, "/")
+        except ValueError:  # different drive — leave this one out rather than guess
+            continue
+        if not rel.startswith("."):
+            rel = "./" + rel
+        lines.append(f"import {{ {', '.join(names)} }} from '{rel}';")
+    if not lines:
+        return ""
+    joined = "\n".join(lines)
+    return (
+        "\n\n## CRITICAL IMPORT RULES — read carefully\n"
+        "Your test file is saved in the `src/` directory. Import the code under test "
+        "using EXACTLY these specifiers — they are relative to your test file, and any "
+        "other path (including one starting `./src/`) will fail to resolve:\n\n"
+        f"```\n{joined}\n```\n"
+        "Adjust only between named and default imports if the module exports a default."
+    )
+
 def _csharp_looks_complete(code: str) -> bool:
     stripped = code.strip()
     if not stripped:
@@ -965,6 +1033,8 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
     # what the skill actually declares to keep prompts tight.
     declared = {k: v for k, v in render_kwargs.items() if k in skill.inputs}
     prompt = skill.render(**declared)
+    if language == "react" and skill.name != "functional_api":
+        prompt += _react_import_hint(state["work_dir"], code_analysis)
 
     blog(f"Skill {skill.name}: prompting LLM ({language}, {len(prompt)} chars)")
     chain = get_llm() | StrOutputParser()
@@ -1005,6 +1075,8 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
                 f"{skill.name}: generated C# was incomplete or syntactically unbalanced; "
                 f"saved diagnostic copy to {diagnostic_path}"
             )
+    if language == "react" and skill.name != "functional_api":
+        code = _ensure_react_jsdom_docblock(code)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(code)
     if language == "dotnet":
