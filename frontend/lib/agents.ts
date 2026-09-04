@@ -51,7 +51,11 @@ export const PHASE_ALL: readonly Phase[] = [
 export const PHASE_LABEL: Record<Phase, string> = {
   requirements: "Requirements",
   design: "Design",
-  plan: "Plan",
+  // "Project Manager", not "Plan" — the agent is named for the job it does, and the
+  // backend registry has called it "Project Manager Agent" all along. The KEY stays
+  // `plan`: it is in route paths, artifact rows and the API contract, and renaming
+  // an identifier to fix a label would be a migration for a display string.
+  plan: "Project Manager",
   development: "Development",
   review: "Code Review",
   security: "Security",
@@ -296,8 +300,12 @@ export const GATE_POLICY: Record<Phase, GatePolicy> = {
     capabilityClass: "consequential",
     ownerLabel: owner("development"),
     title: "Gate: push / open PR",
+    // Was "The Architect approves". That stopped being true when the ownership table
+    // became one-agent-one-role: the Architect no longer reaches the Development
+    // agent, so its gate moved to the Developer. Separation of duties is now
+    // per-PERSON rather than per-role — whoever ran the push cannot approve it.
     description:
-      "The Architect approves — a Developer never approves their own push or PR (separation of duties, PRD §14.7).",
+      "A Developer approves — never the one who made the push or PR themselves, which escalates to another Developer or the Project Admin (separation of duties, PRD §14.6).",
     mandatory: false,
   },
   review: {

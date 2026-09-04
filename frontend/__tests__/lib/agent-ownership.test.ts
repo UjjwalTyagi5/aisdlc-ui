@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_OWNERSHIP } from "@/lib/roles";
+import { AGENT_LABEL, PHASE_LABEL, PHASE_ORDER, phaseHref } from "@/lib/agents";
 
 const PORTFOLIO_1 = [
   "requirements", "design", "development", "review",
@@ -80,5 +81,28 @@ describe("AGENT_OWNERSHIP matches the PRD's §14.7 table for Portfolio 1", () =>
     for (const phase of PORTFOLIO_1) {
       expect(AGENT_OWNERSHIP.project_admin[phase]).toBe("owner");
     }
+  });
+});
+
+/**
+ * The Plan agent is presented as "Project Manager" — the job it does, and what the
+ * backend registry (`AgentDefinition.name`) has called it all along. The KEY stays
+ * `plan`: it appears in route paths, artifact rows and the API contract, so renaming
+ * the identifier to fix a display string would be a migration for a label.
+ */
+describe("the Project Manager agent's name", () => {
+  it("is presented as Project Manager, not Plan", () => {
+    expect(PHASE_LABEL.plan).toBe("Project Manager");
+  });
+
+  it("keeps `plan` as the identifier the routes and API use", () => {
+    expect(PHASE_ORDER).toContain("plan");
+    expect(phaseHref("proj-1", "plan")).toContain("/plan");
+  });
+
+  it("names it consistently wherever a phase label is shown", () => {
+    // The activity timeline keeps its own copy of these labels; a second map is
+    // exactly where a rename goes half-done.
+    expect(AGENT_LABEL.plan).toBe(PHASE_LABEL.plan);
   });
 });

@@ -29,7 +29,7 @@ const KIND_ICON: Record<StepKind, LucideIcon> = {
 };
 
 const KIND_LABEL: Record<StepKind, string> = {
-  plan: "Plan",
+  plan: "Project Manager",
   tool_call: "Tool call",
   llm_call: "LLM call",
   guardrail_check: "Guardrail",
