@@ -1,5 +1,6 @@
 import { ROLE_ORDER, type PlatformRole } from "@/lib/roles";
 import { AGENT_DEFAULT_OWNER_ROLE } from "@/lib/governance";
+import { canUseOrchestrator } from "@/lib/orchestrator/access";
 import {
   Activity,
   Boxes,
@@ -62,6 +63,17 @@ const AGENT_STUDIO_TIER_OWNERS = new Set<PlatformRole>(
 );
 const AGENT_STUDIO_GLOBAL_HIDDEN: readonly PlatformRole[] = ROLE_ORDER.filter(
   (r) => !AGENT_STUDIO_TIER_OWNERS.has(r),
+);
+
+/**
+ * Roles that may see the Orchestrator entry — derived from `canUseOrchestrator`
+ * (`lib/orchestrator/access.ts`), the single source of truth for who may drive
+ * it, rather than a second hardcoded `["project_admin"]`. Two literals that
+ * happen to agree today is exactly the drift that let `cockpit.tsx` disagree
+ * with `access.ts` before this was caught — see that file's history.
+ */
+const ORCHESTRATOR_VISIBLE_ROLES: readonly PlatformRole[] = ROLE_ORDER.filter((r) =>
+  canUseOrchestrator(r),
 );
 
 export interface NavItem {
@@ -182,7 +194,7 @@ export const deliverNav: NavItem[] = [
     href: "/orchestrator",
     icon: Workflow,
     segment: "orchestrator",
-    requirePlatformRole: ["project_admin"],
+    requirePlatformRole: ORCHESTRATOR_VISIBLE_ROLES,
     prdSection: "§34.11",
   },
   {

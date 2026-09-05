@@ -20,7 +20,7 @@ const STATUS_DOT: Record<SessionStatus, string> = {
 const STATUS_TITLE: Record<SessionStatus, string> = {
   idle: "Not started",
   running: "Running",
-  paused: "Paused at a gate",
+  paused: "Paused",
   complete: "Complete",
   failed: "Failed",
 };
