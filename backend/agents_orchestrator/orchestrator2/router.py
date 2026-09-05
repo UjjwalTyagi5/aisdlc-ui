@@ -441,8 +441,10 @@ def _llm_kwargs(resolved: Any) -> dict:
 
 
 def _build_llm(resolved: Any) -> Any:
-    """Build the routing client. Imports litellm lazily — that import costs ~7s and
-    this module is imported by `ws.py` at boot."""
+    """Build the routing client. Imports litellm lazily: that import costs ~7s, and
+    merely importing this module must never cost it. `ws.py` imports its orchestrator2
+    dependency (`dispatch`) at module scope, i.e. at process start, so an eager import
+    here would land on boot the moment routing is wired into that socket."""
     from langchain_litellm import ChatLiteLLM  # noqa: PLC0415
 
     return ChatLiteLLM(**_llm_kwargs(resolved))
@@ -458,8 +460,10 @@ def _history_messages(history: Any) -> list[BaseMessage]:
 
     An entry that is NEITHER shape raises `TypeError`. Routing on a conversation that
     was silently truncated is a mis-route, and a mis-route looks exactly like a
-    correct route — the class of silent failure this engine was rebuilt to end. `ws.py`
-    turns an exception in a turn into a typed `error` the user can see.
+    correct route — the class of silent failure this engine was rebuilt to end.
+    Surfacing it costs a failed turn, which `ws.py`'s turn loop already renders as a
+    typed `error`; that only becomes true of THIS function once `route` is called from
+    inside that loop, and nothing calls it yet.
     """
     if history is None:
         return []
@@ -634,7 +638,10 @@ async def _ask_model(
     laptop succeed where production — which has no such key — fails. Answering "I
     could not choose" would be its own kind of lie: the problem is an unconfigured
     provider, and an administrator sent hunting a routing bug will not find it.
-    `ws.py` turns an exception in a turn into a typed `error` the user can see.
+    `ws.py`'s turn loop already renders an exception raised while serving a turn as a
+    typed `error` the user can see — which is where this will land once `route` is
+    called from inside it. Nothing calls `route` yet, so that is a property of the
+    call site still to be written, not something this module can guarantee alone.
     """
     # Built BEFORE resolving, so a malformed `history` from a call site costs a
     # TypeError rather than a model resolution first.
