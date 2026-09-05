@@ -1209,7 +1209,7 @@ function ContextTab({
 }) {
   void runId;
   const stage = COPILOT_STAGES.find((s) => s.id === activeStage);
-  const owner = gate ? ownerRoleLabel(gate.owner_role) : (stage?.ownerRole ?? "Product Manager");
+  const owner = gate ? ownerRoleLabel(gate.owner_role) : null;
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -1240,41 +1240,45 @@ function ContextTab({
         )}
       </section>
 
-      {/* Who needs to approve */}
-      <section className="border-line-soft space-y-2.5 border-b px-4 py-4">
-        <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
-          Who approves
-        </h3>
-        <div
-          className={cn(
-            "flex items-center gap-2.5 rounded-[var(--radius)] border px-3 py-2.5",
-            gate?.status === "awaiting_gate"
-              ? "border-warning/35 bg-warning/[0.06]"
-              : "border-line-soft bg-panel-elevated/40",
-          )}
-        >
-          <span
+      {/* Who needs to approve — the Orchestrator has no gates at all, so this
+          only renders when a real gate exists (i.e. the Copilot page, which
+          always passes one). Never fall back to an invented owner/status. */}
+      {gate && (
+        <section className="border-line-soft space-y-2.5 border-b px-4 py-4">
+          <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
+            Who approves
+          </h3>
+          <div
             className={cn(
-              "flex size-7 shrink-0 items-center justify-center rounded-full border",
-              gate?.status === "awaiting_gate"
-                ? "border-warning/40 bg-warning/10 text-warning"
-                : "border-line-soft text-muted-foreground",
+              "flex items-center gap-2.5 rounded-[var(--radius)] border px-3 py-2.5",
+              gate.status === "awaiting_gate"
+                ? "border-warning/35 bg-warning/[0.06]"
+                : "border-line-soft bg-panel-elevated/40",
             )}
           >
-            <UserCheck className="size-3.5" aria-hidden />
-          </span>
-          <div className="min-w-0">
-            <p className="text-[12.5px] font-medium text-foreground">{owner}</p>
-            <p className="text-muted-foreground text-[11px]">
-              {stage?.mandatory
-                ? "Mandatory gate — never auto-approved"
-                : stage?.auto
-                  ? "Auto-approved on completion"
-                  : "Approval-required gate"}
-            </p>
+            <span
+              className={cn(
+                "flex size-7 shrink-0 items-center justify-center rounded-full border",
+                gate.status === "awaiting_gate"
+                  ? "border-warning/40 bg-warning/10 text-warning"
+                  : "border-line-soft text-muted-foreground",
+              )}
+            >
+              <UserCheck className="size-3.5" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <p className="text-[12.5px] font-medium text-foreground">{owner}</p>
+              <p className="text-muted-foreground text-[11px]">
+                {stage?.mandatory
+                  ? "Mandatory gate — never auto-approved"
+                  : stage?.auto
+                    ? "Auto-approved on completion"
+                    : "Approval-required gate"}
+              </p>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Run metadata */}
       <section className="space-y-3 px-4 py-4">
