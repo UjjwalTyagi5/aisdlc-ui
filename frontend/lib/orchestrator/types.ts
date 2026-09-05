@@ -24,7 +24,6 @@ import type { Phase } from "@/lib/schemas/enums";
 export type StageRunStatus =
   | "pending"
   | "running"
-  | "awaiting_gate"
   | "approved"
   | "rejected"
   | "skipped";
@@ -79,8 +78,6 @@ export interface OrchestratorSession {
   stages: StageRun[];
   /** Index into `stages` the sequencer is on. */
   cursor: number;
-  /** Off → every gate pauses, mandatory or not (manual hand-off). */
-  autoAdvance: boolean;
   status: SessionStatus;
 }
 

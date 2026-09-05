@@ -57,16 +57,12 @@ interface OrchestratorState {
     input: { projectId: string; projectName: string; track: DeliveryTrack; modelKey: string | null },
   ) => void;
   setModelKey: (id: string, modelKey: string | null) => void;
-  setAutoAdvance: (id: string, on: boolean) => void;
 
   // ── Run mechanics, called by the engine ──────────────────────────────────
   appendMessage: (id: string, msg: OrchestratorMessage) => void;
   patchMessage: (id: string, msgId: string, patch: Partial<OrchestratorMessage>) => void;
   patchStage: (id: string, index: number, patch: Partial<StageRun>) => void;
   setStatus: (id: string, status: SessionStatus) => void;
-  setCursor: (id: string, cursor: number) => void;
-  /** Clear the transcript and stage states, keeping the session identity. */
-  resetRun: (id: string, track: DeliveryTrack) => void;
 }
 
 /** Apply `fn` to one session and stamp `updatedAt`. */
@@ -97,7 +93,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           messages: [],
           stages: freshStages(track),
           cursor: 0,
-          autoAdvance: true,
           status: "idle",
         };
         set((s) => ({ sessions: [session, ...s.sessions], activeSessionId: id }));
@@ -137,8 +132,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
 
       setModelKey: (id, modelKey) => set(mapSession(id, (s) => ({ ...s, modelKey }))),
 
-      setAutoAdvance: (id, on) => set(mapSession(id, (s) => ({ ...s, autoAdvance: on }))),
-
       appendMessage: (id, msg) =>
         set(mapSession(id, (s) => ({ ...s, messages: [...s.messages, msg] }))),
 
@@ -159,19 +152,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         ),
 
       setStatus: (id, status) => set(mapSession(id, (s) => ({ ...s, status }))),
-
-      setCursor: (id, cursor) => set(mapSession(id, (s) => ({ ...s, cursor }))),
-
-      resetRun: (id, track) =>
-        set(
-          mapSession(id, (s) => ({
-            ...s,
-            messages: [],
-            stages: freshStages(track),
-            cursor: 0,
-            status: "idle",
-          })),
-        ),
     }),
     {
       name: "orchestrator-sessions",
