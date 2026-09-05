@@ -300,7 +300,6 @@ export function OrchestratorCockpit({
             placeholder="The Orchestrator engine arrives in the next phase."
             onSend={() => {}}
             onStop={() => {}}
-            onGateDecision={() => {}}
             emptySlot={
               <EmptyThread
                 projectName={project?.name ?? null}

@@ -1,9 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Bot, Send, ShieldAlert, Sparkles, Square, User, Workflow } from "lucide-react";
+import { Bot, Send, Sparkles, Square, User, Workflow } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MarkdownMessage } from "@/components/app/markdown-message";
@@ -20,7 +19,6 @@ export interface ThreadProps {
   placeholder: string;
   onSend: (text: string) => void;
   onStop: () => void;
-  onGateDecision: (decision: "approved" | "rejected") => void;
   /** Rendered above the composer when the run is parked or finished. */
   footerSlot?: React.ReactNode;
   /** Rendered in place of the thread when there is nothing yet. */
@@ -58,7 +56,6 @@ export function Thread({
   placeholder,
   onSend,
   onStop,
-  onGateDecision,
   footerSlot,
   emptySlot,
 }: ThreadProps) {
@@ -76,9 +73,6 @@ export function Thread({
     onSend(trimmed);
     setText("");
   };
-
-  // The one gate still awaiting a decision, if any.
-  const openGate = [...messages].reverse().find((m) => m.gate && !m.gate.decided);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -113,43 +107,12 @@ export function Thread({
               );
             }
 
-            const isOpenGate = openGate?.id === m.id;
-
             return (
               <div
                 key={m.id}
-                className={cn(
-                  "border-line-soft bg-panel-elevated rounded-lg border px-3.5 py-3",
-                  m.gate && "border-warning/45 bg-warning/[0.04]",
-                  m.gate?.decided === "approved" && "border-success/40 bg-success/[0.04]",
-                  m.gate?.decided === "rejected" && "border-destructive/45 bg-destructive/[0.04]",
-                )}
+                className="border-line-soft bg-panel-elevated rounded-lg border px-3.5 py-3"
               >
                 <Attribution message={m} />
-
-                {m.gate && (
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className="text-warning font-mono text-[10px] font-semibold tracking-wide uppercase">
-                      Gate
-                    </span>
-                    {m.gate.mandatory && (
-                      <span className="text-destructive inline-flex items-center gap-1 font-mono text-[10px] tracking-wide uppercase">
-                        <ShieldAlert className="size-3" aria-hidden />
-                        Mandatory — cannot be waived
-                      </span>
-                    )}
-                    {m.gate.decided && (
-                      <span
-                        className={cn(
-                          "font-mono text-[10px] tracking-wide uppercase",
-                          m.gate.decided === "approved" ? "text-success" : "text-destructive",
-                        )}
-                      >
-                        {m.gate.decided}
-                      </span>
-                    )}
-                  </div>
-                )}
 
                 {m.content ? (
                   <MarkdownMessage content={m.content} />
@@ -157,25 +120,6 @@ export function Thread({
                   <ThinkingIndicator
                     label={m.phase ? `${PHASE_LABEL[m.phase]} agent working` : "Orchestrating"}
                   />
-                )}
-
-                {isOpenGate && (
-                  <div className="border-line-soft mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-                    <Button size="sm" className="h-7 text-[12px]" onClick={() => onGateDecision("approved")}>
-                      Approve &amp; continue
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="text-destructive hover:text-destructive h-7 text-[12px]"
-                      onClick={() => onGateDecision("rejected")}
-                    >
-                      Reject
-                    </Button>
-                    <span className="text-muted-foreground text-[11.5px]">
-                      The run is stopped until you decide.
-                    </span>
-                  </div>
                 )}
               </div>
             );

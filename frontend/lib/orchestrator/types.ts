@@ -48,15 +48,6 @@ export interface OrchestratorMessage {
   createdAt: number;
   /** `provider::model_id` of the model that answered — agent turns only. */
   modelKey?: string | null;
-  /**
-   * Set on the turn that closes a stage. `decided` stays undefined while the
-   * gate is open, which is what renders the inline approve/reject control.
-   */
-  gate?: {
-    phase: Phase;
-    mandatory: boolean;
-    decided?: "approved" | "rejected";
-  };
 }
 
 export type SessionStatus = "idle" | "running" | "paused" | "complete" | "failed";
