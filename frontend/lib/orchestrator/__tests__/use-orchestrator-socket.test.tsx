@@ -32,7 +32,7 @@ interface StubSocket {
   close: () => void;
 }
 
-let sockets: StubSocket[] = [];
+let sockets: FakeWebSocket[] = [];
 
 class FakeWebSocket implements StubSocket {
   static readonly CONNECTING = 0;
@@ -73,7 +73,7 @@ class FakeWebSocket implements StubSocket {
   }
 }
 
-const socket = () => sockets[0] as FakeWebSocket;
+const socket = () => sockets[0]!;
 
 beforeEach(() => {
   sockets = [];
@@ -272,6 +272,66 @@ describe("useOrchestratorSocket — turns", () => {
     expect(result.current.error).toMatch(/dropped before this turn finished/i);
     expect(result.current.messages.some((m) => m.role === "agent")).toBe(false);
   });
+
+  /**
+   * A turn queued before the handshake finished must not run twice.
+   *
+   * `send` queues into the outbox when the socket is not OPEN yet, and
+   * `flushOutbox` replays the queue on the next open. `onclose` used to leave
+   * that queue alone while telling the user "send it again once the connection is
+   * back" — so doing exactly what the UI asked ran the agent twice. These are the
+   * real delivery agents: two pushes to Azure DevOps, two release artifacts, two
+   * work items, from one message.
+   */
+  it("does not replay a queued turn after telling the user to send it again", async () => {
+    const { result } = renderHook(() => useOrchestratorSocket({ enabled: true }));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const first = socket();
+    // Deliberately NOT opened: this is the window the outbox exists for.
+    expect(first.readyState).toBe(FakeWebSocket.CONNECTING);
+
+    await act(async () => {
+      result.current.send({
+        text: "ship it",
+        agent: "development",
+        resolveRunId: async () => "run-1",
+      });
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    expect(first.sent).toHaveLength(0); // queued, not sent
+
+    // The connection drops before the handshake ever completes.
+    await act(async () => {
+      first.onclose?.();
+    });
+    expect(result.current.busy).toBe(false);
+    expect(result.current.error).toMatch(/never ran/i);
+    expect(result.current.error).toMatch(/send it again/i);
+
+    // The reconnect succeeds. Nothing may ride it.
+    await waitFor(() => expect(sockets).toHaveLength(2), { timeout: 4_000 });
+    await act(async () => {
+      sockets[1]!.open();
+    });
+    expect(sockets[1]!.sent).toHaveLength(0);
+    expect(first.sent).toHaveLength(0);
+
+    // And doing what the message said produces exactly one run.
+    await act(async () => {
+      result.current.send({
+        text: "ship it",
+        agent: "development",
+        resolveRunId: async () => "run-1",
+      });
+    });
+    await waitFor(() => expect(sockets[1]!.sent).toHaveLength(1));
+    expect(JSON.parse(sockets[1]!.sent[0]!)).toMatchObject({
+      type: "user_message",
+      text: "ship it",
+      agent: "development",
+      run_id: "run-1",
+    });
+  }, 10_000);
 
   /**
    * The regression this test exists for: `send` set `busy` and queued the frame,

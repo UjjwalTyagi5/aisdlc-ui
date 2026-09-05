@@ -305,6 +305,15 @@ export function useOrchestratorSocket(
   const handleEventRef = React.useRef(handleEvent);
   handleEventRef.current = handleEvent;
 
+  /**
+   * Send whatever was typed before the handshake finished.
+   *
+   * The outbox covers ONE window and no other: between a turn being dispatched
+   * and the socket becoming OPEN. Any close empties it (see `ws.onclose` and
+   * `abandonConnection`), so a frame can only ever flush onto the same socket it
+   * was queued for — it never survives a drop to be replayed onto the next one,
+   * because the user is told to resend and two of the same turn is two runs.
+   */
   const flushOutbox = React.useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -381,15 +390,37 @@ export function useOrchestratorSocket(
         };
         ws.onclose = () => {
           if (cancelled || closedByUnmount.current) return;
+
+          // DISCARD ANYTHING STILL QUEUED FOR THIS SOCKET, and do it before the
+          // message below tells the user to send the turn again.
+          //
+          // A frame queued while the handshake was still in flight has not left
+          // the browser, and `flushOutbox` would replay it the moment a reconnect
+          // opens. Combined with "send it again" that runs the agent TWICE — and
+          // these are the real delivery agents: a duplicate push to Azure DevOps,
+          // a duplicate release artifact, a duplicate work item, caused by doing
+          // exactly what the UI asked. Dropping it is what makes "send it again"
+          // mean one run.
+          //
+          // The alternative — replay it and say nothing — was rejected because
+          // the turn would then arrive minutes later, after the thread has
+          // already said it did not run, attached to a composer the user has
+          // moved on from. Silence about work that is still coming is the shape
+          // of failure this engine exists to remove.
+          const neverSent = outboxRef.current.length > 0;
+          outboxRef.current = [];
+
           // A turn cannot survive the socket that was carrying it. Release the
-          // composer — and SAY the turn did not finish, because the frame was
-          // already sent and will not be replayed by a reconnect. Finalizing
+          // composer, and say which of the two things happened — finalizing
           // quietly would leave the user's own message on screen with no reply
-          // and no reason, which is the silence this engine exists to remove.
+          // and no reason.
           if (busyRef.current) {
             failTurn(
-              "The connection dropped before this turn finished. Send it again once " +
-                "the connection is back.",
+              neverSent
+                ? "The connection dropped before this turn was sent, so it never ran. " +
+                    "Send it again once the connection is back."
+                : "The connection dropped before this turn finished. Send it again once " +
+                    "the connection is back.",
             );
           }
           scheduleReconnect();
