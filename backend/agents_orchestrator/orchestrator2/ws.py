@@ -39,6 +39,13 @@ There is also NO DEFAULT AGENT. Phase 2 dispatches only an explicitly named agen
 (routing arrives in Phase 3); a message without an `agent` field gets an `error`
 saying so. A silent default is exactly how the old engine hid six missing prompts.
 
+THE `run_id` ON THE WIRE IS NOT TRUSTED EITHER. It becomes the LangGraph `thread_id`
+against persistent checkpointers, so an unowned id would join someone else's
+conversation. `_resolve_run` proves the run belongs to the caller's tenant before it
+is used for anything; a run that fails that check never reaches the agent. Being a
+Project Admin says you may drive the Orchestrator — it does not say which runs are
+yours, and those are two different questions.
+
 Every inbound frame terminates: the socket answers with the agent's events (which
 always end in `stream_end`) or with an `error` followed by `stream_end`. A turn
 that fails is never allowed to end in silence, and an exception never kills the
@@ -65,11 +72,39 @@ orchestrator2_router = APIRouter()
 ORCHESTRATOR_ROLE = "project_admin"
 
 
+class EventSerializationError(Exception):
+    """An event could not be encoded as JSON, so it never reached the client.
+
+    Distinct from `WebSocketDisconnect` ON PURPOSE. Both used to be laundered into
+    "the peer hung up", which meant an event the socket could not encode was
+    indistinguishable from a client closing the tab: the turn loop unwound, the
+    connection was dropped, and NOTHING was ever sent — the exact swallow-and-go-quiet
+    failure this engine exists to remove. A dead peer is not an error to report (there
+    is nobody to report it to); an unencodable event is, and the socket stays open to
+    say so.
+    """
+
+
+class RunNotAvailableError(Exception):
+    """The named run is not one this caller may use — absent, another tenant's, or
+    unverifiable. One type for all three so the message back to the client cannot
+    accidentally reveal which."""
+
+
 async def _send(websocket: WebSocket, payload: dict) -> None:
-    """Best-effort JSON send — a dead socket ends the turn loop, it does not raise
-    a stray exception into it."""
+    """Encode and send one event.
+
+    Encoding and transport fail differently and must not be conflated (see
+    `EventSerializationError`): a `TypeError`/`ValueError` out of `json.dumps` is a bug
+    in the event we are trying to send and is reported to the client; a failed write
+    means the peer is gone and ends the turn loop.
+    """
     try:
-        await websocket.send_text(json.dumps(payload))
+        raw = json.dumps(payload)
+    except (TypeError, ValueError) as exc:
+        raise EventSerializationError(str(exc)) from exc
+    try:
+        await websocket.send_text(raw)
     except Exception:  # noqa: BLE001
         raise WebSocketDisconnect()
 
@@ -119,40 +154,96 @@ async def _resolve_platform_role(user_id: str, tenant_id: str) -> Optional[str]:
         return None
 
 
-async def _run_model_offering(run_id: str) -> tuple[Optional[str], Optional[str]]:
-    """The (model_id, offering_id) persisted on the run, or (None, None) on any miss.
+async def _resolve_run(run_id: str, tenant_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Confirm `run_id` belongs to the caller's tenant, and return its model selection.
 
-    Same read `copilot_api._run_model_offering` does, for the same reason: the model
-    is a property of the RUN, not something the client gets to name on the wire.
-    Fail-soft — the graph falls back to the organization default on None.
+    THIS IS AN OWNERSHIP CHECK, NOT A LOOKUP, and it is the reason the client's
+    `run_id` may be used at all. `run_id` arrives on the wire and reaches two things
+    that both take it at face value:
+
+      · this query, and
+      · `dispatch.run_agent`, which makes it the LangGraph `thread_id` against
+        PERSISTENT checkpointers (see `design_architecture_agent/agents/architecture.py`
+        and `pm_agent/agents/schedule.py`) — so an unowned id would join that run's
+        conversation thread.
+
+    The first version of this function was copied from
+    `copilot_api._run_model_offering`, which reads through `get_db_session_superuser()`
+    — a session that BYPASSES row-level security — with no tenant predicate. Under a
+    superuser session RLS is not a backstop, so the tenant filter has to be written
+    out, and its absence let a Project Admin in tenant A name a run in tenant B and
+    read its model selection. Here the read runs under the caller's tenant GUC AND
+    carries an explicit `Run.tenant_id` predicate: either alone would do, and the
+    point of having both is that neither is the only thing standing between tenants.
+
+    Raises `RunNotAvailableError` when the run is absent, belongs to another tenant,
+    or could not be verified (a DB failure). All three refuse, and all three raise the
+    SAME exception so the message back to the client cannot distinguish "no such run"
+    from "not yours" — the caller learns nothing about what exists elsewhere. Note the
+    deliberate change of posture from the code this replaces: an unverifiable run is a
+    REFUSAL, not a fall-through to the organization default. A turn that cannot prove
+    which run it belongs to must not run.
+
+    Returns the run's `(model_id, offering_id)` — the model is a property of the run,
+    never something the client names on the wire. `(None, None)` is a legitimate value
+    (the graph falls back to the organization default); it is no longer overloaded to
+    also mean "could not check".
     """
-    if not run_id:
-        return None, None
+    if not run_id or not tenant_id:
+        raise RunNotAvailableError("no run identified")
+
+    run_uuid = _as_run_uuid(run_id)
+    if run_uuid is None:
+        # Run ids in this system are UUIDs. Refusing a non-UUID here keeps a
+        # client-invented conversation key from ever becoming a graph thread_id, and
+        # avoids sending unvalidated text into a UUID column.
+        raise RunNotAvailableError(f"'{run_id}' is not a run id")
+
     try:
         from sqlalchemy import select
 
-        from shared.db import get_db_session_superuser
+        from shared.db import get_db_session_for_tenant
         from shared.models.orm import Run
 
-        async with get_db_session_superuser() as session:
+        async with get_db_session_for_tenant(tenant_id) as session:
             run = (
-                await session.execute(select(Run).where(Run.id == _as_run_uuid(run_id)))
+                await session.execute(
+                    select(Run).where(
+                        Run.id == run_uuid,
+                        Run.tenant_id == _as_run_uuid(tenant_id),
+                    )
+                )
             ).scalar_one_or_none()
-            if run is None:
-                return None, None
-            return getattr(run, "model_id", None), getattr(run, "offering_id", None)
-    except Exception as exc:  # noqa: BLE001 — model selection is never fatal to a turn
-        logger.warning("orchestrator2 _run_model_offering(%s) failed: %s", run_id, exc)
-        return None, None
+    except Exception as exc:  # noqa: BLE001 — cannot prove ownership ⇒ refuse
+        logger.warning(
+            "orchestrator2 could not verify run=%s for tenant=%s: %s — refusing "
+            "(fail-closed)", run_id, tenant_id, exc,
+        )
+        raise RunNotAvailableError("the run could not be verified") from exc
+
+    if run is None:
+        logger.info(
+            "orchestrator2 refused run=%s for tenant=%s — not this tenant's run",
+            run_id, tenant_id,
+        )
+        raise RunNotAvailableError("no such run")
+
+    return getattr(run, "model_id", None), getattr(run, "offering_id", None)
 
 
-def _as_run_uuid(run_id: str) -> Any:
+def _as_run_uuid(value: str) -> Any:
+    """The value as a UUID, or None when it is not one.
+
+    Returning None rather than the raw string (which is what `copilot_api._as_run_uuid`
+    does) is what lets `_resolve_run` refuse a non-UUID outright instead of pushing
+    caller-supplied text into a UUID comparison.
+    """
     import uuid
 
     try:
-        return uuid.UUID(str(run_id))
+        return uuid.UUID(str(value))
     except (ValueError, TypeError, AttributeError):
-        return run_id
+        return None
 
 
 @orchestrator2_router.websocket("/ws")
@@ -198,8 +289,10 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # A run may be pinned on the URL; each message may still carry its own, which
-    # wins. Both are only ever a conversation key (the graph's thread_id) — this
-    # socket reads no position from a run and writes none back.
+    # wins. Neither is trusted: whichever is used is checked against this caller's
+    # tenant by `_resolve_run` before it is used for anything, because it becomes the
+    # graph's thread_id. The socket reads no position from a run and writes none back
+    # — ownership is the only question it asks of one.
     default_run_id = websocket.query_params.get("run", "") or ""
 
     try:
@@ -241,7 +334,21 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 await _fail(websocket, "Missing run_id — provide it on the message or as ?run=.")
                 continue
 
-            model_id, offering_id = await _run_model_offering(run_id)
+            # Ownership gate. `run_id` came from the client and is about to become a
+            # LangGraph thread_id on a persistent checkpointer, so it is checked
+            # against this caller's tenant FIRST. Nothing below this line runs for a
+            # run the caller may not read: a run they cannot see must not become
+            # their conversation thread either.
+            try:
+                model_id, offering_id = await _resolve_run(run_id, tenant_id)
+            except RunNotAvailableError as exc:
+                # One message for absent and for another tenant's run — the two
+                # `RunNotAvailableError` cases are worded identically upstream so this
+                # cannot become an existence oracle for runs the caller cannot see.
+                await _fail(
+                    websocket, "That run is not available.", detail=str(exc)
+                )
+                continue
 
             try:
                 async for event in run_agent(
@@ -255,6 +362,21 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                     await _send(websocket, event)
             except WebSocketDisconnect:
                 raise
+            except EventSerializationError as exc:
+                # An event the socket could not encode. This branch exists because
+                # without it the failure was laundered into WebSocketDisconnect and
+                # the connection just went quiet: the client saw a hang-up it did not
+                # cause and never learned that a frame had been dropped. The peer is
+                # alive here, so tell it — and keep serving.
+                logger.exception(
+                    "orchestrator2 dropped an unencodable event (agent=%s run=%s)",
+                    agent_id, run_id,
+                )
+                await _fail(
+                    websocket,
+                    "The agent produced an event that could not be sent and was dropped.",
+                    detail=str(exc),
+                )
             except Exception as exc:  # noqa: BLE001 — a failed turn must be visible
                 # `run_agent` handles its own failures; reaching here means something
                 # outside it broke. Surfacing it keeps the promise that a turn never
