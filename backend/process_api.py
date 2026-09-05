@@ -66,6 +66,7 @@ from shared.authz.token_epoch import is_token_stale
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
 from shared.authz.catalog import assert_rbac_catalog
+from agents_orchestrator.orchestrator2.registry import validate_registry
 from shared.auth.bootstrap import seed_org_admins
 from shared.authz.resolver import resolve_permissions_for_user, PermissionResolutionError
 from shared.db import engine, get_db_session_for_tenant, get_db_session_superuser, RESOLVED_POSTGRES_CONN_STRING
@@ -598,6 +599,15 @@ async def lifespan(app: FastAPI):
         await assert_rbac_catalog(
             _catalog_session, autorepair=RBAC_CATALOG_AUTOREPAIR
         )
+
+    # Orchestrator2 capability registry boot guard (spec §11.2). The old engine
+    # returned None for an unmapped agent and logged a warning: six of nine agents
+    # ran with no system prompt and the Project Manager agent (`plan`) could not
+    # run at all, and because it failed soft, the symptom was a vague answer, never
+    # an error anyone could chase. This is fatal, not a warning, for the same
+    # reason the RBAC catalogue guard above is fatal: a capability gap must be
+    # impossible to ship, not something a user discovers by being ignored.
+    validate_registry()
 
     # Seed the single organization + its env-listed org admin(s). Idempotent.
     # No-op unless ORG_ADMIN_EMAILS and ORG_ADMIN_PASSWORD are both set.
