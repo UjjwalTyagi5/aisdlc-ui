@@ -1,7 +1,12 @@
+import ast
+import inspect
+
 import pytest
 
+from agents_orchestrator.orchestrator2 import registry as reg, router
 from agents_orchestrator.orchestrator2.registry import AGENT_IDS
 from agents_orchestrator.orchestrator2.router import DISPLAY_NAMES, prefilter
+from shared.services import model_resolver as mr
 
 
 @pytest.mark.parametrize(
@@ -198,3 +203,538 @@ def test_an_internal_fault_surfaces_instead_of_being_routed_away(monkeypatch):
 def test_very_long_input_is_handled():
     assert prefilter("run the testing agent " * 5000) is None
     assert prefilter("x" * 100_000) is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The Context Agent's routing decision
+#
+# The pre-filter above answers "is this an explicit command?". Everything below is
+# the other 95% of turns: `route()` reads the message and picks one of the nine
+# agents by MEANING, or answers directly. The engine this replaces could not do
+# this at all — `stage_switch.py` matched an alias anywhere in the text, so
+# "I need a PRD" routed nowhere and the user had to name the agent by hand.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _a_resolved_model(model="claude-sonnet-4-5"):
+    return mr.ResolvedModel(
+        provider="anthropic", litellm_provider="anthropic", model=model,
+        api_key="sk-this-projects-key", base_url=None, alias="tenant:t1:prov-1",
+    )
+
+
+class _FakeAIMessage:
+    """The shape `guarded_completion` returns: a LangChain AIMessage has `.content`
+    and `.tool_calls` (already parsed into {name, args, id} dicts)."""
+
+    def __init__(self, *, content="", tool_calls=None):
+        self.content = content
+        self.tool_calls = list(tool_calls or [])
+
+
+class _Recorder:
+    def __init__(self):
+        self.resolve_positional = None
+        self.resolve_kwargs = None
+        self.run_project_contextvar = "<never resolved>"
+        self.llm_kwargs = None
+        self.bound_tools = None
+        self.messages = None
+        self.guarded_kwargs = None
+
+
+def _install(monkeypatch, *, response=None, resolve_raises=None):
+    """Wire `_ask_model`'s three real collaborators — the resolver, the client
+    builder and `guarded_completion` — to a recorder, so the LLM call is exercised
+    end to end without a network call or a 7-second litellm import."""
+    rec = _Recorder()
+
+    async def _fake_resolve(tenant_id, requested_model_id=None, **kwargs):
+        rec.resolve_positional = (tenant_id, requested_model_id)
+        # Read the contextvar the REAL resolver falls back to when no project_id is
+        # passed. If the router were leaning on ambient state instead of passing the
+        # id, this is where that would show.
+        rec.run_project_contextvar = mr.get_run_project()
+        rec.resolve_kwargs = kwargs
+        if resolve_raises is not None:
+            raise resolve_raises
+        return _a_resolved_model()
+
+    class _FakeLLM:
+        def bind_tools(self, tools):
+            rec.bound_tools = tools
+            return self
+
+    def _fake_build(resolved):
+        rec.llm_kwargs = router._llm_kwargs(resolved)
+        return _FakeLLM()
+
+    async def _fake_guarded(resolved, chat_model, messages, **kwargs):
+        rec.messages = messages
+        rec.guarded_kwargs = kwargs
+        return response if response is not None else _FakeAIMessage(content="ok")
+
+    monkeypatch.setattr(router, "resolve_model_for_run", _fake_resolve)
+    monkeypatch.setattr(router, "_build_llm", _fake_build)
+    monkeypatch.setattr(router, "guarded_completion", _fake_guarded)
+    return rec
+
+
+async def _route(**overrides):
+    kwargs = dict(history=[], run_id="run-1", tenant_id="t1", project_id="proj-1",
+                  model_id=None, offering_id=None)
+    kwargs.update(overrides)
+    text = kwargs.pop("text", "I need a PRD")
+    return await router.route(text, **kwargs)
+
+
+async def _unused_ask_model(*a, **k):
+    raise AssertionError("the model must not be called here")
+
+
+@pytest.fixture(autouse=True)
+def _clean_run_project():
+    """`resolve_model_for_run` falls back to this contextvar. A value left behind by
+    another test would let a router that DOESN'T pass project_id pass anyway."""
+    mr.set_run_project(None)
+    yield
+    mr.set_run_project(None)
+
+
+# ── the three behaviours the phase exists for ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_prefilter_short_circuits_without_a_model_call(monkeypatch):
+    """An unambiguous command must not spend a model call."""
+    from agents_orchestrator.orchestrator2 import router
+
+    called = False
+
+    async def _boom(*a, **k):
+        nonlocal called
+        called = True
+        raise AssertionError("the model must not be called here")
+
+    monkeypatch.setattr(router, "_ask_model", _boom)
+    d = await router.route("run the testing agent", history=[], run_id="r", tenant_id="t",
+                           project_id="p", model_id=None, offering_id=None)
+    assert d.agent_id == "testing"
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_intent_without_an_agent_name_reaches_the_model(monkeypatch):
+    """'I need a PRD' contains no agent alias. The old router could not route it;
+    that limitation is the whole reason this phase exists."""
+    from agents_orchestrator.orchestrator2 import router
+
+    async def _fake(*a, **k):
+        return router.RoutingDecision(agent_id="requirements", reason="asked for a PRD",
+                                      direct_reply=None)
+
+    monkeypatch.setattr(router, "_ask_model", _fake)
+    d = await router.route("I need a PRD", history=[], run_id="r", tenant_id="t",
+                           project_id="p", model_id=None, offering_id=None)
+    assert d.agent_id == "requirements"
+
+
+@pytest.mark.asyncio
+async def test_a_model_naming_an_unknown_agent_is_refused(monkeypatch):
+    """The router's tools are generated FROM the registry, so this should be
+    impossible — but a model can hallucinate, and a bad id must not reach dispatch."""
+    from agents_orchestrator.orchestrator2 import router
+
+    async def _fake(*a, **k):
+        return router.RoutingDecision(agent_id="marketing", reason="x", direct_reply=None)
+
+    monkeypatch.setattr(router, "_ask_model", _fake)
+    d = await router.route("do the thing", history=[], run_id="r", tenant_id="t",
+                           project_id="p", model_id=None, offering_id=None)
+    assert d.agent_id is None
+    assert d.direct_reply  # says it could not choose, rather than silently doing nothing
+
+
+# ── a pre-filter hit is announced as what it is ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_prefilter_hit_says_it_was_an_explicit_command(monkeypatch):
+    """`reason` is shown to the user, so it has to say WHY this agent — and for a
+    pre-filter hit the honest answer is 'because you named it', not a guess at
+    intent the pre-filter never formed."""
+    monkeypatch.setattr(router, "_ask_model", _unused_ask_model)
+    d = await _route(text="use the project manager agent")
+    assert d.agent_id == "plan"
+    assert d.direct_reply is None
+    assert "Project Manager" in d.reason
+    assert "Plan agent" not in d.reason and "PM agent" not in d.reason
+
+
+# ── the tool list is GENERATED, so it cannot offer an unrunnable agent ───────
+
+
+def _tool_names(specs):
+    return {s["function"]["name"] for s in specs}
+
+
+def test_the_tool_list_covers_exactly_the_registry():
+    """One tool per agent the engine can actually run — not a hand-typed list that
+    can drift from it."""
+    assert _tool_names(router._tool_specs()) == {
+        f"{router._TOOL_PREFIX}{agent_id}" for agent_id in reg.REGISTRY
+    }
+
+
+def test_the_tool_list_cannot_offer_an_agent_the_engine_cannot_run(monkeypatch):
+    """The load-bearing half: DERIVED, not copied. Take an agent out of the registry
+    and the router stops offering it in the same breath. A hand-typed list would
+    keep offering `security` here, and dispatch would then fail on a choice the
+    router had presented as available — the old engine's undispatchable `plan`
+    agent, rebuilt."""
+    registry_without_security = {k: v for k, v in reg.REGISTRY.items() if k != "security"}
+    monkeypatch.setattr(router, "REGISTRY", registry_without_security)
+
+    names = _tool_names(router._tool_specs())
+    assert f"{router._TOOL_PREFIX}security" not in names
+    assert len(names) == len(AGENT_IDS) - 1
+
+
+@pytest.mark.parametrize("agent_id", AGENT_IDS)
+def test_every_tool_carries_its_display_name_and_a_description(agent_id):
+    spec = next(s["function"] for s in router._tool_specs()
+                if s["function"]["name"] == f"{router._TOOL_PREFIX}{agent_id}")
+    assert DISPLAY_NAMES[agent_id] in spec["description"]
+    # A name plus nothing else tells the model nothing it could not guess from the id.
+    assert len(spec["description"]) > len(DISPLAY_NAMES[agent_id]) + 20
+    assert "reason" in spec["parameters"]["properties"]
+
+
+def test_the_project_manager_agent_is_named_correctly_to_the_model():
+    """`plan` is the Project Manager agent in every user-facing string, and the tool
+    description is user-facing by proxy: it is what the model echoes back."""
+    spec = next(s["function"] for s in router._tool_specs()
+                if s["function"]["name"] == f"{router._TOOL_PREFIX}plan")
+    assert "Project Manager" in spec["description"]
+    assert "Plan agent" not in spec["description"]
+    assert "PM agent" not in spec["description"]
+
+
+# ── the routing prompt ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "banned",
+    ["next agent", "next stage", "sign-off", "sign off", "advance to",
+     "progress to", "previous stage", "handoff gate"],
+)
+def test_the_routing_prompt_has_no_positional_progression_language(banned):
+    """There is no ordering in this engine. Every turn considers all nine agents;
+    'the next agent' meant 'the next item in a list' in the engine this replaces,
+    and that is exactly the behaviour being removed."""
+    assert banned not in router._system_prompt().lower()
+
+
+def test_the_routing_prompt_lists_exactly_the_registrys_agents():
+    """Generated from the same source as the tools, so the prompt can never describe
+    an agent the tool list does not offer."""
+    prompt = router._system_prompt()
+    for agent_id in reg.REGISTRY:
+        assert DISPLAY_NAMES[agent_id] in prompt
+    assert "Plan agent" not in prompt
+
+
+# ── BYOK: the router's own model call is project-scoped ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_router_resolves_its_model_with_the_runs_project_id(monkeypatch):
+    """THE regression this task must not reintroduce.
+
+    `resolve_model_for_run` uses `project_id` for two enforcement decisions —
+    `effective_project_offerings` (which models this project was granted) and
+    `check_budgets` (whose monthly cap this spend counts against). Both are BYPASSED
+    when it is None. Dispatch was just fixed to pass it; a router that resolved
+    without it would reopen the identical hole on a NEW code path, where the
+    dispatch tests could not see it.
+    """
+    rec = _install(monkeypatch)
+    await _route(project_id="proj-1", tenant_id="t1")
+
+    assert rec.resolve_kwargs is not None, "the router never resolved a model"
+    assert rec.resolve_kwargs.get("project_id") == "proj-1", (
+        "the router's own LLM call must be scoped to the run's project, exactly as "
+        f"dispatch.run_agent does; saw {rec.resolve_kwargs!r}"
+    )
+    assert rec.resolve_positional == ("t1", None)
+    assert "offering_id" in rec.resolve_kwargs
+
+
+@pytest.mark.asyncio
+async def test_the_router_passes_the_project_id_rather_than_leaning_on_ambient_state(
+    monkeypatch,
+):
+    """`resolve_model_for_run` also reads a `_RUN_PROJECT` contextvar when no
+    project_id is passed. Relying on that would make the router correct only when
+    something else happened to have set it first — and the router runs BEFORE
+    dispatch, which is the thing that sets it. So the id must be explicit."""
+    rec = _install(monkeypatch)
+    await _route(project_id="proj-9")
+
+    assert rec.run_project_contextvar is None, (
+        "the router must not depend on a contextvar it never sets"
+    )
+    assert rec.resolve_kwargs.get("project_id") == "proj-9"
+
+
+@pytest.mark.asyncio
+async def test_a_project_with_no_usable_model_is_not_papered_over(monkeypatch):
+    """No env-key fallback, and no fail-soft to `agent_id=None` either. A router
+    that answered 'I could not choose' when the real problem is an unconfigured
+    provider sends an administrator hunting the wrong bug; `ws.py` already turns an
+    exception in a turn into a typed `error` the user can see."""
+    _install(monkeypatch, resolve_raises=mr.NoModelConfiguredError("none configured"))
+    with pytest.raises(mr.NoModelConfiguredError):
+        await _route()
+
+
+def _module_code(module) -> str:
+    """A module's source with every docstring and every comment stripped.
+
+    Assertions about what code DOES must not be satisfiable — or DEFEATED — by prose
+    about it: this module's docstring names the fallback it refuses to have.
+    """
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (isinstance(body, list) and body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)  # ast.unparse drops comments outright
+
+
+def test_the_router_has_no_env_key_fallback_anywhere():
+    """`copilot_api._classify_switch` — the classifier this replaces — falls back to
+    a hardcoded ANTHROPIC_MODEL + ANTHROPIC_API_KEY when resolution fails. In a
+    deployed environment there IS no platform key, so a local success on one is a
+    lie about production. Source-level, because the point is that no path reaches it."""
+    code = _module_code(router)
+    for banned in ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "local-dev", "local-env"):
+        assert banned not in code, (
+            f"{banned} must not appear in the orchestrator2 router — resolution "
+            f"fails closed, with no platform fallback"
+        )
+
+
+@pytest.mark.parametrize("func_name", ["route", "_ask_model"])
+def test_project_id_is_keyword_required_with_no_default(func_name):
+    """A default of None is how project scoping gets dropped silently at the next
+    call site added. Omitting it must be a TypeError, not a quiet unscoped call."""
+    param = inspect.signature(getattr(router, func_name)).parameters["project_id"]
+    assert param.default is inspect.Parameter.empty
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ── the client the router builds ─────────────────────────────────────────────
+
+
+def test_the_client_is_built_with_the_projects_own_key():
+    """ChatLiteLLM keeps a separate named field per provider, defaulted from the
+    ENVIRONMENT, and it wins over the generic `api_key` — which is how agents
+    authenticated with a stale platform key and reported the tenant's valid key as
+    invalid. `litellm_key_kwargs` is what makes the BYOK key the one actually used."""
+    kwargs = router._llm_kwargs(_a_resolved_model())
+    assert kwargs["api_key"] == "sk-this-projects-key"
+    assert kwargs["anthropic_api_key"] == "sk-this-projects-key"
+    assert kwargs["model"] == "claude-sonnet-4-5"
+    assert kwargs["custom_llm_provider"] == "anthropic"
+
+
+def test_the_client_leaves_retrying_to_guarded_completion():
+    """ChatLiteLLM's own tenacity retry wraps every call underneath
+    guarded_completion's, uncoordinated: one call becomes up to 3x3 real requests at
+    a provider that is already rate-limiting. Measured live (dev_agent._build_llm)."""
+    assert router._llm_kwargs(_a_resolved_model())["max_retries"] == 0
+
+
+def test_a_model_that_rejects_temperature_is_not_sent_one():
+    """litellm raises UnsupportedParamsError BEFORE the call for the gpt-5 family and
+    the newest Claude models, so a hardcoded temperature fails every routing turn for
+    those tenants. `temperature_kwargs` is the measured list."""
+    assert "temperature" not in router._llm_kwargs(_a_resolved_model("azure/gpt-5-mini"))
+    assert "temperature" not in router._llm_kwargs(_a_resolved_model("claude-opus-4-8"))
+    assert router._llm_kwargs(_a_resolved_model("claude-sonnet-4-5"))["temperature"] == 0.0
+
+
+# ── what the model is actually asked ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_model_sees_the_system_prompt_the_history_and_the_new_message(
+    monkeypatch,
+):
+    rec = _install(monkeypatch)
+    await _route(
+        text="and now?",
+        history=[{"role": "user", "content": "we finished the PRD"},
+                 {"role": "assistant", "content": "noted"}],
+    )
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert contents[0] == router._system_prompt()
+    assert "we finished the PRD" in contents
+    assert contents[-1] == "and now?", "the message being routed must be the last turn"
+
+
+@pytest.mark.asyncio
+async def test_history_is_capped_but_the_new_message_always_survives(monkeypatch):
+    """An unbounded history makes a cheap routing call arbitrarily expensive and can
+    push the message being routed out of the model's attention entirely."""
+    rec = _install(monkeypatch)
+    history = [{"role": "user", "content": f"turn {i}"} for i in range(200)]
+    await _route(text="route me", history=history)
+
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert len(rec.messages) <= router._HISTORY_LIMIT + 2  # + system + the new message
+    assert contents[-1] == "route me"
+    assert "turn 199" in contents and "turn 0" not in contents
+
+
+@pytest.mark.asyncio
+async def test_a_wrongly_shaped_history_entry_surfaces_instead_of_being_dropped(
+    monkeypatch,
+):
+    """Routing on a silently truncated conversation is a mis-route, and a mis-route
+    that looks healthy is the failure this engine was rebuilt to end."""
+    _install(monkeypatch)
+    with pytest.raises(TypeError):
+        await _route(history=["just a string"])
+
+
+@pytest.mark.asyncio
+async def test_the_call_is_attributed_to_the_router_not_to_an_agent(monkeypatch):
+    """Cost logs are read per agent_type. Billing the routing call to `development`
+    would make one agent's spend permanently wrong."""
+    rec = _install(monkeypatch)
+    await _route(tenant_id="t1")
+    assert rec.guarded_kwargs["tenant_id"] == "t1"
+    assert rec.guarded_kwargs["agent_type"] == "orchestrator_router"
+
+
+# ── turning the model's answer into a decision ───────────────────────────────
+
+
+def _tool_call(name, reason="because"):
+    return {"name": name, "args": {"reason": reason}, "id": "call-1"}
+
+
+@pytest.mark.asyncio
+async def test_one_tool_call_becomes_the_routing_decision(monkeypatch):
+    _install(monkeypatch, response=_FakeAIMessage(
+        tool_calls=[_tool_call("route_to_requirements", "you asked for a PRD")]))
+    d = await _route()
+    assert d.agent_id == "requirements"
+    assert d.reason == "you asked for a PRD"
+    assert d.direct_reply is None
+
+
+@pytest.mark.asyncio
+async def test_no_tool_call_becomes_a_direct_reply(monkeypatch):
+    """Not every message is delivery work. 'What did we decide yesterday?' needs an
+    answer, not an agent — and handing it to one would interrupt work rather than
+    advance it."""
+    _install(monkeypatch, response=_FakeAIMessage(content="We decided to ship on Friday."))
+    d = await _route(text="what did we decide yesterday?")
+    assert d.agent_id is None
+    assert d.direct_reply == "We decided to ship on Friday."
+
+
+@pytest.mark.asyncio
+async def test_content_blocks_are_read_as_text(monkeypatch):
+    """Some providers return content as a list of typed blocks rather than a string.
+    Reading `.content` naively would put a Python repr in front of the user."""
+    _install(monkeypatch, response=_FakeAIMessage(
+        content=[{"type": "text", "text": "no agent needed here"}]))
+    d = await _route()
+    assert d.direct_reply == "no agent needed here"
+
+
+@pytest.mark.asyncio
+async def test_two_tool_calls_are_refused_rather_than_guessed(monkeypatch):
+    """This function returns ONE id and cannot express 'requirements, then design'.
+    Taking the first would be a silent guess — the same choice the pre-filter
+    already refuses to make for a message naming two agents."""
+    _install(monkeypatch, response=_FakeAIMessage(
+        tool_calls=[_tool_call("route_to_requirements"), _tool_call("route_to_design")]))
+    d = await _route()
+    assert d.agent_id is None
+    assert d.direct_reply
+    assert "Requirements" in d.direct_reply and "Design" in d.direct_reply
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_with_no_reason_still_tells_the_user_something(monkeypatch):
+    """`reason` is required in the schema, but a model can omit a required argument.
+    An empty line in the UI is not a reason."""
+    _install(monkeypatch, response=_FakeAIMessage(
+        tool_calls=[{"name": "route_to_design", "args": {}, "id": "c1"}]))
+    d = await _route()
+    assert d.agent_id == "design"
+    assert d.reason.strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "route_to_marketing",   # an agent that does not exist
+        "route_to_Testing",     # right agent, wrong case — ids are exact
+        "route_to_",            # a truncated name
+        "testing",              # the prefix omitted
+        "route_to_plan_agent",  # the display name smuggled into the id
+    ],
+)
+async def test_a_hallucinated_tool_name_never_reaches_dispatch(monkeypatch, bad_name):
+    """The tools are generated from the registry so none of these can be offered —
+    but a model can emit a name it was never given, and `dispatch.run_agent` would
+    then answer with an `error` event for an id the router had chosen. Refuse here,
+    visibly."""
+    _install(monkeypatch, response=_FakeAIMessage(tool_calls=[_tool_call(bad_name)]))
+    d = await _route()
+    assert d.agent_id is None
+    assert d.direct_reply, "a refusal must say so, not be a silent no-op"
+
+
+@pytest.mark.asyncio
+async def test_choosing_no_agent_and_saying_nothing_is_never_a_silent_no_op(monkeypatch):
+    """agent_id=None means 'the router answers'. With no reply there is nothing to
+    show, and the turn ends in silence — the exact failure mode this engine exists
+    to remove."""
+    async def _empty(*a, **k):
+        return router.RoutingDecision(agent_id=None, reason="", direct_reply=None)
+
+    monkeypatch.setattr(router, "_ask_model", _empty)
+    d = await _route()
+    assert d.agent_id is None
+    assert d.direct_reply and d.direct_reply.strip()
+    assert d.reason and d.reason.strip()
+
+
+def test_a_routing_decision_is_frozen():
+    """A decision is a fact about a turn. Mutating it after the fact is how the
+    agent announced in `agent.selected` stops being the one that ran."""
+    d = router.RoutingDecision(agent_id="design", reason="r", direct_reply=None)
+    with pytest.raises(Exception):
+        d.agent_id = "security"
+
+
+@pytest.mark.asyncio
+async def test_every_agent_is_reachable_by_meaning(monkeypatch):
+    """Derived from AGENT_IDS: a tenth agent cannot silently miss coverage. Proves
+    the id survives tool-name round-tripping for all nine (`code_review`'s
+    underscore is the one that would break a naive split)."""
+    for agent_id in AGENT_IDS:
+        _install(monkeypatch, response=_FakeAIMessage(
+            tool_calls=[_tool_call(f"{router._TOOL_PREFIX}{agent_id}")]))
+        d = await _route()
+        assert d.agent_id == agent_id
