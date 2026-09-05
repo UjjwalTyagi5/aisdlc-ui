@@ -498,3 +498,74 @@ All fixed, plus one regression the fix wave itself introduced (see R14).
 
 Server-backed sessions, the capability registry, the Context Agent, real agent dispatch,
 deleting the Copilot route, and the e2e rewrite. Phases 2–5.
+
+---
+
+## 11. Phase 2 research — a finding that refines D10 (2026-09-05)
+
+D10 says: borrow the standalone agents' capabilities, not the whole agents, because they
+carry permission machinery the Orchestrator does not need. Checking where that machinery
+actually lives changes what "rebuild" has to mean.
+
+**Measured, by counting permission/session/gate patterns per file:**
+
+| Layer | Hits |
+|---|---|
+| `requirements_agent_api.py` | 5 |
+| `development_agent_api.py` | 3 |
+| `pm_agent_api.py` | 3 |
+| `development_agent/agents/dev_agent.py` (graph) | 0 |
+| `pm_agent/agents/schedule.py` (graph) | 0 |
+| `code_review_agent/agents/reviewer.py` (graph) | 0 |
+| `design_architecture_agent/agents/architecture.py` (graph) | 1 |
+| `requirements_agent/agents/planning.py` (graph) | 3 |
+
+**The machinery is in the API wrappers, not the graphs.** Those wrappers are the
+`*_agent_api.py` files that make each agent reachable on its own — WS tickets, per-role
+permission checks, session handling. The Orchestrator would never call them anyway, so
+D10's goal is achieved for free by not using them.
+
+**What the few graph hits actually are** — and this matters:
+
+- `shared/authz/consequential.authorize_consequential` (requirements, design)
+- `shared/authz/connector_access.permits` (requirements)
+
+Neither is role/RBAC machinery. `authorize_consequential` guards **real-world side effects** —
+writing to Azure DevOps, pushing a branch — and `connector_access` checks a connector is
+permitted. These are exactly the guards that should SURVIVE into the Orchestrator: a Project
+Admin having every agent does not mean an agent should silently push to a repo unasked.
+
+**Consequence for Phase 2.** Rebuilding all nine graphs from tools + prompts is a large,
+drift-prone effort whose stated justification (shedding permission machinery) is mostly
+already satisfied by skipping the API layer — and doing it carelessly would drop the
+consequential-action guard, which is a safety regression, not a simplification.
+
+### 11.1 D10 revised — D10a (user decision, 2026-09-05)
+
+**Reuse the compiled graphs; never touch the `*_agent_api.py` wrappers.**
+
+This supersedes D10's "build our own per-agent implementation". D10's *goal* stands
+unchanged — the Orchestrator must not inherit the machinery of an agent being reachable on
+its own — but the measurement above shows that machinery lives in the wrappers, so skipping
+them achieves the goal at zero cost.
+
+What this buys over rebuilding:
+
+- **One capability, one implementation.** The drift risk D10 itself flagged ("a tool improved
+  in the standalone agent does not automatically improve the Orchestrator's") disappears
+  entirely, rather than being mitigated.
+- **The side-effect guards survive.** `authorize_consequential` and `connector_access` stay
+  where they are, so an agent still cannot push to a repo without passing the same check it
+  passes today. A hand-rolled rebuild would have had to re-import both deliberately, and
+  forgetting either is a silent safety regression.
+- **Nine fewer implementations to write and keep in sync.**
+
+What the Orchestrator still owns, and does NOT take from the standalone agents:
+its own routing (the Context Agent), its own session/run handling, its own streaming
+protocol, and its own registry with startup validation. The agents supply capability; the
+Orchestrator supplies everything about being an orchestrator.
+
+**Cost if wrong:** if some agent's graph turns out to depend on state its wrapper used to
+provide, that agent needs an adapter — or, in the worst case, a native rebuild after all.
+The registry is the natural place for such an adapter, so this stays reversible per agent
+rather than being an all-or-nothing bet.
