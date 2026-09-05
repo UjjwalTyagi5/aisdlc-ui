@@ -40,8 +40,13 @@ interface ChatRequest {
   agentParams?: Record<string, unknown>;
 }
 
-/** Map an agent id to its FastAPI WS path. Unknown/absent → orchestrator. */
-function agentWsPath(agent?: string): string {
+/** Map an agent id to its FastAPI WS path. Unknown/absent → orchestrator.
+ *
+ * Exported for `app/api/__tests__/chat-agent-map.test.ts`, which pins this table
+ * so Phase 5's retirement of the legacy `/sdlc/agent/orchestrator/ws` engine
+ * cannot silently change where an unmapped agent lands.
+ */
+export function agentWsPath(agent?: string): string {
   switch (agent) {
     case "requirement":
     case "requirements":
