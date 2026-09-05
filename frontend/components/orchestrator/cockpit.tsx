@@ -3,19 +3,17 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Info, Play, RotateCcw, Sparkles, SquarePlay, Workflow } from "lucide-react";
+import { FolderKanban, Info, RotateCcw, Sparkles, SquarePlay, Workflow } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { LoadingState } from "@/components/ui/loading-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
+import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { ModelPicker, type ProjectModelOption } from "@/components/orchestrator/model-picker";
 import { ProjectPicker } from "@/components/orchestrator/project-picker";
 import { SessionRail } from "@/components/orchestrator/session-rail";
-import { StageRail } from "@/components/orchestrator/stage-rail";
 import { Thread } from "@/components/orchestrator/thread";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { roleAgentSplit } from "@/lib/agent-access";
@@ -23,7 +21,6 @@ import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import { getProject, listProjects } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
-import { PHASE_LABEL } from "@/lib/agents";
 import { TRACK_META } from "@/lib/tracks";
 import { splitModelKey } from "@/lib/orchestrator/types";
 import { useOrchestrator } from "@/lib/orchestrator/use-orchestrator";
@@ -74,6 +71,10 @@ export function OrchestratorCockpit({
   // contents before that would mismatch the server's empty render.
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
+
+  // The artifacts panel starts collapsed — there is nothing to show until a
+  // run has produced something, and an empty expanded panel is just noise.
+  const [artifactsCollapsed, setArtifactsCollapsed] = React.useState(true);
 
   const allSessions = useOrchestratorStore((s) => s.sessions);
   const activeSessionId = useOrchestratorStore((s) => s.activeSessionId);
@@ -344,18 +345,6 @@ export function OrchestratorCockpit({
           />
 
           <div className="ml-auto flex items-center gap-3">
-            <span className="hidden items-center gap-2 lg:flex">
-              <Switch
-                id="auto-advance"
-                checked={active?.autoAdvance ?? true}
-                onCheckedChange={(v) => active && store.getState().setAutoAdvance(active.id, v)}
-                disabled={!active || !canDrive}
-              />
-              <Label htmlFor="auto-advance" className="text-[12px] font-normal">
-                Auto-advance
-              </Label>
-            </span>
-
             {canDrive &&
               (controls.busy ? (
                 <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={controls.stop}>
@@ -377,12 +366,7 @@ export function OrchestratorCockpit({
                   <SquarePlay className="size-3.5" aria-hidden />
                   Resume
                 </Button>
-              ) : (
-                <Button size="sm" className="h-8 gap-1.5" disabled={!ready} onClick={() => handleRun()}>
-                  <Play className="size-3.5" aria-hidden />
-                  Run pipeline
-                </Button>
-              ))}
+              ) : null)}
           </div>
         </header>
 
@@ -466,16 +450,23 @@ export function OrchestratorCockpit({
               <EmptyThread
                 projectName={project?.name ?? null}
                 trackLabel={trackMeta ? `Track ${trackMeta.number} · ${trackMeta.label}` : null}
-                stageCount={stages.length}
-                firstStage={stages[0] ? PHASE_LABEL[stages[0].phase] : null}
-                ready={ready && canDrive}
-                onRun={() => handleRun()}
+                agentCount={stages.length}
               />
             }
           />
 
           <div className={cn("hidden", variant === "page" ? "xl:block" : "lg:block")}>
-            <StageRail stages={stages} cursor={active?.cursor ?? 0} projectId={projectId} />
+            <ArtifactsPanel
+              runId=""
+              activeStage=""
+              gate={null}
+              artifacts={[]}
+              openArtifactId={null}
+              onSelectArtifact={() => {}}
+              streamingArtifactId={null}
+              collapsed={artifactsCollapsed}
+              onToggle={() => setArtifactsCollapsed((v) => !v)}
+            />
           </div>
         </div>
       </div>
@@ -486,17 +477,11 @@ export function OrchestratorCockpit({
 function EmptyThread({
   projectName,
   trackLabel,
-  stageCount,
-  firstStage,
-  ready,
-  onRun,
+  agentCount,
 }: {
   projectName: string | null;
   trackLabel: string | null;
-  stageCount: number;
-  firstStage: string | null;
-  ready: boolean;
-  onRun: () => void;
+  agentCount: number;
 }) {
   return (
     <div className="mx-auto flex max-w-lg flex-col items-center gap-3 py-16 text-center">
@@ -509,20 +494,13 @@ function EmptyThread({
       <p className="text-muted-foreground max-w-md text-[13px] leading-relaxed">
         {projectName && trackLabel ? (
           <>
-            <span className="text-foreground">{trackLabel}</span> — {stageCount} agents, starting at{" "}
-            <span className="text-foreground">{firstStage}</span>. Each agent hands its artifacts to
-            the next automatically. Mandatory gates stop the run and wait for you.
+            <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
+            roster. Ask for what you need. The right agent picks it up.
           </>
         ) : (
-          "Choose a project and one of the models it is allowed to run on. The Orchestrator then executes that project's agent roster in hand-off order."
+          "Choose a project and one of the models it is allowed to run on, then ask for what you need. The right agent picks it up."
         )}
       </p>
-      {ready && (
-        <Button size="sm" className="mt-1 gap-1.5" onClick={onRun}>
-          <Play className="size-3.5" aria-hidden />
-          Run the pipeline
-        </Button>
-      )}
     </div>
   );
 }
