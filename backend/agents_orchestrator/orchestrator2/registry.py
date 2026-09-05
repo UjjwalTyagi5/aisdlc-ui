@@ -48,12 +48,25 @@ class UnknownAgentError(Exception):
 
 
 class RegistryValidationError(Exception):
-    """Raised by a `load_prompt` callable whose prompt symbol is not yet known.
+    """Raised by `validate_registry()`, naming every agent whose graph failed to
+    load, whose prompt failed to load, or whose prompt resolved to an empty or
+    whitespace-only string (the same silent failure wearing a different hat).
 
-    Five of the nine agents' system-prompt symbols have not been located yet
-    (that is the next task's work). Guessing a plausible-but-wrong symbol here
-    would be silently worse than this explicit failure — do not add one without
-    having actually found and verified it.
+    Collects every failure before raising once — the old engine's None-and-continue
+    is exactly how six agents ran with no system prompt without anyone noticing;
+    failing on the first gap here would just make someone re-run this nine times.
+    """
+
+
+class PromptNotApplicableError(Exception):
+    """Raised by the `load_prompt` of an invoke-mode agent (`testing`, the only one).
+
+    Testing is a state machine that reads `state["user_prompt"]`; its nodes carry
+    their own prompts, and it never receives an injected system message. This is a
+    deliberate, recorded design decision — distinct from `RegistryValidationError`
+    on purpose, so a missing STREAM-agent prompt (a bug) can never be confused with
+    an invoke-agent's prompt being not applicable (not a bug). Do not "fix" this by
+    inventing a system prompt for `testing`.
     """
 
 
@@ -65,15 +78,20 @@ class AgentCapability:
     mode: Literal["stream", "invoke"]
 
 
-def _no_prompt(agent_id: str) -> Callable[[], str]:
-    """Build a `load_prompt` that raises, naming the agent, for a not-yet-located
-    prompt symbol. Never invent a plausible symbol here — an honest failure beats a
-    wrong prompt silently shaping an agent's behavior."""
+def _prompt_not_applicable(agent_id: str) -> Callable[[], str]:
+    """Build the `load_prompt` for an invoke-mode agent: raises
+    `PromptNotApplicableError`, never `RegistryValidationError`. Invoke-mode agents
+    (only `testing`, today) carry their own per-node prompts and are never given an
+    injected system message — `validate_registry()` knows this from `mode` and never
+    calls this at all, but if something else calls it directly the distinct
+    exception type makes the "not applicable" story explicit rather than looking
+    like the missing-prompt bug this task closed."""
 
     def _raise() -> str:
-        raise RegistryValidationError(
-            f"agent '{agent_id}' has no known prompt symbol yet — "
-            "locating it is Task 2's work, not a guess to make here."
+        raise PromptNotApplicableError(
+            f"agent '{agent_id}' is invoke-mode — it has no system prompt by "
+            "design (its graph nodes carry their own prompts). This is not a "
+            "gap; do not wire one."
         )
 
     return _raise
@@ -144,11 +162,27 @@ def _load_graph_code_review() -> Any:
     return app
 
 
+def _load_prompt_code_review() -> str:
+    from agents_orchestrator.code_review_agent.prompts.review_prompt import (
+        CODE_REVIEW_SYSTEM_PROMPT,
+    )
+
+    return CODE_REVIEW_SYSTEM_PROMPT
+
+
 # ── security ──────────────────────────────────────────────────────────────────
 def _load_graph_security() -> Any:
     from agents_orchestrator.security_agent.agents.scanner import app
 
     return app
+
+
+def _load_prompt_security() -> str:
+    from agents_orchestrator.security_agent.prompts.security_prompt import (
+        SECURITY_SYSTEM_PROMPT,
+    )
+
+    return SECURITY_SYSTEM_PROMPT
 
 
 # ── testing (the only invoke-mode / state-machine agent) ─────────────────────
@@ -173,11 +207,27 @@ def _load_graph_deployment() -> Any:
     return app
 
 
+def _load_prompt_deployment() -> str:
+    from agents_orchestrator.deployment_agent.prompts.deploy_prompt import (
+        DEPLOY_SYSTEM_PROMPT,
+    )
+
+    return DEPLOY_SYSTEM_PROMPT
+
+
 # ── documentation ─────────────────────────────────────────────────────────────
 def _load_graph_documentation() -> Any:
     from agents_orchestrator.documentation_agent.agents.compiler import app
 
     return app
+
+
+def _load_prompt_documentation() -> str:
+    from agents_orchestrator.documentation_agent.prompts.doc_prompt import (
+        DOC_SYSTEM_PROMPT,
+    )
+
+    return DOC_SYSTEM_PROMPT
 
 
 REGISTRY: dict[str, AgentCapability] = {
@@ -208,33 +258,33 @@ REGISTRY: dict[str, AgentCapability] = {
     "code_review": AgentCapability(
         agent_id="code_review",
         load_graph=_load_graph_code_review,
-        load_prompt=_no_prompt("code_review"),
+        load_prompt=_load_prompt_code_review,
         mode="stream",
     ),
     "security": AgentCapability(
         agent_id="security",
         load_graph=_load_graph_security,
-        load_prompt=_no_prompt("security"),
+        load_prompt=_load_prompt_security,
         mode="stream",
     ),
     # The only invoke-mode / state-machine agent (copilot_api.STATE_MACHINE_STAGES ==
-    # {"testing"}).
+    # {"testing"}). Prompt is deliberately NOT applicable — see PromptNotApplicableError.
     "testing": AgentCapability(
         agent_id="testing",
         load_graph=_load_graph_testing,
-        load_prompt=_no_prompt("testing"),
+        load_prompt=_prompt_not_applicable("testing"),
         mode="invoke",
     ),
     "deployment": AgentCapability(
         agent_id="deployment",
         load_graph=_load_graph_deployment,
-        load_prompt=_no_prompt("deployment"),
+        load_prompt=_load_prompt_deployment,
         mode="stream",
     ),
     "documentation": AgentCapability(
         agent_id="documentation",
         load_graph=_load_graph_documentation,
-        load_prompt=_no_prompt("documentation"),
+        load_prompt=_load_prompt_documentation,
         mode="stream",
     ),
 }
@@ -259,3 +309,54 @@ def get_capability(agent_id: str) -> AgentCapability:
         raise UnknownAgentError(
             f"'{agent_id}' is not a known agent id. Known ids: {sorted(REGISTRY)}"
         ) from None
+
+
+def validate_registry() -> None:
+    """Resolve every agent's graph, and — for `stream`-mode agents only — its
+    prompt, collecting every failure before raising once.
+
+    Six of nine agents used to run with no system prompt at all (spec §11.2): the
+    old engine's `_system_prompt_for` returned `None` for them and the caller
+    carried on, so the symptom was an agent that churned or answered vaguely
+    instead of an error anyone could act on. This function makes that state
+    unshippable — call it at boot.
+
+    `invoke`-mode agents (only `testing`, today) are graph-only by design: a state
+    machine whose nodes carry their own prompts, never given an injected system
+    message. `mode` decides this, not a guess made here — a `stream` agent's
+    `load_prompt` is ALWAYS required to resolve, and an `invoke` agent's is never
+    even called, so `testing` lacking a system prompt can never be mistaken for the
+    six-agent bug this closes.
+
+    A prompt that resolves to an empty or whitespace-only string counts as
+    missing — that is the same silent failure wearing a different hat.
+    """
+    failures: list[str] = []
+
+    for agent_id, capability in REGISTRY.items():
+        try:
+            capability.load_graph()
+        except Exception as exc:  # noqa: BLE001 - collect, don't stop at the first
+            failures.append(f"{agent_id}: graph failed to load ({exc!r})")
+
+        if capability.mode != "stream":
+            # invoke-mode agents (testing) are graph-only by design — never call
+            # load_prompt for them; see PromptNotApplicableError.
+            continue
+
+        try:
+            prompt = capability.load_prompt()
+        except Exception as exc:  # noqa: BLE001 - collect, don't stop at the first
+            failures.append(f"{agent_id}: prompt failed to load ({exc!r})")
+            continue
+
+        if not isinstance(prompt, str) or not prompt.strip():
+            failures.append(
+                f"{agent_id}: prompt resolved to empty/whitespace — treated as missing"
+            )
+
+    if failures:
+        detail = "\n".join(f"  - {failure}" for failure in failures)
+        raise RegistryValidationError(
+            f"registry validation failed for {len(failures)} item(s):\n{detail}"
+        )
