@@ -120,25 +120,66 @@ describe("useOrchestratorSocket — inbound frame validation", () => {
     expect(result.current.connState).toBe("connected");
   });
 
+  /**
+   * LOAD-BEARING CASES. Every frame here reaches a switch branch that WOULD put
+   * something on screen if `safeParse` were removed — a bubble, a system line, an
+   * error banner. Delete the guard and these fail, which is the only way a
+   * validation test earns its place.
+   */
   it.each([
-    // An agent that does not exist — the union names all nine and only those.
+    // An agent that does not exist. Without the guard this announces
+    // "undefined agent is answering" — a name for an agent that is not there.
     ["agent.selected naming an unknown agent", { type: "agent.selected", agent: "marketing" }],
-    // The Orchestrator has no gates. One arriving is a backend bug, not a control.
-    ["a gate event", { type: "gate.state", stage: "design", owner_role: "architect", can_approve: true }],
-    // A type invented since this UI shipped.
-    ["an unknown event type", { type: "stage.changed", stage: "design" }],
-    // Right type, wrong payload.
-    ["a chunk whose content is not text", { type: "stream_chunk", content: { nope: 1 } }],
+    ["agent.selected naming no agent at all", { type: "agent.selected", reason: "because" }],
+    // Right type, wrong payload: both of these become bubble text unguarded.
+    ["a chunk whose content is an object", { type: "stream_chunk", content: { nope: 1 } }],
+    ["a chunk whose content is a number", { type: "stream_chunk", content: 42 }],
+    // Opens an agent bubble unguarded, so a nameless tool spins the thread.
     ["a tool call with no name", { type: "tool.call", status: "running" }],
-    // Not an event at all.
-    ["a bare string", "hello"],
-    ["null", null],
+    ["a tool call with an invented status", { type: "tool.call", name: "grep", status: "exploded" }],
   ])("drops %s", async (_label, frame) => {
     const { result } = await mount();
     await deliver(frame);
     expect(result.current.messages).toHaveLength(0);
     expect(result.current.activeAgent).toBeNull();
     expect(result.current.error).toBeNull();
+  });
+
+  /**
+   * These reach no branch, so they would also "pass" with the guard deleted. They
+   * are kept as a statement of intent rather than as proof: `gate.state` in
+   * particular must stay droppable, because the Orchestrator has no gates and the
+   * day one arrives is the day someone is tempted to render it.
+   */
+  it.each([
+    ["a gate event", { type: "gate.state", stage: "design", owner_role: "architect", can_approve: true }],
+    ["a stage.changed event", { type: "stage.changed", stage: "design" }],
+    ["a bare string", "hello"],
+    ["null", null],
+  ])("also drops %s, which the UI has no branch for", async (_label, frame) => {
+    const { result } = await mount();
+    await deliver(frame);
+    expect(result.current.messages).toHaveLength(0);
+  });
+
+  it("does not let a malformed stream_end close a turn that is still running", async () => {
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({
+        text: "go",
+        agent: "testing",
+        resolveRunId: async () => "run-1",
+      });
+    });
+    expect(result.current.busy).toBe(true);
+
+    // `session_id` must be a string. Unguarded this reaches `finalizeTurn` and
+    // hands the composer back while the agent is still answering.
+    await deliver({ type: "stream_end", session_id: 42 });
+    expect(result.current.busy).toBe(true);
+
+    await deliver({ type: "stream_end" });
+    expect(result.current.busy).toBe(false);
   });
 
   it("keeps serving valid frames after dropping a malformed one", async () => {
@@ -211,6 +252,76 @@ describe("useOrchestratorSocket — turns", () => {
     // The turn ended: no spinner is left behind, and the composer is free again.
     expect(result.current.busy).toBe(false);
     expect(result.current.messages.some((m) => m.role === "agent")).toBe(false);
+  });
+
+  it("says the turn did not finish when the socket drops mid-turn", async () => {
+    const { result } = await mount();
+
+    await act(async () => {
+      result.current.send({ text: "go", agent: "design", resolveRunId: async () => "run-1" });
+    });
+    await waitFor(() => expect(socket().sent).toHaveLength(1));
+
+    await act(async () => {
+      socket().onclose?.();
+    });
+
+    // The frame is already gone down a dead socket and no reconnect will replay
+    // it, so the composer comes back AND the thread says why.
+    expect(result.current.busy).toBe(false);
+    expect(result.current.error).toMatch(/dropped before this turn finished/i);
+    expect(result.current.messages.some((m) => m.role === "agent")).toBe(false);
+  });
+
+  /**
+   * The regression this test exists for: `send` set `busy` and queued the frame,
+   * but when the connection never opened at all, nothing ever cleared `busy` —
+   * so the composer sat disabled reading "the X agent is working…" forever, with
+   * no agent and no socket. A dead connection wearing the costume of work in
+   * progress is the exact failure this engine was rebuilt to end.
+   */
+  it("ends the turn when the connection gives up, rather than claiming the agent is still working", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new Error("network is down");
+        }),
+      );
+
+      const { result } = renderHook(() => useOrchestratorSocket({ enabled: true }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(sockets).toHaveLength(0);
+
+      await act(async () => {
+        result.current.send({
+          text: "go",
+          agent: "deployment",
+          resolveRunId: async () => "run-1",
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.busy).toBe(true);
+
+      // Burn through every backoff (1+2+4+8+8s) and the give-up that follows.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(result.current.connState).toBe("closed");
+      expect(result.current.busy).toBe(false);
+      expect(result.current.error).toMatch(/never ran/i);
+      expect(
+        result.current.messages.some((m) => m.role === "system" && /never ran/i.test(m.content)),
+      ).toBe(true);
+      // The empty bubble that was standing in for the reply is gone too.
+      expect(result.current.messages.some((m) => m.role === "agent")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows a failure when no run could be created, and sends nothing", async () => {

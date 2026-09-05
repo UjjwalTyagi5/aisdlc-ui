@@ -99,6 +99,9 @@ export function useOrchestratorSocket(
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const outboxRef = React.useRef<OrchestratorUserMessage[]>([]);
+  // `busy` as the socket's callbacks can read it: they fire from timers and
+  // event handlers that closed over an older render.
+  const busyRef = React.useRef(false);
   const closedByUnmount = React.useRef(false);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -178,6 +181,7 @@ export function useOrchestratorSocket(
    * Whatever ended the turn (a `stream_end`, an `error`) has already said so.
    */
   const finalizeTurn = React.useCallback(() => {
+    busyRef.current = false;
     setBusy(false);
     const id = streamingIdRef.current;
     streamingIdRef.current = null;
@@ -194,6 +198,33 @@ export function useOrchestratorSocket(
     },
     [appendSystem, finalizeTurn],
   );
+
+  /**
+   * The connection is not coming back — say so, and END ANY TURN IT WAS CARRYING.
+   *
+   * Without the second half, a socket that never opened left `busy` set forever:
+   * the composer stayed disabled reading "the X agent is working…" while nothing
+   * was running and nothing ever would. That is a dead connection wearing the
+   * costume of work in progress — the precise failure shape this engine was
+   * rebuilt to eliminate, and an error banner beside a composer still claiming
+   * the agent is working does not undo it.
+   *
+   * The queued frame goes too. It was addressed to a socket that no longer
+   * exists, and a turn the user has already been told did not run must not
+   * quietly run later.
+   */
+  const abandonConnection = React.useCallback(() => {
+    const hadTurnInFlight = busyRef.current || outboxRef.current.length > 0;
+    outboxRef.current = [];
+    if (hadTurnInFlight) {
+      failTurn(
+        "The connection to the Orchestrator dropped, so this turn never ran. " +
+          "Reload the page to reconnect.",
+      );
+      return;
+    }
+    setError("Lost the connection to the Orchestrator. Reload the page to reconnect.");
+  }, [failTurn]);
 
   const handleEvent = React.useCallback(
     (raw: unknown) => {
@@ -240,9 +271,13 @@ export function useOrchestratorSocket(
           mutateBubble((m) => m);
           break;
         case "choice.card":
-          // Phase 2's socket accepts `user_message` only, so there is nothing to
-          // answer a card WITH. Rendering an inert card would be worse than
-          // rendering the question: show the prompt and let the user reply in prose.
+          // UNREACHABLE TODAY — `orchestrator2/ws.py` forwards five event types
+          // and this is not one of them. Kept, and kept to one line, because the
+          // protocol union accepts it: the moment an agent's graph emits one it
+          // would otherwise be validated, accepted, and then silently discarded
+          // by a missing branch, which is the failure mode this hook exists to
+          // prevent. There is nothing to answer a card WITH (the socket accepts
+          // `user_message` only), so the prompt is shown and answered in prose.
           appendSystem(evt.card.prompt);
           break;
         case "stream_end":
@@ -296,9 +331,7 @@ export function useOrchestratorSocket(
       const attempt = reconnectAttemptsRef.current;
       if (attempt >= RECONNECT_MAX_ATTEMPTS) {
         setConnState("closed");
-        setError(
-          "Lost the connection to the Orchestrator. Reload the page to reconnect.",
-        );
+        abandonConnection();
         return;
       }
       setConnState("reconnecting");
@@ -348,9 +381,17 @@ export function useOrchestratorSocket(
         };
         ws.onclose = () => {
           if (cancelled || closedByUnmount.current) return;
-          // A turn cannot survive the socket that was carrying it — release the
-          // composer rather than leaving it disabled behind a dead connection.
-          finalizeTurn();
+          // A turn cannot survive the socket that was carrying it. Release the
+          // composer — and SAY the turn did not finish, because the frame was
+          // already sent and will not be replayed by a reconnect. Finalizing
+          // quietly would leave the user's own message on screen with no reply
+          // and no reason, which is the silence this engine exists to remove.
+          if (busyRef.current) {
+            failTurn(
+              "The connection dropped before this turn finished. Send it again once " +
+                "the connection is back.",
+            );
+          }
           scheduleReconnect();
         };
       } catch {
@@ -374,7 +415,9 @@ export function useOrchestratorSocket(
       outboxRef.current = [];
       streamingIdRef.current = null;
     };
-  }, [enabled, flushOutbox, finalizeTurn]);
+    // Every callback here is a stable `useCallback`, so listing them cannot
+    // churn the socket; `enabled` is the only thing that reopens it.
+  }, [enabled, flushOutbox, failTurn, abandonConnection]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const send = React.useCallback(
@@ -382,6 +425,7 @@ export function useOrchestratorSocket(
       const trimmed = text.trim();
       if (!trimmed) return;
       setError(null);
+      busyRef.current = true;
       setBusy(true);
 
       // Echo the turn immediately, then open the reply bubble attributed to the
@@ -429,6 +473,7 @@ export function useOrchestratorSocket(
     setMessages([]);
     setActiveAgent(null);
     setError(null);
+    busyRef.current = false;
     setBusy(false);
     streamingIdRef.current = null;
     turnAgentRef.current = null;

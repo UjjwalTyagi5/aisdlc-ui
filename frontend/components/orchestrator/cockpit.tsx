@@ -393,7 +393,11 @@ export function OrchestratorCockpit({
               choice. Ordered as the protocol lists them; nothing about that
               order implies a sequence. */}
           <Select
-            value={agent ?? undefined}
+            // `""`, not `undefined`: Radix reads undefined as "uncontrolled" and
+            // warns the moment a pick makes it controlled. An empty string is a
+            // controlled no-selection, which is what an unpicked agent IS, and it
+            // still shows the placeholder.
+            value={agent ?? ""}
             onValueChange={(v) => setAgent(v as OrchestratorAgentId)}
             disabled={!canDrive || !projectId}
           >

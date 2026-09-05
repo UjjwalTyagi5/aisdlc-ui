@@ -2,7 +2,10 @@
 
 Route: `/sdlc/agent/orchestrator2/ws?ticket=<single-use ticket>[&run=<run_id>]`
 
-IN  : {"type": "user_message", "text": ..., "agent": ..., "run_id": ..., "project_id": ...}
+IN  : {"type": "user_message", "text": ..., "agent": ..., "run_id": ...}
+      Those four fields and no others — anything else on the frame is ignored.
+      (`project_id` was advertised here once and never read; a client that
+      believed the docstring sent a field the socket had no use for.)
 OUT : the events `run_agent` yields, forwarded verbatim as JSON —
       `agent.selected` | `stream_chunk` | `tool.call` | `error` | `stream_end`
       (the union in `frontend/lib/orchestrator/protocol.ts`).
