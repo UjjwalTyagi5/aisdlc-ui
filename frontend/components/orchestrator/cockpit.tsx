@@ -3,10 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Info, RotateCcw, Sparkles, SquarePlay, Workflow } from "lucide-react";
+import { FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -22,8 +21,6 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { getProject, listProjects } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import { TRACK_META } from "@/lib/tracks";
-import { splitModelKey } from "@/lib/orchestrator/types";
-import { useOrchestrator } from "@/lib/orchestrator/use-orchestrator";
 import { freshStages, useOrchestratorStore } from "@/stores/orchestrator-store";
 import type { ProjectId } from "@/lib/schemas";
 
@@ -48,16 +45,15 @@ export interface OrchestratorCockpitProps {
 /**
  * The Orchestrator cockpit — one component behind two routes.
  *
- * Pick a project (or arrive with one), pick a model that project is allowed to
- * run on, and it executes that project's agent roster in hand-off order,
- * streaming each agent's turn and closing the gates it is permitted to close.
+ * Pick a project (or arrive with one) and a model that project is allowed to
+ * run on; the session rail keeps a history of conversations against this
+ * Business Unit's projects. There is no fixed agent order here — any agent
+ * can pick up work based on what the conversation asks for.
  *
- * SCOPE OF "AUTOMATIC" — auto-advance closes `safe` and `consequential` gates
- * on the run's behalf. It never closes a **mandatory** one: PRD §13 makes those
- * unwaivable by the owner *or* the fallback, so a sequencer that waived them
- * would not be automating the process, it would be routing around it. Those
- * stop the run and wait, which is what the inline gate control in the thread is
- * for.
+ * NO ENGINE YET — the composer is intentionally disabled. What used to drive
+ * a scripted, timed reveal of fake agent turns has been removed outright
+ * (see the SDD's mock-engine deletion); until the real engine lands, this
+ * component only renders whatever a session already holds.
  */
 export function OrchestratorCockpit({
   lockedProjectId,
@@ -124,29 +120,7 @@ export function OrchestratorCockpit({
     [projectsQ.data, project],
   );
 
-  const modelLabel = modelKey ? splitModelKey(modelKey).model_id : "no model";
-
-  const controls = useOrchestrator({
-    sessionId: active?.id ?? null,
-    projectName: project?.name ?? "this project",
-    track: project?.track ?? "greenfield",
-    modelLabel,
-    modelKey,
-  });
-
   // ── Session plumbing ──────────────────────────────────────────────────────
-
-  /** Ensure a session exists for the current project, and return its id. */
-  const ensureSession = React.useCallback((): string | null => {
-    if (!project) return null;
-    if (active && active.projectId === String(project.id)) return active.id;
-    return store.getState().createSession({
-      projectId: String(project.id),
-      projectName: project.name,
-      track: project.track,
-      modelKey,
-    });
-  }, [project, active, store, modelKey]);
 
   const handleProjectChange = React.useCallback(
     (id: string) => {
@@ -193,26 +167,6 @@ export function OrchestratorCockpit({
       if (active) store.getState().setModelKey(active.id, defaultKey);
     },
     [modelKey, active, store],
-  );
-
-  // `ensureSession` leaves the new session active in the store, and the engine
-  // resolves the session at call time, so these need no deferral.
-  const handleRun = React.useCallback(
-    (objective?: string) => {
-      if (!ensureSession()) return;
-      controls.start(objective);
-    },
-    [ensureSession, controls],
-  );
-
-  const handleSend = React.useCallback(
-    (text: string) => {
-      if (!ensureSession()) return;
-      // A brand-new session has no transcript, so the first thing typed is the
-      // objective — `send` routes that into `start` itself.
-      controls.send(text);
-    },
-    [ensureSession, controls],
   );
 
   // Above the early return below, because hooks cannot be called conditionally.
@@ -270,12 +224,7 @@ export function OrchestratorCockpit({
   // question — the read-only control view this rail replaced answered it
   // without needing a run either.
   const stages = active?.stages ?? (project ? freshStages(project.track) : []);
-  const status = active?.status ?? "idle";
-  const paused = status === "paused";
-  const complete = status === "complete";
   const trackMeta = project ? TRACK_META[project.track] : null;
-  const ready = !!project && !!modelKey;
-  const parkedOnGate = stages[active?.cursor ?? 0]?.status === "awaiting_gate";
 
   const shell =
     variant === "page"
@@ -307,7 +256,7 @@ export function OrchestratorCockpit({
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* ── Top bar: the pickers, and the run controls ──────────────────── */}
+        {/* ── Top bar: project and model pickers ──────────────────────────── */}
         <header className="border-line-soft bg-panel-elevated/60 flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2.5 backdrop-blur-sm md:px-6">
           {!locked && (
             <span className="mr-1 flex items-center gap-2">
@@ -343,31 +292,6 @@ export function OrchestratorCockpit({
             onValueChange={handleModelChange}
             onOptionsResolved={handleOptionsResolved}
           />
-
-          <div className="ml-auto flex items-center gap-3">
-            {canDrive &&
-              (controls.busy ? (
-                <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={controls.stop}>
-                  Stop
-                </Button>
-              ) : complete || (active && active.messages.length > 0 && !paused) ? (
-                <Button size="sm" className="h-8 gap-1.5" disabled={!ready} onClick={() => handleRun()}>
-                  <RotateCcw className="size-3.5" aria-hidden />
-                  Restart run
-                </Button>
-              ) : paused ? (
-                <Button
-                  size="sm"
-                  className="h-8 gap-1.5"
-                  onClick={controls.resume}
-                  disabled={parkedOnGate}
-                  title={parkedOnGate ? "Decide the open gate in the thread to continue" : undefined}
-                >
-                  <SquarePlay className="size-3.5" aria-hidden />
-                  Resume
-                </Button>
-              ) : null)}
-          </div>
         </header>
 
         {/* Silent while the scope is still resolving — "you cannot drive this"
@@ -430,22 +354,12 @@ export function OrchestratorCockpit({
         <div className="flex min-h-0 flex-1">
           <Thread
             messages={active?.messages ?? []}
-            busy={controls.busy}
-            disabled={!ready || !canDrive}
-            placeholder={
-              !project
-                ? "Pick a project to begin…"
-                : !modelKey
-                  ? "Pick a model to begin…"
-                  : !canDrive
-                    ? "Read-only — you cannot drive this Orchestrator"
-                    : (active?.messages.length ?? 0) === 0
-                      ? `What should the ${project.name} pipeline achieve? Enter starts the run.`
-                      : "Message the Orchestrator…"
-            }
-            onSend={handleSend}
-            onStop={controls.stop}
-            onGateDecision={controls.decideGate}
+            busy={false}
+            disabled
+            placeholder="The Orchestrator engine arrives in the next phase."
+            onSend={() => {}}
+            onStop={() => {}}
+            onGateDecision={() => {}}
             emptySlot={
               <EmptyThread
                 projectName={project?.name ?? null}
@@ -495,10 +409,10 @@ function EmptyThread({
         {projectName && trackLabel ? (
           <>
             <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
-            roster. Ask for what you need. The right agent picks it up.
+            roster. The Orchestrator engine arrives in the next phase, so nothing runs yet.
           </>
         ) : (
-          "Choose a project and one of the models it is allowed to run on, then ask for what you need. The right agent picks it up."
+          "Choose a project and one of the models it is allowed to run on. The Orchestrator engine arrives in the next phase, so nothing runs yet."
         )}
       </p>
     </div>
