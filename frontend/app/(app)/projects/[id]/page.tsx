@@ -8,7 +8,6 @@ import { toast } from "sonner";
 import {
   Clock,
   FolderOpen,
-  Play,
   XCircle,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
@@ -29,6 +28,7 @@ import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
 import { ProjectCostPanel } from "@/components/app/project-cost-panel";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
 import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
+import { RunAgentButton } from "@/components/app/run-agent-button";
 import { isStoredArtifact } from "@/components/app/artifact-list";
 import { RequireRole } from "@/components/auth/require-role";
 import { OutOfScope } from "@/components/auth/scope-empty-state";
@@ -247,12 +247,7 @@ export default function ProjectOverviewPage() {
               onValueChange={setProjectOffering}
             />
           </div>
-          <RequireRole capability="run:trigger">
-            <Button onClick={() => setRunOpen(true)} disabled={actionsLocked}>
-              <Play />
-              Run agent
-            </Button>
-          </RequireRole>
+          <RunAgentButton projectId={String(project.id)} role={role} />
           {/* Raised from here rather than the Requests page because this is
               where someone discovers the agent they need is closed to them.
               Renders nothing when their role already reaches every agent this
