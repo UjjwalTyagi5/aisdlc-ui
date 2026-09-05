@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ThinkingIndicator } from "@/components/app/thinking-indicator";
-import { ChoiceCard } from "@/components/copilot/choice-card";
+import { ChoiceCard } from "@/components/orchestrator/choice-card";
 import { GateInline } from "@/components/copilot/gate-inline";
 import { ownerRoleLabel, stageLabel } from "@/lib/copilot/stages";
 import type { CopilotMessage, CopilotToolActivity } from "@/lib/copilot/use-copilot";

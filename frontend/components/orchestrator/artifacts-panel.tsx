@@ -34,7 +34,7 @@ import { API_BASE } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { LoadingState } from "@/components/ui/loading-state";
-import { ArtifactViewer } from "@/components/copilot/artifact-viewer";
+import { ArtifactViewer } from "@/components/orchestrator/artifact-viewer";
 import { getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { COPILOT_STAGES, ownerRoleLabel, stageLabel } from "@/lib/copilot/stages";

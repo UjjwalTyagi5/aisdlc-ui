@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { PipelineRail, type PipelineRailStage } from "@/components/copilot/pipeline-rail";
 import { CopilotChat } from "@/components/copilot/copilot-chat";
-import { ArtifactsPanel } from "@/components/copilot/artifacts-panel";
+import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { useCopilot } from "@/lib/copilot/use-copilot";
 import {
   COPILOT_STAGES,
