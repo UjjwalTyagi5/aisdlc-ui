@@ -1,6 +1,27 @@
 import pytest
 
 from agents_orchestrator.orchestrator2 import dispatch, registry as reg
+from shared.services import model_resolver as mr
+
+
+@pytest.fixture(autouse=True)
+def _stub_model_resolution(monkeypatch):
+    """Every turn now resolves a BYOK model before the graph runs, so these
+    dispatch-shape tests would otherwise reach the database. Project-scoping
+    behaviour is tested for real in test_byok_project_scoping.py; here we only
+    need resolution to succeed so the graph is reached."""
+    async def _fake_resolve(tenant_id, requested_model_id=None, **kwargs):
+        return mr.ResolvedModel(
+            provider="anthropic", litellm_provider="anthropic", model="m",
+            api_key="k", base_url=None, alias="tenant:t1:p1",
+        )
+
+    monkeypatch.setattr(dispatch, "resolve_model_for_run", _fake_resolve)
+    mr.set_resolved_model(None)
+    mr.set_run_project(None)
+    yield
+    mr.set_resolved_model(None)
+    mr.set_run_project(None)
 
 
 class _FakeStreamGraph:
@@ -26,7 +47,7 @@ async def test_run_agent_announces_the_agent_before_any_text(monkeypatch):
     )
     events = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None)]
+        model_id=None, offering_id=None, project_id="proj-1")]
     assert events[0]["type"] == "agent.selected"
     assert events[0]["agent"] == "design"
     assert events[-1]["type"] == "stream_end"
@@ -43,7 +64,7 @@ async def test_run_agent_passes_thread_id_and_system_prompt(monkeypatch):
     )
     _ = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="run-42", tenant_id="t1",
-        model_id=None, offering_id=None)]
+        model_id=None, offering_id=None, project_id="proj-1")]
     assert fake.seen_config["configurable"]["thread_id"] == "run-42"
     assert any("SYS-PROMPT" in str(getattr(m, "content", m))
                for m in fake.seen_state["messages"])
@@ -54,7 +75,7 @@ async def test_unknown_agent_yields_a_typed_error_not_silence():
     """Fail loudly. The whole point of this phase."""
     events = [e async for e in dispatch.run_agent(
         "nope", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None)]
+        model_id=None, offering_id=None, project_id="proj-1")]
     assert any(e["type"] == "error" for e in events)
     assert events[-1]["type"] == "stream_end"
 
@@ -80,7 +101,7 @@ async def test_unknown_agent_error_event_matches_the_frontend_contract_shape():
     the error event for an unresolved id must carry NO `agent` key at all."""
     events = [e async for e in dispatch.run_agent(
         "nope", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None)]
+        model_id=None, offering_id=None, project_id="proj-1")]
 
     error_events = [e for e in events if e["type"] == "error"]
     assert error_events, "expected an error event for an unknown agent id"
@@ -108,7 +129,7 @@ async def test_run_agent_emits_only_protocol_shaped_events(monkeypatch):
     )
     events = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None)]
+        model_id=None, offering_id=None, project_id="proj-1")]
 
     for e in events:
         assert e["type"] in _VALID_EVENT_TYPES, f"unexpected event type: {e['type']!r}"

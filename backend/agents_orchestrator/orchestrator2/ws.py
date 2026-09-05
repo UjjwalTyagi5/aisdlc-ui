@@ -4,8 +4,12 @@ Route: `/sdlc/agent/orchestrator2/ws?ticket=<single-use ticket>[&run=<run_id>]`
 
 IN  : {"type": "user_message", "text": ..., "agent": ..., "run_id": ...}
       Those four fields and no others — anything else on the frame is ignored.
-      (`project_id` was advertised here once and never read; a client that
-      believed the docstring sent a field the socket had no use for.)
+      `project_id` IS READ FOR EVERY TURN, but from the `runs` row, never from
+      this frame: it decides which models the turn may use and whose budget it
+      spends, so a client-named project would let a caller borrow another
+      project's grant and another project's cap. A `project_id` on the wire is
+      still ignored, and now that is a load-bearing refusal rather than an
+      oversight (see `_resolve_run`).
 OUT : the events `run_agent` yields, forwarded verbatim as JSON —
       `agent.selected` | `stream_chunk` | `tool.call` | `error` | `stream_end`
       (the union in `frontend/lib/orchestrator/protocol.ts`).
@@ -58,7 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -157,8 +161,20 @@ async def _resolve_platform_role(user_id: str, tenant_id: str) -> Optional[str]:
         return None
 
 
-async def _resolve_run(run_id: str, tenant_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Confirm `run_id` belongs to the caller's tenant, and return its model selection.
+class RunSelection(NamedTuple):
+    """What a verified run tells the socket: which model it selected, and which
+    project it belongs to. A NamedTuple rather than a bare tuple so the third
+    field cannot be read positionally by accident at a call site that predates it.
+    """
+
+    model_id: Optional[str]
+    offering_id: Optional[str]
+    project_id: Optional[str]
+
+
+async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
+    """Confirm `run_id` belongs to the caller's tenant, and return its model selection
+    and its project.
 
     THIS IS AN OWNERSHIP CHECK, NOT A LOOKUP, and it is the reason the client's
     `run_id` may be used at all. `run_id` arrives on the wire and reaches two things
@@ -187,10 +203,25 @@ async def _resolve_run(run_id: str, tenant_id: str) -> tuple[Optional[str], Opti
     REFUSAL, not a fall-through to the organization default. A turn that cannot prove
     which run it belongs to must not run.
 
-    Returns the run's `(model_id, offering_id)` — the model is a property of the run,
-    never something the client names on the wire. `(None, None)` is a legitimate value
-    (the graph falls back to the organization default); it is no longer overloaded to
-    also mean "could not check".
+    Returns the run's `(model_id, offering_id, project_id)` — all three are properties
+    of the run, never something the client names on the wire. `(None, None, None)` is a
+    legitimate value; it is no longer overloaded to also mean "could not check".
+
+    WHY `project_id` IS READ HERE AND NOT TAKEN FROM THE MESSAGE. It is the scope that
+    `resolve_model_for_run` uses to decide WHICH models this turn may use
+    (`effective_project_offerings`) and WHOSE monthly budget it spends against
+    (`check_budgets`). Both of those are enforcement, so the project id is an authority
+    claim, not a routing hint. A client-supplied one would let a Project Admin name a
+    project whose grant includes a model theirs does not, or whose budget still has room
+    — which is precisely the scoping this task exists to establish, handed straight back
+    to the caller. This row is already proven to belong to the caller's tenant two lines
+    up, so its project is the one scope the socket can actually stand behind.
+
+    A run with NO project (`project_id` is nullable since migration 0005 — webhook runs
+    carry a provider key, not a local project UUID) yields `None`, which is passed
+    through honestly rather than papered over. On a tenant with any grant rows that
+    fails closed downstream, and it should: an ungoverned run is not a licence to use
+    every model in the org.
     """
     if not run_id or not tenant_id:
         raise RunNotAvailableError("no run identified")
@@ -231,7 +262,14 @@ async def _resolve_run(run_id: str, tenant_id: str) -> tuple[Optional[str], Opti
         )
         raise RunNotAvailableError("no such run")
 
-    return getattr(run, "model_id", None), getattr(run, "offering_id", None)
+    project_id = getattr(run, "project_id", None)
+    return RunSelection(
+        model_id=getattr(run, "model_id", None),
+        offering_id=getattr(run, "offering_id", None),
+        # `Run.project_id` is a UUID column; every consumer downstream compares it as
+        # text (offering-grant sets, budget scope keys), so normalise once here.
+        project_id=str(project_id) if project_id else None,
+    )
 
 
 def _as_run_uuid(value: str) -> Any:
@@ -341,9 +379,11 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
             # LangGraph thread_id on a persistent checkpointer, so it is checked
             # against this caller's tenant FIRST. Nothing below this line runs for a
             # run the caller may not read: a run they cannot see must not become
-            # their conversation thread either.
+            # their conversation thread either. This is also where the turn's
+            # PROJECT comes from — the run's, not the frame's, because the project
+            # decides which models may be used and whose budget pays for them.
             try:
-                model_id, offering_id = await _resolve_run(run_id, tenant_id)
+                model_id, offering_id, project_id = await _resolve_run(run_id, tenant_id)
             except RunNotAvailableError as exc:
                 # One message for absent and for another tenant's run — the two
                 # `RunNotAvailableError` cases are worded identically upstream so this
@@ -361,6 +401,9 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                     tenant_id=tenant_id,
                     model_id=model_id,
                     offering_id=offering_id,
+                    # From the verified `runs` row. `msg` may well carry a
+                    # `project_id`; it is never consulted.
+                    project_id=project_id,
                 ):
                     await _send(websocket, event)
             except WebSocketDisconnect:

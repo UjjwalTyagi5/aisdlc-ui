@@ -80,7 +80,7 @@ def _patch_auth(monkeypatch, ws, *, role, claims=None):
     monkeypatch.setattr(ws, "_resolve_platform_role", _fake_role)
 
     async def _owned_run(run_id, tenant_id):
-        return None, None
+        return ws.RunSelection(model_id=None, offering_id=None, project_id=None)
 
     monkeypatch.setattr(ws, "_resolve_run", _owned_run)
 
@@ -572,7 +572,8 @@ async def test_an_owned_runs_model_selection_is_passed_to_the_agent(monkeypatch)
 
     async def _owned(run_id, tenant_id):
         assert (run_id, tenant_id) == (_A_RUN, "t1")
-        return "claude-x", "offering-7"
+        return ws.RunSelection(model_id="claude-x", offering_id="offering-7",
+                               project_id="proj-from-the-run")
 
     monkeypatch.setattr(ws, "_resolve_run", _owned)
 
