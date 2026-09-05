@@ -569,3 +569,33 @@ Orchestrator supplies everything about being an orchestrator.
 provide, that agent needs an adapter — or, in the worst case, a native rebuild after all.
 The registry is the natural place for such an adapter, so this stays reversible per agent
 rather than being an all-or-nothing bet.
+
+### 11.2 Why the old engine "would not properly do the stuff" — measured
+
+§2.4 recorded that the Project Manager agent had no graph in `copilot_api._graph_for()`.
+The prompt side is worse, and it explains the reported symptom directly.
+
+`copilot_api._system_prompt_for()` handles **three** stages. Verified by executing against
+the real registry:
+
+```
+stages WITH a system prompt:               requirements, design, development
+stages WITHOUT (run with no instructions): plan, code_review, security, testing,
+                                           deployment, documentation
+```
+
+The function's own docstring states the consequence:
+
+> Without this prompt the stage agent has no instructions and will churn without producing
+> a useful reply.
+
+So **six of the nine agents ran with no instructions at all**, and the ninth (`plan`) had
+neither a graph nor a prompt. Only requirements, design and development were ever fully
+wired. Both gaps fail soft — `except Exception: logger.warning(...)` and a `None` return —
+so the symptom was an agent that answered vaguely or not at all, never an error anyone
+could chase.
+
+This is not a subtlety to fix later. It is the single largest cause of the behaviour that
+prompted this rebuild, and it is the reason the Phase 2 registry validates **graph AND
+prompt for all nine agents at startup, refusing to boot if either is missing**. A missing
+capability must be impossible to ship, not something a user discovers by being ignored.
