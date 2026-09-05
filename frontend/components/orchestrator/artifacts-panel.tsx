@@ -63,6 +63,14 @@ export interface ArtifactsPanelProps {
   idleSeconds?: number;
   /** WS connection status — drives the "Reconnecting…" banner. */
   connectionStatus?: CopilotConnState;
+  /**
+   * Whether the Context tab's "Who approves" section renders at all. The
+   * Orchestrator has no gates and must never show approver/gate copy, so it
+   * omits this (default `false`); the Copilot has gates whose `gate` state is
+   * `null` between stages/decisions, so it passes `true` and the section
+   * falls back to the stage's owner role rather than disappearing.
+   */
+  showApprover?: boolean;
   className?: string;
 }
 
@@ -123,6 +131,7 @@ export function ArtifactsPanel({
   stuck = false,
   idleSeconds = 0,
   connectionStatus = "idle",
+  showApprover = false,
   className,
 }: ArtifactsPanelProps) {
   const rid = runId as RunId;
@@ -425,7 +434,14 @@ export function ArtifactsPanel({
           connectionStatus={connectionStatus}
         />
       ) : (
-        <ContextTab runId={runId} run={run} isLoading={runQ.isLoading} activeStage={activeStage} gate={gate} />
+        <ContextTab
+          runId={runId}
+          run={run}
+          isLoading={runQ.isLoading}
+          activeStage={activeStage}
+          gate={gate}
+          showApprover={showApprover}
+        />
       )}
     </aside>
   );
@@ -1200,16 +1216,22 @@ function ContextTab({
   isLoading,
   activeStage,
   gate,
+  showApprover,
 }: {
   runId: string;
   run: Awaited<ReturnType<typeof getRun>> | undefined;
   isLoading: boolean;
   activeStage: string;
   gate: GateState | null;
+  showApprover: boolean;
 }) {
   void runId;
   const stage = COPILOT_STAGES.find((s) => s.id === activeStage);
-  const owner = gate ? ownerRoleLabel(gate.owner_role) : null;
+  // Between stages / gate decisions the Copilot's `gate` is legitimately null
+  // (see lib/copilot/use-copilot.ts), so fall back to the stage's own owner
+  // role rather than hiding the section. Never invent a name when neither is
+  // available.
+  const owner = gate ? ownerRoleLabel(gate.owner_role) : (stage?.ownerRole ?? null);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -1240,10 +1262,15 @@ function ContextTab({
         )}
       </section>
 
-      {/* Who needs to approve — the Orchestrator has no gates at all, so this
-          only renders when a real gate exists (i.e. the Copilot page, which
-          always passes one). Never fall back to an invented owner/status. */}
-      {gate && (
+      {/* Who needs to approve — gated on `showApprover`, a caller decision, not
+          an inference from `gate`. The Orchestrator (cockpit.tsx) has no gates
+          and passes `showApprover={false}` so this never renders there. The
+          Copilot passes `showApprover={true}`; its `gate` is null for most of
+          a run (reset on stage change / after a decision — see
+          lib/copilot/use-copilot.ts), in which case `owner` falls back to the
+          stage's owner role above. Render nothing if there is no owner to
+          name — never invent one. */}
+      {showApprover && owner && (
         <section className="border-line-soft space-y-2.5 border-b px-4 py-4">
           <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
             Who approves
@@ -1251,7 +1278,7 @@ function ContextTab({
           <div
             className={cn(
               "flex items-center gap-2.5 rounded-[var(--radius)] border px-3 py-2.5",
-              gate.status === "awaiting_gate"
+              gate?.status === "awaiting_gate"
                 ? "border-warning/35 bg-warning/[0.06]"
                 : "border-line-soft bg-panel-elevated/40",
             )}
@@ -1259,7 +1286,7 @@ function ContextTab({
             <span
               className={cn(
                 "flex size-7 shrink-0 items-center justify-center rounded-full border",
-                gate.status === "awaiting_gate"
+                gate?.status === "awaiting_gate"
                   ? "border-warning/40 bg-warning/10 text-warning"
                   : "border-line-soft text-muted-foreground",
               )}

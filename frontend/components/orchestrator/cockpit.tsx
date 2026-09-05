@@ -314,6 +314,7 @@ export function OrchestratorCockpit({
               runId=""
               activeStage=""
               gate={null}
+              showApprover={false}
               artifacts={[]}
               openArtifactId={null}
               onSelectArtifact={() => {}}

@@ -179,6 +179,7 @@ export function Copilot({ projectId, runId }: CopilotProps) {
           runId={runId}
           activeStage={activeStage}
           gate={gate}
+          showApprover
           artifacts={artifacts}
           openArtifactId={openArtifactId}
           onSelectArtifact={setOpenArtifactId}
