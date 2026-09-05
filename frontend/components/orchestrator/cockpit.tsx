@@ -193,10 +193,10 @@ export function OrchestratorCockpit({
   }
 
   // With no session yet, show the roster the project *would* run rather than an
-  // empty rail: before you start anything is precisely when "which agents, who
-  // owns their gates, and what is the project already holding on" is the
-  // question — the read-only control view this rail replaced answered it
-  // without needing a run either.
+  // empty rail: before you start anything is precisely when "which agents does
+  // this project have, and what is it already holding on" is the question —
+  // the read-only control view this rail replaced answered it without needing
+  // a run either.
   const stages = active?.stages ?? (project ? freshStages(project.track) : []);
   const trackMeta = project ? TRACK_META[project.track] : null;
 

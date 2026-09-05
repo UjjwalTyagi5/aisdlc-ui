@@ -61,7 +61,6 @@ interface OrchestratorState {
   // ── Run mechanics, called by the engine ──────────────────────────────────
   appendMessage: (id: string, msg: OrchestratorMessage) => void;
   patchMessage: (id: string, msgId: string, patch: Partial<OrchestratorMessage>) => void;
-  patchStage: (id: string, index: number, patch: Partial<StageRun>) => void;
   setStatus: (id: string, status: SessionStatus) => void;
 }
 
@@ -92,7 +91,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           updatedAt: now,
           messages: [],
           stages: freshStages(track),
-          cursor: 0,
           status: "idle",
         };
         set((s) => ({ sessions: [session, ...s.sessions], activeSessionId: id }));
@@ -125,7 +123,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
             modelKey,
             messages: [],
             stages: freshStages(track),
-            cursor: 0,
             status: "idle",
           })),
         ),
@@ -140,14 +137,6 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           mapSession(id, (s) => ({
             ...s,
             messages: s.messages.map((m) => (m.id === msgId ? { ...m, ...patch } : m)),
-          })),
-        ),
-
-      patchStage: (id, index, patch) =>
-        set(
-          mapSession(id, (s) => ({
-            ...s,
-            stages: s.stages.map((st, i) => (i === index ? { ...st, ...patch } : st)),
           })),
         ),
 
@@ -176,9 +165,4 @@ export const useOrchestratorStore = create<OrchestratorState>()(
 export const useSession_ = (id: string | null) =>
   useOrchestratorStore((s) => s.sessions.find((x) => x.id === id) ?? null);
 
-export const orchestratorUid = uid;
 export { freshStages };
-
-/** Non-reactive read, for the engine's async driver (avoids stale closures). */
-export const readSession = (id: string): OrchestratorSession | null =>
-  useOrchestratorStore.getState().sessions.find((s) => s.id === id) ?? null;

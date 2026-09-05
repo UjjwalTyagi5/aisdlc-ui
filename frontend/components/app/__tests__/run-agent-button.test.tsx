@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 
 import { RunAgentButton } from "@/components/app/run-agent-button";
 
@@ -28,4 +28,12 @@ describe("RunAgentButton", () => {
       expect(container).toBeEmptyDOMElement();
     },
   );
+
+  it("renders a disabled button, not a link, when the project's actions are locked", () => {
+    const { container } = render(<RunAgentButton projectId="p1" role="project_admin" disabled />);
+    const scope = within(container);
+    const button = scope.getByRole("button", { name: /run agent/i });
+    expect(button).toBeDisabled();
+    expect(scope.queryByRole("link", { name: /run agent/i })).not.toBeInTheDocument();
+  });
 });

@@ -27,7 +27,6 @@ import { PhasePipeline } from "@/components/app/phase-pipeline";
 import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
 import { ProjectCostPanel } from "@/components/app/project-cost-panel";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
-import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
 import { RunAgentButton } from "@/components/app/run-agent-button";
 import { isStoredArtifact } from "@/components/app/artifact-list";
 import { RequireRole } from "@/components/auth/require-role";
@@ -65,7 +64,6 @@ const TEMPLATE_LABEL: Record<Project["template"], string> = {
 export default function ProjectOverviewPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
-  const [runOpen, setRunOpen] = React.useState(false);
   // Project-level model choice (an offering id = provider connection + model). Local
   // for now; it pre-selects the offering in the Run dialog. TODO(byok-model): persist
   // as Project.default_offering_id (Phase 3).
@@ -215,13 +213,6 @@ export default function ProjectOverviewPage() {
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
-      <RunTriggerDialog
-        projectId={project.id}
-        open={runOpen}
-        onOpenChange={setRunOpen}
-        initialOffering={projectOffering}
-      />
-
       {/* Project name, delivery track and description live in the project
           layout (PRD §32.1) — this row is the overview's actions only. */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -247,7 +238,7 @@ export default function ProjectOverviewPage() {
               onValueChange={setProjectOffering}
             />
           </div>
-          <RunAgentButton projectId={String(project.id)} role={role} />
+          <RunAgentButton projectId={String(project.id)} role={role} disabled={actionsLocked} />
           {/* Raised from here rather than the Requests page because this is
               where someone discovers the agent they need is closed to them.
               Renders nothing when their role already reaches every agent this

@@ -16,17 +16,14 @@ import { OutOfScope } from "@/components/auth/scope-empty-state";
  *
  * The same cockpit as the global `/orchestrator`, with the project fixed to
  * this route: no project picker, and the session rail lists only this
- * project's runs. Everything else — the model picker, the auto-sequencing run,
- * the gate controls, the pipeline rail — is identical, because it is literally
- * the same component (`components/orchestrator/cockpit.tsx`).
+ * project's runs. Everything else is identical, because it is literally the
+ * same component (`components/orchestrator/cockpit.tsx`).
  *
- * PRD NOTE — §34.11 describes the Orchestrator as "a conversation partner, not
- * an automatic sequencer… nothing auto-advances". This page auto-advances by
- * default, which is a deliberate product decision taken by the user and not an
- * oversight. The PRD's constraint is preserved where it is load-bearing rather
- * than stylistic: **mandatory gates are never auto-approved** (PRD §13 makes
- * them unwaivable), and the Auto-advance switch turns the sequencer off
- * entirely, which restores the documented stage-by-stage behaviour.
+ * A conversation partner, not a sequencer (PRD §34.11): any of the project's
+ * agents can pick up work at any time, based on what the conversation asks
+ * for. There is no fixed hand-off order, no auto-advance, and no gates or
+ * sign-off — Project Admin only (`lib/orchestrator/access.ts`), since driving
+ * it reaches every agent on the project at once.
  */
 export default function ProjectOrchestratorPage() {
   const params = useParams<{ id: string }>();
@@ -51,7 +48,7 @@ export default function ProjectOrchestratorPage() {
               Orchestrator
             </h2>
             <p className="text-muted-foreground text-[12px]">
-              Runs this project&apos;s agent roster in hand-off order.
+              Any of this project&apos;s agents, chosen from the conversation — no fixed order.
             </p>
           </div>
         </div>

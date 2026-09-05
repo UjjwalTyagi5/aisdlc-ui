@@ -1,23 +1,16 @@
 import type { Phase } from "@/lib/schemas/enums";
 
 /**
- * The auto-sequencing Orchestrator — a cross-project cockpit that *runs* the
- * project's agent roster in hand-off order rather than waiting to be driven
- * stage by stage.
+ * The Orchestrator — a cockpit that reaches every agent on a project (global
+ * `/orchestrator`) or one project's agents (`/projects/[id]/orchestrator`,
+ * the same component with the project fixed).
  *
- * NOTE ON PRD §34.11 — the per-project Orchestrator
- * (`app/(app)/projects/[id]/orchestrator/page.tsx`) is deliberately the
- * opposite of this: "a conversation partner, not an automatic sequencer.
- * Nothing runs a fixed script, and nothing auto-advances." That page is
- * untouched and remains the PRD-conformant surface. This one is the
- * agentcore-style cockpit — an explicit, opt-outable auto-sequencer — and the
- * two are separate routes precisely so the PRD reading is not overwritten by
- * this one.
- *
- * The one rule the sequencer never bends: a **mandatory** gate
- * (`GATE_POLICY[phase].mandatory`) always pauses the run. A mandatory
- * checkpoint cannot be waived by the owner or the fallback (PRD §13), so
- * auto-approving one would not be "faster" — it would be unrecoverable.
+ * Per PRD §34.11: "a conversation partner, not an automatic sequencer.
+ * Nothing runs a fixed script, and nothing auto-advances." Any agent can pick
+ * up work at any time, based on what the conversation asks for — there is no
+ * hand-off order, no stage-index progression, and no gates or sign-off.
+ * Project-Admin-only (`lib/orchestrator/access.ts`): driving it reaches every
+ * agent on the project at once.
  */
 
 /** Where one stage stands inside a single orchestrated run. */
@@ -67,8 +60,6 @@ export interface OrchestratorSession {
   updatedAt: number;
   messages: OrchestratorMessage[];
   stages: StageRun[];
-  /** Index into `stages` the sequencer is on. */
-  cursor: number;
   status: SessionStatus;
 }
 
