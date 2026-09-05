@@ -34,8 +34,9 @@ giving it a display name breaks the import, not a user's routing.
 `plan` is the **Project Manager agent** in every user-facing string. The display
 name is what users type; the id this function returns stays `plan`.
 
-Pure: no IO, no model call, no state, no notion of a "next" agent. It must never
-raise — odd input (None, a non-string, empty, gibberish) returns `None`.
+Pure: no IO, no model call, no state, no notion of a "next" agent. Odd input (None,
+a non-string, empty, gibberish) returns `None` — by an explicit type guard, not by a
+blanket `except` that would also hide a real routing bug (see `prefilter`).
 """
 from __future__ import annotations
 
@@ -139,12 +140,24 @@ def prefilter(text: str) -> str | None:
     negations, in-agent work, messages naming two agents — so the Context Agent
     can read the intent properly.
 
-    Never raises. Any odd input yields `None`.
+    Odd input yields `None` because of the `isinstance` guard below — NOT because
+    of a blanket `except`. There used to be one here ("a pre-filter bug must never
+    break a turn"), and it was worse than useless: every odd value the tests list is
+    already handled by the guard, so the catch caught nothing real, while making
+    `test_odd_input_returns_none_and_never_raises` unfalsifiable — delete the guard
+    and the test still passed, because the catch covered for it. It would equally
+    have laundered a genuine regex or `_NAME_TO_ID` bug into "not a command", which
+    routes the turn to the model and looks exactly like the intended behaviour. A
+    pre-filter that silently mis-routes is the failure this module was written to
+    end, so the fault surfaces instead: `ws.py` already turns an exception in a turn
+    into a typed `error` the user can see.
+
+    Everything below is total for a `str`: `_normalise` calls only `str` methods and
+    two anchored `re.sub`s, `_COMMAND` is compiled at import over escaped literals
+    with no nested quantifier to backtrack on, and `group(1)` can only ever be one of
+    the `_NAME_TO_ID` keys the alternation was built from.
     """
-    try:
-        if not isinstance(text, str) or not text:
-            return None
-        match = _COMMAND.match(_normalise(text))
-        return _NAME_TO_ID[match.group(1)] if match else None
-    except Exception:  # noqa: BLE001 - a pre-filter bug must never break a turn
+    if not isinstance(text, str) or not text:
         return None
+    match = _COMMAND.match(_normalise(text))
+    return _NAME_TO_ID[match.group(1)] if match else None

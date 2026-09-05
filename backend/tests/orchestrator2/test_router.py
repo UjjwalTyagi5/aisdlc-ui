@@ -162,8 +162,37 @@ def test_the_literal_word_agent_is_required():
     [None, 0, 3.14, [], {}, object(), b"run the testing agent", "   ", "\n\t", "?!;", "\x00"],
 )
 def test_odd_input_returns_none_and_never_raises(value):
-    """A pre-filter bug must never break a turn."""
+    """Odd input is handled, and this test can now say BY WHAT.
+
+    It used to prove nothing. `prefilter` wrapped its whole body in
+    `except Exception: return None`, so every value here returned `None` whether the
+    `isinstance` guard existed or not — delete the guard and the test still passed.
+    With the blanket catch gone the guard is the only thing standing between
+    `prefilter(None)` and `AttributeError`, so removing it fails this test.
+    """
     assert prefilter(value) is None
+
+
+def test_an_internal_fault_surfaces_instead_of_being_routed_away(monkeypatch):
+    """The other half of removing that catch, pinned so it cannot creep back.
+
+    A broken `_COMMAND` or a broken `_NAME_TO_ID` must not be laundered into `None`.
+    `None` means "not an unambiguous command, let the Context Agent read it" — a
+    perfectly normal answer — so a bug that always returns it is a router that
+    silently stops routing and looks entirely healthy while doing it. That is the
+    same class of silent failure this engine was rebuilt to remove, and `ws.py`
+    already turns an exception in a turn into a typed `error` the user can see.
+    """
+    from agents_orchestrator.orchestrator2 import router
+
+    class _BrokenPattern:
+        def match(self, _text):
+            raise RuntimeError("regex regression")
+
+    monkeypatch.setattr(router, "_COMMAND", _BrokenPattern())
+
+    with pytest.raises(RuntimeError, match="regex regression"):
+        router.prefilter("run the testing agent")
 
 
 def test_very_long_input_is_handled():
