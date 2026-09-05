@@ -402,12 +402,36 @@ def test_the_tool_list_cannot_offer_an_agent_the_engine_cannot_run(monkeypatch):
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
 def test_every_tool_carries_its_display_name_and_a_description(agent_id):
+    """A length check alone does not test this. The first version of this assertion
+    was `len(description) > len(display_name) + 20`, and the surrounding boilerplate
+    ("The X agent: . Call this when the user's message asks for that work.") is 62
+    characters on its own — so blanking a capability to "" passed. What has to be true
+    is that the DESCRIPTION carries the CAPABILITY TEXT, and that the capability text
+    says something."""
     spec = next(s["function"] for s in router._tool_specs()
                 if s["function"]["name"] == f"{router._TOOL_PREFIX}{agent_id}")
+    capability = router._CAPABILITIES[agent_id]
+
+    assert len(capability.strip()) >= router._MIN_CAPABILITY_CHARS, (
+        f"{agent_id} is offered to the model as little more than its name: "
+        f"{capability!r}"
+    )
+    assert capability in spec["description"]
     assert DISPLAY_NAMES[agent_id] in spec["description"]
-    # A name plus nothing else tells the model nothing it could not guess from the id.
-    assert len(spec["description"]) > len(DISPLAY_NAMES[agent_id]) + 20
     assert "reason" in spec["parameters"]["properties"]
+
+
+@pytest.mark.parametrize("agent_id", AGENT_IDS)
+def test_no_agent_is_described_by_nothing(agent_id):
+    """The import-time assert enforces this too, and would fail collection outright —
+    but a floor that only lives in an assert is a floor nobody re-reads. `{"security":
+    ""}` covers AGENT_IDS perfectly and still advertises the Security agent as a bare
+    name, which is the failure the coverage assert was believed to prevent and does
+    not."""
+    capability = router._CAPABILITIES[agent_id]
+    assert isinstance(capability, str)
+    assert capability.strip()
+    assert len(capability.strip()) >= router._MIN_CAPABILITY_CHARS
 
 
 def test_the_project_manager_agent_is_named_correctly_to_the_model():
@@ -435,13 +459,68 @@ def test_the_routing_prompt_has_no_positional_progression_language(banned):
     assert banned not in router._system_prompt().lower()
 
 
-def test_the_routing_prompt_lists_exactly_the_registrys_agents():
-    """Generated from the same source as the tools, so the prompt can never describe
-    an agent the tool list does not offer."""
+def _roster_lines(prompt):
+    """The roster block's lines. Every roster entry begins '- The <name> agent'; the
+    prompt's other bullets begin '- Route', '- Call', '- Never', '- There', '- Answer'.
+    Matching the roster's own shape is what lets an EXTRA line be seen — a test that
+    only looks up each expected name is blind to a tenth entry."""
+    return [line for line in prompt.splitlines() if line.startswith("- The ")]
+
+
+def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
+    """The prompt is the other half of the tool list, and the one that actually causes
+    hallucinated ids: a phantom agent ADVERTISED in the roster gets routed to, and the
+    tool it names does not exist.
+
+    The earlier version of this test asserted only that each registry agent's name was
+    PRESENT, which cannot see an extra line. A roster of `AGENT_IDS` plus a hand-typed
+    '- The Marketing agent (route_to_marketing)' passed it."""
     prompt = router._system_prompt()
-    for agent_id in reg.REGISTRY:
-        assert DISPLAY_NAMES[agent_id] in prompt
+    lines = _roster_lines(prompt)
+
+    listed = {
+        line.split("(", 1)[1].split(")", 1)[0].removeprefix(router._TOOL_PREFIX)
+        for line in lines
+        if "(" in line and ")" in line
+    }
+    assert listed == set(reg.REGISTRY), (
+        f"the roster advertises {sorted(listed)}, the registry holds "
+        f"{sorted(reg.REGISTRY)}"
+    )
+    # Count as well as set: a roster line with no `(route_to_x)` at all would be
+    # invisible to the comparison above but perfectly visible to the model.
+    assert len(lines) == len(reg.REGISTRY), (
+        f"{len(lines)} roster lines for {len(reg.REGISTRY)} agents: {lines}"
+    )
     assert "Plan agent" not in prompt
+
+
+def test_the_routing_prompt_cannot_describe_an_agent_the_registry_lacks(monkeypatch):
+    """The same derivation proof the tool list has. `_tool_specs` had this test and
+    `_system_prompt` did not, so a hand-typed roster — the more dangerous of the two,
+    since the roster is what the model reads to decide an agent EXISTS — was
+    unprotected."""
+    registry_without_security = {k: v for k, v in reg.REGISTRY.items() if k != "security"}
+    monkeypatch.setattr(router, "REGISTRY", registry_without_security)
+
+    prompt = router._system_prompt()
+    assert f"{router._TOOL_PREFIX}security" not in prompt
+    assert "Security agent" not in prompt
+    assert len(_roster_lines(prompt)) == len(AGENT_IDS) - 1
+
+
+def test_the_roster_and_the_tool_list_name_the_same_agents():
+    """Two generated lists that must agree. They are built from the same iteration
+    today; this is what notices if one of them stops being."""
+    prompt_ids = {
+        line.split("(", 1)[1].split(")", 1)[0].removeprefix(router._TOOL_PREFIX)
+        for line in _roster_lines(router._system_prompt())
+    }
+    tool_ids = {
+        spec["function"]["name"].removeprefix(router._TOOL_PREFIX)
+        for spec in router._tool_specs()
+    }
+    assert prompt_ids == tool_ids
 
 
 # ── BYOK: the router's own model call is project-scoped ──────────────────────
@@ -609,6 +688,57 @@ async def test_a_wrongly_shaped_history_entry_surfaces_instead_of_being_dropped(
     _install(monkeypatch)
     with pytest.raises(TypeError):
         await _route(history=["just a string"])
+
+
+@pytest.mark.asyncio
+async def test_a_history_turn_whose_content_is_blocks_is_read_not_dropped(monkeypatch):
+    """`content` as a list of typed blocks is what several providers store for a turn
+    that carried an image or a tool result alongside its text, so it is at least as
+    likely a real caller's shape as a bare string.
+
+    This dropped the turn silently until this test existed: the check was
+    `isinstance(content, str)`, and a block list fell through the `continue`. The
+    routing decision was then made on a conversation missing a message, which is a
+    mis-route wearing the face of a correct one — in the very function whose docstring
+    argues against exactly that."""
+    rec = _install(monkeypatch)
+    await _route(
+        text="and now?",
+        history=[
+            {"role": "user", "content": [{"type": "text", "text": "we finished the PRD"}]},
+            {"role": "assistant", "content": "noted"},
+        ],
+    )
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert "we finished the PRD" in contents, (
+        f"the block-list turn was dropped; the model saw {contents!r}"
+    )
+    assert contents[-1] == "and now?"
+
+
+@pytest.mark.asyncio
+async def test_history_content_of_an_unreadable_shape_raises(monkeypatch):
+    """A string and a block list are the two shapes there is evidence for. Anything
+    else is a caller bug, and guessing at it is how a turn goes missing."""
+    _install(monkeypatch)
+    with pytest.raises(TypeError):
+        await _route(history=[{"role": "user", "content": 17}])
+
+
+@pytest.mark.asyncio
+async def test_a_non_conversation_role_is_dropped_whatever_its_content(monkeypatch):
+    """`tool` and `system` entries are transcript artefacts, not something a person
+    said. Dropping them is deliberate — and they are dropped on ROLE, before their
+    content is read, so an odd shape on a turn nobody routes on cannot fail a turn."""
+    rec = _install(monkeypatch)
+    await _route(
+        text="route me",
+        history=[{"role": "tool", "content": {"weird": "shape"}},
+                 {"role": "user", "content": "the real turn"}],
+    )
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert "the real turn" in contents
+    assert not any("weird" in c for c in contents)
 
 
 @pytest.mark.asyncio

@@ -189,8 +189,11 @@ def prefilter(text: str) -> str | None:
     have laundered a genuine regex or `_NAME_TO_ID` bug into "not a command", which
     routes the turn to the model and looks exactly like the intended behaviour. A
     pre-filter that silently mis-routes is the failure this module was written to
-    end, so the fault surfaces instead: `ws.py` already turns an exception in a turn
-    into a typed `error` the user can see.
+    end, so the fault surfaces instead. `ws.py`'s turn loop already renders an
+    exception raised while serving a turn as a typed `error` the user can see, which
+    is where this will land once `route` is called from inside it — nothing calls
+    `route` or `prefilter` yet, so that is a property of the call site still to be
+    written, not one this function can guarantee alone.
 
     Everything below is total for a `str`: `_normalise` calls only `str` methods and
     two anchored `re.sub`s, `_COMMAND` is compiled at import over escaped literals
@@ -234,9 +237,13 @@ class RoutingDecision:
 # graph nodes — not from `AGENT_REGISTRY.required_capabilities`, which is declared
 # metadata nobody checks against behaviour.
 #
-# Hand-typed, and therefore asserted to cover `AGENT_IDS` at import: an agent with no
-# description would be offered to the model as a bare name, and an agent that is
-# offered but never chosen is the gap `registry.py` closed, wearing a softer hat.
+# Hand-typed, and therefore asserted at import — for COVERAGE and for CONTENT, which
+# are different properties. An agent with no description is offered to the model as a
+# bare name, and an agent that is offered but never chosen is the gap `registry.py`
+# closed, wearing a softer hat. A coverage-only assert does not catch that:
+# `{"security": ""}` covers `AGENT_IDS` perfectly and still leaves the Security agent
+# advertised as nothing but its name, so the length check below is the half that
+# actually enforces what this table is for.
 _CAPABILITIES: dict[str, str] = {
     "requirements": (
         "gathers and normalises what is to be built — PRDs and BRDs, epics, features, "
@@ -278,6 +285,23 @@ _CAPABILITIES: dict[str, str] = {
 
 assert set(_CAPABILITIES) == set(AGENT_IDS), (
     f"_CAPABILITIES {sorted(_CAPABILITIES)} does not cover AGENT_IDS {sorted(AGENT_IDS)}"
+)
+
+# The shortest description above is ~90 characters; anything under this floor cannot
+# say what an agent DOES, which is the only thing this table is for. Deliberately a
+# floor rather than "non-empty": "does stuff" is as useless to the model as "", and a
+# rule that only rejects the empty string invites exactly that.
+_MIN_CAPABILITY_CHARS = 40
+
+_UNDESCRIBED = sorted(
+    agent_id
+    for agent_id, text in _CAPABILITIES.items()
+    if not isinstance(text, str) or len(text.strip()) < _MIN_CAPABILITY_CHARS
+)
+assert not _UNDESCRIBED, (
+    f"_CAPABILITIES entries too short to describe an agent (under "
+    f"{_MIN_CAPABILITY_CHARS} characters): {_UNDESCRIBED}. The model routes on this "
+    f"text; an agent described by nothing is an agent that is never chosen."
 )
 
 # One tool per agent, named `route_to_<agent id>`. The prefix is what makes the id
@@ -453,17 +477,31 @@ def _build_llm(resolved: Any) -> Any:
 def _history_messages(history: Any) -> list[BaseMessage]:
     """The recent conversation as LangChain messages, most recent `_HISTORY_LIMIT`.
 
-    Accepts LangChain messages as-is, or mappings with `role` and `content`. A role
-    that is not a user or assistant turn (`system`, `tool`, ...) is a transcript
-    artefact rather than something the user said, and is dropped; so is an entry with
-    no text.
+    Accepts LangChain messages as-is, or mappings with `role` and `content`. `content`
+    may be a plain string OR a list of typed blocks — the same two shapes `_text_of`
+    reads off a response, via the same `_content_text` — because a block list is what
+    several providers store for a turn that carried an image or a tool result
+    alongside its text, and it is at least as likely a shape for a real caller as a
+    bare string.
 
-    An entry that is NEITHER shape raises `TypeError`. Routing on a conversation that
-    was silently truncated is a mis-route, and a mis-route looks exactly like a
-    correct route — the class of silent failure this engine was rebuilt to end.
-    Surfacing it costs a failed turn, which `ws.py`'s turn loop already renders as a
-    typed `error`; that only becomes true of THIS function once `route` is called from
-    inside that loop, and nothing calls it yet.
+    Two things are dropped, both deliberately and neither of them content: a role that
+    is not a user or assistant turn (`system`, `tool`, ...), which is a transcript
+    artefact rather than something a person said, and a turn whose text is empty after
+    extraction. A turn made only of non-text blocks contributes nothing to a decision
+    made on text; that it happened at all is NOT represented, and this is the one
+    knowing omission in this function.
+
+    Everything else raises `TypeError` — an entry that is neither a message nor a
+    mapping, and a `content` that is neither a string nor a list. Routing on a
+    conversation that was silently truncated is a mis-route, and a mis-route looks
+    exactly like a correct route: the class of silent failure this engine was rebuilt
+    to end. An earlier version of this function dropped a block list on the floor
+    (`isinstance(content, str)` was the whole test), which is precisely that bug, in
+    the function whose docstring argues against it.
+
+    Surfacing a fault costs a failed turn, which `ws.py`'s turn loop already renders as
+    a typed `error`; that only becomes true of THIS function once `route` is called
+    from inside that loop, and nothing calls it yet.
     """
     if history is None:
         return []
@@ -482,22 +520,46 @@ def _history_messages(history: Any) -> list[BaseMessage]:
                 "history entries must be LangChain messages or mappings with 'role' "
                 f"and 'content'; got {type(entry).__name__}"
             )
-        content = entry.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
+
+        # Role first: a `tool` or `system` entry is dropped whatever its content is,
+        # so an unusual content shape on a turn nobody routes on cannot fail the turn.
         role = str(entry.get("role") or "").strip().lower()
+        if role not in ("user", "human", "assistant", "ai"):
+            continue
+
+        content = entry.get("content")
+        text = _content_text(content)
+        if text is None:
+            raise TypeError(
+                "history content must be a string or a list of content blocks; got "
+                f"{type(content).__name__} for role {role!r}"
+            )
+        if not text:
+            continue
+
         if role in ("user", "human"):
-            messages.append(HumanMessage(content=content))
-        elif role in ("assistant", "ai"):
-            messages.append(AIMessage(content=content))
+            messages.append(HumanMessage(content=text))
+        else:
+            messages.append(AIMessage(content=text))
     return messages
 
 
-def _text_of(response: Any) -> str:
-    """The response's text. `content` is a string for most providers and a list of
-    typed blocks for others; a naive `str(content)` puts a Python repr in front of the
-    user, since this text IS the direct reply."""
-    content = getattr(response, "content", None)
+def _content_text(content: Any) -> str | None:
+    """The text in a `content` value, or `None` if it is a shape we cannot read.
+
+    `content` is a plain string for most providers and a LIST OF TYPED BLOCKS for
+    others — the same two shapes on a stored history turn and on a live response,
+    which is why both callers come through here rather than each testing
+    `isinstance(content, str)` on its own. That local test is what silently dropped a
+    block-list history turn.
+
+    The two return values are distinct on purpose: `""` means "a shape we understand
+    that carries no text" (an empty string, a block list of images), while `None`
+    means "a shape we do not understand at all". `_history_messages` raises on `None`
+    and skips on `""`; `_text_of` treats both as no text, because a response is the
+    model's output and `_validated` already guarantees the user sees something. Fusing
+    them into `""` would take that choice away from both callers.
+    """
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -508,7 +570,14 @@ def _text_of(response: Any) -> str:
             elif isinstance(block, Mapping) and block.get("type") == "text":
                 parts.append(str(block.get("text") or ""))
         return "".join(parts).strip()
-    return ""
+    return None
+
+
+def _text_of(response: Any) -> str:
+    """The response's text. A naive `str(content)` would put a Python repr in front of
+    the user, since this text IS the direct reply. An unreadable shape yields `""`,
+    which `_validated` turns into the could-not-choose reply rather than silence."""
+    return _content_text(getattr(response, "content", None)) or ""
 
 
 def _agent_id_from_tool_name(name: Any) -> str | None:
