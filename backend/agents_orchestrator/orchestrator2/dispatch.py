@@ -163,9 +163,22 @@ async def run_agent(
     Yields, in order: `agent.selected` first (unless the agent id is unknown,
     in which case an `error` event stands in for it), then zero or more
     `stream_chunk` / `tool.call` events as the graph runs, then `stream_end`
-    always last. Any exception — resolving the capability, resolving the BYOK
+    last on every path this generator is ALLOWED TO FINISH — including every
+    error path. Any exception — resolving the capability, resolving the BYOK
     model, loading the graph or prompt, or running the graph — becomes an
-    `error` event; it never propagates to the caller and never yields nothing.
+    `error` event rather than propagating to the caller, so a consumer that
+    iterates to the end always receives at least one event, and `stream_end`
+    is always the last of them.
+
+    WHAT IS NOT CLAIMED: that `stream_end` arrives no matter what. A consumer
+    that CLOSES or ABANDONS this generator early ends the turn itself —
+    `GeneratorExit` is raised at whichever `yield` was suspended and unwinds
+    straight past the `stream_end` at the bottom, which is never reached. That
+    is not a gap (there is no consumer left to receive it), but it is why this
+    paragraph is qualified and the module docstring above is qualified the same
+    way: an unnarrowed "always last" here would have this function's own
+    docstring contradicting its module's, and a comment asserting a guarantee
+    the code does not provide is worse than no comment at all.
     The `error` event's `agent` field carries the resolved agent id when one
     resolved (a failure while running a known agent), and is OMITTED when the
     id itself is unknown — `OrchestratorAgentId` in the frontend contract is
