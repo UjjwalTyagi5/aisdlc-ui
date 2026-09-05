@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import aclosing
 from typing import Any, NamedTuple, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -394,18 +395,34 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 continue
 
             try:
-                async for event in run_agent(
-                    agent_id,
-                    text=text,
-                    run_id=run_id,
-                    tenant_id=tenant_id,
-                    model_id=model_id,
-                    offering_id=offering_id,
-                    # From the verified `runs` row. `msg` may well carry a
-                    # `project_id`; it is never consulted.
-                    project_id=project_id,
-                ):
-                    await _send(websocket, event)
+                # `aclosing` is not decoration. `run_agent` is an async generator
+                # that clears the turn's resolved model and run project in a
+                # `finally`, and this socket does NOT stop on a mid-stream failure:
+                # the `EventSerializationError` branch below keeps serving. A plain
+                # `async for` that breaks out on a raising `_send` ABANDONS the
+                # generator, and an abandoned asyncgen's `finally` is run by
+                # CPython's finalizer in a NEW TASK whose context is a copy — so the
+                # clear would land on that copy and this socket's context would keep
+                # the previous turn's BYOK key set. Closing it here runs that
+                # `finally` inline, in this task, on every path including the raising
+                # one. (`run_agent` also clears on entry, which is what covers a
+                # consumer that forgets to do this; this makes the exit-clear real
+                # rather than nominal.)
+                async with aclosing(
+                    run_agent(
+                        agent_id,
+                        text=text,
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        model_id=model_id,
+                        offering_id=offering_id,
+                        # From the verified `runs` row. `msg` may well carry a
+                        # `project_id`; it is never consulted.
+                        project_id=project_id,
+                    )
+                ) as events:
+                    async for event in events:
+                        await _send(websocket, event)
             except WebSocketDisconnect:
                 raise
             except EventSerializationError as exc:

@@ -15,10 +15,12 @@ there is no auto-advance in this engine.
 Event type strings match the frontend contract in
 `frontend/lib/orchestrator/protocol.ts` exactly: `agent.selected`,
 `stream_chunk`, `tool.call`, `error`, `stream_end`. `run_agent` always yields
-`stream_end` last, on every path including errors, and `agent.selected` is
-always the first event yielded, before any text — the old engine switched
-agents silently, so a wrong pick was invisible until the answer made no
-sense.
+`stream_end` last on every path it is allowed to finish — including every error
+path — and `agent.selected` is always the first event yielded, before any text:
+the old engine switched agents silently, so a wrong pick was invisible until the
+answer made no sense. (A consumer that closes or abandons the generator early
+ends the turn itself and does not see `stream_end`; there is no consumer left to
+receive it.)
 
 BYOK MODEL RESOLUTION HAPPENS HERE, PER TURN, SCOPED TO THE RUN'S PROJECT
 ------------------------------------------------------------------------
@@ -44,8 +46,29 @@ Two things are set before the graph runs, in this order:
   2. `set_resolved_model(resolved)` — the resolved model, which is what an agent's
      `build_llm` / `resolve_chat_model` reads when it builds its client.
 
-Both are cleared again on every exit, so one turn's project and key never outlive
-it on a socket that serves many.
+THE CLEAR THAT CARRIES THE GUARANTEE IS THE ONE ON ENTRY, NOT THE ONE ON EXIT.
+`run_agent` clears both contextvars as its FIRST statement, before anything can
+fail, so a turn never reads the previous turn's project or key no matter how the
+previous turn ended. That clear runs in the caller's own context — an async
+generator's body executes in the context of whoever is driving it — so on a socket
+that serves many turns it lands exactly where it has to.
+
+The `finally` clears them again, but that is defence in depth and nothing more.
+This is an async generator, and a caller that ABANDONS one — stops iterating
+without closing it, which is what `ws.py` does when `_send` raises an
+`EventSerializationError` mid-stream and then deliberately keeps serving the
+socket — does not run the `finally` inline. CPython's asyncgen finalizer runs
+`aclose()` in a NEW TASK, whose context is a COPY, so `set_resolved_model(None)`
+made there lands on that copy and never reaches the socket. `ws.py` therefore
+closes the generator explicitly (`contextlib.aclosing`), which makes its exit-clear
+land inline; a future call site that forgets to is covered by the ENTRY clear, not
+by the `finally`.
+
+What is NOT claimed: that the contextvars are empty at every instant between
+turns. After an abandoned turn the previous value can sit on the socket's context
+until the next turn starts. Nothing reads it there — between turns the socket only
+receives a frame, validates it and resolves the run, none of which builds an LLM
+client — and the next turn's entry-clear precedes every read.
 
 FAILS CLOSED, LOUDLY, WITH NO ENV FALLBACK. `resolve_model_for_run` deliberately
 does not fall back, and neither does this: a project with no usable model gets an
@@ -67,15 +90,17 @@ does. An agent that crosses an executor boundary without carrying it — `asynci
 inside a node, `run_in_executor` without `copy_context()` — finds nothing set and
 takes ITS OWN fallback, which this module cannot prevent.
 
-The known instance is the Testing agent: `testing_agent/config/shared.py:154-175`
-falls back to `ANTHROPIC_API_KEY` whenever the contextvar is missing and
-`AGENT_RUNTIME_MODE != "enterprise"` — and the default is `"local"`
-(`config/env.py:155`). That agent's own runner only keeps the contextvar because it
-copies the context explicitly before `run_in_executor`
-(`testing_agent/agents/testing_agent.py:429-439`); this module does not go through
-that runner, it awaits the compiled graph directly. The other eight agents'
-executor boundaries are unaudited and are tracked as separate work — deliberately
-not touched here.
+The known instance is the Testing agent:
+`agents_orchestrator/testing_agent/config/shared.py:154-176` falls back to
+`ANTHROPIC_API_KEY` whenever the contextvar is missing, `AGENT_RUNTIME_MODE !=
+"enterprise"` — the default is `"local"` (`config/env.py:155`) — AND that env key is
+non-empty; an empty key raises there instead, so the fallback is a local-dev
+convenience, not a silent production path. That agent's own runner only keeps the
+contextvar because it copies the context explicitly before `run_in_executor`
+(`agents_orchestrator/testing_agent/agents/testing_agent.py:429-439`); this module
+does not go through that runner, it awaits the compiled graph directly. The other
+eight agents' executor boundaries are unaudited and are tracked as separate work —
+deliberately not touched here.
 
 So: this module closes the gap where NOTHING was resolved. Whether each agent then
 holds on to what was resolved is that agent's property, not this one's, and the
@@ -115,8 +140,9 @@ _MODEL_NOT_ENABLED_MESSAGE = (
 def _clear_run_model_context() -> None:
     """Drop this context's resolved model and run project.
 
-    One helper rather than two calls in three places, so "cleared" means the same
-    thing everywhere and a future third contextvar has one place to be added to.
+    One helper rather than two calls at each of the two call sites (entry and
+    `finally`), so "cleared" means the same thing at both and a future third
+    contextvar has one place to be added to.
     """
     set_resolved_model(None)
     set_run_project(None)
@@ -156,12 +182,19 @@ async def run_agent(
     has grants configured. It comes from the `runs` row — never from the client
     (see `ws._resolve_run`).
     """
-    # NOTHING FROM A PREVIOUS TURN SURVIVES INTO THIS ONE. A socket serves many
-    # turns in one async context, and both contextvars are set per turn, so a turn
-    # that ends before setting them would otherwise run — or be observed — under the
-    # PREVIOUS turn's project and model. The unknown-agent branch below returns
-    # before either is set and is the concrete case; clearing here rather than in
-    # that branch means a future early return cannot reintroduce the same hole.
+    # THIS IS THE LOAD-BEARING CLEAR. A socket serves many turns in one async
+    # context and both contextvars are set per turn, so a turn that ends before
+    # setting them would otherwise run — or be observed — under the PREVIOUS turn's
+    # project and model. The unknown-agent branch below returns before either is
+    # set and is the concrete case; clearing here rather than in that branch means
+    # a future early return cannot reintroduce the same hole.
+    #
+    # It is load-bearing rather than belt-and-braces because it is the only clear
+    # that is guaranteed to run in the CALLER'S context. A generator body executes
+    # in the context of whoever drives it, and this statement runs on the first
+    # `__anext__`, so it always lands on the socket. The `finally` at the bottom
+    # does NOT, if the caller abandons this generator instead of closing it: see
+    # the comment there.
     _clear_run_model_context()
 
     try:
@@ -200,9 +233,11 @@ async def run_agent(
             )
         except (NoModelConfiguredError, ModelNotEnabledError) as exc:
             # FAIL CLOSED. No env key, no platform key, no "org default" retry
-            # without the project — just say what is wrong and end the turn. The
-            # contextvars are cleared by the `finally` below, on this path and on
-            # every other one.
+            # without the project — just say what is wrong and end the turn. No
+            # `return` here, and none anywhere else inside this `try`: `stream_end`
+            # is yielded AFTER the `finally` (see below), and a `return` would run
+            # the `finally` and then leave without it. The `else` below is what
+            # keeps the success path off this branch.
             yield {
                 "type": "error",
                 "message": (
@@ -213,36 +248,39 @@ async def run_agent(
                 "detail": str(exc),
                 "agent": agent_id,
             }
-            return
-        set_resolved_model(resolved)
-
-        graph = capability.load_graph()
-        config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
-
-        if capability.mode == "stream":
-            system_prompt = capability.load_prompt()
-            state: dict[str, Any] = {
-                "messages": [SystemMessage(content=system_prompt), HumanMessage(content=text)],
-                "tenant_id": tenant_id,
-                "model_id": model_id,
-                "offering_id": offering_id,
-            }
-            async for chunk, _metadata in graph.astream(
-                state, stream_mode="messages", config=config
-            ):
-                content = getattr(chunk, "content", None)
-                if content:
-                    yield {"type": "stream_chunk", "content": content}
         else:
-            state = {
-                "user_prompt": text,
-                "tenant_id": tenant_id,
-                "model_id": model_id,
-                "offering_id": offering_id,
-            }
-            final_state = await graph.ainvoke(state, config=config)
-            reply = (final_state or {}).get("final_user_message") or ""
-            yield {"type": "stream_chunk", "content": reply}
+            set_resolved_model(resolved)
+
+            graph = capability.load_graph()
+            config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
+
+            if capability.mode == "stream":
+                system_prompt = capability.load_prompt()
+                state: dict[str, Any] = {
+                    "messages": [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=text),
+                    ],
+                    "tenant_id": tenant_id,
+                    "model_id": model_id,
+                    "offering_id": offering_id,
+                }
+                async for chunk, _metadata in graph.astream(
+                    state, stream_mode="messages", config=config
+                ):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        yield {"type": "stream_chunk", "content": content}
+            else:
+                state = {
+                    "user_prompt": text,
+                    "tenant_id": tenant_id,
+                    "model_id": model_id,
+                    "offering_id": offering_id,
+                }
+                final_state = await graph.ainvoke(state, config=config)
+                reply = (final_state or {}).get("final_user_message") or ""
+                yield {"type": "stream_chunk", "content": reply}
     except Exception as exc:  # noqa: BLE001 - never let a run failure reach the socket unlabeled
         # Unlike the UnknownAgentError branch above, `agent_id` HAS already
         # resolved by this point (agent.selected was yielded with it), so it
@@ -250,18 +288,39 @@ async def run_agent(
         # OrchestratorAgentId enum in ErrorEvent.agent.
         yield {"type": "error", "message": str(exc), "agent": agent_id}
     finally:
-        # EVERY EXIT, NOT JUST THE TYPED-FAILURE ONE. The first version of this
-        # cleared the model only in the `NoModelConfiguredError` / `ModelNotEnabledError`
-        # branch, which left the failure modes that raise THROUGH the generic handler
-        # uncovered — `check_budgets` (BudgetExceededError / BudgetWindowClosedError)
-        # and the per-model rate/cost enforcers all raise from inside
-        # `resolve_model_for_run` AFTER a previous turn's model was stashed. A
-        # budget-exceeded turn therefore ended with the PREVIOUS project's
-        # ResolvedModel — and so its BYOK key — still live on this socket's context.
+        # DEFENCE IN DEPTH — the guarantee lives on the entry-clear at the top.
         #
-        # Safe to clear here: the graph has finished by the time `finally` runs (the
-        # astream loop is exhausted, or ainvoke has returned, or an exception unwound
-        # past it), and any task the graph spawned copied the context when it was
-        # created, so this cannot retract a value a still-running node is using.
+        # It still earns its place on the inline paths. The first version cleared
+        # the model only in the `NoModelConfiguredError` / `ModelNotEnabledError`
+        # branch, which left the failure modes that raise THROUGH the generic
+        # handler uncovered — `check_budgets` (BudgetExceededError /
+        # BudgetWindowClosedError) and the per-model rate/cost enforcers all raise
+        # from inside `resolve_model_for_run` AFTER a previous turn's model was
+        # stashed. A budget-exceeded turn therefore ended with the PREVIOUS
+        # project's ResolvedModel — and so its BYOK key — still live on this
+        # socket's context.
+        #
+        # WHERE IT DOES NOT REACH: abandonment. If the consumer stops iterating
+        # without closing this generator, the `finally` does not run inline —
+        # CPython's asyncgen finalizer calls `aclose()` in a NEW TASK, whose
+        # context is a copy, so the clear lands on the copy and the socket's
+        # context keeps the value. `ws.py` avoids that by closing this generator
+        # explicitly (`contextlib.aclosing`), which runs this block inline in the
+        # socket's own context on the `_send`-failed path too; the entry-clear is
+        # what covers any consumer that does not.
+        #
+        # Nothing may `yield` in here. On close, `GeneratorExit` is raised at
+        # whichever `yield` was suspended and unwinds through this block; a `yield`
+        # here would turn that into `RuntimeError: async generator ignored
+        # GeneratorExit` — which is why `stream_end` is yielded BELOW this block
+        # rather than inside it. On a normal exit that is the same last event as
+        # before; on a close there is no consumer left to receive it.
+        #
+        # Safe to clear on the inline paths: the graph has finished by then (the
+        # astream loop is exhausted, or ainvoke has returned, or an exception
+        # unwound past it), and any task the graph spawned copied the context when
+        # it was created, so this cannot retract a value a still-running node is
+        # using.
         _clear_run_model_context()
-        yield {"type": "stream_end"}
+
+    yield {"type": "stream_end"}

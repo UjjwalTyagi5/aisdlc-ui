@@ -63,15 +63,20 @@ class _Recorder:
         self.graph_loads = 0
         self.model_at_graph = "<never invoked>"
         self.project_at_graph = "<never invoked>"
+        # What the resolved-model contextvar held AT THE MOMENT this turn resolved.
+        # The entry-clear's whole job is to make this `None` even when a previous
+        # turn left a model behind, so it has to be sampled, not inferred.
+        self.model_at_resolve = "<never resolved>"
 
 
 def _install(monkeypatch, recorder, *, agent_id="design", mode="stream",
-             resolved=None, raises=None):
+             resolved=None, raises=None, graph_raises=None):
     """Wire a fake resolver and a fake graph for `agent_id`, both reporting into
     `recorder`. Returns nothing — everything observable lands on the recorder."""
 
     async def _fake_resolve(tenant_id, requested_model_id=None, **kwargs):
         recorder.log.append("resolve")
+        recorder.model_at_resolve = mr.get_resolved_model()
         recorder.resolve_calls.append(
             {"tenant_id": tenant_id, "requested_model_id": requested_model_id,
              # Read the run-project contextvar AS THE REAL RESOLVER WOULD: it falls
@@ -91,11 +96,17 @@ def _install(monkeypatch, recorder, *, agent_id="design", mode="stream",
             recorder.model_at_graph = mr.get_resolved_model()
             recorder.project_at_graph = mr.get_run_project()
             yield (type("M", (), {"content": "hi"})(), {})
+            # Raised AFTER a chunk, so the model is already stashed and at least one
+            # event has been yielded — the shape of a mid-stream failure.
+            if graph_raises is not None:
+                raise graph_raises
 
         async def ainvoke(self, state, config=None):
             recorder.log.append("graph")
             recorder.model_at_graph = mr.get_resolved_model()
             recorder.project_at_graph = mr.get_run_project()
+            if graph_raises is not None:
+                raise graph_raises
             return {"final_user_message": "hi"}
 
     def _load_graph():
@@ -506,3 +517,237 @@ async def test_a_run_with_no_project_yields_none_rather_than_a_guess(monkeypatch
 
     selection = await ws._resolve_run(_A_RUN, _A_TENANT)
     assert selection.project_id is None
+
+
+# ── 5. the turn's key does not outlive the turn, however the turn ends ───────
+#
+# Everything above proves the model is RESOLVED and SET. This section proves it is
+# UNSET again, which is the other half and the half that shipped untested: the
+# commit that added the `finally` clear (7ed96891) touched no test file at all, and
+# the only nearby test (`test_a_failed_resolution_leaves_no_model_on_the_contextvar`)
+# exercises `NoModelConfiguredError` — a branch that already cleared before that
+# commit. Every test below fails if the clear is reverted.
+
+
+@pytest.mark.asyncio
+async def test_a_generic_failure_in_the_resolver_leaves_both_contextvars_clear(monkeypatch):
+    """The gap the `finally` was added for, and the one nothing exercised.
+
+    `NoModelConfiguredError` / `ModelNotEnabledError` are the TYPED outcomes and they
+    always cleared. The failures that actually leak are the untyped ones raised from
+    inside `resolve_model_for_run` — `check_budgets` raising BudgetExceededError, a
+    per-model rate or cost enforcer tripping — because those unwind through the
+    generic `except` instead. `set_run_project` has already run by then.
+    """
+    rec = _Recorder()
+    mr.set_resolved_model(_a_resolved_model(model="previous-turns-model"))
+    _install(monkeypatch, rec, raises=RuntimeError(
+        "monthly budget for this project is exhausted"))
+
+    events = await _turn(project_id="proj-B")
+
+    assert [e["type"] for e in events] == ["agent.selected", "error", "stream_end"]
+    assert mr.get_run_project() is None, (
+        "the failed turn left its project scope on the socket's context — the next "
+        "thing to consult it would spend against a project this turn only attempted"
+    )
+    assert mr.get_resolved_model() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_id,mode", [("design", "stream"), ("testing", "invoke")])
+async def test_a_failure_inside_the_graph_leaves_both_contextvars_clear(
+    monkeypatch, agent_id, mode
+):
+    """A turn that dies MID-GRAPH, after its own model is stashed.
+
+    This is the only case where the value left behind is THIS turn's live BYOK key
+    rather than a stale one, so it is the case that most needs the clear. Both
+    dispatch modes, because a fix in one branch leaves the other one leaking.
+    """
+    rec = _Recorder()
+    _install(monkeypatch, rec, agent_id=agent_id, mode=mode,
+             graph_raises=RuntimeError("the graph blew up mid-run"))
+
+    events = await _turn(agent_id, project_id="proj-A")
+
+    assert rec.model_at_graph is not None, "the graph never ran; the test proves nothing"
+    assert [e["type"] for e in events][-2:] == ["error", "stream_end"]
+    assert mr.get_resolved_model() is None, (
+        "the turn's own ResolvedModel — and its BYOK api_key — is still live on this "
+        "context after the graph failed"
+    )
+    assert mr.get_run_project() is None
+
+
+@pytest.mark.asyncio
+async def test_a_successful_turn_also_leaves_both_contextvars_clear(monkeypatch):
+    """The ordinary path. A turn that SUCCEEDS leaves a key behind just as readable
+    as one that fails, and it is the common case."""
+    rec = _Recorder()
+    _install(monkeypatch, rec)
+
+    events = await _turn(project_id="proj-A")
+
+    assert [e["type"] for e in events][-1] == "stream_end"
+    assert mr.get_resolved_model() is None
+    assert mr.get_run_project() is None
+
+
+# ── 6. the entry-clear: no turn inherits the previous turn's model ───────────
+
+
+@pytest.mark.asyncio
+async def test_a_turn_does_not_start_under_the_previous_turns_model(monkeypatch):
+    """The clear that carries the guarantee, sampled where it matters.
+
+    Not "it is cleared afterwards" — clear BEFORE this turn resolves anything. Between
+    `set_run_project` and `set_resolved_model` there is a window in which the model
+    contextvar is read by whatever the resolver touches (each agent's own
+    `resolve_model_for_run` re-resolves), and without the entry-clear the value
+    visible there is the PREVIOUS project's model, with the previous project's key.
+    """
+    rec = _Recorder()
+    mr.set_resolved_model(_a_resolved_model(model="previous-turns-model"))
+    mr.set_run_project("previous-turns-project")
+    _install(monkeypatch, rec)
+
+    await _turn(project_id="proj-B")
+
+    assert rec.model_at_resolve is None, (
+        f"this turn resolved while {rec.model_at_resolve!r} — a previous turn's "
+        f"model, and a previous project's key — was still on the contextvar"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_agent_turn_still_clears_what_the_previous_turn_left(monkeypatch):
+    """The branch that sets nothing and so can clear nothing on the way out.
+
+    An unknown agent id returns before `set_run_project` and before
+    `set_resolved_model`, and outside the `try`, so no exit-clear runs for it at all.
+    Only the entry-clear covers it. A socket that serves a mistyped agent id between
+    two real turns must not carry the first turn's key across the gap.
+    """
+    rec = _Recorder()
+    mr.set_resolved_model(_a_resolved_model(model="previous-turns-model"))
+    mr.set_run_project("previous-turns-project")
+    _install(monkeypatch, rec)
+
+    events = await _turn("no-such-agent")
+
+    assert [e["type"] for e in events] == ["error", "stream_end"]
+    assert mr.get_resolved_model() is None, (
+        "a turn that dispatched nothing left the previous turn's BYOK key live"
+    )
+    assert mr.get_run_project() is None
+    assert rec.graph_loads == 0
+
+
+# ── 7. abandonment: the consumer stops mid-stream ────────────────────────────
+#
+# `run_agent` is an async generator, and `ws.py` does NOT stop serving when a frame
+# fails to send. A consumer that walks away from a suspended generator does not run
+# its `finally` inline: CPython's asyncgen finalizer runs `aclose()` in a NEW TASK
+# whose context is a COPY, so a clear made there never reaches the socket. These
+# tests pin what actually holds — and they run in the same task as the socket
+# handler, so the context they assert on IS the socket's.
+
+
+@pytest.mark.asyncio
+async def test_closing_the_generator_mid_stream_raises_nothing(monkeypatch):
+    """`aclose()` must be quiet.
+
+    The `finally` used to `yield {"type": "stream_end"}`. On close, `GeneratorExit`
+    is raised at the suspended `yield` and unwinds through the `finally`; yielding
+    there turns it into `RuntimeError: async generator ignored GeneratorExit`. A
+    generator that raises a RuntimeError every time a client's frame fails to encode
+    is noise that will hide a real fault later, so `stream_end` is yielded after the
+    `finally`, not inside it.
+    """
+    rec = _Recorder()
+    _install(monkeypatch, rec)
+
+    events = dispatch.run_agent("design", text="hi", run_id="run-1", tenant_id="t1",
+                                model_id=None, offering_id=None, project_id="proj-A")
+    assert (await events.__anext__())["type"] == "agent.selected"
+    assert (await events.__anext__())["type"] == "stream_chunk"
+
+    await events.aclose()  # must not raise; a RuntimeError here IS the bug
+
+
+@pytest.mark.asyncio
+async def test_closing_the_generator_mid_stream_clears_the_closers_context(monkeypatch):
+    """Closed INLINE — `aclose()` awaited by the consumer — the exit-clear does land
+    on the consumer's context. This is the guarantee `ws.py` buys with `aclosing`,
+    and the reason it uses that rather than a bare `async for`."""
+    rec = _Recorder()
+    _install(monkeypatch, rec)
+
+    events = dispatch.run_agent("design", text="hi", run_id="run-1", tenant_id="t1",
+                                model_id=None, offering_id=None, project_id="proj-A")
+    await events.__anext__()                       # agent.selected
+    await events.__anext__()                       # stream_chunk — model is now set
+    assert mr.get_resolved_model() is not None, "the turn never got as far as a model"
+
+    await events.aclose()
+
+    assert mr.get_resolved_model() is None, (
+        "closing the turn mid-stream left its BYOK key on the caller's context"
+    )
+    assert mr.get_run_project() is None
+
+
+@pytest.mark.asyncio
+async def test_the_socket_clears_the_turns_key_when_a_frame_cannot_be_encoded(monkeypatch):
+    """The finding end to end, through the real `ws.py` and the real `run_agent`.
+
+    `_send` raising `EventSerializationError` is the one mid-turn failure this socket
+    deliberately SURVIVES — it reports the dropped frame and keeps serving. So the
+    turn ends with the generator suspended, and if the socket merely walks away from
+    it the clear is left to a finalizer task whose context is a copy: this handler's
+    context — the one the next turn runs on — keeps the key. The assertion below runs
+    in the same task as the handler, so it reads exactly that context.
+    """
+    from agents_orchestrator.orchestrator2 import ws
+
+    _patch_auth(monkeypatch, ws)
+
+    async def _fake_resolve(tenant_id, requested_model_id=None, **kwargs):
+        return _a_resolved_model(model="this-turns-model")
+
+    monkeypatch.setattr(dispatch, "resolve_model_for_run", _fake_resolve)
+
+    class _UnsendableGraph:
+        async def astream(self, state, stream_mode=None, config=None):
+            # Truthy and not JSON-encodable: `_send` raises EventSerializationError
+            # on this frame, mid-stream, with the model stashed and the generator
+            # suspended at the yield.
+            yield (type("M", (), {"content": object()})(), {})
+
+    monkeypatch.setitem(
+        reg.REGISTRY, "design",
+        reg.AgentCapability(agent_id="design", load_graph=_UnsendableGraph,
+                            load_prompt=lambda: "SYS", mode="stream"),
+    )
+
+    async def _owned(run_id, tenant_id):
+        return ws.RunSelection(model_id=None, offering_id=None, project_id="proj-A")
+
+    monkeypatch.setattr(ws, "_resolve_run", _owned)
+
+    socket = _FakeWebSocket(
+        params={"ticket": "tkt"},
+        inbound=[json.dumps({"type": "user_message", "text": "hi", "agent": "design",
+                             "run_id": _A_RUN})],
+    )
+    await ws.orchestrator2_ws(socket)
+
+    assert any("could not be sent" in (e.get("message") or "") for e in socket.sent), (
+        f"the socket never reported the dropped frame: {socket.sent}"
+    )
+    assert mr.get_resolved_model() is None, (
+        "the socket kept serving with the abandoned turn's ResolvedModel — and its "
+        "BYOK api_key — still live on the context the next turn will run on"
+    )
+    assert mr.get_run_project() is None
