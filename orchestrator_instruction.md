@@ -229,6 +229,7 @@ Context Agent — rather than a rebuild of everything.
 | D7 | **No linear pipeline rail.** No positional progression anywhere. | User, direct |
 | D8 | Orchestrator is **project-scoped**; Project Admin only. | User, direct |
 | D9 | Frontend built first, but the **streaming event contract is pinned before either side**. | Claude proposed, user approved |
+| D10 | **Borrow capabilities, not whole agents.** The Orchestrator gets its own per-agent implementation built from the standalone agent's tools + prompt; it does not run their compiled graphs, because their permission/gate/session machinery is exactly what the Orchestrator does not need. | User, direct |
 
 ---
 
@@ -262,8 +263,31 @@ of list order.
 
 ### 5.2 Capability registry — failing loudly
 
-One table is the single source of truth for what can be dispatched: agent id →
-compiled graph, system prompt, required connectors, artifact writer.
+**D10 — borrow capabilities, not whole agents.** The Orchestrator does **not**
+import and run the standalone agents' compiled graphs. It has its own
+implementation per agent, assembled from what the standalone agent is *good at*
+— its tools, its prompt, its output shape — and nothing else.
+
+The reason is that a standalone agent is more than its capability. Each one
+carries the machinery of being reachable on its own: per-role permission checks,
+its own session and gate handling, its own approval routing. Inside the
+Orchestrator none of that applies — the runner is a Project Admin who already
+owns all nine agents, there are no gates (D5), and the only scope that matters is
+*which project is this*. Dragging that machinery in means re-deciding, per turn,
+questions that were already settled at the door, and it is a large part of what
+made the old engine fragile.
+
+So the registry maps agent id → **orchestrator-native implementation**, built
+from the standalone agent's tools + prompt, plus the system prompt, required
+connectors, and artifact writer. The standalone agents keep working unchanged for
+the delivery roles on their own pages; the Orchestrator shares their capability,
+not their plumbing.
+
+The trade-off, stated plainly: one capability now has two call sites, so a tool
+improved in the standalone agent does not automatically improve the Orchestrator's.
+The mitigation is that **tools and prompts are shared modules** — only the graph
+assembly and the permission wrapper differ. If a capability starts drifting, that
+is the signal it was not factored far enough down.
 
 At **startup**, the registry is validated: every agent in `STAGE_ORDER` must
 resolve to an importable graph and a prompt. A missing entry **refuses the boot**,
@@ -411,3 +435,66 @@ Phases are ordered so nothing is built against an unproven interface.
 | 2026-09-05 | Architecture audited (§2). Decisions D1–D9 locked. Document created. No code written yet. |
 | 2026-09-05 | Open question 1 settled: **nine** agents, the ninth being the **Project Manager agent** (formerly "help agent"). User approved the design and authorised the build. Implementation plan next. |
 | 2026-09-05 | Phase 0+1 plan written: `docs/superpowers/plans/2026-09-05-orchestrator-phase-0-1.md` (9 tasks, TDD). Sequencing corrected in §8 — the Copilot page survives Phase 1 and is deleted in Phase 5, so there is never a window with no working orchestration. Protocol decided as *Copilot protocol minus gates, plus `agent.selected`*, reusing the existing Zod union rather than inventing one. |
+| 2026-09-05 | **D10 added** — the Orchestrator gets its own per-agent implementations built from the standalone agents' tools and prompts, rather than running their compiled graphs. Their permission/gate/session machinery is precisely what the Orchestrator does not need. Affects Phases 2-3 only; Phase 1 (frontend) is unchanged and continues. |
+| 2026-09-05 | **PHASE 1 COMPLETE.** Branch `feature/orchestrator-rebuild`, 18 commits, 34 files, +2203/−1306, 601 tests passing, typecheck clean. Not pushed. Details in §10. |
+
+---
+
+## 10. Phase 1 outcome (2026-09-05)
+
+### What shipped
+
+The Orchestrator is now one project-scoped, Project-Admin-only surface. The mock engine is
+deleted, all pipeline linearity and gates are gone, the Artifacts/Activity/Context panel has
+moved out of the Copilot directory so retiring the Copilot later cannot take it down, and
+"Run agent" opens the Orchestrator for a Project Admin and is hidden for everyone else.
+
+The composer is deliberately **disabled** and says the engine arrives in the next phase.
+That honesty is the point: the previous page looked finished while running nothing, and an
+obviously-empty shell is better than a convincing fake.
+
+The Copilot page still runs agents and is still reachable from run history. Nothing that
+worked before this branch has stopped working.
+
+### The bug this phase existed to prevent, found again
+
+The final whole-branch review found that **`/projects/[id]/orchestrator` had no access check
+at all**. Only `artifact:view` gated it, which every delivery role holds — so a BA, developer,
+QA, or even a `bu_admin` (a tier with no agent access whatsoever) reached the full Orchestrator
+by typing the URL. Three of the four surfaces had been gated; that one had not.
+
+No per-task review could have caught it: each reviews a *diff*, and no task touched that file.
+It is the argument for running a whole-branch review at all.
+
+Two more of the same shape — edges left by otherwise-correct deletions:
+- the Context tab still rendered a "Who approves" section, falling back to an invented
+  "Product Manager" / "Approval-required gate" when no gate existed;
+- `thread.tsx` still rendered **Approve & continue / Reject** buttons wired to a no-op, and
+  `localStorage` sessions written by the deleted mock still carried gate messages. The writer
+  was deleted in one commit; the reader survived in another.
+
+All fixed, plus one regression the fix wave itself introduced (see R14).
+
+### Rulings taken without asking
+
+| # | Ruling | Cost if wrong |
+|---|---|---|
+| R1 | New branch `feature/orchestrator-rebuild`, not the RBAC branch with PR #37 open | Merge order matters; rebase is cheap |
+| R2 | Nav test imports `deliverNav` — `NAV_ITEMS` never existed | None, verified |
+| R3 | Added `requirePlatformRole` rather than repurposing the dead `requireRole` | One extra optional field |
+| R4 | Replaced only the header "Run agent"; left the empty-state control | Checked: nothing else opened that dialog |
+| R5 | Role from `effectivePlatformRole(session)`; explicit prop for testability | None material |
+| R6 | Tasks 5+6 dispatched together (shared file) | Larger review surface |
+| R7 | Batched tasks 1+2+3 and 7+8 | Larger diff per review |
+| **R8** | **Deleted `cockpit.tsx`'s competing `canDrive` rule** (membership + agent reach), which admitted BA/Developer/QA. It was a documented earlier decision arguing *against* a Project-Admin binding; the spec supersedes it | Delivery roles lose an Orchestrator view; they keep their own agent pages, which is where §1.2 sends them |
+| R9 | Deferred the e2e rewrite (user's call); skipped the obsolete spec with a comment rather than deleting it or leaving it permanently red | No browser-level proof this phase |
+| **R10** | **Kept two Copilot links** (`runs/page.tsx:283`, `project-runs-table.tsx:99`) — they open past runs from history, and nothing replaces that until Phase 3 | Copilot reachable one phase longer than §1.2 literally reads |
+| R11 | "Paused at a gate" → "Paused" | None |
+| R12 | *Superseded* — Opus limit reset, so the final review ran on Opus as intended | — |
+| R13 | Stale gate messages fixed by **stripping the reader**, not migrating the store — no writer remains, so a migration would preserve a shape nothing can produce again | Old sessions lose badge styling on already-orphaned data |
+| **R14** | **Fixed the fix wave's own regression immediately** rather than parking it per convention: the Copilot's `gate` is `null` for most of a run, so gating the approver section on `gate` alone silently removed it from a live page | One extra commit |
+
+### Deliberately not done in Phase 1
+
+Server-backed sessions, the capability registry, the Context Agent, real agent dispatch,
+deleting the Copilot route, and the e2e rewrite. Phases 2–5.
