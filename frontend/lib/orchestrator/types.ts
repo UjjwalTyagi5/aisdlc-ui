@@ -1,3 +1,5 @@
+import { PHASE_LABEL } from "@/lib/agents";
+import type { OrchestratorAgentId } from "@/lib/orchestrator/protocol";
 import type { Phase } from "@/lib/schemas/enums";
 
 /**
@@ -84,3 +86,34 @@ export const splitModelKey = (key: string) => {
   const [provider = "", model_id = "", credentialId = ""] = key.split("::");
   return { provider, model_id, credentialId: credentialId || null };
 };
+
+/**
+ * The wire's agent id → the platform's phase id.
+ *
+ * Identical for eight of the nine. `code_review` is the exception: the engine's
+ * registry calls it `code_review`, every phase-keyed surface in this app calls it
+ * `review`, and mapping here is cheaper than renaming an identifier that sits in
+ * route paths, artifact rows and the API contract.
+ */
+export const PHASE_FOR_AGENT: Record<OrchestratorAgentId, Phase> = {
+  requirements: "requirements",
+  design: "design",
+  plan: "plan",
+  development: "development",
+  code_review: "review",
+  security: "security",
+  testing: "testing",
+  deployment: "deployment",
+  documentation: "documentation",
+};
+
+/**
+ * What to CALL an agent in front of a user.
+ *
+ * Routed through `PHASE_LABEL` so there is exactly one answer per agent across
+ * the app — which is how `plan` reads as "Project Manager" here, never "Plan"
+ * and never "PM": the agent is named for the job it does, and only its internal
+ * id says `plan`.
+ */
+export const agentLabel = (id: OrchestratorAgentId): string =>
+  PHASE_LABEL[PHASE_FOR_AGENT[id]];

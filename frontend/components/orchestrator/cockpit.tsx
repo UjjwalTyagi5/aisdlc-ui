@@ -3,10 +3,17 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
+import { AlertTriangle, Bot, FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { LoadingState } from "@/components/ui/loading-state";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { ModelPicker, type ProjectModelOption } from "@/components/orchestrator/model-picker";
@@ -17,7 +24,15 @@ import { useAccessScope } from "@/hooks/use-access-scope";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import { canUseOrchestrator } from "@/lib/orchestrator/access";
+import { ORCHESTRATOR_AGENT_IDS, type OrchestratorAgentId } from "@/lib/orchestrator/protocol";
+import { agentLabel, splitModelKey } from "@/lib/orchestrator/types";
+import {
+  useOrchestratorSocket,
+  type OrchestratorConnState,
+} from "@/lib/orchestrator/use-orchestrator-socket";
+import { getModelOptions } from "@/lib/api/models";
 import { getProject, listProjects } from "@/lib/api/projects";
+import { createRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { TRACK_META } from "@/lib/tracks";
 import { freshStages, useOrchestratorStore } from "@/stores/orchestrator-store";
@@ -49,10 +64,17 @@ export interface OrchestratorCockpitProps {
  * Business Unit's projects. There is no fixed agent order here — any agent
  * can pick up work based on what the conversation asks for.
  *
- * NO ENGINE YET — the composer is intentionally disabled. What used to drive
- * a scripted, timed reveal of fake agent turns has been removed outright
- * (see the SDD's mock-engine deletion); until the real engine lands, this
- * component only renders whatever a session already holds.
+ * WHICH AGENT RUNS IS THE USER'S CHOICE, and the picker starts empty. There is
+ * no router yet, so the alternative to asking would be guessing — and a silent
+ * default is precisely how the previous engine dispatched the wrong agent
+ * without anyone being able to see that it had. Nothing sends until an agent is
+ * named, and the server announces the one it dispatched in the thread.
+ *
+ * A RUN IS CREATED LAZILY, ON THE FIRST TURN. The socket resolves `run_id`
+ * against the caller's tenant and refuses anything it cannot verify, so the
+ * conversation needs a real `runs` row — but creating one on page load would
+ * litter every project with empty runs nobody started. The first message pays
+ * for it; the rest of the conversation reuses it.
  */
 export function OrchestratorCockpit({
   lockedProjectId,
@@ -168,12 +190,6 @@ export function OrchestratorCockpit({
     [modelKey, active, store],
   );
 
-  // ── Access ────────────────────────────────────────────────────────────────
-  if (!hasPermission(session, "artifact:view")) {
-    return (
-      <RestrictedAccess description="The Orchestrator requires access to project artifacts." />
-    );
-  }
   // ── Who may drive ─────────────────────────────────────────────────────────
   //
   // PROJECT ADMIN ONLY (`canUseOrchestrator`). The Orchestrator reaches all
@@ -181,8 +197,98 @@ export function OrchestratorCockpit({
   // every agent's access — the exact `use`-tier leak the one-agent-one-role
   // model removed (see lib/orchestrator/access.ts). Everyone else gets the
   // read-only view below and drives their own owned agent from its own page.
+  //
+  // This is the UI's half of the answer only. The socket resolves the caller's
+  // role server-side and refuses before the handshake, because gating the UI is
+  // not access control — last time, typing the URL was enough.
   const scopeReady = !scope.isLoading;
   const canDrive = scopeReady && canUseOrchestrator(scope.role);
+
+  // ── The engine ────────────────────────────────────────────────────────────
+
+  // Phase 2 has no router: the user names the agent, and the picker starts empty.
+  const [agent, setAgent] = React.useState<OrchestratorAgentId | null>(null);
+
+  const socket = useOrchestratorSocket({ enabled: canDrive && !!projectId });
+  const { send: sendTurn, reset: resetSocket } = socket;
+
+  // The chosen model as the RUN's own field. `modelKey` identifies a provider
+  // connection + model; `offering_id` is the same thing in the runs API's
+  // vocabulary, so it is resolved here rather than sending a bare model id and
+  // letting the backend pick whichever connection serves it first.
+  const modelOptionsQ = useQuery({
+    queryKey: qk.model.options(projectId),
+    queryFn: () => getModelOptions(projectId!),
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+  const offeringId = React.useMemo(() => {
+    if (!modelKey) return null;
+    const { provider, model_id, credentialId } = splitModelKey(modelKey);
+    const options = modelOptionsQ.data?.options ?? [];
+    const sameModel = options.filter(
+      (o) => o.provider === provider && o.model_id === model_id,
+    );
+    const exact = credentialId
+      ? sameModel.find((o) => o.provider_id === credentialId)
+      : undefined;
+    return (exact ?? sameModel[0])?.offering_id ?? null;
+  }, [modelKey, modelOptionsQ.data]);
+
+  // One run per conversation, created on the first turn and reused after.
+  const runIdRef = React.useRef<string | null>(null);
+  const creatingRunRef = React.useRef<Promise<string> | null>(null);
+
+  const ensureRun = React.useCallback(async (): Promise<string> => {
+    if (runIdRef.current) return runIdRef.current;
+    // Two quick turns must not mint two runs — the second awaits the first.
+    if (creatingRunRef.current) return creatingRunRef.current;
+    if (!projectId) throw new Error("no project is selected");
+    const pending = createRun({
+      project_id: projectId,
+      offering_id: offeringId,
+      // Only when the offering could not be resolved (the options list has not
+      // loaded, or the picked model is not among them): the backend resolves a
+      // bare model id itself. Null for both means the organization default.
+      model_id: offeringId ? null : (modelKey ? splitModelKey(modelKey).model_id : null),
+    }).then(({ runId }) => {
+      runIdRef.current = runId;
+      return runId;
+    });
+    creatingRunRef.current = pending;
+    try {
+      return await pending;
+    } finally {
+      creatingRunRef.current = null;
+    }
+  }, [projectId, offeringId, modelKey]);
+
+  // A different conversation is a different run and a different transcript.
+  const conversationKey = active?.id ?? projectId ?? "";
+  const lastConversationKey = React.useRef(conversationKey);
+  React.useEffect(() => {
+    if (lastConversationKey.current === conversationKey) return;
+    lastConversationKey.current = conversationKey;
+    runIdRef.current = null;
+    creatingRunRef.current = null;
+    setAgent(null);
+    resetSocket();
+  }, [conversationKey, resetSocket]);
+
+  const handleSend = React.useCallback(
+    (text: string) => {
+      if (!agent || !projectId) return;
+      sendTurn({ text, agent, resolveRunId: ensureRun, modelKey });
+    },
+    [agent, projectId, sendTurn, ensureRun, modelKey],
+  );
+
+  // ── Access ────────────────────────────────────────────────────────────────
+  if (!hasPermission(session, "artifact:view")) {
+    return (
+      <RestrictedAccess description="The Orchestrator requires access to project artifacts." />
+    );
+  }
 
   if (!mounted) {
     return (
@@ -199,6 +305,20 @@ export function OrchestratorCockpit({
   // a run either.
   const stages = active?.stages ?? (project ? freshStages(project.track) : []);
   const trackMeta = project ? TRACK_META[project.track] : null;
+
+  // The composer says WHY it is closed rather than sitting greyed out with no
+  // explanation — "nothing happens when I type" was the old cockpit's whole
+  // failure mode.
+  const composerDisabled = !canDrive || !projectId || !agent || socket.busy;
+  const composerPlaceholder = !canDrive
+    ? "Read-only — only this project's Project Admin can drive the Orchestrator."
+    : !projectId
+      ? "Pick a project to start."
+      : !agent
+        ? "Choose an agent above, then describe the work."
+        : socket.busy
+          ? `The ${agentLabel(agent)} agent is working…`
+          : `Message the ${agentLabel(agent)} agent`;
 
   const shell =
     variant === "page"
@@ -266,6 +386,34 @@ export function OrchestratorCockpit({
             onValueChange={handleModelChange}
             onOptionsResolved={handleOptionsResolved}
           />
+
+          {/* WHICH AGENT — chosen, never assumed. No `defaultValue`: an empty
+              picker is the honest state until the user says who should answer,
+              and it is what keeps a wrong agent from being someone else's
+              choice. Ordered as the protocol lists them; nothing about that
+              order implies a sequence. */}
+          <Select
+            value={agent ?? undefined}
+            onValueChange={(v) => setAgent(v as OrchestratorAgentId)}
+            disabled={!canDrive || !projectId}
+          >
+            <SelectTrigger
+              aria-label="Agent"
+              className="border-line-soft bg-surface-1 h-8 w-auto min-w-[190px] max-w-[260px] gap-2 px-3 text-[12.5px] font-normal"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <Bot className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+                <SelectValue placeholder="Choose an agent" />
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              {ORCHESTRATOR_AGENT_IDS.map((id) => (
+                <SelectItem key={id} value={id} className="text-[12.5px]">
+                  {agentLabel(id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </header>
 
         {/* Silent while the scope is still resolving — "you cannot drive this"
@@ -294,17 +442,27 @@ export function OrchestratorCockpit({
 
         <div className="flex min-h-0 flex-1">
           <Thread
-            messages={active?.messages ?? []}
+            messages={socket.messages}
+            // No Stop affordance: this engine has no cancel, and a button that
+            // does nothing is worse than no button. The composer simply waits.
             busy={false}
-            disabled
-            placeholder="The Orchestrator engine arrives in the next phase."
-            onSend={() => {}}
+            disabled={composerDisabled}
+            placeholder={composerPlaceholder}
+            onSend={handleSend}
             onStop={() => {}}
+            footerSlot={
+              <ThreadFooter
+                error={socket.error}
+                connState={socket.connState}
+                canDrive={canDrive}
+              />
+            }
             emptySlot={
               <EmptyThread
                 projectName={project?.name ?? null}
                 trackLabel={trackMeta ? `Track ${trackMeta.number} · ${trackMeta.label}` : null}
                 agentCount={stages.length}
+                agentChosen={!!agent}
               />
             }
           />
@@ -329,14 +487,51 @@ export function OrchestratorCockpit({
   );
 }
 
+/**
+ * The strip above the composer.
+ *
+ * An `error` event is rendered HERE as well as in the thread, because a failure
+ * that only reaches the console is a failure the user experiences as silence —
+ * the exact behaviour this engine was rebuilt to remove.
+ */
+function ThreadFooter({
+  error,
+  connState,
+  canDrive,
+}: {
+  error: string | null;
+  connState: OrchestratorConnState;
+  canDrive: boolean;
+}) {
+  if (error) {
+    return (
+      <div className="border-destructive/40 bg-destructive/[0.06] text-destructive mx-4 mb-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-[12.5px] md:mx-6">
+        <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+        <span>{error}</span>
+      </div>
+    );
+  }
+  if (!canDrive) return null;
+  if (connState === "connecting" || connState === "reconnecting") {
+    return (
+      <p className="text-muted-foreground mx-4 mb-2 text-[11.5px] md:mx-6">
+        {connState === "connecting" ? "Connecting…" : "Reconnecting…"}
+      </p>
+    );
+  }
+  return null;
+}
+
 function EmptyThread({
   projectName,
   trackLabel,
   agentCount,
+  agentChosen,
 }: {
   projectName: string | null;
   trackLabel: string | null;
   agentCount: number;
+  agentChosen: boolean;
 }) {
   return (
     <div className="mx-auto flex max-w-lg flex-col items-center gap-3 py-16 text-center">
@@ -350,10 +545,13 @@ function EmptyThread({
         {projectName && trackLabel ? (
           <>
             <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
-            roster. The Orchestrator engine arrives in the next phase, so nothing runs yet.
+            roster.{" "}
+            {agentChosen
+              ? "Describe the work and the agent you picked will answer here."
+              : "Choose which agent should answer, then describe the work."}
           </>
         ) : (
-          "Choose a project and one of the models it is allowed to run on. The Orchestrator engine arrives in the next phase, so nothing runs yet."
+          "Choose a project, one of the models it is allowed to run on, and the agent you want to talk to."
         )}
       </p>
     </div>

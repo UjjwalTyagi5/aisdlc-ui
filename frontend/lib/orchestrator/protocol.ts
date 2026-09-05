@@ -104,8 +104,23 @@ export type OrchestratorEvent = z.infer<typeof OrchestratorEvent>;
 export interface OrchestratorUserMessage {
   type: "user_message";
   text: string;
+  /**
+   * WHICH AGENT RUNS THIS TURN — required, and deliberately not optional.
+   *
+   * Phase 2 dispatches only an explicitly named agent; a frame without one is
+   * answered with an `error`, never with a guess (see `orchestrator2/ws.py`).
+   * Routing arrives in Phase 3, and until it does the choice is the user's — a
+   * silent default here is exactly how the previous engine dispatched the wrong
+   * agent without anyone being able to see that it had.
+   */
+  agent: OrchestratorAgentId;
+  /**
+   * A REAL `runs` row this caller's tenant owns. The socket resolves it and
+   * refuses anything it cannot verify, because the id becomes the LangGraph
+   * `thread_id`. A client-invented conversation key is not a run id and is
+   * rejected outright.
+   */
   run_id: string;
-  project_id: string;
 }
 
 export interface OrchestratorChoiceAnswer {
