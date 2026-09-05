@@ -334,6 +334,121 @@ describe("useOrchestratorSocket — turns", () => {
   }, 10_000);
 
   /**
+   * The narrower window the first duplicate fix missed.
+   *
+   * `send` cannot build a frame until `resolveRunId` comes back, and that is a
+   * run-creation POST. If the socket dies DURING it, the close handler sees an
+   * empty outbox — the frame exists nowhere yet — so clearing the outbox achieves
+   * nothing, and the continuation then pushes onto it afterwards for the
+   * reconnect to replay. Same duplicate run, one await later.
+   *
+   * A test that drops the socket before or after the await passes against that
+   * bug. This one has to hold the await open.
+   */
+  it("does not enqueue a turn whose connection died while its run was being created", async () => {
+    const { result } = renderHook(() => useOrchestratorSocket({ enabled: true }));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const first = socket();
+    await act(async () => {
+      first.open();
+    });
+
+    // A run-creation round-trip held open on purpose.
+    let releaseRun: (id: string) => void = () => {};
+    const runId = new Promise<string>((resolve) => {
+      releaseRun = resolve;
+    });
+
+    await act(async () => {
+      result.current.send({
+        text: "ship it",
+        agent: "development",
+        resolveRunId: () => runId,
+      });
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    expect(first.sent).toHaveLength(0); // still resolving; nothing exists to send
+
+    // The connection dies mid-resolve.
+    await act(async () => {
+      first.onclose?.();
+    });
+    expect(result.current.busy).toBe(false);
+    // And it is described accurately: never sent, therefore never ran. The old
+    // wording called this "sent but unfinished".
+    expect(result.current.error).toMatch(/never ran/i);
+
+    // The run resolves — after the connection it belonged to is gone.
+    await act(async () => {
+      releaseRun("run-1");
+      await runId;
+    });
+
+    // The reconnect must carry nothing.
+    await waitFor(() => expect(sockets).toHaveLength(2), { timeout: 4_000 });
+    await act(async () => {
+      sockets[1]!.open();
+    });
+    expect(sockets[1]!.sent).toHaveLength(0);
+    expect(first.sent).toHaveLength(0);
+
+    // One failure, reported once — not a second line from the late continuation.
+    expect(
+      result.current.messages.filter((m) => m.role === "system" && /never ran/i.test(m.content)),
+    ).toHaveLength(1);
+  }, 10_000);
+
+  /**
+   * The same window across an `enabled` toggle — the cockpit clears the project
+   * and re-picks it. Nothing reports the turn in that path, so the late
+   * continuation has to both refuse to enqueue AND release the composer itself.
+   */
+  it("does not enqueue a turn whose run resolved while the socket was disabled", async () => {
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useOrchestratorSocket({ enabled }),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      socket().open();
+    });
+
+    let releaseRun: (id: string) => void = () => {};
+    const runId = new Promise<string>((resolve) => {
+      releaseRun = resolve;
+    });
+    await act(async () => {
+      result.current.send({
+        text: "scan it",
+        agent: "security",
+        resolveRunId: () => runId,
+      });
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+
+    await act(async () => {
+      rerender({ enabled: false });
+    });
+    await act(async () => {
+      releaseRun("run-1");
+      await runId;
+    });
+    await act(async () => {
+      rerender({ enabled: true });
+    });
+
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    await act(async () => {
+      sockets[1]!.open();
+    });
+
+    expect(sockets[1]!.sent).toHaveLength(0);
+    // Nobody else spoke for this turn, so the continuation had to.
+    expect(result.current.busy).toBe(false);
+    expect(result.current.error).toMatch(/never ran/i);
+  }, 10_000);
+
+  /**
    * The regression this test exists for: `send` set `busy` and queued the frame,
    * but when the connection never opened at all, nothing ever cleared `busy` —
    * so the composer sat disabled reading "the X agent is working…" forever, with

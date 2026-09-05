@@ -102,6 +102,25 @@ export function useOrchestratorSocket(
   // `busy` as the socket's callbacks can read it: they fire from timers and
   // event handlers that closed over an older render.
   const busyRef = React.useRef(false);
+  /**
+   * WHICH CONNECTION A TURN BELONGS TO.
+   *
+   * `send` resolves the run over the network before it can build a frame, so its
+   * continuation resumes at a moment the socket it was dispatched for may no
+   * longer exist. The counter is captured before that await and re-checked after:
+   * if it has moved, the frame belongs to a connection that is gone and must not
+   * be enqueued for the next one. Every site that discards the outbox bumps it.
+   */
+  const connectionGenRef = React.useRef(0);
+  /**
+   * Did THIS turn's frame actually reach the wire?
+   *
+   * The close handler used to infer this from "is the outbox non-empty", which is
+   * false during the run-creation round-trip — the frame exists nowhere yet — so a
+   * turn that had never been sent was reported as one that had. One turn is in
+   * flight at a time (the composer is disabled for the duration), so one flag says it.
+   */
+  const turnSentRef = React.useRef(false);
   const closedByUnmount = React.useRef(false);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -200,6 +219,21 @@ export function useOrchestratorSocket(
   );
 
   /**
+   * Retire the current connection: nothing queued for it may reach another one.
+   *
+   * Two things, and they have to happen together. Emptying the outbox handles the
+   * frame that is already queued; bumping the generation handles the frame that is
+   * not queued YET — the one sitting in a `send` continuation waiting on run
+   * creation, which would otherwise push onto the outbox after this ran and ride
+   * the next socket. Clearing the array alone closed the first door and left the
+   * second one open.
+   */
+  const retireConnection = React.useCallback(() => {
+    outboxRef.current = [];
+    connectionGenRef.current += 1;
+  }, []);
+
+  /**
    * The connection is not coming back — say so, and END ANY TURN IT WAS CARRYING.
    *
    * Without the second half, a socket that never opened left `busy` set forever:
@@ -208,23 +242,23 @@ export function useOrchestratorSocket(
    * costume of work in progress — the precise failure shape this engine was
    * rebuilt to eliminate, and an error banner beside a composer still claiming
    * the agent is working does not undo it.
-   *
-   * The queued frame goes too. It was addressed to a socket that no longer
-   * exists, and a turn the user has already been told did not run must not
-   * quietly run later.
    */
   const abandonConnection = React.useCallback(() => {
     const hadTurnInFlight = busyRef.current || outboxRef.current.length > 0;
-    outboxRef.current = [];
+    const neverSent = !turnSentRef.current;
+    retireConnection();
     if (hadTurnInFlight) {
       failTurn(
-        "The connection to the Orchestrator dropped, so this turn never ran. " +
-          "Reload the page to reconnect.",
+        neverSent
+          ? "The connection to the Orchestrator dropped, so this turn never ran. " +
+              "Reload the page to reconnect."
+          : "The connection to the Orchestrator dropped before this turn finished. " +
+              "Reload the page to reconnect.",
       );
       return;
     }
     setError("Lost the connection to the Orchestrator. Reload the page to reconnect.");
-  }, [failTurn]);
+  }, [failTurn, retireConnection]);
 
   const handleEvent = React.useCallback(
     (raw: unknown) => {
@@ -306,19 +340,28 @@ export function useOrchestratorSocket(
   handleEventRef.current = handleEvent;
 
   /**
-   * Send whatever was typed before the handshake finished.
+   * Send whatever was dispatched before the handshake finished.
    *
-   * The outbox covers ONE window and no other: between a turn being dispatched
-   * and the socket becoming OPEN. Any close empties it (see `ws.onclose` and
-   * `abandonConnection`), so a frame can only ever flush onto the same socket it
-   * was queued for — it never survives a drop to be replayed onto the next one,
-   * because the user is told to resend and two of the same turn is two runs.
+   * The outbox covers ONE window: a turn dispatched while its socket is still
+   * CONNECTING. A frame can only flush onto the connection generation it was
+   * enqueued for, and that is enforced in two halves because a frame can be
+   * invisible at the moment a connection dies:
+   *
+   *   · already queued  → `retireConnection` empties the array.
+   *   · not queued yet, still waiting on run creation → `send`'s continuation
+   *     re-checks the generation before it pushes, and refuses if it moved.
+   *
+   * The first half alone is what the previous version claimed was sufficient. It
+   * was not: run creation is a network round-trip, so a socket that dies during
+   * it left an empty outbox to clear and a frame that arrived afterwards.
    */
   const flushOutbox = React.useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (outboxRef.current.length === 0) return;
     for (const frame of outboxRef.current) ws.send(JSON.stringify(frame));
     outboxRef.current = [];
+    turnSentRef.current = true;
   }, []);
 
   // ── Connect, with capped reconnect ────────────────────────────────────────
@@ -389,26 +432,34 @@ export function useOrchestratorSocket(
           setConnState("error");
         };
         ws.onclose = () => {
+          // A closed socket must stop being "the" socket, so a frame can never be
+          // handed to a dead generation's `wsRef`. Guarded on identity: a late
+          // close from an older socket must not null the one that replaced it.
+          if (wsRef.current === ws) wsRef.current = null;
           if (cancelled || closedByUnmount.current) return;
 
-          // DISCARD ANYTHING STILL QUEUED FOR THIS SOCKET, and do it before the
-          // message below tells the user to send the turn again.
+          // RETIRE THIS CONNECTION, before the message below tells the user to
+          // send the turn again.
           //
-          // A frame queued while the handshake was still in flight has not left
-          // the browser, and `flushOutbox` would replay it the moment a reconnect
-          // opens. Combined with "send it again" that runs the agent TWICE — and
-          // these are the real delivery agents: a duplicate push to Azure DevOps,
-          // a duplicate release artifact, a duplicate work item, caused by doing
-          // exactly what the UI asked. Dropping it is what makes "send it again"
-          // mean one run.
+          // A frame that has not left the browser — queued, or still waiting on
+          // run creation — would otherwise ride the reconnect via `flushOutbox`.
+          // Combined with "send it again" that runs the agent TWICE, and these
+          // are the real delivery agents: a duplicate push to Azure DevOps, a
+          // duplicate release artifact, a duplicate work item, caused by doing
+          // exactly what the UI asked. Retiring the generation is what makes
+          // "send it again" mean one run.
           //
           // The alternative — replay it and say nothing — was rejected because
-          // the turn would then arrive minutes later, after the thread has
-          // already said it did not run, attached to a composer the user has
-          // moved on from. Silence about work that is still coming is the shape
-          // of failure this engine exists to remove.
-          const neverSent = outboxRef.current.length > 0;
-          outboxRef.current = [];
+          // the turn would then arrive after the thread has already said it did
+          // not run, attached to a composer the user has moved on from. Silence
+          // about work that is still coming is the shape of failure this engine
+          // exists to remove.
+          //
+          // `turnSentRef` decides the wording, NOT the outbox's length. During
+          // the run-creation round-trip the frame is in neither place, so length
+          // reported "sent but unfinished" about a turn that had never been sent.
+          const neverSent = !turnSentRef.current;
+          retireConnection();
 
           // A turn cannot survive the socket that was carrying it. Release the
           // composer, and say which of the two things happened — finalizing
@@ -443,12 +494,15 @@ export function useOrchestratorSocket(
         // already closing
       }
       wsRef.current = null;
-      outboxRef.current = [];
+      // Same retirement as a close: `enabled` can go false and true again (the
+      // project is cleared and re-picked), and a turn still resolving its run
+      // across that gap must not enqueue onto the socket that comes back.
+      retireConnection();
       streamingIdRef.current = null;
     };
     // Every callback here is a stable `useCallback`, so listing them cannot
     // churn the socket; `enabled` is the only thing that reopens it.
-  }, [enabled, flushOutbox, failTurn, abandonConnection]);
+  }, [enabled, flushOutbox, failTurn, abandonConnection, retireConnection]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const send = React.useCallback(
@@ -464,7 +518,10 @@ export function useOrchestratorSocket(
       // re-attributes if the server picked differently.
       turnAgentRef.current = agent;
       turnModelKeyRef.current = modelKey;
+      turnSentRef.current = false;
       streamingIdRef.current = null;
+      // The connection this turn belongs to, read BEFORE the await below.
+      const generation = connectionGenRef.current;
       appendMessage({
         id: nextId("u"),
         role: "user",
@@ -486,6 +543,28 @@ export function useOrchestratorSocket(
           );
           return;
         }
+        // THE CONNECTION MAY HAVE DIED WHILE THE RUN WAS BEING CREATED.
+        //
+        // Resolving the run is a network round-trip, so this continuation resumes
+        // at a moment that can be on the far side of a close. Enqueueing here
+        // regardless is how the duplicate survived a first fix: the close handler
+        // found an empty outbox, told the user the turn had not run and to send it
+        // again, and this line then pushed the frame for `flushOutbox` to replay
+        // onto the reconnected socket. The agent ran twice, because the user did
+        // what the UI asked.
+        if (connectionGenRef.current !== generation) {
+          // Whoever retired the connection has usually already reported it (and
+          // cleared `busy`). Only speak if nothing did — otherwise this would be a
+          // second failure line for one failure, and a turn abandoned by a path
+          // that says nothing at all would leave the composer disabled forever.
+          if (busyRef.current) {
+            failTurn(
+              "The connection dropped before this turn was sent, so it never ran. " +
+                "Send it again once the connection is back.",
+            );
+          }
+          return;
+        }
         const frame: OrchestratorUserMessage = {
           type: "user_message",
           text: trimmed,
@@ -493,8 +572,12 @@ export function useOrchestratorSocket(
           run_id: runId,
         };
         const ws = wsRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
-        else outboxRef.current.push(frame);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(frame));
+          turnSentRef.current = true;
+        } else {
+          outboxRef.current.push(frame);
+        }
       })();
     },
     [appendMessage, failTurn, mutateBubble, nextId],
@@ -509,8 +592,12 @@ export function useOrchestratorSocket(
     streamingIdRef.current = null;
     turnAgentRef.current = null;
     turnModelKeyRef.current = null;
-    outboxRef.current = [];
-  }, []);
+    turnSentRef.current = false;
+    // A turn from the conversation being discarded must not surface in the new
+    // one: its continuation may still be resolving a run that belongs to a
+    // project the user has already navigated away from.
+    retireConnection();
+  }, [retireConnection]);
 
   return { messages, send, connState, activeAgent, error, busy, reset };
 }
