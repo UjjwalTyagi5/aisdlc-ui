@@ -6,6 +6,10 @@ import { useParams } from "next/navigation";
 import { Sparkles, Workflow } from "lucide-react";
 
 import { OrchestratorCockpit } from "@/components/orchestrator/cockpit";
+import { useSession } from "@/hooks/use-session";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { canUseOrchestrator } from "@/lib/orchestrator/access";
+import { OutOfScope } from "@/components/auth/scope-empty-state";
 
 /**
  * `/projects/[id]/orchestrator` — the **per-project** Orchestrator.
@@ -27,6 +31,13 @@ import { OrchestratorCockpit } from "@/components/orchestrator/cockpit";
 export default function ProjectOrchestratorPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
+  const session = useSession({ required: true });
+  const role = effectivePlatformRole(session);
+  const allowed = canUseOrchestrator(role);
+
+  if (!allowed) {
+    return <OutOfScope kind="resource" backHref={`/projects/${id}`} backLabel="This project" />;
+  }
 
   return (
     <div className="w-full px-4 pb-6 md:px-10 md:pb-8">
