@@ -56,7 +56,19 @@ async function pickFirst(page: Page, name: string) {
 // of that comfortably exceeds Playwright's 30s default.
 test.describe.configure({ timeout: 120_000 });
 
-test.describe("Orchestrator — auto-sequencing cockpit", () => {
+/**
+ * These tests were written to exercise the scripted mock engine that generated
+ * a fixed 9-step pipeline with hard-coded agent replies and auto-approving gates.
+ * That engine has been deleted. The Orchestrator is now Project-Admin-only with no
+ * pipeline ordering, no gates, and no ability to run an agent until the real engine
+ * lands in Phase 3. Every test here — "Run the pipeline", the opening turn, gate
+ * auto-approve, gate approve/reject interactions — depends on the mock engine and
+ * will remain broken until Phase 3 lands.
+ *
+ * This file is retained as the specification for what the Phase 3 rewrite must
+ * cover. It will be updated when that engine arrives and is ready for integration.
+ */
+test.describe.skip("Orchestrator — auto-sequencing cockpit", () => {
   test("runs a project's roster stage by stage and stops at the first gate", async ({
     page,
   }) => {
