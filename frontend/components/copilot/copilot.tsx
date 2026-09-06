@@ -12,11 +12,11 @@ import { CopilotChat } from "@/components/copilot/copilot-chat";
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { useCopilot } from "@/lib/copilot/use-copilot";
 import {
-  COPILOT_STAGES,
+  AGENT_STAGES,
   railStatusFor,
   stageLabel,
   type StageStatusDot,
-} from "@/lib/copilot/stages";
+} from "@/lib/orchestrator/stages";
 import { getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import type { RunId } from "@/lib/schemas";
@@ -100,7 +100,7 @@ export function Copilot({ projectId, runId }: CopilotProps) {
 
   const railStages: PipelineRailStage[] = React.useMemo(
     () =>
-      COPILOT_STAGES.map((s) => ({
+      AGENT_STAGES.map((s) => ({
         id: s.id,
         label: s.label,
         status: railStatusFor(s.id, activeStage, activeStatus, completedStages),
@@ -133,7 +133,7 @@ export function Copilot({ projectId, runId }: CopilotProps) {
                 live activeStage suffix below doesn't render "… · Design · Design". */}
             {(run?.title ?? "Pipeline run").replace(
               new RegExp(
-                `\\s*·\\s*(${COPILOT_STAGES.map((s) => s.label).join("|")})\\s*$`,
+                `\\s*·\\s*(${AGENT_STAGES.map((s) => s.label).join("|")})\\s*$`,
                 "i",
               ),
               "",

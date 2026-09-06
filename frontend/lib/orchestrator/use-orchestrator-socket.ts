@@ -9,7 +9,7 @@ import {
   type OrchestratorAgentId,
   type OrchestratorUserMessage,
 } from "@/lib/orchestrator/protocol";
-import type { CopilotActivityItem } from "@/lib/copilot/use-copilot";
+import type { ActivityItem } from "@/lib/orchestrator/chat-types";
 import type { Deliverable } from "@/lib/orchestrator/deliverables";
 import { PHASE_FOR_AGENT, agentLabel } from "@/lib/orchestrator/types";
 import type { OrchestratorMessage } from "@/lib/orchestrator/types";
@@ -104,7 +104,7 @@ export interface UseOrchestratorSocketResult {
    * empty array. A declared interface with no data behind it looks exactly like an
    * agent that never uses tools.
    */
-  activity: CopilotActivityItem[];
+  activity: ActivityItem[];
   /**
    * What the agents produced on this connection, NEWEST FIRST.
    *
@@ -135,7 +135,7 @@ export function useOrchestratorSocket(
   const [activeAgent, setActiveAgent] = React.useState<OrchestratorAgentId | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
-  const [activity, setActivity] = React.useState<CopilotActivityItem[]>([]);
+  const [activity, setActivity] = React.useState<ActivityItem[]>([]);
   const [deliverables, setDeliverables] = React.useState<Deliverable[]>([]);
   // Tool-call id → activity row, so the `done` event patches the row its `running`
   // opened instead of appending a second one. Keyed on the tool NAME, which is what
@@ -201,7 +201,7 @@ export function useOrchestratorSocket(
   );
 
   const pushActivity = React.useCallback(
-    (item: Omit<CopilotActivityItem, "id" | "ts">): string => {
+    (item: Omit<ActivityItem, "id" | "ts">): string => {
       const id = nextId("act");
       setActivity((prev) => [
         ...prev,
@@ -213,7 +213,7 @@ export function useOrchestratorSocket(
   );
 
   const patchActivity = React.useCallback(
-    (id: string, patch: Partial<CopilotActivityItem>) => {
+    (id: string, patch: Partial<ActivityItem>) => {
       setActivity((prev) =>
         prev.map((item) => (item.id === id ? { ...item, ...patch } : item)),
       );

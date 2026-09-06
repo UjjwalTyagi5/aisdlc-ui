@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { ARTIFACT_EVENTS } from "@/lib/copilot/artifacts";
+import { ARTIFACT_EVENTS } from "@/lib/orchestrator/artifacts";
 
 /**
  * Copilot WS protocol — the Zod mirror of the backend `shared/models/copilot.py`
@@ -174,3 +174,31 @@ export const CopilotTicket = z.object({
   wsUrl: z.string(),
 });
 export type CopilotTicket = z.infer<typeof CopilotTicket>;
+
+// ── live chat surface types ──────────────────────────────────────────────────
+//
+// Moved here in Phase 5 from `lib/copilot/use-copilot.ts`, which is deleted with the
+// rest of that surface. They were always TYPES ONLY as far as the Orchestrator was
+// concerned — it never used the hook — so they belong with the rest of its chat
+// vocabulary rather than in a file about a retired engine.
+
+/** WebSocket connection state, as the panel's banner reads it. */
+export type ConnState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "closed"
+  | "error";
+
+/** What kind of thing an Activity row records. */
+export type ActivityKind = "tool" | "thinking" | "stage" | "turn";
+
+/** One entry in the live agent-action feed (the panel's "Activity" tab). */
+export interface ActivityItem {
+  id: string;
+  ts: string;
+  kind: ActivityKind;
+  label: string;
+  status?: "running" | "done";
+}

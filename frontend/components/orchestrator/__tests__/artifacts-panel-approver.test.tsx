@@ -7,7 +7,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
-import type { GateState } from "@/lib/copilot/types";
+import type { GateState } from "@/lib/orchestrator/chat-types";
 
 /**
  * Regression coverage for the Context tab's "Who approves" section.

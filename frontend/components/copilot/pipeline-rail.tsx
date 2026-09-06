@@ -12,10 +12,10 @@ import {
 
 import { cn } from "@/lib/utils";
 import {
-  COPILOT_STAGES,
+  AGENT_STAGES,
   type CopilotStage,
   type StageStatusDot,
-} from "@/lib/copilot/stages";
+} from "@/lib/orchestrator/stages";
 
 export interface PipelineRailStage {
   id: string;
@@ -89,7 +89,7 @@ function toRailStage(s: CopilotStage, status: StageStatusDot): PipelineRailStage
 
 export function PipelineRail({ stages, active, onSelect, className }: PipelineRailProps) {
   const rows: PipelineRailStage[] =
-    stages ?? COPILOT_STAGES.map((s) => toRailStage(s, "idle"));
+    stages ?? AGENT_STAGES.map((s) => toRailStage(s, "idle"));
 
   return (
     <nav

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-import { ARTIFACT_EVENTS } from "@/lib/copilot/artifacts";
-import { ChoiceCard } from "@/lib/copilot/types";
+import { ARTIFACT_EVENTS } from "@/lib/orchestrator/artifacts";
+import { ChoiceCard } from "@/lib/orchestrator/chat-types";
 import { ORCHESTRATOR_AGENT_IDS, OrchestratorAgentId } from "@/lib/orchestrator/agents";
 import { DELIVERABLE_EVENTS } from "@/lib/orchestrator/deliverables";
 

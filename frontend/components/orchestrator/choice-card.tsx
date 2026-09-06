@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import type { ChoiceCard as ChoiceCardT } from "@/lib/copilot/types";
+import type { ChoiceCard as ChoiceCardT } from "@/lib/orchestrator/chat-types";
 
 export interface ChoiceCardProps {
   card: ChoiceCardT;

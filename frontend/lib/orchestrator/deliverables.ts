@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { ArtifactKind } from "@/lib/copilot/artifacts";
+import { ArtifactKind } from "@/lib/orchestrator/artifacts";
 import { OrchestratorAgentId } from "@/lib/orchestrator/agents";
 
 /**

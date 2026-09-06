@@ -9,14 +9,14 @@ import {
   type ChoiceCard as ChoiceCardT,
   type CopilotOutbound,
   type GateState,
-} from "@/lib/copilot/types";
+} from "@/lib/orchestrator/chat-types";
 import {
   ArtifactsRead,
   TranscriptRead,
   rendererFor,
   type Artifact,
-} from "@/lib/copilot/artifacts";
-import { stageLabel } from "@/lib/copilot/stages";
+} from "@/lib/orchestrator/artifacts";
+import { stageLabel } from "@/lib/orchestrator/stages";
 
 /** A tool the agent invoked during a turn — rendered as an activity chip. */
 export interface CopilotToolActivity {
@@ -50,24 +50,16 @@ export interface CopilotMessage {
   artifactCard?: { titles: string[]; firstId: string | null };
 }
 
-export type CopilotConnState =
-  | "idle"
-  | "connecting"
-  | "connected"
-  | "reconnecting"
-  | "closed"
-  | "error";
+// Moved to `lib/orchestrator/chat-types` in Phase 5. Imported for local use AND
+// re-exported under the old names, so this file keeps building until it is
+// deleted with the rest of the Copilot surface.
+import type {
+  ConnState as CopilotConnState,
+  ActivityKind as CopilotActivityKind,
+  ActivityItem as CopilotActivityItem,
+} from "@/lib/orchestrator/chat-types";
 
-/** One entry in the live agent-action feed (the panel's "Activity" tab). */
-export type CopilotActivityKind = "tool" | "thinking" | "stage" | "turn";
-
-export interface CopilotActivityItem {
-  id: string;
-  ts: string;
-  kind: CopilotActivityKind;
-  label: string;
-  status?: "running" | "done";
-}
+export type { CopilotConnState, CopilotActivityKind, CopilotActivityItem };
 
 export interface UseCopilotResult {
   messages: CopilotMessage[];

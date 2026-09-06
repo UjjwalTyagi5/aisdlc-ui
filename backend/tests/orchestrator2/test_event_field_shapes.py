@@ -118,7 +118,7 @@ def test_every_kind_the_backend_can_emit_is_renderable_by_the_frontend():
     requirement — never reaches the panel."""
     kinds_source = (
         Path(__file__).resolve().parents[3]
-        / "frontend" / "lib" / "copilot" / "artifacts.ts"
+        / "frontend" / "lib" / "orchestrator" / "artifacts.ts"
     ).read_text(encoding="utf-8")
     block = kinds_source[kinds_source.index("export const ArtifactKind = z.enum(["):]
     block = block[: block.index("]")]

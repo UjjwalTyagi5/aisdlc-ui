@@ -5,8 +5,8 @@ import { Clock, Send } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "@/components/app/approval-card";
-import { ownerRoleLabel, stageLabel } from "@/lib/copilot/stages";
-import type { GateState } from "@/lib/copilot/types";
+import { ownerRoleLabel, stageLabel } from "@/lib/orchestrator/stages";
+import type { GateState } from "@/lib/orchestrator/chat-types";
 import type { ApprovalDecision } from "@/lib/schemas";
 
 export interface GateInlineProps {

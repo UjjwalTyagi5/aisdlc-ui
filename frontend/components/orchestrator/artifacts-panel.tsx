@@ -37,10 +37,10 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { ArtifactViewer } from "@/components/orchestrator/artifact-viewer";
 import { getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { COPILOT_STAGES, ownerRoleLabel, stageLabel } from "@/lib/copilot/stages";
-import type { GateState } from "@/lib/copilot/types";
-import type { Artifact, ArtifactKind } from "@/lib/copilot/artifacts";
-import type { CopilotActivityItem, CopilotConnState } from "@/lib/copilot/use-copilot";
+import { AGENT_STAGES, ownerRoleLabel, stageLabel } from "@/lib/orchestrator/stages";
+import type { GateState } from "@/lib/orchestrator/chat-types";
+import type { Artifact, ArtifactKind } from "@/lib/orchestrator/artifacts";
+import type { ActivityItem, ConnState } from "@/lib/orchestrator/chat-types";
 import type { RunId } from "@/lib/schemas";
 
 export interface ArtifactsPanelProps {
@@ -54,7 +54,7 @@ export interface ArtifactsPanelProps {
   collapsed: boolean;
   onToggle: () => void;
   /** Live agent-action feed (Activity tab). */
-  activity?: CopilotActivityItem[];
+  activity?: ActivityItem[];
   /** True the instant a turn is dispatched, until stream_end. */
   working?: boolean;
   /** True when `working` and no event has landed for a while — surfaces a warning. */
@@ -62,7 +62,7 @@ export interface ArtifactsPanelProps {
   /** Seconds since the last observed event — drives the stuck copy. */
   idleSeconds?: number;
   /** WS connection status — drives the "Reconnecting…" banner. */
-  connectionStatus?: CopilotConnState;
+  connectionStatus?: ConnState;
   /**
    * Whether the Context tab's "Who approves" section renders at all. The
    * Orchestrator has no gates and must never show approver/gate copy, so it
@@ -814,7 +814,7 @@ const MUTED_BORDER_L = "border-l-line-soft/40";
  * `ring` triad goes on the icon circle, `borderL` is the row's subtle
  * left-edge accent.
  */
-function activityTone(item: CopilotActivityItem): { icon: typeof Wrench; ring: string; borderL: string } {
+function activityTone(item: ActivityItem): { icon: typeof Wrench; ring: string; borderL: string } {
   if (item.kind === "turn") {
     return {
       icon: UserIcon,
@@ -925,11 +925,11 @@ function ActivityTab({
   idleSeconds,
   connectionStatus,
 }: {
-  activity: CopilotActivityItem[];
+  activity: ActivityItem[];
   working: boolean;
   stuck: boolean;
   idleSeconds: number;
-  connectionStatus: CopilotConnState;
+  connectionStatus: ConnState;
 }) {
   const listRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
@@ -1190,7 +1190,7 @@ function groupByStage(artifacts: Artifact[]): Array<{ stage: string; items: Arti
     arr.push(a);
     byStage.set(a.stage, arr);
   }
-  const order = COPILOT_STAGES.map((s) => s.id);
+  const order = AGENT_STAGES.map((s) => s.id);
   return Array.from(byStage.entries())
     .sort(([a], [b]) => {
       const ia = order.indexOf(a);
@@ -1269,7 +1269,7 @@ function ContextTab({
   showApprover: boolean;
 }) {
   void runId;
-  const stage = COPILOT_STAGES.find((s) => s.id === activeStage);
+  const stage = AGENT_STAGES.find((s) => s.id === activeStage);
   // Between stages / gate decisions the Copilot's `gate` is legitimately null
   // (see lib/copilot/use-copilot.ts), so fall back to the stage's own owner
   // role rather than hiding the section. Never invent a name when neither is

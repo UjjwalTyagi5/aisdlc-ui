@@ -43,7 +43,7 @@ export interface CopilotStage {
  * roles. The security and release sign-offs are the two mandatory checkpoints
  * that cannot be waived (§44.5).
  */
-export const COPILOT_STAGES: readonly CopilotStage[] = [
+export const AGENT_STAGES: readonly CopilotStage[] = [
   { id: "requirements", label: "Requirements", ownerRole: prdOwnerLabel("requirements") },
   { id: "design", label: "Design", ownerRole: prdOwnerLabel("design") },
   { id: "development", label: "Development", ownerRole: prdOwnerLabel("development") },
@@ -55,11 +55,11 @@ export const COPILOT_STAGES: readonly CopilotStage[] = [
 ] as const;
 
 export const STAGE_INDEX: Record<string, number> = Object.fromEntries(
-  COPILOT_STAGES.map((s, i) => [s.id, i]),
+  AGENT_STAGES.map((s, i) => [s.id, i]),
 );
 
 export function stageLabel(id: string): string {
-  return COPILOT_STAGES.find((s) => s.id === id)?.label ?? id;
+  return AGENT_STAGES.find((s) => s.id === id)?.label ?? id;
 }
 
 /**
@@ -97,7 +97,7 @@ const ROLE_LABEL_MAP: Record<string, string> = {
 export function ownerRoleLabel(role: string): string {
   const mapped = ROLE_LABEL_MAP[role.toLowerCase()];
   if (mapped) return mapped;
-  const known = COPILOT_STAGES.find(
+  const known = AGENT_STAGES.find(
     (s) => s.ownerRole.toLowerCase().replace(/\s+/g, "_") === role.toLowerCase(),
   );
   if (known) return known.ownerRole;

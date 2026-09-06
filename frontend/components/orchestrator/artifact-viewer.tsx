@@ -11,7 +11,7 @@ import { DiagramImage } from "@/components/app/diagram-image";
 import { OpenApiViewer } from "@/components/app/openapi-viewer";
 import { MonacoViewer } from "@/components/app/monaco-viewer";
 import { CodeTreeView } from "@/components/orchestrator/code-tree-view";
-import type { Artifact } from "@/lib/copilot/artifacts";
+import type { Artifact } from "@/lib/orchestrator/artifacts";
 
 export interface ArtifactViewerProps {
   artifact: Artifact;

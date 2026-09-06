@@ -22,9 +22,9 @@ import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ThinkingIndicator } from "@/components/app/thinking-indicator";
 import { ChoiceCard } from "@/components/orchestrator/choice-card";
 import { GateInline } from "@/components/copilot/gate-inline";
-import { ownerRoleLabel, stageLabel } from "@/lib/copilot/stages";
+import { ownerRoleLabel, stageLabel } from "@/lib/orchestrator/stages";
 import type { CopilotMessage, CopilotToolActivity } from "@/lib/copilot/use-copilot";
-import type { ChoiceCard as ChoiceCardT, GateState } from "@/lib/copilot/types";
+import type { ChoiceCard as ChoiceCardT, GateState } from "@/lib/orchestrator/chat-types";
 
 export interface CopilotChatProps {
   runId: string;
