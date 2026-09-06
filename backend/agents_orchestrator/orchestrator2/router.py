@@ -237,13 +237,26 @@ class RoutingDecision:
 # graph nodes — not from `AGENT_REGISTRY.required_capabilities`, which is declared
 # metadata nobody checks against behaviour.
 #
-# Hand-typed, and therefore asserted at import — for COVERAGE and for CONTENT, which
-# are different properties. An agent with no description is offered to the model as a
-# bare name, and an agent that is offered but never chosen is the gap `registry.py`
-# closed, wearing a softer hat. A coverage-only assert does not catch that:
-# `{"security": ""}` covers `AGENT_IDS` perfectly and still leaves the Security agent
-# advertised as nothing but its name, so the length check below is the half that
-# actually enforces what this table is for.
+# Hand-typed, and therefore asserted at import for COVERAGE: `{"security": ""}` covers
+# `AGENT_IDS` perfectly and still leaves the Security agent advertised as nothing but
+# its name, which the coverage assert alone cannot see.
+#
+# What each of the three checks on this table actually buys, stated honestly because a
+# comment crediting a check with more than it does is the recurring defect in this
+# rebuild:
+#
+#   · the coverage assert catches a MISSING entry, and nothing else.
+#   · the `_MIN_CAPABILITY_CHARS` floor catches the DEGENERATE entry — "", "does
+#     stuff" — and nothing else. It is a character count; it cannot tell a real
+#     description from plausible filler, and content-free boilerplate over the floor
+#     ("handles whatever needs handling in this area of the project") passes it. Treat
+#     it as a smoke check, not as enforcement of what this table is for.
+#   · what actually enforces what this table is for is REACH: the text must arrive
+#     where the model reads it, which is both the tool description built in
+#     `_tool_specs` and the prompt roster built in `_system_prompt`. Neither is
+#     provable from this table alone, so both are pinned in
+#     `tests/orchestrator2/test_router.py` — drop the interpolation from either and
+#     those tests go red.
 _CAPABILITIES: dict[str, str] = {
     "requirements": (
         "gathers and normalises what is to be built — PRDs and BRDs, epics, features, "
@@ -287,17 +300,30 @@ assert set(_CAPABILITIES) == set(AGENT_IDS), (
     f"_CAPABILITIES {sorted(_CAPABILITIES)} does not cover AGENT_IDS {sorted(AGENT_IDS)}"
 )
 
-# The shortest description above is ~90 characters; anything under this floor cannot
-# say what an agent DOES, which is the only thing this table is for. Deliberately a
-# floor rather than "non-empty": "does stuff" is as useless to the model as "", and a
-# rule that only rejects the empty string invites exactly that.
+# The shortest description above is 98 characters. A floor rather than "non-empty"
+# because "does stuff" is as useless to the model as "", and a rule that only rejects
+# the empty string invites exactly that. It rejects the degenerate case and no more —
+# see the note above for what does the real work.
 _MIN_CAPABILITY_CHARS = 40
 
-_UNDESCRIBED = sorted(
-    agent_id
-    for agent_id, text in _CAPABILITIES.items()
-    if not isinstance(text, str) or len(text.strip()) < _MIN_CAPABILITY_CHARS
-)
+
+def _undescribed(capabilities: Mapping[str, Any]) -> list[str]:
+    """The ids in `capabilities` whose text is too short to say what the agent does.
+
+    A function rather than an inline comprehension so the RULE can be tested against a
+    deliberately broken table without breaking this module's import. Inline, the only
+    way to prove the check works was to weaken `_CAPABILITIES` itself, which fires the
+    assert below during collection — and a collection error reads as a broken test file
+    rather than as a broken invariant, so nobody trusts it.
+    """
+    return sorted(
+        agent_id
+        for agent_id, text in capabilities.items()
+        if not isinstance(text, str) or len(text.strip()) < _MIN_CAPABILITY_CHARS
+    )
+
+
+_UNDESCRIBED = _undescribed(_CAPABILITIES)
 assert not _UNDESCRIBED, (
     f"_CAPABILITIES entries too short to describe an agent (under "
     f"{_MIN_CAPABILITY_CHARS} characters): {_UNDESCRIBED}. The model routes on this "
@@ -384,8 +410,11 @@ def _tool_specs() -> list[dict]:
 #     prompt names the two canonical cases in both directions: "I need a PRD" (routes,
 #     names nothing) and "document this function" (does not route, names something).
 #
-# The roster is generated from `REGISTRY`, the same source as the tools, so the prompt
-# can never describe an agent the tool list does not offer.
+# The ROSTER is generated from `REGISTRY`, the same source as the tools, so the roster
+# cannot name an agent the tool list does not offer. The template below is hand-written
+# prose, so it can: a `route_to_*` typed into it here would be advertised to the model
+# and derived from nothing. That is a test's job, not generation's — see
+# `_system_prompt`.
 _PROMPT_TEMPLATE = """\
 You are the Context Agent for a software delivery platform. You read the conversation
 and decide one thing: which delivery agent should handle the user's latest message —
@@ -422,7 +451,21 @@ Requirements." When you answer directly, just answer: your reply is what they se
 
 
 def _system_prompt() -> str:
-    """The routing prompt with the agent roster generated from `REGISTRY`."""
+    """The routing prompt with the agent roster generated from `REGISTRY`.
+
+    Each line carries the agent's display name, its tool id and its `_CAPABILITIES`
+    text, because the roster is where the model reads what an agent is FOR. A roster of
+    bare names is the failure `_CAPABILITIES` exists to prevent, reached by the other
+    door.
+
+    Generation is what stops the roster naming an agent `REGISTRY` lacks — but only for
+    the roster. The prompt is a template a person will edit, and a `route_to_*` written
+    into its BODY, or into a bullet of some other shape, is just as routable to the
+    model and is not derived from anything. What closes that is a test:
+    `test_the_prompt_names_no_routing_tool_outside_the_registry` compares every
+    `route_to_*` occurrence in the WHOLE rendered prompt against `REGISTRY`, and does
+    not care what line it sits on.
+    """
     roster = "\n".join(
         f"- The {DISPLAY_NAMES[agent_id]} agent ({_TOOL_PREFIX}{agent_id}): "
         f"{_CAPABILITIES[agent_id]}."
@@ -474,34 +517,87 @@ def _build_llm(resolved: Any) -> Any:
     return ChatLiteLLM(**_llm_kwargs(resolved))
 
 
+# THE ROLE VOCABULARY OF THIS PLATFORM, enumerated against the column that stores it
+# — `shared/models/orm.py`'s `conversation_messages.role`, whose comment reads
+# `user|agent|orchestrator|system|tool`. It is NOT the OpenAI vocabulary, and assuming
+# it was is what made this function drop every assistant turn ever persisted here.
+#
+# `agent` is THE assistant role in this codebase. Every writer in the tree persists an
+# agent's reply under it (`copilot_api.py:1619,1628,2393,2657,2660`,
+# `orchestrator_api.py:1729`, `requirements_agent_api.py:573`,
+# `development_agent_api.py:602`, `design_architecture_agent_api.py:399`,
+# `deployment_agent_api.py:605`), and `shared/routers/runs.py:256` normalises
+# everything the runs API hands back to exactly `user` or `agent`.
+#
+# `orchestrator` is accepted deliberately rather than by accident: nothing writes it
+# today (the Orchestrator's own replies are stored as `agent` with
+# `author_id="orchestrator"`), but the column's vocabulary allows it, and anything
+# stored under it would be a reply a user was shown — so it is an assistant turn, not
+# an artefact. `assistant`/`ai` are kept because a caller holding an OpenAI- or
+# LangChain-shaped transcript is a plausible second source and costs nothing to accept.
+_USER_ROLES = frozenset({"user", "human"})
+_ASSISTANT_ROLES = frozenset({"assistant", "ai", "agent", "orchestrator"})
+
+# The complete set of roles this function drops, named individually rather than left to
+# fall out of a whitelist — naming them is the difference between a decision and an
+# oversight, and the oversight is what cost every `agent` turn. `system` is a prompt the
+# platform supplied to itself; `tool` is machine output addressed to the model that
+# asked for it. Neither is something a person wrote or read, and this router decides on
+# what the conversation ASKED FOR, which is said in user and assistant turns.
+#
+# The bounded cost, stated rather than implied: a tool result can carry a fact that
+# would sway a routing decision ("the test run failed"), and the assistant turn beside
+# it is trusted to say so in prose. That is a judgement, not a guarantee.
+#
+# A role in none of these three sets raises rather than dropping — see
+# `_history_messages`.
+_ARTEFACT_ROLES = frozenset({"system", "tool"})
+
+_KNOWN_ROLES = _USER_ROLES | _ASSISTANT_ROLES | _ARTEFACT_ROLES
+
+
 def _history_messages(history: Any) -> list[BaseMessage]:
     """The recent conversation as LangChain messages, most recent `_HISTORY_LIMIT`.
 
-    Accepts LangChain messages as-is, or mappings with `role` and `content`. `content`
-    may be a plain string OR a list of typed blocks — the same two shapes `_text_of`
-    reads off a response, via the same `_content_text` — because a block list is what
-    several providers store for a turn that carried an image or a tool result
-    alongside its text, and it is at least as likely a shape for a real caller as a
-    bare string.
+    Accepts LangChain messages as-is, or mappings with `role` and `content`, which is
+    what `shared/services/conversation_service.get_transcript` returns (its other keys
+    — `seq`, `author_id`, `model`, ... — are ignored). `content` may be a plain string
+    OR a list of typed blocks — the same two shapes `_text_of` reads
+    off a response, via the same `_content_text` — because a block list is what several
+    providers store for a turn that carried an image or a tool result alongside its
+    text, and it is at least as likely a shape for a real caller as a bare string.
 
-    Two things are dropped, both deliberately and neither of them content: a role that
-    is not a user or assistant turn (`system`, `tool`, ...), which is a transcript
-    artefact rather than something a person said, and a turn whose text is empty after
-    extraction. A turn made only of non-text blocks contributes nothing to a decision
-    made on text; that it happened at all is NOT represented, and this is the one
-    knowing omission in this function.
+    WHAT IS DROPPED, BY NAME. Exactly two roles, `system` and `tool`
+    (`_ARTEFACT_ROLES`), because each is transcript machinery rather than something a
+    person wrote or read.
+    Nothing else is dropped by role: `agent` and `orchestrator` are how THIS platform
+    spells an assistant turn (see `_ASSISTANT_ROLES` above), and an earlier version of
+    this function accepted only `assistant`/`ai` — so every assistant reply the platform
+    has ever stored was silently discarded, and the routing decision was made on the
+    user's half of the conversation alone. A role in none of the three sets raises
+    rather than being dropped, so the next addition to that column's vocabulary cannot
+    repeat this quietly.
+
+    Also dropped: a turn with no text — `content` of `None` (an explicit null, or no
+    `content` key at all, which is the canonical shape for an assistant turn that made
+    only tool calls) and a turn whose text is empty after extraction. A turn made only
+    of tool calls or non-text blocks contributes nothing to a decision made on text;
+    that it happened at all is NOT represented, and this is the one knowing omission
+    left in this function.
 
     Everything else raises `TypeError` — an entry that is neither a message nor a
-    mapping, and a `content` that is neither a string nor a list. Routing on a
-    conversation that was silently truncated is a mis-route, and a mis-route looks
-    exactly like a correct route: the class of silent failure this engine was rebuilt
-    to end. An earlier version of this function dropped a block list on the floor
-    (`isinstance(content, str)` was the whole test), which is precisely that bug, in
-    the function whose docstring argues against it.
+    mapping, a role outside the vocabulary above, and a `content` that is present but is
+    neither a string nor a list. Routing on a conversation that was silently truncated
+    is a mis-route, and a mis-route looks exactly like a correct route: the class of
+    silent failure this engine was rebuilt to end. Two earlier versions of this function
+    did precisely that — one dropped a block list on the floor
+    (`isinstance(content, str)` was the whole test), the other dropped role `agent` —
+    in the function whose docstring argues against it.
 
-    Surfacing a fault costs a failed turn, which `ws.py`'s turn loop already renders as
-    a typed `error`; that only becomes true of THIS function once `route` is called
-    from inside that loop, and nothing calls it yet.
+    Surfacing a fault costs a failed turn. `ws.py`'s turn loop renders an exception
+    raised while serving a turn as a typed `error` the user can see, which is where this
+    lands once `route` is called from inside that loop — a property of the call site,
+    not one this function can guarantee alone.
     """
     if history is None:
         return []
@@ -521,13 +617,25 @@ def _history_messages(history: Any) -> list[BaseMessage]:
                 f"and 'content'; got {type(entry).__name__}"
             )
 
-        # Role first: a `tool` or `system` entry is dropped whatever its content is,
-        # so an unusual content shape on a turn nobody routes on cannot fail the turn.
+        # Role first: an artefact entry is dropped whatever its content is, so an
+        # unusual content shape on a turn nobody routes on cannot fail the turn.
         role = str(entry.get("role") or "").strip().lower()
-        if role not in ("user", "human", "assistant", "ai"):
+        if role in _ARTEFACT_ROLES:
             continue
+        if role not in _KNOWN_ROLES:
+            raise TypeError(
+                f"history entry has role {role!r}, which this router does not "
+                f"recognise; it must be one of {sorted(_KNOWN_ROLES)}. Dropping it "
+                f"would route the turn on a conversation missing a message"
+            )
 
         content = entry.get("content")
+        if content is None:
+            # No `content` key, or an explicit null — the canonical shape for an
+            # assistant turn that made only tool calls. That is an absence of text,
+            # not a shape we cannot read, so it joins the empty-text drop below
+            # rather than failing the turn.
+            continue
         text = _content_text(content)
         if text is None:
             raise TypeError(
@@ -537,7 +645,7 @@ def _history_messages(history: Any) -> list[BaseMessage]:
         if not text:
             continue
 
-        if role in ("user", "human"):
+        if role in _USER_ROLES:
             messages.append(HumanMessage(content=text))
         else:
             messages.append(AIMessage(content=text))
@@ -555,10 +663,13 @@ def _content_text(content: Any) -> str | None:
 
     The two return values are distinct on purpose: `""` means "a shape we understand
     that carries no text" (an empty string, a block list of images), while `None`
-    means "a shape we do not understand at all". `_history_messages` raises on `None`
-    and skips on `""`; `_text_of` treats both as no text, because a response is the
-    model's output and `_validated` already guarantees the user sees something. Fusing
-    them into `""` would take that choice away from both callers.
+    means "a shape we do not understand at all". `_history_messages` raises on a `None`
+    RETURNED FROM HERE and skips on `""`; `_text_of` treats both as no text, because a
+    response is the model's output and `_validated` already guarantees the user sees
+    something. Fusing them into `""` would take that choice away from both callers.
+
+    A `content` that IS `None` never reaches this function: that is an absence of text
+    rather than an unreadable shape, so `_history_messages` drops it before calling.
     """
     if isinstance(content, str):
         return content.strip()

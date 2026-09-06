@@ -1,5 +1,6 @@
 import ast
 import inspect
+import re
 
 import pytest
 
@@ -185,8 +186,10 @@ def test_an_internal_fault_surfaces_instead_of_being_routed_away(monkeypatch):
     `None` means "not an unambiguous command, let the Context Agent read it" — a
     perfectly normal answer — so a bug that always returns it is a router that
     silently stops routing and looks entirely healthy while doing it. That is the
-    same class of silent failure this engine was rebuilt to remove, and `ws.py`
-    already turns an exception in a turn into a typed `error` the user can see.
+    same class of silent failure this engine was rebuilt to remove. `ws.py`'s turn loop
+    renders an exception raised while serving a turn as a typed `error` the user can
+    see, which is where this lands once `prefilter` is called from inside it — a
+    property of the call site, not one this function can guarantee alone.
     """
     from agents_orchestrator.orchestrator2 import router
 
@@ -402,36 +405,86 @@ def test_the_tool_list_cannot_offer_an_agent_the_engine_cannot_run(monkeypatch):
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
 def test_every_tool_carries_its_display_name_and_a_description(agent_id):
-    """A length check alone does not test this. The first version of this assertion
-    was `len(description) > len(display_name) + 20`, and the surrounding boilerplate
-    ("The X agent: . Call this when the user's message asks for that work.") is 62
-    characters on its own — so blanking a capability to "" passed. What has to be true
-    is that the DESCRIPTION carries the CAPABILITY TEXT, and that the capability text
-    says something."""
+    """A length check alone does not test this. The first version of this assertion was
+    `len(description) > len(display_name) + 20`, and the fixed boilerplate around the
+    interpolations ("The  agent: . Call this when the user's message asks for that
+    work.") clears that bar on its own for every display name here — so blanking a
+    capability to "" passed. What has to be true is that the DESCRIPTION carries the
+    CAPABILITY TEXT.
+
+    The boilerplate's length is measured below rather than quoted, because the last
+    quoted figure (62) was wrong by five characters and nothing noticed."""
     spec = next(s["function"] for s in router._tool_specs()
                 if s["function"]["name"] == f"{router._TOOL_PREFIX}{agent_id}")
     capability = router._CAPABILITIES[agent_id]
+    display_name = DISPLAY_NAMES[agent_id]
 
-    assert len(capability.strip()) >= router._MIN_CAPABILITY_CHARS, (
-        f"{agent_id} is offered to the model as little more than its name: "
-        f"{capability!r}"
+    # The invariant, asserted first so it is what a failure reports.
+    assert capability in spec["description"], (
+        f"{agent_id} is offered to the model without its capability text: "
+        f"{spec['description']!r}"
     )
-    assert capability in spec["description"]
-    assert DISPLAY_NAMES[agent_id] in spec["description"]
+    assert display_name in spec["description"]
     assert "reason" in spec["parameters"]["properties"]
+
+    # And the docstring's argument, measured rather than quoted, so it cannot go stale
+    # the way the previous "62 characters" did. Only meaningful once the two assertions
+    # above hold, hence last.
+    boilerplate = len(spec["description"]) - len(capability) - len(display_name)
+    assert boilerplate > len(display_name) + 20, (
+        f"the boilerplate no longer clears the old `len(desc) > len(name) + 20` bar "
+        f"on its own, so this docstring's account of why that rule was useless needs "
+        f"rewriting (boilerplate {boilerplate}, name {len(display_name)})"
+    )
 
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
 def test_no_agent_is_described_by_nothing(agent_id):
-    """The import-time assert enforces this too, and would fail collection outright —
-    but a floor that only lives in an assert is a floor nobody re-reads. `{"security":
-    ""}` covers AGENT_IDS perfectly and still advertises the Security agent as a bare
-    name, which is the failure the coverage assert was believed to prevent and does
-    not."""
+    """Every agent's capability text is non-blank and clears the floor.
+
+    Say plainly what this can and cannot catch, since the previous docstring did not.
+    Blanking an entry in `_CAPABILITIES` fires the import-time assert, so this test
+    never runs and pytest reports a COLLECTION ERROR — which reads as a broken test file
+    rather than as a broken invariant. The rule itself is tested directly, without
+    breaking the module, by `test_the_capability_floor_rejects_a_degenerate_entry`."""
     capability = router._CAPABILITIES[agent_id]
     assert isinstance(capability, str)
     assert capability.strip()
     assert len(capability.strip()) >= router._MIN_CAPABILITY_CHARS
+
+
+def test_the_capability_floor_rejects_a_degenerate_entry():
+    """The floor's RULE, exercised against a broken table instead of against the real
+    one — so weakening it is a red test, not a collection error.
+
+    The number is hardcoded here on purpose. Every other assertion about the floor
+    imports `_MIN_CAPABILITY_CHARS` and compares it to itself, so setting the constant
+    to 0 was invisible for any non-blank string: measured, `_MIN_CAPABILITY_CHARS = 0`
+    with `{"security": "does stuff"}` left the whole file green."""
+    assert router._MIN_CAPABILITY_CHARS >= 40, (
+        "the floor is the smoke check that rejects '' and 'does stuff'; lowering it "
+        "silently is how those come back"
+    )
+    assert router._undescribed({"security": "", "plan": router._CAPABILITIES["plan"]}) == [
+        "security"
+    ]
+    assert router._undescribed({"security": "does stuff"}) == ["security"]
+    assert router._undescribed({"security": None}) == ["security"]
+    assert router._undescribed(router._CAPABILITIES) == []
+
+
+def test_the_capability_floor_cannot_tell_filler_from_a_description():
+    """The limit of the floor, pinned so the comment beside it stays honest.
+
+    Content-free boilerplate over the floor passes, and must be understood to pass:
+    what actually keeps `_CAPABILITIES` useful is that the text REACHES the model
+    (`test_every_tool_carries_its_display_name_and_a_description` and
+    `test_the_roster_offers_no_agent_as_a_bare_name`), not its character count. If this
+    test ever fails because the floor grew teeth, delete it and say so — but do not let
+    a comment claim the floor enforces content while this passes."""
+    filler = "handles whatever needs handling in this area of the project"
+    assert len(filler) > router._MIN_CAPABILITY_CHARS
+    assert router._undescribed({"security": filler}) == []
 
 
 def test_the_project_manager_agent_is_named_correctly_to_the_model():
@@ -459,22 +512,68 @@ def test_the_routing_prompt_has_no_positional_progression_language(banned):
     assert banned not in router._system_prompt().lower()
 
 
+def _advertised_agent_ids(prompt):
+    """Every agent id the prompt offers the model, found anywhere in it.
+
+    THE ADVERTISED TOOL NAME IS WHAT THE MODEL ROUTES ON, so this is the property that
+    matters and it is independent of prose: a `route_to_*` is equally routable in a
+    roster bullet, in a differently-shaped bullet, or in a sentence of guidance.
+    """
+    return {
+        name.removeprefix(router._TOOL_PREFIX)
+        for name in re.findall(rf"{re.escape(router._TOOL_PREFIX)}\w+", prompt)
+    }
+
+
 def _roster_lines(prompt):
     """The roster block's lines. Every roster entry begins '- The <name> agent'; the
     prompt's other bullets begin '- Route', '- Call', '- Never', '- There', '- Answer'.
-    Matching the roster's own shape is what lets an EXTRA line be seen — a test that
-    only looks up each expected name is blind to a tenth entry."""
+
+    This pins the TEMPLATE'S SHAPE — that the roster is nine bullets in the form the
+    rest of these tests parse. It is deliberately NOT what enforces the no-phantom
+    invariant any more: a prefix match sees only phantoms that happen to be written in
+    the current bullet shape, and `- Marketing agent (route_to_marketing): ...` (one
+    word shorter) or a `route_to_marketing` in the prompt's prose both walked straight
+    past it. `_advertised_agent_ids` is what closes those.
+    """
     return [line for line in prompt.splitlines() if line.startswith("- The ")]
 
 
-def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
-    """The prompt is the other half of the tool list, and the one that actually causes
-    hallucinated ids: a phantom agent ADVERTISED in the roster gets routed to, and the
-    tool it names does not exist.
+def _roster_line_for(prompt, agent_id):
+    """The one prompt line advertising `agent_id`'s tool, found by the TOOL NAME rather
+    than by a bullet prefix, so rewording the line around it does not hide it."""
+    marker = f"({router._TOOL_PREFIX}{agent_id})"
+    lines = [line for line in prompt.splitlines() if marker in line]
+    assert len(lines) == 1, f"expected exactly one line advertising {marker}: {lines}"
+    return lines[0]
 
-    The earlier version of this test asserted only that each registry agent's name was
-    PRESENT, which cannot see an extra line. A roster of `AGENT_IDS` plus a hand-typed
-    '- The Marketing agent (route_to_marketing)' passed it."""
+
+def test_the_prompt_names_no_routing_tool_outside_the_registry():
+    """The load-bearing anti-phantom assertion, and the shape-independent one.
+
+    A phantom agent advertised to the model costs a turn: it gets chosen, `_validated`
+    refuses the id (see `test_a_hallucinated_tool_name_never_reaches_dispatch`), and the
+    user gets "I could not work out which agent should handle that" instead of work.
+
+    Its predecessor keyed on the literal line prefix `- The `, so it caught the phantom
+    only in the shape the template happens to use today. Measured: a phantom written as
+    `- Marketing agent (route_to_marketing): ...`, and a phantom in the prompt's prose
+    body, both passed the whole suite. This compares the tool ids the prompt names
+    ANYWHERE against `REGISTRY`, so neither can."""
+    advertised = _advertised_agent_ids(router._system_prompt())
+    assert advertised == set(reg.REGISTRY), (
+        f"the prompt advertises {sorted(advertised)}, the registry holds "
+        f"{sorted(reg.REGISTRY)}"
+    )
+
+
+def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
+    """The roster block itself, pinned as nine bullets of the expected shape.
+
+    This is the template check, not the invariant check — a phantom outside this shape
+    is `test_the_prompt_names_no_routing_tool_outside_the_registry`'s job. What this
+    still buys is the COUNT: a roster line carrying no `(route_to_x)` at all is
+    invisible to a set comparison over tool ids and perfectly visible to the model."""
     prompt = router._system_prompt()
     lines = _roster_lines(prompt)
 
@@ -487,12 +586,29 @@ def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
         f"the roster advertises {sorted(listed)}, the registry holds "
         f"{sorted(reg.REGISTRY)}"
     )
-    # Count as well as set: a roster line with no `(route_to_x)` at all would be
-    # invisible to the comparison above but perfectly visible to the model.
     assert len(lines) == len(reg.REGISTRY), (
         f"{len(lines)} roster lines for {len(reg.REGISTRY)} agents: {lines}"
     )
     assert "Plan agent" not in prompt
+
+
+@pytest.mark.parametrize("agent_id", AGENT_IDS)
+def test_the_roster_offers_no_agent_as_a_bare_name(agent_id):
+    """The roster is where the model reads what an agent is FOR, so the capability text
+    has to REACH it — the same reach `test_every_tool_carries_its_display_name_and_a_
+    description` asserts for the tool list, which the roster did not have.
+
+    Measured: reducing the roster to `- The X agent (route_to_x).` left the suite fully
+    green while advertising all nine agents to the model as bare names — verbatim the
+    failure `_CAPABILITIES`' header comment claims is prevented."""
+    prompt = router._system_prompt()
+    capability = router._CAPABILITIES[agent_id]
+    line = _roster_line_for(prompt, agent_id)
+
+    assert capability in line, (
+        f"the roster offers {agent_id} as little more than a name: {line!r}"
+    )
+    assert DISPLAY_NAMES[agent_id] in line
 
 
 def test_the_routing_prompt_cannot_describe_an_agent_the_registry_lacks(monkeypatch):
@@ -506,16 +622,15 @@ def test_the_routing_prompt_cannot_describe_an_agent_the_registry_lacks(monkeypa
     prompt = router._system_prompt()
     assert f"{router._TOOL_PREFIX}security" not in prompt
     assert "Security agent" not in prompt
+    assert _advertised_agent_ids(prompt) == set(registry_without_security)
     assert len(_roster_lines(prompt)) == len(AGENT_IDS) - 1
 
 
 def test_the_roster_and_the_tool_list_name_the_same_agents():
     """Two generated lists that must agree. They are built from the same iteration
-    today; this is what notices if one of them stops being."""
-    prompt_ids = {
-        line.split("(", 1)[1].split(")", 1)[0].removeprefix(router._TOOL_PREFIX)
-        for line in _roster_lines(router._system_prompt())
-    }
+    today; this is what notices if one of them stops being. Read off the prompt by tool
+    id rather than by bullet shape, so a reworded roster still gets compared."""
+    prompt_ids = _advertised_agent_ids(router._system_prompt())
     tool_ids = {
         spec["function"]["name"].removeprefix(router._TOOL_PREFIX)
         for spec in router._tool_specs()
@@ -570,8 +685,10 @@ async def test_the_router_passes_the_project_id_rather_than_leaning_on_ambient_s
 async def test_a_project_with_no_usable_model_is_not_papered_over(monkeypatch):
     """No env-key fallback, and no fail-soft to `agent_id=None` either. A router
     that answered 'I could not choose' when the real problem is an unconfigured
-    provider sends an administrator hunting the wrong bug; `ws.py` already turns an
-    exception in a turn into a typed `error` the user can see."""
+    provider sends an administrator hunting the wrong bug. `ws.py`'s turn loop renders
+    an exception raised while serving a turn as a typed `error` the user can see, which
+    is where this lands once `route` is called from inside it — a property of the call
+    site, not one this module can guarantee alone."""
     _install(monkeypatch, resolve_raises=mr.NoModelConfiguredError("none configured"))
     with pytest.raises(mr.NoModelConfiguredError):
         await _route()
@@ -726,19 +843,144 @@ async def test_history_content_of_an_unreadable_shape_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_non_conversation_role_is_dropped_whatever_its_content(monkeypatch):
-    """`tool` and `system` entries are transcript artefacts, not something a person
-    said. Dropping them is deliberate — and they are dropped on ROLE, before their
-    content is read, so an odd shape on a turn nobody routes on cannot fail a turn."""
+@pytest.mark.parametrize("artefact_role", ["system", "tool"])
+async def test_an_artefact_role_is_dropped_whatever_its_content(
+    monkeypatch, artefact_role
+):
+    """`system` and `tool` are transcript machinery, not something a person wrote or
+    read. Dropping them is deliberate — and they are dropped on ROLE, before their
+    content is read, so an odd shape on a turn nobody routes on cannot fail a turn.
+
+    Parametrised over `router._ARTEFACT_ROLES`' members BY NAME. The version of this
+    test this replaces asserted only that `tool` was dropped, which was true of every
+    role outside a four-entry whitelist — including `agent`, the role this platform
+    actually stores every assistant reply under. A test that passes because a role fell
+    through a whitelist certifies the whitelist, not the intent."""
+    assert artefact_role in router._ARTEFACT_ROLES
     rec = _install(monkeypatch)
     await _route(
         text="route me",
-        history=[{"role": "tool", "content": {"weird": "shape"}},
+        history=[{"role": artefact_role, "content": {"weird": "shape"}},
                  {"role": "user", "content": "the real turn"}],
     )
     contents = [str(getattr(m, "content", m)) for m in rec.messages]
     assert "the real turn" in contents
     assert not any("weird" in c for c in contents)
+
+
+def test_the_dropped_roles_are_exactly_the_two_transcript_artefacts():
+    """The set that may be silently dropped, pinned as a set.
+
+    Everything in `conversation_messages.role`'s vocabulary
+    (`shared/models/orm.py`: `user|agent|orchestrator|system|tool`) is either read or
+    raises; only these two vanish. Widening `_ARTEFACT_ROLES` is how content starts
+    disappearing again, and it must cost a red test rather than a code review."""
+    assert router._ARTEFACT_ROLES == frozenset({"system", "tool"})
+    # A role in both sets is dropped, because the artefact check runs first — so an
+    # overlap is a silent drop wearing the face of a read. (Not a tautology: these are
+    # three independently written sets.)
+    assert router._ARTEFACT_ROLES.isdisjoint(router._USER_ROLES | router._ASSISTANT_ROLES)
+    orm_vocabulary = {"user", "agent", "orchestrator", "system", "tool"}
+    assert orm_vocabulary <= router._KNOWN_ROLES, (
+        "a role this platform's schema allows is neither read nor named as an "
+        f"artefact: {sorted(orm_vocabulary - router._KNOWN_ROLES)}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_role", ["agent", "orchestrator", "assistant", "ai"])
+async def test_an_assistant_turn_is_read_under_every_spelling(
+    monkeypatch, assistant_role
+):
+    """THE regression this round exists for. `agent` is how this platform spells an
+    assistant turn — `shared/models/orm.py`'s role column is `user|agent|orchestrator|
+    system|tool`, every `persist_turn` writer in the tree passes `"agent"`, and
+    `shared/routers/runs.py:256` normalises the runs API to exactly `user`|`agent`.
+
+    The router accepted only `assistant`/`ai`, so every assistant reply this platform
+    has ever stored was dropped before the model saw it — and the previous round wrote
+    a docstring calling those drops "neither of them content" and a test locking the
+    behaviour in. Half the conversation went missing on every turn, silently, which is
+    a mis-route wearing the face of a correct one."""
+    rec = _install(monkeypatch)
+    await _route(
+        text="and now?",
+        history=[{"role": "user", "content": "we need a PRD"},
+                 {"role": assistant_role, "content": "I drafted the PRD."}],
+    )
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert "I drafted the PRD." in contents, (
+        f"a role {assistant_role!r} turn was dropped; the model saw {contents!r}"
+    )
+    kinds = [type(m).__name__ for m in rec.messages]
+    assert "AIMessage" in kinds, f"read, but not as an assistant turn: {kinds}"
+
+
+@pytest.mark.asyncio
+async def test_a_real_get_transcript_conversation_survives_intact(monkeypatch):
+    """The literal output shape of `shared.services.conversation_service.get_transcript`
+    — the repo's only transcript source, and the mapping this module documents as
+    supported. Built from that shape rather than from `assistant`, because a test using
+    `assistant` proves nothing about a platform that never writes it.
+
+    Four turns in, four turns the model sees. Before this round: two."""
+    rec = _install(monkeypatch)
+    transcript = [
+        {"id": "1", "seq": 1, "role": "user", "author_id": "u-1",
+         "content": "we need a PRD for the billing rework", "content_type": "markdown"},
+        {"id": "2", "seq": 2, "role": "agent", "author_id": "requirements",
+         "content": "I drafted the PRD; it covers scope and NFRs.",
+         "content_type": "markdown"},
+        {"id": "3", "seq": 3, "role": "user", "author_id": "u-1",
+         "content": "good", "content_type": "markdown"},
+        {"id": "4", "seq": 4, "role": "agent", "author_id": "design",
+         "content": "Next I would move to architecture.", "content_type": "markdown"},
+    ]
+    await _route(text="and now?", history=transcript)
+
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    history_seen = contents[1:-1]  # drop the system prompt and the routed message
+    assert history_seen == [t["content"] for t in transcript], (
+        f"{len(history_seen)} of {len(transcript)} turns reached the model: "
+        f"{history_seen!r}"
+    )
+    assert [type(m).__name__ for m in rec.messages[1:-1]] == [
+        "HumanMessage", "AIMessage", "HumanMessage", "AIMessage"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_role_raises_rather_than_vanishing(monkeypatch):
+    """A role in neither the read sets nor `_ARTEFACT_ROLES` is a caller this router
+    has not been taught about, and dropping it is exactly how `agent` went missing for
+    a whole round. The next entry added to that column's vocabulary must cost a visible
+    failure, not a quietly shorter conversation."""
+    _install(monkeypatch)
+    with pytest.raises(TypeError, match="reviewer"):
+        await _route(history=[{"role": "reviewer", "content": "looks fine to me"}])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"role": "agent", "content": None},          # an explicit null
+        {"role": "agent"},                            # no `content` key at all
+        {"role": "agent", "content": None, "tool_calls": [{"id": "c1"}]},
+    ],
+)
+async def test_a_turn_with_no_content_is_dropped_not_raised(monkeypatch, entry):
+    """`content: None` is the canonical shape for an assistant turn that made only tool
+    calls, and it is also what a mapping with no `content` key yields. That is an
+    absence of text, not a shape we cannot read, so it joins the empty-text drop the
+    docstring already owns — the alternative was a docstring saying such turns are
+    dropped while the code killed the turn."""
+    rec = _install(monkeypatch)
+    await _route(text="route me",
+                 history=[entry, {"role": "user", "content": "the real turn"}])
+    contents = [str(getattr(m, "content", m)) for m in rec.messages]
+    assert "the real turn" in contents
+    assert contents[-1] == "route me"
 
 
 @pytest.mark.asyncio
