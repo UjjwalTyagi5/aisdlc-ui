@@ -410,6 +410,17 @@ def _patch_auth(monkeypatch, ws):
     monkeypatch.setattr(ws, "_redeem_ws_ticket", _fake_redeem)
     monkeypatch.setattr(ws, "_resolve_platform_role", _fake_role)
 
+    # This caller administers the run's project. The per-project rule has its own
+    # tests in test_ws_project_scope.py; these tests are about BYOK scoping.
+    async def _permissions(user_id, tenant_id):
+        return ["agent:use"]
+
+    async def _tier(project_id, tenant_id, *, user_id, permissions):
+        return "project"
+
+    monkeypatch.setattr(ws, "_resolve_permissions", _permissions)
+    monkeypatch.setattr(ws, "_project_admin_tier_for_run", _tier)
+
 
 @pytest.mark.asyncio
 async def test_the_socket_passes_the_runs_project_not_the_clients(monkeypatch):

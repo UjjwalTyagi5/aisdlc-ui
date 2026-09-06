@@ -185,6 +185,83 @@ async def _resolve_platform_role(user_id: str, tenant_id: str) -> Optional[str]:
         return None
 
 
+async def _resolve_permissions(user_id: str, tenant_id: str) -> Optional[list]:
+    """The caller's permission list, resolved once per CONNECTION — never from the client.
+
+    Separate from `_resolve_platform_role`, which resolves its own copy internally. That
+    is one extra read per connection (not per turn), and it is the price of leaving a
+    security-critical function's signature alone; the alternative, threading the list
+    out of the role resolver, touches every one of its call sites. Worth revisiting if a
+    connection ever becomes expensive to open.
+
+    FAILS CLOSED, and the distinction matters: `None` means "could not tell", `[]` means
+    "this caller holds nothing". `read_scope`'s own docstrings warn against conflating
+    those two — treating a real empty answer as "no filter" is what would show a
+    brand-new account the whole organization — so a resolver failure returns `None` and
+    the caller refuses the connection rather than continuing with an empty list that
+    reads as a legitimate verdict.
+    """
+    if not user_id or not tenant_id:
+        return None
+    try:
+        from shared.authz.resolver import resolve_permissions_for_user
+
+        return list(await resolve_permissions_for_user(user_id, tenant_id))
+    except Exception as exc:  # noqa: BLE001 — incl. PermissionResolutionError
+        logger.warning(
+            "orchestrator2 permission resolution failed for user=%s tenant=%s: %s — "
+            "refusing (fail-closed)", user_id, tenant_id, exc,
+        )
+        return None
+
+
+async def _project_admin_tier_for_run(
+    project_id: str, tenant_id: str, *, user_id: str, permissions: list
+) -> Optional[str]:
+    """Does this caller RUN the project this run belongs to? The tier, or None.
+
+    THE RULE IS NOT WRITTEN HERE. `shared.authz.project_scope.project_admin_tier_for` is
+    the same function the HTTP routers reach through `project_admin_tier`, addressed by
+    identity because a WebSocket has no `Request` to carry `request.state`. Writing a
+    second `role_bindings` query on this socket is the mistake `read_scope.live_binding`
+    records — one rule written four different ways, disagreeing, so an elevation that had
+    lapsed kept granting on one path while being refused on another.
+
+    The project row is read TENANT-SCOPED, the same shape as `_resolve_run`: under the
+    caller's tenant GUC and with an explicit `Project.tenant_id` predicate, so a project
+    id belonging to another tenant cannot be resolved even though the id reaching here
+    came from a row already proven to be this tenant's.
+
+    Returns None — a refusal — when the project cannot be found. An unresolvable project
+    is not a licence to run against it.
+    """
+    from sqlalchemy import select
+
+    from shared.authz.project_scope import project_admin_tier_for
+    from shared.db import get_db_session_for_tenant
+    from shared.models.orm import Project
+
+    tenant_uuid = _as_run_uuid(tenant_id)
+    project_uuid = _as_run_uuid(project_id)
+    if project_uuid is None or tenant_uuid is None:
+        return None
+
+    async with get_db_session_for_tenant(tenant_id) as session:
+        project = (
+            await session.execute(
+                select(Project).where(
+                    Project.id == project_uuid,
+                    Project.tenant_id == tenant_uuid,
+                )
+            )
+        ).scalar_one_or_none()
+        if project is None:
+            return None
+        return await project_admin_tier_for(
+            session, user_id=user_id, permissions=permissions, project=project
+        )
+
+
 class RunSelection(NamedTuple):
     """What a verified run tells the socket: which model it selected, and which
     project it belongs to. A NamedTuple rather than a bare tuple so the third
@@ -368,8 +445,13 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
     # Server-side, from the redeemed claims, BEFORE accept(): a caller who is not a
     # Project Admin never gets an open socket, so there is no turn to refuse later.
     # Never assume the caller came through the UI — last time, a URL was enough.
+    # Resolved once per connection and reused for the PER-PROJECT check on every turn
+    # (`_project_admin_tier_for_run`). `None` is "could not tell" and refuses; `[]` is a
+    # real answer meaning this caller holds nothing, and would refuse there instead.
+    permissions = await _resolve_permissions(user_id, tenant_id)
+
     role = await _resolve_platform_role(user_id, tenant_id)
-    if role != ORCHESTRATOR_ROLE:
+    if permissions is None or role != ORCHESTRATOR_ROLE:
         logger.info(
             "orchestrator2 refused user=%s tenant=%s role=%s — Project Admin only",
             user_id, tenant_id, role,
@@ -454,6 +536,51 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
             # is a response to.
             agent_id = override_agent or "(not yet chosen)"
             reason = ""
+
+            # ── THE PER-PROJECT CHECK ────────────────────────────────────────
+            # The check above, at connect, asks whether this caller is a Project Admin
+            # ANYWHERE in the tenant. That is the wrong question for a turn: the
+            # Orchestrator reaches all nine agents at once, and every turn spends the
+            # RUN's project's model grant and the RUN's project's budget. Without this,
+            # a Project Admin of project A could name a run belonging to project B in
+            # the same tenant and drive everything against it — which tenant scoping
+            # cannot see, because both are one tenant's.
+            #
+            # It lives HERE, not before `accept()`, because the run — and so the
+            # project — arrives per turn. Refusing the TURN rather than the connection
+            # is deliberate: the caller may well own the next run they name.
+            try:
+                tier = (
+                    await _project_admin_tier_for_run(
+                        project_id, tenant_id,
+                        user_id=user_id, permissions=permissions,
+                    )
+                    if project_id
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001 — cannot prove standing ⇒ refuse
+                logger.warning(
+                    "orchestrator2 could not resolve project standing for user=%s "
+                    "project=%s: %s — refusing (fail-closed)",
+                    user_id, project_id, exc,
+                )
+                tier = None
+            if tier is None:
+                # A run with NO project (nullable since migration 0005 — webhook runs
+                # carry a provider key, not a local project UUID) lands here too, and
+                # should: there is no project to administer, nothing to scope its models
+                # or budget to, and "no project" must not become "no check".
+                #
+                # Worded IDENTICALLY to the unavailable-run refusal above. A distinct
+                # "that project is not yours" would confirm the run exists, which is the
+                # existence oracle `RunNotAvailableError` is worded to avoid, arriving
+                # one step further along.
+                logger.info(
+                    "orchestrator2 refused user=%s run=%s project=%s — does not "
+                    "administer the run's project", user_id, run_id, project_id,
+                )
+                await _fail(websocket, "That run is not available.")
+                continue
 
             try:
                 if override_agent:

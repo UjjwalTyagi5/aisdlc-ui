@@ -67,6 +67,18 @@ def _patch_auth(monkeypatch, ws, *, project_id="proj-A"):
     monkeypatch.setattr(ws, "_redeem_ws_ticket", _fake_redeem)
     monkeypatch.setattr(ws, "_resolve_platform_role", _fake_role)
     monkeypatch.setattr(ws, "_resolve_run", _owned)
+    # This caller administers the run's project. The per-project check
+    # (`_project_admin_tier_for_run`) is exercised on its own in
+    # test_ws_project_scope.py; stubbing it here keeps these tests about what they are
+    # each named for, rather than making every one of them a role-binding fixture.
+    async def _permissions(user_id, tenant_id):
+        return ["agent:use"]
+
+    async def _tier(project_id, tenant_id, *, user_id, permissions):
+        return "project"
+
+    monkeypatch.setattr(ws, "_resolve_permissions", _permissions)
+    monkeypatch.setattr(ws, "_project_admin_tier_for_run", _tier)
 
 
 def _record_run_agent(monkeypatch, ws, events=None):
