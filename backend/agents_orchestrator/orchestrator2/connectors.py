@@ -48,6 +48,8 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+from agents_orchestrator.orchestrator2.project_config import project_maps
+
 logger = logging.getLogger(__name__)
 
 #: What a project with no per-agent selection means. Matches
@@ -60,37 +62,14 @@ DEFAULT_CONNECTOR_KIND = "azure_devops"
 async def _project_connectors(tenant_id: str, project_id: str) -> dict:
     """The project's `{agent_id: [kind, ...]}` selection map.
 
-    Tenant-scoped read, so row-level security keeps it to the caller's org — and, as
-    everywhere else in this engine, that is not the only thing doing so: the project
-    id itself came from the verified `runs` row.
-
-    Fail-soft: any miss returns `{}` and the caller falls back to
-    `DEFAULT_CONNECTOR_KIND`. A project's connector selection is a refinement, not a
-    precondition, and a socket must not die because one could not be read.
+    Delegates to `project_config.project_maps`, which reads both per-agent maps in one
+    tenant-scoped query — `mcp.py` needs the other one at the same moment, for the same
+    turn, and two reads of one row is one read too many. Fail-soft there, so a project
+    with nothing selected falls back to `DEFAULT_CONNECTOR_KIND` rather than ending the
+    turn.
     """
-    if not tenant_id or not project_id:
-        return {}
-    try:
-        import uuid
-
-        from sqlalchemy import select
-
-        from shared.db import get_db_session_for_tenant
-        from shared.models.orm import Project
-
-        async with get_db_session_for_tenant(tenant_id) as session:
-            project = (
-                await session.execute(
-                    select(Project).where(Project.id == uuid.UUID(str(project_id)))
-                )
-            ).scalar_one_or_none()
-            return (getattr(project, "connectors", None) or {}) if project else {}
-    except Exception as exc:  # noqa: BLE001 — a refinement, never fatal
-        logger.warning(
-            "orchestrator2 could not read the connector selection for project=%s: %s",
-            project_id, exc,
-        )
-        return {}
+    connectors, _mcp = await project_maps(tenant_id, project_id)
+    return connectors
 
 
 async def connector_kind_for(

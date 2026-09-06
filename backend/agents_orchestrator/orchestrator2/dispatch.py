@@ -116,7 +116,7 @@ from typing import Any, AsyncIterator, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents_orchestrator.orchestrator2 import connectors, deliverables
+from agents_orchestrator.orchestrator2 import connectors, deliverables, mcp
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.services.model_resolver import (
     ModelNotEnabledError,
@@ -413,11 +413,23 @@ async def run_agent(
             # credential is usually a project-scoped PERSONAL one, and resolving it
             # without the turn's user yields a connector with no PAT, which the agent
             # reports exactly as it reports having no connector at all.
+            # The project's connector AND its MCP servers, both bound for this turn
+            # only. The old engine wraps every turn in exactly these two; this engine
+            # had neither. The connector gap announced itself — the Development agent
+            # said it could not reach Azure DevOps — while the MCP one never would
+            # have: the agent node binds whatever `mcp_runtime` holds, so an unbound
+            # contextvar is an agent quietly missing every tool the project
+            # registered, with no error and an answer that looks complete.
             async with connectors.bound_connector(
                 agent_id,
                 tenant_id=tenant_id,
                 # From the verified `runs` row, like every other project-scoped
                 # value on this path. Never from the client frame.
+                project_id=project_id,
+                owner_id=user_id,
+            ), mcp.bound_mcp_tools(
+                agent_id,
+                tenant_id=tenant_id,
                 project_id=project_id,
                 owner_id=user_id,
             ):
