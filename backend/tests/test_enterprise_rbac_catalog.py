@@ -59,8 +59,13 @@ def test_agent_access_stage_two_owner_roles_hold_governance_decide():
     from shared.governance import routing
 
     owner_roles = set(routing.AGENT_OWNER_ROLE.values()) - {"project_admin"}
+    # scrum_master joined this set when routing.AGENT_OWNER_ROLE gained its missing
+    # `plan` entry. It was absent from 0037 only because the map had no `plan` key and
+    # `agent_owner_role()` answered a "project_admin" default for the miss, so Plan
+    # looked like a project_admin-owned agent. Granted by 0044.
     assert owner_roles == {
-        "ba", "architect", "qa", "devops_engineer", "security_engineer", "data_engineer",
+        "ba", "architect", "qa", "devops_engineer", "security_engineer",
+        "data_engineer", "scrum_master",
     }
     for role in owner_roles:
         assert "governance:decide" in _ROLE_PERMISSIONS[role], (

@@ -210,6 +210,13 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # role OWNS rather than merely uses, and this permission is what makes that
         # ownership real rather than a table entry.
         "artifact:approve_plan",
+        # Stage two of an `agent_access` request for the Plan agent routes here, and
+        # POST /governance-approvals/{id}/decide is gated on this with no per-type
+        # carve-out — without it the Plan agent's owner takes a flat 403 deciding
+        # their own agent's request. Migration 0037 granted this to the six other
+        # agent owners and missed scrum_master only because routing.AGENT_OWNER_ROLE
+        # had no `plan` entry at the time; 0044 completes it.
+        "governance:decide",
         "agent:invoke",
         "connector:view",
     ],

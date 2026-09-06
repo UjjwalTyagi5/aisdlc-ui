@@ -69,7 +69,13 @@ _NOT_OWNER = (
 
 def _owner_label(stage: str) -> str:
     """The owning role, spelled the way a person would say it."""
-    from shared.governance.routing import agent_owner_role  # noqa: PLC0415 — import cycle
+    # Called with a BACKEND stage name (`code_review`, not `review`). The owner map is
+    # keyed on those, with the UI names aliased — it was keyed the other way round,
+    # which is how this message came to name a Project Admin for Code Review sign-off
+    # that only an Architect can give.
+    from shared.governance.routing import (  # noqa: PLC0415 — import cycle
+        agent_owner_role_or_none,
+    )
 
     return {
         "ba": "a Business Analyst",
@@ -78,8 +84,11 @@ def _owner_label(stage: str) -> str:
         "security_engineer": "a Security engineer",
         "devops_engineer": "a DevOps engineer",
         "data_engineer": "a Data engineer",
+        # Plan's owner. Absent while the owner map wrongly resolved plan to
+        # project_admin, so the gap was invisible until that was fixed.
+        "scrum_master": "a Scrum Master",
         "project_admin": "a Project Admin",
-    }.get(agent_owner_role(stage), "this agent's owner")
+    }.get(agent_owner_role_or_none(stage) or "", "this agent's owner")
 
 
 async def owner_approved(stage: str) -> Tuple[bool, str]:
