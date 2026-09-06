@@ -214,7 +214,7 @@ def test_very_long_input_is_handled():
 # The pre-filter above answers "is this an explicit command?". Everything below is
 # the other 95% of turns: `route()` reads the message and picks one of the nine
 # agents by MEANING, or answers directly. The engine this replaces could not do
-# this at all — `stage_switch.py` matched an alias anywhere in the text, so
+# this at all — the retired `stage_switch.py` matched an alias anywhere in the text, so
 # "I need a PRD" routed nowhere and the user had to name the agent by hand.
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -12,7 +12,8 @@ that none should and the user gets a direct answer. It is two stages:
 
 ALL NINE AGENTS ARE CANDIDATES ON EVERY TURN. There is no ordering in this engine:
 no `STAGE_ORDER.index(active) + 1`, no "next agent", no notion of what ran before.
-`stage_switch.py` advanced positionally, which made "the next agent" mean "the next
+`stage_switch.py` (retired in Phase 5) advanced positionally, which made "the next
+ agent" mean "the next
 item in a list" rather than "what the conversation needs".
 
 The pre-filter returning `None` is not a failure; it is the design. It is why the
@@ -21,7 +22,8 @@ Context Agent exists, and stage 2 is the half the old engine did not have at all
 Why this is deliberately narrow
 -------------------------------
 The engine this replaces routed on an agent alias appearing ANYWHERE in the text
-(`agents_orchestrator/orchestrator/stage_switch.py`). That produced two failures
+(`agents_orchestrator/orchestrator/stage_switch.py`, deleted in Phase 5). That
+produced two failures
 which between them define this module's contract:
 
   - "I need a PRD" contains no alias, so it routed nowhere and the user had to
@@ -400,7 +402,8 @@ def _tool_specs() -> list[dict]:
 # The routing prompt. Three things it deliberately does NOT say, each of them a
 # behaviour of the engine being replaced:
 #
-#   · nothing about order. `stage_switch.py` advanced by `STAGE_ORDER.index(active) + 1`
+#   · nothing about order. The retired `stage_switch.py` advanced by
+#     `STAGE_ORDER.index(active) + 1`
 #     — "the next agent" meant "the next item in a list", not "what the conversation
 #     needs". Every turn here considers all nine, and the model is told so explicitly
 #     because a model shown a list will otherwise infer a pipeline from it.
@@ -884,7 +887,8 @@ async def route(
     spending a model call, and the reason says so — "because you named it" is the only
     honest thing to tell the user about a decision no intent-reading went into.
     Everything else goes to the Context Agent, which reads the message for MEANING.
-    That second half is the whole point of the phase: `stage_switch.py` matched an
+    That second half is the whole point of the phase: the retired `stage_switch.py`
+    matched an
     agent alias anywhere in the text, so "I need a PRD" routed nowhere and the user had
     to name the agent by hand.
 

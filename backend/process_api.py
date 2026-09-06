@@ -21,8 +21,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 # Importing routers for chat and development functionalities
-from agents_orchestrator.orchestrator.orchestrator_api import orchestrator_router
-from agents_orchestrator.orchestrator.copilot_api import copilot_router
 from agents_orchestrator.orchestrator2.ws import orchestrator2_router
 from agents_orchestrator.requirements_agent.requirements_agent_api import requirement_router_orchestrator
 from agents_orchestrator.design_architecture_agent.design_architecture_agent_api import design_router_orchestrator
@@ -977,8 +975,6 @@ app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/ingestio
 # The legacy evaluator stays at /sdlc/agent/deployment_orchestrator below.
 from agents_orchestrator.deployment_agent.deployment_standalone_api import deployment_standalone_router
 app.include_router(deployment_standalone_router, prefix="/sdlc/agent/deployment", tags=["deployment"], dependencies=[_VIEW_DEP])
-app.include_router(orchestrator_router, prefix="/sdlc/agent/orchestrator", tags=["orchestrator"], dependencies=[_VIEW_DEP])
-app.include_router(copilot_router, prefix="/sdlc/agent/copilot", tags=["copilot"], dependencies=[_VIEW_DEP])
 # Orchestrator (Phase 2 engine) — one WebSocket that dispatches an explicitly named
 # agent. `_VIEW_DEP` is carried for consistency with the agent mounts above and to
 # give any future REST route on this router the same floor, but it is a DELIBERATE
