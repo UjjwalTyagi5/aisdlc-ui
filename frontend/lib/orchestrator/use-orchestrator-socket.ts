@@ -9,6 +9,7 @@ import {
   type OrchestratorAgentId,
   type OrchestratorUserMessage,
 } from "@/lib/orchestrator/protocol";
+import type { CopilotActivityItem } from "@/lib/copilot/use-copilot";
 import { PHASE_FOR_AGENT, agentLabel } from "@/lib/orchestrator/types";
 import type { OrchestratorMessage } from "@/lib/orchestrator/types";
 
@@ -85,6 +86,16 @@ export interface UseOrchestratorSocketResult {
   error: string | null;
   /** A turn is in flight: dispatched and not yet ended. */
   busy: boolean;
+  /**
+   * The live agent-action feed for the Activity tab: which agent was chosen, what
+   * it is thinking, and every tool it runs.
+   *
+   * `tool.call` was declared in the protocol and consumed by the panel from the
+   * start, but nothing emitted it and nothing recorded it — the tab was wired to an
+   * empty array. A declared interface with no data behind it looks exactly like an
+   * agent that never uses tools.
+   */
+  activity: CopilotActivityItem[];
   /** Drop the transcript — the conversation changed underneath us. */
   reset: () => void;
 }
@@ -102,6 +113,14 @@ export function useOrchestratorSocket(
   const [activeAgent, setActiveAgent] = React.useState<OrchestratorAgentId | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [activity, setActivity] = React.useState<CopilotActivityItem[]>([]);
+  // Tool-call id → activity row, so the `done` event patches the row its `running`
+  // opened instead of appending a second one. Keyed on the tool NAME, which is what
+  // both events carry; a tool used twice in one turn therefore reuses its row, which
+  // is the same trade `lib/copilot/use-copilot.ts` makes.
+  const toolActivityIdRef = React.useRef<Map<string, string>>(new Map());
+  // One "Thinking…" row per turn, closed when the turn ends.
+  const thinkingActivityIdRef = React.useRef<string | null>(null);
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const outboxRef = React.useRef<OrchestratorUserMessage[]>([]);
@@ -158,6 +177,27 @@ export function useOrchestratorSocket(
     [appendMessage, nextId],
   );
 
+  const pushActivity = React.useCallback(
+    (item: Omit<CopilotActivityItem, "id" | "ts">): string => {
+      const id = nextId("act");
+      setActivity((prev) => [
+        ...prev,
+        { ...item, id, ts: new Date().toISOString() },
+      ]);
+      return id;
+    },
+    [nextId],
+  );
+
+  const patchActivity = React.useCallback(
+    (id: string, patch: Partial<CopilotActivityItem>) => {
+      setActivity((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+      );
+    },
+    [],
+  );
+
   /**
    * Apply `mut` to this turn's agent bubble, opening one if none is live.
    *
@@ -206,13 +246,24 @@ export function useOrchestratorSocket(
    * Whatever ended the turn (a `stream_end`, an `error`) has already said so.
    */
   const finalizeTurn = React.useCallback(() => {
+    // Close this turn's open activity rows. A "Thinking…" or a tool left spinning
+    // after the turn ended reads as an agent still working, which is the "stuck"
+    // state the Activity tab's status line is there to report honestly.
+    if (thinkingActivityIdRef.current) {
+      patchActivity(thinkingActivityIdRef.current, { status: "done" });
+      thinkingActivityIdRef.current = null;
+    }
+    for (const id of toolActivityIdRef.current.values()) {
+      patchActivity(id, { status: "done" });
+    }
+    toolActivityIdRef.current.clear();
     busyRef.current = false;
     setBusy(false);
     const id = streamingIdRef.current;
     streamingIdRef.current = null;
     if (!id) return;
     setMessages((prev) => prev.filter((m) => !(m.id === id && m.content.length === 0)));
-  }, []);
+  }, [patchActivity]);
 
   /** Surface a failure in the thread AND as a banner, then end the turn. */
   const failTurn = React.useCallback(
@@ -282,6 +333,12 @@ export function useOrchestratorSocket(
           // obvious on the turn it happens — the previous engine chose silently by
           // list index, and a wrong choice was indistinguishable from a bad answer.
           setActiveAgent(evt.agent);
+          pushActivity({
+            kind: "stage",
+            label: evt.reason
+              ? `${agentLabel(evt.agent)} — ${evt.reason}`
+              : `${agentLabel(evt.agent)} is answering`,
+          });
           turnAgentRef.current = evt.agent;
           // Re-attribute the bubble already opened for this turn: the server's
           // choice wins over the one the composer assumed.
@@ -306,10 +363,38 @@ export function useOrchestratorSocket(
           // No token yet, but the agent is working — open the bubble so the thread
           // shows a working indicator instead of nothing.
           mutateBubble((m) => m);
+          if (!thinkingActivityIdRef.current) {
+            thinkingActivityIdRef.current = pushActivity({
+              kind: "thinking",
+              label: "Thinking…",
+              status: "running",
+            });
+          }
           break;
-        case "tool.call":
+        case "tool.call": {
+          // Opens the bubble (the agent is working) AND records the action, which is
+          // what the Activity tab renders.
           mutateBubble((m) => m);
+          const known = toolActivityIdRef.current.get(evt.name);
+          if (evt.status === "running") {
+            if (known) {
+              patchActivity(known, { status: "running" });
+            } else {
+              toolActivityIdRef.current.set(
+                evt.name,
+                pushActivity({ kind: "tool", label: evt.name, status: "running" }),
+              );
+            }
+          } else if (known) {
+            patchActivity(known, { status: "done" });
+            toolActivityIdRef.current.delete(evt.name);
+          } else {
+            // A `done` with no `running` before it — a provider that never announced
+            // the start. Recorded rather than dropped: the tool did run.
+            pushActivity({ kind: "tool", label: evt.name, status: "done" });
+          }
           break;
+        }
         case "choice.card":
           // UNREACHABLE TODAY — `orchestrator2/ws.py` forwards five event types
           // and this is not one of them. Kept, and kept to one line, because the
@@ -336,7 +421,15 @@ export function useOrchestratorSocket(
           break;
       }
     },
-    [appendChunk, appendSystem, failTurn, finalizeTurn, mutateBubble],
+    [
+      appendChunk,
+      appendSystem,
+      failTurn,
+      finalizeTurn,
+      mutateBubble,
+      patchActivity,
+      pushActivity,
+    ],
   );
 
   // The connect effect must not re-run just because a handler's identity changed —
@@ -597,6 +690,9 @@ export function useOrchestratorSocket(
   );
 
   const reset = React.useCallback(() => {
+    setActivity([]);
+    toolActivityIdRef.current.clear();
+    thinkingActivityIdRef.current = null;
     setMessages([]);
     setActiveAgent(null);
     setError(null);
@@ -612,5 +708,5 @@ export function useOrchestratorSocket(
     retireConnection();
   }, [retireConnection]);
 
-  return { messages, send, connState, activeAgent, error, busy, reset };
+  return { messages, send, connState, activeAgent, error, busy, activity, reset };
 }

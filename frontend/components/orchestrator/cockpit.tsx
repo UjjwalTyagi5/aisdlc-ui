@@ -501,6 +501,15 @@ export function OrchestratorCockpit({
               openArtifactId={null}
               onSelectArtifact={() => {}}
               streamingArtifactId={null}
+              // The live feed: which agent was chosen and why, what it is thinking,
+              // and every tool it runs. `tool.call` has been declared in the protocol
+              // and rendered by this panel from the start, but nothing emitted it and
+              // nothing recorded it, so the tab was wired to a literal `[]` — a
+              // declared interface with no data behind it, which on screen is
+              // indistinguishable from an agent that never uses tools.
+              activity={socket.activity}
+              working={socket.busy}
+              connectionStatus={socket.connState}
               collapsed={artifactsCollapsed}
               onToggle={() => setArtifactsCollapsed((v) => !v)}
             />

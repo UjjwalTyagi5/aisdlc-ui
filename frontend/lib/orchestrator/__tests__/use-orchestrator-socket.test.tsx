@@ -210,6 +210,55 @@ describe("useOrchestratorSocket — inbound frame validation", () => {
   });
 });
 
+describe("useOrchestratorSocket — the activity feed", () => {
+  it("records a tool call and closes it when the result arrives", async () => {
+    // `tool.call` was declared in the protocol and rendered by the Activity tab from
+    // the start, while nothing emitted it and this hook accepted it and kept nothing.
+    // The tab was wired to an empty array, which on screen is indistinguishable from
+    // an agent that never uses tools.
+    const { result } = await mount();
+
+    await deliver({ type: "tool.call", name: "read_repo", status: "running" });
+    await waitFor(() => expect(result.current.activity).toHaveLength(1));
+    expect(result.current.activity[0]).toMatchObject({
+      kind: "tool",
+      label: "read_repo",
+      status: "running",
+    });
+
+    await deliver({ type: "tool.call", name: "read_repo", status: "done" });
+    await waitFor(() => expect(result.current.activity[0]!.status).toBe("done"));
+    expect(result.current.activity).toHaveLength(1);
+  });
+
+  it("announces which agent was chosen, and why", async () => {
+    const { result } = await mount();
+    await deliver({
+      type: "agent.selected",
+      agent: "requirements",
+      reason: "You asked for a PRD.",
+    });
+    await waitFor(() => expect(result.current.activity).toHaveLength(1));
+    expect(result.current.activity[0]!.kind).toBe("stage");
+    expect(result.current.activity[0]!.label).toContain("You asked for a PRD.");
+  });
+
+  it("leaves nothing spinning after the turn ends", async () => {
+    // A tool left "running" past `stream_end` reads as an agent still working, which
+    // is exactly the state the Activity tab's status line exists to report honestly.
+    const { result } = await mount();
+    await deliver({ type: "tool.call", name: "run_tests", status: "running" });
+    await deliver({ type: "agent.thinking", delta: "" });
+    await deliver({ type: "stream_end" });
+
+    await waitFor(() =>
+      expect(
+        result.current.activity.filter((a) => a.status === "running"),
+      ).toHaveLength(0),
+    );
+  });
+});
+
 describe("useOrchestratorSocket — turns", () => {
   it("names the agent on the wire and sends the resolved run id", async () => {
     const { result } = await mount();
