@@ -116,7 +116,7 @@ from typing import Any, AsyncIterator, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents_orchestrator.orchestrator2 import deliverables
+from agents_orchestrator.orchestrator2 import connectors, deliverables
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.services.model_resolver import (
     ModelNotEnabledError,
@@ -262,6 +262,7 @@ async def run_agent(
     model_id: str | None,
     offering_id: str | None,
     project_id: str | None,
+    user_id: str,
     context: str,
     reason: str,
 ) -> AsyncIterator[dict]:
@@ -401,105 +402,126 @@ async def run_agent(
             graph = capability.load_graph()
             config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
 
-            if capability.mode == "stream":
-                system_prompt = capability.load_prompt()
-                # The run's existing artifacts go in as a SECOND system message
-                # rather than being spliced into the agent's own prompt or prepended
-                # to the user's words. Each agent's prompt is a long, carefully
-                # written document (25,844 characters for Requirements), and editing
-                # one at runtime to carry data is how a prompt stops being reviewable;
-                # putting it in the human turn would have the agent answering a
-                # question the user did not ask.
-                messages: list[Any] = [SystemMessage(content=system_prompt)]
-                if context:
-                    messages.append(SystemMessage(content=context))
-                messages.append(HumanMessage(content=text))
-                state: dict[str, Any] = {
-                    "messages": messages,
-                    "tenant_id": tenant_id,
-                    "model_id": model_id,
-                    "offering_id": offering_id,
-                }
-                # One `running` per TOOL, not per chunk: providers split a single tool
-                # call across many chunks that share an id, and only the first carries
-                # the name. Scoped to this turn, so the same tool used twice in one
-                # conversation is announced twice.
-                announced: set[str] = set()
-                async for chunk, _metadata in graph.astream(
-                    state, stream_mode="messages", config=config
-                ):
-                    if _is_tool_result(chunk):
-                        # A tool RESULT. Its `content` is the tool's output, and
-                        # forwarding it as a `stream_chunk` put it in the transcript as
-                        # if the agent had said it — so it is reported as activity and
-                        # its text is not streamed.
-                        yield {
-                            "type": "tool.call",
-                            "name": _tool_name(getattr(chunk, "name", None)),
-                            "status": "done",
-                            "run_id": run_id,
-                        }
-                        continue
+            # The project's connector, bound for this turn only.
+            #
+            # The agents' board and repo tools do not take credentials as arguments;
+            # they read a connector off `config.connectors.context`. Nothing here
+            # bound one, so the Development agent on a project with Azure DevOps
+            # connected reported that no ADO credentials were configured — truthfully,
+            # because it could not see them. See orchestrator2/connectors.py for why
+            # every argument below is load-bearing, `owner_id` especially: the
+            # credential is usually a project-scoped PERSONAL one, and resolving it
+            # without the turn's user yields a connector with no PAT, which the agent
+            # reports exactly as it reports having no connector at all.
+            async with connectors.bound_connector(
+                agent_id,
+                tenant_id=tenant_id,
+                # From the verified `runs` row, like every other project-scoped
+                # value on this path. Never from the client frame.
+                project_id=project_id,
+                owner_id=user_id,
+            ):
 
-                    for call in getattr(chunk, "tool_call_chunks", None) or ():
-                        key = str(_call_field(call, "id") or "")
-                        name = _call_field(call, "name")
-                        # A continuation chunk carries the id but no name. Waiting for
-                        # a named one keeps the placeholder for tools that are never
-                        # named at all, rather than spending it on the second half of
-                        # a tool whose name already arrived.
-                        if not name or key in announced:
-                            continue
-                        announced.add(key)
-                        yield {
-                            "type": "tool.call",
-                            "name": _tool_name(name),
-                            "status": "running",
-                            "run_id": run_id,
-                        }
-
-                    text = _stream_text(getattr(chunk, "content", None))
-                    if text:
-                        reply_parts.append(text)
-                        yield {"type": "stream_chunk", "content": text}
-            else:
-                # Invoke-mode agents take a single prompt string and no message
-                # list, so the context is prepended to it. Same information, the only
-                # shape this graph accepts.
-                state = {
-                    "user_prompt": f"{context}\n\n{text}" if context else text,
-                    "tenant_id": tenant_id,
-                    "model_id": model_id,
-                    "offering_id": offering_id,
-                }
-                final_state = await graph.ainvoke(state, config=config)
-                reply = (final_state or {}).get("final_user_message") or ""
-                if reply:
-                    reply_parts.append(reply)
-                    yield {"type": "stream_chunk", "content": reply}
-                else:
-                    # AN EMPTY REPLY IS A FAILED TURN, NOT A QUIET ONE.
-                    #
-                    # This used to yield the empty string regardless. The client skips
-                    # a chunk with no content and then REMOVES the bubble that never
-                    # received a token, so the user saw their own message, a line
-                    # saying the agent was answering, and then nothing at all — no
-                    # reply, no error, composer handed back. That is the "agent appears
-                    # to say nothing" failure this engine was rebuilt to remove,
-                    # reproduced one layer up.
-                    #
-                    # Reported here rather than papered over downstream: only this
-                    # layer knows the graph finished and produced no message, and an
-                    # invoke-mode graph that returns no `final_user_message` has not
-                    # done its job.
-                    yield {
-                        "type": "error",
-                        "message": _EMPTY_REPLY_MESSAGE,
-                        "agent": agent_id,
+                if capability.mode == "stream":
+                    system_prompt = capability.load_prompt()
+                    # The run's existing artifacts go in as a SECOND system message
+                    # rather than being spliced into the agent's own prompt or prepended
+                    # to the user's words. Each agent's prompt is a long, carefully
+                    # written document (25,844 characters for Requirements), and editing
+                    # one at runtime to carry data is how a prompt stops being reviewable;
+                    # putting it in the human turn would have the agent answering a
+                    # question the user did not ask.
+                    messages: list[Any] = [SystemMessage(content=system_prompt)]
+                    if context:
+                        messages.append(SystemMessage(content=context))
+                    messages.append(HumanMessage(content=text))
+                    state: dict[str, Any] = {
+                        "messages": messages,
+                        "tenant_id": tenant_id,
+                        "model_id": model_id,
+                        "offering_id": offering_id,
                     }
+                    # One `running` per TOOL, not per chunk: providers split a single tool
+                    # call across many chunks that share an id, and only the first carries
+                    # the name. Scoped to this turn, so the same tool used twice in one
+                    # conversation is announced twice.
+                    announced: set[str] = set()
+                    async for chunk, _metadata in graph.astream(
+                        state, stream_mode="messages", config=config
+                    ):
+                        if _is_tool_result(chunk):
+                            # A tool RESULT. Its `content` is the tool's output, and
+                            # forwarding it as a `stream_chunk` put it in the transcript as
+                            # if the agent had said it — so it is reported as activity and
+                            # its text is not streamed.
+                            yield {
+                                "type": "tool.call",
+                                "name": _tool_name(getattr(chunk, "name", None)),
+                                "status": "done",
+                                "run_id": run_id,
+                            }
+                            continue
 
-        # Reached only when the graph ran to the end without raising. Everything the
-        # capture block below does is gated on this.
+                        for call in getattr(chunk, "tool_call_chunks", None) or ():
+                            key = str(_call_field(call, "id") or "")
+                            name = _call_field(call, "name")
+                            # A continuation chunk carries the id but no name. Waiting for
+                            # a named one keeps the placeholder for tools that are never
+                            # named at all, rather than spending it on the second half of
+                            # a tool whose name already arrived.
+                            if not name or key in announced:
+                                continue
+                            announced.add(key)
+                            yield {
+                                "type": "tool.call",
+                                "name": _tool_name(name),
+                                "status": "running",
+                                "run_id": run_id,
+                            }
+
+                        text = _stream_text(getattr(chunk, "content", None))
+                        if text:
+                            reply_parts.append(text)
+                            yield {"type": "stream_chunk", "content": text}
+                else:
+                    # Invoke-mode agents take a single prompt string and no message
+                    # list, so the context is prepended to it. Same information, the only
+                    # shape this graph accepts.
+                    state = {
+                        "user_prompt": f"{context}\n\n{text}" if context else text,
+                        "tenant_id": tenant_id,
+                        "model_id": model_id,
+                        "offering_id": offering_id,
+                    }
+                    final_state = await graph.ainvoke(state, config=config)
+                    reply = (final_state or {}).get("final_user_message") or ""
+                    if reply:
+                        reply_parts.append(reply)
+                        yield {"type": "stream_chunk", "content": reply}
+                    else:
+                        # AN EMPTY REPLY IS A FAILED TURN, NOT A QUIET ONE.
+                        #
+                        # This used to yield the empty string regardless. The client skips
+                        # a chunk with no content and then REMOVES the bubble that never
+                        # received a token, so the user saw their own message, a line
+                        # saying the agent was answering, and then nothing at all — no
+                        # reply, no error, composer handed back. That is the "agent appears
+                        # to say nothing" failure this engine was rebuilt to remove,
+                        # reproduced one layer up.
+                        #
+                        # Reported here rather than papered over downstream: only this
+                        # layer knows the graph finished and produced no message, and an
+                        # invoke-mode graph that returns no `final_user_message` has not
+                        # done its job.
+                        yield {
+                            "type": "error",
+                            "message": _EMPTY_REPLY_MESSAGE,
+                            "agent": agent_id,
+                        }
+
+        # Reached only when the graph ran to the end without raising — the connector
+        # is unbound by then, so nothing below can reach a credential. Everything the
+        # capture block does is gated on this.
         turn_completed = True
     except Exception as exc:  # noqa: BLE001 - never let a run failure reach the socket unlabeled
         # Unlike the UnknownAgentError branch above, `agent_id` HAS already

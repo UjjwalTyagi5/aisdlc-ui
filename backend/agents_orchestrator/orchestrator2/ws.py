@@ -715,6 +715,11 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # From the verified `runs` row. `msg` may well carry a
                         # `project_id`; it is never consulted.
                         project_id=project_id,
+                        # The AUTHENTICATED user, from the ticket claim — never from
+                        # the frame. It selects this person's own project-scoped
+                        # connector credential, so a client-supplied value here would
+                        # be a way to borrow somebody else's PAT.
+                        user_id=user_id,
                         context=context,
                         reason=reason,
                     )

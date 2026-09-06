@@ -474,3 +474,32 @@ def test_ordinary_turns_are_kept_whole(monkeypatch):
 
     assert [e["content"] for e in history] == [
         "design the billing service", "Here is the design."]
+
+
+@pytest.mark.asyncio
+async def test_the_turns_user_reaches_dispatch_from_the_ticket(monkeypatch):
+    """The authenticated user is threaded into the turn, and comes from the TICKET.
+
+    It selects this person's project-scoped connector credential
+    (`project_integration_credentials`), which is how an Azure DevOps PAT is usually
+    saved on this platform. Sent as "" the connector resolves with no PAT at all, and
+    the Development agent then reports "credentials aren't configured" on a project
+    that has ADO connected — the bug this was added to fix.
+
+    It must come from the ticket claim rather than the frame for the same reason
+    `project_id` does: a client-supplied user id here would be a way to borrow
+    somebody else's saved PAT.
+    """
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+    _record_route(monkeypatch, ws, rtr.RoutingDecision(
+        agent_id="development", reason="r", direct_reply=None))
+    calls = _record_run_agent(monkeypatch, ws)
+
+    await _serve(ws, [_frame()])
+
+    _, kwargs = calls[0]
+    assert kwargs["user_id"] == "u1", (
+        "without the turn's user, a project-scoped personal credential is never found"
+    )

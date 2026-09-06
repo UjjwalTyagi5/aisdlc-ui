@@ -55,7 +55,7 @@ async def _turn(monkeypatch, reply: str, *, project_id: str = "p1") -> list[dict
     )
     return [e async for e in dispatch.run_agent(
         "security", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id=project_id,
+        model_id=None, offering_id=None, project_id=project_id, user_id="u1",
         context="", reason="")]
 
 
@@ -171,6 +171,7 @@ async def test_a_failed_turn_captures_nothing(monkeypatch):
     )
     events = [e async for e in dispatch.run_agent(
         "security", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="p1", context="", reason="")]
+        model_id=None, offering_id=None, project_id="p1", user_id="u1",
+        context="", reason="")]
     assert _events_of(events, "error"), "the failure itself must still be reported"
     assert called == [], "a failed turn must not persist its partial output"

@@ -126,6 +126,7 @@ async def _turn(agent_id="design", *, project_id="proj-A", tenant_id="t1",
     return [e async for e in dispatch.run_agent(
         agent_id, text="hi", run_id="run-1", tenant_id=tenant_id,
         model_id=model_id, offering_id=offering_id, project_id=project_id,
+        user_id="u1",
         context="", reason="")]
 
 
@@ -682,7 +683,7 @@ async def test_closing_the_generator_mid_stream_raises_nothing(monkeypatch):
 
     events = dispatch.run_agent("design", text="hi", run_id="run-1", tenant_id="t1",
                                 model_id=None, offering_id=None, project_id="proj-A",
-                                context="", reason="")
+                                user_id="u1", context="", reason="")
     assert (await events.__anext__())["type"] == "agent.selected"
     assert (await events.__anext__())["type"] == "stream_chunk"
 
@@ -699,7 +700,7 @@ async def test_closing_the_generator_mid_stream_clears_the_closers_context(monke
 
     events = dispatch.run_agent("design", text="hi", run_id="run-1", tenant_id="t1",
                                 model_id=None, offering_id=None, project_id="proj-A",
-                                context="", reason="")
+                                user_id="u1", context="", reason="")
     await events.__anext__()                       # agent.selected
     await events.__anext__()                       # stream_chunk — model is now set
     assert mr.get_resolved_model() is not None, "the turn never got as far as a model"
