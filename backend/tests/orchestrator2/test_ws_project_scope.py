@@ -17,6 +17,14 @@ The rule is NOT re-implemented on the socket. `project_admin_tier_for` in
 `project_admin_tier`, addressed by identity because a WebSocket has no `Request`; that
 the two are the same rule is pinned by
 `tests/test_project_admin_tier_addressed_by_identity.py`.
+
+WHAT THIS FILE COVERS, STATED SO NOBODY STOPS LOOKING HERE. Every test below STUBS
+`_project_admin_tier_for_run` and asserts on the CALL SITE: that the socket refuses the
+turn when the lookup answers None, admits all three tiers, asks about the run's project
+rather than the frame's, and fails closed. It does not execute the lookup's own body.
+That is `test_ws_project_tier_lookup.py`, which drives the real function against a fake
+session factory — and for a while it did not exist, while this file's name was cited by
+two others as the place the function was covered.
 """
 import json
 
