@@ -1,14 +1,24 @@
 # Orchestrator rebuild — session handoff
 
-**Written at the end of Phase 3. Phases 0–3 are complete, reviewed and green. Phase 4 is
-next and nothing blocks it.**
+> **SUPERSEDED, 2026-09-07. Written at the end of Phase 3, when Phase 4 was next.**
+> **All five phases are now complete.** The rest of this document is kept because its
+> traps (§6), method (§5) and setup notes (§3) still hold, but its status lines and its
+> "what is left" are historical. **`orchestrator_instruction.md` §16 is current** — read
+> that first.
+>
+> Corrections to what follows:
+> - Phase 4 shipped Deliverables (§15 of the spec); Phase 5 retired both old engines and
+>   made the rail server-backed history (§16).
+> - `copilot_api.py` and `orchestrator_api.py` no longer exist, so §2's "old engines" and
+>   §7's carried-debt item 3 are moot.
+> - `lib/copilot/` no longer exists; that vocabulary lives in `lib/orchestrator/`.
+> - Test counts below are stale: backend is 3,322 passing at a 22-failure baseline,
+>   frontend 688.
 
 Read this first, then `orchestrator_instruction.md` (the spec of record). Everything below
-is fact checked against the repo at the time of writing, not recalled.
+was fact checked against the repo at the time of writing, not recalled.
 
-- Branch: **`feature/orchestrator-rebuild`** — 41 commits ahead of `f7c9bfd9`. Not pushed.
-- Backend tests: **363 passing** (`tests/orchestrator2/` + one authz test)
-- Frontend tests: **644 passing**, typecheck and lint clean on orchestrator files
+- Branch: **`feature/orchestrator-rebuild`** — not pushed.
 
 ---
 
