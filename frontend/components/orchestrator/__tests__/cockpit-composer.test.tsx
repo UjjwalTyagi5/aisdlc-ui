@@ -7,14 +7,17 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 /**
- * The composer is open, and it says who is missing.
+ * The composer is open, and the Orchestrator chooses unless told otherwise.
  *
- * The cockpit shipped its last phase with the composer nailed shut behind "the
- * engine arrives in the next phase". The engine exists now, so the disabled
- * composer and that copy must be gone — but the thing worth pinning is what
- * replaced them: an agent picker that starts EMPTY. Phase 2 has no router, so a
- * default here would be the UI choosing an agent on the user's behalf and
- * calling it their choice, which is the failure this rebuild exists to end.
+ * The cockpit shipped an earlier phase with the composer nailed shut behind "the
+ * engine arrives in the next phase", and then with it disabled until the user named
+ * an agent. Both are gone: routing is in the engine, so the picker defaults to "Let
+ * the Orchestrator choose" and a message sent that way is routed.
+ *
+ * What is pinned here is that the default is a REAL, VISIBLE selection rather than an
+ * empty control — the common case must not look like an unanswered question — and
+ * that picking an agent still overrides the router, because the router is a model and
+ * a wrong decision has to be correctable in one turn.
  */
 
 const sendTurn = vi.fn();

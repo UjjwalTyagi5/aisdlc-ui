@@ -64,11 +64,16 @@ export interface OrchestratorCockpitProps {
  * Business Unit's projects. There is no fixed agent order here — any agent
  * can pick up work based on what the conversation asks for.
  *
- * WHICH AGENT RUNS IS THE USER'S CHOICE, and the picker starts empty. There is
- * no router yet, so the alternative to asking would be guessing — and a silent
- * default is precisely how the previous engine dispatched the wrong agent
- * without anyone being able to see that it had. Nothing sends until an agent is
- * named, and the server announces the one it dispatched in the thread.
+ * WHICH AGENT RUNS IS THE ORCHESTRATOR'S CHOICE BY DEFAULT. The picker starts on
+ * "Let the Orchestrator choose", and a message sent that way is ROUTED: the engine
+ * reads it, and the connection's earlier turns, and picks one of the nine or answers
+ * directly. Picking an agent overrides the router for that turn.
+ *
+ * The invariant the old required-picker stood for is unchanged, and now lives in the
+ * engine: nothing is chosen silently. Every routed turn announces its agent AND the
+ * reason in `agent.selected` before any of the agent's text, so a wrong choice is
+ * visible and correctable in one turn — which is exactly what the previous engine,
+ * advancing by list index, never told anyone.
  *
  * A RUN IS CREATED LAZILY, ON THE FIRST TURN. The socket resolves `run_id`
  * against the caller's tenant and refuses anything it cannot verify, so the
@@ -279,7 +284,21 @@ export function OrchestratorCockpit({
   }, [projectId, offeringId, modelKey]);
 
   // A different conversation is a different run and a different transcript.
-  const conversationKey = active?.id ?? projectId ?? "";
+  //
+  // THE PROJECT IS PART OF THE KEY, not a fallback for when there is no session.
+  // It was `active?.id ?? projectId`, so with a session open the key was the session
+  // id alone — and `handleProjectChange` repoints the active session in place via
+  // `retargetSession`, which deliberately keeps that id. Switching project therefore
+  // changed the header, the model picker and the artifacts panel while this key stood
+  // still, so the reset below never ran: the next turn went out with the PREVIOUS
+  // project's `run_id`.
+  //
+  // That is not a privilege leak — the caller administers both projects and
+  // `_project_admin_tier_for_run` is satisfied — but `ws._resolve_run` reads
+  // `project_id` from the RUN row and never from the frame, so the turn enforced the
+  // old project's offering grant, spent the old project's budget with its BYOK key,
+  // and joined the old run's LangGraph thread, under a UI naming the new project.
+  const conversationKey = `${active?.id ?? ""}:${projectId ?? ""}`;
   const lastConversationKey = React.useRef(conversationKey);
   React.useEffect(() => {
     if (lastConversationKey.current === conversationKey) return;

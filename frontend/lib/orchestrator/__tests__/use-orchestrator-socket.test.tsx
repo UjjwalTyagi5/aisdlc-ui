@@ -210,6 +210,56 @@ describe("useOrchestratorSocket — inbound frame validation", () => {
   });
 });
 
+describe("useOrchestratorSocket — a routed turn's bubble attribution", () => {
+  /**
+   * THE CENTRAL NEW PATH OF THE BRANCH, and it had no test at all.
+   *
+   * Found by the whole-branch review: every existing test that delivers
+   * `agent.selected` either never called `send`, or called it with an explicit
+   * `agent` — so `turnAgentRef` was already correct before the frame landed and the
+   * re-attribution was a no-op. Two mutations therefore survived the whole suite:
+   * deleting the re-attribution outright, and having the UI GUESS an agent when the
+   * user named none.
+   */
+  const runId = "3f6b0b7e-1a8a-4b3d-8a2c-0f1e2d3c4b5a";
+
+  it("leaves the bubble unattributed until the server names the agent", async () => {
+    // With no override there is nothing to attribute the reply to yet. A guess here
+    // would show one agent's badge and then swap it for another mid-answer, which
+    // reads as a bug in the answer rather than as routing working.
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({ text: "I need a PRD", resolveRunId: async () => runId });
+    });
+    await deliver({ type: "stream_chunk", content: "Working on it" });
+
+    const bubble = result.current.messages.find((m) => m.role === "agent");
+    expect(bubble).toBeDefined();
+    expect(bubble!.phase).toBeNull();
+  });
+
+  it("re-attributes the live bubble when agent.selected arrives", async () => {
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({ text: "I need a PRD", resolveRunId: async () => runId });
+    });
+    await deliver({ type: "stream_chunk", content: "Drafting" });
+    expect(result.current.messages.find((m) => m.role === "agent")!.phase).toBeNull();
+
+    await deliver({
+      type: "agent.selected",
+      agent: "requirements",
+      reason: "You asked for a PRD.",
+    });
+
+    await waitFor(() =>
+      expect(result.current.messages.find((m) => m.role === "agent")!.phase).toBe(
+        "requirements",
+      ),
+    );
+  });
+});
+
 describe("useOrchestratorSocket — the activity feed", () => {
   it("records a tool call and closes it when the result arrives", async () => {
     // `tool.call` was declared in the protocol and rendered by the Activity tab from
