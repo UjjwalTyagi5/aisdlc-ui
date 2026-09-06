@@ -53,6 +53,21 @@ export const qk = {
     forProject: (id: ProjectId) => ["artifacts", "project", id] as const,
     detail: (id: ArtifactId) => ["artifacts", "detail", id] as const,
   },
+  // Frozen stage payload versions and their publication state. Deliberately a
+  // separate namespace from `artifacts` above: that one is blob documents, this one
+  // is the JSONB hand-off between agents, and they have independent lifecycles.
+  artifactVersions: {
+    all: () => ["artifact-versions"] as const,
+    forStage: (id: ProjectId, phase: string) =>
+      ["artifact-versions", id, phase] as const,
+    published: (id: ProjectId, phase: string) =>
+      ["artifact-versions", id, phase, "published"] as const,
+    matrix: (id: ProjectId) => ["artifact-versions", id, "matrix"] as const,
+    runEvidence: (id: ProjectId, runId: string) =>
+      ["artifact-versions", id, "run", runId] as const,
+    versionConsumers: (id: ProjectId, phase: string, version: number) =>
+      ["artifact-versions", id, phase, version, "consumers"] as const,
+  },
   connectors: {
     list: (workspaceId?: string | null) => ["connectors", workspaceId ?? ""] as const,
     detail: (kind: string) => ["connectors", kind] as const,

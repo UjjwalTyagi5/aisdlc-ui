@@ -152,6 +152,11 @@ export const Project = z.object({
   /** Access mode per assigned tool — see ToolAccessMode above. Unset entries
    *  (e.g. projects created before this existed) default to "both" in the UI. */
   toolAccessModes: z.record(z.string(), ToolAccessMode).optional(),
+  /** When true, agents on this project read ONLY published artifact versions and
+   *  refuse unapproved upstream work (migration 0046). False everywhere by
+   *  default — enabling it on a project that has never published anything makes
+   *  every agent correctly report "no approved upstream". */
+  enforceArtifactPublication: z.boolean().optional(),
   /** Monthly cost cap; null = inherit workspace / unlimited (migration 0032). */
   monthlyBudgetUsd: z.number().nonnegative().nullable().optional(),
   /** The period that cap is valid for — see lib/schemas/budget-window.ts. */

@@ -389,6 +389,18 @@ async def create_request(
         approver = routing.agent_access_approver(stage, phase or "")
         payload = {**(payload or {}), "phase": phase} if phase else payload
 
+    if request_type == "artifact_consumption":
+        # ONE APPROVER, and it is the owner of the PRODUCING stage — the only person
+        # who can answer "may they build on my unfinished work". Not the requester's
+        # Project Admin: tier routing would send a Developer's ask up a chain that
+        # never had standing to judge the design they want to read.
+        #
+        # No project_admin first stage, unlike agent_access. There the cheap question
+        # ("should this person use this agent at all") is genuinely separate; here the
+        # consumer is already working in the project and the only open question is the
+        # owner's. Adding a stage would be ceremony that trains people to click.
+        approver = routing.agent_owner_role(phase or "")
+
     # connector_access and mcp_server read payload.targetId (see
     # _apply_connector_access) — merged the same way phase is, never a raw
     # passthrough.

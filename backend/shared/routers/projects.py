@@ -199,6 +199,11 @@ class ProjectPatchIn(BaseModel):
     tool_access_modes: Optional[dict[str, str]] = None
     # 0 clears the cap (inherit workspace / unlimited); positive sets it.
     monthlyBudgetUsd: Optional[float] = None
+    # Read ONLY published artifact versions on this project. Off everywhere by
+    # default: turning it on for a project whose stages have never published makes
+    # every agent correctly report "no approved upstream", which is the right
+    # answer and looks exactly like an outage to whoever is watching.
+    enforceArtifactPublication: Optional[bool] = None
 
     @field_validator("tool_access_modes")
     @classmethod
@@ -1104,6 +1109,8 @@ async def patch_project(
         project.connectors = body.connectors or None
     if body.monthlyBudgetUsd is not None:
         project.monthly_budget_usd = body.monthlyBudgetUsd or None  # 0 clears the cap
+    if body.enforceArtifactPublication is not None:
+        project.enforce_artifact_publication = body.enforceArtifactPublication
     await db.flush()
     await db.refresh(project)
     from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415

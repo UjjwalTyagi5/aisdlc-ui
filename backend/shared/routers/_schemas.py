@@ -108,6 +108,9 @@ class ProjectOut(BaseModel):
     # Per-(stage, tool) read/write mode, "{agent_id}::{connector|mcp}::{ref}" ->
     # "read" | "write" | "both". Absent key = "both" (migration 0024).
     toolAccessModes: dict[str, str] = {}
+    # Whether agents on this project read ONLY published artifact versions (0046).
+    # False everywhere by default; the settings page is where it is turned on.
+    enforceArtifactPublication: bool = False
     # TOTAL cost budget (0032). None = inherit workspace / unlimited. The field name
     # is historical — spend is accumulated over the project's life, not per month
     # (shared/services/budget_store.py).
@@ -162,6 +165,9 @@ class ProjectOut(BaseModel):
             mcpServers=getattr(project, "mcp_servers", None) or {},
             connectors=getattr(project, "connectors", None) or {},
             toolAccessModes=getattr(project, "tool_access_modes", None) or {},
+            enforceArtifactPublication=bool(
+                getattr(project, "enforce_artifact_publication", False)
+            ),
             monthlyBudgetUsd=float(_budget) if _budget is not None else None,
             monthlySpendUsd=round(float(spend_usd or 0.0), 4),
             lastActivityAt=_iso(project.updated_at),

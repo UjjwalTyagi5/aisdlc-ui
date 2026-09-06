@@ -15,6 +15,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
 
@@ -329,6 +330,11 @@ export default function RequirementsPage() {
           aria-label="Stories"
           className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
         >
+          <StageVersionPanel
+            projectId={projectId}
+            phase="requirements"
+            className="mb-3 shrink-0"
+          />
           <ArtifactList
             items={artifactsQ.isLoading ? null : stories}
             selectedId={selected?.id}

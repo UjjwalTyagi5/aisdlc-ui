@@ -154,6 +154,8 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_mcp_server(db, request)
     if rtype == "agent_access":
         return await _apply_agent_access(db, request)
+    if rtype == "artifact_consumption":
+        return await _apply_artifact_consumption(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
     if rtype == "user_onboarding":
@@ -268,6 +270,11 @@ _SETTINGS_FIELDS: dict[str, str] = {
     "connectors": "connectors",
     "mcpServers": "mcp_servers",
     "toolAccessModes": "tool_access_modes",
+    # Whether agents on this project may read only PUBLISHED artifact versions.
+    # Routed through the same governed change as every other setting on purpose:
+    # switching it on makes every agent correctly refuse unapproved upstream work,
+    # which is a visible change to how the project runs, not a preference.
+    "enforceArtifactPublication": "enforce_artifact_publication",
 }
 
 # The JSONB ones, which have to be bound as JSON text rather than a dict.
@@ -1010,6 +1017,63 @@ async def _apply_mcp_server(db: AsyncSession, request: dict[str, Any]) -> str:
     logger.info("mcp_server approved: unit %s -> mcp %s", workspace_id, target_ref)
     return "MCP server granted to the business unit."
 
+
+
+async def _apply_artifact_consumption(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant one consuming stage the right to read one non-published version.
+
+    NARROW BY CONSTRUCTION: the grant names a single `version_id` and a single
+    `consumer_stage`. It is not "design may read drafts" — that would be a standing
+    licence indistinguishable from turning enforcement off, and the next draft is a
+    new question that deserves asking again.
+
+    The grant carries the REASON the owner gave. A later reader deciding whether it
+    still applies needs to know what was being allowed and why, and "approved" on its
+    own does not survive the month.
+    """
+    payload = request.get("payload") or {}
+    version_id = payload.get("versionId")
+    consumer_stage = payload.get("consumerStage")
+    project_id = request.get("projectId") or payload.get("projectId")
+    decided_by = request.get("decidedBy") or request.get("currentApproverRole") or "unknown"
+
+    if not version_id or not consumer_stage:
+        raise EffectNotAvailable(
+            "artifact_consumption",
+            "This request does not name a version and a consuming stage.",
+        )
+    if not project_id:
+        raise EffectNotAvailable(
+            "artifact_consumption", "This request names no project to apply to."
+        )
+
+    # ON CONFLICT DO NOTHING, not DO UPDATE: a live grant already covering this pair
+    # is the outcome being asked for. Re-granting would move `granted_by` to whoever
+    # happened to decide the duplicate, rewriting who actually allowed it.
+    await db.execute(
+        text(
+            "INSERT INTO artifact_consumption_grants "
+            "  (tenant_id, project_id, version_id, consumer_stage, granted_by, "
+            "   reason, request_id) "
+            "VALUES (CAST(:t AS uuid), CAST(:p AS uuid), CAST(:v AS uuid), :c, :g, "
+            "        :r, CAST(:rq AS uuid)) "
+            "ON CONFLICT (version_id, consumer_stage) DO NOTHING"
+        ),
+        {
+            "t": str(request.get("tenantId")),
+            "p": str(project_id),
+            "v": str(version_id),
+            "c": consumer_stage,
+            "g": str(decided_by),
+            "r": (request.get("description") or request.get("summary")
+                  or "approved without a stated reason"),
+            "rq": str(request.get("id")),
+        },
+    )
+    return (
+        f"{consumer_stage} may read artifact version {version_id} "
+        f"in project {project_id}"
+    )
 
 async def _apply_agent_access(db: AsyncSession, request: dict[str, Any]) -> str:
     """Grant the requester the extra agent access their final approver just
