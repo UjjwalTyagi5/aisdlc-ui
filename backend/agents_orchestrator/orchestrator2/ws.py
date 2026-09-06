@@ -519,12 +519,23 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
             try:
                 model_id, offering_id, project_id = await _resolve_run(run_id, tenant_id)
             except RunNotAvailableError as exc:
-                # One message for absent and for another tenant's run — the two
-                # `RunNotAvailableError` cases are worded identically upstream so this
-                # cannot become an existence oracle for runs the caller cannot see.
-                await _fail(
-                    websocket, "That run is not available.", detail=str(exc)
+                # NO `detail`. `RunNotAvailableError` carries one of four strings —
+                # "no run identified", "'…' is not a run id", "no such run", "the run
+                # could not be verified" — and every one of them says something about
+                # the run that the caller is being refused knowledge of. Sending them
+                # made this refusal an existence oracle: it was distinguishable, by the
+                # PRESENCE of the key alone, from the per-project refusal below, which
+                # fires only when the run does exist in this tenant. A caller holding a
+                # run UUID learned whether it was real. The single exception type
+                # upstream was chosen so the message could not reveal which case it
+                # was; emitting the case as a detail gave it straight back.
+                #
+                # The reason is logged instead, which is who it was ever for.
+                logger.info(
+                    "orchestrator2 refused run=%s for tenant=%s user=%s: %s",
+                    run_id, tenant_id, user_id, exc,
                 )
+                await _fail(websocket, "That run is not available.")
                 continue
 
             # Everything from here to `run_agent` can fail, and every failure must
@@ -571,10 +582,17 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 # should: there is no project to administer, nothing to scope its models
                 # or budget to, and "no project" must not become "no check".
                 #
-                # Worded IDENTICALLY to the unavailable-run refusal above. A distinct
-                # "that project is not yours" would confirm the run exists, which is the
-                # existence oracle `RunNotAvailableError` is worded to avoid, arriving
-                # one step further along.
+                # BYTE-IDENTICAL to the unavailable-run refusal above: the same
+                # message, and — this is the part that was wrong for a while — the same
+                # KEYS. A distinct "that project is not yours" would confirm the run
+                # exists, which is the existence oracle `RunNotAvailableError` is worded
+                # to avoid, arriving one step further along. So would a differing set of
+                # keys: this branch fires only when the run DOES exist in this tenant,
+                # so anything present here and absent above (or the reverse) is that
+                # same oracle wearing a different hat. It was `detail`, which the
+                # `_resolve_run` handler used to send and no longer does.
+                # `test_the_refusal_does_not_reveal_whether_the_run_exists` compares the
+                # whole event stream of both paths, not one key of it.
                 logger.info(
                     "orchestrator2 refused user=%s run=%s project=%s — does not "
                     "administer the run's project", user_id, run_id, project_id,

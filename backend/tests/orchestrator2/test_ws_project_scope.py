@@ -192,31 +192,58 @@ async def test_a_run_with_no_project_is_refused(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_refusal_does_not_reveal_whether_the_run_exists(monkeypatch):
-    """`RunNotAvailableError` words "absent" and "another tenant's" identically so the
-    message cannot become an existence oracle. A distinct "that project is not yours"
-    would reintroduce exactly that, one level along: it confirms the run exists."""
+@pytest.mark.parametrize(
+    "label,raised",
+    [
+        ("absent, or another tenant's", "no such run"),
+        ("could not be verified (a DB failure)", "the run could not be verified"),
+        ("not a UUID — echoes the caller's own text back", f"'{_RUN}x' is not a run id"),
+        ("no run identified at all", "no run identified"),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+async def test_the_refusal_does_not_reveal_whether_the_run_exists(
+    monkeypatch, label, raised
+):
+    """`RunNotAvailableError` words all four of its cases identically so the message
+    cannot become an existence oracle. A distinct "that project is not yours" would
+    reintroduce exactly that, one level along: it confirms the run exists.
+
+    COMPARES THE WHOLE EVENT, not `message`. For a while it compared only `message`,
+    and the two paths were in fact distinguishable the entire time: the tier refusal
+    sent `{"type","message"}` and the `RunNotAvailableError` refusal sent those plus
+    `"detail"`, so the PRESENCE of a key told a caller holding a run UUID whether that
+    run existed in their tenant. A test that reads one key certifies one key.
+
+    Every `RunNotAvailableError` case is parametrised because they must all look the
+    same as each other too — the not-a-UUID one used to echo the caller's own text back
+    inside the frame, which was a fourth distinguishable shape from one nominally
+    uniform refusal.
+    """
     from agents_orchestrator.orchestrator2 import ws
 
+    # Fires only when the run EXISTS in this tenant and belongs to a project the
+    # caller does not administer.
     _patch(monkeypatch, ws, tier=None)
     _stub_turn(monkeypatch, ws)
     refused = await _serve(ws, [_frame()])
 
-    async def _absent(run_id, tenant_id):
-        raise ws.RunNotAvailableError("no such run")
+    async def _unavailable(run_id, tenant_id):
+        raise ws.RunNotAvailableError(raised)
 
     _patch(monkeypatch, ws, tier="project")
     _stub_turn(monkeypatch, ws)
-    monkeypatch.setattr(ws, "_resolve_run", _absent)
+    monkeypatch.setattr(ws, "_resolve_run", _unavailable)
     missing = await _serve(ws, [_frame()])
 
-    def _messages(socket):
-        return [e.get("message") for e in socket.sent if e["type"] == "error"]
-
-    assert _messages(refused) == _messages(missing), (
-        f"the two refusals are distinguishable: {_messages(refused)} vs "
-        f"{_messages(missing)}"
+    assert refused.sent == missing.sent, (
+        f"{label}: the two refusals are distinguishable.\n"
+        f"  run exists, project not yours: {refused.sent}\n"
+        f"  run unavailable             : {missing.sent}"
     )
+    assert not any(
+        raised in json.dumps(event) for event in missing.sent
+    ), f"{label}: the reason reached the client — {missing.sent}"
 
 
 @pytest.mark.asyncio
