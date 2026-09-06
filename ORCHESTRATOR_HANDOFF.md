@@ -132,7 +132,7 @@ real time this session:
 | Docs say | Actually |
 |---|---|
 | FastAPI on port **8001** | **8004** — `frontend/.env.local` has `FASTAPI_INTERNAL_URL=http://localhost:8004` |
-| PostgreSQL is native on 5432 | **Compose Postgres on 5433** — `.env` has `POSTGRES_CONN_STRING=…@localhost:5433/sdlc_product` |
+| PostgreSQL is native on 5432 | **Compose Postgres on 5433** — `backend/.env` has `POSTGRES_CONN_STRING=postgresql+asyncpg://postgres:…@localhost:5433/sdlc_product`. Note it is `backend/.env`, not the repo-root `.env`, which has neither. |
 
 ```bash
 # 1. containers (Docker Desktop must be running)
