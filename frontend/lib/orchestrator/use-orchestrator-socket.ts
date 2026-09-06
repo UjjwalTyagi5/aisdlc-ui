@@ -87,8 +87,16 @@ export interface UseOrchestratorSocketResult {
   /** A turn is in flight: dispatched and not yet ended. */
   busy: boolean;
   /**
-   * The live agent-action feed for the Activity tab: which agent was chosen, what
-   * it is thinking, and every tool it runs.
+   * The live agent-action feed for the Activity tab: which agent was chosen, and
+   * every tool it runs.
+   *
+   * `agent.thinking` has a branch too, but NOTHING IN `orchestrator2` EMITS ONE —
+   * the socket forwards `agent.selected`, `stream_chunk`, `tool.call`, `error` and
+   * `stream_end`, and that is the whole list. The branch is kept for the same reason
+   * `choice.card`'s is: the protocol union accepts the event, so the moment a graph
+   * produces one it would otherwise be validated, accepted and silently discarded.
+   * It is named here as unreachable rather than advertised as something the feed
+   * carries, because claiming it does is how an empty tab looks like a working one.
    *
    * `tool.call` was declared in the protocol and consumed by the panel from the
    * start, but nothing emitted it and nothing recorded it — the tab was wired to an
@@ -360,6 +368,10 @@ export function useOrchestratorSocket(
           if (evt.content) appendChunk(evt.content);
           break;
         case "agent.thinking":
+          // UNREACHABLE TODAY — nothing in `orchestrator2` emits this; see the
+          // `activity` docstring above. Kept, and kept working, so that a graph that
+          // starts emitting one is rendered rather than dropped.
+          //
           // No token yet, but the agent is working — open the bubble so the thread
           // shows a working indicator instead of nothing.
           mutateBubble((m) => m);

@@ -319,3 +319,53 @@ async def test_understood_shapes_carrying_no_text_are_not_errors(monkeypatch, co
     assert [e for e in events if e["type"] == "error"] == []
     assert _chunks(events) == []
     assert events[-1]["type"] == "stream_end"
+
+
+# ── an invoke-mode agent that produces nothing must say so ───────────────────
+
+
+class _InvokeGraph:
+    def __init__(self, final_state):
+        self._final_state = final_state
+
+    async def ainvoke(self, state, config=None):
+        return self._final_state
+
+
+def _install_invoke(monkeypatch, final_state):
+    monkeypatch.setitem(
+        reg.REGISTRY, "testing",
+        reg.AgentCapability(agent_id="testing", load_graph=lambda: _InvokeGraph(final_state),
+                            load_prompt=lambda: "SYS", mode="invoke"),
+    )
+
+
+async def _run_testing():
+    return [e async for e in dispatch.run_agent(
+        "testing", text="run the tests", run_id="r1", tenant_id="t1",
+        model_id=None, offering_id=None, project_id="p1", context="", reason="")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_state", [{}, {"final_user_message": ""}, None])
+async def test_an_invoke_agent_that_returns_nothing_reports_it(monkeypatch, final_state):
+    """The turn used to end in COMPLETE silence: an empty `stream_chunk` is skipped by
+    the client, and the bubble that never received a token is then removed — so the
+    user saw their message, "the Testing agent is answering", and nothing else. No
+    reply, no error, composer handed back."""
+    _install_invoke(monkeypatch, final_state)
+    events = await _run_testing()
+
+    assert _chunks(events) == [], "an empty chunk is worse than no chunk"
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors, "a turn that produced nothing must say so"
+    assert errors[0]["agent"] == "testing"
+    assert events[-1]["type"] == "stream_end"
+
+
+@pytest.mark.asyncio
+async def test_an_invoke_agent_with_a_reply_still_streams_it(monkeypatch):
+    _install_invoke(monkeypatch, {"final_user_message": "All 42 tests passed."})
+    events = await _run_testing()
+    assert [e["content"] for e in _chunks(events)] == ["All 42 tests passed."]
+    assert [e for e in events if e["type"] == "error"] == []

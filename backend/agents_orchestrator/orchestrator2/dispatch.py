@@ -133,6 +133,10 @@ _NO_MODEL_MESSAGE = (
     "verify a model provider, and grant it to this project, in Org Settings → Model "
     "Providers."
 )
+_EMPTY_REPLY_MESSAGE = (
+    "The agent finished without producing a reply. Nothing was saved. Try again, or "
+    "rephrase what you asked for."
+)
 _MODEL_NOT_ENABLED_MESSAGE = (
     "The model this run selected is not available to this project. An administrator "
     "must grant it to the project in Org Settings → Model Providers, or the run must "
@@ -458,7 +462,28 @@ async def run_agent(
                 }
                 final_state = await graph.ainvoke(state, config=config)
                 reply = (final_state or {}).get("final_user_message") or ""
-                yield {"type": "stream_chunk", "content": reply}
+                if reply:
+                    yield {"type": "stream_chunk", "content": reply}
+                else:
+                    # AN EMPTY REPLY IS A FAILED TURN, NOT A QUIET ONE.
+                    #
+                    # This used to yield the empty string regardless. The client skips
+                    # a chunk with no content and then REMOVES the bubble that never
+                    # received a token, so the user saw their own message, a line
+                    # saying the agent was answering, and then nothing at all — no
+                    # reply, no error, composer handed back. That is the "agent appears
+                    # to say nothing" failure this engine was rebuilt to remove,
+                    # reproduced one layer up.
+                    #
+                    # Reported here rather than papered over downstream: only this
+                    # layer knows the graph finished and produced no message, and an
+                    # invoke-mode graph that returns no `final_user_message` has not
+                    # done its job.
+                    yield {
+                        "type": "error",
+                        "message": _EMPTY_REPLY_MESSAGE,
+                        "agent": agent_id,
+                    }
     except Exception as exc:  # noqa: BLE001 - never let a run failure reach the socket unlabeled
         # Unlike the UnknownAgentError branch above, `agent_id` HAS already
         # resolved by this point (agent.selected was yielded with it), so it
