@@ -317,12 +317,26 @@ async def test_the_targets_own_artifact_is_included_and_marked_as_its_own(monkey
     out = await context.handoff_context(_RUN, _TENANT, "design")
 
     assert "my own earlier design" in out
-    own_heading = context._heading("design", target_agent="design")
-    other_heading = context._heading("development", target_agent="design")
-    assert own_heading in out
-    assert other_heading in out
-    assert own_heading != other_heading, (
-        "the target's own output must be distinguishable from another agent's"
+
+    # Asserted against LITERAL text, not against `_heading`'s own return value. The
+    # first version of this test read both headings back out of `_heading` and
+    # asserted they differed — which passes however `_heading` behaves, because the
+    # two agents have different NAMES ("Design Agent" vs "Development Agent") and that
+    # alone satisfies `!=`. Deleting the marking branch outright left this test green.
+    # A test whose expected value comes from the function under test cannot fail.
+    design_line = next(
+        line for line in out.splitlines() if line.startswith("### ") and "Design" in line
+    )
+    development_line = next(
+        line for line in out.splitlines()
+        if line.startswith("### ") and "Development" in line
+    )
+    assert "(this agent's own earlier output on this run)" in design_line, (
+        "the target's own artifact must be MARKED as its own, or the agent reads its "
+        "own earlier output as an external requirement handed to it"
+    )
+    assert "(this agent's own earlier output on this run)" not in development_line, (
+        "another agent's artifact must not be marked as the target's own"
     )
 
 
