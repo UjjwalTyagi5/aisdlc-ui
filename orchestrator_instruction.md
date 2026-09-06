@@ -599,3 +599,107 @@ This is not a subtlety to fix later. It is the single largest cause of the behav
 prompted this rebuild, and it is the reason the Phase 2 registry validates **graph AND
 prompt for all nine agents at startup, refusing to boot if either is missing**. A missing
 capability must be impossible to ship, not something a user discovers by being ignored.
+
+---
+
+## 12. Phase 2 outcome — the engine exists and all nine agents resolve
+
+Phase 2 built `backend/agents_orchestrator/orchestrator2/` as a NEW package rather than
+extending `copilot_api.py` (P2-R1). The old engine keeps running untouched; it is retired
+in Phase 5, once this one is proven.
+
+**What shipped**
+
+- `registry.py` — the nine agents, each with a lazily-loaded graph and prompt, plus
+  `validate_registry()`. The direct answer to §11.2: a missing graph or prompt now breaks
+  the import instead of producing an agent that answers vaguely. `AGENT_IDS` is derived
+  from `STAGE_ORDER` and asserted equal to it at import, so the two cannot drift.
+  Verified by EXECUTION, not by inspection — every one of the nine resolves a real graph,
+  and all eight stream-mode agents resolve a real prompt (requirements 25,844 chars,
+  design 20,553, plan 6,616, development 31,719, code_review 3,854, security 4,380,
+  deployment 12,277, documentation 8,035). `testing` is invoke-mode and takes none
+  (P2-R4).
+- `dispatch.py` — `run_agent(...)`, one agent per turn, streaming protocol events.
+- `ws.py` — the authenticated socket. Project Admin only, checked **before** the handshake
+  is accepted.
+
+**BYOK is project-scoped, as you asked mid-phase.** The turn's project comes from the
+verified `runs` row and never from the client frame — a client-named project would let a
+caller borrow another project's model grant and another project's budget. `run_agent`
+takes `project_id` as a keyword with **no default**, deliberately: a default of `None`
+would let a future call site drop project scoping silently, which is the exact bug that
+was being fixed.
+
+**Two defects found in Phase 2 that were not in the plan**
+
+1. `_run_model_offering` (copied from the old engine) read runs through a session that
+   **bypasses row-level security**, with no tenant filter — so a Project Admin in one
+   tenant could name a run in another and read its model selection. The new
+   `_resolve_run` runs under the caller's tenant AND carries an explicit tenant predicate,
+   because neither should be the only thing standing between tenants.
+2. An `error` event announcing an unknown agent was **undeliverable**. The backend put the
+   unresolved id in a field the frontend types as an enum of the nine valid ids, so the
+   browser's validation dropped the frame — the one event whose entire job is to say "that
+   agent does not exist" was the one guaranteed not to arrive. The trap was in the Phase 1
+   protocol design, and it was fixed on the backend rather than by widening the contract.
+
+**Deferred out of Phase 2, deliberately, and all now closed or scheduled**: `tool.call`
+emission (Phase 3 Task 4), the per-project access check (Phase 3 Task 5), and two minor
+residuals carried to the phase review (P2-R9).
+
+---
+
+## 13. Phase 3 — routing, context, and the last access gap
+
+The phase that makes the Orchestrator behave the way you described: *"Any agent can come at
+any time according to the chat."*
+
+**Task 1 — the pre-filter** (done). An explicit imperative naming an agent ("run the
+security agent") is answered with **no model call at all**, and the reason shown says so.
+It requires a VERB followed by a NAME — the old `stage_switch.py` matched an agent alias
+**anywhere** in the text, which is why "I need a PRD" routed nowhere while an incidental
+mention of a name could hijack a turn.
+
+**Task 2 — the Context Agent** (done). Everything the pre-filter does not answer goes to a
+model that reads the message for MEANING and picks one of the nine, or answers directly.
+**All nine are candidates on every turn** — there is no `STAGE_ORDER.index(active) + 1`, no
+notion of a next agent, nothing about what ran before. A hallucinated agent id is refused
+visibly rather than dropped. The router makes its own model call, and that call is
+project-scoped like every other, so BYOK holds on this path too.
+
+**Task 3 — context propagation** (in progress). Reading the old engine's version of this
+function while briefing the work confirmed your complaint had a second cause nobody had
+named: `_upstream_context` slices the run's artifacts by **pipeline position**
+(`STAGE_ORDER[:idx]`). Run Design after Development and Design is shown **nothing** about
+the development work. The linearity was in the context layer as well as the routing layer,
+so removing hardcoded routing alone would not have fixed it. The replacement includes
+everything that exists on the run, labelled by the agent that produced it, ordered by
+nothing. That same old function also has the RLS-bypassing read described in §12, and
+returns `""` on any failure — which reaches the agent as "no prior work exists", so it
+re-asks you for work already done.
+
+**Task 4 — wiring** (next). Routing into the socket; an explicit agent choice still
+overrides the router (an LLM will sometimes be wrong, and with no override a wrong decision
+is unrecoverable inside the conversation); `tool.call` events to the Activity tab. Two live
+defects found while briefing it, both invisible to the current tests because they all fake
+the graph: streamed content that arrives as a **list of typed blocks** — what Anthropic
+actually returns — fails the frontend's validation and is dropped, so the user watches an
+agent produce nothing; and tool OUTPUT is currently streamed to the user as if it were the
+agent's own prose.
+
+**Task 5 — the last access gap** (after Task 4). The socket asks "are you a Project Admin
+*somewhere* in this tenant". Routing makes that load-bearing: a Project Admin of project A
+could name a run belonging to project B in the same tenant and drive all nine agents
+against it, on B's BYOK grant and B's budget. Plus the frontend change that makes the agent
+picker an **optional override** defaulting to "Let the Orchestrator choose", which is the
+visible half of everything above.
+
+**Standing method.** Every task is implemented by one agent and reviewed by another, and no
+fix is accepted on "the tests pass" — the implementation is deliberately broken to confirm
+the test actually fails. That standard was adopted because it kept catching things: three
+separate rounds this phase found tests that passed against a knowingly broken
+implementation, including one change I committed myself on a green suite that turned out to
+have no test covering it at all.
+
+**Not in Phase 3**: server-backed sessions, artifact persistence from the new engine,
+retiring the old engines (Phase 5), and the e2e rewrite you deferred in Phase 1.
