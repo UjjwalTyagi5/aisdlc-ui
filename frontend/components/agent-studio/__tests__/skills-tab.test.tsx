@@ -93,6 +93,7 @@ import { ApiRequestError } from "@/lib/api/client";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { SkillDetail, SkillList } from "@/lib/schemas/agent-skills";
 import type { Workspace } from "@/lib/schemas/workspace";
+import { listGovernanceApprovals } from "@/lib/mock/governance-approval-fixtures";
 
 import { SkillsTab } from "../skills-tab";
 import type { ScopeContext } from "../agent-editor";
@@ -157,6 +158,10 @@ function renderSkillsTab(scopeContext: ScopeContext) {
     </QueryClientProvider>,
   );
 }
+
+/** Any valid approval. `proposeAgentSkill` resolves to a GovernanceApproval and
+ *  the tests only care that it resolved, not what it contained. */
+const A_GOVERNANCE_APPROVAL = listGovernanceApprovals()[0]!;
 
 describe("SkillsTab cascade awareness", () => {
   it("requests skills at the org tier when scopeContext.scope is org (was hardcoded to workspace before)", async () => {
@@ -274,7 +279,10 @@ describe("SkillsTab cascade awareness", () => {
       }],
     } satisfies SkillList);
     const mockedPropose = vi.mocked(proposeAgentSkill);
-    mockedPropose.mockResolvedValue({ id: "req-1" } as any);
+    // The resolved value is never read — this test asserts the API was CALLED. A real
+    // fixture keeps that type-safe without seventeen lines of filler, and without the
+    // `as any` that used to stand in for the full GovernanceApproval shape.
+    mockedPropose.mockResolvedValue(A_GOVERNANCE_APPROVAL);
     const mockedEvaluate = vi.mocked(evaluateAgentSkill);
     mockedEvaluate.mockResolvedValue({
       id: "eval-1", target_type: "skill", target_id: "team-skill", agent_id: "requirements",
