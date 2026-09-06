@@ -65,7 +65,8 @@ def _install(monkeypatch, messages):
 async def _run():
     return [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="p1")]
+        model_id=None, offering_id=None, project_id="p1",
+        context="", reason="")]
 
 
 def _chunks(events):

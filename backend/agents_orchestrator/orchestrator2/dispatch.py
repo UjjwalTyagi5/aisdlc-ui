@@ -1,7 +1,10 @@
 """Dispatch one named agent and stream its output as protocol events.
 
-Phase 2 dispatches only an explicitly named agent — there is no default agent
-and no routing here (routing is Phase 3). An unknown or absent agent, or any
+This module dispatches the agent it is TOLD to dispatch and chooses nothing: the
+decision is made in `router.route` and applied by `ws.py`, which passes the chosen
+id and the `reason` the user is shown. Keeping the choice out of here is deliberate —
+one place decides, one place runs, and `agent.selected` cannot disagree with what
+actually ran. An unknown or absent agent, or any
 failure while the agent runs, yields a typed `error` event rather than raising
 into the socket or failing silently: that silent-failure pattern is exactly
 what let the old engine's Project Manager agent (`plan`) go undispatchable
@@ -251,6 +254,8 @@ async def run_agent(
     model_id: str | None,
     offering_id: str | None,
     project_id: str | None,
+    context: str,
+    reason: str,
 ) -> AsyncIterator[dict]:
     """Run `agent_id` on `text` and yield protocol events.
 
@@ -279,6 +284,19 @@ async def run_agent(
     an enum of the nine valid ids, so an unresolved id in that field would
     fail Zod validation and the frame would be silently dropped, exactly the
     failure mode this phase exists to eliminate.
+
+    `context` is what the run already holds (`context.handoff_context`), or `""`.
+    KEYWORD-REQUIRED WITH NO DEFAULT for the same reason as `project_id`: a default
+    of `""` would let a call site drop the hand-off silently, and an agent that is
+    handed nothing behaves exactly like an agent on a run where nothing has happened
+    yet — it re-asks the user for work the run already contains. That is the defect
+    the old engine's `_upstream_context` had, and it must not be reachable by
+    forgetting an argument.
+
+    `reason` is why THIS agent is answering, shown to the user in `agent.selected`.
+    Also keyword-required: the event exists so that a wrong routing decision is
+    visible and correctable in one turn, and an empty reason is an event that has
+    stopped doing its job while still appearing to.
 
     `project_id` is KEYWORD-REQUIRED WITH NO DEFAULT, on purpose. It is the
     scope that decides which models this run may use and whose budget it spends
@@ -320,7 +338,14 @@ async def run_agent(
         yield {"type": "stream_end"}
         return
 
-    yield {"type": "agent.selected", "agent": agent_id, "reason": "", "run_id": run_id}
+    # The ONE `agent.selected` for this turn. `reason` is the caller's — the router's
+    # explanation, or "you named it" for an explicit override — because this is the
+    # event the user reads to see WHY this agent is answering, and a wrong routing
+    # decision is only correctable if it is visible. Emitting an empty reason here and
+    # a real one at the call site would put two of these on the wire, the second
+    # erasing the first.
+    yield {"type": "agent.selected", "agent": agent_id, "reason": reason,
+           "run_id": run_id}
 
     try:
         # ── BYOK, project-scoped ─────────────────────────────────────────────
@@ -363,11 +388,19 @@ async def run_agent(
 
             if capability.mode == "stream":
                 system_prompt = capability.load_prompt()
+                # The run's existing artifacts go in as a SECOND system message
+                # rather than being spliced into the agent's own prompt or prepended
+                # to the user's words. Each agent's prompt is a long, carefully
+                # written document (25,844 characters for Requirements), and editing
+                # one at runtime to carry data is how a prompt stops being reviewable;
+                # putting it in the human turn would have the agent answering a
+                # question the user did not ask.
+                messages: list[Any] = [SystemMessage(content=system_prompt)]
+                if context:
+                    messages.append(SystemMessage(content=context))
+                messages.append(HumanMessage(content=text))
                 state: dict[str, Any] = {
-                    "messages": [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=text),
-                    ],
+                    "messages": messages,
                     "tenant_id": tenant_id,
                     "model_id": model_id,
                     "offering_id": offering_id,
@@ -414,8 +447,11 @@ async def run_agent(
                     if text:
                         yield {"type": "stream_chunk", "content": text}
             else:
+                # Invoke-mode agents take a single prompt string and no message
+                # list, so the context is prepended to it. Same information, the only
+                # shape this graph accepts.
                 state = {
-                    "user_prompt": text,
+                    "user_prompt": f"{context}\n\n{text}" if context else text,
                     "tenant_id": tenant_id,
                     "model_id": model_id,
                     "offering_id": offering_id,

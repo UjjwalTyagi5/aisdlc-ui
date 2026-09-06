@@ -47,7 +47,8 @@ async def test_run_agent_announces_the_agent_before_any_text(monkeypatch):
     )
     events = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="proj-1")]
+        model_id=None, offering_id=None, project_id="proj-1",
+        context="", reason="")]
     assert events[0]["type"] == "agent.selected"
     assert events[0]["agent"] == "design"
     assert events[-1]["type"] == "stream_end"
@@ -64,7 +65,8 @@ async def test_run_agent_passes_thread_id_and_system_prompt(monkeypatch):
     )
     _ = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="run-42", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="proj-1")]
+        model_id=None, offering_id=None, project_id="proj-1",
+        context="", reason="")]
     assert fake.seen_config["configurable"]["thread_id"] == "run-42"
     assert any("SYS-PROMPT" in str(getattr(m, "content", m))
                for m in fake.seen_state["messages"])
@@ -75,7 +77,8 @@ async def test_unknown_agent_yields_a_typed_error_not_silence():
     """Fail loudly. The whole point of this phase."""
     events = [e async for e in dispatch.run_agent(
         "nope", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="proj-1")]
+        model_id=None, offering_id=None, project_id="proj-1",
+        context="", reason="")]
     assert any(e["type"] == "error" for e in events)
     assert events[-1]["type"] == "stream_end"
 
@@ -101,7 +104,8 @@ async def test_unknown_agent_error_event_matches_the_frontend_contract_shape():
     the error event for an unresolved id must carry NO `agent` key at all."""
     events = [e async for e in dispatch.run_agent(
         "nope", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="proj-1")]
+        model_id=None, offering_id=None, project_id="proj-1",
+        context="", reason="")]
 
     error_events = [e for e in events if e["type"] == "error"]
     assert error_events, "expected an error event for an unknown agent id"
@@ -129,7 +133,8 @@ async def test_run_agent_emits_only_protocol_shaped_events(monkeypatch):
     )
     events = [e async for e in dispatch.run_agent(
         "design", text="hi", run_id="r1", tenant_id="t1",
-        model_id=None, offering_id=None, project_id="proj-1")]
+        model_id=None, offering_id=None, project_id="proj-1",
+        context="", reason="")]
 
     for e in events:
         assert e["type"] in _VALID_EVENT_TYPES, f"unexpected event type: {e['type']!r}"

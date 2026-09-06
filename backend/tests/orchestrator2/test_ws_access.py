@@ -229,24 +229,54 @@ async def test_named_agent_is_dispatched_and_its_events_stream_out_verbatim(monk
 
 
 @pytest.mark.asyncio
-async def test_a_message_with_no_agent_is_an_error_never_a_default(monkeypatch):
-    """Phase 2 dispatches only an explicitly named agent. A silent default is
-    exactly how the old engine hid six missing prompts."""
+async def test_a_message_with_no_agent_is_chosen_for_openly_never_silently(monkeypatch):
+    """Phase 2 REFUSED a frame naming no agent; Phase 3 routes it. What must not
+    change is the reason that refusal existed: the old engine picked an agent and told
+    nobody, so a wrong pick was invisible until the answer made no sense. A routed
+    turn is still a choice the user can see and correct — `agent.selected` names the
+    agent AND says why, before any of its text.
+
+    So this test is no longer about refusing. It is about the choice being ANNOUNCED,
+    which is the invariant the refusal was standing in for while there was no router.
+    """
     from agents_orchestrator.orchestrator2 import ws
     _patch_auth(monkeypatch, ws, role="project_admin")
-    calls = _record_run_agent(monkeypatch, ws, [{"type": "stream_end"}])
+
+    async def _routed(text, **kwargs):
+        from agents_orchestrator.orchestrator2.router import RoutingDecision
+        return RoutingDecision(agent_id="requirements",
+                               reason="You asked for a PRD.", direct_reply=None)
+
+    async def _no_context(run_id, tenant_id, target_agent):
+        return ""
+
+    monkeypatch.setattr(ws, "route", _routed)
+    monkeypatch.setattr(ws, "handoff_context", _no_context)
+
+    async def _run_agent(agent_id, **kwargs):
+        yield {"type": "agent.selected", "agent": agent_id,
+               "reason": kwargs["reason"], "run_id": kwargs["run_id"]}
+        yield {"type": "stream_end"}
+
+    monkeypatch.setattr(ws, "run_agent", _run_agent)
 
     socket = _FakeWebSocket(
         params={"ticket": "tkt"},
-        inbound=[json.dumps({"type": "user_message", "text": "hi",
+        inbound=[json.dumps({"type": "user_message", "text": "I need a PRD",
                              "run_id": "r1", "project_id": "p1"})],
     )
     await ws.orchestrator2_ws(socket)
 
-    assert calls == [], "no agent may be guessed"
-    errors = [e for e in socket.events if e["type"] == "error"]
-    assert errors and "agent" in (errors[0].get("message") or "")
-    assert socket.events[-1]["type"] == "stream_end", "the turn must still terminate"
+    assert not [e for e in socket.events if e["type"] == "error"]
+    selected = [e for e in socket.events if e["type"] == "agent.selected"]
+    assert len(selected) == 1
+    assert selected[0]["agent"] == "requirements"
+    assert selected[0]["reason"] == "You asked for a PRD.", (
+        "a chosen agent must arrive with the reason it was chosen — an unexplained "
+        "choice is the silent dispatch this engine was rebuilt to end"
+    )
+    assert socket.events[0]["type"] == "agent.selected", "announced BEFORE any text"
+    assert socket.events[-1]["type"] == "stream_end"
 
 
 @pytest.mark.asyncio

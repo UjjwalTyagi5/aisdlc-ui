@@ -2,8 +2,11 @@
 
 Route: `/sdlc/agent/orchestrator2/ws?ticket=<single-use ticket>[&run=<run_id>]`
 
-IN  : {"type": "user_message", "text": ..., "agent": ..., "run_id": ...}
-      Those four fields and no others — anything else on the frame is ignored.
+IN  : {"type": "user_message", "text": ..., "run_id": ..., "agent": <optional>}
+      Those four fields and no others — anything else on the frame is ignored,
+      `history` included (see below).
+      `agent` is OPTIONAL and is an override; omitting it is the normal path and
+      means "let the Orchestrator choose".
       `project_id` IS READ FOR EVERY TURN, but from the `runs` row, never from
       this frame: it decides which models the turn may use and whose budget it
       spends, so a client-named project would let a caller borrow another
@@ -42,9 +45,24 @@ sentinel-driven hand-off between agents, and nothing advances on its own — non
 that machinery exists in this engine, and re-importing its vocabulary is how a
 rebuild quietly becomes the thing it replaced.
 
-There is also NO DEFAULT AGENT. Phase 2 dispatches only an explicitly named agent
-(routing arrives in Phase 3); a message without an `agent` field gets an `error`
-saying so. A silent default is exactly how the old engine hid six missing prompts.
+NOTHING IS CHOSEN SILENTLY. A frame naming no `agent` — the normal case — is ROUTED:
+`router.route` reads the message, and this connection's earlier turns, for meaning and
+picks one of the nine, or answers directly. The choice is always announced first, in
+`agent.selected`, with the reason. An `agent` on the frame OVERRIDES the router and is
+kept for exactly that: the router is a model, it will sometimes be wrong, and with no
+way to force an agent a wrong decision would be unrecoverable inside the conversation.
+
+Phase 2 refused a frame with no agent instead, because there was no router yet. The
+invariant that refusal stood for is unchanged — the old engine picked an agent and told
+nobody, so a wrong pick stayed invisible until the answer made no sense. A routed turn
+is still a choice the user can see and correct in one turn.
+
+THE CONVERSATION THE ROUTER READS IS THIS SOCKET'S, NOT THE CLIENT'S. It is held in
+memory for the life of the connection (`_remember`), never taken from a frame: a
+client-supplied history would be caller-controlled text steering a routing decision.
+It is routing input only, and nothing about authority is read from it. A reconnect
+starts empty, so the first turn after one routes on the message alone — recoverable,
+because naming an agent always overrides.
 
 THE `run_id` ON THE WIRE IS NOT TRUSTED EITHER. It becomes the LangGraph `thread_id`
 against persistent checkpointers, so an unowned id would join someone else's
@@ -67,7 +85,12 @@ from typing import Any, NamedTuple, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from agents_orchestrator.orchestrator2.context import handoff_context
 from agents_orchestrator.orchestrator2.dispatch import run_agent
+from agents_orchestrator.orchestrator2.router import (
+    _HISTORY_LIMIT as _ROUTER_HISTORY_LIMIT,
+    route,
+)
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.env import AGENT_RUNTIME_MODE
 
@@ -288,6 +311,35 @@ def _as_run_uuid(value: str) -> Any:
         return None
 
 
+# How many turns of this connection the router is given. Matched to
+# `router._HISTORY_LIMIT`, which truncates to the same number anyway — keeping the
+# socket's own list at that size means the cap is enforced where the memory is held,
+# not only where it is read.
+_HISTORY_TURNS = _ROUTER_HISTORY_LIMIT
+
+
+def _remember(history: list[dict], role: str, text: str) -> None:
+    """Append one turn to this CONNECTION's conversation, oldest dropped first.
+
+    `role` is `user` or `agent` — this platform's vocabulary
+    (`conversation_messages.role`), which is what `router._history_messages` reads.
+
+    THE HISTORY IS THE SOCKET'S, NOT THE CLIENT'S. A `history` field on an inbound
+    frame is ignored like every other unexpected field: it would be caller-controlled
+    text steering a routing decision, and while a caller can already force an agent
+    outright with `agent`, that at least SAYS what it is doing in `agent.selected`.
+    Nothing about authority is ever read from this list; it is routing input only.
+
+    It lives for the connection and no longer. Server-backed sessions are not part of
+    this phase, so a reconnect starts empty and the first turn after one routes on the
+    message alone — recoverable, because naming an agent always overrides.
+    """
+    if not text:
+        return
+    history.append({"role": role, "content": text})
+    del history[:-_HISTORY_TURNS]
+
+
 @orchestrator2_router.websocket("/ws")
 async def orchestrator2_ws(websocket: WebSocket) -> None:
     """Serve one Project Admin's Orchestrator session."""
@@ -337,6 +389,9 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
     # — ownership is the only question it asks of one.
     default_run_id = websocket.query_params.get("run", "") or ""
 
+    # This CONNECTION's conversation, for routing only. See `_remember`.
+    history: list[dict] = []
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -359,17 +414,13 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 await _fail(websocket, "Empty message.")
                 continue
 
-            # No default agent, on purpose. Phase 2 dispatches only what the client
-            # names; routing is Phase 3. Guessing here would reintroduce exactly the
-            # silent mis-dispatch this engine was rebuilt to eliminate.
-            agent_id = (msg.get("agent") or "").strip()
-            if not agent_id:
-                await _fail(
-                    websocket,
-                    "This message named no agent. Include an 'agent' field — the "
-                    "Orchestrator does not pick one for you yet.",
-                )
-                continue
+            # An agent named on the frame is an OVERRIDE, not the normal path.
+            # Absent — the default, and what the UI sends unless the user picks one —
+            # the Context Agent reads the message and chooses. The override stays
+            # because the router is a model: it will sometimes be wrong, and with no
+            # way to force an agent a wrong decision would be unrecoverable inside the
+            # conversation.
+            override_agent = (msg.get("agent") or "").strip()
 
             run_id = (msg.get("run_id") or default_run_id or "").strip()
             if not run_id:
@@ -394,7 +445,64 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 )
                 continue
 
+            # Everything from here to `run_agent` can fail, and every failure must
+            # reach the user as a typed `error` rather than as a silent non-answer.
+            # Bound BEFORE the try, because both handlers below log it and routing
+            # can fail before it is chosen. An UnboundLocalError raised inside the
+            # error handler would replace the report with a crash — the failure
+            # channel losing the failure, which is the shape of bug this whole engine
+            # is a response to.
+            agent_id = override_agent or "(not yet chosen)"
+            reason = ""
+
             try:
+                if override_agent:
+                    agent_id = override_agent
+                    reason = "You named this agent, so nothing was inferred."
+                else:
+                    decision = await route(
+                        text,
+                        history=list(history),
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        # From the verified `runs` row. The router makes its OWN model
+                        # call, so this is the same authority claim it is for the
+                        # agent: it decides which models the call may use and whose
+                        # budget it spends. A frame-supplied project here would
+                        # reintroduce the gap Phase 2 closed, on a new code path.
+                        project_id=project_id,
+                        model_id=model_id,
+                        offering_id=offering_id,
+                    )
+                    if decision.agent_id is None:
+                        # Answered without a delivery agent. NO `agent.selected`:
+                        # its `agent` field is the strict nine-value enum in
+                        # protocol.ts, so a null one fails validation and the frame
+                        # vanishes in the browser. `direct_reply` is guaranteed
+                        # non-empty by `_validated`, and it says what the reason
+                        # would have said; the ABSENCE of the badge is what tells the
+                        # user no agent ran.
+                        _remember(history, "user", text)
+                        _remember(history, "agent", decision.direct_reply or "")
+                        await _send(websocket, {
+                            "type": "stream_chunk",
+                            "content": decision.direct_reply or "",
+                        })
+                        await _send(websocket, {"type": "stream_end"})
+                        continue
+                    agent_id = decision.agent_id
+                    reason = decision.reason
+
+                # What the run already holds, for whichever agent was chosen. This
+                # RAISES if the artifacts could not be read, and that is deliberate:
+                # the old engine returned "" on any failure, which told the agent
+                # "nothing has been produced yet" and had it re-ask the user for work
+                # the run already contained.
+                context = await handoff_context(run_id, tenant_id, agent_id)
+
+                _remember(history, "user", text)
+                reply_text: list[str] = []
+
                 # `aclosing` is not decoration. `run_agent` is an async generator
                 # that clears the turn's resolved model and run project in a
                 # `finally`, and this socket does NOT stop on a mid-stream failure:
@@ -419,10 +527,19 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # From the verified `runs` row. `msg` may well carry a
                         # `project_id`; it is never consulted.
                         project_id=project_id,
+                        context=context,
+                        reason=reason,
                     )
                 ) as events:
                     async for event in events:
+                        if event.get("type") == "stream_chunk":
+                            # Kept so the NEXT turn's routing can resolve "and now?"
+                            # against what the agent actually said. Accumulated from
+                            # the events rather than from the graph, so whatever the
+                            # user saw is exactly what the router reads.
+                            reply_text.append(str(event.get("content") or ""))
                         await _send(websocket, event)
+                _remember(history, "agent", "".join(reply_text))
             except WebSocketDisconnect:
                 raise
             except EventSerializationError as exc:
