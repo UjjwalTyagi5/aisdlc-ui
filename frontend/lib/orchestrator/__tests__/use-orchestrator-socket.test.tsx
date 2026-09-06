@@ -646,3 +646,120 @@ describe("useOrchestratorSocket — turns", () => {
 
 // Keep React in scope for the classic JSX transform some toolchains fall back to.
 void React;
+
+/**
+ * Deliverables — what the agents produced, collected off the wire.
+ *
+ * Append-only, because the engine is: any agent can run at any time and the same
+ * agent can run repeatedly in one conversation, so a re-run must add a version
+ * rather than replace the one before it. Nothing here overwrites.
+ */
+describe("useOrchestratorSocket — deliverables", () => {
+  const row = (id: string, agent: string, title: string, at?: string) => ({
+    id,
+    agent,
+    kind: "markdown",
+    title,
+    content: "body",
+    url: null,
+    language: null,
+    source: null,
+    created_at: at ?? "2026-09-06T10:00:00+00:00",
+  });
+
+  it("collects what an agent produced", async () => {
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "security",
+      deliverables: [row("d1", "security", "Security Report")],
+    });
+    expect(result.current.deliverables).toHaveLength(1);
+    expect(result.current.deliverables[0]?.title).toBe("Security Report");
+  });
+
+  it("keeps every version, newest first", async () => {
+    // A re-run must never destroy the document it replaces — that is the whole
+    // reason deliverables are append-only rather than an overwrite.
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "security",
+      deliverables: [row("d1", "security", "first")],
+    });
+    await deliver({
+      type: "deliverable.ready",
+      agent: "security",
+      deliverables: [row("d2", "security", "second")],
+    });
+    expect(result.current.deliverables.map((d) => d.title)).toEqual(["second", "first"]);
+  });
+
+  it("does not duplicate a deliverable that arrives twice", async () => {
+    // A reconnect can replay a frame. Ids are stable, so de-dupe on id.
+    const { result } = await mount();
+    const frame = {
+      type: "deliverable.ready",
+      agent: "design",
+      deliverables: [row("d1", "design", "HLD")],
+    };
+    await deliver(frame);
+    await deliver(frame);
+    expect(result.current.deliverables).toHaveLength(1);
+  });
+
+  it("collects the Project Manager agent's output like any other", async () => {
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "plan",
+      deliverables: [row("d1", "plan", "Sprint plan")],
+    });
+    expect(result.current.deliverables).toHaveLength(1);
+  });
+
+  it("drops a frame naming an agent that does not exist", async () => {
+    // Same rule as every other frame: an unknown agent cannot be attributed to a
+    // heading, and an unattributed document is worse than none.
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "marketing",
+      deliverables: [row("d1", "marketing", "Campaign")],
+    });
+    expect(result.current.deliverables).toHaveLength(0);
+  });
+
+  it("accepts a deliverable whose nullable fields are null", async () => {
+    // These arrive as null from nullable columns. A schema that rejected null would
+    // drop the frame, and the panel would look like an agent that produced nothing.
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "development",
+      deliverables: [{
+        id: "dev-code", agent: "development", kind: "code-tree",
+        title: "Repository code", content: "", url: null,
+        language: null, source: "development", created_at: null,
+      }],
+    });
+    expect(result.current.deliverables).toHaveLength(1);
+    expect(result.current.deliverables[0]?.kind).toBe("code-tree");
+  });
+
+  it("drops the collected deliverables on reset", async () => {
+    // Switching project repoints a session in place while keeping its id. The Phase 3
+    // review found the RUN surviving that switch, so the next turn spent the previous
+    // project's budget under a header naming the new one. Deliverables must not
+    // survive it either, or one project's documents show under another's name.
+    const { result } = await mount();
+    await deliver({
+      type: "deliverable.ready",
+      agent: "plan",
+      deliverables: [row("d1", "plan", "Sprint plan")],
+    });
+    expect(result.current.deliverables).toHaveLength(1);
+    act(() => result.current.reset());
+    expect(result.current.deliverables).toHaveLength(0);
+  });
+});

@@ -10,6 +10,7 @@ import {
   type OrchestratorUserMessage,
 } from "@/lib/orchestrator/protocol";
 import type { CopilotActivityItem } from "@/lib/copilot/use-copilot";
+import type { Deliverable } from "@/lib/orchestrator/deliverables";
 import { PHASE_FOR_AGENT, agentLabel } from "@/lib/orchestrator/types";
 import type { OrchestratorMessage } from "@/lib/orchestrator/types";
 
@@ -104,6 +105,19 @@ export interface UseOrchestratorSocketResult {
    * agent that never uses tools.
    */
   activity: CopilotActivityItem[];
+  /**
+   * What the agents produced on this connection, NEWEST FIRST.
+   *
+   * Append-only, because the engine is: any agent can run at any time and the same
+   * agent can run repeatedly in one conversation, so a re-run adds a version rather
+   * than replacing the one before it. De-duped on id, because a reconnect can replay
+   * a frame and ids are stable.
+   *
+   * This is only what arrived on THIS connection. What the run already held before
+   * it is fetched over REST and merged by the cockpit — the socket does not know
+   * about earlier turns and must not pretend to.
+   */
+  deliverables: Deliverable[];
   /** Drop the transcript — the conversation changed underneath us. */
   reset: () => void;
 }
@@ -122,6 +136,7 @@ export function useOrchestratorSocket(
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [activity, setActivity] = React.useState<CopilotActivityItem[]>([]);
+  const [deliverables, setDeliverables] = React.useState<Deliverable[]>([]);
   // Tool-call id → activity row, so the `done` event patches the row its `running`
   // opened instead of appending a second one. Keyed on the tool NAME, which is what
   // both events carry; a tool used twice in one turn therefore reuses its row, which
@@ -423,9 +438,26 @@ export function useOrchestratorSocket(
         case "error":
           failTurn(evt.message ?? evt.detail ?? "The Orchestrator reported an error.");
           break;
-        // Artifact events are typed by the protocol but nothing writes artifacts in
-        // Phase 2, so there is no panel state to feed. Ignored rather than rendered
-        // as an empty panel that would imply an output exists.
+        case "deliverable.ready": {
+          const incoming = evt.deliverables ?? [];
+          if (incoming.length) {
+            setDeliverables((prev) => {
+              // De-duped on id: a reconnect can replay a frame, and stacking the
+              // same document twice under one heading reads as a re-run that never
+              // happened. New rows go in FRONT — every version is kept, newest first.
+              const seen = new Set(prev.map((d) => d.id));
+              const fresh = incoming.filter((d) => !seen.has(d.id));
+              return fresh.length ? [...fresh, ...prev] : prev;
+            });
+          }
+          break;
+        }
+        // The Copilot's streaming artifact events. The union still folds in
+        // ARTIFACT_EVENTS, so these frames validate — but this engine never emits
+        // them: a deliverable arrives whole in one `deliverable.ready`, because the
+        // agent's text already streams to chat and a second streaming channel would
+        // carry nothing new. Named here as unreachable rather than left looking like
+        // a feature with no data behind it.
         case "artifact.open":
         case "artifact.delta":
         case "artifact.end":
@@ -703,6 +735,11 @@ export function useOrchestratorSocket(
 
   const reset = React.useCallback(() => {
     setActivity([]);
+    // Switching project repoints a session in place while keeping its id. The Phase 3
+    // review found the RUN surviving that switch, so a turn spent the previous
+    // project's budget under a header naming the new one. Deliverables must not
+    // survive it either, or one project's documents show under another project's name.
+    setDeliverables([]);
     toolActivityIdRef.current.clear();
     thinkingActivityIdRef.current = null;
     setMessages([]);
@@ -720,5 +757,7 @@ export function useOrchestratorSocket(
     retireConnection();
   }, [retireConnection]);
 
-  return { messages, send, connState, activeAgent, error, busy, activity, reset };
+  return {
+    messages, send, connState, activeAgent, error, busy, activity, deliverables, reset,
+  };
 }
