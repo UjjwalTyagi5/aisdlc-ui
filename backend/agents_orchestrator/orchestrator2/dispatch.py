@@ -108,7 +108,7 @@ end-to-end claim is only as strong as the weakest of the nine.
 """
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -146,6 +146,100 @@ def _clear_run_model_context() -> None:
     """
     set_resolved_model(None)
     set_run_project(None)
+
+
+# The placeholder for a tool a provider did not name. `ToolCallEvent.name` in
+# `frontend/lib/orchestrator/protocol.ts` is `z.string()` with NO default, so a frame
+# whose name is null or empty fails `safeParse` and is dropped in the browser without a
+# trace — the one behaviour this engine exists to remove. Announcing an unnamed tool as
+# "a tool" is worse information than its real name and better than a frame that cannot
+# arrive.
+_UNNAMED_TOOL = "tool"
+
+
+def _stream_text(content: Any) -> str:
+    """The displayable text of one streamed chunk.
+
+    `content` is a plain string for some providers and a LIST OF TYPED BLOCKS for
+    others — Anthropic streams `[{"type": "text", "text": ...}]`. The list shape used
+    to be forwarded verbatim, which `json.dumps` accepts, so nothing failed on the way
+    out; it then failed `StreamChunkEvent.content: z.string()` in the browser and the
+    frame was DROPPED. An agent that produced only block-list chunks appeared to say
+    nothing at all.
+
+    DELIBERATELY NOT `router._content_text`, which does the same traversal and then
+    STRIPS. Stripping is correct there — whitespace changes no routing decision — and
+    ruinous here: chunk boundaries fall inside sentences, so "Hello " + "world" would
+    arrive as "Helloworld". Two functions, because the two callers genuinely want
+    different things; `test_streamed_text_keeps_the_whitespace_that_joins_tokens`
+    exists to stop a future tidy-up merging them.
+
+    RAISES on a shape that is neither a string nor a list. The first version of this
+    function returned `""` there, reasoning that one un-renderable fragment should not
+    cost the whole turn — which was rationalising: it turned an unknown provider shape
+    into an agent that silently says less than it said, with nothing in the transcript
+    and nothing in the logs. That is the failure class this engine exists to remove,
+    and it would have been a REGRESSION in visibility: the previous code forwarded the
+    value to `json.dumps`, which raises on an object it cannot encode, so the socket
+    reported a dropped frame. `test_the_socket_clears_the_turns_key_when_a_frame_cannot_
+    be_encoded` caught exactly that and is why this raises instead.
+
+    `run_agent`'s handler turns it into a typed `error` naming the agent, after the
+    text that already streamed — visible, and consistent with `_history_messages`,
+    which raises on an unreadable history shape for the same reason.
+
+    An empty string, an empty list, and a list holding no text blocks are all
+    UNDERSTOOD shapes that carry no text, and yield `""`. Only an unrecognised
+    container raises.
+    """
+    if content is None:
+        # An ABSENCE of text, not an unreadable shape — the canonical content of a
+        # chunk that carried only tool calls, and of a message with no content at all.
+        # `_history_messages` draws the same line for the same reason.
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, Mapping) and block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+        return "".join(parts)
+    raise TypeError(
+        f"a streamed chunk carried content of type {type(content).__name__}, which is "
+        f"neither a string nor a list of blocks"
+    )
+
+
+def _is_tool_result(message: Any) -> bool:
+    """Whether this streamed message is a tool RESULT rather than the agent's prose.
+
+    `tool_call_id` is the discriminator, not `.type`: a `ToolMessage` reports type
+    `"tool"` but a `ToolMessageChunk` reports `"ToolMessageChunk"`, and streaming
+    yields whichever the provider produces. Both carry `tool_call_id`; no AI or human
+    message does.
+    """
+    return getattr(message, "tool_call_id", None) is not None
+
+
+def _call_field(call: Any, field: str) -> Any:
+    """One field of a tool-call chunk, whether it is a mapping or an object.
+
+    LangChain normalises tool-call chunks to `TypedDict`s, but a provider integration
+    may hand back an object. Reading both keeps a named tool from being announced as
+    the unnamed placeholder purely because of its container's shape. (The same
+    accommodation, for the same reason, as `router._call_field`.)
+    """
+    if isinstance(call, Mapping):
+        return call.get(field)
+    return getattr(call, field, None)
+
+
+def _tool_name(value: Any) -> str:
+    name = value if isinstance(value, str) else None
+    return name.strip() if name and name.strip() else _UNNAMED_TOOL
 
 
 async def run_agent(
@@ -278,12 +372,47 @@ async def run_agent(
                     "model_id": model_id,
                     "offering_id": offering_id,
                 }
+                # One `running` per TOOL, not per chunk: providers split a single tool
+                # call across many chunks that share an id, and only the first carries
+                # the name. Scoped to this turn, so the same tool used twice in one
+                # conversation is announced twice.
+                announced: set[str] = set()
                 async for chunk, _metadata in graph.astream(
                     state, stream_mode="messages", config=config
                 ):
-                    content = getattr(chunk, "content", None)
-                    if content:
-                        yield {"type": "stream_chunk", "content": content}
+                    if _is_tool_result(chunk):
+                        # A tool RESULT. Its `content` is the tool's output, and
+                        # forwarding it as a `stream_chunk` put it in the transcript as
+                        # if the agent had said it — so it is reported as activity and
+                        # its text is not streamed.
+                        yield {
+                            "type": "tool.call",
+                            "name": _tool_name(getattr(chunk, "name", None)),
+                            "status": "done",
+                            "run_id": run_id,
+                        }
+                        continue
+
+                    for call in getattr(chunk, "tool_call_chunks", None) or ():
+                        key = str(_call_field(call, "id") or "")
+                        name = _call_field(call, "name")
+                        # A continuation chunk carries the id but no name. Waiting for
+                        # a named one keeps the placeholder for tools that are never
+                        # named at all, rather than spending it on the second half of
+                        # a tool whose name already arrived.
+                        if not name or key in announced:
+                            continue
+                        announced.add(key)
+                        yield {
+                            "type": "tool.call",
+                            "name": _tool_name(name),
+                            "status": "running",
+                            "run_id": run_id,
+                        }
+
+                    text = _stream_text(getattr(chunk, "content", None))
+                    if text:
+                        yield {"type": "stream_chunk", "content": text}
             else:
                 state = {
                     "user_prompt": text,

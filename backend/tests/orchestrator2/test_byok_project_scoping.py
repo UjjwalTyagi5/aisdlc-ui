@@ -718,18 +718,46 @@ async def test_the_socket_clears_the_turns_key_when_a_frame_cannot_be_encoded(mo
 
     monkeypatch.setattr(dispatch, "resolve_model_for_run", _fake_resolve)
 
-    class _UnsendableGraph:
+    class _TalkingGraph:
         async def astream(self, state, stream_mode=None, config=None):
-            # Truthy and not JSON-encodable: `_send` raises EventSerializationError
-            # on this frame, mid-stream, with the model stashed and the generator
-            # suspended at the yield.
-            yield (type("M", (), {"content": object()})(), {})
+            yield (type("M", (), {"content": "some words"})(), {})
 
     monkeypatch.setitem(
         reg.REGISTRY, "design",
-        reg.AgentCapability(agent_id="design", load_graph=_UnsendableGraph,
+        reg.AgentCapability(agent_id="design", load_graph=_TalkingGraph,
                             load_prompt=lambda: "SYS", mode="stream"),
     )
+
+    # HOW THE UNSENDABLE FRAME IS PRODUCED, AND WHY IT CHANGED. This test used to make
+    # the graph yield `content=object()` — truthy and not JSON-encodable, so json.dumps
+    # inside `_send` raised. `dispatch._stream_text` now REJECTS a content shape that is
+    # neither a string nor a list before it can become an event, so that vehicle yields
+    # a typed `error` about the chunk and never reaches `_send`. That is an improvement:
+    # after it, `run_agent` cannot emit an unencodable `stream_chunk` at all, because
+    # every one is built by `_stream_text` and is a `str`.
+    #
+    # But the branch under test is `ws._send`'s, not `dispatch`'s, and it must keep its
+    # teeth — `EventSerializationError` is defensive against ANY event that cannot be
+    # encoded, including ones a future event type introduces. So the failure is injected
+    # at `_send` itself, leaving the real turn loop, the real `run_agent` and the real
+    # resolution in place. What this test is about no longer depends on HOW a frame came
+    # to be unencodable.
+    real_send = ws._send
+    failed_once = []
+
+    async def _first_chunk_cannot_be_encoded(websocket, payload):
+        # The first `stream_chunk` ONLY. `_fail` reports the drop through this same
+        # function, so a blanket raise would take the report out with it and the test
+        # would pass for the wrong reason: a socket that says nothing is indistinguish-
+        # able from a socket that says nothing.
+        if payload.get("type") == "stream_chunk" and not failed_once:
+            failed_once.append(True)
+            raise ws.EventSerializationError(
+                "Object of type object is not JSON serializable"
+            )
+        await real_send(websocket, payload)
+
+    monkeypatch.setattr(ws, "_send", _first_chunk_cannot_be_encoded)
 
     async def _owned(run_id, tenant_id):
         return ws.RunSelection(model_id=None, offering_id=None, project_id="proj-A")
