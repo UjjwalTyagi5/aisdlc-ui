@@ -27,6 +27,8 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from agents_orchestrator.orchestrator2.registry import AGENT_IDS
+
 
 #: A bound value the fake store could not read. Compares equal to nothing.
 _UNREADABLE = object()
@@ -68,7 +70,7 @@ async def test_the_first_agent_still_sees_every_later_agents_work(monkeypatch):
     Under this engine it must see all eight of the others."""
     from agents_orchestrator.orchestrator2 import context
 
-    everything = {a: {"marker": f"artifact-of-{a}"} for a in context.ARTIFACT_COLUMNS}
+    everything = {a: f"artifact-of-{a}" for a in AGENT_IDS}
 
     async def _fake(run_id, tenant_id):
         return everything
@@ -98,66 +100,97 @@ async def test_no_agent_ordering_vocabulary_survives_in_the_code(monkeypatch):
 
 
 class _Row:
-    """A `runs` row with every artifact column present, defaulting to None, so a
-    query that reads a column this test did not set gets None rather than an
-    AttributeError that would look like a different bug."""
+    """One `orchestrator_deliverables` row.
 
-    def __init__(self, **columns):
-        from agents_orchestrator.orchestrator2 import context
+    Phase 4 moved this read off the run's `*_artifacts` columns and onto the
+    deliverables table. The GUARANTEES these tests defend are unchanged — the read is
+    tenant-scoped twice and never touches the RLS-bypassing session — so the fixtures
+    were repointed rather than the tests deleted. What changed is only where the rows
+    live; deleting the tests would have retired the guarantee along with the column.
+    """
 
-        for column in context.ARTIFACT_COLUMNS.values():
-            setattr(self, column, None)
-        for key, value in columns.items():
-            setattr(self, key, value)
+    def __init__(self, agent_id, content, *, run_id=None, tenant_id=None,
+                 title=None, created_at=0):
+        self.id = uuid.uuid4()
+        self.run_id = uuid.UUID(run_id or _RUN)
+        self.tenant_id = uuid.UUID(tenant_id or _TENANT)
+        self.project_id = None
+        self.agent_id = agent_id
+        self.kind = "markdown"
+        self.title = title or f"{agent_id} deliverable"
+        self.content = content
+        self.url = None
+        self.language = None
+        self.source = None
+        self.created_at = created_at
 
 
 class _Result:
-    def __init__(self, row):
-        self._row = row
+    def __init__(self, rows):
+        self._rows = rows
 
-    def scalar_one_or_none(self):
-        return self._row
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
 
 
 class _RowStore:
-    """A two-row 'database': the SAME run id under two DIFFERENT tenants.
+    """A small 'database' holding rows under more than one tenant.
 
     `execute` reads the statement's where-clause and matches on the predicates it
     actually contains. Drop the tenant predicate and this store happily returns the
-    other tenant's row — which is exactly the regression the tests below catch.
+    other tenant's rows — which is exactly the regression the tests below catch.
+
+    It also honours the statement's ORDER BY rather than imposing its own. Sorting
+    here would let the real query be flipped to ascending with every test still green,
+    and `latest_per_agent` takes the FIRST row per agent — so a stale document would
+    be handed to every downstream agent, silently.
     """
 
     def __init__(self, rows):
-        self.rows = rows          # list of (id, tenant_id, row)
+        self.rows = rows
         self.statements = []
         self.tenants_scoped_to = []
 
     def _predicates(self, statement):
         where = statement.whereclause
-        assert where is not None, "the run query must be filtered, not a full scan"
+        assert where is not None, "the deliverables query must be filtered, not a full scan"
         clauses = list(getattr(where, "clauses", [where]))
         pairs = {}
         for clause in clauses:
-            # Fail loudly on an unexpected clause shape rather than silently
-            # matching nothing, which would make every assertion below vacuous.
+            # Fail loudly on an unexpected clause shape rather than silently matching
+            # nothing, which would make every assertion below vacuous.
             assert hasattr(clause, "left") and hasattr(clause, "right"), clause
-            # A bound value we cannot read (e.g. `Run.id == None`, which compiles to
-            # IS NULL) becomes a sentinel that matches no row. A predicate that was
-            # DROPPED disappears from `pairs` entirely and matches every row, so the
-            # tenant tests keep their teeth.
+            # A bound value we cannot read becomes a sentinel that matches no row. A
+            # predicate that was DROPPED disappears from `pairs` entirely and matches
+            # every row, so the tenant tests keep their teeth.
             pairs[clause.left.name] = getattr(clause.right, "value", _UNREADABLE)
         return pairs
+
+    def _ordering(self, statement):
+        out = []
+        for element in getattr(statement, "_order_by_clauses", ()):
+            column = getattr(element, "element", element)
+            name = getattr(column, "name", None)
+            if name:
+                out.append((name, "desc" in str(getattr(element, "modifier", None))))
+        return out
 
     async def execute(self, statement):
         self.statements.append(statement)
         pairs = self._predicates(statement)
-        for row_id, row_tenant, row in self.rows:
-            if "id" in pairs and str(pairs["id"]) != row_id:
+        keep = []
+        for row in self.rows:
+            if "run_id" in pairs and pairs["run_id"] != row.run_id:
                 continue
-            if "tenant_id" in pairs and str(pairs["tenant_id"]) != row_tenant:
+            if "tenant_id" in pairs and pairs["tenant_id"] != row.tenant_id:
                 continue
-            return _Result(row)
-        return _Result(None)
+            keep.append(row)
+        for name, descending in reversed(self._ordering(statement)):
+            keep.sort(key=lambda r: getattr(r, name), reverse=descending)
+        return _Result(keep)
 
 
 def _install_store(monkeypatch, store, *, raises=None):
@@ -181,6 +214,7 @@ def _install_store(monkeypatch, store, *, raises=None):
     return store
 
 
+
 @pytest.mark.asyncio
 async def test_a_run_in_another_tenant_is_indistinguishable_from_one_that_does_not_exist(
     monkeypatch,
@@ -190,8 +224,8 @@ async def test_a_run_in_another_tenant_is_indistinguishable_from_one_that_does_n
     for an id that was never issued."""
     from agents_orchestrator.orchestrator2 import context
 
-    theirs = _Row(design_artifacts={"secret": "another tenant's design"})
-    store = _install_store(monkeypatch, _RowStore([(_RUN, _OTHER_TENANT, theirs)]))
+    theirs = _Row("design", "another tenant's design", tenant_id=_OTHER_TENANT)
+    store = _install_store(monkeypatch, _RowStore([theirs]))
 
     assert await context.handoff_context(_RUN, _TENANT, "development") == ""
     assert store.tenants_scoped_to == [_TENANT], (
@@ -209,24 +243,28 @@ async def test_the_query_carries_an_explicit_tenant_predicate(monkeypatch):
     a second line. Both are wanted, so the predicate is written out and checked."""
     from agents_orchestrator.orchestrator2 import context
 
-    mine = _Row(design_artifacts={"summary": "mine"})
-    store = _install_store(monkeypatch, _RowStore([(_RUN, _TENANT, mine)]))
+    mine = _Row("design", "mine")
+    store = _install_store(monkeypatch, _RowStore([mine]))
 
     out = await context.handoff_context(_RUN, _TENANT, "development")
     assert "mine" in out
 
     assert len(store.statements) == 1
     pairs = store._predicates(store.statements[0])
-    assert pairs.get("id") == uuid.UUID(_RUN)
+    assert pairs.get("run_id") == uuid.UUID(_RUN)
     assert pairs.get("tenant_id") == uuid.UUID(_TENANT), (
-        "the run lookup must filter on the caller's tenant"
+        "the deliverables lookup must filter on the caller's tenant"
     )
 
 
 def test_the_reader_never_names_the_rls_bypassing_session():
-    from agents_orchestrator.orchestrator2 import context
+    """The query moved into `deliverables._load` in Phase 4, so that is what this
+    inspects now. The guarantee is unchanged: a superuser session bypasses
+    row-level security unconditionally, and `copilot_api.py` has been caught
+    reading through one with no tenant filter twice."""
+    from agents_orchestrator.orchestrator2 import deliverables
 
-    code = _code_of(context._load_run_artifacts)
+    code = _code_of(deliverables._load)
     assert "get_db_session_for_tenant" in code
     assert "get_db_session_superuser" not in code
     assert "tenant_id" in code
@@ -348,7 +386,7 @@ async def test_the_cap_holds_with_nine_oversized_artifacts(monkeypatch):
     from agents_orchestrator.orchestrator2 import context
 
     async def _fake(run_id, tenant_id):
-        return {a: {"blob": "x" * 200_000} for a in context.ARTIFACT_COLUMNS}
+        return {a: "x" * 200_000 for a in AGENT_IDS}
 
     monkeypatch.setattr(context, "_load_run_artifacts", _fake)
     out = await context.handoff_context(_RUN, _TENANT, "design")
@@ -387,14 +425,14 @@ async def test_one_huge_artifact_does_not_starve_the_others(monkeypatch):
     from agents_orchestrator.orchestrator2 import context
 
     async def _fake(run_id, tenant_id):
-        artifacts = {a: {"body": "m" * 3_000} for a in context.ARTIFACT_COLUMNS}
-        artifacts["requirements"] = {"body": "z" * 200_000}
+        artifacts = {a: "m" * 3_000 for a in AGENT_IDS}
+        artifacts["requirements"] = "z" * 200_000
         return artifacts
 
     monkeypatch.setattr(context, "_load_run_artifacts", _fake)
     out = await context.handoff_context(_RUN, _TENANT, "design")
 
-    for agent_id in context.ARTIFACT_COLUMNS:
+    for agent_id in AGENT_IDS:
         heading = context._heading(agent_id, target_agent="design")
         assert heading in out, (
             f"{agent_id} was pushed out of the block — the oversized requirements "
@@ -418,96 +456,86 @@ async def test_a_small_artifact_is_never_marked_truncated(monkeypatch):
     assert "truncated" not in out.lower()
 
 
-# ── the column names come from the registry ──────────────────────────────────
+# ── where a deliverable is stored, and what stops it drifting ────────────────
+#
+# Phase 4 replaced the run's `*_artifacts` columns with the `orchestrator_deliverables`
+# table, so the tests that proved "every agent resolves a real column" no longer have
+# a column to check. The GUARANTEE they stood for is unchanged and did not go away
+# with them:
+#
+#   · every agent can store something          -> the agent_id CHECK equals AGENT_IDS,
+#                                                 asserted in test_deliverables_schema.py
+#   · every agent renders under its own name   -> DISPLAY_NAME covers AGENT_IDS,
+#                                                 asserted in test_deliverables_render.py
+#                                                 and at import in deliverables.py
+#   · nothing reads the standalone agents' columns -> asserted below
+#
+# Deleting these tests outright would have retired the guarantee along with the
+# column, which is the failure this branch has already made eight times: prose (or a
+# test) certifying something the code no longer does.
 
 
-def test_every_agent_has_an_artifact_column_that_exists_on_the_run_row():
-    from agents_orchestrator.orchestrator2 import context
-    from agents_orchestrator.orchestrator2.registry import AGENT_IDS
-    from shared.models.orm import Run
+def test_the_context_reader_names_no_run_artifact_column():
+    """The clearest statement of the separation the user asked for.
 
-    assert set(context.ARTIFACT_COLUMNS) == set(AGENT_IDS)
-    for agent_id, column in context.ARTIFACT_COLUMNS.items():
-        assert hasattr(Run, column), f"{agent_id} -> {column} is not a runs column"
-
-
-def test_requirements_writes_the_payload_column_not_an_artifacts_column():
-    """The one the plan's earlier draft got wrong. `requirements_artifacts` also
-    exists on the row and is NOT what the Requirements agent writes."""
-    from agents_orchestrator.orchestrator2 import context
-
-    assert context.ARTIFACT_COLUMNS["requirements"] == "requirements_payload"
-
-
-@pytest.mark.asyncio
-async def test_each_agents_artifact_is_read_from_the_column_the_registry_names(monkeypatch):
-    """End to end through the real row-reading path: a value written to the column
-    `AGENT_REGISTRY` names for an agent must come back attributed to that agent. The
-    structural assertions above would still pass if the mapping were built correctly
-    and then read from the wrong attribute."""
-    from agents_orchestrator.orchestrator2 import context
-
-    row = _Row(**{column: {"marker": f"in-{column}"}
-                  for column in context.ARTIFACT_COLUMNS.values()})
-    _install_store(monkeypatch, _RowStore([(_RUN, _TENANT, row)]))
-
-    out = await context.handoff_context(_RUN, _TENANT, "design")
-    for agent_id, column in context.ARTIFACT_COLUMNS.items():
-        assert context._heading(agent_id, target_agent="design") in out
-        assert f"in-{column}" in out, f"{agent_id} was not read from {column}"
-
-
-@pytest.mark.asyncio
-async def test_the_decoy_requirements_artifacts_column_is_never_read(monkeypatch):
-    """`runs.requirements_artifacts` exists and is NOT what the Requirements agent
-    writes. Reading it would give every run a phantom requirements section (or, with
-    the mapping the plan's earlier draft had, hide the real payload)."""
-    from agents_orchestrator.orchestrator2 import context
-
-    row = _Row(requirements_artifacts={"marker": "decoy-column"},
-               requirements_payload={"marker": "the-real-payload"})
-    _install_store(monkeypatch, _RowStore([(_RUN, _TENANT, row)]))
-
-    out = await context.handoff_context(_RUN, _TENANT, "design")
-    assert "the-real-payload" in out
-    assert "decoy-column" not in out
-
-
-def test_the_columns_are_derived_from_the_registry_not_typed_out():
+    `runs.design_artifacts` and friends are what the STANDALONE agents write. If this
+    module ever names one again, the Orchestrator has started reading the other
+    surface's storage and the two concepts have quietly merged back together.
+    """
     from agents_orchestrator.orchestrator2 import context
 
     code = _module_code(context)
-    assert "AGENT_REGISTRY" in code
-    for hardcoded in ('"design_artifacts"', "'design_artifacts'",
-                      '"requirements_payload"', "'requirements_payload'"):
-        assert hardcoded not in code, (
-            "column names must be derived from the registry, never restated here"
+    for column in ("design_artifacts", "requirements_payload", "requirements_artifacts",
+                   "development_artifacts", "plan_artifacts", "security_artifacts"):
+        assert column not in code, (
+            f"context reads {column} — that column belongs to the standalone agents"
         )
 
 
-def test_an_agent_with_no_output_artifact_breaks_the_import(monkeypatch):
-    """The pattern `registry.py` and `router.py` use: an agent that would otherwise
-    be silently unreachable fails at import, not at request time."""
+@pytest.mark.asyncio
+async def test_each_agents_deliverable_is_attributed_to_that_agent(monkeypatch):
+    """End to end through the real reading path: a row stored under an agent must come
+    back under that agent's own heading. A structural assertion alone would still pass
+    if rows were read correctly and then attributed to the wrong author."""
     from agents_orchestrator.orchestrator2 import context
 
-    class _NoColumn:
-        output_artifact = None
+    rows = [_Row(agent_id, f"work-of-{agent_id}", created_at=i)
+            for i, agent_id in enumerate(AGENT_IDS)]
+    _install_store(monkeypatch, _RowStore(rows))
 
-    doctored = {"design": _NoColumn()}
-    with pytest.raises(context.ArtifactColumnError) as caught:
-        context._build_artifact_columns(agent_ids=("design",), registry=doctored)
-    assert "design" in str(caught.value)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    for agent_id in AGENT_IDS:
+        assert context._heading(agent_id, target_agent="design") in out
+        assert f"work-of-{agent_id}" in out, f"{agent_id}'s deliverable was not read"
 
 
-def test_an_artifact_column_missing_from_the_row_breaks_the_import():
+@pytest.mark.asyncio
+async def test_the_project_manager_agent_is_read_like_any_other(monkeypatch):
+    """`plan` had no branch in `sections_from_run`, so `plan_artifacts` was written by
+    nothing and read by nothing. It must not be a special case here either."""
     from agents_orchestrator.orchestrator2 import context
 
-    class _Bogus:
-        output_artifact = "column_that_does_not_exist"
+    _install_store(monkeypatch, _RowStore([_Row("plan", "the sprint plan")]))
+    out = await context.handoff_context(_RUN, _TENANT, "development")
+    assert "the sprint plan" in out
 
-    with pytest.raises(context.ArtifactColumnError) as caught:
-        context._build_artifact_columns(agent_ids=("design",), registry={"design": _Bogus()})
-    assert "column_that_does_not_exist" in str(caught.value)
+
+@pytest.mark.asyncio
+async def test_only_the_newest_row_per_agent_is_rendered(monkeypatch):
+    """Through the REAL reader, not a stubbed `latest_per_agent`. Every version stays
+    in the panel; only the newest is handed forward."""
+    from agents_orchestrator.orchestrator2 import context
+
+    _install_store(monkeypatch, _RowStore([
+        _Row("requirements", "SUPERSEDED", created_at=1),
+        _Row("requirements", "CURRENT", created_at=2),
+    ]))
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    assert "CURRENT" in out
+    assert "SUPERSEDED" not in out, (
+        "two versions of one document leave the agent to guess which is current"
+    )
+
 
 
 # ── odds and ends ────────────────────────────────────────────────────────────
@@ -538,10 +566,12 @@ async def test_empty_artifacts_are_nothing_to_report(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_run_with_no_artifacts_at_all_yields_nothing(monkeypatch):
+async def test_a_run_with_no_deliverables_at_all_yields_nothing(monkeypatch):
+    """An empty run and a failed read must NOT look the same to the agent — the empty
+    one returns "", the failed one raises. This is the empty half."""
     from agents_orchestrator.orchestrator2 import context
 
-    store = _install_store(monkeypatch, _RowStore([(_RUN, _TENANT, _Row())]))
+    store = _install_store(monkeypatch, _RowStore([]))
     assert await context.handoff_context(_RUN, _TENANT, "design") == ""
     assert store.tenants_scoped_to == [_TENANT], "the run WAS read; it is simply empty"
 
@@ -619,3 +649,80 @@ def _module_code(module) -> str:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             _strip_docstring(node)
     return ast.unparse(tree)
+
+
+# ── Phase 4: context reads deliverables, not the run's artifact columns ───────
+
+
+@pytest.mark.asyncio
+async def test_context_reads_deliverables_not_run_columns(monkeypatch):
+    """The run's `*_artifacts` columns are what the STANDALONE agents write. The
+    Orchestrator's agents share their names and capability and are a different thing;
+    reading those columns here would mix the two concepts the separate deliverables
+    table exists to keep apart."""
+    from agents_orchestrator.orchestrator2 import context, deliverables
+
+    async def _latest(run_id, tenant_id):
+        return {"requirements": {"title": "PRD v2", "content": "the newest PRD"}}
+
+    monkeypatch.setattr(deliverables, "latest_per_agent", _latest)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    assert "the newest PRD" in out
+
+
+@pytest.mark.asyncio
+async def test_only_the_newest_version_reaches_an_agent(monkeypatch):
+    """Every version stays visible in the panel. Feeding two versions of one PRD to a
+    downstream agent makes it guess which is current, and it will sometimes guess
+    wrong."""
+    from agents_orchestrator.orchestrator2 import context, deliverables
+
+    async def _latest(run_id, tenant_id):
+        return {"requirements": {"title": "PRD v2", "content": "NEWEST"}}
+
+    monkeypatch.setattr(deliverables, "latest_per_agent", _latest)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    assert "NEWEST" in out and "PRD v1" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_deliverable_reaches_the_agent_as_markdown_not_json(monkeypatch):
+    """A document JSON-quoted into the prompt arrives with escaped newlines and
+    surrounding quotes — technically present, and materially harder for the agent to
+    read than the markdown the user saw."""
+    from agents_orchestrator.orchestrator2 import context, deliverables
+
+    async def _latest(run_id, tenant_id):
+        return {"requirements": {"title": "PRD", "content": "# Heading\n\n- a bullet"}}
+
+    monkeypatch.setattr(deliverables, "latest_per_agent", _latest)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    assert "# Heading\n\n- a bullet" in out
+    # No backslash-escaped newlines: that is exactly what json.dumps would have
+    # produced. Built with chr(92) so the check cannot itself be softened by an
+    # escape sequence being read one level too early.
+    assert chr(92) + "n" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_failed_deliverables_read_is_not_reported_as_an_empty_run(monkeypatch):
+    """`""` reaches the agent as "nothing has happened on this run", so it re-asks the
+    user for work already done. That was the old `_upstream_context` defect and it
+    must not come back through the new reader."""
+    from agents_orchestrator.orchestrator2 import context, deliverables
+
+    async def _boom(run_id, tenant_id):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(deliverables, "latest_per_agent", _boom)
+    with pytest.raises(context.ContextUnavailableError):
+        await context.handoff_context(_RUN, _TENANT, "design")
+
+
+def test_the_column_based_reader_is_gone(monkeypatch):
+    """ARTIFACT_COLUMNS mapped each agent to a `runs` column. Nothing reads those
+    columns now, and leaving the map behind would invite a future change to read from
+    it again — reintroducing exactly the confusion between the standalone agents'
+    artifacts and the Orchestrator's deliverables."""
+    from agents_orchestrator.orchestrator2 import context
+    assert not hasattr(context, "ARTIFACT_COLUMNS")

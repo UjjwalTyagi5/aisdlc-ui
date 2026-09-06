@@ -17,12 +17,12 @@ conversation, so Design may well run after Development. Under the old rule Desig
 would then be shown nothing about the development work, and would ask the user to
 re-supply what the run already had.
 
-So this module includes EVERY artifact present on the run, whatever produced it and
-whenever. Nothing here filters by position, and nothing here has a notion of a
-"next" or "prior" agent. `ARTIFACT_COLUMNS` is iterated for a STABLE PRESENTATION
-ORDER — so the same run renders identically twice — and for nothing else: it decides
-the sequence sections appear in, never which sections exist. Every key it holds is
-considered on every call.
+So this module includes EVERY deliverable present on the run, whatever produced it
+and whenever. Nothing here filters by position, and nothing here has a notion of a
+"next" or "prior" agent. `AGENT_IDS` is iterated for a STABLE PRESENTATION ORDER — so
+the same run renders identically twice — and for nothing else: it decides the sequence
+sections appear in, never which sections exist. Every agent is considered on every
+call.
 
 2. IT READ THE RUN THROUGH AN RLS-BYPASSING SESSION WITH NO TENANT PREDICATE
 ----------------------------------------------------------------------------
@@ -30,8 +30,11 @@ The old function used `get_db_session_superuser()` and matched on `Run.id` alone
 a run id belonging to another tenant read back — and its artifacts were then fed
 straight into an agent's prompt. `_load_run_artifacts` mirrors
 `orchestrator2/ws.py::_resolve_run` instead: the read runs inside the caller's
-tenant GUC session AND carries an explicit `Run.tenant_id` predicate. Either alone
-would do; having both means neither is the only thing standing between tenants.
+tenant GUC session AND carries an explicit tenant predicate — since Phase 4 that
+predicate is `OrchestratorDeliverable.tenant_id`, written out in
+`deliverables._load`. Either alone would do on paper; RLS is inert in this deployment
+(the app connects as a rolbypassrls superuser), so today the explicit predicate is the
+one actually doing the work — which is exactly why both are written.
 
 A run that does not belong to `tenant_id` is indistinguishable from one that does
 not exist — both yield `""`, and the caller learns nothing about what exists
@@ -72,22 +75,35 @@ divided EQUALLY among the artifacts present, so one oversized payload cannot sta
 the others, and any artifact that is shortened says so in the rendered output. A
 silently shortened context is defect 3 in another costume.
 
-THE COLUMN NAMES COME FROM THE REGISTRY
----------------------------------------
-`AGENT_REGISTRY[agent_id].output_artifact` is the only source of the column each
-agent writes; none of them is typed out here. An agent in `AGENT_IDS` whose registry
-entry has no `output_artifact`, or names a column that does not exist on `runs`,
-raises `ArtifactColumnError` AT IMPORT — the pattern `registry.py` and `router.py`
-use for an agent that would otherwise be silently unreachable. (Deriving rather than
-transcribing is what caught `requirements` writing `requirements_payload`, not the
-`requirements_artifacts` column that also exists on the row.)
+IT READS DELIVERABLES, NOT THE RUN'S ARTIFACT COLUMNS
+-----------------------------------------------------
+Since Phase 4 the source is `orchestrator_deliverables`, not `runs.*_artifacts`. The
+columns are what the STANDALONE agents write; the Orchestrator's agents share their
+names and capability and are a different thing, so their output has its own table with
+no approval concept, and this module never names a column of the other one. A test
+asserts that by inspecting this module's source.
+
+ONLY THE NEWEST VERSION PER AGENT IS HANDED FORWARD
+---------------------------------------------------
+Nothing is ever overwritten — an agent can be re-run at any time and every version
+stays visible in the Deliverables tab. But an agent handed two versions of one PRD has
+to guess which is current, and it will sometimes guess wrong, so `latest_per_agent`
+resolves that here rather than leaving it to the model.
+
+WHAT REPLACED THE IMPORT-TIME COLUMN CHECK
+------------------------------------------
+The previous version proved AT IMPORT that every agent resolved a real `runs` column.
+Storage is now one table, so the equivalent proofs are that the `agent_id` CHECK
+constraint equals `AGENT_IDS` (tests/orchestrator2/test_deliverables_schema.py) and
+that `DISPLAY_NAME` covers `AGENT_IDS` (checked at import in `deliverables.py`). The
+guarantee moved; it was not dropped.
 """
 from __future__ import annotations
 
 import json
 import logging
 import uuid
-from typing import Any, Mapping
+from typing import Any
 
 from agents_orchestrator.orchestrator2.registry import AGENT_IDS, UnknownAgentError
 from config.agent_registry import AGENT_REGISTRY
@@ -96,7 +112,6 @@ from config.agent_registry import AGENT_REGISTRY
 # is pure schema by contract ("Do NOT import from shared.db here", "Do NOT import from
 # config.env") so it drags in no connection, and the import-time column check below
 # cannot run without it.
-from shared.models.orm import Run
 
 logger = logging.getLogger(__name__)
 
@@ -109,71 +124,6 @@ class ContextUnavailableError(Exception):
     merely unreachable — and the agent then re-asked the user for things that already
     existed. Callers must not catch this and substitute `""`.
     """
-
-
-class ArtifactColumnError(Exception):
-    """Raised AT IMPORT when an agent's artifact column cannot be resolved.
-
-    Names every offender at once rather than stopping at the first, so a registry
-    edit that breaks several agents is fixed in one pass. An agent whose column is
-    missing must break the import rather than be skipped at runtime, where it would
-    look exactly like an agent that simply had not run yet.
-    """
-
-
-def _build_artifact_columns(
-    *,
-    agent_ids: tuple[str, ...] | list[str],
-    registry: Mapping[str, Any],
-) -> dict[str, str]:
-    """Map each agent id to the `runs` column it writes, or raise `ArtifactColumnError`.
-
-    Takes both inputs as arguments so the failure path is reachable from a test
-    without doctoring the real registry — the module-level call below passes the real
-    ones.
-
-    A column is rejected unless it also EXISTS on `Run`. `AgentDefinition` documents
-    `output_artifact` as an "AgentSession field name", so nothing about the registry
-    alone guarantees it names a `runs` column; without this check a renamed column
-    would read back as `None` on every run and present as "this agent has not run
-    yet" forever.
-    """
-    columns: dict[str, str] = {}
-    problems: list[str] = []
-
-    for agent_id in agent_ids:
-        definition = registry.get(agent_id)
-        if definition is None:
-            problems.append(f"{agent_id}: absent from AGENT_REGISTRY")
-            continue
-        column = getattr(definition, "output_artifact", None)
-        if not column:
-            problems.append(
-                f"{agent_id}: has no output_artifact, so nothing it produces could "
-                "ever be handed to another agent"
-            )
-            continue
-        if not hasattr(Run, column):
-            problems.append(
-                f"{agent_id}: output_artifact {column!r} is not a column on runs"
-            )
-            continue
-        columns[agent_id] = column
-
-    if problems:
-        detail = "\n".join(f"  - {problem}" for problem in problems)
-        raise ArtifactColumnError(
-            f"cannot resolve an artifact column for {len(problems)} agent(s):\n{detail}"
-        )
-    return columns
-
-
-#: agent id -> the `runs` column that agent writes. Also the stable PRESENTATION
-#: order used when rendering (see the module docstring): it never decides which
-#: artifacts are included, only the sequence they appear in.
-ARTIFACT_COLUMNS: dict[str, str] = _build_artifact_columns(
-    agent_ids=AGENT_IDS, registry=AGENT_REGISTRY
-)
 
 
 # ── the size budget ──────────────────────────────────────────────────────────
@@ -244,9 +194,9 @@ def _worst_case_share() -> int:
     """The per-artifact share when all nine agents have produced something and every
     heading is the longest one they can have."""
     widest = max(
-        len(_heading(agent_id, target_agent=agent_id)) for agent_id in ARTIFACT_COLUMNS
+        len(_heading(agent_id, target_agent=agent_id)) for agent_id in AGENT_IDS
     )
-    count = len(ARTIFACT_COLUMNS)
+    count = len(AGENT_IDS)
     scaffold = (
         len(_HEADER) + len(_FOOTER) + count * (widest + _section_scaffold_chars())
     )
@@ -277,12 +227,19 @@ def _as_uuid(value: str) -> uuid.UUID | None:
 
 
 def _render_body(value: Any) -> str:
-    """One artifact as JSON.
+    """One deliverable, as the agent should read it.
 
-    `default=str` because an artifact column is JSONB and should already be plain
-    data; a value that somehow is not must not take the whole turn down over
-    formatting.
+    A deliverable's content is MARKDOWN — the same text the user saw. Passing it
+    through `json.dumps` would wrap it in quotes and escape every newline, so the
+    receiving agent gets `"# Heading\n\n- a bullet"` instead of a document. It is
+    technically present and materially harder to read, which is the kind of loss that
+    never shows up as an error.
+
+    Anything that is somehow not a string still goes through `json.dumps` with
+    `default=str`, so a malformed value cannot take the turn down over formatting.
     """
+    if isinstance(value, str):
+        return value
     return json.dumps(value, indent=2, default=str)
 
 
@@ -341,55 +298,41 @@ def _render(sections: list[tuple[str, str]], target_agent: str) -> str:
 
 
 async def _load_run_artifacts(run_id: str, tenant_id: str) -> dict[str, Any]:
-    """Read every non-empty artifact column off one run, keyed by the agent that
-    writes it.
+    """What this run already holds, keyed by the agent that produced it.
 
-    THE READ IS TENANT-SCOPED TWICE, and that is the point. It runs inside
+    READS DELIVERABLES, NOT THE RUN'S `*_artifacts` COLUMNS. Those columns are what
+    the STANDALONE agents write. The Orchestrator's agents share their names and
+    capability and are a different thing, so their output lives in its own table with
+    no approval concept, and mixing the two is exactly what that separation prevents.
+
+    ONLY THE NEWEST VERSION PER AGENT. Every version stays visible in the panel — an
+    agent can be re-run at any time and nothing is ever overwritten — but handing a
+    downstream agent two versions of one PRD makes it guess which is current, and it
+    will sometimes guess wrong.
+
+    THE READ IS TENANT-SCOPED TWICE, and that is the point: inside
     `get_db_session_for_tenant` (which sets the tenant GUC, so row-level security
-    applies) and it also carries an explicit `Run.tenant_id` predicate. The function
-    this replaces used the superuser session — under which RLS is not a backstop at
-    all — and filtered on `Run.id` alone, so another tenant's run read back and its
-    artifacts went into an agent's prompt. See `ws.py::_resolve_run`, whose shape
-    this matches.
+    applies) AND with an explicit tenant predicate in `deliverables._load`. The
+    function this replaces used the superuser session — under which RLS is not a
+    backstop at all — and filtered on `Run.id` alone, so another tenant's run read
+    back and its artifacts went into an agent's prompt.
 
-    Returns `{}` when the run holds no artifacts, does not exist, belongs to another
+    Returns `{}` when the run holds nothing, does not exist, belongs to another
     tenant, or is named by an id that cannot address a row. The middle two are the
-    same answer to the caller on purpose: "not yours" must not be distinguishable
-    from "not there".
+    same answer on purpose: "not yours" must not be distinguishable from "not there".
 
     RAISES `ContextUnavailableError` when the read itself fails, chaining the cause.
     A failed read is NOT an empty run, and reporting it as one is the defect this
-    module was written to remove.
+    module was written to remove: the agent hears "no prior work exists" and re-asks
+    the user for things that are already done.
     """
-    run_uuid = _as_uuid(run_id)
-    tenant_uuid = _as_uuid(tenant_id)
-    if run_uuid is None or tenant_uuid is None:
-        # Well-defined answer ("no such run"), but a caller bug: nothing upstream
-        # should be able to produce an id that cannot address a row.
-        logger.warning(
-            "orchestrator2 context skipped a lookup it could not address "
-            "(run=%r, tenant=%r) — reporting no artifacts",
-            run_id, tenant_id,
-        )
-        return {}
+    from agents_orchestrator.orchestrator2 import deliverables
 
     try:
-        from sqlalchemy import select
-
-        from shared.db import get_db_session_for_tenant
-
-        async with get_db_session_for_tenant(tenant_id) as session:
-            run = (
-                await session.execute(
-                    select(Run).where(
-                        Run.id == run_uuid,
-                        Run.tenant_id == tenant_uuid,
-                    )
-                )
-            ).scalar_one_or_none()
-    except Exception as exc:  # noqa: BLE001 — unknown ≠ empty; see the class docstring
+        latest = await deliverables.latest_per_agent(run_id, tenant_id)
+    except Exception as exc:  # noqa: BLE001 — unknown != empty; see the class docstring
         logger.warning(
-            "orchestrator2 could not read artifacts for run=%s tenant=%s: %s — "
+            "orchestrator2 could not read deliverables for run=%s tenant=%s: %s — "
             "raising rather than reporting an empty run",
             run_id, tenant_id, exc,
         )
@@ -397,16 +340,10 @@ async def _load_run_artifacts(run_id: str, tenant_id: str) -> dict[str, Any]:
             "the run's existing work could not be read"
         ) from exc
 
-    if run is None:
-        logger.info(
-            "orchestrator2 context found no run=%s for tenant=%s", run_id, tenant_id
-        )
-        return {}
-
     return {
-        agent_id: value
-        for agent_id, column in ARTIFACT_COLUMNS.items()
-        if (value := getattr(run, column, None))
+        agent_id: row.get("content") or ""
+        for agent_id, row in latest.items()
+        if (row.get("content") or "").strip()
     }
 
 
@@ -439,16 +376,16 @@ async def handoff_context(run_id: str, tenant_id: str, target_agent: str) -> str
     The result is at most `MAX_CONTEXT_CHARS` characters, and any artifact shortened
     to fit says so in the text.
     """
-    if target_agent not in ARTIFACT_COLUMNS:
+    if target_agent not in AGENT_IDS:
         raise UnknownAgentError(
             f"'{target_agent}' is not a known agent id. Known ids: "
-            f"{sorted(ARTIFACT_COLUMNS)}"
+            f"{sorted(AGENT_IDS)}"
         )
 
     artifacts = await _load_run_artifacts(run_id, tenant_id)
 
     for key in artifacts:
-        if key not in ARTIFACT_COLUMNS:
+        if key not in AGENT_IDS:
             # Only the nine can be attributed to an author, and an unattributed block
             # in an agent's prompt is worse than no block. Loud, because the only way
             # to get here is a bug in whatever produced the mapping.
@@ -457,9 +394,9 @@ async def handoff_context(run_id: str, tenant_id: str, target_agent: str) -> str
             )
 
     sections: list[tuple[str, str]] = []
-    # ARTIFACT_COLUMNS is iterated for a stable rendering sequence ONLY — every key is
+    # AGENT_IDS is iterated for a stable rendering sequence ONLY — every key is
     # considered, so nothing is filtered by where an agent sits in it.
-    for agent_id in ARTIFACT_COLUMNS:
+    for agent_id in AGENT_IDS:
         value = artifacts.get(agent_id)
         if not value:
             # Null, or an empty object/list/string: the column exists but the agent
