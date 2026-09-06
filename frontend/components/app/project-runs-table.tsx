@@ -96,7 +96,8 @@ export function ProjectRunsTable({
             >
               <TableCell className="py-3">
                 <Link
-                  href={`/projects/${r.projectId}/copilot?run=${r.id}`}
+                  // Read-only history; the Orchestrator rail is where a chat continues.
+                  href={`/runs/${r.id}/conversation`}
                   className="block truncate text-[13px] font-medium text-brand-bright underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
                 >
                   {r.title}
