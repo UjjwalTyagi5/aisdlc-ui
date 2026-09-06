@@ -142,7 +142,22 @@ they belong. On top of that baseline:
 | `design` | Split into HLD / LLD / C4 / API contracts / DB schema / ADRs / tech stack by the existing pure `parse_design_markdown`. Reused, not reimplemented. |
 | `development` | A `code-tree` pointer (`dev-code`) and a PR `link` when one exists. |
 | `plan` | Nothing special — the baseline, which is what closes §2's gap. |
-| any | A `file-tree` pointer via the existing `stage_files_section` when the run generated files on disk. |
+| any | A `file-tree` pointer when that agent generated files on disk. |
+
+**Pointers are synthesized on read, never stored** (corrected while planning). The code
+tree, the per-agent file trees and the PR link are not documents — they are references to
+state that already lives elsewhere (the run workspace, disk, Azure DevOps). Persisting one
+per turn would stack a duplicate row on every turn the agent ran, and their ids must stay
+**stable** anyway, because the panel de-dupes the Development tree on the literal id
+`dev-code`. So `pointers_for_run()` is pure and the REST read supplies them; deliverable
+rows are only ever documents.
+
+Which agents wrote files is decided by the **REST layer**, the only place that can look at
+the disk, and passed into the pure function. An agent that generated nothing gets no tree:
+an empty tree reads as a pull that failed rather than as a stage with no files.
+
+During a live turn the panel already synthesises the Development tree itself whenever
+Development is the active agent, so nothing is missing before the first REST refresh.
 
 **`runs.development_artifacts` keeps being written** with `repo_url` / `branch_name` /
 `base_sha`. That is a **workspace recovery pointer, not a Deliverable**:
