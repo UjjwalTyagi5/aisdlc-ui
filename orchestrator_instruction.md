@@ -438,6 +438,7 @@ Phases are ordered so nothing is built against an unproven interface.
 | 2026-09-05 | **D10 added** — the Orchestrator gets its own per-agent implementations built from the standalone agents' tools and prompts, rather than running their compiled graphs. Their permission/gate/session machinery is precisely what the Orchestrator does not need. Affects Phases 2-3 only; Phase 1 (frontend) is unchanged and continues. |
 | 2026-09-05 | **PHASE 1 COMPLETE.** Branch `feature/orchestrator-rebuild`, 18 commits, 34 files, +2203/−1306, 601 tests passing, typecheck clean. Not pushed. Details in §10. |
 | 2026-09-06 | **PHASE 4 COMPLETE.** Deliverables: their own table, append-only, no approval concept. Design at `docs/superpowers/specs/2026-09-06-orchestrator-phase-4-deliverables-design.md`, plan at `docs/superpowers/plans/2026-09-06-orchestrator-phase-4.md`. Decisions D11–D17. Backend 397 tests, frontend 669, typecheck and lint clean, zero regressions against the pre-phase baseline. Details in §15. |
+| 2026-09-07 | **PHASE 5 COMPLETE.** Both old engines retired; the Orchestrator's rail is server-backed history. Design at `docs/superpowers/specs/2026-09-07-orchestrator-phase-5-design.md`, plan at `docs/superpowers/plans/2026-09-07-orchestrator-phase-5.md`. Decisions D18–D24. Backend 3,322 passing at the recorded baseline (22 failed / 7 errors, all pre-existing); frontend 688 passing, typecheck, lint and `next build` clean. Details in §16. |
 
 ---
 
@@ -889,3 +890,127 @@ Context truncation (~2,400 characters per artifact on a full nine-agent run) is
 not mistaken for having addressed it. RLS remains inert pending a non-superuser
 application role. Phase 5 (retiring `copilot_api.py` and `orchestrator_api.py`) and the
 deferred e2e rewrite are unchanged.
+
+---
+
+## 16. Phase 5 outcome — retirement, and real history (2026-09-07)
+
+Phase 5 was specified as one thing — remove the two old engines — and grew a second when
+the scope was discussed:
+
+> *"in the orchestrator, on the left side, there is a history of all the chats. Opening
+> that history will open up that full chat that the person had, and he can continue that
+> chat also."*
+
+That is §5.3, deferred in Phase 1 and never resumed. The two belong together: the Copilot
+is deleted because the Orchestrator replaces it, and until the Orchestrator could reopen a
+past conversation that replacement was not true — the Copilot page was the ONLY surface
+that could open a historical run, which is why ruling R10 left two links pointing at it.
+Shipping the retirement alone would have taken a capability away.
+
+### 16.1 What went
+
+The whole `agents_orchestrator/orchestrator/` package: `copilot_api.py` (2,722 lines),
+`orchestrator_api.py` (1,970, reference-only from the start), and `copilot_cards.py` and
+`stage_switch.py`, whose only importers were inside the deleted set. Plus the two mounts,
+the three `/runs/{id}/copilot/*` endpoints, `tests/copilot/` (22 files), the Copilot page,
+its four components, its WS-ticket route and its three BFF proxies. Net **-7,633 lines**
+in the retirement commit alone.
+
+`copilot_api` gave a system prompt to three of nine agents and had no `plan` branch at
+all, both failing soft. It survived Phases 1-4 deliberately: until Phase 4 it was the only
+surface that actually ran agents.
+
+### 16.2 Decisions
+
+| # | Decision | Source |
+|---|---|---|
+| D18 | Retire both engines, the Copilot page, its components, its WS-ticket route and the three `/runs/{id}/copilot/*` endpoints. | Spec §8, user |
+| D19 | The four `lib/copilot/` modules the Orchestrator depends on MOVE to `lib/orchestrator/` rather than being deleted or stranded. | Claude |
+| D20 | `/api/chat` refuses an unmapped agent (400) rather than routing it anywhere. | Claude |
+| D21 | The `/runs` page points at the read-only `/runs/[id]/conversation`. History is for reading; the Orchestrator rail is for continuing. | User |
+| D22 | **Orchestrator sessions are server-backed**, keyed `session_id == run_id`. | User, direct |
+| D23 | A new chat is not persisted until its first turn. | Claude |
+| D24 | The WS frame-size limit and the sweep's WS blindness are fixed here. | User, chosen from options |
+
+### 16.3 The ordering that made it safe
+
+`lib/copilot/` could not simply be deleted: **seven** Orchestrator modules imported from
+it. Those moved FIRST, in their own commit, with a guard test forbidding the Orchestrator
+from importing that directory again — proven by reintroducing one and watching it fail.
+Without that ordering, deleting the Copilot would have broken the surface replacing it, at
+RENDER time rather than build time, because a missing module still typechecks until
+something resolves it.
+
+Every deletion task therefore ended with a real `next build`, not only `vitest` and `tsc`.
+That is the one failure mode unit tests structurally cannot catch here. Final proof: the
+build's route table contains **zero** copilot routes, and `/api/runs/[id]/deliverables` is
+present.
+
+### 16.4 Real history
+
+The rail was `zustand` + localStorage and said so on screen. Almost none of the fix was
+new: `conversation_service` is complete and every standalone agent already uses it, while
+`orchestrator2` only READ from it and never wrote. Wiring the writer, plus pointing the
+rail at the server, was the whole job.
+
+`session_id == run_id` is what makes continuing work — reopening a chat adopts that run,
+so the next turn rejoins its LangGraph thread, its Deliverables and its project scope with
+no mapping anywhere.
+
+Two defects the wiring exposed, neither visible in tests until the behaviour was driven:
+
+1. Selecting a saved chat left `active` null (a server chat is not in the local store) and
+   `projectId` reads through `active` — so **the project silently became null the moment a
+   chat was opened**, disabling the composer on the conversation just requested.
+2. `handleProjectChange` asked `active.messages.length === 0` to mean "untouched, safe to
+   repoint", which is unknowable once transcripts leave the browser. It now asks whether
+   the session has a RUN — the truer question, since a chat that has run has Deliverables
+   and a thread bound to its old project.
+
+### 16.5 What the deletion uncovered
+
+- **§1.5 is now enforced nowhere.** "Whoever ran the agent is never the one who accepts
+  its own output" lived in exactly one place, `copilot_api._handle_gate_decision`, and was
+  tested in exactly one file. `record_approval` checks the stage's approve PERMISSION but
+  never whether the approver started the run; the artifact approve/reject path checks
+  neither. `runs.created_by` (migration 0038, added to serve this rule) now has no
+  consumer. **Recorded as carried debt, not quietly dropped** — reinstating it belongs to
+  the approvals system, not to retiring an engine.
+- **Dead machinery in the shared panel.** `showApprover` and `gate` existed only for the
+  Copilot, and `chat-types.ts` carried the Copilot's whole WS protocol — 122 lines nothing
+  imported. Both removed; a `GateState` type on a surface the spec says has no gates is
+  worse than no type.
+- **Four comments became false the moment the files went**, including the one justifying
+  the `tabLabel` prop by saying the Copilot imports the panel. All corrected.
+
+### 16.6 Debt closed, and debt honestly left open
+
+**Closed:** copilot_api's three known defects (deleted with it); the unbounded inbound WS
+frame (#2); the boot scan's blindness to WebSocket routes (#4); the credential-attribution
+gap in copilot_api.
+
+**Scoped deliberately, and said so in the code:** the WS sweep now lists all 21 sockets and
+requires each to be recorded, seeded with those that existed. **Being in that allowlist is
+not an audit** — the comment says so. Confirming each in-handler check is real is 21
+sockets across ten agents and remains debt. What it buys is that a NEW socket cannot ship
+unrecorded, which is exactly what happened in Phase 1.
+
+**Still open:** §1.5 self-approval (above); the BYOK env-fallback audit across nine agents
+(#5); the e2e rewrite (#8, needs credentials); RLS inert (#1); context truncation (#6);
+`"review this"` routing (#7).
+
+### 16.7 Proof
+
+- Backend **3,322 passing**, and the failure set is byte-identical to the recorded baseline
+  (22 failed, 7 errors — RLS inert, plus two live-E2E fixtures failing on
+  `invalid UUID 'test-tenant'`). One genuinely new failure appeared and was a test
+  asserting a known gap in `copilot_api.py` still existed; deleting the file resolved it.
+- Frontend **688 passing** across 81 files, typecheck and lint clean, `next build` compiles
+  every route.
+- `scripts/live_sessions_check.py` — **12/12 against the real database**, including that
+  `ensure_session` is genuinely idempotent (it runs on every turn), that another person's
+  rail does not show the chat, and that it does not leak into a standalone agent's history.
+- `scripts/live_deliverables_check.py` — 16/16, unchanged.
+- `scripts/live_routing_check.py` — **28/29**, the recorded boundary only.
+- The app boots with the D-05 scan reporting no offenders, now including WebSocket routes.
