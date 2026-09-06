@@ -183,6 +183,43 @@ class Artifact(Base):
     run: Mapped["Run"] = relationship(back_populates="artifacts")
 
 
+class OrchestratorDeliverable(Base):
+    """One document an Orchestrator agent produced. Append-only.
+
+    NOT an `Artifact`. `artifacts` rows carry `approval_status` because a STANDALONE
+    agent wrote them and a human accepts them. The Orchestrator's agents share the
+    standalone agents' names and capability and are a different thing: the runner is a
+    Project Admin who already owns all nine, and there are no gates. So its output is a
+    separate concept with no approval column anywhere in its shape.
+
+    APPEND-ONLY BY DESIGN. Any agent can run at any time here, and the same agent can
+    run repeatedly in one conversation. Every run is kept and the panel shows them
+    newest-first, so a re-run never destroys the document it replaces.
+    """
+    __tablename__ = "orchestrator_deliverables"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # Nullable to match `runs.project_id` (nullable since 0005 for webhook runs).
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id"), nullable=True, index=True
+    )
+
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String(50))
+    source: Mapped[str | None] = mapped_column(String(50))
+
+    # No `updated_at`. There is no update: a re-run is a new row.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Deployment(Base):
     """One requested deployment action, and the human decision about it.
 
