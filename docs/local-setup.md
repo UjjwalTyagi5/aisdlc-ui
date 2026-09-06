@@ -158,8 +158,18 @@ That applies the same statements but does **not** verify them — prefer the Pyt
 
 ```powershell
 cd backend
-uv run uvicorn process_api:app --reload --port 8001
+uv run uvicorn process_api:app --reload --port 8004 --ws-max-size 1000000
 ```
+
+Two notes on that command:
+
+- **Port 8004, not 8001.** `frontend/.env.local` sets
+  `FASTAPI_INTERNAL_URL=http://localhost:8004`, so the BFF calls 8004; a backend on
+  8001 leaves every request failing.
+- **`--ws-max-size`** bounds an inbound WebSocket frame at the protocol layer.
+  `orchestrator2/ws.py` enforces the same 1 MB bound itself, so omitting the flag
+  degrades the protection rather than removing it — the frame still arrives, it is
+  just refused before being parsed.
 
 > **Keep `watchfiles` installed.** It is pinned in `requirements.txt`/`pyproject.toml`
 > and `--reload` depends on it. Without it uvicorn silently falls back to `StatReload`,

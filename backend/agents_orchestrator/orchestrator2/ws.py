@@ -96,6 +96,30 @@ from config.env import AGENT_RUNTIME_MODE
 
 logger = logging.getLogger(__name__)
 
+#: The largest inbound frame this socket will parse.
+#:
+#: `_remember` bounds what is RETAINED — twenty 1 MB messages no longer means 20 MB
+#: held and re-sent to the routing model every turn. It says nothing about what
+#: ARRIVES, and a single 20 MB frame was received and json-parsed before anything
+#: looked at its size. This is that half.
+#:
+#: 1 MB is far above any real message — a pasted PRD is a few tens of KB — and far
+#: below a frame that could hurt. uvicorn's `ws_max_size` is the real defence, at the
+#: protocol layer, and is set for the `python process_api.py` path; the CLI path takes
+#: `--ws-max-size`, which this code cannot enforce, so the check below is the layer we
+#: always control.
+MAX_INBOUND_FRAME_BYTES = 1_000_000
+
+
+def _frame_too_large(raw: str) -> bool:
+    """True when `raw` must be refused unparsed.
+
+    Measured in BYTES, not characters: a message of astral-plane characters is four
+    bytes each, so a length check would let a frame four times the limit through —
+    exactly what this bounds.
+    """
+    return len(raw.encode("utf-8", errors="ignore")) > MAX_INBOUND_FRAME_BYTES
+
 orchestrator2_router = APIRouter()
 
 # The single role that may drive the Orchestrator. Kept as a named constant so the
@@ -520,6 +544,23 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
+            if _frame_too_large(raw):
+                # Refused BEFORE json.loads: parsing it would already have paid the
+                # memory cost this limit exists to avoid.
+                #
+                # `continue`, not close: an oversized paste is a user mistake, not an
+                # attack, and leaving the socket open lets them send a smaller one.
+                logger.warning(
+                    "orchestrator2 refused an oversized frame (%d bytes) from "
+                    "user=%s tenant=%s",
+                    len(raw.encode("utf-8", errors="ignore")), user_id, tenant_id,
+                )
+                await _fail(
+                    websocket,
+                    "That message is too large to send.",
+                    detail=f"limit {MAX_INBOUND_FRAME_BYTES} bytes",
+                )
+                continue
             try:
                 msg = json.loads(raw)
             except Exception:  # noqa: BLE001

@@ -1278,4 +1278,11 @@ async def get_my_permissions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("process_api:app", host="0.0.0.0", port=80, log_level="info")
+    uvicorn.run(
+        "process_api:app", host="0.0.0.0", port=80, log_level="info",
+        # Bounds an inbound WebSocket frame at the PROTOCOL layer, before any handler
+        # sees it. orchestrator2/ws.py repeats the check because the CLI path
+        # (`uv run uvicorn ...`) never executes this line, and neither path covers
+        # every deployment.
+        ws_max_size=1_000_000,
+    )
