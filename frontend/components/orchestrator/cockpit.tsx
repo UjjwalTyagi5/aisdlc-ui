@@ -211,7 +211,11 @@ export function OrchestratorCockpit({
       setPendingModelKey(null);
       if (!active) return;
       const p = projectsQ.data?.items.find((x) => String(x.id) === id);
-      if (active.messages.length === 0) {
+      // Untouched means "has not run yet". It used to mean "has no local messages",
+      // which stopped being knowable once transcripts moved server-side — and this is
+      // the truer question anyway: a chat with a run has Deliverables and a LangGraph
+      // thread bound to its old project, so it must not be repointed.
+      if (!runIdRef.current && !openedRunId) {
         // Untouched session — repoint it rather than littering the rail.
         store.getState().retargetSession(active.id, {
           projectId: id,
@@ -230,7 +234,7 @@ export function OrchestratorCockpit({
         });
       }
     },
-    [active, store, projectsQ.data],
+    [active, store, projectsQ.data, openedRunId],
   );
 
   const handleModelChange = React.useCallback(
