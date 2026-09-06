@@ -764,6 +764,29 @@ async def record_approval(
         )
 
     actor_id = getattr(request.state, "user_id", "system")
+
+    # §1.5: WHOEVER RAN THE AGENT IS NEVER THE ONE WHO ACCEPTS ITS OWN OUTPUT.
+    #
+    # The permission check above answers "may this ROLE approve this stage". That is a
+    # different question, and it passes for exactly the person this rule exists to
+    # stop: a BA who starts a Requirements run holds artifact:approve_requirements by
+    # definition. Both checks are needed.
+    #
+    # This lived in copilot_api._handle_gate_decision until Phase 5 retired that
+    # engine, which left the rule enforced NOWHERE and `runs.created_by` — migration
+    # 0038, added to serve it — with no consumer. This is where it lives now.
+    #
+    # A run with no recorded initiator is NOT blocked: `created_by` is nullable
+    # (webhook runs, and rows predating 0038), and refusing there would make every
+    # historical run permanently unapprovable. The rule cannot be applied, so it is
+    # not — deliberately, rather than by omission.
+    initiator = getattr(run, "created_by", None)
+    if initiator and actor_id and str(initiator) == str(actor_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: the person who started a run cannot approve its output",
+        )
+
     now = datetime.now(timezone.utc)
 
     audit = AuditEvent(
