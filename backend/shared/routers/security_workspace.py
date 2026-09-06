@@ -43,8 +43,13 @@ security_workspace_router = APIRouter(
 async def list_open_prs(
     project_id: str, ado_project: str, repo: str, request: Request
 ) -> list[dict]:
+    # project_id + owner_id, like every dev-workspace picker route: the tenant's
+    # Azure DevOps credential may be a project-scoped personal one, which resolves
+    # to nothing when only tenant_id is passed.
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
     return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id
+        ado_project, repo, status="active", tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
     )
 
 
@@ -61,7 +66,15 @@ async def prepare_scan(project_id: str, body: PrepareScanRequest, request: Reque
     """Clone the branch (or PR's source branch) read-only and bind it to the chat
     session so the agent can scan it."""
     tenant_id: str = request.state.tenant_id
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    # project_id + owner_id, matching dev_workspace.pull_workspace. Passing only the
+    # tenant looks at tenant-wide connectors alone, so a project-scoped PERSONAL Azure
+    # DevOps credential -- what the Integrations page lets a Project Admin save for
+    # just their own project -- was never found here, and this route 500'd while the
+    # repo/branch pickers in the very same dialog resolved it and worked.
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id, project_id=project_id, owner_id=owner_id
+    )
 
     branch = (body.branch or "").strip()
     pr_title = ""
@@ -77,9 +90,16 @@ async def prepare_scan(project_id: str, body: PrepareScanRequest, request: Reque
     if not branch:
         raise HTTPException(status_code=400, detail="branch is required")
 
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
+    # "Not configured" is a RuntimeError from deep inside _resolve; unhandled it reaches
+    # the browser as a bare 500 "Internal Server Error", which reads as a broken agent
+    # rather than as a connector nobody has set up. 424 carries the resolver's own
+    # sentence, which names the fix and the page that performs it.
+    try:
+        remote_url = await ado_repos.resolve_clone_url(
+            body.ado_project, body.repo_name, pat=pat, org_url=org_url
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=424, detail=str(exc))
     if remote_url is None:
         raise HTTPException(
             status_code=404,

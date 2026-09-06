@@ -555,8 +555,21 @@ async def classify_intent(state: SuperAgentState):
     if selected_types:
         upstream_dev_for_selection = state.get("upstream_development") or {}
         clone_target_for_selection = state.get("clone_target") or {}
+        # A PREPARED WORKSPACE IS CODE TO TEST. setup_workspace treats an existing
+        # work_dir as the highest-priority source — it is the Copilot's shared run
+        # workspace (`ps.work_dir`), already cloned once for the whole pipeline — but
+        # this gate did not count it, so an orchestrator handoff that passed the
+        # workspace instead of a repo/branch was answered "Unit testing needs code to
+        # test" with the checkout sitting right there. Checked on disk, matching
+        # setup_workspace's own guard, so a stale path still falls through to the
+        # upload prompt rather than starting a run against a directory that is gone.
+        prepared_dir = state.get("work_dir")
+        has_prepared_workspace = (
+            isinstance(prepared_dir, str) and bool(prepared_dir) and os.path.isdir(prepared_dir)
+        )
         has_code_target = bool(
             file_path
+            or has_prepared_workspace
             or (isinstance(upstream_dev_for_selection, dict) and upstream_dev_for_selection.get("repo_url"))
             or (isinstance(clone_target_for_selection, dict) and clone_target_for_selection.get("repo"))
         )

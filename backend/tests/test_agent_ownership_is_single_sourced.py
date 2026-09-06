@@ -165,8 +165,30 @@ def test_a_phaseless_agent_access_request_does_not_invent_an_owner_stage():
 def test_a_real_phase_still_advances_to_its_owner():
     assert routing.next_agent_access_stage("project_admin", "design") == "agent_owner"
     assert routing.agent_access_approver("agent_owner", "design") == "architect"
-    # Documentation's owner IS the Project Admin, so stage one was already theirs.
-    assert routing.next_agent_access_stage("project_admin", "documentation") is None
+    # Development moved to `developer` with "One agent, one role" — it advances like
+    # any other owned stage, and the approver is the role that can open the agent.
+    assert routing.next_agent_access_stage("project_admin", "development") == "agent_owner"
+    assert routing.agent_access_approver("agent_owner", "development") == "developer"
+
+
+def test_no_pipeline_stage_collapses_to_a_single_approver_any_more():
+    """`next_agent_access_stage` returns None when the Project Admin IS the owner, so
+    stage one was already the owner's decision and advancing would hand the request
+    back to whoever just made it.
+
+    Documentation used to be that case. "One agent, one role" moved it to `ba`, so
+    every pipeline stage now has a distinct owner and every agent_access request gets
+    a genuine second opinion. Asserted rather than assumed: if a stage ever returns to
+    project_admin ownership, the collapse branch matters again and this says so.
+    """
+    collapsed = [
+        stage for stage in STAGE_ORDER
+        if routing.next_agent_access_stage("project_admin", stage) is None
+    ]
+    assert collapsed == [], (
+        f"these stages are owned by project_admin, so their agent_access request is "
+        f"decided by one person: {collapsed}"
+    )
 
 
 # -- the staffing check must be able to see the data --------------------------

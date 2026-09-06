@@ -101,10 +101,10 @@ PHASES: tuple[str, ...] = (
 
 # Who owns each agent — the role that signs its gate off, and therefore the role
 # that decides stage two of an agent-access request. Mirrors
-# frontend/lib/roles.ts::AGENT_OWNER_ROLE, which encodes decisions the raw
-# involvement table cannot express: Development is BUILT by the Developer and
-# APPROVED by the Architect (never self-approval), and Documentation's owner is
-# the Project Admin because acceptance there is automatic.
+# frontend/lib/roles.ts::AGENT_OWNER_ROLE, which is the spec. Since main's
+# "One agent, one role" change a delivery role reaches exactly the agents it OWNS,
+# so the gate has to sit with the role that can open the agent — see the per-entry
+# notes on `development` and `documentation` below.
 # KEYED ON BACKEND STAGE NAMES (progression.STAGE_ORDER), with the UI names from
 # frontend/lib/schemas/enums.ts::Phase as explicit aliases below.
 #
@@ -125,12 +125,19 @@ AGENT_OWNER_ROLE: dict[str, str] = {
     "requirements": "ba",
     "design": "architect",
     "plan": "scrum_master",
-    "development": "architect",
+    # MOVED FROM `architect` by frontend/lib/roles.ts (main, "One agent, one role"):
+    # the Architect no longer REACHES the Development agent, so leaving the gate
+    # there routed every development sign-off to a role that cannot open it.
+    # Per-person self-approval prevention still applies — one developer's work is
+    # approved by another, or by the Project Admin fallback.
+    "development": "developer",
     "code_review": "architect",
     "security": "security_engineer",
     "testing": "qa",
     "deployment": "devops_engineer",
-    "documentation": "project_admin",
+    # The BA owns Documentation in the one-agent-one-role matrix, so the gate
+    # follows the access. project_admin remains the fallback approver.
+    "documentation": "ba",
     # Track-specific agents. Not in AGENT_REGISTRY, so no run ever sits at one and
     # they have no artifact:approve_* permission — but agent-access requests are
     # routed for them from the catalogue, so they need an owner.

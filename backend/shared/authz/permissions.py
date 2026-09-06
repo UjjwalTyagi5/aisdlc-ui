@@ -109,6 +109,9 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "governance:decide",
     ],
     "ba": [
+        # OWNS the Documentation gate since the one-agent-one-role matrix moved
+        # it here. project_admin keeps its own grant as the fallback approver.
+        "artifact:approve_documentation",
         "run:create", "run:view",
         "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
@@ -150,6 +153,14 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "governance:decide",
     ],
     "developer": [
+        # OWNS the Development gate since frontend/lib/roles.ts moved it here
+        # ("One agent, one role"). Without this the named owner could not
+        # approve — the exact defect the ownership boot guard exists to catch.
+        "artifact:approve_development",
+        # Stage two of an agent_access request for Development routes here, and
+        # POST /governance-approvals/{id}/decide is gated on this with no
+        # per-type carve-out. Same reasoning as migrations 0037 and 0044.
+        "governance:decide",
         "run:create", "run:view",
         "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke",

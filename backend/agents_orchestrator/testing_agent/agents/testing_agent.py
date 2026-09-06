@@ -327,7 +327,8 @@ def _initial_state(user_prompt, input_file_path, previous_state,
 
 
 async def _resolve_and_stash_model(tenant_id: Optional[str], model_id: Optional[str],
-                                   offering_id: Optional[str] = None):
+                                   offering_id: Optional[str] = None,
+                                   project_id: Optional[str] = None):
     """Resolve the run's BYOK model and stash it in the model_resolver contextvar
     BEFORE the graph runs in the executor. The whole testing graph is driven
     synchronously via `app.invoke` inside `loop.run_in_executor`, and each node
@@ -341,7 +342,16 @@ async def _resolve_and_stash_model(tenant_id: Optional[str], model_id: Optional[
         resolve_model_for_run, set_resolved_model,
     )
     try:
-        resolved = await resolve_model_for_run(tenant_id or "", model_id, offering_id=offering_id)
+        # WITHOUT project_id THIS FAILS CLOSED ON EVERY GOVERNED TENANT. Once an org
+        # has a single org_model_grants row, effective_project_offerings needs the
+        # project to know which offerings apply; with no project it matches none and
+        # raises NoModelConfiguredError — so a correctly-configured org gets told it
+        # has no model, and the except-branch below quietly runs the whole testing
+        # run on a local .env key instead of the org's verified BYOK provider. The
+        # deployment and code-review agents already pass it.
+        resolved = await resolve_model_for_run(
+            tenant_id or "", model_id, offering_id=offering_id, project_id=project_id,
+        )
     except (NoModelConfiguredError, ModelNotEnabledError):
         # Local-dev fallback: in non-enterprise mode the model key lives in .env
         # (no DB-configured BYOK provider). Mirror every other agent's behaviour
@@ -391,11 +401,13 @@ async def run_super_agent_async(
         tenant_id = tenant_id if tenant_id is not None else previous_state.get("tenant_id")
         model_id = model_id if model_id is not None else previous_state.get("model_id")
         offering_id = offering_id if offering_id is not None else previous_state.get("offering_id")
+    _project_id = (previous_state or {}).get("project_id")
 
     # Resolve + stash the BYOK model before entering the executor. Fail closed.
     from shared.services.model_resolver import NoModelConfiguredError, ModelNotEnabledError
     try:
-        resolved = await _resolve_and_stash_model(tenant_id, model_id, offering_id)
+        resolved = await _resolve_and_stash_model(tenant_id, model_id, offering_id,
+                                                  project_id=_project_id)
         blog(f"Using model {resolved.alias} for testing run")
     except (NoModelConfiguredError, ModelNotEnabledError) as exc:
         msg = (

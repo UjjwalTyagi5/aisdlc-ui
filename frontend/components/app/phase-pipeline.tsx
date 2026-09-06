@@ -401,18 +401,24 @@ function renderPhaseRow(
         {!locked && !comingSoon && slaDeadline && entry.status === "awaiting_approval" && (
           <SlaCountdown deadline={slaDeadline} className="mt-2" />
         )}
-        {locked && renderLockedAction && (
-          <div className="mt-2">{renderLockedAction(entry.phase)}</div>
-        )}
       </div>
       {/* The run's status is suppressed on a locked or coming-soon row.
           "Awaiting approval" is a call to act, and showing it to someone who
           cannot act on this agent reads as a task they are ignoring. The
           lock (or the "coming soon" badge) is the status. */}
       {locked ? (
-        <span className="bg-muted text-muted-foreground shrink-0 self-start rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
-          No access
-        </span>
+        // The action sits WITH the badge that explains it, not under the agent's
+        // name. Below the title it pushed every locked row taller than the rows
+        // around it, so a rail of mostly-locked agents read as a stack of forms
+        // rather than a pipeline — and the button was nowhere near the "No access"
+        // it answers. Kept left of the badge so the badge column still lines up
+        // down the rail with QUEUED and the other statuses.
+        <div className="flex shrink-0 items-center gap-2 self-start">
+          {renderLockedAction?.(entry.phase)}
+          <span className="bg-muted text-muted-foreground rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
+            No access
+          </span>
+        </div>
       ) : comingSoon ? (
         <span className="bg-muted text-muted-foreground shrink-0 self-start rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-wide uppercase">
           Coming soon

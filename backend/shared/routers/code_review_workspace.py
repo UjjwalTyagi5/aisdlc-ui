@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.agent_access import require_agent_access
 from shared.authz.project_scope import require_project_access
 from agents_orchestrator.code_review_agent.config.session_state import set_prepared
 from shared.db import get_db_session
@@ -32,15 +33,31 @@ from shared.services import ado_repos
 # was the artifact:view floor applied at include time — a permission `contributor`
 # holds. The router-level dependency covers all of them at once, and covers whatever
 # route is added next. See docs/rbac-audit-2026-08-17.md finding 3.
-code_review_workspace_router = APIRouter(dependencies=[Depends(require_project_access())])
+#
+# require_project_access() alone only proves project membership -- it does not
+# consult AGENT_DEFAULT_REACH["code_review"], where QA and Data Engineer are "none"
+# (PRD §14.7). Without require_agent_access("code_review") too, any project member
+# could hit review/prepare and reviews regardless of role -- mirrors
+# security_workspace_router's identical two-dependency stack.
+code_review_workspace_router = APIRouter(
+    dependencies=[
+        Depends(require_project_access()),
+        Depends(require_agent_access("code_review")),
+    ]
+)
 
 
 @code_review_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")
 async def list_open_prs(
     project_id: str, ado_project: str, repo: str, request: Request
 ) -> list[dict]:
+    # project_id + owner_id, like every dev-workspace picker route: the tenant's
+    # Azure DevOps credential may be a project-scoped personal one, which resolves
+    # to nothing when only tenant_id is passed.
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
     return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id
+        ado_project, repo, status="active", tenant_id=request.state.tenant_id,
+        project_id=project_id, owner_id=owner_id,
     )
 
 
@@ -53,12 +70,65 @@ class PrepareRequest(BaseModel):
     pr_id: str | None = None
 
 
+async def _find_unchanged_review(
+    db: AsyncSession, *, tenant_id: str, project_id: str, repo_name: str,
+    head_sha: str, base_sha: str,
+) -> Run | None:
+    """The most recent prior review of this exact diff (same repo, head, base), if any.
+
+    PRD §21.4 (help/Prd (1).md line 307): "Skips redundant re-review when nothing
+    changed since the last pass." A diff is unchanged, not merely similar, only when
+    both shas match the same repo — comparing on shas rather than source/base branch
+    names means a force-push that lands the identical tree still counts as unchanged,
+    while a same-named branch that moved does not.
+
+    Filters in Python rather than a JSON-path WHERE clause: `code_review_artifacts` is
+    a plain JSON column, `context` is nested inside it, and this project already reads
+    it the same way in `_review_summary_row` just above. The last 20 reviews for this
+    project is enough headroom for a real target to have moved since a stale match —
+    a project running this many reviews without the diff changing is not the case this
+    guards for.
+    """
+    stmt = (
+        select(Run)
+        .where(
+            Run.project_id == uuid.UUID(project_id),
+            Run.tenant_id == uuid.UUID(tenant_id),
+            Run.code_review_artifacts.isnot(None),
+        )
+        .order_by(Run.created_at.desc())
+        .limit(20)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    for run in rows:
+        ctx = (run.code_review_artifacts or {}).get("context") or {}
+        if (
+            ctx.get("repo_name") == repo_name
+            and ctx.get("head_sha") == head_sha
+            and ctx.get("base_sha") == base_sha
+        ):
+            return run
+    return None
+
+
 @code_review_workspace_router.post("/{project_id}/review/prepare")
-async def prepare_review(project_id: str, body: PrepareRequest, request: Request) -> dict:
+async def prepare_review(
+    project_id: str, body: PrepareRequest, request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Clone the repo read-only and compute the diff for the selected target, binding
     it to the chat session so the agent can review it. Returns the diff + context."""
     tenant_id: str = request.state.tenant_id
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    # project_id + owner_id, matching dev_workspace.pull_workspace. Passing only the
+    # tenant looks at tenant-wide connectors alone, so a project-scoped PERSONAL
+    # Azure DevOps credential -- the kind the Integrations page lets a Project Admin
+    # save for just their own project -- was never found here. The pickers in the very
+    # same dialog (repos, branches) pass both and resolved it fine, so the target
+    # selected fine and only "Prepare diff" failed, with a bare 500.
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id, project_id=project_id, owner_id=owner_id
+    )
 
     source = (body.source_branch or "").strip()
     base = (body.base_branch or "").strip()
@@ -77,9 +147,16 @@ async def prepare_review(project_id: str, body: PrepareRequest, request: Request
     if source == base:
         raise HTTPException(status_code=400, detail="source and base branch must differ")
 
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
+    # "Not configured" is a RuntimeError from deep inside _resolve, and unhandled it
+    # reaches the browser as a bare 500 "Internal Server Error" -- which reads as a
+    # broken agent rather than as a connector nobody has set up. 424 with the
+    # resolver's own sentence names the fix and the page that performs it.
+    try:
+        remote_url = await ado_repos.resolve_clone_url(
+            body.ado_project, body.repo_name, pat=pat, org_url=org_url
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=424, detail=str(exc))
     if remote_url is None:
         raise HTTPException(
             status_code=404,
@@ -111,6 +188,18 @@ async def prepare_review(project_id: str, body: PrepareRequest, request: Request
         "changed_files": result["files"],
     })
 
+    unchanged = await _find_unchanged_review(
+        db, tenant_id=tenant_id, project_id=project_id, repo_name=body.repo_name,
+        head_sha=result["head_sha"], base_sha=result["base_sha"],
+    )
+    # The branch the matching review was run against. Usually the same branch, but
+    # two branch names can point at one commit -- and then "nothing changed" reads as
+    # "it ignored the branch I picked" unless the UI can name the branch it matched.
+    unchanged_branch = (
+        ((unchanged.code_review_artifacts or {}).get("context") or {}).get("source_branch")
+        if unchanged is not None else None
+    )
+
     return {
         "status": "ready",
         "mode": body.mode,
@@ -125,6 +214,9 @@ async def prepare_review(project_id: str, body: PrepareRequest, request: Request
         "files": result["files"],
         "diff": result["diff"],
         "truncated": result["truncated"],
+        "unchanged_since_last_review": unchanged is not None,
+        "existing_review_id": str(unchanged.id) if unchanged is not None else None,
+        "existing_review_branch": unchanged_branch,
     }
 
 

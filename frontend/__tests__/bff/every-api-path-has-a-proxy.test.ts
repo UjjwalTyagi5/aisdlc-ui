@@ -63,8 +63,9 @@ function requestedPaths(): { path: string[]; file: string }[] {
     const re = /\bapi\(\s*[`"](\/[^`"]*)[`"]/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(src)) !== null) {
-      const segments = m[1]
-        .split("?")[0]
+      const literal = m[1];
+      if (!literal) continue;
+      const segments = (literal.split("?")[0] ?? "")
         .split("/")
         .filter(Boolean)
         .map((s) => (s.includes("${") ? "*" : s));

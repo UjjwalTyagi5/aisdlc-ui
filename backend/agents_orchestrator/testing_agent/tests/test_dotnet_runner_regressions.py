@@ -205,3 +205,78 @@ def test_dotnet_prompt_includes_exact_member_signatures(tmp_path: Path):
     assert "CaseStatus" in prompt
     assert "Open" in prompt
     assert "Closed" in prompt
+
+
+# --- .NET SDK detection -----------------------------------------------------
+# A machine with only the .NET *runtime* has dotnet.exe on PATH, so the
+# executable check passes and every `dotnet build` then fails with "No .NET SDKs
+# were found". Each generated chunk gets rejected as uncompilable and the run
+# blames the model for a missing toolchain. These pin the distinction.
+
+import subprocess  # noqa: E402
+import types  # noqa: E402
+
+import pytest  # noqa: E402
+
+from agents_orchestrator.testing_agent.Nodes import dispatch_test_types as _dtt  # noqa: E402
+
+
+def _fake_run(stdout: str, returncode: int = 0):
+    def run(cmd, **kwargs):
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+    return run
+
+
+def _uncached():
+    """_dotnet_sdk_available is lru_cached; clear between cases.
+
+    Tolerates the attribute being absent — one case monkeypatches the function
+    itself with a plain lambda, which has no cache to clear.
+    """
+    clear = getattr(_dtt._dotnet_sdk_available, "cache_clear", None)
+    if clear:
+        clear()
+
+
+def test_sdk_probe_false_when_only_runtimes_installed(monkeypatch):
+    _uncached()
+    monkeypatch.setattr(subprocess, "run", _fake_run(""))
+    assert _dtt._dotnet_sdk_available() is False
+    _uncached()
+
+
+def test_sdk_probe_true_when_an_sdk_is_listed(monkeypatch):
+    _uncached()
+    monkeypatch.setattr(subprocess, "run", _fake_run("8.0.404 [C:\Program Files\dotnet\sdk]\n"))
+    assert _dtt._dotnet_sdk_available() is True
+    _uncached()
+
+
+def test_sdk_probe_false_when_dotnet_cannot_be_run(monkeypatch):
+    _uncached()
+
+    def boom(cmd, **kwargs):
+        raise FileNotFoundError("dotnet")
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert _dtt._dotnet_sdk_available() is False
+    _uncached()
+
+
+def test_dotnet_unit_skill_names_the_missing_sdk_before_spending_model_calls(monkeypatch):
+    """The failure must name the SDK and the fix, and must happen before generation."""
+    import asyncio
+
+    _uncached()
+    monkeypatch.setattr(_dtt, "_dotnet_sdk_available", lambda: False)
+    called = []
+    monkeypatch.setattr(_dtt, "get_llm", lambda *a, **k: called.append(1))
+
+    skill = types.SimpleNamespace(name="unit")
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(_dtt._run_dotnet_unit_skill({"work_dir": "."}, skill))
+
+    msg = str(exc.value)
+    assert ".NET SDK" in msg
+    assert "aka.ms/dotnet/download" in msg
+    assert not called, "the model was called before the toolchain was checked"
+    _uncached()

@@ -1,5 +1,7 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
+
 import * as React from "react";
 import Link from "next/link";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -727,7 +729,13 @@ function ProviderCard({
   catalog: CatalogProvider[];
 }) {
   const label = providerLabel(kind);
-  const [modelsOpen, setModelsOpen] = React.useState(false);
+  // `?curate=<provider>` opens THIS card's curation dialog on arrival. Approving a
+  // provider request lands the Org Admin here to choose which models the requesting
+  // unit gets — the step that turns a granted provider into a usable one. Sending them
+  // to the grid alone left the actual task un-started and unnamed; the earlier target
+  // (/admin/models/<provider>) is a stub that answers "You don't have access".
+  const curateParam = useSearchParams().get("curate");
+  const [modelsOpen, setModelsOpen] = React.useState(() => curateParam === kind);
 
   /**
    * For Org Admin: the CATALOGUE's total for this provider — how many models

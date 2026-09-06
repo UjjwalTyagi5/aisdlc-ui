@@ -31,6 +31,13 @@ export const PrepareResult = z.object({
   files: z.array(ChangedFile),
   diff: z.string(),
   truncated: z.boolean(),
+  // True when this exact diff (same repo + head + base sha) was already reviewed —
+  // PRD §21.4: "Skips redundant re-review when nothing changed since the last pass."
+  unchanged_since_last_review: z.boolean().default(false),
+  existing_review_id: z.string().nullable().optional(),
+  // The branch that review ran against — often a DIFFERENT name pointing at the same
+  // commit, which is the case that makes an unexplained "nothing changed" confusing.
+  existing_review_branch: z.string().nullable().optional(),
 });
 export type PrepareResult = z.infer<typeof PrepareResult>;
 

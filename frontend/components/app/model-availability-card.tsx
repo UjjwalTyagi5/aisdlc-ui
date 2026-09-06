@@ -8,7 +8,7 @@ import { Building2, CheckCircle2, ChevronRight, Globe, KeyRound } from "lucide-r
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
-import { getModelAvailability } from "@/lib/api/models";
+import { getGrantedProviders, getModelAvailability } from "@/lib/api/models";
 import { qk } from "@/lib/api/query-keys";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import type { CatalogProvider, ModelAvailability } from "@/lib/schemas/model";
@@ -56,7 +56,15 @@ export function ModelAvailabilityCard({
     enabled: !!workspaceId,
   });
 
-  // Memoised because `ungranted` below depends on it: `q.data ?? []` produces
+  // Providers this unit HOLDS — including any granted with nothing curated under it
+  // yet, which `availability` (a per-model answer) structurally cannot report.
+  const grantedQ = useQuery({
+    queryKey: qk.model.grantedProviders(workspaceId),
+    queryFn: () => getGrantedProviders(workspaceId),
+    enabled: !!workspaceId,
+  });
+
+  // Memoised because `ungrantedProviders` below depends on it: `q.data ?? []` produces
   // a fresh array on every render when the query has no data, which would make
   // that memo recompute the whole catalogue diff each time.
   const rows = React.useMemo(() => q.data ?? [], [q.data]);
@@ -89,21 +97,46 @@ export function ModelAvailabilityCard({
    */
   const requestType = "model_provider_access";
 
-  const ungranted = React.useMemo(() => {
-    const held = new Set(rows.map((r) => `${r.provider}::${r.model_id}`));
-    // Deduped on the way out as well as filtered: a provider listing the same
-    // model_id twice would otherwise produce two identical "request this" rows
-    // for one model, which reads as two different models with one name.
+  /**
+   * PROVIDERS you could ask for, not models.
+   *
+   * This listed every ungranted MODEL — ~2,700 rows, each with its own "Request
+   * access" button, one governance request per model. That is not the grant an
+   * Organization Admin makes: they grant a PROVIDER to the unit and then curate which
+   * of its models the unit gets. So the long list asked for something the approval
+   * screen could not give, one row at a time.
+   *
+   * A provider is worth asking for when NOTHING from it currently reaches this unit.
+   * Once anything does, the provider is already granted and "we want more of its
+   * models" is a curation question for the Organization Admin, not another request.
+   */
+  const granted = React.useMemo(() => grantedQ.data ?? [], [grantedQ.data]);
+
+  /**
+   * GRANTED, BUT WITH NOTHING TO USE YET. The provider reached this unit — usually
+   * because a request was approved — and the Organization Admin has not yet chosen
+   * which of its models the unit gets. Naming that state is the difference between
+   * "my request did nothing" and "my request landed, one step left, and it isn't mine".
+   */
+  const awaitingCuration = React.useMemo(() => {
+    const labels = new Map(catalog.map((p) => [p.provider, p.label]));
+    return granted
+      .filter((g) => g.curatedCount === 0)
+      .map((g) => ({ provider: g.provider, label: labels.get(g.provider) ?? g.provider }));
+  }, [granted, catalog]);
+
+  const ungrantedProviders = React.useMemo(() => {
+    // Held, NOT "has models we can see". Keying this off the model list offered the
+    // unit a request for the provider it had just been granted, because a provider
+    // with nothing curated yet contributes no model rows.
+    const held = new Set(granted.map((g) => g.provider));
     const seen = new Set<string>();
-    return catalog.flatMap((p) =>
-      p.models.flatMap((m) => {
-        const key = `${p.provider}::${m.model_id}`;
-        if (held.has(key) || seen.has(key)) return [];
-        seen.add(key);
-        return [{ provider: p.provider, providerLabel: p.label, ...m }];
-      }),
-    );
-  }, [catalog, rows]);
+    return catalog.flatMap((p) => {
+      if (held.has(p.provider) || seen.has(p.provider)) return [];
+      seen.add(p.provider);
+      return [{ provider: p.provider, label: p.label, modelCount: p.models.length }];
+    });
+  }, [catalog, granted]);
 
   return (
     <Card className="border-line-soft bg-panel-elevated">
@@ -153,9 +186,9 @@ export function ModelAvailabilityCard({
             <p className="text-muted-foreground text-[12.5px]">
               Your Organization Admin hasn&apos;t granted this {BUSINESS_UNIT_LABEL.toLowerCase()}{" "}
               any models yet. Nothing can be onboarded or run until they do
-              {ungranted.length > 0 && " — the catalogue below is what you could ask for"}.
+              {ungrantedProviders.length > 0 && " — the providers below are what you could ask for"}.
             </p>
-            {ungranted.length === 0 &&
+            {ungrantedProviders.length === 0 &&
               (audience === "project" ? (
                 <Link
                   href="/projects"
@@ -205,27 +238,44 @@ export function ModelAvailabilityCard({
             behind a disclosure rather than inline: it is the longer list and
             the less important one, and expanding the answer to "what can we
             use" with forty things you can't would bury it. */}
-        {ungranted.length > 0 && (
+        {/* Granted, awaiting curation — above the "could ask for" list on purpose:
+            this is a provider the unit HAS, and the reason its models are missing is
+            an outstanding step by someone else, not a request still to raise. */}
+        {awaitingCuration.length > 0 && (
+          <ul className="border-line-soft divide-line-soft mt-4 divide-y rounded-xl border">
+            {awaitingCuration.map((p) => (
+              <li key={p.provider} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-3">
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{p.label}</span>
+                <Pill icon={Building2} tone="neutral" label="Granted to this business unit" />
+                <span className="text-muted-foreground shrink-0 text-[11px]">
+                  No models chosen yet — your Organization Admin picks which ones this{" "}
+                  {BUSINESS_UNIT_LABEL.toLowerCase()} gets.
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {ungrantedProviders.length > 0 && (
           <details className="border-line-soft group mt-4 rounded-xl border border-dashed">
             <summary className="text-muted-foreground hover:text-foreground flex cursor-pointer items-center gap-2 px-3 py-2.5 font-mono text-[11.5px] transition-colors">
               <ChevronRight
                 className="size-3.5 shrink-0 transition-transform group-open:rotate-90"
                 aria-hidden
               />
-              {ungranted.length} more {ungranted.length === 1 ? "model" : "models"} exist that{" "}
+              {ungrantedProviders.length}{" "}
+              {ungrantedProviders.length === 1 ? "provider" : "providers"} exist that{" "}
               {workspaceName} wasn&apos;t granted
             </summary>
             <ul className="divide-line-soft border-line-soft divide-y border-t">
-              {ungranted.map((m) => (
+              {ungrantedProviders.map((p) => (
                 <li
-                  key={`${m.provider}::${m.model_id}`}
+                  key={p.provider}
                   className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3 opacity-75 transition-opacity hover:opacity-100"
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                    {m.model_id}
-                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{p.label}</span>
                   <span className="text-muted-foreground shrink-0 font-mono text-[10.5px]">
-                    {m.providerLabel}
+                    {p.modelCount} {p.modelCount === 1 ? "model" : "models"}
                   </span>
                   {audience === "project" ? (
                     <Link
@@ -238,13 +288,13 @@ export function ModelAvailabilityCard({
                     <RequestAccessButton
                       prefill={{
                         type: requestType,
-                        title: `${m.label} access`,
-                        description: `Requesting ${m.label} (${m.providerLabel}) for ${workspaceName}. It isn't granted to us today.`,
+                        title: `${p.label} access`,
+                        description: `Requesting the ${p.label} provider for ${workspaceName}. It isn't granted to us today.`,
                         workspaceId,
-                        // Neither this component nor its caller ever holds a
-                        // specific `model_providers` row id — only the catalog
-                        // pair — so the provider/model pair IS the target.
-                        providerModel: { provider: m.provider, modelId: m.model_id },
+                        // Provider only, no modelId: this asks for the grant an
+                        // Organization Admin actually makes. Which of the provider's
+                        // models the unit then gets is theirs to curate afterwards.
+                        providerModel: { provider: p.provider },
                       }}
                     />
                   )}

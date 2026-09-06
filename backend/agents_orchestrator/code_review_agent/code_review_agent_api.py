@@ -132,7 +132,19 @@ async def _load_mcp_tools(tenant_id: str, project_id: str | None) -> list:
         return []
 
 
-async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: str) -> str:
+async def _stream(
+    state: dict, config: dict, websocket: WebSocket, session_id: str,
+    before_end=None,
+) -> str:
+    """Stream the graph's text to the client. `before_end` runs BEFORE `stream_end`.
+
+    ORDERING IS THE WHOLE POINT of that hook. `stream_end` is what flips the page out
+    of its busy state, and the page reacts by refetching the review list and opening
+    the newest one. Persisting after that signal is a race the UI loses every time:
+    it refetched, the row did not exist yet, so a review that HAD been saved correctly
+    still left the Summary/Findings tabs on "Diff ready — run the review". Persist
+    first, then say the turn is over.
+    """
     from langgraph.errors import GraphRecursionError
 
     final, got = "", False
@@ -162,6 +174,11 @@ async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: s
         logger.error("Code-review stream error: %s", e)
         if not got:
             raise
+    if before_end is not None:
+        try:
+            await before_end()
+        except Exception:  # noqa: BLE001 — a failed save must not strand the client
+            logger.exception("Code-review: before_end hook failed for session %s", session_id)
     await manager.send_personal_message(
         json.dumps({"type": "stream_end", "session_id": session_id}), websocket
     )
@@ -172,24 +189,23 @@ async def _persist_review_to_run(session_id: str, project_id: str | None, tenant
     s = get_session(session_id)
     if not s.last_artifact or not project_id or not tenant_id:
         return
-    from sqlalchemy import select
     from shared.models.orm import Run
 
     artifact = dict(s.last_artifact)
-    head = (artifact.get("context") or {}).get("head_sha", "")
+    # EVERY COMPLETED REVIEW IS SAVED, including a re-review of a commit already
+    # reviewed. This used to skip the insert when any run already carried this
+    # head_sha, which SILENTLY DISCARDED the review the reader had just deliberately
+    # run: the agent streamed a full review into the chat, nothing reached the
+    # Summary/Findings tabs, and no error said why. Re-running a review on an
+    # unchanged commit is a legitimate thing to ask for (a changed prompt, a
+    # different model, a second opinion), and the run history is the point of the
+    # Past reviews switcher.
+    #
+    # Idempotency never depended on that guard: `last_artifact` is falsy-checked
+    # above and cleared below, so the two call sites (WS and REST) cannot persist one
+    # artifact twice regardless of head_sha.
     try:
         async with get_db_session_for_tenant(tenant_id) as db:
-            if head:
-                existing = (
-                    await db.execute(
-                        select(Run).where(
-                            Run.project_id == uuid.UUID(project_id),
-                            Run.code_review_artifacts["context"]["head_sha"].astext == head,
-                        )
-                    )
-                ).scalars().first()
-                if existing:
-                    return
             db.add(
                 Run(
                     project_id=uuid.UUID(project_id),
@@ -305,22 +321,31 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 or "Please review the prepared change and submit your findings."
             )
 
+        # project_id is load-bearing for model resolution, not just for logging:
+        # resolve_model_for_run filters the tenant's offerings through
+        # effective_project_offerings(tenant, project), and a None project filters
+        # EVERY offering out ("grants configured but none apply to this project").
+        # This agent attaches AuditCallbackHandler directly rather than going through
+        # shared/observability/callbacks.py, which is the only thing that threads the
+        # run's project into the contextvar the resolver otherwise reads — so pass it
+        # explicitly instead of depending on a contextvar nothing here sets.
+        # offering_id likewise: AgentState has always declared it, but nothing filled it,
+        # so a project pinned to a specific provider connection was silently ignored.
+        _model_state = {
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "model_id": message_data.get("model_id"),
+            "offering_id": message_data.get("offering_id"),
+        }
+
         first = not s.system_injected
         if first:
             ctx = _review_context_block(s)
             content = (ctx + "\n" + user_text) if ctx else user_text
-            state = {
-                "messages": [HumanMessage(content=content)],
-                "tenant_id": tenant_id,
-                "model_id": message_data.get("model_id"),
-            }
+            state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
         else:
-            state = {
-                "messages": [HumanMessage(content=user_text)],
-                "tenant_id": tenant_id,
-                "model_id": message_data.get("model_id"),
-            }
+            state = {"messages": [HumanMessage(content=user_text)], **_model_state}
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="code_review", project_id=_project_id_from_message(message_data))
@@ -343,14 +368,20 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             "code_review", CODE_REVIEW_SYSTEM_PROMPT,
             tenant_id or s.tenant_id, project_id or s.project_id,
         )
+        # Saved BEFORE `stream_end` reaches the client — see `_stream`'s docstring. The
+        # page opens the newest review the moment it stops being busy, so the row has to
+        # exist by then or a correctly-saved review still shows as "Diff ready".
+        async def _save() -> None:
+            await _persist_review_to_run(
+                session_id, project_id or s.project_id, tenant_id or s.tenant_id
+            )
+
         try:
             async with prompt_override_scope("code_review", _injected):
                 async with skill_context_scope("code_review", _skills):
-                    await _stream(state, config, websocket, session_id)
+                    await _stream(state, config, websocket, session_id, before_end=_save)
         finally:
             clear_mcp_tools()
-
-        await _persist_review_to_run(session_id, project_id or s.project_id, tenant_id or s.tenant_id)
         await manager.broadcast({
             "type": "activity_update",
             "activity": {

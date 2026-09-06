@@ -6,8 +6,10 @@ describe("tileStateFor", () => {
     expect(tileStateFor("security_engineer", "security", "greenfield", ["security"])).toBe("owner");
   });
 
-  it("is 'use' when the role reaches but doesn't own the agent, and it's built", () => {
-    expect(tileStateFor("developer", "security", "greenfield", ["security"])).toBe("use");
+  it("is 'locked' when the role does not own the agent, even though it is built", () => {
+    // There is no `use` tier any more — reach IS ownership, so a Developer looking
+    // at Security gets the same locked tile as any other agent it does not own.
+    expect(tileStateFor("developer", "security", "greenfield", ["security"])).toBe("locked");
   });
 
   it("is 'locked' when the role has no reach, and the agent is built", () => {

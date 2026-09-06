@@ -127,6 +127,13 @@ export const ConnectorKind = z.enum([
   "azure_devops",
   "github",
   "azure_repos",
+  // Probed by the backend since the deployment agent's Azure Pipelines connector
+  // landed. Its absence here failed the WHOLE `GET /connectors` array — one
+  // unrecognised kind, and the Integrations page rendered nothing but
+  // SCHEMA_MISMATCH. Like `azure_repos`, it is Azure DevOps plumbing rather than a
+  // tile of its own, so it belongs here (the set the API accepts) and NOT in
+  // CONNECTOR_CATALOG_KINDS (the set the product presents).
+  "azure_pipelines",
   "github_actions",
   "slack",
   "ms_teams",

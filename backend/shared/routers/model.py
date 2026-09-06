@@ -572,6 +572,19 @@ async def get_availability_route(request: Request, workspaceId: str) -> list[dic
     return [_to_camel(e, *_CRED_KEYS) for e in entries]
 
 
+@model_availability_router.get("/granted-providers")
+async def get_granted_providers_route(request: Request, workspaceId: str) -> list[dict]:
+    """Providers this unit holds, with how many of their models it can see.
+
+    Separate from /availability rather than folded into it: that route answers per
+    MODEL, and a provider granted with nothing curated under it has no model rows to
+    carry the fact. Without this, "granted but not yet curated" and "never granted"
+    look identical to the unit — see get_granted_providers' own docstring.
+    """
+    entries = await mg.get_granted_providers(_tenant_id(request), workspaceId)
+    return [{"provider": e["provider"], "curatedCount": e["curated_count"]} for e in entries]
+
+
 @model_router.get("/grant-matrix")
 async def get_grant_matrix_route(request: Request) -> dict:
     matrix = await mg.get_grant_matrix(_tenant_id(request))

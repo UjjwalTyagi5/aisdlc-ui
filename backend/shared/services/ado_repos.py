@@ -270,10 +270,18 @@ async def list_pull_requests(
     pat: str | None = None,
     org_url: str | None = None,
     tenant_id: str = "",
+    *, project_id: str = "", owner_id: str = "",
 ) -> list[dict]:
     """Return open PRs for a repo as
-    [{id, title, source_branch, target_branch, created_by}]."""
-    base, pat = await _resolve(org_url, pat, tenant_id)
+    [{id, title, source_branch, target_branch, created_by}].
+
+    project_id/owner_id let this check a project-scoped personal credential first —
+    see resolve_auth's docstring. Without them a tenant whose only Azure DevOps
+    credential is a per-project personal one resolves to nothing and this raises
+    "Azure DevOps is not configured", even though the repo/branch pickers beside it
+    (list_repos, list_branches) find it and work.
+    """
+    base, pat = await _resolve(org_url, pat, tenant_id, project_id=project_id, owner_id=owner_id)
     repo_id = await _resolve_repo_id(project, repo_id_or_name, base, pat)
     if not repo_id:
         return []

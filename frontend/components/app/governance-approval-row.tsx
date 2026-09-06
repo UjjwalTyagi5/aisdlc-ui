@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, ShieldCheck } from "lucide-react";
@@ -47,12 +48,29 @@ export function GovernanceApprovalRow({
   onResolved: (id: string) => void;
 }) {
   const [assigning, setAssigning] = React.useState(false);
+  const router = useRouter();
   const decide = useMutation({
     mutationFn: (input: { decision: "approve" | "reject"; reason?: string }) =>
       decideGovernanceApproval(approval.id, input),
     onSuccess: (_data, vars) => {
-      toast.success(vars.decision === "approve" ? "Approved" : "Rejected");
+      // APPROVING A PROVIDER IS HALF THE JOB. The grant and the (keyless) connection
+      // land server-side, but a provider still reaches nobody until this admin curates
+      // which of its models the unit gets and a key is attached — and nothing on the
+      // approvals inbox says so. Landing them on that provider's own page is where
+      // both of those are done, so the request does not close into an apparent no-op.
+      const provider =
+        vars.decision === "approve" && approval.type === "model_provider_access"
+          ? ((approval.payload ?? {}) as { providerModel?: { provider?: string } })
+              .providerModel?.provider
+          : undefined;
+      toast.success(
+        vars.decision === "approve" ? "Approved" : "Rejected",
+        provider
+          ? { description: "Choose which of its models this business unit gets." }
+          : undefined,
+      );
       onResolved(approval.id);
+      if (provider) router.push(`/admin/models?curate=${encodeURIComponent(provider)}`);
     },
     onError: (err) =>
       toast.error("Couldn't submit decision", {

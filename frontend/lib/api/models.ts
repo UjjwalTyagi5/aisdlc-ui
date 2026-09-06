@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type GrantVisibility } from "@/lib/schemas/grant";
 import {
   CatalogProvider,
+  GrantedProvider,
   ModelAllowEntry,
   ModelAvailability,
   ModelGrantMatrix,
@@ -54,6 +55,13 @@ export const setBuModelGrants = (workspaceId: string, entries: ModelAllowEntry[]
 /** The same set, plus whether each model still needs a key at this level. */
 export const getModelAvailability = (workspaceId: string) =>
   api("/model/availability", { query: { workspaceId }, schema: z.array(ModelAvailability) });
+
+/** Providers this unit holds — including ones granted with no models curated yet. */
+export const getGrantedProviders = (workspaceId: string) =>
+  api("/model/granted-providers", {
+    query: { workspaceId },
+    schema: z.array(GrantedProvider),
+  });
 
 /** The last tier: what one project selected from what its BU was granted. */
 export const getProjectModelSelection = (projectId: string) =>

@@ -93,6 +93,21 @@ export const ModelAvailability = z.object({
 });
 export type ModelAvailability = z.infer<typeof ModelAvailability>;
 
+/**
+ * A provider this business unit HOLDS, and how many of its models it can see.
+ *
+ * `curatedCount === 0` is a real, nameable state: the provider was granted (usually
+ * by an approved request) but the Organization Admin has not chosen which of its
+ * models this unit gets. Without it, that is indistinguishable from never having been
+ * granted — which is how a unit ended up being offered the chance to request a
+ * provider it had just been given.
+ */
+export const GrantedProvider = z.object({
+  provider: ModelProviderKind,
+  curatedCount: z.number(),
+});
+export type GrantedProvider = z.infer<typeof GrantedProvider>;
+
 /** One Business Unit's standing against a single model. */
 export const ModelUnitAccess = z.object({
   id: z.string(),
@@ -260,7 +275,14 @@ export const VerifyResult = z.object({ id: z.string(), status: ModelProviderStat
 
 /** Stateless pre-save credential check (BU Admin's "Test" button, spec §5) — no
  *  provider row exists yet, so there's no `id` to carry, unlike `VerifyResult`. */
-export const ProbeResult = z.object({ status: ModelProviderStatus });
+/** `reason` is present only on failure — a short, user-facing diagnosis (wrong API
+ *  base, unreachable endpoint, model not on that endpoint) so the dialog can stop
+ *  reporting every failure as a rejected key. Optional: a backend that predates it
+ *  still parses. */
+export const ProbeResult = z.object({
+  status: ModelProviderStatus,
+  reason: z.string().nullish(),
+});
 
 export const ModelOption = z.object({
   /** Stable id of the exact provider connection + model. The unit of selection. */

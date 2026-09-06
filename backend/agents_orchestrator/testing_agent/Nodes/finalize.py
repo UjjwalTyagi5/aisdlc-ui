@@ -17,6 +17,7 @@ import base64
 import io
 import json
 import os
+import tempfile
 import shutil
 import stat
 from typing import Optional
@@ -312,14 +313,55 @@ async def package_final_reports(state: SuperAgentState):
     return result
 
 
+def _workspace_is_ours_to_delete(state: SuperAgentState, work_dir: str) -> bool:
+    """Only remove a workspace this agent created.
+
+    This node used to rmtree whatever `work_dir` pointed at. But the highest-priority
+    workspace source is one the agent did NOT create: the Copilot passes its shared
+    run clone (`ps.work_dir`) — the single checkout Code Review, Security, Deployment
+    and Documentation all read for that run — straight into this graph. Running the
+    testing stage therefore deleted the repo every later stage still needed, and the
+    stage that broke was never the stage that did it.
+
+    setup_workspace states ownership explicitly. When the flag is absent (a session
+    checkpointed before it existed), fall back to recognising this agent's own
+    handiwork: a directory directly inside the system temp root whose name carries a
+    prefix our `tempfile.mkdtemp` calls produce. "Somewhere under the temp root" is
+    NOT enough on its own — plenty of other tools put real directories there, and a
+    caller can legitimately hand us one. Anything unrecognised is left alone: a
+    leaked temp directory is recoverable, someone else's checkout is not.
+    """
+    flag = state.get("workspace_is_ephemeral")
+    if flag is not None:
+        return bool(flag)
+    try:
+        tmp_root = os.path.realpath(tempfile.gettempdir())
+        resolved = os.path.realpath(work_dir)
+        if os.path.dirname(resolved) != tmp_root:
+            return False
+        # "testing_agent_*" covers the named clone/api workspaces; "tmp*" is
+        # mkdtemp's own default prefix, used by the zip-extract path.
+        name = os.path.basename(resolved)
+        return name.startswith("testing_agent_") or name.startswith("tmp")
+    except Exception:  # noqa: BLE001 — different drive, unreadable path: not ours
+        return False
+
+
 async def cleanup_workspace(state: SuperAgentState):
     logger.info("Cleaning up workspace...")
-    blog("Cleaning up workspace...")
 
     work_dir = state.get('work_dir')
-    if work_dir and os.path.exists(work_dir):
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _rmtree, work_dir)
-        logger.info("Workspace cleaned up.")
-        blog("Workspace cleaned up successfully")
+    if not work_dir or not os.path.exists(work_dir):
+        return {}
+
+    if not _workspace_is_ours_to_delete(state, work_dir):
+        logger.info("Leaving caller-supplied workspace in place: %s", work_dir)
+        blog("Left the shared run workspace in place (this run did not create it)")
+        return {}
+
+    blog("Cleaning up workspace...")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _rmtree, work_dir)
+    logger.info("Workspace cleaned up.")
+    blog("Workspace cleaned up successfully")
     return {}

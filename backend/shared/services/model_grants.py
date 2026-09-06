@@ -330,6 +330,36 @@ async def get_availability(tenant_id: str, workspace_id: str) -> list[dict]:
     return out
 
 
+async def get_granted_providers(tenant_id: str, workspace_id: str) -> list[dict]:
+    """Which providers this unit HOLDS, and how many of their models it can actually see.
+
+    THE STATE THAT HAD NO NAME. `get_availability` answers per MODEL, so a provider
+    granted to a unit with nothing curated under it yet produced an empty list —
+    indistinguishable, on the unit's own Models page, from never having been granted at
+    all. A Business Unit Admin whose request had just been approved saw their page
+    unchanged, and (because "no models" was read as "not granted") was offered the
+    chance to request the very provider they had just been given.
+
+    `curated_count` is what separates the two: 0 means "granted, waiting on the
+    Organization Admin to choose models", above 0 means the models are listed already.
+    """
+    granted: set[str] = set()
+    if _is_valid_uuid(workspace_id):
+        async with get_db_session_for_tenant(tenant_id) as s:
+            granted = await granted_target_refs(
+                s, tenant_id=tenant_id, workspace_id=workspace_id, kind="model_provider",
+            )
+    if not granted:
+        return []
+    allowed = await get_bu_allowed(tenant_id, workspace_id)
+    counts: dict[str, int] = {}
+    for e in allowed:
+        counts[e["provider"]] = counts.get(e["provider"], 0) + 1
+    return [
+        {"provider": p, "curated_count": counts.get(p, 0)} for p in sorted(granted)
+    ]
+
+
 async def _project_workspace_id(tenant_id: str, project_id: str) -> str:
     from sqlalchemy.exc import DBAPIError  # noqa: PLC0415
 

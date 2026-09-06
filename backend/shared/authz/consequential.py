@@ -80,6 +80,8 @@ def _owner_label(stage: str) -> str:
     return {
         "ba": "a Business Analyst",
         "architect": "an Architect",
+        # Owns the Development gate since "One agent, one role".
+        "developer": "a Developer",
         "qa": "a QA engineer",
         "security_engineer": "a Security engineer",
         "devops_engineer": "a DevOps engineer",

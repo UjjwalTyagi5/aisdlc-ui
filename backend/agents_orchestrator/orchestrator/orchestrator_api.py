@@ -1019,11 +1019,15 @@ async def decide_stage(state: OrchestratorState) -> OrchestratorState:
     # Same pattern as copilot_api.py's ChatLiteLLM import.
     from langchain_litellm import ChatLiteLLM
 
+    from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
     _orch_llm = ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
         api_base=resolved.base_url,
         api_key=resolved.api_key,
+        # The BYOK key must be the one litellm uses — see
+        # shared/services/model_resolver.litellm_key_kwargs.
+        **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
         temperature=0,
         max_tokens=4096,
     )

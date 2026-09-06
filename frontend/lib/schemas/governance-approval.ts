@@ -314,7 +314,15 @@ export const RequestCreateInput = z.object({
   accessLevel: z.string().max(16).optional(),
   /** model_credential's target: a project's ask needs both a provider and a
    *  model id. */
-  providerModel: z.object({ provider: z.string(), modelId: z.string() }).optional(),
+  // `modelId` is optional because a request can name a PROVIDER on its own.
+  // Asking per model meant a Business Unit Admin picking one row out of ~2,700
+  // "Request access" buttons, one request per model; asking for the provider is the
+  // grant the Organization Admin actually makes, after which they curate which of
+  // that provider's models the unit gets. The effect grants the named model too when
+  // one is given (shared/governance/effects.py::_apply_model_provider_access).
+  providerModel: z
+    .object({ provider: z.string(), modelId: z.string().optional() })
+    .optional(),
   /** user_onboarding's target: who is being asked about. */
   onboardEmail: z.string().email().optional(),
 });
