@@ -239,6 +239,63 @@ async def get_run_artifacts(
     return {"artifacts": sections_from_run(run)}
 
 
+@runs_router.get("/{run_id}/deliverables")
+async def get_run_deliverables(
+    run_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Panel-ready deliverables for an Orchestrator run (reload/replay). Tenant-scoped.
+
+    NOT `/artifacts`. That endpoint reads the run's `*_artifacts` columns, which the
+    STANDALONE agents write and which carry an approval concept. The Orchestrator's
+    agents share their names and capability and are a different thing; their output
+    lives in `orchestrator_deliverables` and is never gated, because the person
+    driving it is a Project Admin who already owns all nine agents.
+
+    Resolved through `_get_run_or_404` like every other route in this module, so the
+    tenant filter and the caller-scope check are not things this endpoint could
+    forget on its own. The deliverables read is scoped to the CALLER's tenant, not
+    the run's: reading with `run.tenant_id` would make the query agree with whatever
+    row came back, laundering a scoping bug upstream into a successful cross-tenant
+    read instead of an empty one.
+    """
+    tenant_id = request.state.tenant_id
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
+
+    from agents_orchestrator.orchestrator2.deliverables import (
+        deliverables_for_run,
+        pointers_for_run,
+    )
+    from agents_orchestrator.orchestrator2.registry import AGENT_IDS
+
+    dev_artifacts = getattr(run, "development_artifacts", None)
+
+    # Which agents actually wrote files to disk. Checked HERE rather than inside
+    # `pointers_for_run`, which stays pure: this is the only layer that can look at
+    # the disk. An agent that generated nothing gets no tree, because an empty tree
+    # reads as a pull that failed rather than as a stage with no files.
+    stages_with_files: set[str] = set()
+    for agent_id in AGENT_IDS:
+        if agent_id == "development":
+            continue  # already covered by its own code-tree pointer
+        try:
+            directory = await _run_stage_output_dir(
+                str(run.id), agent_id,
+                development_artifacts=dev_artifacts,
+                tenant_id=str(tenant_id),
+                project_id=str(run.project_id) if run.project_id else None,
+            )
+        except Exception:  # noqa: BLE001 - a missing tree must not fail the whole read
+            continue
+        if directory and os.path.isdir(directory) and os.listdir(directory):
+            stages_with_files.add(agent_id)
+
+    stored = await deliverables_for_run(str(run.id), str(tenant_id))
+    pointers = pointers_for_run(dev_artifacts, stages_with_files)
+    return {"deliverables": stored + pointers}
+
+
 @runs_router.get("/{run_id}/transcript")
 async def get_run_transcript(
     run_id: str,
