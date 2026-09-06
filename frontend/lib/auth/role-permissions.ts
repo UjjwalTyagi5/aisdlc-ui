@@ -82,6 +82,11 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "agent:invoke",
     "approve",
     "artifact:approve_requirements",
+    // AGENT_OWNER_ROLE.documentation moved to `ba` when the ownership table became
+    // one-agent-one-role. Without the matching permission the gate would route to a
+    // role that cannot pass it — a sign-off addressed to someone who can only look
+    // at it. `permission-catalog.test.ts` fails on exactly that.
+    "artifact:approve_documentation",
     "connector:view",
     // AGENT_OWNER_ROLE.requirements is `ba`, so this role is stage two's approver
     // for an agent_access request on that phase. Scoped by the backend decide()'s
@@ -126,6 +131,15 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "artifact:export",
     "artifact:delete",
     "agent:invoke",
+    // AGENT_OWNER_ROLE.development moved here from `architect`, which no longer
+    // reaches the Development agent under one-agent-one-role. The gate has to be
+    // passable by the role that owns it.
+    //
+    // This DOES remove the old role-level split where the Architect approved what
+    // the Developer built. Per-PERSON self-approval prevention still applies
+    // (§14.6) — the individual who ran the action cannot approve their own, so it
+    // goes to another developer or to the Project Admin fallback.
+    "artifact:approve_development",
     "connector:view",
     "skill:edit",
   ],

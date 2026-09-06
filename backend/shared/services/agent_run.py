@@ -51,6 +51,42 @@ class AgentRunScope:
 _BOARD_KINDS = ("azure_devops", "jira", "github_issues", "linear")
 
 
+#: Credential field names across board connectors — ADO returns `pat`, Jira `token`.
+#: Used only to answer "did this connector resolve a credential at all"; the value is
+#: never read, logged or returned.
+_CREDENTIAL_FIELDS = ("pat", "token", "api_key", "password")
+
+
+async def _board_is_credentialed(
+    kind: str, tenant_id: str, project_id: str, owner_id: str
+) -> bool:
+    """Can this board connector actually authenticate for this caller?
+
+    Asks the connector itself rather than re-implementing resolution, so every rung it
+    supports counts — the person's own project credential, the tenant secret store and
+    Key Vault — and a connector that gains a new rung needs no change here.
+
+    `unrestricted=True` because this asks only whether a credential EXISTS. Nothing is
+    called with the result; the connector that actually gets injected is built through
+    the normal access-gated path.
+
+    Fail-soft: an error resolving one board must not stop a chat turn, so it reads as
+    "not credentialed" and the caller falls back to the static preference.
+    """
+    try:
+        from config.connector_factory import get_connector_for_session  # noqa: PLC0415
+
+        connector = await get_connector_for_session(
+            kind=kind, tenant_id=tenant_id, project_id=project_id,
+            owner_id=owner_id, unrestricted=True,
+        )
+        adapter = await connector.auth_adapter(tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("board credential probe failed for %s: %s", kind, type(exc).__name__)
+        return False
+    return any(adapter.get(field) for field in _CREDENTIAL_FIELDS)
+
+
 def _pick_board_kind(assigned: list[str]) -> Optional[str]:
     """Choose one board kind from a stage's assigned list, or None if empty.
 
@@ -60,6 +96,39 @@ def _pick_board_kind(assigned: list[str]) -> Optional[str]:
     """
     non_ado = [k for k in assigned if k != "azure_devops"]
     return (non_ado or assigned or [None])[0]
+
+
+async def _pick_usable_board_kind(
+    assigned: list[str], tenant_id: str, project_id: str, owner_id: str
+) -> Optional[str]:
+    """`_pick_board_kind`, but only among boards that can actually authenticate.
+
+    A STATIC PREFERENCE CAN CHOOSE A BOARD NOBODY CONNECTED. A project with both Azure
+    DevOps and Jira wired to a stage resolved to Jira by the rule above, whichever one
+    the team had actually credentialed — so a member who had connected ADO, and tested
+    it green on the Integrations page, watched every board call fail with
+    `UnsupportedProtocol`: httpx being handed the empty URL of a Jira connector that
+    was never configured. The preference was right about which board to favour and
+    wrong to apply it to a board that cannot be used.
+
+    Among boards that DO authenticate the original preference still decides, so a
+    project with both connected keeps resolving to Jira. When none is credentialed the
+    answer is unchanged too — the stage's declared board, so the failure stays "connect
+    this board" rather than silently becoming a different one.
+    """
+    if len(assigned) < 2 or not (tenant_id and project_id):
+        return _pick_board_kind(assigned)
+
+    usable = [
+        kind for kind in assigned
+        if await _board_is_credentialed(kind, tenant_id, project_id, owner_id or "")
+    ]
+    if usable and len(usable) != len(assigned):
+        logger.info(
+            "board selection: %s of %s are credentialed — choosing among those",
+            usable, assigned,
+        )
+    return _pick_board_kind(usable or assigned)
 
 
 async def stage_board_kinds(
@@ -98,7 +167,8 @@ async def stage_board_kinds(
 
 
 async def _stage_board_kind(
-    tenant_id: Optional[str], project_id: Optional[str], agent_id: str
+    tenant_id: Optional[str], project_id: Optional[str], agent_id: str,
+    owner_id: Optional[str] = None,
 ) -> Optional[str]:
     """Board connector kind the project assigned to this stage (jira/azure_devops/…),
     or None when the stage has no board assigned.
@@ -123,13 +193,17 @@ async def _stage_board_kind(
             conns = (getattr(project, "connectors", None) if project else None) or {}
             assigned = [k for k in (conns.get(agent_id) or []) if k in _BOARD_KINDS]
             legacy = getattr(project, "provider_kind", None) if project else None
-            kind = _pick_board_kind(assigned)
-            logger.info(
-                "agent_run_scope: stage=%s resolved board kind=%s "
-                "(connectors[%s]=%s, legacy provider_kind=%s ignored)",
-                agent_id, kind, agent_id, conns.get(agent_id), legacy,
-            )
-            return kind
+        # OUTSIDE the session: the credential probe opens its own, and holding this
+        # one across it would nest two sessions for the same tenant.
+        kind = await _pick_usable_board_kind(
+            assigned, str(tenant_id or ""), str(project_id or ""), str(owner_id or ""),
+        )
+        logger.info(
+            "agent_run_scope: stage=%s resolved board kind=%s "
+            "(connectors[%s]=%s, legacy provider_kind=%s ignored)",
+            agent_id, kind, agent_id, conns.get(agent_id), legacy,
+        )
+        return kind
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "agent_run_scope: board-kind lookup failed (project=%s agent=%s): %s — "
@@ -172,7 +246,10 @@ async def agent_run_scope(
         # tools target the same board the Pull-stories UI does. When the stage has no
         # board assigned, inject nothing (no azure_devops fallback): board tools then
         # fail closed with a "connect a board" message rather than hitting ADO.
-        kind = await _stage_board_kind(tenant_id, project_id, agent_id)
+        # owner_id: which of the stage's boards this PERSON can authenticate against.
+        # A stage with two boards used to resolve by a static preference that could
+        # name one nobody had connected.
+        kind = await _stage_board_kind(tenant_id, project_id, agent_id, owner_id)
         if kind:
             try:
                 # Bound to this project's effective access (unit grant ∩ project

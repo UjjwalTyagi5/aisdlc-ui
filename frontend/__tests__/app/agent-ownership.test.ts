@@ -43,61 +43,59 @@ describe("AGENT_OWNERSHIP invariants", () => {
     }
   });
 
-  it("Documentation stays reachable by every delivery role except security_engineer", () => {
-    // Its acceptance is automatic and every role writes into it — the one
-    // genuinely shared surface, and the easiest to lose to an over-zealous
-    // narrowing. Security Engineer is excepted by the PRD (§14.7).
+  it("a delivery role reaches ONLY the agents it owns", () => {
+    // The rule the table was rewritten around: there is no `use` tier any more, so
+    // "reaches" and "owns" are the same set. A role that reaches an agent it does
+    // not own means the softer tier crept back in.
     for (const role of DELIVERY_ROLES) {
-      if (role === "security_engineer") continue;
-      expect(roleReachesAgent(role, "documentation"), `${role} lost Documentation`).toBe(
-        true,
-      );
+      for (const phase of roleAgentSplit(role).reachable) {
+        expect(
+          AGENT_OWNER_ROLE[phase],
+          `${role} reaches ${phase} without owning it`,
+        ).toBe(role);
+      }
     }
   });
 
   it("no delivery role reaches every agent — least privilege actually bites", () => {
-    // Guards the regression this table was rewritten to fix: roles composed
-    // from ALL_USE reached all thirteen, so "locked" was always empty and
-    // every access affordance built on it was dead UI.
+    // Guards the regression this table was rewritten to fix: roles composed from
+    // ALL_USE reached all thirteen, so "locked" was always empty and every access
+    // affordance built on it was dead UI.
     for (const role of DELIVERY_ROLES) {
       const { locked } = roleAgentSplit(role);
       expect(locked.length, `${role} reaches every agent`).toBeGreaterThan(0);
     }
   });
 
-  it("holds the roles that were specified explicitly", () => {
+  it("holds the agreed owner of each agent", () => {
+    // The matrix as specified: Project Admin everything; Project Manager Plan; BA
+    // Requirements + Documentation; Architect Design + Code Review; Developer
+    // Development; QA Testing; Security Engineer Security; DevOps Deployment.
     const reach = (role: PlatformRole) => roleAgentSplit(role).reachable.sort();
 
-    expect(reach("ba")).toEqual(
-      ["requirements", "design", "plan", "development", "review", "security", "testing", "deployment", "documentation"].sort(),
-    );
-    expect(reach("developer")).toEqual(
-      ["requirements", "plan", "development", "review", "security", "testing", "documentation"].sort(),
-    );
-    expect(reach("qa")).toEqual(
-      ["requirements", "plan", "development", "security", "testing", "documentation", "validation"].sort(),
-    );
-    expect(reach("devops_engineer")).toEqual(
-      ["development", "security", "testing", "deployment", "documentation"].sort(),
-    );
-    // Architect additionally holds `review` and the three modernization-track
-    // agents BECAUSE IT OWNS THEM — see the note in lib/roles.ts.
+    expect(reach("ba")).toEqual(["documentation", "requirements"]);
+    expect(reach("developer")).toEqual(["development"]);
+    expect(reach("qa")).toEqual(["testing", "validation"].sort());
+    expect(reach("security_engineer")).toEqual(["security"]);
+    expect(reach("devops_engineer")).toEqual(["deployment"]);
+    expect(reach("scrum_master")).toEqual(["plan"]);
+    expect(reach("data_engineer")).toEqual(["data_engineering"]);
+    // Architect holds the two greenfield agents plus the three modernization-track
+    // ones it owns; those never appear on a Track 1 project.
     expect(reach("architect")).toEqual(
-      [
-        "requirements",
-        "design",
-        "plan",
-        "development",
-        "review",
-        "security",
-        "testing",
-        "deployment",
-        "documentation",
-        "discovery",
-        "strategy",
-        "migration_mapping",
-      ].sort(),
+      ["design", "review", "discovery", "strategy", "migration_mapping"].sort(),
     );
+  });
+
+  it("every agent has exactly one delivery owner, so none is unreachable", () => {
+    // With reach == ownership, an agent whose owner is a governance role or is
+    // missing would be openable by nobody except the Project Admin fallback.
+    for (const phase of PHASE_ORDER) {
+      const owner = AGENT_OWNER_ROLE[phase];
+      expect(NO_AGENT_ROLES, `${PHASE_LABEL[phase]} owned by a no-access role`)
+        .not.toContain(owner);
+      expect(roleReachesAgent(owner, phase)).toBe(true);
+    }
   });
 
   it("keeps the governance tier and custom at no access", () => {

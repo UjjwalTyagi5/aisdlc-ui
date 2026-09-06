@@ -26,24 +26,46 @@ def test_every_portfolio_1_agent_has_a_default_reach_row():
         assert agent_id in AGENT_REGISTRY
 
 
-def test_ba_owns_requirements_and_uses_everything_else_in_portfolio_1():
+def test_ba_owns_requirements_and_documentation_and_reaches_nothing_else():
+    """One agent, one role. The `use` tier that let a BA open all nine is gone —
+    extra access is granted per person per project instead."""
     row = {a: AGENT_DEFAULT_REACH[a]["ba"] for a in _PORTFOLIO_1}
     assert row == {
-        "requirements": "owner", "design": "use", "plan": "use", "development": "use",
-        "code_review": "use", "security": "use", "testing": "use",
-        "deployment": "use", "documentation": "use",
+        "requirements": "owner", "documentation": "owner",
+        "design": "none", "plan": "none", "development": "none",
+        "code_review": "none", "security": "none", "testing": "none",
+        "deployment": "none",
     }
 
 
-def test_security_engineer_owns_only_security_and_reaches_six_others():
+def test_security_engineer_owns_only_security():
     row = {a: AGENT_DEFAULT_REACH[a]["security_engineer"] for a in _PORTFOLIO_1}
     assert row == {
-        "requirements": "use", "design": "use", "development": "use",
-        # The planner schedules work; a security engineer neither owns nor drives it.
-        "plan": "none",
-        "code_review": "use", "security": "owner", "testing": "none",
-        "deployment": "use", "documentation": "none",
+        "security": "owner",
+        "requirements": "none", "design": "none", "development": "none",
+        "plan": "none", "code_review": "none", "testing": "none",
+        "deployment": "none", "documentation": "none",
     }
+
+
+def test_every_delivery_role_reaches_only_what_it_owns():
+    """The property the whole table now rests on. A role with reach on an agent it
+    does not own means the `use` tier crept back in under another name."""
+    owners = {
+        "requirements": "ba", "documentation": "ba",
+        "design": "architect", "code_review": "architect",
+        "development": "developer", "testing": "qa",
+        "security": "security_engineer", "deployment": "devops_engineer",
+        "plan": "scrum_master",
+    }
+    for agent_id, reach in AGENT_DEFAULT_REACH.items():
+        for role, involvement in reach.items():
+            if role == "project_admin":
+                continue  # universal fallback approver, owner everywhere by design
+            expected = "owner" if owners[agent_id] == role else "none"
+            assert involvement == expected, (
+                f"{agent_id}.{role} is {involvement!r}, expected {expected!r}"
+            )
 
 
 def test_devops_engineer_has_no_default_reach_to_requirements_design_or_code_review():

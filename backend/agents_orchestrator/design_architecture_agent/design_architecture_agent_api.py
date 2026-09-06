@@ -45,6 +45,10 @@ from config.ws_helper import broadcast_log, set_session_id, set_user_id, set_pro
 from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.db import get_db_session_for_tenant
 from shared.errors import classify_error
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from shared.models.design import parse_artifact_sections
 from shared.audit import AuditCallbackHandler
 from shared.observability import langfuse_langchain_extras
@@ -299,50 +303,15 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         "tenant_id": tenant_id,
         "model_id": message_data.get("model_id"),
     }
-    # Chat attachments (uploaded via POST /conversations/{id}/attachments) arrive as paths
-    # in pipeline_context.attachments — pass them to the agent's file tools.
+    # Chat attachments (POST /conversations/{id}/attachments) arrive as paths on
+    # pipeline_context.attachments; uploads on this socket are saved above. Both are
+    # extracted server-side — see document_tools.attachment_message_contents for why,
+    # and for the Plan route that silently dropped every attachment without it.
     _attachments = pipeline_context.get("attachments") if isinstance(pipeline_context, dict) else None
-    _attach_paths = [a.get("path") for a in (_attachments or []) if isinstance(a, dict) and a.get("path")]
-    _all_files = file_names + _attach_paths
-    if _all_files:
-        # Read attachment content SERVER-SIDE and inject it directly, rather than only
-        # passing paths and hoping the agent calls read_document (which can silently skip,
-        # or fail on a Windows path mangled through the LLM tool-call). Falls back to the
-        # path hint when a file can't be read.
-        from shared.tools.document_tools import (  # noqa: PLC0415
-            extract_file_text as _extract,
-            extraction_succeeded as _extracted_ok,
-        )
-        _parts, _unread = [], []
-        for _p in _all_files:
-            try:
-                _txt = _extract(_p)
-            except Exception:  # noqa: BLE001 — best-effort; degrade to the path hint
-                _txt = ""
-            # NOT `if _txt` — extraction returns a non-empty PLACEHOLDER on failure.
-            # See the same block in requirements_agent_api for the failure it caused.
-            if _extracted_ok(_txt):
-                _parts.append(f"--- Attached file: {os.path.basename(_p)} ---\n{_txt.strip()[:20000]}")
-            else:
-                _unread.append(_p)
-        if _parts:
-            state["messages"].append(HumanMessage(
-                content="The user attached the following file(s); use their content directly:\n\n"
-                        + "\n\n".join(_parts)))
-        if _unread:
-            # Name the limit instead of handing over a path the file tools cannot read
-            # either. Design is more exposed to this than Requirements — people attach
-            # screenshots of diagrams and wireframes to it constantly.
-            _names = ", ".join(os.path.basename(_u) for _u in _unread)
-            state["messages"].append(HumanMessage(
-                content=(
-                    f"The user attached {_names}, which could not be read as text — it "
-                    "is an image or an unsupported format. You CANNOT open it: do not "
-                    "call a file tool on it, and do not claim to have looked at it. "
-                    "Tell the user you cannot read that file type and ask them to paste "
-                    "the relevant text, or re-upload as .pdf, .docx, .txt, .md, .csv "
-                    "or .xlsx."
-                )))
+    for _content in attachment_message_contents(
+        file_names + attachment_paths_from_context(pipeline_context)
+    ):
+        state["messages"].append(HumanMessage(content=_content))
 
     await manager.broadcast({"type": "message_received", "session_id": session_id, "message": "Processing your request..."})
 

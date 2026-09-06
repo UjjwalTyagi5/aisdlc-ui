@@ -341,6 +341,44 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     logger.addHandler(console_handler)
 
 
+
+async def _stash_byok_model(tenant_id: str | None, project_id: str | None,
+                            previous_state: dict | None) -> str:
+    """Resolve the run's BYOK model and stash it on the contextvar before the graph runs.
+
+    BOTH CHAT ENTRYPOINTS SKIPPED THIS ENTIRELY. They call `_testing_app.invoke`
+    directly rather than going through `run_super_agent_async`, which is the only
+    place that resolved and stashed a model — so every node's `build_llm` found an
+    empty contextvar and dropped to the local `.env` Anthropic key. The org's
+    verified provider was never used, no usage was metered against its offering and
+    no budget gate applied, on a run the org believes is governed.
+
+    project_id is not optional detail either: once a tenant has any org_model_grants
+    row, effective_project_offerings matches nothing without a project and reports
+    "no model configured" for an org that has one.
+
+    Returns the alias for the log. On a resolver error it returns "" and leaves the
+    contextvar unset, preserving each node's existing fail-closed behaviour instead
+    of failing the whole request here.
+    """
+    from shared.services.model_resolver import (
+        ModelNotEnabledError, NoModelConfiguredError, resolve_model_for_run,
+        set_resolved_model,
+    )
+    st = previous_state or {}
+    try:
+        resolved = await resolve_model_for_run(
+            tenant_id or "", st.get("model_id"),
+            offering_id=st.get("offering_id"), project_id=project_id or None,
+        )
+    except (NoModelConfiguredError, ModelNotEnabledError) as exc:
+        logger.warning("testing: BYOK model resolution failed (tenant=%s project=%s): %s",
+                       tenant_id, project_id, type(exc).__name__)
+        return ""
+    set_resolved_model(resolved)
+    return resolved.alias
+
+
 def process_agent_stream_for_chat_display(final_state, *, orchestrator_driven: bool = True):
     """Process agent output for chat display - adapted for super_agent.
 
@@ -750,6 +788,20 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
         previous_state = dict(previous_state or {})
         if tenant_id:
             previous_state["tenant_id"] = tenant_id
+        # PROJECT AND PERSON, NOT JUST TENANT. Azure DevOps credentials are stored per
+        # person per project (`project_integration_credentials`); the tenant-wide shared
+        # fallback was deliberately removed. Resolving with a tenant alone therefore
+        # finds nothing and the clone reports "the Azure DevOps connector is not
+        # configured" on an organization where it plainly is — which is what a standalone
+        # unit-test run did. The dev and code-review workspaces already pass all three.
+        _ws_project_id = (
+            _early_project_id
+            or (parsed_pipeline_context.get("project_id") if isinstance(parsed_pipeline_context, dict) else None)
+        )
+        if _ws_project_id:
+            previous_state["project_id"] = _ws_project_id
+        if user_id:
+            previous_state["owner_id"] = user_id
 
         _lf_pid = parsed_pipeline_context.get("project_id") if isinstance(parsed_pipeline_context, dict) else None
         _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
@@ -766,6 +818,10 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
         _mcp_tools = await _load_testing_mcp_tools(tenant_id, _project_id)
         set_mcp_tools(_mcp_tools)
         try:
+            _alias = await _stash_byok_model(tenant_id, _project_id, previous_state)
+            if _alias:
+                logger.info("testing: using BYOK model %s", _alias)
+            # to_thread copies the current context, so the stashed model travels with it.
             final_state = await asyncio.to_thread(
                 _testing_app.invoke,
                 _initial_ws,
@@ -1186,7 +1242,19 @@ async def chat(
         # and invoke _testing_app directly so we can pass config["callbacks"].
         # Same thread-isolation pattern as the WS handler (avoids event-loop poisoning).
         _lf_pid_rest = parsed_pipeline_context.get("project_id") if isinstance(parsed_pipeline_context, dict) else None
-        _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id="")
+        # The REST path threaded NONE of these — not even the tenant, which the WS path
+        # has always set. A run started here could not resolve the Azure DevOps
+        # connector at all, so every standalone clone failed with "not configured"
+        # regardless of how the organization was set up. Same three values, same reason
+        # as the WS path above: credentials are per person, per project.
+        previous_state = dict(previous_state or {})
+        if real_tenant_id:
+            previous_state["tenant_id"] = real_tenant_id
+        if _lf_pid_rest:
+            previous_state["project_id"] = _lf_pid_rest
+        if real_user_id:
+            previous_state["owner_id"] = real_user_id
+        _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
         _lf_cbs_rest, _lf_meta_rest = langfuse_langchain_extras(session_id=session_id, agent_type="testing", project_id=_lf_pid_rest)
         from agents_orchestrator.testing_agent.agents.testing_agent import _initial_state as _build_initial_rest
         _initial_rest = _build_initial_rest(
@@ -1194,6 +1262,9 @@ async def chat(
             input_file_path,
             previous_state if previous_state else None,
         )
+        _alias_rest = await _stash_byok_model(real_tenant_id, _lf_pid_rest, previous_state)
+        if _alias_rest:
+            logger.info("testing: using BYOK model %s", _alias_rest)
         final_state = await asyncio.to_thread(
             _testing_app.invoke,
             _initial_rest,
