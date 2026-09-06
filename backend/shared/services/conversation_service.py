@@ -217,13 +217,21 @@ async def ensure_session_with_id(
     run_id: Optional[str] = None,
     project_id: Optional[uuid.UUID] = None,
     created_by: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> None:
     """Idempotently ensure a ConversationSession exists with id == session_id.
 
-    Unlike create_session (which mints its own uuid), this pins the row's primary key
-    to a caller-chosen id — needed by the Copilot, whose session_id IS the run_id
-    (graph thread, ws_helper, persist_turn all key off run_id). Without this row the
-    conversation_messages FK has nothing to reference and every persist_turn fails.
+    Unlike create_session (which mints its own uuid), this pins the row's primary key to
+    a caller-chosen id. The Copilot needed that because its session_id WAS the run_id;
+    Phase 5 retired the Copilot and the Orchestrator inherited the same shape, for the
+    same reason — one conversation is one run, so the graph thread, the deliverables and
+    the transcript all key off a single id. Without this row the conversation_messages
+    FK has nothing to reference and every persist_turn silently fails.
+
+    `agent_id` and `title` are what the history rail lists and labels by; a session
+    written without them exists but cannot be found or read in a list of chats.
+
     Best-effort: swallows all errors so a persistence miss never blocks the socket."""
     if not (session_id and tenant_id):
         return
@@ -246,6 +254,8 @@ async def ensure_session_with_id(
                 run_id=run_id,
                 project_id=project_id,
                 created_by=created_by,
+                agent_id=agent_id,
+                title=title,
                 status="active",
             ))
             await session.flush()

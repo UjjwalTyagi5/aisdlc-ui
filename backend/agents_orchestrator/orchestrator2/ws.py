@@ -86,6 +86,7 @@ from typing import Any, NamedTuple, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from agents_orchestrator.orchestrator2.context import handoff_context
+from agents_orchestrator.orchestrator2 import sessions
 from agents_orchestrator.orchestrator2.dispatch import run_agent
 from agents_orchestrator.orchestrator2.router import (
     _HISTORY_LIMIT as _ROUTER_HISTORY_LIMIT,
@@ -684,6 +685,24 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 await _fail(websocket, "That run is not available.")
                 continue
 
+            # The conversation row this run's transcript hangs off. AFTER the run and
+            # the per-project check are verified, so a refused turn never creates one,
+            # and BEFORE the first `record_turn`, because conversation_messages has a
+            # foreign key to it and every persist would otherwise fail silently.
+            #
+            # Idempotent, so calling it every turn costs a no-op read and removes the
+            # need to track "have I created it yet" on a socket that can reconnect
+            # mid-conversation.
+            await sessions.ensure_session(
+                run_id,
+                tenant_id=tenant_id,
+                # From the verified `runs` row, like every other project-scoped value
+                # on this path. Never from the client frame.
+                project_id=project_id,
+                user_id=user_id,
+                first_message=text,
+            )
+
             try:
                 if override_agent:
                     agent_id = override_agent
@@ -713,6 +732,17 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # user no agent ran.
                         _remember(history, "user", text)
                         _remember(history, "agent", decision.direct_reply or "")
+                        # A direct answer is still part of the conversation. Skipping
+                        # it here would leave a reopened chat with the user's question
+                        # and no reply, which reads as a turn that failed.
+                        await sessions.record_turn(
+                            run_id, "user", text,
+                            tenant_id=tenant_id, user_id=user_id,
+                        )
+                        await sessions.record_turn(
+                            run_id, "agent", decision.direct_reply or "",
+                            tenant_id=tenant_id, user_id=user_id,
+                        )
                         await _send(websocket, {
                             "type": "stream_chunk",
                             "content": decision.direct_reply or "",
@@ -730,6 +760,9 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 context = await handoff_context(run_id, tenant_id, agent_id)
 
                 _remember(history, "user", text)
+                await sessions.record_turn(
+                    run_id, "user", text, tenant_id=tenant_id, user_id=user_id,
+                )
                 reply_text: list[str] = []
 
                 # `aclosing` is not decoration. `run_agent` is an async generator
@@ -774,6 +807,12 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                             reply_text.append(str(event.get("content") or ""))
                         await _send(websocket, event)
                 _remember(history, "agent", "".join(reply_text))
+                # The same string `_remember` keeps — which is accumulated from the
+                # EVENTS, so what is stored is exactly what the user saw.
+                await sessions.record_turn(
+                    run_id, "agent", "".join(reply_text),
+                    tenant_id=tenant_id, user_id=user_id,
+                )
             except WebSocketDisconnect:
                 raise
             except EventSerializationError as exc:
