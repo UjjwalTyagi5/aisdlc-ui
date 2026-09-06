@@ -111,10 +111,12 @@ end-to-end claim is only as strong as the weakest of the nine.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, AsyncIterator, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agents_orchestrator.orchestrator2 import deliverables
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.services.model_resolver import (
     ModelNotEnabledError,
@@ -123,6 +125,8 @@ from shared.services.model_resolver import (
     set_resolved_model,
     set_run_project,
 )
+
+logger = logging.getLogger(__name__)
 
 # User-facing text for the two fail-closed resolver outcomes. Both name what an
 # administrator has to do, because "model resolution failed" is not something the
@@ -351,6 +355,13 @@ async def run_agent(
     yield {"type": "agent.selected", "agent": agent_id, "reason": reason,
            "run_id": run_id}
 
+    # What the USER saw, accumulated from the events this generator yields rather than
+    # from the graph's state — so a deliverable is exactly the reply that was
+    # displayed, never a different rendering of it.
+    reply_parts: list[str] = []
+    # Only a turn that ran to completion is captured. See the capture block below.
+    turn_completed = False
+
     try:
         # ── BYOK, project-scoped ─────────────────────────────────────────────
         # Order matters and is asserted by the tests. `set_run_project` FIRST so
@@ -449,6 +460,7 @@ async def run_agent(
 
                     text = _stream_text(getattr(chunk, "content", None))
                     if text:
+                        reply_parts.append(text)
                         yield {"type": "stream_chunk", "content": text}
             else:
                 # Invoke-mode agents take a single prompt string and no message
@@ -463,6 +475,7 @@ async def run_agent(
                 final_state = await graph.ainvoke(state, config=config)
                 reply = (final_state or {}).get("final_user_message") or ""
                 if reply:
+                    reply_parts.append(reply)
                     yield {"type": "stream_chunk", "content": reply}
                 else:
                     # AN EMPTY REPLY IS A FAILED TURN, NOT A QUIET ONE.
@@ -484,6 +497,10 @@ async def run_agent(
                         "message": _EMPTY_REPLY_MESSAGE,
                         "agent": agent_id,
                     }
+
+        # Reached only when the graph ran to the end without raising. Everything the
+        # capture block below does is gated on this.
+        turn_completed = True
     except Exception as exc:  # noqa: BLE001 - never let a run failure reach the socket unlabeled
         # Unlike the UnknownAgentError branch above, `agent_id` HAS already
         # resolved by this point (agent.selected was yielded with it), so it
@@ -525,5 +542,49 @@ async def run_agent(
         # it was created, so this cannot retract a value a still-running node is
         # using.
         _clear_run_model_context()
+
+    # ── deliverable capture ──────────────────────────────────────────────────
+    #
+    # AFTER the `finally` and BEFORE `stream_end`, both deliberately.
+    #
+    # Not inside `finally`: nothing may yield there. On close, `GeneratorExit` is
+    # raised at the suspended yield and unwinds through that block, and a yield inside
+    # it becomes `RuntimeError: async generator ignored GeneratorExit` — which is the
+    # same reason `stream_end` itself sits out here.
+    #
+    # Not in `ws.py` after its `async for` either: `stream_end` is yielded from HERE,
+    # so capturing outside this generator would land `deliverable.ready` after the
+    # client had already been told the turn was over — the panel would fill in after
+    # the composer came back, which reads as a document arriving from nowhere.
+    #
+    # Only on a turn that actually completed. Capturing a partial reply from a failed
+    # turn would file a truncated document under the agent's heading, where nothing
+    # distinguishes it from a complete one.
+    if turn_completed:
+        try:
+            produced = await deliverables.capture(
+                agent_id,
+                "".join(reply_parts),
+                run_id=run_id,
+                tenant_id=tenant_id,
+                # From the verified `runs` row, like every other project-scoped value
+                # on this path. Never from the client frame.
+                project_id=project_id,
+            )
+            if produced:
+                yield {"type": "deliverable.ready", "run_id": run_id,
+                       "agent": agent_id, "deliverables": produced}
+        except Exception as exc:  # noqa: BLE001 - a failed capture must not fail the turn
+            # The agent has done its work and the user has read the reply; losing the
+            # persistence step is the smaller harm. But it is SURFACED and logged at
+            # exception level, never swallowed — a silent `except` here is exactly how
+            # the old engine's missing agents went unnoticed for so long.
+            logger.exception(
+                "orchestrator2 could not persist a deliverable (agent=%s run=%s)",
+                agent_id, run_id,
+            )
+            yield {"type": "error", "agent": agent_id,
+                   "message": "The reply could not be saved to Deliverables.",
+                   "detail": str(exc)}
 
     yield {"type": "stream_end"}
