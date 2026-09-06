@@ -5,10 +5,14 @@ import { agentWsPath } from "@/app/api/chat/route";
 /**
  * The BFF's agent → FastAPI WS mapping, pinned.
  *
- * The `default` case routes to the LEGACY orchestrator engine
- * (`/sdlc/agent/orchestrator/ws`), which Phase 5 retires. Without this test that
- * retirement silently breaks every caller that omits `agent`. If you are changing
- * the default, you are changing behaviour — update this test deliberately.
+ * The `default` case USED to route to the legacy orchestrator engine
+ * (`/sdlc/agent/orchestrator/ws`). Phase 5 retired that engine, so the default now
+ * REFUSES: an unmapped agent returns null and the route answers 400.
+ *
+ * That is deliberate rather than convenient. Every caller (`useAgentChat`) passes an
+ * explicit agent, so reaching the default at all is a programming error — and an
+ * unknown agent quietly answering as something else, with no error and a reply that
+ * looks complete, is the exact failure class this rebuild exists to remove.
  */
 describe("agentWsPath", () => {
   it.each([
@@ -37,8 +41,31 @@ describe("agentWsPath", () => {
     }
   });
 
-  it("falls back to the legacy orchestrator socket for unknown agents", () => {
-    expect(agentWsPath(undefined)).toBe("/sdlc/agent/orchestrator/ws");
-    expect(agentWsPath("nonsense")).toBe("/sdlc/agent/orchestrator/ws");
+  it("refuses an unmapped agent instead of routing it somewhere", () => {
+    expect(agentWsPath(undefined)).toBeNull();
+    expect(agentWsPath("nonsense")).toBeNull();
+  });
+
+  it("names no retired engine anywhere in the table", () => {
+    const nine = [
+      "requirements", "design", "plan", "development", "code_review",
+      "security", "testing", "deployment", "documentation",
+    ];
+    for (const agent of nine) {
+      expect(agentWsPath(agent)).not.toContain("/sdlc/agent/orchestrator/ws");
+      expect(agentWsPath(agent)).not.toContain("/sdlc/agent/copilot/ws");
+    }
+  });
+
+  it("still maps every one of the nine", () => {
+    // The other half of refusing a default: if a mapping is ever dropped, that agent
+    // would start returning null and be refused outright rather than mis-routed.
+    const nine = [
+      "requirements", "design", "plan", "development", "code_review",
+      "security", "testing", "deployment", "documentation",
+    ];
+    for (const agent of nine) {
+      expect(agentWsPath(agent), `${agent} is unmapped`).toBeTruthy();
+    }
   });
 });

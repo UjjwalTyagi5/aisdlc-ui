@@ -40,13 +40,12 @@ interface ChatRequest {
   agentParams?: Record<string, unknown>;
 }
 
-/** Map an agent id to its FastAPI WS path. Unknown/absent → orchestrator.
+/** Map an agent id to its FastAPI WS path, or `null` when there is no such agent.
  *
- * Exported for `app/api/__tests__/chat-agent-map.test.ts`, which pins this table
- * so Phase 5's retirement of the legacy `/sdlc/agent/orchestrator/ws` engine
- * cannot silently change where an unmapped agent lands.
+ * Exported for `app/api/__tests__/chat-agent-map.test.ts`, which pins this table so a
+ * mapping cannot be dropped unnoticed.
  */
-export function agentWsPath(agent?: string): string {
+export function agentWsPath(agent?: string): string | null {
   switch (agent) {
     case "requirement":
     case "requirements":
@@ -68,9 +67,13 @@ export function agentWsPath(agent?: string): string {
       return "/sdlc/agent/deployment/ws";
     case "documentation":
       return "/sdlc/agent/documentation/ws";
-    // Any other agent falls through to the orchestrator (functional, non-breaking).
+    // NO FALLBACK. This returned `/sdlc/agent/orchestrator/ws` until Phase 5 retired
+    // that engine. Falling through to any OTHER engine would let an unmapped agent
+    // answer as something else — silently, with a reply that looks complete, which is
+    // the failure class this rebuild exists to remove. Every caller passes an explicit
+    // agent, so reaching here is a bug, and it is reported as one.
     default:
-      return "/sdlc/agent/orchestrator/ws";
+      return null;
   }
 }
 
@@ -101,6 +104,16 @@ export async function POST(req: NextRequest) {
 
   const { message, sessionId, context, agentParams } = body;
   const wsPath = agentWsPath(body.agent);
+  if (!wsPath) {
+    // Refused rather than routed. See `agentWsPath`'s default branch.
+    return new Response(
+      JSON.stringify({
+        code: "unknown_agent",
+        detail: `no agent named ${body.agent ?? "(none)"}`,
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
 
   // Use the sessionId from the request as the synthetic runId for this chat
   // session — it lets the client correlate SSE events with the conversation.
