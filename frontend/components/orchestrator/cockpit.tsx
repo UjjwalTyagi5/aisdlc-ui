@@ -25,6 +25,12 @@ import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import { canUseOrchestrator } from "@/lib/orchestrator/access";
 import { DeliverablesRead } from "@/lib/orchestrator/deliverables";
+import {
+  deleteConversation,
+  getConversationMessages,
+  listConversations,
+  renameConversation,
+} from "@/lib/api/conversations";
 import { ORCHESTRATOR_AGENT_IDS, type OrchestratorAgentId } from "@/lib/orchestrator/protocol";
 import { agentLabel, splitModelKey } from "@/lib/orchestrator/types";
 import {
@@ -126,11 +132,51 @@ export function OrchestratorCockpit({
     [sessions, activeSessionId],
   );
 
+  // ── History ───────────────────────────────────────────────────────────────
+  //
+  // The rail used to BE the store: zustand + localStorage, and it said so on screen.
+  // A chat survived neither a cleared browser nor a change of device, and none of it
+  // was auditable. It is now a view of the server, and the store keeps only the
+  // unsaved draft plus which row is selected.
+  //
+  // A saved chat's id IS its run id (backend `sessions.ensure_session`), which is what
+  // makes opening one also reopen its Deliverables, its LangGraph thread and its
+  // project scope — no mapping, no second identifier.
+  const [openedRunId, setOpenedRunId] = React.useState<string | null>(null);
+
   // ── Selection ─────────────────────────────────────────────────────────────
   const [pendingProjectId, setPendingProjectId] = React.useState<string | null>(null);
   const [pendingModelKey, setPendingModelKey] = React.useState<string | null>(null);
 
   const projectId = lockedProjectId ?? active?.projectId ?? pendingProjectId;
+
+  const historyQ = useQuery({
+    queryKey: ["orchestrator", "sessions", projectId],
+    queryFn: () => listConversations(projectId as ProjectId, "orchestrator"),
+    enabled: !!projectId,
+  });
+
+  /**
+   * What the rail shows: every saved chat on this project, plus the unsaved draft.
+   *
+   * The draft is local on purpose (spec D23). A run — and therefore a session — is
+   * minted by the first turn, so clicking "New" repeatedly cannot litter the database
+   * with conversations nobody used.
+   */
+  const railSessions = React.useMemo(() => {
+    const saved = (historyQ.data ?? []).map((s) => ({
+      id: s.id,
+      title: s.title || "Untitled chat",
+      projectId: String(projectId ?? ""),
+      status: "idle" as const,
+    }));
+    const drafts = sessions
+      .filter((s) => !saved.some((v) => v.id === s.id))
+      .map((s) => ({
+        id: s.id, title: s.title, projectId: s.projectId, status: s.status,
+      }));
+    return [...drafts, ...saved];
+  }, [historyQ.data, sessions, projectId]);
   const modelKey = active?.modelKey ?? pendingModelKey;
 
   const projectQ = useQuery({
@@ -267,6 +313,15 @@ export function OrchestratorCockpit({
 
   const ensureRun = React.useCallback(async (): Promise<string> => {
     if (runIdRef.current) return runIdRef.current;
+    // A chat opened from history already HAS a run — its id is the session id — so
+    // continuing it must rejoin that run rather than mint a new one. Without this the
+    // rail would look right while every reopened conversation silently started over,
+    // against a different LangGraph thread and different Deliverables.
+    if (openedRunId) {
+      runIdRef.current = openedRunId;
+      setRunId(openedRunId);
+      return openedRunId;
+    }
     // Two quick turns must not mint two runs — the second awaits the first.
     if (creatingRunRef.current) return creatingRunRef.current;
     if (!projectId) throw new Error("no project is selected");
@@ -288,7 +343,7 @@ export function OrchestratorCockpit({
     } finally {
       creatingRunRef.current = null;
     }
-  }, [projectId, offeringId, modelKey]);
+  }, [projectId, offeringId, modelKey, openedRunId]);
 
   // A different conversation is a different run and a different transcript.
   //
@@ -317,6 +372,41 @@ export function OrchestratorCockpit({
     setOpenDeliverableId(null);
     resetSocket();
   }, [conversationKey, resetSocket]);
+
+  /** Open a saved chat: adopt its run and replay its transcript. */
+  const openSession = React.useCallback(
+    async (id: string) => {
+      const saved = (historyQ.data ?? []).some((s) => s.id === id);
+      if (!saved) {
+        // A local draft: the existing selection path, which has no run yet.
+        store.getState().selectSession(id);
+        setOpenedRunId(null);
+        return;
+      }
+      // Hold the project before switching. A saved chat is not in the local store, so
+      // selecting it leaves `active` null — and `projectId` reads through `active`,
+      // so without this the project silently becomes null the moment a chat is
+      // opened, disabling the composer on the conversation the user just asked for.
+      if (projectId) setPendingProjectId(projectId);
+      store.getState().selectSession(id);
+      setOpenedRunId(id);
+      runIdRef.current = id;
+      setRunId(id);
+      setOpenDeliverableId(null);
+      const messages = await getConversationMessages(id);
+      socket.hydrate(
+        messages.map((m) => ({
+          id: m.id,
+          role: m.role === "user" ? ("user" as const) : ("agent" as const),
+          phase: null,
+          content: m.content,
+          createdAt: m.created_at ? Date.parse(m.created_at) : Date.now(),
+        })),
+      );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [historyQ.data, store, socket.hydrate, projectId],
+  );
 
   // ── Deliverables ───────────────────────────────────────────────────────────
   //
@@ -433,9 +523,11 @@ export function OrchestratorCockpit({
     <div className={cn("flex min-h-0", shell)}>
       <div className="hidden md:block">
         <SessionRail
-          sessions={sessions}
-          activeId={active?.id ?? null}
-          onSelect={(id) => store.getState().selectSession(id)}
+          // Saved chats from the server, plus the unsaved draft. The rail stopped
+          // being the store and became a view of it.
+          sessions={railSessions}
+          activeId={active?.id ?? openedRunId}
+          onSelect={(id) => void openSession(id)}
           onCreate={() => {
             if (!project) return;
             store.getState().createSession({
@@ -445,8 +537,26 @@ export function OrchestratorCockpit({
               modelKey,
             });
           }}
-          onRename={(id, title) => store.getState().renameSession(id, title)}
-          onDelete={(id) => store.getState().deleteSession(id)}
+          onRename={(id, title) => {
+            store.getState().renameSession(id, title);
+            // A saved chat's title lives on the server; a draft's does not exist there
+            // yet, so the call is best-effort and the rail refetches either way.
+            void renameConversation(id, title).catch(() => {}).finally(() => {
+              void historyQ.refetch();
+            });
+          }}
+          onDelete={(id) => {
+            store.getState().deleteSession(id);
+            if (openedRunId === id) {
+              setOpenedRunId(null);
+              runIdRef.current = null;
+              setRunId(null);
+              resetSocket();
+            }
+            void deleteConversation(id).catch(() => {}).finally(() => {
+              void historyQ.refetch();
+            });
+          }}
           projectName={projectName}
         />
       </div>

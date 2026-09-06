@@ -118,6 +118,14 @@ export interface UseOrchestratorSocketResult {
    * about earlier turns and must not pretend to.
    */
   deliverables: Deliverable[];
+  /**
+   * Replace the transcript with a saved one.
+   *
+   * Opening a chat from the history rail replays what the server stored, so the thread
+   * shows the whole conversation before the next turn is sent. Distinct from `reset`,
+   * which empties it: reopening a chat is not starting one.
+   */
+  hydrate: (messages: OrchestratorMessage[]) => void;
   /** Drop the transcript — the conversation changed underneath us. */
   reset: () => void;
 }
@@ -733,6 +741,16 @@ export function useOrchestratorSocket(
     [appendMessage, failTurn, mutateBubble, nextId],
   );
 
+  const hydrate = React.useCallback((restored: OrchestratorMessage[]) => {
+    // Replaces rather than appends: the caller has just switched to a different
+    // conversation, so anything already on screen belongs to the previous one.
+    setMessages(restored);
+    setActiveAgent(null);
+    setError(null);
+    setActivity([]);
+    setDeliverables([]);
+  }, []);
+
   const reset = React.useCallback(() => {
     setActivity([]);
     // Switching project repoints a session in place while keeping its id. The Phase 3
@@ -758,6 +776,7 @@ export function useOrchestratorSocket(
   }, [retireConnection]);
 
   return {
-    messages, send, connState, activeAgent, error, busy, activity, deliverables, reset,
+    messages, send, connState, activeAgent, error, busy, activity, deliverables,
+    hydrate, reset,
   };
 }
