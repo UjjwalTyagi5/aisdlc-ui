@@ -643,6 +643,96 @@ async def test_an_owned_runs_model_selection_is_passed_to_the_agent(monkeypatch)
     assert kwargs["offering_id"] == "offering-7"
 
 
+_A_DECOY = "99999999-9999-9999-9999-999999999999"
+_A_URL_RUN = "88888888-8888-8888-8888-888888888888"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [True, False], ids=["named agent", "routed"])
+async def test_the_run_id_that_was_verified_is_the_one_that_is_dispatched(
+    monkeypatch, override
+):
+    """`_resolve_run` proving a run is the caller's buys NOTHING unless the id it
+    proved is the id that reaches the agent, and until this test nothing checked the
+    two were the same one. Every other fixture on the branch sets the frame's `run_id`
+    and the expected dispatched `run_id` to the same literal, so verified-id and
+    dispatched-id are indistinguishable in all of them: threading a completely
+    different, unverified, client-supplied id into `run_agent` left the suite green.
+
+    That is the exact breach this module's docstring is written about. `run_id` becomes
+    the LangGraph `thread_id` against PERSISTENT checkpointers, so a caller who can name
+    the dispatched id joins whichever run's conversation they like, without
+    `_resolve_run` ever being asked about it.
+
+    So: the stub RECORDS the id it verified, the frame carries three plausible decoys a
+    future resume/continue feature would add (`thread_id`, `conversation_id`,
+    `resume_run_id`) and the URL carries a fourth, and every downstream consumer of a
+    run id is asserted to have received the recorded one. Nothing is compared to a
+    literal — the linkage is the assertion.
+    """
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws, role="project_admin")
+
+    verified: list[str] = []
+    routed: list[str] = []
+    contexts: list[str] = []
+
+    async def _owned(run_id, tenant_id):
+        verified.append(run_id)
+        return ws.RunSelection(model_id="m", offering_id="o", project_id="proj-A")
+
+    async def _route(text, **kwargs):
+        from agents_orchestrator.orchestrator2.router import RoutingDecision
+        routed.append(kwargs["run_id"])
+        return RoutingDecision(agent_id="design", reason="r", direct_reply=None)
+
+    async def _context(run_id, tenant_id, target_agent):
+        contexts.append(run_id)
+        return ""
+
+    monkeypatch.setattr(ws, "_resolve_run", _owned)
+    monkeypatch.setattr(ws, "route", _route)
+    monkeypatch.setattr(ws, "handoff_context", _context)
+    calls = _record_run_agent(monkeypatch, ws, [{"type": "stream_end"}])
+
+    frame = {"type": "user_message", "text": "hi", "run_id": _A_RUN,
+             # Decoys. A caller may put anything on the frame; nothing but the four
+             # documented fields is read, and a run id in particular is only ever the
+             # one that went through the ownership gate.
+             "thread_id": _A_DECOY, "conversation_id": _A_DECOY,
+             "resume_run_id": _A_DECOY}
+    if override:
+        frame["agent"] = "design"
+
+    socket = _FakeWebSocket(
+        # A DIFFERENT run pinned on the URL, so a dispatch that fell back to the
+        # query param instead of the verified local is caught too.
+        params={"ticket": "tkt", "run": _A_URL_RUN},
+        inbound=[json.dumps(frame)],
+    )
+    await ws.orchestrator2_ws(socket)
+
+    assert not [e for e in socket.events if e["type"] == "error"], socket.events
+    assert len(verified) == 1, f"the ownership gate ran {len(verified)} times"
+    assert len(calls) == 1
+
+    proved = verified[0]
+    _, kwargs = calls[0]
+    assert kwargs["run_id"] == proved, (
+        f"the agent was handed {kwargs['run_id']!r}, but {proved!r} is the id "
+        f"`_resolve_run` was asked about — an unverified id became the graph thread"
+    )
+    assert contexts == [proved], (
+        f"the run's artifacts were read for {contexts!r}, not for the verified "
+        f"{proved!r}"
+    )
+    if not override:
+        assert routed == [proved], (
+            f"the router was told the turn was about {routed!r}, not {proved!r}"
+        )
+    assert _A_DECOY not in json.dumps(calls[0][1], default=str)
+
+
 # ── serialization ────────────────────────────────────────────────────────────
 
 
