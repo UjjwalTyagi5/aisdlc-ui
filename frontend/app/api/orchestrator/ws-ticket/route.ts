@@ -7,7 +7,7 @@
  * the WS entirely server-side — the browser needs to open the socket itself. To
  * keep the auth boundary intact we NEVER expose the BFF JWT: this route mints a
  * single-use, 20-second Redis ticket server-side (the exact same `mintWsTicket`
- * flow the SSE bridges and `/api/copilot/ws-ticket` use) and returns ONLY that
+ * flow the SSE bridges use) and returns ONLY that
  * short-lived ticket plus the browser-reachable WS URL. FastAPI redeems the
  * ticket atomically (GETDEL) on connect.
  *

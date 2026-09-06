@@ -585,8 +585,6 @@ export function OrchestratorCockpit({
               // the panel synthesises only while Development is the active agent.
               // This was "" too, so that tree never appeared at all.
               activeStage={socket.activeAgent ?? ""}
-              gate={null}
-              showApprover={false}
               // What its agents produced. This was a literal [] — a declared
               // interface with no data behind it, which on screen is exactly what an
               // agent that produced nothing looks like.

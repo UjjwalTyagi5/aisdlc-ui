@@ -1,17 +1,18 @@
 import { z } from "zod";
 
-import { ARTIFACT_EVENTS } from "@/lib/orchestrator/artifacts";
-
 /**
- * Copilot WS protocol — the Zod mirror of the backend `shared/models/copilot.py`
- * shapes and the Copilot WebSocket event envelopes.
+ * The Orchestrator's chat vocabulary.
  *
- * The Copilot page opens the FastAPI Copilot WS directly (via a short-lived,
- * single-use ticket minted server-side — see `/api/copilot/ws-ticket`), so —
- * unlike the SSE bridge (`ws-to-sse.ts`) — these events are consumed RAW. Every
- * inbound frame is validated with `CopilotEvent.safeParse` before it touches
- * component state; unrecognised frames are dropped (defense-in-depth, mirrors
- * the ws-to-sse discard rule).
+ * Moved here in Phase 5 from `lib/copilot/types.ts`, keeping only what this surface
+ * actually uses: choice cards, the Activity feed row, and the connection state the
+ * panel's banner reads.
+ *
+ * WHAT WENT WITH THE COPILOT. The rest of that file was the Copilot's own WS protocol
+ * — its event union, its gate state and gate-decision payloads, its outbound message
+ * types and its ws-ticket shape. Nothing imported any of it once that surface was
+ * deleted. The Orchestrator has its own union in `protocol.ts` and, by spec D5, no
+ * gates at all, so keeping a `GateState` here would have been a type describing a
+ * concept this product no longer has on this surface.
  */
 
 // ── Choice cards (mirror shared/models/copilot.py) ─────────────────────────────
@@ -52,128 +53,6 @@ export const ChoiceAnswer = z.object({
   free_text: z.string().nullish(),
 });
 export type ChoiceAnswer = z.infer<typeof ChoiceAnswer>;
-
-// ── Gate state ─────────────────────────────────────────────────────────────
-
-/** Chat-driven stage status — mirrors `stage_status_from_run` in progression.py. */
-export const StageStatus = z.enum([
-  "idle",
-  "interviewing",
-  "running",
-  "awaiting_gate",
-  "approved",
-  "rejected",
-  "complete",
-]);
-export type StageStatus = z.infer<typeof StageStatus>;
-
-export const GateState = z.object({
-  stage: z.string(),
-  status: z.string().default("awaiting_gate"),
-  owner_role: z.string(),
-  can_approve: z.boolean().default(false),
-});
-export type GateState = z.infer<typeof GateState>;
-
-// ── WS event envelopes (server → client) ──────────────────────────────────────
-
-export const StreamChunkEvent = z.object({
-  type: z.literal("stream_chunk"),
-  content: z.string().default(""),
-  session_id: z.string().optional(),
-});
-
-export const StreamEndEvent = z.object({
-  type: z.literal("stream_end"),
-  session_id: z.string().optional(),
-});
-
-export const ChoiceCardEvent = z.object({
-  type: z.literal("choice.card"),
-  run_id: z.string().optional(),
-  card: ChoiceCard,
-});
-
-export const GateStateEvent = GateState.extend({
-  type: z.literal("gate.state"),
-});
-
-export const StageChangedEvent = z.object({
-  type: z.literal("stage.changed"),
-  stage: z.string(),
-});
-
-/** A tool the active agent invoked — surfaced as an activity chip. */
-export const ToolCallEvent = z.object({
-  type: z.literal("tool.call"),
-  run_id: z.string().optional(),
-  name: z.string(),
-  status: z.enum(["running", "done"]).default("running"),
-});
-
-/** Extended-thinking / reasoning delta, streamed before the visible answer. */
-export const ThinkingEvent = z.object({
-  type: z.literal("agent.thinking"),
-  run_id: z.string().optional(),
-  delta: z.string().default(""),
-});
-
-export const ErrorEvent = z.object({
-  type: z.literal("error"),
-  message: z.string().optional(),
-  detail: z.string().optional(),
-});
-
-export const CopilotEvent = z.discriminatedUnion("type", [
-  StreamChunkEvent,
-  StreamEndEvent,
-  ChoiceCardEvent,
-  GateStateEvent,
-  StageChangedEvent,
-  ToolCallEvent,
-  ThinkingEvent,
-  ErrorEvent,
-  // Artifacts panel stream (P1) — panel opens / builds / finalizes / lists.
-  ...ARTIFACT_EVENTS,
-]);
-export type CopilotEvent = z.infer<typeof CopilotEvent>;
-
-// ── WS messages (client → server) ──────────────────────────────────────────
-
-export interface UserMessagePayload {
-  type: "user_message";
-  text: string;
-  run_id: string;
-  project_id?: string;
-}
-
-export interface ChoiceAnswerPayload {
-  type: "choice_answer";
-  card_id: string;
-  selected_ids: string[];
-  free_text?: string;
-  run_id: string;
-}
-
-export interface GateDecisionPayload {
-  type: "gate.decision";
-  decision: "approved" | "rejected";
-  stage: string;
-  reason?: string;
-  run_id: string;
-}
-
-export type CopilotOutbound =
-  | UserMessagePayload
-  | ChoiceAnswerPayload
-  | GateDecisionPayload;
-
-/** Shape returned by the BFF `/api/copilot/ws-ticket` mint route. */
-export const CopilotTicket = z.object({
-  ticket: z.string(),
-  wsUrl: z.string(),
-});
-export type CopilotTicket = z.infer<typeof CopilotTicket>;
 
 // ── live chat surface types ──────────────────────────────────────────────────
 //

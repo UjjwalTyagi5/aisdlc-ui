@@ -24,7 +24,6 @@ import {
   PanelRightClose,
   Play,
   User as UserIcon,
-  UserCheck,
   Wifi,
   Wrench,
 } from "lucide-react";
@@ -37,8 +36,7 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { ArtifactViewer } from "@/components/orchestrator/artifact-viewer";
 import { getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
-import { AGENT_STAGES, ownerRoleLabel, stageLabel } from "@/lib/orchestrator/stages";
-import type { GateState } from "@/lib/orchestrator/chat-types";
+import { AGENT_STAGES, stageLabel } from "@/lib/orchestrator/stages";
 import type { Artifact, ArtifactKind } from "@/lib/orchestrator/artifacts";
 import type { ActivityItem, ConnState } from "@/lib/orchestrator/chat-types";
 import type { RunId } from "@/lib/schemas";
@@ -46,7 +44,6 @@ import type { RunId } from "@/lib/schemas";
 export interface ArtifactsPanelProps {
   runId: string;
   activeStage: string;
-  gate: GateState | null;
   artifacts: Artifact[];
   openArtifactId: string | null;
   onSelectArtifact: (id: string | null) => void;
@@ -64,21 +61,13 @@ export interface ArtifactsPanelProps {
   /** WS connection status — drives the "Reconnecting…" banner. */
   connectionStatus?: ConnState;
   /**
-   * Whether the Context tab's "Who approves" section renders at all. The
-   * Orchestrator has no gates and must never show approver/gate copy, so it
-   * omits this (default `false`); the Copilot has gates whose `gate` state is
-   * `null` between stages/decisions, so it passes `true` and the section
-   * falls back to the stage's owner role rather than disappearing.
-   */
-  showApprover?: boolean;
-  /**
-   * What the first tab is called. Defaults to `"Artifacts"` so the still-live Copilot
-   * is unchanged; the Orchestrator passes `"Deliverables"`.
+   * What the first tab is called. The Orchestrator passes `"Deliverables"`; the
+   * default is kept for any caller that does not.
    *
-   * A PROP rather than a rename because this file is shared: `components/copilot/
-   * copilot.tsx` imports the same panel, and what the standalone agents write really
-   * is an Artifact — approval-gated, in its own table. The Orchestrator's output is a
-   * different concept and says so.
+   * A PROP rather than a rename: this file was shared with the Copilot until Phase 5
+   * deleted that surface, and the distinction it encodes outlives it — what the
+   * STANDALONE agents write really is an Artifact, approval-gated and in its own
+   * table, while the Orchestrator's output is a different concept and says so.
    */
   tabLabel?: string;
   className?: string;
@@ -129,7 +118,6 @@ const clampNum = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo)
 export function ArtifactsPanel({
   runId,
   activeStage,
-  gate,
   artifacts,
   openArtifactId,
   onSelectArtifact,
@@ -141,7 +129,6 @@ export function ArtifactsPanel({
   stuck = false,
   idleSeconds = 0,
   connectionStatus = "idle",
-  showApprover = false,
   tabLabel = "Artifacts",
   className,
 }: ArtifactsPanelProps) {
@@ -450,8 +437,6 @@ export function ArtifactsPanel({
           run={run}
           isLoading={runQ.isLoading}
           activeStage={activeStage}
-          gate={gate}
-          showApprover={showApprover}
         />
       )}
     </aside>
@@ -1258,23 +1243,13 @@ function ContextTab({
   run,
   isLoading,
   activeStage,
-  gate,
-  showApprover,
 }: {
   runId: string;
   run: Awaited<ReturnType<typeof getRun>> | undefined;
   isLoading: boolean;
   activeStage: string;
-  gate: GateState | null;
-  showApprover: boolean;
 }) {
   void runId;
-  const stage = AGENT_STAGES.find((s) => s.id === activeStage);
-  // Between stages / gate decisions the Copilot's `gate` is legitimately null
-  // (see lib/copilot/use-copilot.ts), so fall back to the stage's own owner
-  // role rather than hiding the section. Never invent a name when neither is
-  // available.
-  const owner = gate ? ownerRoleLabel(gate.owner_role) : (stage?.ownerRole ?? null);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -1305,50 +1280,6 @@ function ContextTab({
         )}
       </section>
 
-      {/* Who needs to approve — gated on `showApprover`, a caller decision, not
-          an inference from `gate`. The Orchestrator (cockpit.tsx) has no gates
-          and passes `showApprover={false}` so this never renders there. The
-          Copilot passes `showApprover={true}`; its `gate` is null for most of
-          a run (reset on stage change / after a decision — see
-          lib/copilot/use-copilot.ts), in which case `owner` falls back to the
-          stage's owner role above. Render nothing if there is no owner to
-          name — never invent one. */}
-      {showApprover && owner && (
-        <section className="border-line-soft space-y-2.5 border-b px-4 py-4">
-          <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
-            Who approves
-          </h3>
-          <div
-            className={cn(
-              "flex items-center gap-2.5 rounded-[var(--radius)] border px-3 py-2.5",
-              gate?.status === "awaiting_gate"
-                ? "border-warning/35 bg-warning/[0.06]"
-                : "border-line-soft bg-panel-elevated/40",
-            )}
-          >
-            <span
-              className={cn(
-                "flex size-7 shrink-0 items-center justify-center rounded-full border",
-                gate?.status === "awaiting_gate"
-                  ? "border-warning/40 bg-warning/10 text-warning"
-                  : "border-line-soft text-muted-foreground",
-              )}
-            >
-              <UserCheck className="size-3.5" aria-hidden />
-            </span>
-            <div className="min-w-0">
-              <p className="text-[12.5px] font-medium text-foreground">{owner}</p>
-              <p className="text-muted-foreground text-[11px]">
-                {stage?.mandatory
-                  ? "Mandatory gate — never auto-approved"
-                  : stage?.auto
-                    ? "Auto-approved on completion"
-                    : "Approval-required gate"}
-              </p>
-            </div>
-          </div>
-        </section>
-      )}
 
       {/* Run metadata */}
       <section className="space-y-3 px-4 py-4">

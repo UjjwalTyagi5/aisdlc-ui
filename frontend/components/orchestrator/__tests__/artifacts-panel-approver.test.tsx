@@ -1,43 +1,56 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 
+import { readFileSync } from "node:fs";
+
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
-import type { GateState } from "@/lib/orchestrator/chat-types";
 
 /**
- * Regression coverage for the Context tab's "Who approves" section.
+ * The panel has NO approver or gate concept at all.
  *
- * A prior fix correctly stripped invented gate language from the Orchestrator
- * (which has no gates at all) by hiding the section whenever `gate` was null.
- * But the Copilot's `gate` is ALSO null for most of a run — it starts null and
- * is reset on every stage change and after every gate decision (see
- * lib/copilot/use-copilot.ts) — so that fix silently deleted the section from
- * the Copilot too, for every state except the brief window a gate is pending.
+ * This file used to guard a two-sided rule. A Phase 1 fix had hidden the "Who
+ * approves" section whenever `gate` was null — correct for the Orchestrator, which has
+ * no gates, and wrong for the Copilot, whose `gate` was ALSO null for most of a run,
+ * so the section silently vanished from a live page. The fix made visibility the
+ * caller's decision (`showApprover`) rather than an inference from `gate`.
  *
- * Visibility must be the CALLER's decision (`showApprover`), not an inference
- * from `gate`: the Orchestrator passes `showApprover={false}` (or omits it)
- * and must never render this section in any state; the Copilot passes
- * `showApprover` and falls back to the stage's real owner role when `gate` is
- * null, never to an invented name like "Product Manager".
+ * Phase 5 deleted the Copilot, so the only caller that ever passed `showApprover`
+ * is gone. The rule survives in a stronger form: the section cannot render because it
+ * does not exist, and the props that drove it do not exist either. A guarantee held by
+ * structure beats one held by a default.
+ *
+ * Asserted on the rendered panel AND on its prop surface, because "we removed the
+ * feature" is only true while nobody adds the prop back.
  */
+
+vi.mock("@/lib/api/runs", () => ({ getRun: async () => ({ id: "run-1" }) }));
+vi.mock("@/components/orchestrator/artifact-viewer", () => ({
+  ArtifactViewer: () => <div data-testid="viewer" />,
+}));
+
+class _ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", _ResizeObserver);
 
 afterEach(cleanup);
 
-type PanelProps = React.ComponentProps<typeof ArtifactsPanel>;
-
-function renderPanel(overrides: Partial<PanelProps>) {
-  const client = new QueryClient();
+function renderPanel(overrides: Record<string, unknown> = {}) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
   render(
     <QueryClientProvider client={client}>
       <ArtifactsPanel
         runId=""
         activeStage="requirements"
-        gate={null}
         artifacts={[]}
         openArtifactId={null}
         onSelectArtifact={() => {}}
@@ -51,41 +64,27 @@ function renderPanel(overrides: Partial<PanelProps>) {
   fireEvent.click(screen.getByRole("tab", { name: "Context" }));
 }
 
-describe("ArtifactsPanel Context tab — Who approves", () => {
-  it("never renders for the Orchestrator when showApprover is omitted", () => {
-    // No showApprover passed at all — the component's own default.
-    renderPanel({ gate: null, activeStage: "requirements" });
-    expect(screen.queryByText("Who approves")).not.toBeInTheDocument();
+describe("the Context tab has no approver section", () => {
+  it("renders no approver copy", () => {
+    renderPanel();
+    expect(screen.queryByText(/who approves/i)).toBeNull();
+    expect(screen.queryByText(/approval-required/i)).toBeNull();
+    expect(screen.queryByText(/product manager/i)).toBeNull();
   });
 
-  it("never renders for the Orchestrator when showApprover is explicitly false", () => {
-    // What cockpit.tsx actually passes.
-    renderPanel({ showApprover: false, gate: null, activeStage: "requirements" });
-    expect(screen.queryByText("Who approves")).not.toBeInTheDocument();
+  it("renders none even if a caller passes the retired props", () => {
+    // They are no longer declared, so this is what a stale call site would do. It must
+    // be inert rather than quietly reviving a surface the Orchestrator must not have.
+    renderPanel({ showApprover: true, gate: { owner_role: "product_manager" } });
+    expect(screen.queryByText(/who approves/i)).toBeNull();
   });
 
-  it("renders for the Copilot even when gate is null, falling back to the stage owner", () => {
-    // This is the Copilot's steady state between gates — `useCopilot` keeps
-    // `gate` at null except for the brief awaiting-approval window.
-    renderPanel({ showApprover: true, gate: null, activeStage: "requirements" });
-
-    expect(screen.getByText("Who approves")).toBeInTheDocument();
-    // The Requirements stage's real PRD owner (BA) — never the invented
-    // "Product Manager" fallback the earlier regression would have shown.
-    expect(screen.getByText("BA (Business Analyst)")).toBeInTheDocument();
-    expect(screen.queryByText("Product Manager")).not.toBeInTheDocument();
-  });
-
-  it("renders for the Copilot with a real gate, naming the gate's own owner", () => {
-    const gate: GateState = {
-      stage: "requirements",
-      status: "awaiting_gate",
-      owner_role: "ba",
-      can_approve: true,
-    };
-    renderPanel({ showApprover: true, gate, activeStage: "requirements" });
-
-    expect(screen.getByText("Who approves")).toBeInTheDocument();
-    expect(screen.getByText("BA (Business Analyst)")).toBeInTheDocument();
+  it("does not declare gate or showApprover props any more", () => {
+    // Structural, not behavioural: the section is gone because the concept is gone.
+    // Without this, someone re-adding the prop would find both tests above still green
+    // until they also re-added the section.
+    const src = readFileSync("components/orchestrator/artifacts-panel.tsx", "utf8");
+    expect(src).not.toContain("showApprover");
+    expect(src).not.toContain("GateState");
   });
 });

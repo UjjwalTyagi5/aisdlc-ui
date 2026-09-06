@@ -12,9 +12,8 @@ import { OrchestratorAgentId } from "@/lib/orchestrator/agents";
  * concept, in a separate table, with no approval anywhere in its shape. The two are
  * kept apart deliberately and must not be merged back together.
  *
- * Owned by `lib/orchestrator/`, not imported from `lib/copilot/`, which Phase 5
- * deletes. `ArtifactKind` is the one exception: it is the renderer registry's
- * vocabulary, shared by both surfaces, and moves here whole when the Copilot goes.
+ * Owned by `lib/orchestrator/`; `lib/copilot/` was deleted in Phase 5, and the
+ * vocabulary it held — `ArtifactKind` included — moved here with it.
  *
  * NULLISH, NOT MERELY OPTIONAL. `url`, `language`, `source` and `created_at` are
  * nullable database columns and arrive as `null`. A schema that accepts `undefined`

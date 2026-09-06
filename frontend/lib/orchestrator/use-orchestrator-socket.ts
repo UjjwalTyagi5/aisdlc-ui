@@ -17,7 +17,7 @@ import type { OrchestratorMessage } from "@/lib/orchestrator/types";
 /**
  * The Orchestrator's socket — one Project Admin, one named agent per turn.
  *
- * Ticket flow mirrors `lib/copilot/use-copilot.ts`: the browser POSTs the BFF
+ * Ticket flow mirrors the other BFF bridges: the browser POSTs the BFF
  * (`/api/orchestrator/ws-ticket`), which mints a single-use ws-ticket server-side
  * and returns `{ ticket, wsUrl }`; the hook then opens `wsUrl?ticket=<t>`. The BFF
  * JWT never reaches the browser — only the short-lived (20 s), single-use ticket.
@@ -140,7 +140,7 @@ export function useOrchestratorSocket(
   // Tool-call id → activity row, so the `done` event patches the row its `running`
   // opened instead of appending a second one. Keyed on the tool NAME, which is what
   // both events carry; a tool used twice in one turn therefore reuses its row, which
-  // is the same trade `lib/copilot/use-copilot.ts` makes.
+  // is the same trade the Copilot made before Phase 5 retired it.
   const toolActivityIdRef = React.useRef<Map<string, string>>(new Map());
   // One "Thinking…" row per turn, closed when the turn ends.
   const thinkingActivityIdRef = React.useRef<string | null>(null);

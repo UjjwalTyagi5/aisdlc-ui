@@ -9,10 +9,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 
 /**
- * The panel is SHARED with the still-live Copilot (`components/copilot/copilot.tsx`
- * imports this same file). Phase 5 deletes that surface; until then, every change
- * here has to leave it reading "Artifacts" with its own affordances intact, so the
- * tab name is a PROP rather than a rename.
+ * The tab name is a PROP rather than a rename. It was shared with the Copilot until
+ * Phase 5 deleted that surface, and the distinction it encodes outlives it: what the
+ * STANDALONE agents write really is an Artifact, approval-gated and in its own table,
+ * while the Orchestrator's output is a different concept and says so.
  */
 
 vi.mock("@/lib/api/runs", () => ({ getRun: async () => ({ id: "run-1" }) }));
