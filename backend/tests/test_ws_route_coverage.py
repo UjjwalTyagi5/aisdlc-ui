@@ -73,3 +73,76 @@ def test_the_boot_scan_passes_as_configured():
     import process_api
 
     dep.assert_all_routes_protected(process_api.app)
+
+
+# ── the audit the allowlist deliberately was not ─────────────────────────────
+#
+# Phase 5 extended the scan to LIST sockets and require each to be recorded, and said
+# plainly that being listed was not an audit. This is the audit: every recorded socket
+# must actually redeem a single-use ticket BEFORE it accepts the connection.
+#
+# It found four that did not. `/test-ws` endpoints in the requirements and ingestion
+# agents called `websocket.accept()` immediately and echoed whatever they were sent —
+# unauthenticated sockets mounted in the running app, invisible to every check until
+# the sweep listed them. Nothing referenced them; they were debug scaffolding, and they
+# are gone.
+
+
+def _ws_handlers(app):
+    """(path, handler) for every WebSocket route on the app."""
+    out = []
+    for route in app.routes:
+        if route.__class__.__name__ in ("APIWebSocketRoute", "WebSocketRoute"):
+            path = getattr(route, "path", "")
+            fn = getattr(route, "endpoint", None)
+            if path and fn is not None:
+                out.append((path, fn))
+    return out
+
+
+def test_every_socket_authenticates_before_it_accepts():
+    """A socket that accepts first and checks later has already let the caller in.
+
+    Read off the source with docstrings stripped: several of these handlers DESCRIBE
+    their ticket flow in prose, and a check that a docstring can satisfy is the defect
+    this branch has corrected nine times.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    import process_api
+
+    offenders = []
+    for path, fn in _ws_handlers(process_api.app):
+        try:
+            src = textwrap.dedent(inspect.getsource(fn))
+        except (OSError, TypeError):  # pragma: no cover - not introspectable
+            continue
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (node.body and isinstance(node.body[0], ast.Expr)
+                        and isinstance(node.body[0].value, ast.Constant)
+                        and isinstance(node.body[0].value.value, str)):
+                    node.body.pop(0)
+        code = ast.unparse(tree)
+
+        if "_redeem_ws_ticket" not in code:
+            offenders.append(f"{path}: never redeems a ticket")
+            continue
+        # And it must happen BEFORE the handshake is accepted.
+        if "accept()" in code and code.index("_redeem_ws_ticket") > code.index("accept()"):
+            offenders.append(f"{path}: accepts before redeeming")
+
+    assert offenders == [], (
+        "these sockets do not authenticate before accepting:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_no_unauthenticated_debug_socket_is_mounted():
+    """The four that failed the audit. Named so re-adding one is a deliberate act."""
+    import process_api
+
+    paths = dep.websocket_route_paths(process_api.app)
+    assert [p for p in paths if p.endswith("/test-ws")] == []

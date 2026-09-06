@@ -249,7 +249,13 @@ _SIGNALS_IN_BODY_PROTECTED_PATHS: set[str] = {"/runs/{run_id}/signals/{name}"}
 # authenticates in-handler" apart from "nobody has looked". A socket that is not listed
 # FAILS THE BOOT, which is the whole point.
 #
-# BEING IN THIS SET IS NOT AN AUDIT. It records the sockets that existed when the scan
+# AUDITED, 2026-09-07. `tests/test_ws_route_coverage.py` now asserts that every
+# socket here redeems a single-use ticket BEFORE it accepts, reading the handler
+# with docstrings stripped so prose cannot satisfy it. The audit found four
+# `/test-ws` debug sockets that accepted unauthenticated and echoed whatever they
+# were sent; they are deleted. The rest passed.
+#
+# Adding a path here is still a decision, not a formality: It records the sockets that existed when the scan
 # was extended. Confirming that each one's in-handler check is real, and correct, is
 # tracked as carried debt — saying otherwise here would be prose asserting a guarantee
 # the code does not provide, which this codebase has done enough times already.
@@ -262,15 +268,11 @@ _WS_IN_HANDLER_AUTH_PATHS: set[str] = {
     "/sdlc/agent/development/ws",
     "/sdlc/agent/development_orchestrator/ws",
     "/sdlc/agent/documentation/ws",
-    "/sdlc/agent/ingestion/test-ws",
     "/sdlc/agent/ingestion/ws",
-    "/sdlc/agent/ingestion_orchestrator/test-ws",
     "/sdlc/agent/ingestion_orchestrator/ws",
     "/sdlc/agent/orchestrator2/ws",
     "/sdlc/agent/plan/ws",
-    "/sdlc/agent/requirement/test-ws",
     "/sdlc/agent/requirement/ws",
-    "/sdlc/agent/requirement_orchestrator/test-ws",
     "/sdlc/agent/requirement_orchestrator/ws",
     "/sdlc/agent/security/ws",
     "/sdlc/agent/testing/ws",

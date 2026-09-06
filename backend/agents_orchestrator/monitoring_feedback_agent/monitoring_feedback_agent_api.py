@@ -163,20 +163,11 @@ def classify_and_separate_input(full_text: str, has_files: bool, chat_history: L
     return {"intent": "unknown", "question": full_text, "log_data": ""}
 
 # WebSocket test endpoint
-@monitoring_feedback_router_orchestrator.websocket("/test-ws")
-async def test_websocket(websocket: WebSocket):
-    set_agent_folder("orchestrator")
-    await websocket.accept()
-    await websocket.send_text("Monitoring Agent WebSocket connection successful!")
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await websocket.send_text(f"Monitoring Agent Echo: {data}")
-    except WebSocketDisconnect:
-        logger.info("Test WebSocket disconnected")
+# The `/test-ws` debug socket was removed in the Phase 5 follow-up audit. It called
+# `websocket.accept()` immediately and echoed whatever it was sent — an
+# unauthenticated socket mounted in the running app, invisible to every check until
+# the boot scan was taught to see WebSocket routes. Nothing referenced it.
 
-
-# Main WebSocket endpoint
 @monitoring_feedback_router_orchestrator.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     ticket = websocket.query_params.get("ticket", "")
