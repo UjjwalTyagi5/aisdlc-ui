@@ -23,6 +23,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 const sendTurn = vi.fn();
 let socketError: string | null = null;
 
+const deliverablesFromSocket: Array<Record<string, unknown>> = [];
+
 vi.mock("@/lib/orchestrator/use-orchestrator-socket", () => ({
   useOrchestratorSocket: () => ({
     messages: [],
@@ -31,6 +33,8 @@ vi.mock("@/lib/orchestrator/use-orchestrator-socket", () => ({
     activeAgent: null,
     error: socketError,
     busy: false,
+    activity: [],
+    deliverables: deliverablesFromSocket,
     reset: () => {},
   }),
 }));

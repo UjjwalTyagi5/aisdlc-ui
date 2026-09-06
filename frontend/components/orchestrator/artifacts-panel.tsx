@@ -71,6 +71,16 @@ export interface ArtifactsPanelProps {
    * falls back to the stage's owner role rather than disappearing.
    */
   showApprover?: boolean;
+  /**
+   * What the first tab is called. Defaults to `"Artifacts"` so the still-live Copilot
+   * is unchanged; the Orchestrator passes `"Deliverables"`.
+   *
+   * A PROP rather than a rename because this file is shared: `components/copilot/
+   * copilot.tsx` imports the same panel, and what the standalone agents write really
+   * is an Artifact — approval-gated, in its own table. The Orchestrator's output is a
+   * different concept and says so.
+   */
+  tabLabel?: string;
   className?: string;
 }
 
@@ -132,6 +142,7 @@ export function ArtifactsPanel({
   idleSeconds = 0,
   connectionStatus = "idle",
   showApprover = false,
+  tabLabel = "Artifacts",
   className,
 }: ArtifactsPanelProps) {
   const rid = runId as RunId;
@@ -307,7 +318,7 @@ export function ArtifactsPanel({
       <button
         type="button"
         onClick={onToggle}
-        aria-label="Show artifacts panel"
+        aria-label={`Show ${tabLabel.toLowerCase()} panel`}
         className={cn(
           "border-line-soft bg-panel-elevated/40 text-muted-foreground hover:text-foreground flex h-full w-10 shrink-0 flex-col items-center gap-3 border-l py-4",
           className,
@@ -315,7 +326,7 @@ export function ArtifactsPanel({
       >
         <ChevronRight className="size-4 rotate-180" aria-hidden />
         <span className="[writing-mode:vertical-rl] font-mono text-[10px] uppercase tracking-[0.2em]">
-          Artifacts
+          {tabLabel}
         </span>
         {artifactCount > 0 && (
           <span className="bg-brand-bright/15 text-brand-bright rounded-full px-1.5 py-0.5 font-mono text-[10px] font-semibold">
@@ -381,7 +392,7 @@ export function ArtifactsPanel({
             onClick={() => setTab("artifacts")}
             count={artifactCount}
           >
-            Artifacts
+            {tabLabel}
           </TabButton>
           <TabButton
             id="activity"
@@ -683,7 +694,7 @@ function ArtifactsTab({
         {groups.map(({ stage, items }) => {
           const open = expanded.has(stage);
           return (
-            <div key={stage} className="mb-1">
+            <div key={stage} className="mb-1" data-testid={`deliverable-group-${stage}`}>
               <button
                 type="button"
                 onClick={() => toggleGroup(stage)}
@@ -1115,9 +1126,23 @@ function ArtifactRow({
         >
           <ArtifactKindIcon kind={artifact.kind} className="size-3.5" />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+        <span
+          data-testid="deliverable-title"
+          data-id={artifact.id}
+          className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground"
+        >
           {artifact.title}
         </span>
+        {artifact.created_at && (
+          // What tells two versions of one document apart. Absent on pointers, which
+          // reference live state rather than a moment.
+          <span
+            data-testid="deliverable-time"
+            className="text-muted-foreground/70 shrink-0 font-mono text-[10px]"
+          >
+            {formatProducedAt(artifact.created_at)}
+          </span>
+        )}
       </button>
       {streaming ? (
         <Loader2 className="text-brand-bright mr-1 size-3.5 shrink-0 animate-spin" aria-hidden />
@@ -1150,6 +1175,14 @@ function ArtifactKindIcon({ kind, className }: { kind: ArtifactKind; className?:
   return <Icon className={className} aria-hidden />;
 }
 
+/** A version's produced-at, short enough to sit on one row. */
+function formatProducedAt(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  return at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+
 function groupByStage(artifacts: Artifact[]): Array<{ stage: string; items: Artifact[] }> {
   const byStage = new Map<string, Artifact[]>();
   for (const a of artifacts) {
@@ -1164,7 +1197,17 @@ function groupByStage(artifacts: Artifact[]): Array<{ stage: string; items: Arti
       const ib = order.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
     })
-    .map(([stage, items]) => ({ stage, items }));
+    .map(([stage, items]) => ({
+      stage,
+      // Newest first WITHIN a group. Every version of a document is kept — a re-run
+      // appends rather than overwrites — so without this the reader has to work out
+      // which of three identically-titled reports is the current one. Items with no
+      // timestamp (synthesized pointers, and every Copilot artifact) sort last, since
+      // "" loses to any ISO-8601 string.
+      items: [...items].sort((a, b) =>
+        (b.created_at ?? "").localeCompare(a.created_at ?? ""),
+      ),
+    }));
 }
 
 function TabButton({

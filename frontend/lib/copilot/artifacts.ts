@@ -47,6 +47,13 @@ export const Artifact = z.object({
   /** Monaco/code language hint (e.g. "sql", "yaml"). */
   language: z.string().optional(),
   /**
+   * When this was produced, ISO-8601. Absent on a Copilot artifact and on a
+   * synthesized POINTER (a code tree references the run workspace; it has no single
+   * moment). The Orchestrator keeps every version of a document, so this is what
+   * distinguishes three identically-titled reports from each other.
+   */
+  created_at: z.string().nullish(),
+  /**
    * Stage whose generated output dir a `file-tree` artifact should browse
    * (e.g. "design", "testing"). Falls back to `stage` when omitted — the
    * backend currently emits both set to the same value.

@@ -41,6 +41,8 @@ let activityFromSocket: Array<{
   status?: "running" | "done";
 }> = [];
 
+const deliverablesFromSocket: Array<Record<string, unknown>> = [];
+
 vi.mock("@/lib/orchestrator/use-orchestrator-socket", () => ({
   useOrchestratorSocket: () => ({
     messages: [],
@@ -50,6 +52,7 @@ vi.mock("@/lib/orchestrator/use-orchestrator-socket", () => ({
     error: null,
     busy: socketBusy,
     activity: activityFromSocket,
+    deliverables: deliverablesFromSocket,
     reset: resetSocket,
   }),
 }));
@@ -189,7 +192,7 @@ describe("OrchestratorCockpit — the Activity tab is actually fed", () => {
     await screen.findByRole("combobox", { name: /agent/i });
 
     // The panel starts collapsed.
-    fireEvent.click(screen.getByRole("button", { name: /show artifacts panel/i }));
+    fireEvent.click(screen.getByRole("button", { name: /show deliverables panel/i }));
     fireEvent.click(await screen.findByRole("tab", { name: /activity/i }));
     expect(await screen.findByText("read_repo")).toBeInTheDocument();
   });
@@ -204,7 +207,7 @@ describe("OrchestratorCockpit — the Activity tab is actually fed", () => {
     renderGlobalCockpit();
     await screen.findByRole("combobox", { name: /agent/i });
 
-    fireEvent.click(screen.getByRole("button", { name: /show artifacts panel/i }));
+    fireEvent.click(screen.getByRole("button", { name: /show deliverables panel/i }));
     fireEvent.click(await screen.findByRole("tab", { name: /activity/i }));
 
     // The composer also says "reconnecting", so scope to the panel's status line.

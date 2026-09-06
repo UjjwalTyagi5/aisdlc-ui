@@ -24,6 +24,7 @@ import { useAccessScope } from "@/hooks/use-access-scope";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import { canUseOrchestrator } from "@/lib/orchestrator/access";
+import { DeliverablesRead } from "@/lib/orchestrator/deliverables";
 import { ORCHESTRATOR_AGENT_IDS, type OrchestratorAgentId } from "@/lib/orchestrator/protocol";
 import { agentLabel, splitModelKey } from "@/lib/orchestrator/types";
 import {
@@ -258,6 +259,11 @@ export function OrchestratorCockpit({
   // One run per conversation, created on the first turn and reused after.
   const runIdRef = React.useRef<string | null>(null);
   const creatingRunRef = React.useRef<Promise<string> | null>(null);
+  // The same value as `runIdRef`, held in state as well. The ref is what the send
+  // path reads synchronously; this is what the Deliverables panel renders against,
+  // and a ref alone would never re-render it — the run would exist and the panel
+  // would go on showing an empty tab.
+  const [runId, setRunId] = React.useState<string | null>(null);
 
   const ensureRun = React.useCallback(async (): Promise<string> => {
     if (runIdRef.current) return runIdRef.current;
@@ -271,9 +277,10 @@ export function OrchestratorCockpit({
       // loaded, or the picked model is not among them): the backend resolves a
       // bare model id itself. Null for both means the organization default.
       model_id: offeringId ? null : (modelKey ? splitModelKey(modelKey).model_id : null),
-    }).then(({ runId }) => {
-      runIdRef.current = runId;
-      return runId;
+    }).then(({ runId: created }) => {
+      runIdRef.current = created;
+      setRunId(created);
+      return created;
     });
     creatingRunRef.current = pending;
     try {
@@ -304,10 +311,67 @@ export function OrchestratorCockpit({
     if (lastConversationKey.current === conversationKey) return;
     lastConversationKey.current = conversationKey;
     runIdRef.current = null;
+    setRunId(null);
     creatingRunRef.current = null;
     setAgent(null);
+    setOpenDeliverableId(null);
     resetSocket();
   }, [conversationKey, resetSocket]);
+
+  // ── Deliverables ───────────────────────────────────────────────────────────
+  //
+  // What the agents produced on this run: everything the socket has seen this
+  // session, plus whatever the run already held before it, replayed over REST so
+  // reopening a conversation shows its documents without waiting for another turn.
+  const [openDeliverableId, setOpenDeliverableId] = React.useState<string | null>(null);
+
+  const deliverablesQ = useQuery({
+    queryKey: ["orchestrator", "deliverables", runId],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/runs/${encodeURIComponent(runId as string)}/deliverables`,
+        { credentials: "include" },
+      );
+      if (!res.ok) throw new Error(`deliverables read failed: ${res.status}`);
+      return DeliverablesRead.parse(await res.json());
+    },
+    enabled: !!runId,
+  });
+
+  // The panel speaks `stage`; the wire speaks `agent`. ONE mapping, here at the
+  // boundary — the panel is shared with the still-live Copilot and must not be taught
+  // a second vocabulary.
+  //
+  // Socket rows come FIRST so a document produced this turn wins over the REST
+  // snapshot that predates it, and the de-dupe keeps the newer of the two.
+  const deliverables = React.useMemo(() => {
+    const seen = new Set<string>();
+    return [...socket.deliverables, ...(deliverablesQ.data?.deliverables ?? [])]
+      .filter((d) => {
+        if (seen.has(d.id)) return false;
+        seen.add(d.id);
+        return true;
+      })
+      .map((d) => ({
+        id: d.id,
+        stage: d.agent,
+        kind: d.kind,
+        title: d.title,
+        content: d.content ?? "",
+        url: d.url ?? undefined,
+        language: d.language ?? undefined,
+        source: d.source ?? undefined,
+        created_at: d.created_at ?? undefined,
+      }));
+  }, [socket.deliverables, deliverablesQ.data]);
+
+  // Re-read once a turn finishes, so a deliverable that was persisted but whose
+  // frame did not arrive (a reconnect mid-turn) still appears.
+  const busy = socket.busy;
+  React.useEffect(() => {
+    if (!busy && runId) void deliverablesQ.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, runId]);
 
   const handleSend = React.useCallback(
     (text: string) => {
@@ -512,13 +576,24 @@ export function OrchestratorCockpit({
 
           <div className={cn("hidden", variant === "page" ? "xl:block" : "lg:block")}>
             <ArtifactsPanel
-              runId=""
-              activeStage=""
+              // The REAL run, not "". The panel resolves the Development code tree
+              // and every per-agent file tree against this id, so an empty string
+              // rendered a permanently empty tree — indistinguishable from a repo the
+              // agent had failed to pull.
+              runId={runId ?? ""}
+              // Drives which group is expanded AND the Development code tree, which
+              // the panel synthesises only while Development is the active agent.
+              // This was "" too, so that tree never appeared at all.
+              activeStage={socket.activeAgent ?? ""}
               gate={null}
               showApprover={false}
-              artifacts={[]}
-              openArtifactId={null}
-              onSelectArtifact={() => {}}
+              // What its agents produced. This was a literal [] — a declared
+              // interface with no data behind it, which on screen is exactly what an
+              // agent that produced nothing looks like.
+              tabLabel="Deliverables"
+              artifacts={deliverables}
+              openArtifactId={openDeliverableId}
+              onSelectArtifact={setOpenDeliverableId}
               streamingArtifactId={null}
               // The live feed: which agent was chosen and why, what it is thinking,
               // and every tool it runs. `tool.call` has been declared in the protocol
