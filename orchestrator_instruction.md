@@ -437,6 +437,7 @@ Phases are ordered so nothing is built against an unproven interface.
 | 2026-09-05 | Phase 0+1 plan written: `docs/superpowers/plans/2026-09-05-orchestrator-phase-0-1.md` (9 tasks, TDD). Sequencing corrected in §8 — the Copilot page survives Phase 1 and is deleted in Phase 5, so there is never a window with no working orchestration. Protocol decided as *Copilot protocol minus gates, plus `agent.selected`*, reusing the existing Zod union rather than inventing one. |
 | 2026-09-05 | **D10 added** — the Orchestrator gets its own per-agent implementations built from the standalone agents' tools and prompts, rather than running their compiled graphs. Their permission/gate/session machinery is precisely what the Orchestrator does not need. Affects Phases 2-3 only; Phase 1 (frontend) is unchanged and continues. |
 | 2026-09-05 | **PHASE 1 COMPLETE.** Branch `feature/orchestrator-rebuild`, 18 commits, 34 files, +2203/−1306, 601 tests passing, typecheck clean. Not pushed. Details in §10. |
+| 2026-09-06 | **PHASE 4 COMPLETE.** Deliverables: their own table, append-only, no approval concept. Design at `docs/superpowers/specs/2026-09-06-orchestrator-phase-4-deliverables-design.md`, plan at `docs/superpowers/plans/2026-09-06-orchestrator-phase-4.md`. Decisions D11–D17. Backend 397 tests, frontend 669, typecheck and lint clean, zero regressions against the pre-phase baseline. Details in §15. |
 
 ---
 
@@ -783,3 +784,108 @@ a test certifying a silent data loss as deliberate; this one was a commit messag
 certifying a cleanup that had not happened. It is the reason every task on this branch is
 reviewed by someone other than its author, and the reason the standard of proof is
 "break the code and watch the test fail" rather than "the suite is green".
+
+---
+
+## 15. Phase 4 outcome — Deliverables (2026-09-06)
+
+Requirement 7 of your original message: *"All the generated documents are stored on the
+artifact tab for reference… in the artifacts tab, there are headings agent-wise."*
+
+### 15.1 The distinction you drew, and what it changed
+
+Asked where Orchestrator output should live, you said the existing `artifacts` table
+belongs to the standalone agents — *"that is why it needs approval"* — and that the
+Orchestrator's should be **a separate thing with a different name**.
+
+That is the right cut, and it settled more than storage. An `artifacts` row carries
+`approval_status` **because** a standalone agent wrote it and a human accepts it. The
+Orchestrator has no gates (D5) and is driven by a Project Admin who already owns all
+nine agents, so reusing that table would have dragged an approval concept into a
+surface the spec says has none. Orchestrator output is now a **Deliverable**, in
+`orchestrator_deliverables`, with no approval column anywhere in its shape — on the
+table, in the ORM model, or on the wire. Three tests assert the absence.
+
+It is the same line D10a already drew in the engine, where the Orchestrator reuses the
+agents' compiled graphs and never their `*_agent_api.py` wrappers.
+
+### 15.2 Decisions
+
+| # | Decision | Source |
+|---|---|---|
+| D11 | Orchestrator output is a **Deliverable**, stored separately, never gated. | User, direct |
+| D12 | **Every version is kept**, newest first. A re-run never destroys the earlier document. | User, chosen from options |
+| D13 | **Only the latest per agent feeds context**, so nothing downstream is handed two contradictory PRDs. | User, chosen from options |
+| D14 | Its **own table**, not the run's JSONB columns — versioning is a query, not a whole-blob rewrite that races. | User, chosen from options |
+| D15 | Only `deliverable.ready` is emitted; no open/delta/end trio. Text already streams to chat. | Claude, YAGNI |
+| D16 | The schema lives in `lib/orchestrator/`, not `lib/copilot/`, which Phase 5 deletes. | Claude |
+| D17 | The shared panel is adapted at the boundary; its tab name is a prop defaulting to `"Artifacts"` so the live Copilot is untouched. | Claude |
+
+**One correction made while planning:** pointers (the Development code tree, per-agent
+file trees, the PR link) are **synthesized on read, never stored**. They reference state
+that already lives elsewhere, so a stored row would stack a duplicate on every turn —
+and their ids must stay stable anyway, because the panel de-dupes the tree on the
+literal id `dev-code`.
+
+### 15.3 A gap this closed that was not in the brief
+
+`sections_from_run` had no `plan` branch. `plan_artifacts` was written by nothing and
+read by nothing, so the **Project Manager agent's output rendered nowhere** — the same
+shape as the §2.4 dispatch gap that prompted this rebuild, sitting one layer further
+out. It is now handled like any other agent, and that it needed a special case at all
+was the bug.
+
+### 15.4 Proof
+
+Three things had never been done before this phase, and all three now have been:
+
+- **The real database.** Every Phase 4 unit test fakes the session, which proves the SQL
+  is assembled correctly and nothing about whether Postgres accepts it.
+  `scripts/live_deliverables_check.py` runs 16 checks against the seeded tenant — all
+  pass, including that the database itself refuses an agent id outside the nine.
+- **A real agent turn.** Every dispatch test fakes the graph. Running the **Project
+  Manager agent** for real, on the project's own BYOK grant:
+  `agent.selected -> stream_chunk -> tool.call -> deliverable.ready -> stream_end`, ready
+  before `stream_end` as designed, 1,368 characters persisted, stored content identical
+  to what the user saw, and it reached the next agent's context under its proper name.
+- **A regression baseline.** The full backend suite has 22 failures. Running the same
+  subset in a worktree at the pre-phase commit gives an **identical set** — all
+  pre-existing (RLS inert per carried debt 1, plus two live-E2E fixtures failing on
+  `invalid UUID 'test-tenant'`). Zero regressions.
+
+### 15.5 What the mutation testing caught this phase
+
+Six survivors, each a test that passed against knowingly broken code:
+
+1. **`ORDER BY` flipped to ascending** — all 13 store tests stayed green, because the
+   fake session sorted rows itself. Not cosmetic: `latest_per_agent` takes the FIRST row
+   per agent, so an ascending read would have fed every downstream agent the **oldest**
+   version of a document, silently.
+2. **Bypassing `_get_run_or_404`** in the new REST endpoint — the source-inspection test
+   grepped raw source, and the endpoint's own **docstring** names that function. The
+   prose satisfied the check the code had stopped satisfying. Assertions now run against
+   docstring-stripped source.
+3. **The mutation hit the wrong line.** `run = await _get_run_or_404(...)` appears
+   **fifteen times** in `runs.py`, so `replace(..., 1)` mutated a different route. "The
+   file changed" is not "the line I meant changed" — the harness now asserts anchor
+   uniqueness and probes the function under test.
+4. **`created_at` tightened to required** broke nothing for a stored row, which always
+   has a timestamp, while silently dropping every **pointer** — taking the Development
+   code tree with it.
+5. **`runId=""`, `activeStage=""` and `artifacts={[]}`** — reverting all three left the
+   entire 83-test orchestrator suite green. These three literals *are* the requirement.
+   Rendering the panel proves the panel works; only capturing its props proves the
+   cockpit feeds it. This is the same failure the Activity tab had.
+
+Two harness lessons, both of which produced a false SURVIVED before being fixed: print
+`sys.executable` (a bare `python` heredoc uses the SYSTEM interpreter), and
+`git diff --numstat` proves nothing for an **untracked** file — content length and
+anchor-absence checks do.
+
+### 15.6 Carried debt, unchanged
+
+Context truncation (~2,400 characters per artifact on a full nine-agent run) is
+**untouched** and still needs a product decision — it is recorded here so this phase is
+not mistaken for having addressed it. RLS remains inert pending a non-superuser
+application role. Phase 5 (retiring `copilot_api.py` and `orchestrator_api.py`) and the
+deferred e2e rewrite are unchanged.
