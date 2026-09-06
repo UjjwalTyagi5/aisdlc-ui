@@ -30,8 +30,11 @@ import type { OrchestratorMessage } from "@/lib/orchestrator/types";
  *    tenant and refuses anything it cannot verify. The caller therefore hands in a
  *    `resolveRunId` that produces a REAL `runs` row (see the cockpit), and the
  *    first turn is what pays for creating one.
- *  · It never names an agent for you. `agent` is required on every turn; Phase 2
- *    has no router, so the pick is the user's and stays visible.
+ *  · It never names an agent for you. `agent` is an OPTIONAL override; omitted,
+ *    the ENGINE routes and says which agent it chose and why. What this hook must
+ *    not do is guess one locally to fill the gap — the choice and its reason have
+ *    to come from the server, or the badge on the bubble would be the UI's opinion
+ *    rather than the agent that actually ran.
  *  · It never lets an unrecognised frame reach component state. EVERY inbound
  *    frame goes through `OrchestratorEvent.safeParse` and is dropped on failure —
  *    that validation is the whole reason the protocol was pinned. A frame the UI
@@ -54,8 +57,11 @@ export type OrchestratorConnState =
 
 export interface OrchestratorTurnInput {
   text: string;
-  /** Which agent runs this turn. Required — the UI makes the user choose. */
-  agent: OrchestratorAgentId;
+  /**
+   * Which agent runs this turn — an override. Omit it (or pass null) to let the
+   * Orchestrator choose, which is the default the cockpit sends.
+   */
+  agent?: OrchestratorAgentId | null;
   /**
    * Resolves the REAL run this turn belongs to, awaited before the frame goes out.
    *
@@ -506,7 +512,7 @@ export function useOrchestratorSocket(
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const send = React.useCallback(
-    ({ text, agent, resolveRunId, modelKey = null }: OrchestratorTurnInput) => {
+    ({ text, agent = null, resolveRunId, modelKey = null }: OrchestratorTurnInput) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       setError(null);
@@ -516,6 +522,11 @@ export function useOrchestratorSocket(
       // Echo the turn immediately, then open the reply bubble attributed to the
       // agent the USER picked. `agent.selected` confirms it a moment later and
       // re-attributes if the server picked differently.
+      //
+      // With no override there is nothing to attribute it to YET, and `null` is the
+      // honest value: the bubble stays unattributed until `agent.selected` arrives,
+      // rather than showing a guess that a moment later turns into a different
+      // agent. A wrong badge that corrects itself reads as a bug in the answer.
       turnAgentRef.current = agent;
       turnModelKeyRef.current = modelKey;
       turnSentRef.current = false;
@@ -565,11 +576,13 @@ export function useOrchestratorSocket(
           }
           return;
         }
+        // `agent` is OMITTED, not sent as null, when there is no override — see
+        // the field's own comment in protocol.ts.
         const frame: OrchestratorUserMessage = {
           type: "user_message",
           text: trimmed,
-          agent,
           run_id: runId,
+          ...(agent ? { agent } : {}),
         };
         const ws = wsRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {

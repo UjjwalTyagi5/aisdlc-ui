@@ -76,6 +76,16 @@ export interface OrchestratorCockpitProps {
  * litter every project with empty runs nobody started. The first message pays
  * for it; the rest of the conversation reuses it.
  */
+/**
+ * The value the agent picker uses for "let the Orchestrator choose".
+ *
+ * Radix forbids an empty string as a `SelectItem` value and `null` cannot cross
+ * that API, so the no-override option needs a name of its own. Deliberately not
+ * one of the nine ids, and never sent on the wire: the hook omits the `agent`
+ * field entirely when there is no override.
+ */
+const AUTO = "__auto__";
+
 export function OrchestratorCockpit({
   lockedProjectId,
   variant = "page",
@@ -206,8 +216,13 @@ export function OrchestratorCockpit({
 
   // ── The engine ────────────────────────────────────────────────────────────
 
-  // Phase 2 has no router: the user names the agent, and the picker starts empty.
+  // `null` is "let the Orchestrator choose", which is the DEFAULT and a real
+  // selection rather than an unanswered question. Picking an agent overrides the
+  // router for that turn. Phase 2 had no router, so the picker started empty and
+  // nothing could be sent until it was filled; that is no longer the shape of the
+  // decision, and leaving it would make the common case the one that needs work.
   const [agent, setAgent] = React.useState<OrchestratorAgentId | null>(null);
+
 
   const socket = useOrchestratorSocket({ enabled: canDrive && !!projectId });
   const { send: sendTurn, reset: resetSocket } = socket;
@@ -277,7 +292,9 @@ export function OrchestratorCockpit({
 
   const handleSend = React.useCallback(
     (text: string) => {
-      if (!agent || !projectId) return;
+      if (!projectId) return;
+      // `agent` may be null — that is the routed path, and the hook omits the
+      // field entirely rather than sending a null the protocol does not declare.
       sendTurn({ text, agent, resolveRunId: ensureRun, modelKey });
     },
     [agent, projectId, sendTurn, ensureRun, modelKey],
@@ -309,16 +326,18 @@ export function OrchestratorCockpit({
   // The composer says WHY it is closed rather than sitting greyed out with no
   // explanation — "nothing happens when I type" was the old cockpit's whole
   // failure mode.
-  const composerDisabled = !canDrive || !projectId || !agent || socket.busy;
+  const composerDisabled = !canDrive || !projectId || socket.busy;
   const composerPlaceholder = !canDrive
     ? "Read-only — only this project's Project Admin can drive the Orchestrator."
     : !projectId
       ? "Pick a project to start."
-      : !agent
-        ? "Choose an agent above, then describe the work."
-        : socket.busy
+      : socket.busy
+        ? agent
           ? `The ${agentLabel(agent)} agent is working…`
-          : `Message the ${agentLabel(agent)} agent`;
+          : "Working…"
+        : agent
+          ? `Message the ${agentLabel(agent)} agent`
+          : "Describe the work — the Orchestrator picks the agent.";
 
   const shell =
     variant === "page"
@@ -387,18 +406,16 @@ export function OrchestratorCockpit({
             onOptionsResolved={handleOptionsResolved}
           />
 
-          {/* WHICH AGENT — chosen, never assumed. No `defaultValue`: an empty
-              picker is the honest state until the user says who should answer,
-              and it is what keeps a wrong agent from being someone else's
-              choice. Ordered as the protocol lists them; nothing about that
-              order implies a sequence. */}
+          {/* WHICH AGENT — an OVERRIDE, defaulting to letting the Orchestrator
+              choose. "Let the Orchestrator choose" is a real, visible, selected
+              option rather than an empty control the reader has to interpret: the
+              common case must not look like an unanswered question. Picking one of
+              the nine forces it for that turn and skips routing entirely. Ordered
+              as the protocol lists them; nothing about that order implies a
+              sequence. */}
           <Select
-            // `""`, not `undefined`: Radix reads undefined as "uncontrolled" and
-            // warns the moment a pick makes it controlled. An empty string is a
-            // controlled no-selection, which is what an unpicked agent IS, and it
-            // still shows the placeholder.
-            value={agent ?? ""}
-            onValueChange={(v) => setAgent(v as OrchestratorAgentId)}
+            value={agent ?? AUTO}
+            onValueChange={(v) => setAgent(v === AUTO ? null : (v as OrchestratorAgentId))}
             disabled={!canDrive || !projectId}
           >
             <SelectTrigger
@@ -407,10 +424,13 @@ export function OrchestratorCockpit({
             >
               <span className="flex min-w-0 items-center gap-2">
                 <Bot className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
-                <SelectValue placeholder="Choose an agent" />
+                <SelectValue placeholder="Let the Orchestrator choose" />
               </span>
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={AUTO} className="text-[12.5px]">
+                Let the Orchestrator choose
+              </SelectItem>
               {ORCHESTRATOR_AGENT_IDS.map((id) => (
                 <SelectItem key={id} value={id} className="text-[12.5px]">
                   {agentLabel(id)}
@@ -552,10 +572,10 @@ function EmptyThread({
             roster.{" "}
             {agentChosen
               ? "Describe the work and the agent you picked will answer here."
-              : "Choose which agent should answer, then describe the work."}
+              : "Describe the work — the Orchestrator picks the agent, and says which and why. Pick one yourself above to override it."}
           </>
         ) : (
-          "Choose a project, one of the models it is allowed to run on, and the agent you want to talk to."
+          "Choose a project and one of the models it is allowed to run on, then describe the work."
         )}
       </p>
     </div>

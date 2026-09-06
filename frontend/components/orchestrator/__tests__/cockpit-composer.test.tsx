@@ -119,17 +119,40 @@ function sendMessage(text: string) {
 afterEach(cleanup);
 
 describe("OrchestratorCockpit composer", () => {
-  it("offers an agent picker that starts empty", () => {
+  it("defaults to letting the Orchestrator choose, as a visible selection", () => {
+    // NOT an empty picker. Phase 2 started blank because there was no router and the
+    // user HAD to name an agent; now the common case is that nobody names one, and an
+    // empty control would make the default path look like an unanswered question.
     renderCockpit();
     const picker = screen.getByRole("combobox", { name: /agent/i });
-    expect(picker).toHaveTextContent("Choose an agent");
+    expect(picker).toHaveTextContent(/let the orchestrator choose/i);
   });
 
-  it("keeps the composer closed until an agent is named — and says so", () => {
+  it("opens the composer with no agent named, because routing is the default", () => {
+    // The inverse of the Phase 2 test this replaces, which kept the composer disabled
+    // until an agent was picked. Sending with no agent is now the normal path: the
+    // engine routes and announces what it chose and why.
     renderCockpit();
     const composer = screen.getByRole("textbox", { name: /message the orchestrator/i });
-    expect(composer).toBeDisabled();
-    expect(composer).toHaveAttribute("placeholder", expect.stringMatching(/choose an agent/i));
+    expect(composer).not.toBeDisabled();
+    expect(composer).toHaveAttribute(
+      "placeholder",
+      expect.stringMatching(/orchestrator picks the agent/i),
+    );
+  });
+
+  it("still lets an agent be picked, and then addresses the composer to it", async () => {
+    // The override survives. A default of "let the Orchestrator choose" would be
+    // worth little if choosing one yourself no longer did anything — the router is a
+    // model, and a wrong decision has to be correctable in one turn.
+    renderCockpit();
+    await chooseAgent("Security");
+    const composer = screen.getByRole("textbox", { name: /message the orchestrator/i });
+    expect(composer).not.toBeDisabled();
+    expect(composer).toHaveAttribute(
+      "placeholder",
+      expect.stringMatching(/security agent/i),
+    );
   });
 
   it("no longer claims the engine is coming in a later phase", () => {
@@ -167,6 +190,34 @@ describe("OrchestratorCockpit run creation", () => {
     renderCockpit();
     await screen.findByRole("combobox", { name: /agent/i });
     expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("sends no agent at all when the Orchestrator is left to choose", async () => {
+    // The picker's "let the Orchestrator choose" row needs a value Radix accepts, so
+    // it carries a sentinel. That sentinel must never escape the component: reaching
+    // the hook it would be sent as an agent id and refused by the engine as unknown.
+    renderCockpit();
+    await screen.findByRole("combobox", { name: /agent/i });
+
+    sendMessage("I need a PRD");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    const turn = sendTurn.mock.calls[0]![0] as { agent?: string | null };
+    expect(turn.agent ?? null).toBeNull();
+  });
+
+  it("returns to no override when the auto option is re-selected", async () => {
+    renderCockpit();
+    await chooseAgent("Security");
+    sendMessage("scan it");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+    expect((sendTurn.mock.calls[0]![0] as { agent?: string | null }).agent).toBe("security");
+
+    await chooseAgent("Let the Orchestrator choose");
+    sendMessage("and now?");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(2));
+    const second = sendTurn.mock.calls[1]![0] as { agent?: string | null };
+    expect(second.agent ?? null).toBeNull();
   });
 
   it("creates one run on the first turn and reuses it on the next", async () => {

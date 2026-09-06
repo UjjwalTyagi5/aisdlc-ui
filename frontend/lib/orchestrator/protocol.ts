@@ -105,15 +105,25 @@ export interface OrchestratorUserMessage {
   type: "user_message";
   text: string;
   /**
-   * WHICH AGENT RUNS THIS TURN — required, and deliberately not optional.
+   * WHICH AGENT RUNS THIS TURN — an OVERRIDE, and normally absent.
    *
-   * Phase 2 dispatches only an explicitly named agent; a frame without one is
-   * answered with an `error`, never with a guess (see `orchestrator2/ws.py`).
-   * Routing arrives in Phase 3, and until it does the choice is the user's — a
-   * silent default here is exactly how the previous engine dispatched the wrong
-   * agent without anyone being able to see that it had.
+   * Omitted, the Orchestrator routes: it reads the message, and the connection's
+   * earlier turns, and picks one of the nine or answers directly. Present, that
+   * agent runs and no routing call is made.
+   *
+   * The key must be OMITTED rather than sent as `null` or `""` when there is no
+   * override. The backend reads `(msg.get("agent") or "").strip()`, so any falsy
+   * value routes — but sending a field the protocol does not declare is how frames
+   * start being dropped, and this union has already lost one event type that way.
+   *
+   * Phase 2 required this field and refused a frame without it, because there was
+   * no router yet. The invariant that refusal stood for is unchanged and now lives
+   * in the engine: nothing is chosen silently. Every routed turn announces its
+   * agent AND the reason in `agent.selected`, before any of the agent's text, so a
+   * wrong choice is visible and correctable in one turn — which is precisely what
+   * the previous engine, advancing by list index, never told anyone.
    */
-  agent: OrchestratorAgentId;
+  agent?: OrchestratorAgentId;
   /**
    * A REAL `runs` row this caller's tenant owns. The socket resolves it and
    * refuses anything it cannot verify, because the id becomes the LangGraph

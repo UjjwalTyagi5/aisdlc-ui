@@ -231,6 +231,31 @@ describe("useOrchestratorSocket — turns", () => {
     });
   });
 
+  it("OMITS the agent key entirely when there is no override", async () => {
+    // Not `agent: null`, and not `agent: ""`. The backend reads
+    // `(msg.get("agent") or "").strip()`, so any falsy value would route correctly —
+    // but `protocol.ts` declares `agent?: OrchestratorAgentId`, and sending a field
+    // shaped differently from the declared contract is how frames start being
+    // dropped. This union has already silently lost one event type that way.
+    const { result } = await mount();
+
+    await act(async () => {
+      result.current.send({
+        text: "I need a PRD",
+        resolveRunId: async () => "3f6b0b7e-1a8a-4b3d-8a2c-0f1e2d3c4b5a",
+      });
+    });
+
+    await waitFor(() => expect(socket().sent).toHaveLength(1));
+    const frame = JSON.parse(socket().sent[0]!);
+    expect(frame).toEqual({
+      type: "user_message",
+      text: "I need a PRD",
+      run_id: "3f6b0b7e-1a8a-4b3d-8a2c-0f1e2d3c4b5a",
+    });
+    expect("agent" in frame).toBe(false);
+  });
+
   it("surfaces a server error instead of swallowing it", async () => {
     const { result } = await mount();
 
