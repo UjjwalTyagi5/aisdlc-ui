@@ -154,6 +154,25 @@ SECRET_STORE_KEY: str = os.environ.get("SECRET_STORE_KEY", "")
 # "enterprise" — SQL checkpointing required; startup fails if unavailable
 AGENT_RUNTIME_MODE = os.environ.get("AGENT_RUNTIME_MODE", "local")
 
+# May an agent fall back to the PLATFORM's own ANTHROPIC_API_KEY when the run's
+# resolved BYOK model is missing from the context?
+#
+# DEFAULT FALSE, so a BYOK deployment fails closed without anyone configuring anything.
+#
+# The Testing agent is the only one that ever built a model from the env key, and it
+# does so when the resolved-model contextvar is absent — which its own comment says
+# happens, because each node re-enters asyncio in an executor thread and the contextvar
+# does not follow. The guard used to be the runtime mode alone, which left the fallback
+# LIVE on every non-enterprise deployment that happens to have a key in its environment.
+# A dropped contextvar then spent the platform's key instead of the project's, bypassing
+# the project's grant and its budget — silently, with an answer that looked fine.
+#
+# Turning this on is a deliberate choice for a developer with no provider configured. An
+# escape hatch you have to ask for is not the same thing as one that fires on its own.
+ALLOW_PLATFORM_MODEL_FALLBACK: bool = os.environ.get(
+    "ALLOW_PLATFORM_MODEL_FALLBACK", ""
+).strip().lower() in ("1", "true", "yes", "on")
+
 # Key Vault secret NAMES for the three Postgres DSNs. The secret VALUES live in Key Vault;
 # only the names are configured here. Defaults reproduce the historical
 # sdlc-{env}-postgres-*-conn-string convention (env derived from AGENT_RUNTIME_MODE,

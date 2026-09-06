@@ -356,8 +356,18 @@ async def _resolve_and_stash_model(tenant_id: Optional[str], model_id: Optional[
         # Local-dev fallback: in non-enterprise mode the model key lives in .env
         # (no DB-configured BYOK provider). Mirror every other agent's behaviour
         # and resolve from ANTHROPIC_API_KEY. Enterprise mode still fails closed.
-        from config.env import AGENT_RUNTIME_MODE, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
-        if AGENT_RUNTIME_MODE == "enterprise" or not ANTHROPIC_API_KEY:
+        # OPT-IN. Guarding on runtime mode alone left this live on every
+        # non-enterprise deployment with a key in its environment, so a BYOK run whose
+        # contextvar was dropped spent the PLATFORM's key instead of the project's —
+        # bypassing its grant and its budget, with an answer that looked fine. An
+        # administrator must configure a provider in Org Settings → Model Providers.
+        from config.env import (
+            AGENT_RUNTIME_MODE, ALLOW_PLATFORM_MODEL_FALLBACK,
+            ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+        )
+        if (AGENT_RUNTIME_MODE == "enterprise"
+                or not ALLOW_PLATFORM_MODEL_FALLBACK
+                or not ANTHROPIC_API_KEY):
             raise
         resolved = ResolvedModel(
             provider="anthropic",
