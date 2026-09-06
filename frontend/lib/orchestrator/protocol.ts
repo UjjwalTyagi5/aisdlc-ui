@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { ARTIFACT_EVENTS } from "@/lib/copilot/artifacts";
 import { ChoiceCard } from "@/lib/copilot/types";
+import { ORCHESTRATOR_AGENT_IDS, OrchestratorAgentId } from "@/lib/orchestrator/agents";
+import { DELIVERABLE_EVENTS } from "@/lib/orchestrator/deliverables";
 
 /**
  * Orchestrator wire protocol — the contract between the Orchestrator UI and the
@@ -20,21 +22,15 @@ import { ChoiceCard } from "@/lib/copilot/types";
  *    `agent.selected` carries the same information without the false ordering.
  */
 
-/** The nine agents. `plan` is the Project Manager agent — internal id only. */
-export const ORCHESTRATOR_AGENT_IDS = [
-  "requirements",
-  "design",
-  "plan",
-  "development",
-  "code_review",
-  "security",
-  "testing",
-  "deployment",
-  "documentation",
-] as const;
-
-export const OrchestratorAgentId = z.enum(ORCHESTRATOR_AGENT_IDS);
-export type OrchestratorAgentId = z.infer<typeof OrchestratorAgentId>;
+/**
+ * The nine agents. `plan` is the Project Manager agent — internal id only.
+ *
+ * Defined in `./agents` and re-exported here. `deliverables.ts` needs to name an
+ * agent, and this module folds the deliverable event into its union, so keeping the
+ * enum here would make those two files import each other. Everything that already
+ * imported these names from `protocol` keeps working.
+ */
+export { ORCHESTRATOR_AGENT_IDS, OrchestratorAgentId };
 
 export const StreamChunkEvent = z.object({
   type: z.literal("stream_chunk"),
@@ -96,6 +92,7 @@ export const OrchestratorEvent = z.discriminatedUnion("type", [
   ChoiceCardEvent,
   ErrorEvent,
   ...ARTIFACT_EVENTS,
+  ...DELIVERABLE_EVENTS,
 ]);
 export type OrchestratorEvent = z.infer<typeof OrchestratorEvent>;
 
