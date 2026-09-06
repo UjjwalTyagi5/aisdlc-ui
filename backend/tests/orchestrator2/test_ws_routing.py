@@ -426,3 +426,51 @@ async def test_a_context_failure_is_reported_not_silently_dropped(monkeypatch):
     assert dispatched == [], "an agent must not run believing the run is empty"
     assert any(e["type"] == "error" for e in socket.sent)
     assert socket.sent[-1]["type"] == "stream_end"
+
+
+# ── the history is bounded in BYTES, not only in turns ───────────────────────
+
+
+def test_one_enormous_turn_cannot_fill_the_history(monkeypatch):
+    """F11 from the whole-branch review: the cap was 20 ENTRIES and nothing else, so
+    twenty 1 MB messages retained 20 MB on the socket AND forwarded all of it to the
+    routing model on every subsequent turn — while the comment claimed the cap was
+    "where the memory is held". A turn count is not a memory bound."""
+    from agents_orchestrator.orchestrator2 import ws
+
+    history: list[dict] = []
+    for i in range(ws._HISTORY_TURNS * 2):
+        ws._remember(history, "user", "x" * 1_000_000)
+
+    total = sum(len(entry["content"]) for entry in history)
+    assert total <= ws._HISTORY_MAX_CHARS, (
+        f"history holds {total} chars, over the {ws._HISTORY_MAX_CHARS} bound"
+    )
+    assert len(history) <= ws._HISTORY_TURNS
+
+
+def test_a_truncated_turn_says_it_was_truncated(monkeypatch):
+    """A silently shortened turn is a routing decision made on text the user did not
+    write. Same rule `context.py` follows for artifacts."""
+    from agents_orchestrator.orchestrator2 import ws
+
+    history: list[dict] = []
+    ws._remember(history, "user", "y" * (ws._HISTORY_MAX_CHARS * 4))
+
+    assert len(history) == 1
+    content = history[0]["content"]
+    assert len(content) <= ws._HISTORY_MAX_CHARS
+    assert "truncated" in content.lower()
+
+
+def test_ordinary_turns_are_kept_whole(monkeypatch):
+    """The bound must not shorten normal conversation — a cap that truncates real
+    messages would degrade routing rather than protect it."""
+    from agents_orchestrator.orchestrator2 import ws
+
+    history: list[dict] = []
+    ws._remember(history, "user", "design the billing service")
+    ws._remember(history, "agent", "Here is the design.")
+
+    assert [e["content"] for e in history] == [
+        "design the billing service", "Here is the design."]

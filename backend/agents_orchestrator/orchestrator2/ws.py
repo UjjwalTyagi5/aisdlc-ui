@@ -394,6 +394,19 @@ def _as_run_uuid(value: str) -> Any:
 # not only where it is read.
 _HISTORY_TURNS = _ROUTER_HISTORY_LIMIT
 
+# And a bound in CHARACTERS, because a turn count is not a memory bound. Twenty turns
+# of 1 MB each is 20 MB held on the socket and forwarded to the routing model on every
+# subsequent turn; the frame size that gets it there is the server's inbound limit,
+# which is not this module's to set. ~24k chars is roughly 6k tokens — enough
+# conversation for "and now?" to be routable, and small enough that the routing call
+# cannot grow without bound. Deliberately the same order as
+# `context.MAX_CONTEXT_CHARS`, which bounds the other text a turn carries.
+_HISTORY_MAX_CHARS = 24_000
+# The longest a single turn may be before it is shortened. A fifth of the budget, so
+# one long message cannot crowd out the four before it.
+_HISTORY_MAX_ENTRY_CHARS = _HISTORY_MAX_CHARS // 5
+_TRUNCATION_NOTE = "… [truncated]"
+
 
 def _remember(history: list[dict], role: str, text: str) -> None:
     """Append one turn to this CONNECTION's conversation, oldest dropped first.
@@ -410,11 +423,28 @@ def _remember(history: list[dict], role: str, text: str) -> None:
     It lives for the connection and no longer. Server-backed sessions are not part of
     this phase, so a reconnect starts empty and the first turn after one routes on the
     message alone — recoverable, because naming an agent always overrides.
+
+    BOUNDED IN TURNS AND IN CHARACTERS. The turn count alone was not a memory bound:
+    twenty 1 MB messages meant 20 MB retained here and re-sent to the routing model on
+    every later turn. A single long turn is shortened to `_HISTORY_MAX_ENTRY_CHARS`,
+    and the oldest turns are then dropped until the whole list fits
+    `_HISTORY_MAX_CHARS`.
+
+    A shortened turn SAYS so, for the same reason `context.py` announces a truncated
+    artifact: routing on text the user did not write is a mis-route, and a mis-route
+    looks exactly like a correct one.
     """
     if not text:
         return
+    if len(text) > _HISTORY_MAX_ENTRY_CHARS:
+        keep = _HISTORY_MAX_ENTRY_CHARS - len(_TRUNCATION_NOTE)
+        text = text[:keep] + _TRUNCATION_NOTE
     history.append({"role": role, "content": text})
     del history[:-_HISTORY_TURNS]
+    # Oldest first, so what survives is the most recent conversation — which is what a
+    # routing decision is actually made on.
+    while len(history) > 1 and sum(len(e["content"]) for e in history) > _HISTORY_MAX_CHARS:
+        history.pop(0)
 
 
 @orchestrator2_router.websocket("/ws")
