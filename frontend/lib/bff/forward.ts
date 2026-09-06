@@ -26,12 +26,28 @@ import { bffFetch } from "@/lib/bff/client";
 export async function forward(
   req: NextRequest,
   path: string,
-  opts: { method?: "GET" | "POST"; withBody?: boolean } = {},
+  opts: {
+    method?: "GET" | "POST";
+    withBody?: boolean;
+    /**
+     * Append this request's query string to the forwarded path.
+     *
+     * OPT-IN, not automatic. A proxy that forwards whatever it is given lets a
+     * caller reach filters the route never meant to expose, and the enumerated
+     * surface this file exists for would stop meaning much. Routes whose backend
+     * takes no query parameters simply do not set it.
+     */
+    withQuery?: boolean;
+  } = {},
 ) {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
 
   const method = opts.method ?? "GET";
+  if (opts.withQuery) {
+    const search = req.nextUrl.searchParams.toString();
+    if (search) path = `${path}?${search}`;
+  }
   let body: unknown;
   if (opts.withBody) {
     try {

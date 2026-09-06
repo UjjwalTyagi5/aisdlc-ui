@@ -95,23 +95,21 @@ function matches(request: string[], handler: string[]): boolean {
 }
 
 /**
- * KNOWN-BROKEN, PRE-EXISTING, and deliberately not fixed here.
+ * Paths deliberately fetched without a handler. EMPTY, and it should stay that way.
  *
- * These four are live code — `lib/api/audit.ts` is used by both audit pages,
- * `eval.ts` by the eval indicator, `evidence.ts` by the audit tab — and every one of
- * them 404s in the browser today for exactly the reason this file exists. They were
- * found BY this test, not introduced by it.
+ * It briefly held four run-scoped paths — audit, eval, evidence, and the evidence
+ * job status poll — all live code, all 404ing in the browser for exactly the reason
+ * this file exists. They were found BY this test and have since been given handlers,
+ * so the entries are gone rather than lingering as a permanent excuse.
  *
- * Registered rather than fixed because the fix is a guess without knowing what those
- * backend routes expect, and a wrong proxy is worse than an absent one: it turns a
- * clean 404 into a plausible-looking error. Removing an entry here is the fix.
+ * (Paths are written prose-style here on purpose: a glob like the one those routes
+ * use closes a block comment, which is how this very comment first broke the file.)
+ *
+ * If something has to go in here, it needs a reason next to it. The staleness check
+ * below deletes the alternative: an allowlist that outlives its problem starts hiding
+ * the next one.
  */
-const KNOWN_MISSING = new Set([
-  "/runs/*/audit",
-  "/runs/*/eval",
-  "/runs/*/evidence",
-  "/runs/*/evidence/*/status",
-]);
+const KNOWN_MISSING = new Set<string>([]);
 
 describe("BFF coverage", () => {
   it("finds both sides, so the assertion below is not vacuous", () => {
