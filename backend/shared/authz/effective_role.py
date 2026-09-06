@@ -107,8 +107,26 @@ async def resolve_platform_role_for_user(
     """Login-time entry point: opens its own tenant-scoped session.
 
     Mirrors `resolve_permissions_for_user`, and for the same reason — `role_bindings`
-    is FORCE RLS, so this must run under the tenant GUC or it reads nothing and every
-    caller silently looks role-less.
+    is FORCE RLS, so this is opened tenant-scoped.
+
+    WHAT THAT ACTUALLY BUYS TODAY: nothing. This docstring used to say the query "reads
+    nothing" without the tenant GUC. In this deployment it reads EVERYTHING. The
+    application connects as `postgres` (`rolsuper`, `rolbypassrls`), superusers bypass
+    RLS unconditionally, and `FORCE` does not apply to them — so `roles_held`, which
+    has no tenant column of its own, returns bindings from every tenant.
+
+    The consequence is real and is why this is written down rather than left implied:
+    one person legitimately holds one `user_id` across several tenants (`users` is a
+    global catalog by design, D-03), so someone who is `project_admin` in tenant A and
+    only `developer` in tenant B resolves as `project_admin` in B. The Orchestrator
+    socket's connect-time check is one caller of this. What stops that becoming access
+    is the explicit `Run.tenant_id` / `Project.tenant_id` predicates further in —
+    not this function.
+
+    The fix is a non-superuser application role; `POSTGRES_MIGRATIONS_CONN_STRING`
+    already exists so `postgres` can stay for migrations only. Until then
+    `tests/test_m7_rbac.py`'s two cross-tenant failures are correct and should stay
+    red.
 
     Originally presentation-only (a login-time label), but `agent_skills.py`'s write
     routes (sub-project 2) now also call this per-request to feed

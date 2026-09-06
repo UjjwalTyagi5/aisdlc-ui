@@ -293,8 +293,21 @@ async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
     superuser session RLS is not a backstop, so the tenant filter has to be written
     out, and its absence let a Project Admin in tenant A name a run in tenant B and
     read its model selection. Here the read runs under the caller's tenant GUC AND
-    carries an explicit `Run.tenant_id` predicate: either alone would do, and the
-    point of having both is that neither is the only thing standing between tenants.
+    carries an explicit `Run.tenant_id` predicate.
+
+    THE PREDICATE IS THE ONE DOING THE WORK, and this sentence used to say the
+    opposite: "either alone would do … neither is the only thing standing between
+    tenants." In this deployment the GUC is INERT. `POSTGRES_CONN_STRING` connects as
+    `postgres`, which is `rolsuper` and `rolbypassrls`; PostgreSQL superusers bypass
+    row-level security unconditionally and `FORCE` does not apply to them, so the
+    policy on `runs` never fires. Measured, not assumed — it is what
+    `tests/test_m7_rbac.py::test_uwr_cross_tenant_empty` and
+    `test_grant_cross_tenant_isolated` are failing on.
+
+    So do not delete this predicate as redundant belt-and-braces. Until the
+    application is given a non-superuser role (`POSTGRES_MIGRATIONS_CONN_STRING`
+    already exists to keep `postgres` for migrations), it is the only thing standing
+    between tenants on this read.
 
     Raises `RunNotAvailableError` when the run is absent, belongs to another tenant,
     or could not be verified (a DB failure). All three refuse, and all three raise the
