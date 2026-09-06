@@ -703,3 +703,83 @@ have no test covering it at all.
 
 **Not in Phase 3**: server-backed sessions, artifact persistence from the new engine,
 retiring the old engines (Phase 5), and the e2e rewrite you deferred in Phase 1.
+
+---
+
+## 14. Phase 3 closed out — what the blockers found
+
+Two things stood between Phase 3 and Phase 4: an independent review of the whole branch,
+and the fact that **nothing in this rebuild had ever run against a real model**.
+
+### 14.1 The engine works, and measuring it changed the prompt
+
+Every test to this point fakes model resolution, the LLM client and the agent graph. That
+proves the plumbing — project-scoped BYOK, tool binding, message assembly, the event
+contract — and says exactly nothing about whether the router sends "I need a PRD" to
+Requirements. That was named as the biggest open item when the router was built, and it
+stayed open until now.
+
+Run against the seeded tenant's own BYOK provider, project-scoped, through the same
+`route()` the socket calls:
+
+| | correct |
+|---|---|
+| before | 11 / 16 |
+| after | **16 / 16**, plus **7 / 7** held-out |
+
+**Your headline requirement passed on the first run, before any tuning:** "I need a PRD
+for the billing rework" started the Requirements agent, with no menu and no agent named.
+
+All five failures were the same two prompt defects, and neither was visible to any unit
+test:
+
+1. **The router refused to route when a request lacked specifics.** "I'd be happy to help
+   you design the architecture, but I don't have context on what service." The admin
+   asked for work and got a question back, and no agent ran — a direct contradiction of
+   the requirement that the right agent starts automatically and does the task fully.
+   Gathering those specifics is the agent's own first job, and it can ask far better than
+   a router can.
+2. **"Answer directly when the message is a question" was far too broad.** It caught
+   questions whose ANSWER IS an agent's work product: "are there any injection risks
+   here?" is Security's output, "who is working on what, and when does this land?" is the
+   Project Manager's.
+
+The obvious way to over-correct a fix for under-routing is to make the thing route
+everything, so the harness carries a **held-out set that informed none of the wording** —
+six messages an agent must NOT be started for. All seven pass; "hello" and "what can you
+do?" still answer directly. That is the result that makes the sixteen worth anything.
+
+`backend/scripts/live_routing_check.py` is kept, because this is the only way to measure
+routing quality and it will be needed again every time the prompt or the capability
+descriptions change.
+
+### 14.2 The review found one Critical, and it was in the UI, not the engine
+
+Switching project on the global Orchestrator ran the **next turn against the previous
+project's run**. The reset that clears the run and the transcript was keyed on the
+session, and switching project repoints a session in place while keeping its id — so the
+header, the model picker, the artifacts panel and the rail all changed to the new project
+while the run did not. The turn then spent the OLD project's budget with its BYOK key and
+joined its conversation thread, under a header naming the new one.
+
+Nobody's permissions were exceeded. The damage is that the screen and the run disagreed
+about which project was being worked on — misattributed spend, and a conversation filed
+against the wrong project. The backend had been given an entire per-turn project check to
+make exactly that impossible; the frontend was handing it over by accident.
+
+Three further defects were tests that could not fail — including one that restored the
+exact bug the commit it belonged to was named after, and left all 638 tests green.
+
+### 14.3 One finding was mine, and it is worth recording as the pattern
+
+A commit message of mine claimed "every docstring making the Phase 2 claim was rewritten".
+I had changed one inline comment; the two most prominent instances were still on disk,
+including one asserting "Nothing sends until an agent is named" — the exact line the code
+no longer enforced.
+
+That is the **eighth** instance in this rebuild of the same defect: prose asserting a
+guarantee the code does not provide. The earlier ones were comments; one was a comment AND
+a test certifying a silent data loss as deliberate; this one was a commit message
+certifying a cleanup that had not happened. It is the reason every task on this branch is
+reviewed by someone other than its author, and the reason the standard of proof is
+"break the code and watch the test fail" rather than "the suite is green".
