@@ -116,10 +116,21 @@ export function DocumentList({
   const source = items === undefined ? ownQ.data : items;
 
   const documents = React.useMemo(
-    // `story` rows are the payload projection, not documents. Everything else is a
-    // real row in `artifacts` with a blob and an approval state.
-    () => (source ?? []).filter((a) => a.type !== "story"),
-    [source],
+    () =>
+      (source ?? []).filter(
+        (a) =>
+          // `story` rows are the payload projection, not documents.
+          a.type !== "story" &&
+          // THIS AGENT'S DOCUMENTS, PLUS THE PROJECT-WIDE ONES — never another
+          // agent's. The listing endpoint returns every document in the project, so
+          // without this the Design screen showed Requirements' files badged
+          // "Requirements", which is precisely the separation the scope exists to
+          // make. Another agent's document belongs on that agent's screen; if this
+          // stage may READ it, that happens through the published version, not by
+          // appearing in this list.
+          (a.scope === "project" || a.stage === stage),
+      ),
+    [source, stage],
   );
 
   const refresh = () =>

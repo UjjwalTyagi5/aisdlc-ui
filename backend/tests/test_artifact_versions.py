@@ -445,3 +445,52 @@ async def test_another_tenant_cannot_see_these_versions(project):
         assert await latest_version(db, project["project"], "requirements") is None
     finally:
         await _close(ctx, db)
+
+
+async def test_a_different_document_set_is_a_different_version(project):
+    """FOUND IN AN END-TO-END RUN, and silent.
+
+    Dedupe compared the payload alone, so freezing the same payload with documents
+    ticked returned the EXISTING version — which covered none of them — and reported
+    success. The user chose a set of documents, was told "frozen", and the signed unit
+    covered nothing.
+
+    The covered documents are part of what is being frozen: the signed unit is "this
+    payload plus these documents", so two units differing only in documents are still
+    two units.
+    """
+    ctx, db = await _session(project["org"])
+    try:
+        kw = dict(tenant_id=project["org"], project_id=project["project"],
+                  stage="design", produced_by=PRODUCER, payload={"c4": "x"})
+        doc = str(_uuid.uuid4())
+
+        bare = await snapshot_stage_payload(db, **kw)
+        with_doc = await snapshot_stage_payload(db, covers=[doc], **kw)
+
+        assert with_doc.created, "a different document set must create a version"
+        assert with_doc.version == bare.version + 1
+
+        rows = {r.version: list(r.covers or [])
+                for r in await list_versions(db, project["project"], "design")}
+        assert rows[bare.version] == []
+        assert rows[with_doc.version] == [doc]
+    finally:
+        await _close(ctx, db)
+
+
+async def test_the_same_payload_and_the_same_documents_still_dedupes(project):
+    """The original behaviour survives: a stage re-running with nothing new must not
+    manufacture a version to approve."""
+    ctx, db = await _session(project["org"])
+    try:
+        doc = str(_uuid.uuid4())
+        kw = dict(tenant_id=project["org"], project_id=project["project"],
+                  stage="design", produced_by=PRODUCER, payload={"c4": "x"},
+                  covers=[doc])
+        first = await snapshot_stage_payload(db, **kw)
+        again = await snapshot_stage_payload(db, **kw)
+        assert first.created and not again.created
+        assert again.version == first.version
+    finally:
+        await _close(ctx, db)

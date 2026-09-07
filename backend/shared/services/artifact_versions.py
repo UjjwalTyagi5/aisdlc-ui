@@ -236,7 +236,18 @@ async def snapshot_stage_payload(
 
     if dedupe:
         current = await latest_version(db, project_id, stage)
-        if current is not None and current.content_hash == content_hash:
+        # THE COVERED DOCUMENTS ARE PART OF WHAT IS BEING FROZEN, so an identical
+        # payload with a DIFFERENT document set is a different unit and must become a
+        # new version. Comparing the payload alone silently discarded `covers`: the
+        # caller ticked documents, got back the existing version that covered none of
+        # them, and was told "frozen" — the signed unit was not the one chosen, and
+        # nothing said so.
+        same_covers = (
+            current is not None
+            and sorted(str(x) for x in (current.covers or []))
+            == sorted(str(x) for x in (covers or []))
+        )
+        if current is not None and current.content_hash == content_hash and same_covers:
             logger.info(
                 "artifact version: %s/%s v%s already holds this payload (%s), reusing",
                 project_id, stage, current.version, content_hash[:12],
