@@ -401,6 +401,17 @@ async def create_request(
         # owner's. Adding a stage would be ceremony that trains people to click.
         approver = routing.agent_owner_role(phase or "")
 
+    if request_type == "artifact_delete":
+        # THE PERSON WHO MAY AGREE TO LOSE A DOCUMENT IS THE ONE WHO ACCEPTED IT.
+        # `phase` is the document's own stage, so an agent-level file goes to that
+        # agent's owner — the same person whose Approve put it in the record.
+        #
+        # A PROJECT-WIDE DOCUMENT HAS NO STAGE, and falls through to the Project
+        # Admin rather than to a guessed owner. `agent_owner_role_or_none` is used
+        # for exactly this: absence is legitimate here, not a bug to raise on.
+        owner = routing.agent_owner_role_or_none(phase or "") if phase else None
+        approver = owner or "project_admin"
+
     # connector_access and mcp_server read payload.targetId (see
     # _apply_connector_access) — merged the same way phase is, never a raw
     # passthrough.

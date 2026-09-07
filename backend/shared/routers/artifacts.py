@@ -616,6 +616,90 @@ async def delete_artifact(
     return Response(status_code=204)
 
 
+class DeletionRequestIn(BaseModel):
+    """Why this document should go. Required — see the route."""
+    reason: str
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/deletion-request",
+    status_code=202,
+    dependencies=[Depends(require_permission("artifact:delete"))],
+)
+async def request_artifact_deletion(
+    artifact_id: str,
+    body: DeletionRequestIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Ask the document's owner to delete it. Nothing is destroyed here.
+
+    THE ASYMMETRY THIS CLOSES. Uploading a document is gated on somebody accepting it;
+    removing one was gated on nothing but holding `artifact:delete`, which most roles
+    do. So a single click could undo an approval nobody was asked about, and the record
+    would simply be missing a file with only an audit line to say so.
+
+    ROUTED TO THE OWNER OF THE DOCUMENT'S OWN STAGE — the person whose Approve put it
+    in the record is the person who may agree to lose it. A project-wide document has
+    no stage and goes to the Project Admin instead. Both decisions live in
+    `governance_requests.create_request`; this route only supplies the phase.
+
+    202, NOT 204. Nothing has been deleted yet, and answering 204 would tell the client
+    the file is gone while it is still there — the same class of lie as the PATCH that
+    returned 200 and dropped the field.
+
+    A REASON IS REQUIRED. The approver is being asked to destroy something
+    irreversibly; "approve this deletion" with no stated why is not a decision anybody
+    can take responsibly, and the reason is what the audit answer rests on later.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="Say why this document should be deleted — the approver is being "
+                   "asked to destroy it permanently.",
+        )
+
+    title = (artifact.blob_path or "").rsplit("/", 1)[-1] or artifact.artifact_type
+    user_id = getattr(request.state, "user_id", "") or ""
+
+    from shared.services import governance_requests as gov  # noqa: PLC0415
+
+    req = await gov.create_request(
+        db,
+        tenant_id=str(tenant_id),
+        initiator_id=user_id,
+        initiator_name=user_id,
+        initiator_role=getattr(request.state, "platform_role", "") or "contributor",
+        request_type="artifact_delete",
+        title=f"Delete {title}",
+        description=reason,
+        project_id=str(artifact.project_id),
+        target_ref=str(artifact.id),
+        # `phase` is what decides the approver: the document's own stage, or None for a
+        # project-wide one. Passed rather than resolved here so one place owns routing.
+        phase=artifact.stage,
+        payload={
+            "artifactId": str(artifact.id),
+            "projectId": str(artifact.project_id),
+            "stage": artifact.stage,
+            "title": title,
+        },
+        # Filed by pressing Delete on a document, not composed in the request picker —
+        # so `can_raise_type` is not the gate here (see routing.SYSTEM_RAISED).
+        system_raised=True,
+    )
+    logger.info(
+        "Artifact %s deletion requested by %s (request=%s)",
+        artifact_id, user_id, req.get("id") if isinstance(req, dict) else req,
+    )
+    return req
+
+
 @artifacts_router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)
 async def patch_artifact(
     artifact_id: str,

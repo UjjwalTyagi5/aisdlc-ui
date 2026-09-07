@@ -85,6 +85,7 @@ export const GovernanceApprovalType = z.enum([
    * and decided HERE like every other request rather than at the agent's own screen.
    */
   "artifact_consumption",
+  "artifact_delete",
   "other",
 ]);
 export type GovernanceApprovalType = z.infer<typeof GovernanceApprovalType>;
@@ -107,6 +108,7 @@ export const REQUEST_TYPE_LABEL: Record<GovernanceApprovalType, string> = {
   cross_bu_assignment: "Cross-unit contributor",
   model_provider_access: "Model provider access",
   artifact_consumption: "Artifact consumption",
+  artifact_delete: "Delete a document",
   other: "Other",
 };
 

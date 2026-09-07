@@ -67,6 +67,11 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   // real approver is the OWNER of the producing stage, resolved per request
   // (shared/services/governance_requests.py). Mirrors the backend map.
   artifact_consumption: "project_admin",
+  // Inert like the other computed entries: the real approver is the owner of the
+  // document's own stage, or the Project Admin for a project-wide one. The Record
+  // must stay exhaustive over the type union, which is what stops a new type being
+  // added without a decision.
+  artifact_delete: "project_admin",
 };
 
 /**

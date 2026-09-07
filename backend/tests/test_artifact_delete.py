@@ -93,6 +93,11 @@ def _artifact(*, blob_path: str | None, blob_url: str | None = "https://x/y"):
         id=uuid.uuid4(),
         run_id=uuid.uuid4(),
         tenant_id=TENANT,
+        # THE ROW'S OWN SCOPE since 0052, and required here even though the fixture
+        # patches `_assert_project_visible`: the route reads `artifact.project_id` to
+        # build the CALL, so a fake without it raises before the patch is ever reached.
+        project_id=PROJECT,
+        stage="design",
         artifact_type="document",
         blob_url=blob_url,
         blob_path=blob_path,

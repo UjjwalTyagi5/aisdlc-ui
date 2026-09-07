@@ -50,6 +50,7 @@ REQUEST_TYPES: tuple[str, ...] = (
     "cross_bu_assignment",
     "model_provider_access",
     "artifact_consumption",
+    "artifact_delete",
     "other",
 )
 
@@ -77,6 +78,7 @@ REQUEST_TYPE_LABEL: dict[str, str] = {
     "cross_bu_assignment": "Cross-unit contributor",
     "model_provider_access": "Model provider access",
     "artifact_consumption": "Artifact consumption",
+    "artifact_delete": "Delete a document",
     "other": "Other",
 }
 
@@ -198,6 +200,10 @@ GOVERNANCE_APPROVER_ROLE: dict[str, str] = {
     # computes: kept so this map stays exhaustive over REQUEST_TYPES. The real
     # value is `agent_owner_role(producing_stage)`.
     "artifact_consumption": "project_admin",
+    # Inert like the other TYPE_ROUTED entries whose approver is computed: the real
+    # value is `agent_owner_role(stage)` for an agent-level document, and the Project
+    # Admin for a project-wide one, which no map keyed by type can express.
+    "artifact_delete": "project_admin",
     # SIDEWAYS to a SPECIFIC Business Unit Admin — the one who owns the
     # contributor being borrowed, found via the request's workspace_id. Climbing
     # from the requester would land it with the BORROWING unit's admin, who
@@ -227,6 +233,11 @@ TYPE_ROUTED: frozenset[str] = frozenset(
         # send a Developer's ask to their Project Admin, who does not own the
         # design they want to read.
         "artifact_consumption",
+        # Same shape: the person who may agree to LOSE a document is the one who
+        # approved it in the first place — the owner of the stage it belongs to.
+        # Tier routing would hand it to the requester's Project Admin, who may not own
+        # the agent whose record is about to lose a file.
+        "artifact_delete",
         # `model_credential` is deliberately ABSENT. Its meaning is "make a model
         # available to my project", and who can grant that depends on who asks:
         # a contributor needs their Project Admin (who holds model:manage), a
@@ -318,6 +329,9 @@ SYSTEM_RAISED: frozenset[str] = frozenset(
         # from the picker: the requester is answering "I hit this wall", not
         # composing an ask.
         "artifact_consumption",
+        # Filed by pressing Delete on a document, never composed in the request
+        # picker: the requester is naming a file, not describing an ask in prose.
+        "artifact_delete",
         "agent_default_org",
         "agent_default_workspace",
         "agent_default_project",

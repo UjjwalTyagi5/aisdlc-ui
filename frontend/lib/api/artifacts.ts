@@ -32,6 +32,26 @@ export const updateArtifact = (id: ArtifactId, patch: ArtifactPatch) =>
     schema: Artifact,
   });
 
+/** Ask the document's owner to delete it. NOTHING IS DELETED BY THIS CALL.
+ *
+ * The backend answers 202 with the governance request it raised, routed to the owner
+ * of the document's own stage — the person whose Approve put it in the record — or to
+ * the Project Admin for a project-wide one. It appears in that person's Requests &
+ * Approvals queue, and the file is destroyed only when they approve.
+ *
+ * A REASON IS REQUIRED and the backend 422s without one: the approver is being asked
+ * to destroy something irreversibly.
+ *
+ * `deleteArtifact` below still exists and still deletes outright. It is the
+ * administrator's break-glass path, not what the Documents list calls.
+ */
+export const requestArtifactDeletion = (id: ArtifactId, reason: string) =>
+  api(`/artifacts/${encodeURIComponent(id)}/deletion-request`, {
+    method: "POST",
+    body: { reason },
+    schema: z.unknown(),
+  });
+
 /** Permanently delete an artifact and its stored file. Irreversible.
  *
  * Returns nothing: the backend answers 204. Callers must invalidate the artifact list
