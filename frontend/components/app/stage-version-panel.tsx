@@ -355,7 +355,11 @@ export function StageVersionPanel({
                   {chip.label}
                 </Badge>
                 <div className="min-w-0 flex-1 text-xs text-muted-foreground">
-                  <span className="truncate">produced by {v.producedBy}</span>
+                  {/* `block`, not bare `truncate`. Truncation needs a block box to
+                      clip against — on an inline span it does nothing, and a user id
+                      is long enough to overflow this 340px column and render on top
+                      of the hash beside it. The two spans below already had it. */}
+                  <span className="block truncate">produced by {v.producedBy}</span>
                   {v.status === "rejected" && v.rejectionReason ? (
                     <span className="block truncate text-destructive">
                       {v.rejectionReason}
