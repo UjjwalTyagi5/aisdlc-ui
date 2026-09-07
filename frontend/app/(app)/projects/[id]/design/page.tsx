@@ -18,6 +18,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentList } from "@/components/app/document-list";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
@@ -272,6 +273,14 @@ export default function DesignPage() {
             projectId={projectId}
             phase="design"
             className="mb-3 shrink-0"
+          />
+          {/* Documents and the design artifact list are separate: one is rows with
+              bytes and an approver, the other is what the agent produced. */}
+          <DocumentList
+            projectId={projectId}
+            items={artifactsQ.data ?? null}
+            stage="design"
+            className="mb-4 shrink-0"
           />
           <ArtifactList
             items={artifactsQ.isLoading ? null : designs}

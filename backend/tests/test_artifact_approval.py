@@ -95,10 +95,20 @@ class _Db:
         return None
 
 
-def _artifact(status="pending"):
+def _artifact(status="pending", stage="design", project_id=None):
+    """A stand-in for an ORM Artifact.
+
+    `project_id` and `stage` are NOT optional decoration: since migration 0052 they are
+    the row's own scope, and the routes read them directly rather than joining to the
+    run. A fake missing them passes construction and fails inside the route, several
+    frames from the cause.
+    """
     return SimpleNamespace(
         id=uuid.uuid4(),
+        project_id=project_id or uuid.uuid4(),
+        stage=stage,
         run_id=uuid.uuid4(),
+        uploaded_by=None,
         tenant_id=TENANT,
         artifact_type="document",
         blob_url=None,

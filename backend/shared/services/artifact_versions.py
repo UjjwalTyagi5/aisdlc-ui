@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from sqlalchemy import select, text
@@ -163,6 +163,38 @@ async def list_versions(
     return list((await db.execute(
         stmt.order_by(ArtifactVersion.stage, ArtifactVersion.version.desc())
     )).scalars().all())
+
+
+async def current_working_payload(
+    db: AsyncSession, project_id: str, stage: str,
+) -> Any:
+    """The stage's latest working payload — what a freeze captures.
+
+    READ SERVER-SIDE, NOT SENT BY THE CLIENT. A freeze exists to capture what the AGENT
+    produced; accepting the payload from the browser would let somebody freeze, publish
+    and hand downstream something the agent never wrote, with the whole gate wrapped
+    approvingly around it.
+
+    Uses the same column map `persist_artifact` writes through, so the freeze reads
+    exactly where the agent wrote — including `requirements_payload`, which is not
+    `requirements_artifacts` and is the column the standalone Requirements agent
+    actually fills.
+    """
+    from shared.models.orm import Run  # noqa: PLC0415
+    from shared.services.artifact_service import _COLUMN_MAP  # noqa: PLC0415
+
+    column = _COLUMN_MAP.get(stage)
+    if not column:
+        return None
+    col = getattr(Run, column, None)
+    if col is None:
+        return None
+    return (await db.execute(
+        select(col)
+        .where(Run.project_id == project_id, col.isnot(None))
+        .order_by(Run.updated_at.desc())
+        .limit(1)
+    )).scalars().first()
 
 
 async def snapshot_stage_payload(
@@ -575,6 +607,11 @@ class UpstreamRead:
     #: the run has to be able to say so — an exception recorded as routine is how the
     #: next reviewer learns the gate means nothing.
     via_grant: bool = False
+    #: Documents this consumer may read: the ones the published version COVERS, plus
+    #: every approved project-level document. Metadata only — `read_document` fetches
+    #: the text, because inlining a 200-page PDF into every upstream read would cost
+    #: context on every turn whether or not the agent wanted it.
+    documents: list = field(default_factory=list)
 
     @property
     def found(self) -> bool:
@@ -629,6 +666,85 @@ async def granted_version(
         .order_by(ArtifactConsumptionGrant.granted_at.desc())
         .limit(1)
     )).scalar_one_or_none()
+
+
+# ── documents a consumer may read (phase 6) ──────────────────────────────────
+#
+#   project-level, approved                every agent
+#   agent-level, COVERED by a published    every agent
+#     version
+#   agent-level, approved but not covered  its own agent only
+#   pending or rejected                    nobody
+#
+# Approved means "fit to exist in the project's record". Covered by a published version
+# means "part of the signed-off unit this stage handed downstream". Two different
+# questions, and the gate exists for the second: a document can be a perfectly good
+# document and still not be something another agent should build on.
+
+
+def _document_row(a: "Artifact", source: str) -> dict[str, Any]:  # noqa: F821
+    """Metadata only, and deliberately no blob path or URL.
+
+    A path tells an agent where the bytes live, which is not something it should be
+    reasoning about — `read_document` resolves the id and re-checks permission. Handing
+    over a location would be a second, unguarded way in.
+    """
+    return {
+        "id": str(a.id),
+        "title": (a.blob_path or "").rsplit("/", 1)[-1] or a.artifact_type,
+        "type": a.artifact_type,
+        "scope": "project" if a.stage is None else "agent",
+        "stage": a.stage,
+        "sizeBytes": a.size_bytes,
+        "approvedBy": a.approved_by,
+        "approvedAt": a.approved_at.isoformat() if a.approved_at else None,
+        #: "covered" (this stage signed it off) or "project" (project-wide). Says WHY
+        #: the agent is allowed to see it, which an auditor needs and the agent's own
+        #: reasoning sometimes does too.
+        "via": source,
+    }
+
+
+async def readable_documents(
+    db: AsyncSession,
+    project_id: str,
+    *,
+    covered_ids: Optional[list] = None,
+) -> list[dict[str, Any]]:
+    """The documents a consuming agent may read, per the rule above."""
+    from shared.models.orm import Artifact  # noqa: PLC0415
+
+    out: list[dict[str, Any]] = []
+
+    # Project-level: approved is enough. A project-wide policy IS context for every
+    # agent by definition; requiring each to request it separately would be ceremony
+    # with a predictable answer.
+    project_wide = (await db.execute(
+        select(Artifact).where(
+            Artifact.project_id == project_id,
+            Artifact.stage.is_(None),
+            Artifact.approval_status == "approved",
+        )
+    )).scalars().all()
+    out.extend(_document_row(a, "project") for a in project_wide)
+
+    # Agent-level: only what the published version named. An approved-but-uncovered
+    # document belongs to its own stage and stops there.
+    if covered_ids:
+        wanted = [str(x) for x in covered_ids if x]
+        if wanted:
+            covered = (await db.execute(
+                select(Artifact).where(
+                    Artifact.project_id == project_id,
+                    Artifact.id.in_(wanted),
+                    # Covered by a version is not enough on its own: a document that
+                    # was later REJECTED must stop being readable even though the
+                    # frozen version still names it.
+                    Artifact.approval_status == "approved",
+                )
+            )).scalars().all()
+            out.extend(_document_row(a, "covered") for a in covered)
+    return out
 
 
 async def read_upstream(
@@ -693,6 +809,11 @@ async def read_upstream(
         stage=stage, payload=row.payload, version=row.version,
         content_hash=row.content_hash, published_by=row.published_by,
         via_grant=via_grant,
+        # The documents this signed unit named, plus the project-wide ones. Metadata
+        # only; `read_document` fetches text.
+        documents=await readable_documents(
+            db, project_id, covered_ids=list(row.covers or []),
+        ),
     )
 
 
@@ -725,6 +846,46 @@ async def record_consumption(
         "artifact consumption: %s read %s v%s in project %s%s",
         consumer_stage, version.stage, version.version, project_id,
         " (BY GRANT, not published)" if via_grant else "",
+    )
+
+
+async def record_document_consumption(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    project_id: str,
+    artifact_id: str,
+    producing_stage: Optional[str],
+    consumer_stage: str,
+    consumer_run_id: Optional[str] = None,
+    consumed_by: Optional[str] = None,
+    via_grant: bool = False,
+) -> None:
+    """Record that a run read a DOCUMENT.
+
+    Same table as a version read, because "what did this run build on" is one question
+    and answering it from two tables means every caller unions them and one eventually
+    forgets. `version_id` is NULL here and `artifact_id` is set; a CHECK requires one of
+    the two, so a row that points at nothing cannot exist.
+    """
+    from shared.models.orm import ArtifactConsumption  # noqa: PLC0415
+
+    db.add(ArtifactConsumption(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        artifact_id=artifact_id,
+        version_id=None,
+        # None for a project-level document, which belongs to no stage.
+        producing_stage=producing_stage,
+        version=None,
+        consumer_stage=consumer_stage,
+        consumer_run_id=consumer_run_id,
+        consumed_by=consumed_by,
+        via_grant=via_grant,
+    ))
+    logger.info(
+        "artifact consumption: %s read document %s in project %s",
+        consumer_stage, artifact_id, project_id,
     )
 
 

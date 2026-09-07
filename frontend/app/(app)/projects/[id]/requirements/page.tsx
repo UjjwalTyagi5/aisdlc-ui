@@ -15,6 +15,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentList } from "@/components/app/document-list";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
@@ -335,6 +336,19 @@ export default function RequirementsPage() {
             phase="requirements"
             className="mb-3 shrink-0"
           />
+          {/* Documents and Stories are two different things and are listed apart.
+              Stories below are projections of the run's requirements payload — no
+              blob, no row, never approvable — so an approval column beside them would
+              be blank for most of the list. */}
+          <DocumentList
+            projectId={projectId}
+            items={artifactsQ.data ?? null}
+            stage="requirements"
+            className="mb-4 shrink-0"
+          />
+          <h3 className="mb-2 text-sm font-medium">
+            Stories{stories.length ? ` (${stories.length})` : ""}
+          </h3>
           <ArtifactList
             items={artifactsQ.isLoading ? null : stories}
             selectedId={selected?.id}

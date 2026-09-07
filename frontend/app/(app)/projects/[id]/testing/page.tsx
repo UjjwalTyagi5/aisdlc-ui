@@ -27,6 +27,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { DocumentList } from "@/components/app/document-list";
+import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
@@ -257,6 +259,16 @@ export default function TestingPage() {
         {/* Left config rail */}
         {panelOpen && (
           <aside className="min-h-0 overflow-auto border-b md:border-b-0 md:border-r">
+          <StageVersionPanel
+            projectId={id}
+            phase="testing"
+            className="mb-3 shrink-0"
+          />
+          <DocumentList
+            projectId={id}
+            stage="testing"
+            className="mb-4 shrink-0"
+          />
             <div className="space-y-4 p-3">
               <div>
                 <p className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">Test type</p>

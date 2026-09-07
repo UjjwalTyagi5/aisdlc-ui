@@ -221,11 +221,20 @@ class ArtifactConsumption(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
-    version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("artifact_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    #: NULLABLE since 0053 — a document read has no version. Exactly one of
+    #: `version_id` / `artifact_id` is set, enforced by a CHECK.
+    version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifact_versions.id", ondelete="CASCADE"), index=True
     )
-    producing_stage: Mapped[str] = mapped_column(String(32), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Set when a run read a DOCUMENT directly — a project-level one, which belongs to
+    #: no stage and so has no version to point at, or a covered one fetched on its own.
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    #: Denormalised from the version. None for a project-level document, which belongs
+    #: to no stage by definition.
+    producing_stage: Mapped[str | None] = mapped_column(String(32))
+    version: Mapped[int | None] = mapped_column(Integer)
     consumer_stage: Mapped[str] = mapped_column(String(32), nullable=False)
     consumer_run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("runs.id", ondelete="SET NULL"), index=True
@@ -303,12 +312,39 @@ class ArtifactVersion(Base):
 
 
 class Artifact(Base):
-    """A blob-backed output file (DOCX, PDF, diagram PNG, etc.). Immutable after creation."""
+    """A blob-backed output file (DOCX, PDF, diagram PNG, etc.). Immutable after creation.
+
+    SCOPE (migration 0052). A document belongs to a PROJECT, and optionally to one
+    AGENT:
+
+        stage IS NULL     project-level — a policy, a standard. Every agent may read
+                          it once approved.
+        stage = 'design'  agent-level — readable by other agents only when a published
+                          version covers it (artifact_versions.covers).
+
+    Before 0052 both facts were recovered by joining to `Run`, so a document was only
+    "the Design agent's" by accident of which run produced it, and a project-wide one
+    could not exist. `blob_path_for` had emitted the project/agent path all along.
+    """
     __tablename__ = "artifacts"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    #: The producing agent, or None for a project-level document. A BACKEND stage name
+    #: (`code_review`, never the UI's `review`).
+    stage: Mapped[str | None] = mapped_column(String(32))
+    #: NULLABLE since 0052: a document outlives the run that made it, and a
+    #: hand-uploaded one never had one. SET NULL, so deleting a run cannot destroy an
+    #: approved document.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    #: Who put it here — deliberately distinct from `approved_by`. Collapsing the two
+    #: would make self-approval invisible.
+    uploaded_by: Mapped[str | None] = mapped_column(String(255))
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     blob_url: Mapped[str | None] = mapped_column(Text)
     blob_path: Mapped[str | None] = mapped_column(Text)
@@ -329,7 +365,7 @@ class Artifact(Base):
     # rather than edits to it.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    run: Mapped["Run"] = relationship(back_populates="artifacts")
+    run: Mapped["Run | None"] = relationship(back_populates="artifacts")
 
 
 class Deployment(Base):

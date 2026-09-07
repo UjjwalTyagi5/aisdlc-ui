@@ -844,6 +844,17 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
         extras.append("Excel exports contain the document's TABLES, one sheet each.")
     return export_result_message(name, url, extras)
 
+
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Bound to this agent's stage: it decides what "its own agent" means for an
+    # approved-but-uncovered document, and it is what the evidence trail records as
+    # the reader. Never a tool argument — a prompt could then claim another agent.
+    _DOCUMENT_TOOLS = make_document_tools("design")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
 tools = [
     read_document,
     # The project's requirements, ON DEMAND. Replaced the Design page's automatic
@@ -873,6 +884,7 @@ tools = [
     list_figma_frames,
     read_figma_design,
     export_figma_frames,
+    *_DOCUMENT_TOOLS,
 ]
 
 

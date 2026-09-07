@@ -47,6 +47,17 @@ class AgentState(TypedDict):
     resolved_model: Any
 
 
+
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Bound to this agent's stage: it decides what "its own agent" means for an
+    # approved-but-uncovered document, and it is what the evidence trail records as
+    # the reader. Never a tool argument — a prompt could then claim another agent.
+    _DOCUMENT_TOOLS = make_document_tools("security")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
 _tools = [
     scan_dependencies,
     scan_code,
@@ -56,6 +67,7 @@ _tools = [
     search_repo,
     read_design_artifacts,
     submit_security_review,
+    *_DOCUMENT_TOOLS,
 ]
 
 

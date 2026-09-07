@@ -206,10 +206,27 @@ async def snapshot_stage_version(
             status_code=403,
             detail="a version must record who produced it; this request has no user",
         )
+
+    # THE PAYLOAD IS READ SERVER-SIDE when the caller does not send one, which is what
+    # the UI does. A freeze captures what the AGENT produced; taking it from the
+    # browser would let somebody freeze and publish something the agent never wrote,
+    # with the gate wrapped approvingly around it. The body still accepts a payload for
+    # programmatic callers that genuinely have one.
+    payload = body.payload
+    if payload is None:
+        payload = await svc.current_working_payload(db, project_id, stage)
+        if payload is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{stage} has produced nothing to freeze yet. Run the agent first — "
+                    "a version has to capture something."
+                ),
+            )
     try:
         ref = await svc.snapshot_stage_payload(
             db, tenant_id=request.state.tenant_id, project_id=project_id, stage=stage,
-            payload=body.payload, produced_by=produced_by, run_id=body.runId,
+            payload=payload, produced_by=produced_by, run_id=body.runId,
             covers=body.covers,
         )
     except svc.UnknownStage as exc:

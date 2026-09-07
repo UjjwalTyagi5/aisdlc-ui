@@ -612,6 +612,18 @@ try:  # pragma: no cover - import guard only
 except Exception:  # noqa: BLE001
     logger.warning("PM agent: shared document tools unavailable")
 
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Bound to "plan": that is what "its own agent" means for the private-document
+    # rule, and it is what the evidence trail records as the reader. The stage comes
+    # from here rather than from a tool argument, so a prompt cannot claim to be a
+    # different agent.
+    _DOCUMENT_TOOLS = make_document_tools("plan")
+except Exception:  # noqa: BLE001
+    _DOCUMENT_TOOLS = []
+    logger.warning("PM agent: project document tools unavailable")
+
 tools = [
     read_project_inputs,
     list_sprints,
@@ -625,6 +637,7 @@ tools = [
     cost_plan,
     save_plan,
     *_SHARED_TOOLS,
+    *_DOCUMENT_TOOLS,
 ]
 
 
@@ -640,6 +653,11 @@ THE USER ASKING IS THE TRIGGER. If they greet you or ask a question, reply to wh
 said. Do not start planning because context exists.
 
 ── READ BEFORE YOU PLAN ──────────────────────────────────────────────────────
+Call `list_project_documents` to see what Requirements, Design or project-wide
+documents have been approved and are available to you, then `read_document` to read one.
+They are the signed-off versions — a document that is not listed has not been published
+for you to build on, which is a fact about the process rather than a failure.
+
 Call `read_project_inputs` when the user asks you to plan THIS PROJECT, or refers to
 "the requirements", "the design", "the backlog". Planning from memory when stored
 requirements exist produces a plan for a system nobody asked for.

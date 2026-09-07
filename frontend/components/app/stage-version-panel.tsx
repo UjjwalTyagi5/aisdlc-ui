@@ -27,7 +27,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  CheckCircle2, ChevronDown, ChevronRight, Clock, FileClock, KeyRound, Loader2, XCircle,
+  CheckCircle2, ChevronDown, ChevronRight, Clock, FileClock, KeyRound, Loader2,
+  Snowflake, XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -43,8 +44,9 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { useSession } from "@/hooks/use-session";
 import {
   getVersionConsumers, listStageVersions, publishStageVersion, rejectStageVersion,
-  toBackendStage, type ArtifactVersion,
+  snapshotStageVersion, toBackendStage, type ArtifactVersion,
 } from "@/lib/api/artifact-versions";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
 import { ownerRoleLabel } from "@/lib/roles";
@@ -168,6 +170,8 @@ export function StageVersionPanel({
 
   const stage = toBackendStage(phase);
   const canDecide = hasPermission(session, `artifact:approve_${stage}`);
+  // Freezing is producing, not accepting — the same permission as running the agent.
+  const canProduce = hasPermission(session, "run:create");
   // `produced_by` is the backend's `request.state.user_id`, which is this same id —
   // comparing against email instead would silently never match.
   const me = session?.user.id ?? null;
@@ -216,6 +220,53 @@ export function StageVersionPanel({
   const [rejecting, setRejecting] = React.useState<number | null>(null);
   const [reason, setReason] = React.useState("");
 
+  // FREEZING is where `covers` is decided, and the only place it can be. The version's
+  // documents are frozen with its payload, because the signed unit is "this payload
+  // plus these documents" — letting the list change after freezing would mean the
+  // thing approved was not the thing signed.
+  const [freezing, setFreezing] = React.useState(false);
+  const [covers, setCovers] = React.useState<Set<string>>(new Set());
+
+  const approvedDocsQ = useQuery({
+    queryKey: qk.artifacts.forProject(projectId),
+    queryFn: () => listArtifacts(projectId),
+    enabled: freezing,
+  });
+  const approvedDocs = React.useMemo(
+    () =>
+      (approvedDocsQ.data ?? []).filter(
+        (a) =>
+          a.type !== "story" &&
+          a.status === "approved" &&
+          // Only THIS stage's documents. A project-wide one is already readable by
+          // every agent, so covering it would add nothing and imply this stage owns it.
+          a.scope === "agent" &&
+          a.stage === stage,
+      ),
+    [approvedDocsQ.data, stage],
+  );
+
+  const freeze = useMutation({
+    // No payload: the backend reads the stage's working output itself. Sending it from
+    // here would let somebody freeze something the agent never produced.
+    mutationFn: () =>
+      snapshotStageVersion(projectId, phase, {
+        payload: undefined,
+        covers: [...covers],
+      }),
+    onSuccess: (row) => {
+      toast.success(
+        row.version
+          ? `Froze ${phase} v${row.version}`
+          : "Version frozen",
+      );
+      setFreezing(false);
+      setCovers(new Set());
+      void invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message || "Could not freeze a version"),
+  });
+
   const submitRejection = () => {
     const text = reason.trim();
     if (!text || rejecting == null) return;
@@ -241,7 +292,7 @@ export function StageVersionPanel({
   return (
     <section className={cn("space-y-3", className)}>
       <header className="flex items-baseline justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <h3 className="text-sm font-medium">Published version</h3>
           <p className="text-xs text-muted-foreground">
             {published
@@ -249,6 +300,17 @@ export function StageVersionPanel({
               : `Nothing published yet — other agents have no approved ${phase} to read. ${ownerRoleLabel(phase)} signs it off.`}
           </p>
         </div>
+        {canProduce && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            onClick={() => setFreezing(true)}
+          >
+            <Snowflake className="h-3.5 w-3.5" />
+            Freeze
+          </Button>
+        )}
       </header>
 
       {versions.length === 0 ? (
@@ -351,6 +413,90 @@ export function StageVersionPanel({
           })}
         </ul>
       )}
+
+      <Dialog
+        open={freezing}
+        onOpenChange={(o) => {
+          if (!o) {
+            setFreezing(false);
+            setCovers(new Set());
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Freeze a {phase} version</DialogTitle>
+            <DialogDescription>
+              Captures this stage&apos;s current output as an unchangeable version.
+              Tick the approved documents it signs off — other agents can read those
+              once {ownerRoleLabel(phase)} publishes it.
+            </DialogDescription>
+          </DialogHeader>
+
+          {approvedDocsQ.isLoading ? (
+            <p className="text-muted-foreground text-xs">Loading documents…</p>
+          ) : approvedDocs.length === 0 ? (
+            // NOT an error, and not a blocker. A version with no documents is normal —
+            // most stages hand over a payload and nothing else.
+            <p className="text-muted-foreground text-xs">
+              No approved {phase} documents to include. The version will cover the
+              stage&apos;s output only, which is the usual case.
+            </p>
+          ) : (
+            <ul className="max-h-56 space-y-1 overflow-auto rounded-md border p-2">
+              {approvedDocs.map((d) => (
+                <li key={d.id} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    id={`cover-${d.id}`}
+                    checked={covers.has(d.id)}
+                    onChange={(e) =>
+                      setCovers((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(d.id);
+                        else next.delete(d.id);
+                        return next;
+                      })
+                    }
+                  />
+                  <label htmlFor={`cover-${d.id}`} className="truncate">
+                    {d.title}
+                  </label>
+                  <span className="text-muted-foreground ml-auto shrink-0">
+                    {d.approvedBy ?? ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* Said before the click, not after. `covers` is frozen with the payload —
+              the signed unit is "this payload plus these documents", so the list
+              cannot be edited later without the approval meaning something else. */}
+          <p className="text-muted-foreground text-xs">
+            The document list is fixed once frozen. To change it, freeze another
+            version.
+          </p>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setFreezing(false);
+                setCovers(new Set());
+              }}
+            >
+              Cancel
+            </Button>
+            <Button disabled={freeze.isPending} onClick={() => freeze.mutate()}>
+              {freeze.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : null}
+              Freeze version
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={rejecting != null}

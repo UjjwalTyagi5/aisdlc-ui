@@ -64,3 +64,42 @@ export const rejectArtifact = (id: ArtifactId, reason?: string) =>
     body: { reason },
     schema: Artifact,
   });
+
+/**
+ * Upload a document to a project by hand.
+ *
+ * `stage` omitted means PROJECT-LEVEL — a policy or standard that is not one agent's
+ * output. Present, it must name a real backend stage.
+ *
+ * Uses fetch directly rather than `api()`: that helper sends JSON, and setting a
+ * Content-Type here would send a multipart boundary that does not match the body.
+ * The browser lets fetch derive it from the FormData.
+ *
+ * The uploaded document is PENDING — listed but not downloadable until somebody with
+ * the stage's approve permission (or project administration) accepts it.
+ */
+export async function uploadArtifact(
+  projectId: ProjectId,
+  file: File,
+  opts: { stage?: string | null; artifactType?: string } = {},
+): Promise<Artifact> {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.stage) form.append("stage", opts.stage);
+  if (opts.artifactType) form.append("artifact_type", opts.artifactType);
+
+  const res = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/artifacts/upload`,
+    { method: "POST", body: form },
+  );
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    // The backend says WHY — a rejected extension, an oversized file, an unknown
+    // stage. Replacing that with a generic message would leave the user guessing at
+    // which of the three it was.
+    const detail =
+      (body as { detail?: string } | null)?.detail ?? "Upload failed";
+    throw new Error(detail);
+  }
+  return Artifact.parse(body);
+}
