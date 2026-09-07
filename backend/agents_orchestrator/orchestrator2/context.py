@@ -106,6 +106,10 @@ import uuid
 from typing import Any
 
 from agents_orchestrator.orchestrator2.registry import AGENT_IDS, UnknownAgentError
+from agents_orchestrator.orchestrator2.transcript import (
+    load_run_transcript,
+    render as render_transcript,
+)
 from config.agent_registry import AGENT_REGISTRY
 
 # Imported eagerly, unlike the agent graphs `registry.py` defers: `shared/models/orm.py`
@@ -447,6 +451,49 @@ async def handoff_context(run_id: str, tenant_id: str, target_agent: str) -> str
             continue
         sections.append((agent_id, _render_body(value)))
 
-    if not sections:
+    # ── the conversation ────────────────────────────────────────────────────
+    #
+    # ADDED because documents alone were not memory. A user drove the Development
+    # agent through a whole change — clone, locate the duplicate table, recolour it,
+    # push, PR — then asked Requirements for story tickets and was told "I don't have
+    # any context about a 'change table to orange' modification from our conversation".
+    # That run held a real conversation and zero deliverables, so this function
+    # returned "" and the next agent genuinely knew nothing.
+    #
+    # Read INDEPENDENTLY of the artifacts, and failing separately: losing the
+    # conversation must not also lose the PRD, and an agent handed half the context
+    # with no sign of it is the exact failure this module was built around.
+    conversation = ""
+    conversation_failed = False
+    try:
+        turns = await load_run_transcript(run_id, tenant_id)
+        conversation = render_transcript(turns)
+    except Exception:  # noqa: BLE001 — reported to the agent, never silently dropped
+        conversation_failed = True
+        logger.exception(
+            "orchestrator2 could not read the conversation for run=%s", run_id
+        )
+
+    if not sections and not conversation and not conversation_failed:
+        # The run genuinely holds nothing. `""` has to keep meaning that, or a caller
+        # cannot tell a fresh run from a failed read.
         return ""
-    return _render(sections, target_agent)
+
+    parts: list[str] = []
+    if conversation:
+        parts.append(
+            "## Conversation so far\n\n"
+            "This is the conversation on this run, including turns handled by other "
+            "agents. Treat it as context you were present for.\n\n" + conversation
+        )
+    elif conversation_failed:
+        # Said out loud. An agent that silently receives only the documents will read
+        # them as the whole story and re-ask for work the conversation already settled.
+        parts.append(
+            "## Conversation so far\n\n"
+            "_The conversation for this run could not be read. What follows is the "
+            "documents only, and may not be everything that was said._"
+        )
+    if sections:
+        parts.append(_render(sections, target_agent))
+    return "\n\n".join(parts)

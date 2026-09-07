@@ -990,6 +990,15 @@ class ConversationMessage(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)          # user|agent|orchestrator|system|tool
+    # WHICH of the nine replied, when `role` is `agent` (migration 0045). Null on
+    # user turns, on `orchestrator` turns — the router answering directly is not one
+    # of the nine — and on every row written before the column existed, where the
+    # information was never recorded and there is nothing to backfill from.
+    #
+    # Without it a transcript fed to the next agent reads as one undifferentiated
+    # voice, which is how "the Development agent already did this" became invisible
+    # to Requirements.
+    agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     author_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_type: Mapped[str] = mapped_column(

@@ -321,7 +321,10 @@ async def get_run_transcript(
         messages.append({
             "role": role,
             "content": r.get("content") or "",
-            "stage": r.get("author_id") if role == "agent" else None,
+            # The AGENT, not `author_id` — which is the user who typed at it, and
+            # was what every replayed agent turn used to be labelled with. Null for a
+            # turn from before migration 0045, which is honest: nothing recorded it.
+            "stage": r.get("agent_id") if role == "agent" else None,
         })
     return {"messages": messages}
 

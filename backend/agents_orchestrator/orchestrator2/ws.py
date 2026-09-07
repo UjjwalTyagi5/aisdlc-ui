@@ -756,8 +756,12 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                             run_id, "user", text,
                             tenant_id=tenant_id, user_id=user_id,
                         )
+                        # `orchestrator`, not `agent`: the router answered this
+                        # itself, and it is not one of the nine. Filing it as an
+                        # unattributed agent turn would make it indistinguishable from
+                        # a pre-migration row when the transcript is fed forward.
                         await sessions.record_turn(
-                            run_id, "agent", decision.direct_reply or "",
+                            run_id, "orchestrator", decision.direct_reply or "",
                             tenant_id=tenant_id, user_id=user_id,
                         )
                         await _send(websocket, {
@@ -829,9 +833,12 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 last_agent = agent_id
                 # The same string `_remember` keeps — which is accumulated from the
                 # EVENTS, so what is stored is exactly what the user saw.
+                # WHICH agent, so the next one inherits an attributed conversation
+                # rather than one undifferentiated voice. This is what makes "the
+                # Development agent already did this" legible to Requirements.
                 await sessions.record_turn(
                     run_id, "agent", "".join(reply_text),
-                    tenant_id=tenant_id, user_id=user_id,
+                    tenant_id=tenant_id, user_id=user_id, agent_id=agent_id,
                 )
             except WebSocketDisconnect:
                 raise

@@ -139,6 +139,10 @@ class _Result:
 class _RowStore:
     """A small 'database' holding rows under more than one tenant.
 
+    Holds DELIVERABLE rows only. The conversation half of `handoff_context` is
+    answered empty here — `test_transcript_memory.py` is where that half is exercised,
+    against its own fixtures.
+
     `execute` reads the statement's where-clause and matches on the predicates it
     actually contains. Drop the tenant predicate and this store happily returns the
     other tenant's rows — which is exactly the regression the tests below catch.
@@ -180,6 +184,16 @@ class _RowStore:
 
     async def execute(self, statement):
         self.statements.append(statement)
+        # `handoff_context` makes TWO reads now: the deliverables, and the run's
+        # conversation. This store holds deliverable rows, so answering the transcript
+        # query with them would hand `transcript.load_run_transcript` objects with no
+        # `seq` — a fake failing in a way the real table cannot, which then surfaces as
+        # "the conversation could not be read" and hides what these tests are about.
+        #
+        # Distinguished by the table the statement actually selects from, so a query
+        # that changed shape stops being answered rather than being answered wrongly.
+        if "conversation_messages" in str(statement.get_final_froms()[0]):
+            return _Result([])
         pairs = self._predicates(statement)
         keep = []
         for row in self.rows:
@@ -228,8 +242,9 @@ async def test_a_run_in_another_tenant_is_indistinguishable_from_one_that_does_n
     store = _install_store(monkeypatch, _RowStore([theirs]))
 
     assert await context.handoff_context(_RUN, _TENANT, "development") == ""
-    assert store.tenants_scoped_to == [_TENANT], (
-        "the read must run in the caller's tenant session, not another's"
+    assert store.tenants_scoped_to and set(store.tenants_scoped_to) == {_TENANT}, (
+        "every read must run in the caller's tenant session, not another's — "
+        "handoff_context makes two (deliverables and conversation)"
     )
     # And the same call for a run id nobody issued is byte-identical.
     assert await context.handoff_context(
@@ -249,12 +264,19 @@ async def test_the_query_carries_an_explicit_tenant_predicate(monkeypatch):
     out = await context.handoff_context(_RUN, _TENANT, "development")
     assert "mine" in out
 
-    assert len(store.statements) == 1
-    pairs = store._predicates(store.statements[0])
-    assert pairs.get("run_id") == uuid.UUID(_RUN)
-    assert pairs.get("tenant_id") == uuid.UUID(_TENANT), (
-        "the deliverables lookup must filter on the caller's tenant"
+    # BOTH reads — the deliverables and the run's conversation. Checking only the
+    # first would have let the transcript query ship with no tenant predicate at all,
+    # which is the same defect this test was written for, on a newer table.
+    assert len(store.statements) == 2, (
+        "handoff_context reads the deliverables and the conversation"
     )
+    for statement in store.statements:
+        pairs = store._predicates(statement)
+        assert pairs.get("run_id") in (uuid.UUID(_RUN), None)
+        assert pairs.get("session_id") in (uuid.UUID(_RUN), None)
+        assert pairs.get("tenant_id") == uuid.UUID(_TENANT), (
+            f"a lookup ran without the caller's tenant predicate: {statement}"
+        )
 
 
 def test_the_reader_never_names_the_rls_bypassing_session():
@@ -573,7 +595,9 @@ async def test_a_run_with_no_deliverables_at_all_yields_nothing(monkeypatch):
 
     store = _install_store(monkeypatch, _RowStore([]))
     assert await context.handoff_context(_RUN, _TENANT, "design") == ""
-    assert store.tenants_scoped_to == [_TENANT], "the run WAS read; it is simply empty"
+    assert store.tenants_scoped_to and set(store.tenants_scoped_to) == {_TENANT}, (
+        "the run WAS read — twice, deliverables and conversation — and is simply empty"
+    )
 
 
 @pytest.mark.asyncio

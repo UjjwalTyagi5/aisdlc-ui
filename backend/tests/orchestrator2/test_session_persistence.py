@@ -122,8 +122,8 @@ async def test_the_socket_records_the_user_turn_and_the_reply(monkeypatch):
 
     recorded = []
 
-    async def _record(run_id, role, content, *, tenant_id, user_id):
-        recorded.append((run_id, role, content))
+    async def _record(run_id, role, content, *, tenant_id, user_id, agent_id=None):
+        recorded.append((run_id, role, content, agent_id))
 
     ensured = []
 
@@ -147,8 +147,12 @@ async def test_the_socket_records_the_user_turn_and_the_reply(monkeypatch):
     assert ensured and ensured[0][1] == "I need a PRD", (
         "the session is created from the first message, so the rail has a real title"
     )
-    assert [(r[1], r[2]) for r in recorded] == [
-        ("user", "I need a PRD"),
-        ("agent", "here is your PRD"),
+    # The agent id is recorded with the reply, which is what makes the transcript
+    # usable as memory: `role` alone is `agent` for all nine, so a conversation fed to
+    # the next agent would read as one undifferentiated voice — the reason Requirements
+    # could not see what Development had just done.
+    assert [(r[1], r[2], r[3]) for r in recorded] == [
+        ("user", "I need a PRD", None),
+        ("agent", "here is your PRD", "requirements"),
     ]
     assert {r[0] for r in recorded} == {_RUN}, "both sides file under the run id"

@@ -100,15 +100,23 @@ async def record_turn(
     *,
     tenant_id: str,
     user_id: str,
+    agent_id: Optional[str] = None,
 ) -> None:
     """Persist one side of a turn. Never raises.
 
     `author_id` is the turn's own user for BOTH sides — on the agent's reply it records
     whose conversation this was, which is what makes a transcript attributable at all.
+
+    `agent_id` says WHICH of the nine replied, and is what makes the transcript usable
+    as memory: `role` alone is `agent`, so a conversation fed to the next agent reads
+    as one undifferentiated voice. Left `None` for user turns and for the Orchestrator
+    answering directly — the router is not one of the nine, and saying it was would
+    tell the next agent a delivery agent said something it did not.
     """
     try:
         await cs.persist_turn(
             run_id, role, content, tenant_id=tenant_id, author_id=user_id,
+            agent_id=agent_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(

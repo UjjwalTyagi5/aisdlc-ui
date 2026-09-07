@@ -270,6 +270,11 @@ async def append_message(
     *,
     tenant_id: str,
     author_id: Optional[str] = None,
+    # WHICH of the nine replied. Null for user turns, for the Orchestrator answering
+    # directly, and for every row written before migration 0045. Without it a
+    # transcript fed to the next agent reads as one undifferentiated voice, which is
+    # how "the Development agent already did this" became invisible.
+    agent_id: Optional[str] = None,
     content_type: str = "markdown",
     tool_calls: Optional[Any] = None,
     artifact_refs: Optional[Any] = None,
@@ -319,6 +324,7 @@ async def append_message(
                 tenant_id=uuid.UUID(tenant_id),
                 seq=next_seq,
                 role=role,
+                agent_id=agent_id,
                 author_id=author_id,
                 content=content,
                 content_type=content_type,
@@ -405,6 +411,7 @@ async def get_transcript(
                     "session_id": str(m.session_id),
                     "seq": m.seq,
                     "role": m.role,
+                    "agent_id": m.agent_id,
                     "author_id": m.author_id,
                     "content": m.content,
                     "content_type": m.content_type,
