@@ -38,7 +38,13 @@ logger = logging.getLogger(__name__)
 #: The fields worth carrying onto the run. Deliberately a short list rather than the
 #: session's whole `model_dump()`: this column is read by the panel, and everything
 #: put here is something a client eventually sees.
-_FIELDS = ("repo_url", "branch_name", "pr_url", "pr_title", "status")
+#:
+#: `status` IS NOT CARRIED. `DevelopmentArtifacts.status` defaults to `"not_started"`
+#: and the graph does not maintain it, so copying it stored `status: "not_started"`
+#: beside a real pull request URL — a statement in the database that contradicts the
+#: row it sits in. Nothing reads it (`pointers_for_run` uses `repo_url` and `pr_url`),
+#: so the honest move is to omit it rather than persist a value that is wrong.
+_FIELDS = ("repo_url", "branch_name", "pr_url", "pr_title")
 
 
 def _dev_session(run_id: str) -> Any:
@@ -52,20 +58,45 @@ def _dev_session(run_id: str) -> Any:
     The session id IS the run id: `dispatch.run_agent` sets that contextvar before
     running the graph, which is what makes the clone land under `<run_id>/project`
     in the first place.
+
+    THE MODULE PATH IS `config.session_state`, NOT `session`. An earlier version
+    imported the latter, which does not exist; the ImportError was caught by
+    `persist`'s "no session for this run is the normal case" guard, so
+    `runs.development_artifacts` was never written on any run — and the code tree the
+    user saw was only the synthetic one the panel draws while Development is the
+    ACTIVE agent, which vanished the moment another agent started. Every test
+    monkeypatched this function, so none of them imported what it imports.
+
+    `get_session` CREATES on a miss rather than raising, so a turn for any other agent
+    gets an empty state and `_collect` reads nothing from it.
     """
-    from agents_orchestrator.development_agent.session import get_session
+    from agents_orchestrator.development_agent.config.session_state import get_session
 
     return get_session(run_id)
 
 
+#: What makes a session worth recording at all. `pointers_for_run` builds `dev-code`
+#: from `repo_url` and `dev-pr` from `pr_url`, and nothing else there produces a
+#: pointer — so a mapping with neither cannot put anything on the panel.
+#:
+#: THIS GUARD IS LOAD-BEARING. `DevelopmentArtifacts.status` defaults to
+#: `"not_started"`, which is truthy, so collecting "any non-empty field" returned
+#: `{"status": "not_started"}` for EVERY agent's turn — a truthy dict, which
+#: `pointers_for_run` renders as a code tree over a clone that does not exist. An empty
+#: tree reads as a pull that failed, which is worse than no tree at all.
+_EVIDENCE_OF_WORK = ("repo_url", "pr_url")
+
+
 def _collect(session: Any) -> dict:
-    """The non-empty artifact fields this session knows about."""
+    """The artifact fields this session knows about, or `{}` if it did no work."""
     artifacts = getattr(session, "dev_artifacts", None)
     out: dict = {}
     for name in _FIELDS:
         value = getattr(artifacts, name, None) or getattr(session, name, None)
         if value:
             out[name] = value
+    if not any(out.get(name) for name in _EVIDENCE_OF_WORK):
+        return {}
     return out
 
 

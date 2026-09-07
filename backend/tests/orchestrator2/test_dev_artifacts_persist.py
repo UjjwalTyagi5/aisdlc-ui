@@ -383,3 +383,97 @@ async def test_a_persist_failure_does_not_fail_the_turn(
     assert events[-1]["type"] == "stream_end", (
         "a failed artifact write cost the user the end of their turn"
     )
+
+
+
+# ── the session lookup has to be real ────────────────────────────────────────
+
+
+def test_the_development_session_is_actually_reachable():
+    """CAUGHT LIVE. Every test above monkeypatches `_dev_session`, so none of them
+    ever imported what it imports.
+
+    It imported `agents_orchestrator.development_agent.session`, which does not exist —
+    the module is `development_agent.config.session_state`. The ImportError was caught
+    by `persist`'s "no session for this run is the normal case" guard and returned
+    None, so `runs.development_artifacts` stayed null on every run, and the panel's
+    code tree was only ever the synthetic one the frontend draws while Development is
+    the ACTIVE agent. Switch agents and it vanished.
+
+    The fail-soft was right and hid the bug anyway: a broken import and an absent
+    session were indistinguishable. This asserts the real thing resolves.
+    """
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    session = da._dev_session("some-run-id-that-has-no-session")
+    assert session is not None, "the real session lookup could not be imported"
+    # The fields `_collect` reads, on the real object rather than a stand-in.
+    for field in ("repo_url", "branch_name", "pr_url"):
+        assert hasattr(session, field) or hasattr(
+            getattr(session, "dev_artifacts", object()), field
+        ), f"the real session exposes no {field} for _collect to read"
+
+
+def test_a_session_that_cloned_is_collected_from_the_real_object():
+    """The shape end to end, against the real DevSessionState rather than a fake with
+    the fields the fake's author remembered."""
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session, get_session,
+    )
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-collect-test"
+    try:
+        session = get_session(run)
+        session.repo_url = "https://dev.azure.com/x/_git/Company"
+        session.branch_name = "feature/duplicate-table-pink"
+        session.pr_url = "https://dev.azure.com/x/_git/Company/pullrequest/34"
+
+        found = da._collect(da._dev_session(run))
+        assert found["repo_url"].endswith("/Company")
+        assert found["branch_name"] == "feature/duplicate-table-pink"
+        assert found["pr_url"].endswith("/pullrequest/34")
+    finally:
+        clear_session(run)
+
+
+def test_an_untouched_session_collects_nothing():
+    """`get_session` CREATES on miss, so every agent's turn gets an empty state rather
+    than an error. That must read as "nothing to record", not as a row of blanks."""
+    from agents_orchestrator.development_agent.config.session_state import clear_session
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-empty-test"
+    try:
+        assert da._collect(da._dev_session(run)) == {}
+    finally:
+        clear_session(run)
+
+
+
+def test_a_status_the_graph_never_updates_is_not_persisted():
+    """`DevelopmentArtifacts.status` defaults to "not_started" and nothing maintains
+    it, so carrying it wrote `status: "not_started"` next to a real pull request URL —
+    a row that contradicts itself. Nothing reads it; omitting it is the honest move.
+    """
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    assert "status" not in da._FIELDS
+
+
+def test_a_real_session_yields_only_fields_that_are_true():
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session, get_session,
+    )
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-no-status-test"
+    try:
+        session = get_session(run)
+        session.repo_url = "https://dev.azure.com/x/_git/Company"
+        session.pr_url = "https://dev.azure.com/x/_git/Company/pullrequest/34"
+        found = da._collect(da._dev_session(run))
+        assert set(found) <= {"repo_url", "branch_name", "pr_url", "pr_title"}
+        assert "status" not in found
+    finally:
+        clear_session(run)
