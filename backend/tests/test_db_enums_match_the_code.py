@@ -76,6 +76,20 @@ async def test_governance_request_types_match_the_database():
     )
 
 
+async def test_project_delivery_statuses_match_the_database():
+    """A THIRD copy of this list lives in frontend/lib/schemas/project.ts. The picker
+    offering a value the database refuses is how this field shipped broken the first
+    time — see 0054 — so the two copies this suite can reach are compared here."""
+    from shared.routers.projects import _DELIVERY_STATUSES
+
+    allowed = await _allowed_values("ck_project_delivery_status")
+    assert set(_DELIVERY_STATUSES) == allowed, (
+        "projects.delivery_status CHECK and _DELIVERY_STATUSES disagree. "
+        f"in code only: {sorted(set(_DELIVERY_STATUSES) - allowed)}; "
+        f"in DB only: {sorted(allowed - set(_DELIVERY_STATUSES))}"
+    )
+
+
 async def test_notification_kinds_the_code_emits_are_all_accepted():
     """Every `kind` any caller passes to `emit` must be one the constraint allows.
 

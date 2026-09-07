@@ -101,6 +101,14 @@ class Project(Base):
     enforce_artifact_publication: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Where the project stands as DELIVERY WORK, set by a person (0054) — distinct
+    # from `approval_status`, which is the creation gate, and from whatever the agents
+    # happen to be running right now. Constrained to _DELIVERY_STATUSES by
+    # ck_project_delivery_status; see the migration for why that CHECK exists.
+    delivery_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_started",
+        server_default=text("'not_started'"),
+    )
     # TOTAL USD cost budget (0032). NULL = inherit workspace / unlimited. The name is
     # historical: spend accumulates over the project's life and never resets (see
     # shared/services/budget_store.py).

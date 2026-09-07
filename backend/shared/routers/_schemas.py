@@ -108,6 +108,11 @@ class ProjectOut(BaseModel):
     # Per-(stage, tool) read/write mode, "{agent_id}::{connector|mcp}::{ref}" ->
     # "read" | "write" | "both". Absent key = "both" (migration 0024).
     toolAccessModes: dict[str, str] = {}
+    # Where the project stands as delivery work (0054), set by a person. The picker on
+    # the Overview page existed for a while with nothing behind it: PATCH answered 200
+    # and dropped the field, and this schema's absence meant the frontend's own
+    # `.default("not_started")` supplied the value the success toast then reported.
+    deliveryStatus: str = "not_started"
     # Whether agents on this project read ONLY published artifact versions (0046).
     # False everywhere by default; the settings page is where it is turned on.
     enforceArtifactPublication: bool = False
@@ -165,6 +170,10 @@ class ProjectOut(BaseModel):
             mcpServers=getattr(project, "mcp_servers", None) or {},
             connectors=getattr(project, "connectors", None) or {},
             toolAccessModes=getattr(project, "tool_access_modes", None) or {},
+            # `or "not_started"`, not just a getattr default: the column is NOT NULL
+            # but this classmethod is also handed fixture doubles and freshly
+            # constructed rows whose attribute is still None.
+            deliveryStatus=getattr(project, "delivery_status", None) or "not_started",
             enforceArtifactPublication=bool(
                 getattr(project, "enforce_artifact_publication", False)
             ),
