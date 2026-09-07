@@ -312,6 +312,40 @@ explicit tenant predicate. This has been found twice in `copilot_api.py`.
 
 ## 7. What is left
 
+### The first all-nine live pass (`backend/scripts/live_all_agents_check.py`)
+
+Every agent had been reasoned about; only Development had been RUN. So this script runs
+all nine through the real graph, the real BYOK provider and the real database, then reads
+back what each one deposited. It costs nine real model calls — run it deliberately.
+
+The first pass found that **not one of the nine agents filed an actual document.** Six
+captured a deliverable and all six were chat: three refusals ("Security Review Not
+Possible", "Cannot Proceed", "What I Can Do") and three announcements of documents saved
+elsewhere ("Download Your PRD", "Plan Summary", "Quick Explanation"). Meanwhile the real
+PRD, the real delivery plan and the real test plan sat on disk, invisible.
+
+All of that is fixed (commits `224e5a7e`, `6cc1ea29`, `fc36e893`) and re-verified live:
+the Project Manager's `Coffee_Ordering_App_Delivery_Plan.pdf` now reaches the panel once,
+under the Project Manager, and its chat announcement files nothing.
+
+**Findings that are agent behaviour, not orchestrator bugs, and are still open:**
+
+- **Design does not save unless asked.** It answers "The architecture document has been
+  generated. Would you like me to save this as a .docx?" — so there is nothing on disk to
+  show. Two live runs, same result. The orchestrator cannot fix this; the agent's prompt
+  has to stop offering and start saving.
+- **Testing hallucinated an upload.** It replied "I don't have access to any Excel file"
+  about an Excel file nobody mentioned, then generated `test_plan.xlsx` anyway.
+- **Security, Deployment and Documentation refuse without a repository.** Defensible on
+  its own terms — they are code-reading agents and the run had no clone. Worth revisiting
+  only if they should degrade to advice rather than refuse.
+- **Per-agent attribution of the shared output directory is approximate.** `plan`,
+  `design` and `testing` all write to `files/<user>/orchestrator/<run>/output`, nothing on
+  disk says who wrote what, and `runs.stage` is set once at creation. The tree is shown
+  once under the run's stage. Exact attribution needs the agents writing into per-agent
+  subdirectories — a change to the agents, not to the read path.
+
+
 ### Phase 4 — Artifacts and per-agent quirks ← **START HERE**
 
 This is requirement 7, and the largest remaining piece of the user's spec.
