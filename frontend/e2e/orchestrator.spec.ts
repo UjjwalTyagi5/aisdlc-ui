@@ -1,36 +1,46 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * The cross-project Orchestrator (`/orchestrator`) — pick a project, pick a
- * model that project is allowed to run on, and watch the agent roster execute
- * in hand-off order.
+ * The Orchestrator (`/orchestrator`), rewritten for what it actually is.
  *
- * Signs in as **Project Admin** because driving the Orchestrator is that role's
- * alone (PRD §15.5–§15.11); every other role gets the read-only rendering,
- * which the last test covers.
+ * The previous version of this file was written against the scripted mock engine — a
+ * fixed nine-step pipeline with hard-coded replies and auto-approving gates — and was
+ * skipped wholesale in Phase 1 when that engine was deleted, retained as "the
+ * specification for what the Phase 3 rewrite must cover". Phases 3, 4 and 5 have all
+ * landed, so this is that rewrite.
+ *
+ * WHAT CHANGED, and why almost none of the old assertions could survive:
+ *   · There is no pipeline and no ordering. Any agent can run at any time, chosen from
+ *     the conversation — so "runs the roster stage by stage" describes nothing.
+ *   · There are no gates and no sign-off (D5), so every gate assertion is gone.
+ *   · There is no "Run the pipeline" button; the surface is a chat.
+ *   · The right panel is Deliverables, not Artifacts (D11).
+ *   · The Copilot it replaced no longer exists (D18).
+ *
+ * SCOPE. This runs in the default `chromium` project, which boots with MSW mocks and no
+ * backend, so it covers access control and the surface — not a live agent turn. Driving
+ * a real turn needs the real-api project, a seeded tenant and BYOK model calls; the
+ * backend equivalents are `scripts/live_deliverables_check.py`,
+ * `scripts/live_sessions_check.py` and `scripts/live_routing_check.py`, which exercise
+ * that path against a real database and a real model.
  */
 
 async function signInAsPlatformRole(page: Page, label: RegExp) {
   await page.goto("/login");
-  // The mock panel defaults to the 12-platform-role picker — no toggle needed.
   await page.getByRole("radio", { name: label }).check();
   await page.getByRole("button", { name: /continue as/i }).click();
   await page.waitForURL((url) => !url.pathname.startsWith("/login"), {
     waitUntil: "commit",
   });
-  // The landing page (/dashboard) is still fetching when the redirect commits.
-  // Navigating away mid-flight aborts the pending request and Chromium reports
-  // the *next* goto as ERR_ABORTED, so let the landing settle first.
   await page.waitForLoadState("networkidle");
 }
 
 /**
  * Open the Orchestrator, tolerating the cold-compile race.
  *
- * The first test to reach this route pays Next's dev compile (tens of seconds
- * on this app). A `goto` issued while the previous page still has requests in
- * flight is reported as ERR_ABORTED rather than retried, so navigate on
- * `domcontentloaded` and give it one more go.
+ * The first test to reach this route pays Next's dev compile. A `goto` issued while the
+ * previous page still has requests in flight is reported as ERR_ABORTED rather than
+ * retried, so navigate on `domcontentloaded` and give it one more go.
  */
 async function gotoOrchestrator(page: Page) {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -43,170 +53,91 @@ async function gotoOrchestrator(page: Page) {
   }
 }
 
-/** Choose the first option in one of the header's Radix selects. */
-async function pickFirst(page: Page, name: string) {
-  const trigger = page.getByRole("combobox", { name });
-  await expect(trigger).toBeVisible();
-  await trigger.click();
-  const option = page.getByRole("option").filter({ hasNot: page.locator("[data-disabled]") }).first();
-  await option.click();
-}
-
-// A full run streams eight agent turns; the cold compile of this route on top
-// of that comfortably exceeds Playwright's 30s default.
-test.describe.configure({ timeout: 120_000 });
-
-/**
- * These tests were written to exercise the scripted mock engine that generated
- * a fixed 9-step pipeline with hard-coded agent replies and auto-approving gates.
- * That engine has been deleted. The Orchestrator is now Project-Admin-only with no
- * pipeline ordering, no gates, and no ability to run an agent until the real engine
- * lands in Phase 3. Every test here — "Run the pipeline", the opening turn, gate
- * auto-approve, gate approve/reject interactions — depends on the mock engine and
- * will remain broken until Phase 3 lands.
- *
- * This file is retained as the specification for what the Phase 3 rewrite must
- * cover. It will be updated when that engine arrives and is ready for integration.
- */
-test.describe.skip("Orchestrator — auto-sequencing cockpit", () => {
-  test("runs a project's roster stage by stage and stops at the first gate", async ({
-    page,
-  }) => {
-    await signInAsPlatformRole(page, /^Project Admin\b/i);
-
-    await gotoOrchestrator(page);
-    await expect(page.getByRole("heading", { name: /Pick a project to orchestrate/i })).toBeVisible();
-
-    await pickFirst(page, "Project");
-
-    // Selecting a project resolves its allowed models and auto-seeds the
-    // default, so the empty state flips to "Ready to orchestrate <name>".
-    await expect(page.getByRole("heading", { name: /Ready to orchestrate/i })).toBeVisible({
-      timeout: 15_000,
-    });
-
-    // The model picker is populated from the project's own allow-list.
-    await expect(page.getByRole("combobox", { name: "Model" })).toBeVisible();
-
-    await page.getByRole("button", { name: /^Run the pipeline$/i }).click();
-
-    // The Orchestrator's opening turn names the roster it is about to run.
-    await expect(page.getByText(/I will run the project's/i)).toBeVisible({ timeout: 15_000 });
-
-    // First agent takes its turn — Requirements leads every track that has it.
-    await expect(page.getByText(/Requirements/).first()).toBeVisible({ timeout: 20_000 });
-
-    // Auto-advance closes the non-mandatory gates on its own, which is the
-    // whole point of this surface: a second agent speaks without a click.
-    await expect(page.getByText(/Auto-approved the .* gate/i).first()).toBeVisible({
-      timeout: 30_000,
-    });
-    await expect(page.getByText(/Handing off/i).first()).toBeVisible();
-  });
-
-  test("a mandatory gate stops the run and waits for a decision", async ({ page }) => {
+test.describe("Orchestrator — the merged surface", () => {
+  test("a Project Admin reaches it", async ({ page }) => {
     await signInAsPlatformRole(page, /^Project Admin\b/i);
     await gotoOrchestrator(page);
-    await pickFirst(page, "Project");
-    await expect(page.getByRole("heading", { name: /Ready to orchestrate/i })).toBeVisible({
-      timeout: 15_000,
-    });
 
-    // Turning auto-advance OFF makes every gate behave like a mandatory one,
-    // so the pause path is reachable without depending on which track the
-    // first fixture project happens to be on.
-    await page.getByRole("button", { name: /^Run the pipeline$/i }).click();
-    await expect(page.getByText(/I will run the project's/i)).toBeVisible({ timeout: 15_000 });
-    await page.getByLabel("Auto-advance").click();
-
-    const approve = page.getByRole("button", { name: /Approve & continue/i });
-    await expect(approve).toBeVisible({ timeout: 40_000 });
-    await expect(page.getByText(/The run is stopped until you decide/i)).toBeVisible();
-
-    // Deciding it resumes the sequence.
-    await approve.click();
-    await expect(page.getByText(/gate approved\. Handing off\./i).first()).toBeVisible({
-      timeout: 15_000,
-    });
+    // The composer is the surface. It is DISABLED until a project is picked — the
+    // mock persona has no business unit — but present, which is what distinguishes
+    // "admitted, pick a project" from "refused".
+    await expect(page.getByRole("textbox", { name: /message the orchestrator/i }))
+      .toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("heading", { name: /pick a project to orchestrate/i }))
+      .toBeVisible();
+    await expect(page.getByText(/you do not have access/i)).toHaveCount(0);
   });
 
-  test("rejecting a gate stops the run and nothing downstream executes", async ({ page }) => {
+  test("the right panel is Deliverables, not Artifacts", async ({ page }) => {
+    // D11: what the Orchestrator's agents produce is a different concept from the
+    // approval-gated artifacts the standalone agents write, and the tab says so.
     await signInAsPlatformRole(page, /^Project Admin\b/i);
     await gotoOrchestrator(page);
-    await pickFirst(page, "Project");
-    await expect(page.getByRole("heading", { name: /Ready to orchestrate/i })).toBeVisible({
-      timeout: 15_000,
-    });
 
-    await page.getByRole("button", { name: /^Run the pipeline$/i }).click();
-    await expect(page.getByText(/I will run the project's/i)).toBeVisible({ timeout: 15_000 });
-    await page.getByLabel("Auto-advance").click();
+    // The panel is xl-and-up and starts collapsed, so what is on screen is its rail.
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await expect(page.getByRole("textbox", { name: /message the orchestrator/i }))
+      .toBeVisible({ timeout: 30_000 });
 
-    const reject = page.getByRole("button", { name: /^Reject$/i });
-    await expect(reject).toBeVisible({ timeout: 40_000 });
-    await reject.click();
-
-    await expect(
-      page.getByText(/gate rejected\. The run is stopped here — nothing downstream ran/i),
-    ).toBeVisible({ timeout: 10_000 });
+    const deliverables = page.getByRole("tab", { name: /^deliverables$/i })
+      .or(page.getByRole("button", { name: /show deliverables panel/i }));
+    await expect(deliverables.first()).toBeVisible({ timeout: 15_000 });
+    // And never the retired name on this surface.
+    await expect(page.getByRole("tab", { name: /^artifacts$/i })).toHaveCount(0);
   });
 
-  test("the per-project Orchestrator runs the same way with the project fixed", async ({
-    page,
-  }) => {
-    await signInAsPlatformRole(page, /^Project Admin\b/i);
-
-    // Straight to the route. The project tab strip no longer advertises
-    // Orchestrator — the sidebar's cross-project entry is the way in now — but
-    // the per-project route still resolves, and that is exactly what this test
-    // exists to prove: arriving with the project already fixed behaves the same
-    // as choosing one.
-    await page.goto("/projects", { waitUntil: "domcontentloaded" });
-    await page.getByRole("link", { name: /Payments API/i }).first().click();
-    await page.waitForURL(/\/projects\/[^/]+$/);
-    await page.goto(`${new URL(page.url()).pathname}/orchestrator`, {
-      waitUntil: "domcontentloaded",
-    });
-
-    // No project picker here: the route already fixes the project.
-    await expect(page.getByRole("combobox", { name: "Project" })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Model" })).toBeVisible({
-      timeout: 15_000,
-    });
-
-    await expect(page.getByRole("heading", { name: /Ready to orchestrate/i })).toBeVisible({
-      timeout: 15_000,
-    });
-    await page.getByRole("button", { name: /^Run the pipeline$/i }).click();
-
-    await expect(page.getByText(/I will run the project's/i)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText(/Auto-approved the .* gate/i).first()).toBeVisible({
-      timeout: 30_000,
-    });
-  });
-
-  test("the rail shows the project's real stage state, not just the run's", async ({ page }) => {
+  test("there is no pipeline rail and no gate controls", async ({ page }) => {
+    // "There won't be a linearity that, after one agent, the next comes." Any agent can
+    // run at any time, so nothing on this surface may imply an order or a sign-off.
     await signInAsPlatformRole(page, /^Project Admin\b/i);
     await gotoOrchestrator(page);
-    await pickFirst(page, "Project");
-    await expect(page.getByRole("heading", { name: /Ready to orchestrate/i })).toBeVisible({
-      timeout: 15_000,
-    });
+    await page.waitForLoadState("networkidle");
 
-    // Before any run: the roster, its gate owners, and what the project itself
-    // is currently holding on — the signal the read-only control view carried.
-    await expect(page.getByText(/Gate owner:/).first()).toBeVisible();
-    await expect(page.getByText("HOLDING")).toBeVisible();
-    await expect(page.getByText("Awaiting approval")).toBeVisible();
+    await expect(page.getByRole("button", { name: /^run the pipeline$/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /approve & continue/i })).toHaveCount(0);
+    await expect(page.getByText(/auto-advance/i)).toHaveCount(0);
+    await expect(page.getByText(/awaiting sign-off/i)).toHaveCount(0);
   });
 
-  test("a non-driving role gets the Orchestrator read-only", async ({ page }) => {
+  test("the chat history rail is not described as browser-only", async ({ page }) => {
+    // Phase 5B moved sessions server-side. The rail used to say "Sessions are stored in
+    // this browser only", which stopped being true.
+    await signInAsPlatformRole(page, /^Project Admin\b/i);
+    await gotoOrchestrator(page);
+    await page.waitForLoadState("networkidle");
+
+    await expect(page.getByText(/stored in this browser only/i)).toHaveCount(0);
+    await expect(page.getByText(/open on any device/i)).toBeVisible();
+  });
+
+  test("a delivery role is refused", async ({ page }) => {
+    // Driving the Orchestrator IS holding every agent's access at once, so it is
+    // Project-Admin-only. A developer reaching the URL directly must be refused — this
+    // is the bug the Phase 1 whole-branch review found on exactly one of four surfaces.
     await signInAsPlatformRole(page, /^Developer\b/i);
     await gotoOrchestrator(page);
+    await page.waitForLoadState("networkidle");
 
-    await expect(
-      page.getByText(/driving it across agents is the Project Admin's role/i),
-    ).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: /Run pipeline/i })).toHaveCount(0);
+    // Refused outright: no composer at all, not merely a disabled one.
+    await expect(page.getByRole("textbox", { name: /message the orchestrator/i }))
+      .toHaveCount(0);
+    await expect(page.getByRole("heading", { name: /pick a project to orchestrate/i }))
+      .toHaveCount(0);
+  });
+});
+
+test.describe("the Copilot is gone", () => {
+  test("its page no longer exists", async ({ page }) => {
+    // Phase 1 unlinked it and deliberately left it reachable, because it was the only
+    // surface actually running agents. Phase 5 deleted it once that stopped being true.
+    await signInAsPlatformRole(page, /^Project Admin\b/i);
+
+    const response = await page.goto("/projects/p1/copilot", {
+      waitUntil: "domcontentloaded",
+    });
+    // Either a 404 from the router, or Next's not-found page. What must NOT happen is
+    // the Copilot rendering.
+    await expect(page.getByRole("button", { name: /^run the pipeline$/i })).toHaveCount(0);
+    expect(response?.status()).not.toBe(200);
   });
 });
