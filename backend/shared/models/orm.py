@@ -327,8 +327,10 @@ class Artifact(Base):
 
         stage IS NULL     project-level — a policy, a standard. Every agent may read
                           it once approved.
-        stage = 'design'  agent-level — readable by other agents only when a published
-                          version covers it (artifact_versions.covers).
+        stage = 'design'  agent-level — filed under that agent, and readable by every
+                          agent once approved. This used to additionally require a
+                          published version to name it in `artifact_versions.covers`;
+                          approval is the whole gate now.
 
     Before 0052 both facts were recovered by joining to `Run`, so a document was only
     "the Design agent's" by accident of which run produced it, and a project-wide one

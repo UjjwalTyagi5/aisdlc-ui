@@ -1,21 +1,25 @@
-"""One agent reading another's documents — phase 6.
+"""One agent reading another's documents.
 
 THE RULE, and every row of it is asserted directly below:
 
-    project-level, approved                every agent
-    agent-level, COVERED by a published    every agent
-      version
-    agent-level, approved but not covered  its own agent only
+    approved, either scope                 every agent
     pending or rejected                    nobody
 
-APPROVED AND COVERED ARE DIFFERENT QUESTIONS. Approved means "fit to exist in the
-project's record". Covered means "part of the signed-off unit this stage handed
-downstream". A document can be a perfectly good document and still not be something
-another agent should build on, and collapsing the two would make the gate decorative.
+APPROVAL IS THE WHOLE GATE. It used to have a second half: an agent-level document was
+readable only once a published version NAMED it in `covers`, ticked by hand in a freeze
+dialog. Approved meant "fit to exist in the project's record" and covered meant "part of
+the unit this stage handed downstream" — two real questions, but in practice somebody
+approved a document and then had to know about a separate ceremony before it counted for
+anything, and a document approved by the stage's own owner yet invisible to the next
+agent reads as the product losing the file.
 
-WHY `covers` RATHER THAN A SECOND APPROVAL SYSTEM. `artifact_versions.covers` was added
-for exactly this and never populated. Documents joining the existing gate means one
-audit trail and one thing called approval, instead of two that have to be reconciled.
+WHAT THAT COSTS, asserted below so the trade is visible rather than assumed: a stage can
+no longer approve a document and still keep it out of downstream reach. A private
+working file should not be approved into the record in the first place.
+
+WHAT DID NOT CHANGE: rejected and pending are still nobody's to read, the status is
+re-checked at READ time rather than trusted from a frozen version, and tenants stay
+isolated.
 """
 from __future__ import annotations
 
@@ -155,13 +159,30 @@ async def test_a_covered_agent_document_is_readable_by_everyone(project):
     assert docs[0]["scope"] == "agent" and docs[0]["via"] == "covered"
 
 
-async def test_an_uncovered_agent_document_is_not_offered(project):
-    """THE DISTINCTION THE GATE EXISTS FOR. Approved is not the same as handed
-    downstream — a stage's own working document stays its own."""
-    await _document(project, stage="design", name="scratch.pdf")
+async def test_an_approved_agent_document_is_offered_without_being_covered(project):
+    """THE CHANGE. This document is approved, no published version names it, and it is
+    readable anyway — which is the whole point of dropping the freeze step.
+
+    The old behaviour asserted the exact opposite here, so this test failing in the
+    other direction is the signal that the covers gate has come back."""
+    doc = await _document(project, stage="design", name="scratch.pdf")
     await _publish(project, "design", {"c4": "x"}, covers=[])
 
-    assert await _readable(project, covered_ids=[]) == []
+    docs = await _readable(project, covered_ids=[])
+    assert [d["id"] for d in docs] == [doc]
+    # `via` still distinguishes the two, because an auditor asking "was this part of a
+    # signed-off version?" is a different question from "may this be read?".
+    assert docs[0]["via"] == "agent"
+
+
+async def test_a_covered_document_is_still_labelled_covered(project):
+    """Versions keep recording what they covered — that is still the honest answer to
+    "what did this run build on" — it just no longer decides permission."""
+    doc = await _document(project, stage="design", name="hld.pdf")
+    await _publish(project, "design", {"c4": "x"}, covers=[doc])
+
+    docs = await _readable(project, covered_ids=[doc])
+    assert [d["via"] for d in docs] == ["covered"]
 
 
 @pytest.mark.parametrize("status", ["pending", "rejected"])

@@ -679,18 +679,22 @@ async def granted_version(
     )).scalar_one_or_none()
 
 
-# ── documents a consumer may read (phase 6) ──────────────────────────────────
+# ── documents a consumer may read ────────────────────────────────────────────
 #
-#   project-level, approved                every agent
-#   agent-level, COVERED by a published    every agent
-#     version
-#   agent-level, approved but not covered  its own agent only
+#   approved, either scope                 every agent
 #   pending or rejected                    nobody
 #
-# Approved means "fit to exist in the project's record". Covered by a published version
-# means "part of the signed-off unit this stage handed downstream". Two different
-# questions, and the gate exists for the second: a document can be a perfectly good
-# document and still not be something another agent should build on.
+# THIS GATE USED TO HAVE A SECOND HALF and no longer does. An agent-level document was
+# readable only once a published version NAMED it in `covers`, picked by hand in a
+# freeze dialog. Approved meant "fit to exist in the project's record"; covered meant
+# "part of the unit this stage handed downstream" — genuinely two questions, but in
+# practice it made somebody approve a document and then tick it again in a separate
+# ceremony before it counted for anything, and a document approved by the stage's own
+# owner yet invisible to the next agent reads as the product losing the file.
+#
+# What that costs: a stage can no longer approve a document while keeping it out of
+# downstream reach. A private working file simply should not be approved into the
+# record.
 
 
 def _document_row(a: "Artifact", source: str) -> dict[str, Any]:  # noqa: F821
@@ -722,39 +726,64 @@ async def readable_documents(
     *,
     covered_ids: Optional[list] = None,
 ) -> list[dict[str, Any]]:
-    """The documents a consuming agent may read, per the rule above."""
+    """The documents a consuming agent may read: APPROVAL IS THE WHOLE GATE.
+
+    THIS USED TO ASK TWO QUESTIONS AND NOW ASKS ONE. An agent-level document was
+    readable only if a published version NAMED it in `covers`, chosen by hand in a
+    freeze dialog. The distinction was real on paper — approved meant "fit to exist in
+    the project's record", covered meant "part of the unit this stage handed
+    downstream" — but in practice it made a person approve a document and then, in a
+    separate ceremony they had to know about, tick it again for it to be worth
+    anything. A document approved by the stage's own owner and still invisible to the
+    next agent reads as the product losing the file, not as a gate doing its job.
+
+    So approval is now the gate, for both scopes. What is lost is the ability to
+    approve a document while deliberately keeping it out of downstream reach; a stage
+    that wants a private working file should not approve it into the record.
+
+    `covered_ids` IS STILL ACCEPTED AND STILL IGNORED FOR PERMISSION. Versions keep
+    recording what they covered — that remains the honest answer to "what did this run
+    build on" — so callers that have it may still pass it, and it now only decides
+    whether a row is labelled `covered` or `agent` in `via`.
+    """
     from shared.models.orm import Artifact  # noqa: PLC0415
 
-    out: list[dict[str, Any]] = []
+    covered = {str(x) for x in (covered_ids or []) if x}
 
-    # Project-level: approved is enough. A project-wide policy IS context for every
-    # agent by definition; requiring each to request it separately would be ceremony
-    # with a predictable answer.
-    project_wide = (await db.execute(
+    rows = (await db.execute(
         select(Artifact).where(
             Artifact.project_id == project_id,
-            Artifact.stage.is_(None),
+            # Rejected and pending are still nobody's to read. Re-checked HERE rather
+            # than trusted from a version, because a document rejected after it was
+            # frozen must stop being readable even though the frozen row still names it.
             Artifact.approval_status == "approved",
         )
     )).scalars().all()
-    out.extend(_document_row(a, "project") for a in project_wide)
 
-    # Agent-level: only what the published version named. An approved-but-uncovered
-    # document belongs to its own stage and stops there.
-    if covered_ids:
-        wanted = [str(x) for x in covered_ids if x]
-        if wanted:
-            covered = (await db.execute(
-                select(Artifact).where(
-                    Artifact.project_id == project_id,
-                    Artifact.id.in_(wanted),
-                    # Covered by a version is not enough on its own: a document that
-                    # was later REJECTED must stop being readable even though the
-                    # frozen version still names it.
-                    Artifact.approval_status == "approved",
-                )
-            )).scalars().all()
-            out.extend(_document_row(a, "covered") for a in covered)
+    out: list[dict[str, Any]] = []
+    for a in rows:
+        if a.stage is None:
+            source = "project"
+        elif str(a.id) in covered:
+            source = "covered"
+        else:
+            source = "agent"
+        out.append(_document_row(a, source))
+
+    # WHO APPROVED IT, AS A PERSON. These columns hold the JWT subject — a UUID — and
+    # an agent reasoning about "approved by 09e55932-…" learns nothing it can use or
+    # repeat back to a reader. Same resolution the Documents screen does; see
+    # shared/services/actor_labels.
+    if out:
+        from shared.services.actor_labels import actor_labels, relabel  # noqa: PLC0415
+
+        tenant = rows[0].tenant_id if rows else None
+        labels = await actor_labels(
+            db, str(tenant) if tenant else None, [d["approvedBy"] for d in out],
+        )
+        if labels:
+            for d in out:
+                d["approvedBy"] = relabel(d["approvedBy"], labels)
     return out
 
 

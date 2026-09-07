@@ -149,16 +149,17 @@ async def read_document_for_agent(
 
     FAILS CLOSED, AND RE-CHECKS. The metadata `read_upstream` handed over is not a
     capability: this resolves the id again and applies the same rule, so a document
-    that was rejected or uncovered between the two calls stops being readable. Passing
-    an id the caller was never offered gets the same refusal as passing a bad one.
+    whose approval is withdrawn between the two calls stops being readable. Passing an
+    id the caller was never offered gets the same refusal as passing a bad one.
 
     THE RULE, unchanged from `readable_documents`:
 
-        project-level, approved                every agent
-        agent-level, covered by a published    every agent
-          version
-        agent-level, approved but not covered  its own agent only
+        approved (either scope)                every agent
         pending or rejected                    nobody
+
+    The covered-by-a-published-version half of this gate was removed: approving a
+    document into the project's record is now what makes it readable downstream. See
+    `readable_documents` for why.
 
     COMMITS, like the rest of this module: an agent tool is not inside a request, so
     nobody else will commit the consumption row it records.
@@ -190,27 +191,16 @@ async def read_document_for_agent(
                     f"{NOT_PUBLISHED_HINT}"
                 )
 
-            # Re-derive what this consumer may see rather than trusting the id.
-            covered: list = []
-            if row.stage:
-                published = await latest_published(db, project_id, row.stage)
-                covered = list(published.covers or []) if published else []
-            allowed = {
-                d["id"] for d in await readable_documents(
-                    db, project_id, covered_ids=covered,
-                )
-            }
+            # Re-derive what this consumer may see rather than trusting the id. Still
+            # a real re-check even though approval is now the whole gate: `row` was
+            # fetched by id, and a document belonging to a DIFFERENT project or one
+            # whose approval was withdrawn between the two calls must not slip through.
+            allowed = {d["id"] for d in await readable_documents(db, project_id)}
             if str(row.id) not in allowed:
-                # Its own agent may still read it; another may not.
-                if row.stage and row.stage == consumer_stage:
-                    pass
-                else:
-                    return None, (
-                        f"that document belongs to {row.stage} and no published "
-                        f"{row.stage} version covers it, so {consumer_stage} may not "
-                        "read it yet. Publishing a version that includes it, or an "
-                        "owner-granted exception, is what makes it available."
-                    )
+                return None, (
+                    "that document is not readable in this project. Only approved "
+                    "documents can be read; an owner has to accept it first."
+                )
 
             if not row.blob_path:
                 return None, "that document has no stored file"

@@ -17,17 +17,14 @@ have needed one section of.
 
 THE RULE IS ENFORCED IN THE SERVICE, NOT HERE. `read_document_for_agent` re-resolves the
 id and re-applies it, so the metadata this hands over is not a capability: a document
-rejected or uncovered between the two calls stops being readable. These tools only
+whose approval is withdrawn between the two calls stops being readable. These tools only
 translate a refusal into a sentence the model can act on.
 
-    project-level, approved                every agent
-    agent-level, covered by a published    every agent
-      version
-    agent-level, approved but not covered  its own agent only
+    approved, either scope                 every agent
     pending or rejected                    nobody
 
-BOUND TO A STAGE BY A FACTORY. `consumer_stage` decides what "its own agent" means and
-is recorded on every read, so the evidence trail says which agent read what. It comes
+BOUND TO A STAGE BY A FACTORY. `consumer_stage` is recorded on every read, so the
+evidence trail says which agent read what. It comes
 from the agent that registers the tool, never from the model — a tool argument would let
 a prompt claim to be a different agent.
 """
@@ -70,20 +67,15 @@ def make_document_tools(consumer_stage: str) -> list[Any]:
 
         from shared.db import get_db_session_for_tenant  # noqa: PLC0415
         from shared.services.artifact_versions import (  # noqa: PLC0415
-            latest_published, readable_documents,
+            readable_documents,
         )
-        from shared.services.orchestrator.progression import STAGE_ORDER  # noqa: PLC0415
 
         try:
             async with get_db_session_for_tenant(tenant_id) as db:
-                covered: list = []
-                # Every stage's published version, because a consumer may read any
-                # stage's covered documents — not only its immediate upstream.
-                for stage in STAGE_ORDER:
-                    published = await latest_published(db, project_id, stage)
-                    if published is not None:
-                        covered.extend(published.covers or [])
-                docs = await readable_documents(db, project_id, covered_ids=covered)
+                # No `covered_ids`: approval is the whole gate now, so walking every
+                # stage's published version to collect `covers` bought one query per
+                # stage and changed nothing about the answer.
+                docs = await readable_documents(db, project_id)
         except Exception as exc:  # noqa: BLE001 — degrade, do not kill the turn
             logger.warning(
                 "list_project_documents failed for %s: %s",
@@ -96,8 +88,7 @@ def make_document_tools(consumer_stage: str) -> list[Any]:
             # model looking for a bug that is not there.
             return (
                 "No documents are available to this agent yet. A document becomes "
-                "readable when it is approved AND either published as part of a "
-                "stage's signed-off version, or filed as project-wide."
+                "readable once its owner approves it."
             )
         return json.dumps(docs, indent=2)[:12000]
 
