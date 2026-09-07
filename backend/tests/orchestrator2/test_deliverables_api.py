@@ -123,3 +123,86 @@ async def test_pointers_are_returned_alongside_stored_rows(monkeypatch):
     ids = [d["id"] for d in out["deliverables"]]
     assert "d1" in ids, "stored deliverables must be returned"
     assert "dev-code" in ids, "the code tree pointer must be synthesized on read"
+
+
+# ── the shared output directory reaches the panel once ───────────────────────
+#
+# `plan`, `design` and `testing` all resolve `files/<user>/orchestrator/<run>/output`.
+# Mapping all three (so the Project Manager's delivery plan would stop being invisible)
+# made the endpoint emit the identical files three times, once per heading — the
+# Testing agent's `test_plan.xlsx` appearing under Design.
+#
+# Found by mutation: `_dedupe_by_directory` was tested directly and the ENDPOINT was
+# free to ignore it.
+
+
+def _endpoint_fixture(monkeypatch, *, stage, shared_dir, tmp_path):
+    from shared.routers import runs
+
+    class _Run:
+        id = "11111111-1111-1111-1111-111111111111"
+        project_id = None
+        development_artifacts = None
+
+    _Run.stage = stage
+
+    async def _get_run(db, run_id, tenant_id, *, request):
+        return _Run()
+
+    async def _stored(run_id, tenant_id):
+        return []
+
+    async def _dirs(run_id, stage_, **kwargs):
+        # Exactly what the real resolver does: these three share one directory.
+        return shared_dir if stage_ in ("plan", "design", "testing") else None
+
+    monkeypatch.setattr(runs, "_get_run_or_404", _get_run)
+    monkeypatch.setattr(runs, "_run_stage_output_dir", _dirs)
+    monkeypatch.setattr(
+        "agents_orchestrator.orchestrator2.deliverables.deliverables_for_run", _stored
+    )
+
+    class _Request:
+        class state:
+            tenant_id = "22222222-2222-2222-2222-222222222222"
+
+    return runs, _Run, _Request
+
+
+@pytest.mark.asyncio
+async def test_one_shared_directory_yields_one_tree_from_the_endpoint(
+    monkeypatch, tmp_path,
+):
+    """End to end through `get_run_deliverables`, with a real directory on disk so the
+    `isdir`/`listdir` guard runs for real."""
+    shared_dir = tmp_path / "output"
+    shared_dir.mkdir()
+    (shared_dir / "test_plan.xlsx").write_text("x", encoding="utf-8")
+
+    runs, _Run, _Request = _endpoint_fixture(
+        monkeypatch, stage="testing", shared_dir=str(shared_dir), tmp_path=tmp_path,
+    )
+    out = await runs.get_run_deliverables(_Run.id, _Request(), db=None)
+    trees = [d for d in out["deliverables"] if d["kind"] == "file-tree"]
+    assert len(trees) == 1, (
+        f"the same directory was shown {len(trees)} times: "
+        + ", ".join(t["agent"] for t in trees)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_shared_tree_is_filed_under_the_agent_the_run_is_for(
+    monkeypatch, tmp_path,
+):
+    """Without this the winner is whichever stage sorts first, so a run opened for the
+    Project Manager files its delivery plan under Design."""
+    shared_dir = tmp_path / "output"
+    shared_dir.mkdir()
+    (shared_dir / "Delivery_Plan.pdf").write_text("x", encoding="utf-8")
+
+    runs, _Run, _Request = _endpoint_fixture(
+        monkeypatch, stage="plan", shared_dir=str(shared_dir), tmp_path=tmp_path,
+    )
+    out = await runs.get_run_deliverables(_Run.id, _Request(), db=None)
+    trees = [d for d in out["deliverables"] if d["kind"] == "file-tree"]
+    assert [t["agent"] for t in trees] == ["plan"]

@@ -275,7 +275,7 @@ async def get_run_deliverables(
     # `pointers_for_run`, which stays pure: this is the only layer that can look at
     # the disk. An agent that generated nothing gets no tree, because an empty tree
     # reads as a pull that failed rather than as a stage with no files.
-    stages_with_files: set[str] = set()
+    dir_by_stage: dict[str, str] = {}
     for agent_id in AGENT_IDS:
         if agent_id == "development":
             continue  # already covered by its own code-tree pointer
@@ -289,7 +289,14 @@ async def get_run_deliverables(
         except Exception:  # noqa: BLE001 - a missing tree must not fail the whole read
             continue
         if directory and os.path.isdir(directory) and os.listdir(directory):
-            stages_with_files.add(agent_id)
+            dir_by_stage[agent_id] = directory
+
+    # Several stages resolve one shared directory, and it may be shown only once.
+    # The run's own stage owns the shared directory when it is one of the agents
+    # that write there — see `_dedupe_by_directory`.
+    stages_with_files = _dedupe_by_directory(
+        dir_by_stage, prefer=getattr(run, "stage", None),
+    )
 
     stored = await deliverables_for_run(str(run.id), str(tenant_id))
     pointers = pointers_for_run(dev_artifacts, stages_with_files)
@@ -417,7 +424,55 @@ def _glob_user_scoped_dir(run_id: str, rel_suffix: str, *, segment: str = "orche
 # through different tools — the Project Manager's plan export, `architecture.py`, and
 # Testing's `finalize.py` — but land in the same place, because `session_id` is the
 # run id for every agent the Orchestrator dispatches.
-_ORCHESTRATOR_OUTPUT_STAGES = {"plan", "design", "testing"}
+#
+# ORDERED, because they share a directory and only one of them may show it. See
+# `_dedupe_by_directory`. The order is the one these agents typically run in, so the
+# earliest contributor owns the heading.
+_ORCHESTRATOR_OUTPUT_STAGES: tuple[str, ...] = ("design", "plan", "testing")
+
+
+def _dedupe_by_directory(
+    by_stage: dict[str, str], *, prefer: str | None = None,
+) -> set[str]:
+    """Keep one stage per distinct directory, `prefer` first and then
+    `_ORCHESTRATOR_OUTPUT_STAGES` order.
+
+    `plan`, `design` and `testing` all resolve the SAME path, so mapping all three
+    made the panel render the identical files once per heading — the Testing agent's
+    `test_plan.xlsx` showing up under Design. Wrong attribution is worse than none: an
+    empty heading reads as "nothing produced yet", a populated one reads as evidence.
+
+    `prefer` is the run's own stage. It is right whenever a run exercised one of the
+    sharing agents — which is the common case — and it is what stops the Project
+    Manager's delivery plan being filed under Design purely because Design sorts
+    first.
+
+    WHAT THIS DOES NOT DO is attribute correctly in general. Nothing on disk records
+    which agent wrote which file; the agents share the directory, and `runs.stage` is
+    set once at creation and never updated, because orchestrator2 deliberately writes
+    no position back to a run. So a long conversation where Design and the Project
+    Manager both exported shows both documents under whichever the run was opened for.
+    Exact attribution needs the agents writing into per-agent subdirectories, which is
+    a change to the agents rather than to this read path.
+
+    The order is a fixed tuple rather than set iteration order: the winner has to be
+    the same on every read, or the same run files its documents under a different
+    agent each time the panel refreshes.
+    """
+    seen: dict[str, str] = {}
+    ordered = [prefer] if prefer and prefer in by_stage else []
+    ordered += [s for s in _ORCHESTRATOR_OUTPUT_STAGES if s in by_stage]
+    ordered += sorted(
+        s for s in by_stage
+        if s not in _ORCHESTRATOR_OUTPUT_STAGES and s != prefer
+    )
+    for stage in ordered:
+        # Normalised because the same directory reached through two stages can come
+        # back spelled differently — `glob` preserves whatever case and separators the
+        # caller handed it, and on Windows both vary.
+        key = os.path.normcase(os.path.normpath(by_stage[stage]))
+        seen.setdefault(key, stage)
+    return set(seen.values())
 
 # Stages whose generated output isn't in its own dedicated location (dev workspace,
 # the shared `output/` above, docs' own root) yet — populated under a shared

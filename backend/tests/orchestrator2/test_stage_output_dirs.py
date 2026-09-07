@@ -104,6 +104,85 @@ async def test_one_stages_files_are_never_served_as_anothers(files_root):
     assert found is None, "the Requirements agent's output was served as Testing's"
 
 
+def test_one_directory_yields_one_tree_not_one_per_stage_that_resolves_it():
+    """`plan`, `design` and `testing` all resolve the SAME directory.
+
+    Mapping them (the fix above) made the panel show the identical files three times,
+    once under each heading — so the Testing agent's `test_plan.xlsx` appeared under
+    Design. Wrong attribution is worse than none: an empty heading reads as "nothing
+    produced yet", a populated one reads as evidence.
+
+    Nothing on disk says which agent wrote which file — the agents share the
+    directory, `runs.stage` is set once at creation and orchestrator2 deliberately
+    never writes a position back to a run. So the tree is emitted ONCE, under a
+    documented priority, and exact per-agent attribution waits on the agents writing
+    into per-agent subdirectories.
+    """
+    from shared.routers.runs import _dedupe_by_directory
+
+    shared_dir = "/files/u1/orchestrator/r1/output"
+    out = _dedupe_by_directory({
+        "design": shared_dir,
+        "plan": shared_dir,
+        "testing": shared_dir,
+        "requirements": "/files/u1/requirements_agent/r1/output",
+    })
+    assert out == {"design", "requirements"}, (
+        "the shared directory must appear once, and a stage with its own directory "
+        "must never be dropped with it"
+    )
+
+
+def test_the_run_s_own_stage_wins_the_shared_directory():
+    """A run opened for the Project Manager must file its delivery plan under the
+    Project Manager, not under whichever sharing stage happens to sort first."""
+    from shared.routers.runs import _dedupe_by_directory
+
+    shared_dir = "/files/u1/orchestrator/r1/output"
+    kept = _dedupe_by_directory(
+        {"design": shared_dir, "plan": shared_dir, "testing": shared_dir},
+        prefer="plan",
+    )
+    assert kept == {"plan"}
+
+
+def test_a_prefer_that_wrote_nothing_is_ignored():
+    """`prefer` is the run's stage, which is set at creation and says nothing about
+    who exported. A stage with no files must not be given a tree it did not fill."""
+    from shared.routers.runs import _dedupe_by_directory
+
+    shared_dir = "/files/u1/orchestrator/r1/output"
+    kept = _dedupe_by_directory({"testing": shared_dir}, prefer="requirements")
+    assert kept == {"testing"}
+
+
+def test_the_priority_is_stable_so_the_tree_does_not_move_between_reads():
+    """A set iterates in whatever order it likes. If the winner were picked from one,
+    the same run would file its documents under a different agent on every refresh."""
+    from shared.routers.runs import _dedupe_by_directory
+
+    shared_dir = "/files/u1/orchestrator/r1/output"
+    picks = {
+        frozenset(_dedupe_by_directory(
+            {s: shared_dir for s in ("testing", "plan", "design")}
+        ))
+        for _ in range(20)
+    }
+    assert len(picks) == 1
+
+
+def test_paths_that_differ_only_in_case_or_separator_are_one_directory():
+    """Windows. `_glob_user_scoped_dir` returns whatever `glob` produced, and the same
+    directory reached through two stages can come back spelled differently."""
+    from shared.routers.runs import _dedupe_by_directory
+
+    out = _dedupe_by_directory({
+        "design": r"C:\files\U1\orchestrator\r1\output",
+        "plan": r"c:/files/u1/orchestrator/r1/output",
+    })
+    assert len(out) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["security", "code_review", "deployment"])
 async def test_an_agent_with_no_output_of_its_own_is_not_handed_someone_elses(
