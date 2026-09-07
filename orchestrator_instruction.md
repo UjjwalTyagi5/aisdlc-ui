@@ -1364,6 +1364,52 @@ under the Project Manager, with its chat announcement filing nothing.
 - Frontend **715 passing** across 85 files, typecheck and eslint clean.
 - `live_deliverables_check` 16/16, `live_sessions_check` 12/12.
 
+### 18.9 Run memory (2026-09-07)
+
+REPORTED, with the transcript. A user drove the Development agent through a whole
+change — cloned the ADO repo, found the duplicate table, recoloured it to orange,
+pushed, opened a PR — then asked Requirements for story tickets "of the same change
+table to orange" and was told "I don't have any context about a 'change table to
+orange' modification from our conversation".
+
+Probed against the live run: the transcript WAS stored (20 turns), the run had 0
+deliverables, and `handoff_context(run, "requirements")` returned **0 characters**.
+`handoff_context` fed agents DELIVERABLES and nothing else, so a conversation that
+produced no document handed the next agent an empty string.
+
+**D18m — an agent receives the run's CONVERSATION, not only its documents.** Read
+independently of the deliverables and failing independently: losing the transcript must
+not also lose the PRD, and a failed read SAYS so rather than arriving as "nothing
+happened yet".
+
+**D18n — the transcript budget is guaranteed PER AGENT.** "Generous ... so that at
+least one run of each agent is visible to the next agent." Every agent's latest turn is
+reserved, with the user turn that prompted it, before recency fills the rest.
+`PER_AGENT_TRANSCRIPT_CHARS = 6,000`, `MAX_TRANSCRIPT_CHARS = 64,000`, and when the
+reservations cannot all fit the SLICE shrinks rather than an agent being dropped —
+trimming the rendered output instead cuts from the oldest end and evicts exactly the
+early agents the guarantee protects. Mutation found that; at a generous budget the two
+behaved identically.
+
+**D18o — `conversation_messages.agent_id` (migration 0045).** `role` is `agent` for all
+nine, so a transcript fed forward unattributed reads as one voice. Nullable, and null
+means *not attributable*: rows predating the column were never recorded, and inventing
+attribution would tell the next agent that a particular agent said something it did
+not. The router answering directly is filed as `orchestrator`, because it is not one of
+the nine.
+
+Fixed alongside: `GET /runs/{id}/transcript` filled its `stage` field from `author_id`
+— the USER's id — so every agent turn in a reopened chat was labelled with the person
+who typed at it.
+
+**What escaped the tests.** The ORM model never got the column; every unit test passes
+dicts, and a dict fake cannot catch a missing mapped column. The first real read raised
+`AttributeError`, which `handoff_context` reported to the agent as "the conversation
+could not be read" — a defect that only a live read found, after twelve mutants were
+already dead. There is now a test asserting the mapper declares what the loader reads.
+
+Verified against the reported run: **0 characters before, 4,896 after.**
+
 ### 18.8 Left open, deliberately
 
 - **RLS (#1)** — unchanged, and still the operator's call. See 17.6.
