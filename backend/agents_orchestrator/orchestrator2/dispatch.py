@@ -123,7 +123,12 @@ from agents_orchestrator.orchestrator2 import (
     mcp,
 )
 from config.ws_helper import (
-    reset_session_id, set_provider_kind, set_session_id, set_user_id,
+    reset_session_id,
+    set_orchestrator_run,
+    set_provider_kind,
+    set_session_id,
+    set_tenant_id,
+    set_user_id,
 )
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.services.model_resolver import (
@@ -443,6 +448,18 @@ async def run_agent(
             # own, because the work_dir path is `files/<user>/orchestrator/<run>/project`.
             _session_token = set_session_id(run_id)
             set_user_id(user_id)
+            # THE TENANT, alongside the user. `shared.authz.consequential.owner_approved`
+            # reads both and refuses with "this run has none — it is running in the
+            # background" if either is missing, so without this every Orchestrator turn
+            # looked unattended and no consequential action could ever be authorised.
+            # Reported: Requirements refused to create Azure Board work items for a
+            # Project Admin who had just confirmed them.
+            set_tenant_id(tenant_id)
+            # This turn is the Orchestrator's, and `ws.py` has already verified the
+            # caller administers the run's project. Per §1.5 that person owns every
+            # stage here, which the stage-owner permissions do not otherwise say —
+            # `project_admin` holds approval for `documentation` and `plan` alone.
+            set_orchestrator_run(True)
             # Which board/repo provider the agent's tools are talking to. Without it
             # they default to azure_devops, which is right today and silently wrong the
             # first time a project selects GitHub.
@@ -626,6 +643,12 @@ async def run_agent(
             except Exception:  # noqa: BLE001 - nothing useful remains to do
                 pass
             set_user_id("")
+            set_tenant_id(None)
+            # CLEARED, always. A leaked True would carry the Orchestrator's
+            # stage-ownership exemption into whatever ran next on this worker,
+            # including a standalone agent's request, where the stage owner really
+            # does decide.
+            set_orchestrator_run(False)
 
     # ── deliverable capture ──────────────────────────────────────────────────
     #
