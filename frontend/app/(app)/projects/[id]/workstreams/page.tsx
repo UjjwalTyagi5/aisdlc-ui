@@ -3,16 +3,16 @@
 import * as React from "react";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Play } from "lucide-react";
+import { Activity } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ProjectRunsTable } from "@/components/app/project-runs-table";
-import { RunTriggerDialog } from "@/components/runs/run-trigger-dialog";
-import { RequireRole } from "@/components/auth/require-role";
+import { RunAgentButton } from "@/components/app/run-agent-button";
+import { effectivePlatformRole } from "@/lib/auth/effective-role";
+import { useRawSession } from "@/components/auth/session-provider";
 import { listRuns } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { WORKSTREAM_LABEL_PLURAL } from "@/lib/scope";
@@ -57,7 +57,8 @@ export default function ProjectWorkstreamsPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
   const [filter, setFilter] = React.useState<StatusFilter>("all");
-  const [runOpen, setRunOpen] = React.useState(false);
+  // `RunAgentButton` hides itself for anyone who may not use the Orchestrator.
+  const role = effectivePlatformRole(useRawSession());
 
   const runsQ = useQuery({
     queryKey: qk.runs.forProject(id),
@@ -78,8 +79,6 @@ export default function ProjectWorkstreamsPage() {
 
   return (
     <div className="w-full space-y-5 p-4 md:px-10 md:py-8">
-      <RunTriggerDialog projectId={id} open={runOpen} onOpenChange={setRunOpen} />
-
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="font-display text-lg font-semibold tracking-tight">
@@ -92,12 +91,14 @@ export default function ProjectWorkstreamsPage() {
           </p>
         </div>
 
-        <RequireRole capability="run:trigger">
-          <Button onClick={() => setRunOpen(true)} className="gap-2">
-            <Play className="size-4" aria-hidden />
-            Start a workstream
-          </Button>
-        </RequireRole>
+        {/* Starting a workstream IS opening the Orchestrator. The dialog that used
+            to stand here pre-created a run and pushed to the Copilot page, which Phase
+            5A deleted — so it 404'd, and the run it created was orphaned
+            because the Orchestrator opens its own. Its model picker was redundant for
+            the same reason: the cockpit picks the model now. `RunAgentButton` carries
+            the Project-Admin gate itself, so a `RequireRole` here would be a second,
+            weaker copy of it. */}
+        <RunAgentButton projectId={id} role={role} />
       </div>
 
       {/* Status filter */}
