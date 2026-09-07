@@ -37,6 +37,7 @@ from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
+from shared.services.actor_labels import actor_labels, relabel
 from shared.routers.projects import _get_or_404
 from shared.services.artifact_store import is_blob_path
 
@@ -76,6 +77,25 @@ async def _assert_project_visible(db: AsyncSession, request: Request, project_id
     )
     if visible is not None and str(project_id) not in visible:
         raise HTTPException(status_code=404, detail="not found")
+
+
+async def _with_actor_emails(db, tenant_id, outs: list[ArtifactOut]) -> list[ArtifactOut]:
+    """Render `uploadedBy`/`approvedBy` as emails rather than JWT subject UUIDs.
+
+    ONE QUERY FOR THE WHOLE RESPONSE, not one per row — a Documents list is the place
+    this is called most and it would otherwise issue a lookup per document. An id we
+    cannot resolve is LEFT AS THE ID: a departed approver must still show as somebody.
+    """
+    labels = await actor_labels(
+        db, tenant_id,
+        [o.uploadedBy for o in outs] + [o.approvedBy for o in outs],
+    )
+    if not labels:
+        return outs
+    for o in outs:
+        o.uploadedBy = relabel(o.uploadedBy, labels)
+        o.approvedBy = relabel(o.approvedBy, labels)
+    return outs
 
 
 @artifacts_router.get("/projects/{project_id}/artifacts", response_model=List[ArtifactOut])
@@ -141,7 +161,7 @@ async def list_artifacts_for_project(
                 result.extend(synth)
                 break
 
-    return result
+    return await _with_actor_emails(db, tenant_id, result)
 
 
 @artifacts_router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
@@ -159,7 +179,8 @@ async def get_artifact(
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, artifact.project_id)
-    return ArtifactOut.from_orm_artifact(artifact)
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.get("/artifacts/{artifact_id}/download")
@@ -366,7 +387,8 @@ async def approve_artifact(
     if artifact.approval_status == "approved":
         # Idempotent: a double-click must not attempt a second move whose source has
         # already been deleted.
-        return ArtifactOut.from_orm_artifact(artifact)
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
     if artifact.approval_status == "rejected":
         raise HTTPException(
             status_code=409,
@@ -422,7 +444,8 @@ async def approve_artifact(
     # failed outright with "Could not refresh instance". The dependency's commit
     # persists both the artifact and the audit event.
     logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
-    return ArtifactOut.from_orm_artifact(artifact)
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.post(
@@ -451,7 +474,8 @@ async def reject_artifact(
             detail="This artifact is already approved. Delete it instead of rejecting it.",
         )
     if artifact.approval_status == "rejected":
-        return ArtifactOut.from_orm_artifact(artifact)
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
     blob_client = getattr(request.app.state, "blob_client", None)
     if artifact.blob_path and blob_client is not None:
@@ -489,7 +513,8 @@ async def reject_artifact(
     )
     # See approve_artifact: the request-scoped dependency owns the commit.
     logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
-    return ArtifactOut.from_orm_artifact(artifact)
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.delete(
@@ -617,7 +642,8 @@ async def patch_artifact(
             body.title,
             body.status,
         )
-    return ArtifactOut.from_orm_artifact(artifact)
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 class ExportDocxIn(BaseModel):
@@ -814,4 +840,5 @@ async def upload_artifact(
         "Artifact %s uploaded to project %s (stage=%s) by %s",
         artifact.id, project.id, stage or "project-level", uploader,
     )
-    return ArtifactOut.from_orm_artifact(artifact)
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]

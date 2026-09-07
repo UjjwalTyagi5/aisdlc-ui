@@ -94,6 +94,22 @@ class _Db:
     async def refresh(self, _obj):
         return None
 
+    async def execute(self, *_a, **_kw):
+        """The routes now resolve actor ids to emails before responding.
+
+        THIS FAKE ANSWERS "no such user", which is the interesting case: the route must
+        still return the decision with the raw id rather than blanking the approver.
+        Returning a canned email here would test the fake instead of the route.
+        """
+        class _R:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return []
+
+        return _R()
+
 
 def _artifact(status="pending", stage="design", project_id=None):
     """A stand-in for an ORM Artifact.

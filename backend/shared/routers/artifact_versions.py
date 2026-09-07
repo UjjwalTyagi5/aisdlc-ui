@@ -37,6 +37,7 @@ from shared.authz.dependency import require_permission, require_stage_approval
 from shared.authz.project_scope import require_project_access
 from shared.db import get_db_session
 from shared.services import artifact_versions as svc
+from shared.services.actor_labels import actor_labels, relabel
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,26 @@ def _refusal(exc: svc.PublicationRefused) -> HTTPException:
     return HTTPException(status_code=status, detail=str(exc))
 
 
+async def _labelled(db, request, outs):
+    """Render `producedBy`/`publishedBy` as emails instead of JWT subject UUIDs.
+
+    Same reasoning as the Documents list — see `shared.services.actor_labels`. The
+    version panel sat right beside that list showing the identical unreadable id.
+    Accepts one VersionOut or a list; returns what it was given.
+    """
+    one = not isinstance(outs, list)
+    items = [outs] if one else outs
+    labels = await actor_labels(
+        db, getattr(request.state, "tenant_id", None),
+        [o.producedBy for o in items] + [o.publishedBy for o in items],
+    )
+    if labels:
+        for o in items:
+            o.producedBy = relabel(o.producedBy, labels) or o.producedBy
+            o.publishedBy = relabel(o.publishedBy, labels)
+    return items[0] if one else items
+
+
 @artifact_versions_router.get(
     "/{project_id}/stages/{stage}/versions",
     response_model=list[VersionOut],
@@ -139,7 +160,7 @@ async def list_stage_versions(
     except svc.UnknownStage as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     rows = await svc.list_versions(db, project_id, stage)
-    return [VersionOut.of(r) for r in rows]
+    return await _labelled(db, request, [VersionOut.of(r) for r in rows])
 
 
 @artifact_versions_router.get(
@@ -161,7 +182,7 @@ async def get_published_version(
     credential" decorative until it was removed.
     """
     row = await svc.latest_published(db, project_id, stage)
-    return VersionDetailOut.of(row) if row is not None else None
+    return await _labelled(db, request, VersionDetailOut.of(row)) if row is not None else None
 
 
 @artifact_versions_router.get(
@@ -179,7 +200,7 @@ async def get_stage_version(
     row = await svc.get_version(db, project_id, stage, version)
     if row is None:
         raise HTTPException(status_code=404, detail=f"{stage} v{version} not found")
-    return VersionDetailOut.of(row)
+    return await _labelled(db, request, VersionDetailOut.of(row))
 
 
 @artifact_versions_router.post(
@@ -235,7 +256,7 @@ async def snapshot_stage_version(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     row = await svc.get_version(db, project_id, stage, ref.version)
-    return VersionOut.of(row)
+    return await _labelled(db, request, VersionOut.of(row))
 
 
 @artifact_versions_router.post(
@@ -267,7 +288,7 @@ async def publish_stage_version(
         raise _refusal(exc) from exc
     except svc.UnknownStage as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return VersionOut.of(row)
+    return await _labelled(db, request, VersionOut.of(row))
 
 
 @artifact_versions_router.post(
@@ -297,7 +318,7 @@ async def reject_stage_version(
         raise _refusal(exc) from exc
     except svc.UnknownStage as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return VersionOut.of(row)
+    return await _labelled(db, request, VersionOut.of(row))
 
 
 @artifact_versions_router.post(
