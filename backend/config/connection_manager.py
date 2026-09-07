@@ -59,12 +59,36 @@ class ConnectionManager:
         """Send message only to websockets registered under message['session_id'].
 
         Falls back to broadcasting to ALL connections only when session_id is
-        absent from the message (e.g. agents_cleared, legacy paths).
+        absent from the message (e.g. agents_cleared, legacy paths). A session_id
+        that is present but unregistered — one that names nobody — sends to NOBODY,
+        and never to everybody.
+
+        THAT DISTINCTION WAS THE BUG, and this docstring is where it hid. The
+        condition used to be `if session_id and session_id in self._session_connections`
+        with a bare `else`, so the fallback fired in two cases: session_id absent (as
+        documented) and session_id present-but-unregistered (not documented, and a
+        cross-session leak).
+
+        It was not hypothetical. NOTHING registers a socket under an orchestrator2 run
+        id — `orchestrator2/ws.py` and `dispatch.py` never call `register_session` —
+        so every orchestrator2 run took the undocumented branch, and a document
+        generated there was streamed onto whatever unrelated sockets were open on the
+        process. 79 call sites reach this method; fixing them individually would have
+        left the 80th to reintroduce it.
+
+        Silence is the right failure. Both behaviours lose the message for its
+        intended reader — that socket is not connected either way — but only one of
+        them hands it to someone else.
         """
         session_id = message.get("session_id")
-        if session_id and session_id in self._session_connections:
-            targets = list(self._session_connections[session_id])
+        if session_id:
+            # Addressed to a session: its own sockets, or none. `.get` rather than a
+            # membership test, so a session whose sockets have all disconnected is
+            # treated the same as one that never registered — both name nobody.
+            targets = list(self._session_connections.get(session_id, ()))
         else:
+            # Addressed to no session at all. `agents_cleared` and the legacy paths
+            # genuinely mean everyone, which is why this branch survives.
             targets = list(self.active_connections)
 
         if not targets:
