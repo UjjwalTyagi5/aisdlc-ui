@@ -201,7 +201,7 @@ describe("OrchestratorCockpit — the Activity tab is actually fed", () => {
       { id: "a1", ts: new Date().toISOString(), kind: "tool", label: "read_repo", status: "running" },
     ];
     renderGlobalCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
 
     // The panel starts collapsed.
     fireEvent.click(screen.getByRole("button", { name: /show deliverables panel/i }));
@@ -217,7 +217,7 @@ describe("OrchestratorCockpit — the Activity tab is actually fed", () => {
     socketBusy = true;
     socketConnState = "reconnecting";
     renderGlobalCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
 
     fireEvent.click(screen.getByRole("button", { name: /show deliverables panel/i }));
     fireEvent.click(await screen.findByRole("tab", { name: /activity/i }));
@@ -231,7 +231,7 @@ describe("OrchestratorCockpit — the Activity tab is actually fed", () => {
 describe("OrchestratorCockpit — switching project with a session open", () => {
   it("starts a NEW run against the new project rather than reusing the old one", async () => {
     renderGlobalCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
 
     sendMessage("first turn on Alpha");
     await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
@@ -254,7 +254,7 @@ describe("OrchestratorCockpit — switching project with a session open", () => 
     // conversation under a header that now says Beta is the visible half of the
     // same defect.
     renderGlobalCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
 
     sendMessage("first turn on Alpha");
     await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));

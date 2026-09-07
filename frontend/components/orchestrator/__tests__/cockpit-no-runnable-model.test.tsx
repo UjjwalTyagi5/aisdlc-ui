@@ -161,7 +161,7 @@ describe("OrchestratorCockpit — a project with nothing runnable", () => {
 
   it("leaves the composer open when the project has a runnable model", async () => {
     renderCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
 
     await waitFor(() => expect(composer()).not.toBeDisabled());
     expect(composer()).toHaveAttribute(
@@ -184,7 +184,7 @@ describe("OrchestratorCockpit — a project with nothing runnable", () => {
     });
 
     renderCockpit();
-    await screen.findByRole("combobox", { name: /agent/i });
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
     expect(composer()).not.toBeDisabled();
 
     release({ options: RUNNABLE, default_offering_id: null, default_model_id: null });

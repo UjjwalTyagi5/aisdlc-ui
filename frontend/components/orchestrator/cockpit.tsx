@@ -3,17 +3,10 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Bot, FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
+import { AlertTriangle, FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { LoadingState } from "@/components/ui/loading-state";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { ModelPicker, type ProjectModelOption } from "@/components/orchestrator/model-picker";
@@ -31,8 +24,7 @@ import {
   listConversations,
   renameConversation,
 } from "@/lib/api/conversations";
-import { ORCHESTRATOR_AGENT_IDS, type OrchestratorAgentId } from "@/lib/orchestrator/protocol";
-import { agentLabel, splitModelKey } from "@/lib/orchestrator/types";
+import { splitModelKey } from "@/lib/orchestrator/types";
 import {
   useOrchestratorSocket,
   type OrchestratorConnState,
@@ -88,15 +80,6 @@ export interface OrchestratorCockpitProps {
  * litter every project with empty runs nobody started. The first message pays
  * for it; the rest of the conversation reuses it.
  */
-/**
- * The value the agent picker uses for "let the Orchestrator choose".
- *
- * Radix forbids an empty string as a `SelectItem` value and `null` cannot cross
- * that API, so the no-override option needs a name of its own. Deliberately not
- * one of the nine ids, and never sent on the wire: the hook omits the `agent`
- * field entirely when there is no override.
- */
-const AUTO = "__auto__";
 
 export function OrchestratorCockpit({
   lockedProjectId,
@@ -277,7 +260,6 @@ export function OrchestratorCockpit({
   // router for that turn. Phase 2 had no router, so the picker started empty and
   // nothing could be sent until it was filled; that is no longer the shape of the
   // decision, and leaving it would make the common case the one that needs work.
-  const [agent, setAgent] = React.useState<OrchestratorAgentId | null>(null);
 
 
   const socket = useOrchestratorSocket({ enabled: canDrive && !!projectId });
@@ -383,7 +365,6 @@ export function OrchestratorCockpit({
     runIdRef.current = null;
     setRunId(null);
     creatingRunRef.current = null;
-    setAgent(null);
     setOpenDeliverableId(null);
     resetSocket();
   }, [conversationKey, resetSocket]);
@@ -483,9 +464,9 @@ export function OrchestratorCockpit({
       if (!projectId) return;
       // `agent` may be null — that is the routed path, and the hook omits the
       // field entirely rather than sending a null the protocol does not declare.
-      sendTurn({ text, agent, resolveRunId: ensureRun, modelKey });
+      sendTurn({ text, resolveRunId: ensureRun, modelKey });
     },
-    [agent, projectId, sendTurn, ensureRun, modelKey],
+    [projectId, sendTurn, ensureRun, modelKey],
   );
 
   // ── Access ────────────────────────────────────────────────────────────────
@@ -526,12 +507,10 @@ export function OrchestratorCockpit({
           // only thing that decides whether a turn can be answered.
           "No model this project can run — a provider still needs a working key."
         : socket.busy
-          ? agent
-            ? `The ${agentLabel(agent)} agent is working…`
-            : "Working…"
-          : agent
-            ? `Message the ${agentLabel(agent)} agent`
-            : "Describe the work — the Orchestrator picks the agent.";
+          ? "Working…"
+          : // The only line that now tells the user an agent is chosen for them. The
+            // picker used to say so; with the picker gone this is load-bearing.
+            "Describe the work — the Orchestrator picks the agent.";
 
   const shell =
     variant === "page"
@@ -622,38 +601,17 @@ export function OrchestratorCockpit({
             onOptionsResolved={handleOptionsResolved}
           />
 
-          {/* WHICH AGENT — an OVERRIDE, defaulting to letting the Orchestrator
-              choose. "Let the Orchestrator choose" is a real, visible, selected
-              option rather than an empty control the reader has to interpret: the
-              common case must not look like an unanswered question. Picking one of
-              the nine forces it for that turn and skips routing entirely. Ordered
-              as the protocol lists them; nothing about that order implies a
-              sequence. */}
-          <Select
-            value={agent ?? AUTO}
-            onValueChange={(v) => setAgent(v === AUTO ? null : (v as OrchestratorAgentId))}
-            disabled={!canDrive || !projectId}
-          >
-            <SelectTrigger
-              aria-label="Agent"
-              className="border-line-soft bg-surface-1 h-8 w-auto min-w-[190px] max-w-[260px] gap-2 px-3 text-[12.5px] font-normal"
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <Bot className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
-                <SelectValue placeholder="Let the Orchestrator choose" />
-              </span>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={AUTO} className="text-[12.5px]">
-                Let the Orchestrator choose
-              </SelectItem>
-              {ORCHESTRATOR_AGENT_IDS.map((id) => (
-                <SelectItem key={id} value={id} className="text-[12.5px]">
-                  {agentLabel(id)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* NO AGENT PICKER. Removed 2026-09-07 at the user's request: it offered
+              the same nine agents as the project's own agent tiles, one control away
+              from them and under different rules — the Orchestrator reaches all nine
+              for a Project Admin, the tiles are owner-scoped per agent.
+
+              Naming an agent in the CONVERSATION still works and is untouched:
+              `router.prefilter` answers "run the security agent" without spending a
+              model call. A model's decision needs a way to be overridden by the person
+              talking to it; the conversation is where this engine puts every other
+              decision, so it is where this one belongs too. `ws.py` still accepts an
+              `agent` field — nothing sends one now. */}
         </header>
 
         {/* Silent while the scope is still resolving — "you cannot drive this"
@@ -702,7 +660,6 @@ export function OrchestratorCockpit({
                 projectName={project?.name ?? null}
                 trackLabel={trackMeta ? `Track ${trackMeta.number} · ${trackMeta.label}` : null}
                 agentCount={stages.length}
-                agentChosen={!!agent}
               />
             }
           />
@@ -784,12 +741,10 @@ function EmptyThread({
   projectName,
   trackLabel,
   agentCount,
-  agentChosen,
 }: {
   projectName: string | null;
   trackLabel: string | null;
   agentCount: number;
-  agentChosen: boolean;
 }) {
   return (
     <div className="mx-auto flex max-w-lg flex-col items-center gap-3 py-16 text-center">
@@ -804,9 +759,11 @@ function EmptyThread({
           <>
             <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
             roster.{" "}
-            {agentChosen
-              ? "Describe the work and the agent you picked will answer here."
-              : "Describe the work — the Orchestrator picks the agent, and says which and why. Pick one yourself above to override it."}
+            {/* No "pick one yourself above" any more — the picker is gone and the
+                Orchestrator always chooses. Naming an agent in the message still
+                works, which is what this now points at. */}
+            Describe the work — the Orchestrator picks the agent, and says which and
+            why. Name one in your message to steer it.
           </>
         ) : (
           "Choose a project and one of the models it is allowed to run on, then describe the work."

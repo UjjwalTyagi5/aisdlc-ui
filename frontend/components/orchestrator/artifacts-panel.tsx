@@ -1,15 +1,12 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowRightCircle,
   Brain,
   ChevronRight,
   Download,
-  ExternalLink,
   FileCode,
   FileEdit,
   FileJson,
@@ -31,15 +28,10 @@ import {
 import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { LoadingState } from "@/components/ui/loading-state";
 import { ArtifactViewer } from "@/components/orchestrator/artifact-viewer";
-import { getRun } from "@/lib/api/runs";
-import { qk } from "@/lib/api/query-keys";
 import { AGENT_STAGES, stageLabel } from "@/lib/orchestrator/stages";
 import type { Artifact, ArtifactKind } from "@/lib/orchestrator/artifacts";
 import type { ActivityItem, ConnState } from "@/lib/orchestrator/chat-types";
-import type { RunId } from "@/lib/schemas";
 
 export interface ArtifactsPanelProps {
   runId: string;
@@ -73,7 +65,14 @@ export interface ArtifactsPanelProps {
   className?: string;
 }
 
-type Tab = "artifacts" | "activity" | "context";
+//: Removed 2026-09-07 at the user's request: "this context tab on the right, just
+//: remove that. It is not needed. It just makes things confusing."
+//:
+//: It amends `orchestrator_instruction.md` §1.1, which said to keep Artifacts,
+//: Activity AND Context from the Copilot. The first two carry what THIS run produced
+//: and what it is doing; Context restated the run's stage and gate position, which is
+//: exactly the linear-pipeline framing the Orchestrator was built to remove.
+type Tab = "artifacts" | "activity";
 
 // Resizable panel bounds. The panel is anchored right; its handle lives on the
 // left edge (facing the chat). Design docs embed wide C4/ER diagrams and code, so
@@ -132,14 +131,6 @@ export function ArtifactsPanel({
   tabLabel = "Artifacts",
   className,
 }: ArtifactsPanelProps) {
-  const rid = runId as RunId;
-  const runQ = useQuery({
-    queryKey: qk.runs.detail(rid),
-    queryFn: () => getRun(rid),
-    enabled: !!runId,
-    refetchInterval: 8_000,
-  });
-  const run = runQ.data;
 
   // While the Development stage is active, always surface a live code-tree
   // artifact so the driver can watch the repo as the agent clones/edits it —
@@ -326,7 +317,7 @@ export function ArtifactsPanel({
 
   return (
     <aside
-      aria-label="Run artifacts and context"
+      aria-label="Run artifacts and activity"
       style={{ width, maxWidth: "85vw" }}
       className={cn(
         "border-line-soft bg-panel-elevated/30 relative flex h-full min-h-0 shrink-0 flex-col border-l",
@@ -399,9 +390,6 @@ export function ArtifactsPanel({
               )}
             </span>
           </TabButton>
-          <TabButton id="context" active={tab === "context"} onClick={() => setTab("context")}>
-            Context
-          </TabButton>
         </div>
         <Button
           variant="ghost"
@@ -423,20 +411,13 @@ export function ArtifactsPanel({
           onSelectArtifact={onSelectArtifact}
           streamingArtifactId={streamingArtifactId}
         />
-      ) : tab === "activity" ? (
+      ) : (
         <ActivityTab
           activity={activity}
           working={working}
           stuck={stuck}
           idleSeconds={idleSeconds}
           connectionStatus={connectionStatus}
-        />
-      ) : (
-        <ContextTab
-          runId={runId}
-          run={run}
-          isLoading={runQ.isLoading}
-          activeStage={activeStage}
         />
       )}
     </aside>
@@ -1236,99 +1217,3 @@ function TabButton({
   );
 }
 
-// ── Tab: Context (relocated verbatim from the former ArtifactPanel) ─────────
-
-function ContextTab({
-  runId,
-  run,
-  isLoading,
-  activeStage,
-}: {
-  runId: string;
-  run: Awaited<ReturnType<typeof getRun>> | undefined;
-  isLoading: boolean;
-  activeStage: string;
-}) {
-  void runId;
-
-  return (
-    <div className="min-h-0 flex-1 overflow-auto">
-      {/* Active stage artifact */}
-      <section className="border-line-soft space-y-3 border-b px-4 py-4">
-        <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
-          Current stage
-        </h3>
-        <div className="border-line-soft bg-panel-elevated/40 flex items-start gap-3 rounded-[var(--radius)] border p-3">
-          <span className="border-brand-bright/30 bg-brand-bright/10 text-brand-bright mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-[var(--radius)] border">
-            <FileText className="size-4" aria-hidden />
-          </span>
-          <div className="min-w-0">
-            <p className="text-[13px] font-semibold text-foreground">{stageLabel(activeStage)}</p>
-            <p className="text-muted-foreground text-[11.5px] leading-snug">
-              {ARTIFACT_HINT[activeStage] ?? "The stage agent's produced artifact appears here."}
-            </p>
-          </div>
-        </div>
-        {run && (
-          <Link
-            href={`/runs/${run.id}`}
-            className="text-info inline-flex items-center gap-1.5 text-[12px] hover:underline"
-          >
-            <ExternalLink className="size-3.5" aria-hidden />
-            Open full run view
-          </Link>
-        )}
-      </section>
-
-
-      {/* Run metadata */}
-      <section className="space-y-3 px-4 py-4">
-        <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
-          Run
-        </h3>
-        {isLoading ? (
-          <LoadingState variant="list" rows={2} />
-        ) : run ? (
-          <dl className="space-y-2 text-[12px]">
-            <Row label="Status">
-              <StatusBadge status={run.status} />
-            </Row>
-            <Row label="Cost">
-              <span className="font-mono">${run.cost.usd.toFixed(run.cost.usd < 0.01 ? 4 : 3)}</span>
-            </Row>
-            <Row label="Tokens">
-              <span className="font-mono">
-                {(run.cost.inputTokens + run.cost.outputTokens).toLocaleString()}
-              </span>
-            </Row>
-            <Row label="Run id">
-              <span className="text-muted-foreground truncate font-mono text-[11px]">{run.id}</span>
-            </Row>
-          </dl>
-        ) : (
-          <p className="text-muted-foreground text-[12px]">Run metadata unavailable.</p>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-right">{children}</dd>
-    </div>
-  );
-}
-
-const ARTIFACT_HINT: Record<string, string> = {
-  requirements: "Baselined stories + acceptance criteria (BRD).",
-  design: "HLD, LLD, C4, API contracts, DB schema, ADRs (SDD).",
-  development: "Implementation diff + pull request.",
-  code_review: "Review findings + merge recommendation.",
-  security: "SCA / SAST / secrets findings + SBOM.",
-  testing: "Generated tests, run results, coverage.",
-  deployment: "Deploy package, readiness, runbooks.",
-  documentation: "Doc set, changelog, RTM, compliance.",
-};

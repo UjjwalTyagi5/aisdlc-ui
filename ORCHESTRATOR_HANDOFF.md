@@ -353,29 +353,45 @@ under the Project Manager, and its chat announcement files nothing.
   subdirectories — a change to the agents, not to the read path.
 
 
-### Phase 4 — Artifacts and per-agent quirks ← **START HERE**
+### Phases 4 and 5 — DONE
 
-This is requirement 7, and the largest remaining piece of the user's spec.
+Both shipped. This section used to say "Phase 4 ← START HERE" and list Phase 5 as
+pending, which sent at least one reader at finished work.
 
-Today the new cockpit passes the panel `artifacts={[]}` and `runId=""`. The new engine
-writes **no artifacts at all**. Needed:
+- **Phase 4 (Deliverables).** `orchestrator2` persists what agents produce, grouped
+  agent-wise, with per-agent surfaces — the Development code tree, and a generated-file
+  tree for every stage that writes one.
+- **Phase 5A (retirement).** `copilot_api.py`, `orchestrator_api.py` and the Copilot
+  page are gone (−7,633 lines). Phase 5B replaced connection-local chat with
+  server-backed sessions, so history survives a reconnect and opens on any device.
 
-- artifact persistence from `orchestrator2`
-- **agent-wise grouping** in the Artifacts tab (explicitly asked for)
-- per-agent surfaces — the Development code tree (`code-tree-view.tsx` exists), ADO code
-  pulls appearing under Development, and whatever each other agent surfaces
+### What is genuinely left
 
-**Note the precedent:** the Activity tab was in exactly this state — declared in the
-protocol, rendered by the panel, and wired to a literal empty array, which on screen is
-indistinguishable from an agent that never uses tools. Do not leave the Artifacts tab
-half-wired the same way.
-
-### Phase 5 — retire the old engines
-
-Delete `copilot_api.py`, `orchestrator_api.py` and the Copilot page, once the new engine is
-proven in use. Not before.
+1. **RLS is inert** — carried debt 1 below. The largest remaining risk, and the only
+   item blocked on a decision rather than on work.
+2. **The BYOK "no env fallback" guarantee is one layer deep** — carried debt 5.
+3. **Context truncation** — carried debt 6. Needs a product decision, not a fix.
+4. **`advanceCopilotRun` posts to a deleted endpoint.** `frontend/lib/api/runs.ts`
+   still calls `POST /runs/<id>/copilot/advance`, which the backend no longer defines
+   (`tests/orchestrator2/test_old_engines_are_gone.py` asserts its absence). Three live
+   components call it: `approval-gate-row`, `run-detail-drawer`, `run-conversation`.
+   The replacement is `POST /runs/<id>/approvals`, whose docstring says it "mirrors
+   copilot_advance" — mapping one onto the other is an approvals question, not a
+   routing one. Pinned by a test in
+   `frontend/components/runs/__tests__/no-route-reaches-the-deleted-copilot.test.tsx`
+   so it cannot be mistaken for fixed.
+5. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
+   exceptions". Seen after a low-memory event; the Orchestrator's own routes were
+   unaffected. Not diagnosed.
+6. **The Design agent's document does not reach the Orchestrator CHAT as text.**
+   Nothing registers a socket under a run id and the tool result carrying it is emitted
+   as `tool.call`, not `stream_chunk`. The user gets the file plus a reply naming it —
+   the same shape Requirements and the Project Manager have. Forwarding the text needs
+   a `dispatch` change.
 
 ### Carried debt — recorded, not forgotten
+
+**Resolved since this list was written:** 2 (the socket bounds inbound frames itself via `_frame_too_large`, and the documented run command now passes `--ws-max-size`), 3 (moot — `copilot_api.py` is deleted), 4 (the boot scan enumerates WebSocket routes), 8 (the e2e suite was rewritten and passes). 1, 5, 6 and 7 below are still open, and 6 needs a decision from the user rather than work.
 
 1. **RLS is inert in this deployment.** `POSTGRES_CONN_STRING` connects as `postgres`,
    which is `rolsuper` AND `rolbypassrls`. Superusers bypass row-level security

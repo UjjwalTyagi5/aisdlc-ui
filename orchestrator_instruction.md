@@ -28,7 +28,12 @@ They become **one** surface, called **Orchestrator**. The Copilot is removed fro
 the frontend.
 
 **Keep from the Copilot:** the right-hand panel — **Artifacts**, **Activity**,
-**Context** — and the chat itself.
+~~**Context**~~ — and the chat itself.
+
+> **Amended 2026-09-07 (D18l):** Context was removed at the user's request — "it
+> is not needed, it just makes things confusing." It restated the run's stage and
+> gate position, which is the linear-pipeline framing this Orchestrator exists to
+> remove. Artifacts (now **Deliverables**) and Activity remain.
 
 **Do not keep:** the left-hand linear pipeline rail. There is no linearity in the
 new Orchestrator. Any agent can run at any time depending on the conversation.
@@ -1129,3 +1134,250 @@ the only reason the sixteen tuned cases are worth anything. Marginal gain, real 
 - **E2E 6 passing.**
 - `live_deliverables_check` 16/16, `live_sessions_check` 12/12, routing 27/29
   (`"review this"` plus `"fix the tests"`, which flips between runs on both branches).
+
+---
+
+## 18. Live testing — every agent, and what only running them could find (2026-09-07)
+
+Phases 1–5 built the engine and proved it agent by agent in tests. This section is what
+happened when all nine were **run**, first through
+`backend/scripts/live_all_agents_check.py` (added this round) and then by hand in the
+browser signed in as `sarthakk2004@gmail.com` on project `reall`.
+
+The headline: **not one of the nine agents filed an actual document.** Six captured a
+deliverable and all six were chat. The engine was correct; what it was capturing was
+not.
+
+### 18.1 The three complaints you reported, and what they turned out to be
+
+You tested the Development agent by hand and reported three things. Each had a
+different cause, and none of them was the one it looked like.
+
+**"The flow is completely redundant and long for no reason."** The router runs on every
+turn and was never told which agent answered the previous one. The transcript records
+that an *agent* replied, never *which* — so a reply of `2` or `main` arrived as a bare,
+contextless message, and the routing prompt explicitly permits answering directly for
+"a follow-up about something already produced". A bare word looks exactly like one. The
+Orchestrator answered, re-asked what Development had just asked, and Development asked a
+third time.
+
+**"On the deliverable tab it says repository code but I can't see it."** Two causes,
+found weeks apart. The first was per-run agent context, fixed in Phase 5. The second was
+that **`orchestrator2` never wrote `runs.development_artifacts` at all** — a grep for
+the column name across the package returned nothing. `pointers_for_run` builds the
+"Repository code" and "Pull request" rows from that column and nothing else.
+
+**"There are like 10 deliverables which are just normal chats."** The capture rule was
+"longer than 200 characters", inherited from the Copilot and never re-examined. Listing
+the branches in a repository is longer than that.
+
+### 18.2 What running all nine added
+
+Three failure modes look identical in the UI — an empty Deliverables tab — and have
+nothing to do with each other: the agent errored, the agent replied in chat, the agent
+wrote a document. The live script separates them, and doing so turned up:
+
+| agent | filed | what it actually was |
+|---|---|---|
+| Security | "⚠️ Security Review Not Possible" | a refusal |
+| Deployment | "Cannot Proceed — Missing Prerequisites" | a refusal |
+| Testing | "What I Can Do" | a refusal, over an invented Excel file |
+| Requirements | "📄 Download Your PRD" | a link to the real `.docx` |
+| Project Manager | "Plan Summary" | a link to the real `.pdf` |
+| Development | "Quick Explanation" | prose about the code |
+
+Meanwhile the real PRD, delivery plan and test plan sat on disk, invisible: `plan` and
+`design` had **no output-directory mapping at all**, so the Project Manager's
+`Coffee_Ordering_App_Delivery_Plan.pdf` — written to exactly the path `testing`
+resolves fine — never reached the panel.
+
+### 18.3 Decisions
+
+**D18a — A deliverable is a document, and three things now disqualify one.** Length was
+the Copilot's rule and it was wrong the moment agents started holding conversations.
+Replaced by: **structure** (≥2 markdown headings and ≥400 characters), **completion**
+(not a refusal), and **first-hand-ness** (not an announcement of a document saved
+elsewhere).
+
+**D18b — A refusal is never a deliverable, and the check is first-person.** A security
+review is *made* of sentences about what cannot be done — "the endpoint cannot validate
+the total" is a finding. What disqualifies a document is the **agent** saying it did not
+do the work, not the subject matter saying something is broken. Matching "cannot"
+without the pronoun would stop Security ever filing a review again. Anchored to the
+first 700 characters, with a second signal on section headings that announce
+non-completion, because how much an agent narrates before giving up is not a property of
+refusals.
+
+**D18c — A message about a document is not the document.** A reply linking to the
+platform's own `/generated/` mount is an announcement; the document is at the other end
+of the link and reaches the panel as a file tree. The link stays in the chat, where a
+link belongs.
+
+**D18d — An agent mid-conversation keeps the turn. A nudge, not a lock.** The router is
+now told which agent answered last. Every agent remains a candidate and the pre-filter
+still wins outright: "any agent can come at any time according to the chat" is the
+premise of this engine, and pinning a conversation to whoever spoke first would rebuild
+the linearity it exists to remove.
+
+**D18e — One shared output directory yields one tree, and exact attribution is
+deferred.** `plan`, `design` and `testing` all write to
+`files/<user>/orchestrator/<run>/output`. Nothing on disk says who wrote what, and
+`runs.stage` is set once at creation because this engine deliberately writes no position
+back to a run. The tree is emitted once, under the run's own stage when that is one of
+the three. Wrong attribution is worse than none — an empty heading reads as "nothing
+produced yet", a populated one reads as evidence. Exact attribution needs the agents
+writing into per-agent subdirectories, which is a change to the agents rather than to
+the read path, and is **not** done.
+
+**D18f — `development_artifacts` is merged, never replaced.** A conversation clones on
+one turn and raises a PR several turns later. Overwriting would drop `repo_url` the
+moment a turn knew only about the PR, taking the code tree out of the panel
+mid-conversation.
+
+**D18g — A message naming a session nobody holds goes to nobody.** See 18.4; this one
+is a confidentiality fix, not an orchestrator one.
+
+**D18h — The model picker offers only what can run.** Sourced from `/model/options`
+alone. With no default configured it still preselects, because refusing to choose does
+not make the choice explicit — it hands it to an invisible server-side org default the
+project may not even be granted. When nothing is runnable the composer closes and says
+why. **Deliberate loss:** granted-but-unkeyed models no longer appear as disabled "No
+key" rows. That set belongs on the Models screen, which names it and is where the fix
+gets made; a composer's list should be what can answer the message about to be sent.
+
+**D18i — The Design agent saves without being asked.** Its prompt told it to *offer*.
+The receipt is prepended rather than appended, because `parse_design_markdown` splits on
+`##` and discards the preamble — a trailing receipt would render inside the Database
+Schema section.
+
+**D18k — The agent picker is removed. The Orchestrator chooses; the user does not.**
+Your words: "we don't want to give that because that conflicts with our similar agent
+... the user will not have the option to choose." The dropdown offered the same nine
+agents as the project's own agent tiles, one control away from them and under different
+access rules — the Orchestrator reaches all nine for a Project Admin, the tiles are
+owner-scoped per agent.
+
+Naming an agent **in the conversation** is untouched: `router.prefilter` still answers
+"run the security agent" without spending a model call. A model's decision needs a way
+to be overridden by the person talking to it, and the conversation is where this engine
+puts every other decision. `ws.py` still accepts an `agent` field; nothing sends one.
+
+**D18l — The Context tab is removed. This AMENDS §1.1.** §1.1 said to keep Artifacts,
+Activity and Context from the Copilot. Your words: "it is not needed, it just makes
+things confusing." Artifacts and Activity carry what this run produced and what it is
+doing; Context restated the run's stage and gate position — the linear-pipeline framing
+the Orchestrator exists to remove. Removing it also dropped an 8-second `getRun` poll
+that nothing else rendered.
+
+**D18j — Starting a workstream opens the Orchestrator.** `RunTriggerDialog` is deleted
+rather than repaired: it pre-created a run the Orchestrator never used and its model
+picker chose an offering the Orchestrator chose again. What remained was a button that
+navigates.
+
+### 18.4 The finding that was not about the Orchestrator
+
+`ConnectionManager.broadcast` sent a message to **every open WebSocket on the process**
+whenever its `session_id` had no registered socket. Its own docstring said the fallback
+applied "only when session_id is absent" — but the `else` also caught
+present-but-unregistered.
+
+`orchestrator2` never calls `register_session`, so **every Orchestrator run took that
+branch**, and a design document generated there was streamed token by token onto
+unrelated sockets.
+
+The leak was already known: `tests/test_connection_manager.py`'s own header describes it
+as "leaking one tenant's source code to every other open WebSocket on the process". The
+C1 fix added `broadcast_to_session` and deliberately left `broadcast`'s fallback so
+existing callers kept working — which left it live across 79 call sites. What settles it
+is that where the fallback fires, the intended reader is on none of those sockets, so
+its only effect is delivery to strangers. A fallback that never reaches its audience is
+not compatibility; it is only the leak.
+
+The documented half survives: no `session_id` still means everyone, because
+`agents_cleared` and the legacy paths genuinely address no one session.
+
+**This is the twelfth instance on this branch of prose asserting a guarantee the code
+does not provide, and the first with a confidentiality consequence.** The docstring is
+now asserted by a test.
+
+### 18.5 The pattern, for the fourth time
+
+`orchestrator2` loads each agent's **graph**, not the `*_agent_api.py` wrapper around
+it. Everything the wrapper used to do therefore has to be re-provided deliberately, and
+each omission is invisible until someone runs the agent:
+
+1. the project's connector (Phase 4)
+2. the project's MCP tools (Phase 4)
+3. the per-run `session_id` / `user_id` / provider contextvars (Phase 5)
+4. **`runs.development_artifacts`** (this round)
+
+Anything else the wrappers did is suspect until checked. This list is the fourth entry,
+not the last.
+
+### 18.6 What the mutation testing caught this round
+
+Every fix was mutation-tested. Survivors, each a real gap:
+
+- **Two assertions satisfied by the agent roster.** `"Development" in prompt` was true
+  whether or not the continuity line was added, and again with it added but naming
+  nobody — the roster already names every agent. Now asserted on the *delta* the line
+  adds.
+- **A refusal-heading check that no test defended.** All three live refusals happened to
+  say "I cannot" early, which is a property of how much those turns narrated, not of
+  refusals. Now defended by a fixture that overruns the window.
+- **An early return that looked redundant.** Removing it changed no outcome, because the
+  no-op check below already declines to write — but every agent's turn calls
+  `dev_artifacts.persist` and only Development ever has anything, so without it all nine
+  pay a tenant-scoped session and a `SELECT` per turn. The test now measures that.
+- **Two of my own wiring tests asserted nothing**, stubbing a `dispatch._run_graph` that
+  does not exist; with `raising=False` that silently passed. Rewritten on the
+  registry-substitution harness the other dispatch tests use.
+- **A subagent's test passed against the broken code** because the fixture request
+  itself ended "do not ask me questions", so the substring was satisfied by the user's
+  own words echoed back.
+- **A URL assertion that did not catch a missing broadcast**, because
+  `_markdown_to_docx` happens to set the same string on `shared.output_file_url`.
+
+### 18.7 Proof
+
+Verified in the browser, signed in, on project `reall`:
+
+- `pull the code from ADO` → routed straight to **Development**, no Orchestrator
+  clarifying questions. Then `2` → Development. Then `1` → Development. Three bare
+  answers in a row, each continuing with the agent.
+- The ADO project list, repository list and branch list — all long, structured replies
+  the old rule would have filed — left Deliverables at **1**, the code tree, grouped
+  agent-wise under DEVELOPMENT.
+- The model picker opens on `claude-opus-4-5` with exactly the two runnable models, and
+  neither grant-cascade endpoint is requested any more.
+
+And against the real database: the Project Manager's PDF now reaches the panel once,
+under the Project Manager, with its chat announcement filing nothing.
+
+### 18.7a State
+
+- Backend **3,442 passing** in `tests/`, plus **198** in the testing agent's own suite.
+  The failure set is the recorded baseline and unchanged by this round's work — RLS
+  inert, two live-E2E fixtures needing real scanners, and the `project_business_unit`
+  errors. Measured by diffing the full-suite failure list against a stash of the change:
+  35 before, 33 after, nothing in the new-failure set.
+- Frontend **715 passing** across 85 files, typecheck and eslint clean.
+- `live_deliverables_check` 16/16, `live_sessions_check` 12/12.
+
+### 18.8 Left open, deliberately
+
+- **RLS (#1)** — unchanged, and still the operator's call. See 17.6.
+- **`advanceCopilotRun` posts to a deleted endpoint.** Three live components call
+  `POST /runs/<id>/copilot/advance`, which the backend no longer defines. Its
+  replacement is `POST /runs/<id>/approvals` — mapping one onto the other is an
+  approvals question, not a routing one. Pinned by a test so it cannot be mistaken for
+  fixed.
+- **The Design agent's document does not reach the Orchestrator chat as text.** Nothing
+  registers a socket under a run id, and the tool result carrying it is emitted as
+  `tool.call`. The user gets the file plus a reply naming it — the same shape
+  Requirements and the Project Manager have.
+- **Security, Deployment and Documentation refuse without a repository.** Defensible for
+  code-reading agents; worth revisiting only if they should degrade to advice.
+- **`broadcast`'s fallback pattern remains in `_design_broadcast_file`** and in every
+  other agent's API layer. The root fix is in, so those paths no longer leak, but they
+  still address sessions through the wrong method.
