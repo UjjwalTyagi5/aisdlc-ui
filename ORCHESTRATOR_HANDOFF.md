@@ -136,12 +136,19 @@ reachable on purpose, so there is never a window with no working orchestration.
 
 ## 3. Starting the stack
 
-`docs/local-setup.md` is the reference, but it is **wrong in two places** — both cost
-real time this session:
+`docs/local-setup.md` is the reference. It has since been corrected on the port, and
+now says 8004 with the reason; the Postgres port below is still worth knowing.
+
+**THE PORT IS 8004, NOT 8001.** It moved because 8001 was occupied, and everything
+followed it: `frontend/.env.local` (`FASTAPI_INTERNAL_URL`), `backend/.env`
+(`AGENTIC_BASE_URL`, which builds the `/generated/...` download links the agents hand
+out) and `docs/local-setup.md`. A backend on 8001 leaves the BFF answering "Couldn't
+reach the sign-in service" on every login AND every generated-file link 404ing. This
+was re-broken once by starting the backend from an older command remembered out of a
+session transcript rather than read from here — so read the command below.
 
 | Docs say | Actually |
 |---|---|
-| FastAPI on port **8001** | **8004** — `frontend/.env.local` has `FASTAPI_INTERNAL_URL=http://localhost:8004` |
 | PostgreSQL is native on 5432 | **Compose Postgres on 5433** — `backend/.env` has `POSTGRES_CONN_STRING=postgresql+asyncpg://postgres:…@localhost:5433/sdlc_product`. Note it is `backend/.env`, not the repo-root `.env`, which has neither. |
 
 ```bash
@@ -150,7 +157,7 @@ docker compose up -d redis postgres     # sdlc-redis:6379, sdlc-postgres:5433, s
 docker ps                               # confirm healthy before trusting anything
 
 # 2. backend
-cd backend && uv run uvicorn process_api:app --reload --port 8004
+cd backend && uv run uvicorn process_api:app --reload --port 8004 --ws-max-size 1000000
 
 # 3. frontend
 cd frontend && npm run dev              # :3000
