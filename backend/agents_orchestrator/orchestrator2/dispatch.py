@@ -116,7 +116,12 @@ from typing import Any, AsyncIterator, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents_orchestrator.orchestrator2 import connectors, deliverables, mcp
+from agents_orchestrator.orchestrator2 import (
+    connectors,
+    deliverables,
+    dev_artifacts,
+    mcp,
+)
 from config.ws_helper import (
     reset_session_id, set_provider_kind, set_session_id, set_user_id,
 )
@@ -640,6 +645,23 @@ async def run_agent(
     # turn would file a truncated document under the agent's heading, where nothing
     # distinguishes it from a complete one.
     if turn_completed:
+        # The clone and the PR, onto the run row. `pointers_for_run` builds the
+        # "Repository code" and "Pull request" rows from that column and nothing else,
+        # and orchestrator2 never wrote it — so a repo the agent had genuinely cloned
+        # could not be linked from the panel.
+        #
+        # GUARDED HERE TOO, even though `persist` promises never to raise. The promise
+        # is one function's; the cost of it being wrong is the user's whole turn,
+        # taken away after the agent had already done the work. A pointer is worth
+        # less than that, and this is the layer that knows it.
+        try:
+            await dev_artifacts.persist(run_id, tenant_id=tenant_id)
+        except Exception:  # noqa: BLE001 - a lost pointer must never cost a turn
+            logger.exception(
+                "orchestrator2 could not record development artifacts (agent=%s "
+                "run=%s)", agent_id, run_id,
+            )
+
         try:
             produced = await deliverables.capture(
                 agent_id,
