@@ -439,6 +439,7 @@ Phases are ordered so nothing is built against an unproven interface.
 | 2026-09-05 | **PHASE 1 COMPLETE.** Branch `feature/orchestrator-rebuild`, 18 commits, 34 files, +2203/−1306, 601 tests passing, typecheck clean. Not pushed. Details in §10. |
 | 2026-09-06 | **PHASE 4 COMPLETE.** Deliverables: their own table, append-only, no approval concept. Design at `docs/superpowers/specs/2026-09-06-orchestrator-phase-4-deliverables-design.md`, plan at `docs/superpowers/plans/2026-09-06-orchestrator-phase-4.md`. Decisions D11–D17. Backend 397 tests, frontend 669, typecheck and lint clean, zero regressions against the pre-phase baseline. Details in §15. |
 | 2026-09-07 | **PHASE 5 COMPLETE.** Both old engines retired; the Orchestrator's rail is server-backed history. Design at `docs/superpowers/specs/2026-09-07-orchestrator-phase-5-design.md`, plan at `docs/superpowers/plans/2026-09-07-orchestrator-phase-5.md`. Decisions D18–D24. Backend 3,322 passing at the recorded baseline (22 failed / 7 errors, all pre-existing); frontend 688 passing, typecheck, lint and `next build` clean. Details in §16. |
+| 2026-09-07 | **CARRIED DEBT CLOSED.** Six of seven open items done: §1.5 self-approval reinstated, the BYOK env fallback made opt-in, all WebSocket sockets audited (four unauthenticated ones deleted), context truncation fixed, the e2e suite rewritten and passing. RLS (#1) is one `ALTER ROLE` away and needs the operator. Details in §17. |
 
 ---
 
@@ -1014,3 +1015,117 @@ unrecorded, which is exactly what happened in Phase 1.
 - `scripts/live_deliverables_check.py` — 16/16, unchanged.
 - `scripts/live_routing_check.py` — **28/29**, the recorded boundary only.
 - The app boots with the D-05 scan reporting no offenders, now including WebSocket routes.
+
+---
+
+## 17. Carried debt, closed (2026-09-07)
+
+Everything §16.6 left open, worked through. Six of seven done; the seventh needs one
+command only an operator can run.
+
+### 17.1 §1.5 — you cannot approve your own run ✅
+
+Phase 5 recorded that deleting `copilot_api` left this enforced NOWHERE, with
+`runs.created_by` (migration 0038, added to serve it) consumerless. It now lives in
+`record_approval`, the surviving path that both identifies a run and writes an
+approval.
+
+The permission check it already had answers a different question — "may this ROLE
+approve this stage" — and passes for exactly the person the rule exists to stop, since
+a BA who starts a Requirements run holds `artifact:approve_requirements` by definition.
+
+A run with no recorded initiator is deliberately **not** blocked: `created_by` is
+nullable for webhook runs and rows predating 0038, and refusing there would make every
+historical run permanently unapprovable.
+
+### 17.2 BYOK env fallback (#5) ✅ — narrower, and worse, than recorded
+
+The note said the guarantee was "one layer deep" and nine agents were unaudited. The
+audit found only the **Testing** agent ever builds a model from `ANTHROPIC_API_KEY`;
+every other agent resolves through `resolve_chat_model`, which fails closed.
+
+But the guard was the runtime mode alone, and this deployment is `local` with the key
+set — so the fallback was **live**. A dropped contextvar mid-run spent the *platform's*
+key instead of the project's, bypassing that project's grant and its budget, silently,
+with an answer that looked fine.
+
+`ALLOW_PLATFORM_MODEL_FALLBACK` now gates it, defaulting to false. `build_llm`'s
+docstring already claimed "There is NO platform fallback — fail CLOSED"; that was untrue
+when written and is true now.
+
+### 17.3 The WebSocket sockets ✅ — and four had no auth at all
+
+Phase 5 taught the boot scan to SEE sockets and said plainly that being in the allowlist
+was not an audit. This is the audit, and it found something: four `/test-ws` endpoints
+in the requirements and ingestion agents called `websocket.accept()` immediately and
+echoed whatever they were sent. No ticket, no tenant check. Unauthenticated sockets in
+the running app, invisible to every check until the scan was taught to list them, and
+referenced by nothing — debug scaffolding that outlived its debugging. Deleted.
+
+The other 17 all redeem a single-use ticket before accepting, and a test now enforces
+that for every socket, reading each handler with its **docstring stripped** because
+several describe their ticket flow in prose.
+
+### 17.4 Context truncation (#6) ✅ — how it was cut mattered more than how much
+
+Truncation was `body[:share]`, head only. Each artifact got ~2,400 characters on a
+nine-agent run, so a PRD arrived as its title, its background, and nothing else — the
+requirements, the acceptance criteria and every decision live at the END of such a
+document. The agent downstream read an introduction and inferred the rest, which is
+worse than being told the document was unavailable.
+
+`_shorten` keeps head AND tail with the seam marked. The ceiling also rose, 24,000 to
+72,000 characters (~18k tokens, under 10% of a 200k window) — a judgement recorded as
+one.
+
+**Summarising each artifact with a model call is deliberately NOT done.** It would be
+better and costs a call per artifact per turn; that remains a product decision.
+
+### 17.5 The e2e rewrite (#8) ✅ — never actually blocked on credentials
+
+Phase 1 skipped the spec and kept it "as the specification for what the Phase 3 rewrite
+must cover". This is that rewrite, and the first browser-level proof this surface has
+had.
+
+The recorded blocker was wrong. The suite signs in through the **mock-mode role
+picker** — no password. The real blocker was that Playwright's browsers were not
+installed, which looks identical from outside: every test failing at launch. Six pass
+now.
+
+Scope is honest: the default project boots with MSW mocks and no backend, so it covers
+access control and the surface, not a live agent turn. The three `live_*_check.py`
+scripts are what exercise that path against a real database and a real model.
+
+### 17.6 RLS (#1) ⏸ — one command away, and it is the operator's
+
+Much closer than recorded. The `sdlc_app` role **already exists**, is correctly
+non-superuser and `NOBYPASSRLS`, and its grants are applied and self-verified by
+`scripts/grant_app_role.py`. `docs/local-setup.md` already says the application connects
+as it. Only `backend/.env` drifted, still pointing `POSTGRES_CONN_STRING` at `postgres`.
+
+What remains is giving the role a login password, which is a credential change:
+
+```sql
+ALTER ROLE sdlc_app WITH LOGIN PASSWORD '<pick one>';
+```
+
+Then point `POSTGRES_CONN_STRING` in `backend/.env` and `backend/.env.test` at
+`sdlc_app`, keeping `POSTGRES_MIGRATIONS_CONN_STRING` as `postgres`. Most of the 22
+baseline test failures exist *because* the app connects as a `rolbypassrls` superuser
+and should go green.
+
+### 17.7 `"review this"` (#7) — deliberately left
+
+Recorded in `live_routing_check.py` as a known boundary and left failing rather than
+tuned away. Re-tuning the routing prompt to catch it risks the **held-out set** — six
+messages an agent must NOT be started for, which informed none of the wording and are
+the only reason the sixteen tuned cases are worth anything. Marginal gain, real risk.
+
+### 17.8 State
+
+- Backend **3,350 passing**; the failure set is unchanged from the recorded baseline
+  (22 failed, 7 errors — RLS inert, plus two live-E2E fixtures on `invalid UUID`).
+- Frontend **688 passing**, typecheck and lint clean.
+- **E2E 6 passing.**
+- `live_deliverables_check` 16/16, `live_sessions_check` 12/12, routing 27/29
+  (`"review this"` plus `"fix the tests"`, which flips between runs on both branches).
