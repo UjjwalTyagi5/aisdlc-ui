@@ -726,3 +726,112 @@ def test_the_column_based_reader_is_gone(monkeypatch):
     artifacts and the Orchestrator's deliverables."""
     from agents_orchestrator.orchestrator2 import context
     assert not hasattr(context, "ARTIFACT_COLUMNS")
+
+
+# ── carried debt #6: what a shortened document keeps ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_shortened_document_keeps_its_ending(monkeypatch):
+    """CARRIED DEBT #6, the mechanical half.
+
+    Truncation was `body[:share]` — head only. On a full nine-agent run each artifact
+    got ~2,400 characters, so a PRD was cut to its title, its background and nothing
+    else: the requirements themselves, the acceptance criteria and every decision live
+    at the END of such a document. The agent downstream then read an introduction and
+    inferred the rest.
+
+    Keeping the head AND the tail costs nothing extra and preserves both the framing
+    and the conclusions. It does not make the budget larger; it makes the same budget
+    carry the parts that matter.
+    """
+    from agents_orchestrator.orchestrator2 import context
+
+    head = "OPENING-MARKER " + ("a" * 40_000)
+    body = head + " CLOSING-MARKER"
+
+    async def _fake(run_id, tenant_id):
+        return {a: body for a in AGENT_IDS}
+
+    monkeypatch.setattr(context, "_load_run_artifacts", _fake)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+
+    assert "OPENING-MARKER" in out, "the opening must survive"
+    assert "CLOSING-MARKER" in out, (
+        "the ending must survive too — a PRD's requirements and acceptance criteria "
+        "are at the bottom, and head-only truncation threw them away"
+    )
+    assert len(out) <= context.MAX_CONTEXT_CHARS
+
+
+@pytest.mark.asyncio
+async def test_the_cut_says_where_it_happened(monkeypatch):
+    """A document with its middle removed must not read as continuous prose — an agent
+    that cannot see the seam will treat two unrelated paragraphs as consecutive."""
+    from agents_orchestrator.orchestrator2 import context
+
+    async def _fake(run_id, tenant_id):
+        return {"requirements": "x" * 200_000}
+
+    monkeypatch.setattr(context, "_load_run_artifacts", _fake)
+    out = await context.handoff_context(_RUN, _TENANT, "design")
+    assert "truncated" in out.lower()
+
+
+def test_the_budget_is_large_enough_for_a_real_document():
+    """The other half of #6, and a judgement call recorded as one.
+
+    24,000 characters over nine agents is ~2,400 each — under a page. The ceiling is
+    raised so a full run still hands each agent something usable, while staying a
+    bounded and predictable slice of the target's window rather than an open tap.
+    """
+    from agents_orchestrator.orchestrator2 import context
+    from agents_orchestrator.orchestrator2.registry import AGENT_IDS as _IDS
+
+    per_agent = context.MAX_CONTEXT_CHARS // len(_IDS)
+    assert per_agent >= 5_000, f"only {per_agent} chars per agent on a full run"
+    # Still bounded: ~4 chars/token, so this must stay a modest slice of a large window.
+    assert context.MAX_CONTEXT_CHARS <= 120_000
+
+
+def test_shorten_never_returns_more_than_its_share():
+    """The invariant `_render`'s budget arithmetic depends on.
+
+    Found by mutation: dropping the elision from the budget made `_shorten` return
+    `share + len(_ELISION)`, and every existing test still passed — because the
+    hard-trim fallback at the end of `_render` silently rescued the total. A rescue
+    path covering for a broken caller is exactly the kind of thing that keeps working
+    until the day it does not.
+    """
+    from agents_orchestrator.orchestrator2.context import _shorten
+
+    body = "x" * 100_000
+    for share in (200, 500, 2_400, 8_000):
+        assert len(_shorten(body, share)) <= share, share
+
+
+def test_shorten_marks_the_seam():
+    """Head and tail joined with nothing between them read as continuous prose, so an
+    agent treats two unrelated paragraphs as consecutive. Found by mutation: removing
+    the marker broke nothing else."""
+    from agents_orchestrator.orchestrator2.context import _ELISION, _shorten
+
+    out = _shorten("A" * 5_000 + "Z" * 5_000, 2_000)
+    assert _ELISION.strip() in out
+
+
+def test_shorten_leaves_a_short_document_alone():
+    from agents_orchestrator.orchestrator2.context import _shorten
+
+    assert _shorten("short", 500) == "short"
+
+
+def test_shorten_degrades_to_head_only_when_the_share_is_tiny():
+    """Below roughly two markers' worth there is no room for both halves, and a
+    document that is mostly marker is worse than one that is merely cut short."""
+    from agents_orchestrator.orchestrator2.context import _ELISION, _shorten
+
+    tiny = len(_ELISION)
+    out = _shorten("A" * 5_000, tiny)
+    assert len(out) <= tiny
+    assert _ELISION.strip() not in out

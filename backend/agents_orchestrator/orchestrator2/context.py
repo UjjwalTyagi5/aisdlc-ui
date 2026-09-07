@@ -128,13 +128,22 @@ class ContextUnavailableError(Exception):
 
 # ── the size budget ──────────────────────────────────────────────────────────
 #
-# 24,000 characters is roughly 6,000 tokens at the usual ~4 chars/token, so this
-# block costs a bounded and predictable slice of the target agent's window — under
-# 5% of a 128k-token context — leaving the conversation and the agent's own
-# reasoning the rest. It is a ceiling on the WHOLE returned string, not per
-# artifact: the function this replaces capped each artifact at 8,000 with no total,
-# so nine of them could hand an agent 72,000 characters.
-MAX_CONTEXT_CHARS: int = 24_000
+# 72,000 characters is roughly 18,000 tokens at the usual ~4 chars/token — a bounded
+# and predictable slice of the target agent's window (under 10% of a 200k context),
+# leaving the conversation and the agent's own reasoning the rest. It is a ceiling on
+# the WHOLE returned string, not per artifact: the function this replaces capped each
+# artifact at 8,000 with no total at all.
+#
+# RAISED FROM 24,000 (carried debt #6). That divided by nine agents gave each ~2,400
+# characters — under a page — so a full run handed the next agent a PRD cut to its
+# title and background. This is a judgement, not a calculation: big enough that a real
+# document survives a nine-agent run, small enough to stay a slice rather than a tap.
+#
+# The other half of #6 was HOW a document is cut, which mattered more than the size:
+# see `_shorten`. Summarising each artifact with a model call instead would be better
+# still and costs a call per artifact per turn — a product decision, deliberately not
+# taken here.
+MAX_CONTEXT_CHARS: int = 72_000
 
 _HEADER = (
     "--- WORK ALREADY ON THIS RUN ---\n\n"
@@ -243,6 +252,40 @@ def _render_body(value: Any) -> str:
     return json.dumps(value, indent=2, default=str)
 
 
+#: Marks where the middle of a document was removed. Counted inside the share, so
+#: `_shorten` never returns more than it was given.
+_ELISION = (
+    "\n\n[… middle of this document omitted to fit the context budget …]\n\n"
+)
+
+
+def _shorten(body: str, share: int) -> str:
+    """Keep the START and the END of a document, dropping the middle.
+
+    Truncation used to be `body[:share]`. On a full nine-agent run that meant a PRD
+    arrived as its title, its background, and nothing else — because the requirements
+    themselves, the acceptance criteria and every decision live at the END of such a
+    document. The agent downstream read an introduction and inferred the rest, which is
+    worse than being told the document was unavailable.
+
+    Head and tail costs nothing extra: the same budget carries the framing AND the
+    conclusions, with the seam marked so two unrelated paragraphs are never read as
+    consecutive prose.
+
+    Never returns more than `share`. When the share is too small to hold both halves
+    plus the marker, it degrades to the old head-only behaviour rather than returning
+    a document that is mostly marker.
+    """
+    if len(body) <= share:
+        return body
+    if share <= len(_ELISION) * 2:
+        return body[:share]
+    budget = share - len(_ELISION)
+    head = budget * 2 // 3          # the opening usually carries the framing
+    tail = budget - head            # the ending usually carries the decisions
+    return body[:head] + _ELISION + body[-tail:]
+
+
 def _render(sections: list[tuple[str, str]], target_agent: str) -> str:
     """Assemble the block, keeping the total inside `MAX_CONTEXT_CHARS`.
 
@@ -274,7 +317,7 @@ def _render(sections: list[tuple[str, str]], target_agent: str) -> str:
             note = _NOTE_TEMPLATE.format(shown=share, total=len(body))
             if len(note) > _NOTE_RESERVE:
                 note = _NOTE_FALLBACK
-            parts.append(body[:share])
+            parts.append(_shorten(body, share))
             parts.append(_FENCE_CLOSE)
             parts.append(note)
             logger.info(
