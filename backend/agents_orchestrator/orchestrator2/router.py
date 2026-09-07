@@ -493,6 +493,50 @@ def _system_prompt() -> str:
     return _PROMPT_TEMPLATE.format(roster=roster)
 
 
+#: Appended to the routing prompt when a delivery agent answered the previous turn.
+#:
+#: THE BUG. `route` runs on every turn, and without this the router sees a reply of
+#: "2" or "main" with no sign that anyone asked a question. The prompt permits
+#: answering directly for "a follow-up about something already produced", and a bare
+#: word looks exactly like one — so the Orchestrator answered, re-asked what the agent
+#: had just asked, and the agent then asked a third time. Observed live:
+#:
+#:     Development:  Here are the projects... which one?
+#:     You:          2
+#:     Orchestrator: Great, you have selected Company. Which repository?
+#:     Development:  Here are the repositories in Company... which one?
+#:
+#: A NUDGE, NOT A LOCK. "Any agent can come at any time according to the chat" is the
+#: whole premise of this engine; pinning a conversation to whoever spoke first would
+#: rebuild the linearity it exists to remove. So this says what is true — that agent
+#: is mid-conversation — and leaves the decision where it was.
+_CONTINUITY_TEMPLATE = """
+
+THE {name} AGENT IS MID-CONVERSATION. It answered the previous turn, and it may have
+ended by asking the user something. If this message reads as an ANSWER to it — a
+number, a branch or repository name, a yes or no, a short phrase that only means
+anything as a reply — route it back to {name} ({tool}). Do not answer it yourself,
+and do not re-ask what has already been asked: the agent asked because it needs the
+answer to continue, and it is the only one that can act on it.
+
+This does not pin the conversation. A message asking for different work goes to
+whichever agent does that work, exactly as it would have on any other turn.
+"""
+
+
+def _system_prompt_with_continuity(last_agent: str | None) -> str:
+    """`_system_prompt`, plus who is mid-conversation when anyone is.
+
+    An unknown agent id is treated as no agent rather than raising: this is a hint,
+    and a routing turn is the wrong place to fail over one.
+    """
+    if not last_agent or last_agent not in REGISTRY:
+        return _system_prompt()
+    return _system_prompt() + _CONTINUITY_TEMPLATE.format(
+        name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
+    )
+
+
 def _llm_kwargs(resolved: Any) -> dict:
     """ChatLiteLLM construction kwargs for a resolved BYOK model.
 
@@ -814,8 +858,14 @@ async def _ask_model(
     project_id: str | None,
     model_id: str | None,
     offering_id: str | None,
+    system_prompt: str,
 ) -> RoutingDecision:
     """Ask the Context Agent which agent should handle `text`.
+
+    `system_prompt` is PASSED, not built here. `route` is the only thing that knows
+    which agent answered last, and a default of `_system_prompt()` would let a call
+    site drop that silently — the routing would still work, just worse, in the exact
+    way that produced the ping-pong.
 
     BYOK, PROJECT-SCOPED, WITH NO ENV FALLBACK — the same contract as
     `dispatch.run_agent`, and for the same reason. `resolve_model_for_run` enforces
@@ -845,7 +895,7 @@ async def _ask_model(
     # Built BEFORE resolving, so a malformed `history` from a call site costs a
     # TypeError rather than a model resolution first.
     messages: list[BaseMessage] = [
-        SystemMessage(content=_system_prompt()),
+        SystemMessage(content=system_prompt),
         *_history_messages(history),
         HumanMessage(content=text),
     ]
@@ -880,6 +930,7 @@ async def route(
     project_id: str | None,
     model_id: str | None,
     offering_id: str | None,
+    last_agent: str | None = None,
 ) -> RoutingDecision:
     """Decide which of the nine agents handles `text`, or answer directly.
 
@@ -895,6 +946,13 @@ async def route(
     ALL NINE AGENTS ARE CANDIDATES ON EVERY TURN. There is no ordering in this engine
     — no `STAGE_ORDER.index(active) + 1`, no notion of a next agent, nothing about
     what ran before.
+
+    `last_agent` does not weaken that. It names the agent that answered the PREVIOUS
+    turn, and it exists because an agent that asked the user a question owns the
+    answer to it: "2" and "main" are not routable messages, they are replies. It
+    changes what the model is TOLD, never what it is allowed to choose — every agent
+    remains a candidate, and `prefilter` still wins outright. `None` is the ordinary
+    first-message case, not an error.
 
     `project_id` is KEYWORD-REQUIRED WITH NO DEFAULT, like `dispatch.run_agent`'s: it
     decides which models this run may use and whose budget it spends, and a default of
@@ -923,5 +981,9 @@ async def route(
         project_id=project_id,
         model_id=model_id,
         offering_id=offering_id,
+        # The one piece of turn-to-turn state this router has. It does not order the
+        # agents and does not decide anything; it tells the model that a question is
+        # outstanding, which a bare "2" does not carry on its own.
+        system_prompt=_system_prompt_with_continuity(last_agent),
     )
     return _validated(decision)

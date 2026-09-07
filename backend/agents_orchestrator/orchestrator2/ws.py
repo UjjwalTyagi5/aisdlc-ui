@@ -541,6 +541,18 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
 
     # This CONNECTION's conversation, for routing only. See `_remember`.
     history: list[dict] = []
+    # The delivery agent that answered the previous turn, or None on the first.
+    #
+    # Same lifetime as `history` and for the same reason: it is routing input, so it
+    # lives where the rest of the routing input lives, and a reconnect starts both
+    # empty. It is set ONLY after an agent actually produced a reply, never from a
+    # frame — a client-supplied "who spoke last" would steer routing while claiming
+    # to describe it.
+    #
+    # A direct answer from the Orchestrator does NOT clear it. That answer is the very
+    # failure this exists to stop: if the model still answers a reply meant for an
+    # agent, forgetting the agent as well would make the next turn worse, not better.
+    last_agent: str | None = None
 
     try:
         while True:
@@ -721,6 +733,11 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         project_id=project_id,
                         model_id=model_id,
                         offering_id=offering_id,
+                        # An agent that asked the user a question owns the answer.
+                        # Without this the router saw "2" or "main" as a bare message,
+                        # answered it itself, and re-asked what the agent had just
+                        # asked — the ping-pong reported from a live session.
+                        last_agent=last_agent,
                     )
                     if decision.agent_id is None:
                         # Answered without a delivery agent. NO `agent.selected`:
@@ -807,6 +824,9 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                             reply_text.append(str(event.get("content") or ""))
                         await _send(websocket, event)
                 _remember(history, "agent", "".join(reply_text))
+                # AFTER the agent's reply, so a turn that failed before producing one
+                # does not claim that agent is mid-conversation.
+                last_agent = agent_id
                 # The same string `_remember` keeps — which is accumulated from the
                 # EVENTS, so what is stored is exactly what the user saw.
                 await sessions.record_turn(

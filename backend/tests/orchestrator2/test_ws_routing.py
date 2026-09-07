@@ -503,3 +503,133 @@ async def test_the_turns_user_reaches_dispatch_from_the_ticket(monkeypatch):
     assert kwargs["user_id"] == "u1", (
         "without the turn's user, a project-scoped personal credential is never found"
     )
+
+
+# ── who is mid-conversation ──────────────────────────────────────────────────
+#
+# REPORTED, from a real session: the Development agent listed the ADO projects and
+# asked which one; the user answered "2"; the ORCHESTRATOR replied and asked for the
+# repository; Development then asked for it again. Two turns spent on one question.
+#
+# "the flow is completely redundant and long for no reason, once dev agent is initiated
+#  it should ask the question."
+#
+# The socket is where the fix has to be wired, because the router has no memory: it is
+# handed a message and a transcript, and the transcript records that an "agent"
+# replied, never WHICH agent.
+
+
+@pytest.mark.asyncio
+async def test_the_router_is_told_which_agent_answered_the_previous_turn(monkeypatch):
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+    routed = _record_route(monkeypatch, ws, rtr.RoutingDecision(
+        agent_id="development", reason="r", direct_reply=None))
+
+    async def _replying(agent_id, **kwargs):
+        yield {"type": "stream_chunk", "content": "which branch?"}
+        yield {"type": "stream_end"}
+
+    monkeypatch.setattr(ws, "run_agent", _replying)
+    await _serve(ws, [_frame(text="pull the repo"), _frame(text="main")])
+
+    assert routed[0][1]["last_agent"] is None, "nobody had spoken on the first turn"
+    assert routed[1][1]["last_agent"] == "development", (
+        "the router was not told Development is mid-conversation, which is what made "
+        "it answer 'main' itself and re-ask the question"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_agent_named_outright_also_becomes_the_last_agent(monkeypatch):
+    """The override path bypasses the router entirely, so it has to record this
+    itself. Missing it would mean naming an agent and then answering its question put
+    you straight back into the ping-pong."""
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+    routed = _record_route(monkeypatch, ws, rtr.RoutingDecision(
+        agent_id="design", reason="r", direct_reply=None))
+
+    async def _replying(agent_id, **kwargs):
+        yield {"type": "stream_chunk", "content": "which service?"}
+        yield {"type": "stream_end"}
+
+    monkeypatch.setattr(ws, "run_agent", _replying)
+    await _serve(ws, [_frame(text="go", agent="security"), _frame(text="yes")])
+
+    assert routed[0][1]["last_agent"] == "security"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_failed_does_not_claim_an_agent_is_mid_conversation(
+    monkeypatch,
+):
+    """An agent that never produced a reply asked nothing, so there is nothing
+    outstanding for the next message to be an answer TO."""
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+    routed = _record_route(monkeypatch, ws, rtr.RoutingDecision(
+        agent_id="development", reason="r", direct_reply=None))
+
+    async def _failing(agent_id, **kwargs):
+        raise RuntimeError("the provider refused")
+        yield  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(ws, "run_agent", _failing)
+    await _serve(ws, [_frame(text="pull the repo"), _frame(text="main")])
+
+    assert routed[1][1]["last_agent"] is None
+
+
+@pytest.mark.asyncio
+async def test_each_connection_starts_with_nobody_mid_conversation(monkeypatch):
+    """Same lifetime as `history`. A `last_agent` that outlived the socket would pin a
+    fresh conversation to whatever the previous one happened to end on."""
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+    routed = _record_route(monkeypatch, ws, rtr.RoutingDecision(
+        agent_id="testing", reason="r", direct_reply=None))
+    _record_run_agent(monkeypatch, ws, [{"type": "stream_chunk", "content": "done"},
+                                        {"type": "stream_end"}])
+
+    await _serve(ws, [_frame(text="run the tests")])
+    await _serve(ws, [_frame(text="ok")])
+
+    assert [c[1]["last_agent"] for c in routed] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_reply_does_not_forget_the_agent(monkeypatch):
+    """The Orchestrator answering IS the failure mode. Clearing `last_agent` there
+    would make the turn after it worse — the agent is still the one holding the
+    conversation, and still the one waiting on an answer."""
+    from agents_orchestrator.orchestrator2 import ws
+    _patch_auth(monkeypatch, ws)
+    _no_context(monkeypatch, ws)
+
+    decisions = [
+        rtr.RoutingDecision(agent_id="development", reason="r", direct_reply=None),
+        rtr.RoutingDecision(agent_id=None, reason=None, direct_reply="Sure."),
+        rtr.RoutingDecision(agent_id="development", reason="r", direct_reply=None),
+    ]
+    routed = []
+
+    async def _fake_route(text, **kwargs):
+        routed.append((text, kwargs))
+        return decisions[len(routed) - 1]
+
+    monkeypatch.setattr(ws, "route", _fake_route)
+
+    async def _replying(agent_id, **kwargs):
+        yield {"type": "stream_chunk", "content": "which branch?"}
+        yield {"type": "stream_end"}
+
+    monkeypatch.setattr(ws, "run_agent", _replying)
+    await _serve(ws, [_frame(text="pull the repo"), _frame(text="main"),
+                      _frame(text="2")])
+
+    assert routed[2][1]["last_agent"] == "development"
