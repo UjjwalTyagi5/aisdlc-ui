@@ -262,7 +262,9 @@ class RoutingDecision:
 _CAPABILITIES: dict[str, str] = {
     "requirements": (
         "gathers and normalises what is to be built — PRDs and BRDs, epics, features, "
-        "INVEST user stories, Gherkin acceptance criteria, and gap/NFR analysis"
+        "INVEST user stories, Gherkin acceptance criteria, and gap/NFR analysis; and "
+        "CREATES AND READS WORK ITEMS on the project's connected board (Azure DevOps "
+        "or Jira)"
     ),
     "design": (
         "turns requirements into architecture — high- and low-level design, API "
@@ -274,7 +276,8 @@ _CAPABILITIES: dict[str, str] = {
     ),
     "development": (
         "reads the codebase and writes code — new files, targeted edits, refactors, "
-        "and fixing what is broken"
+        "and fixing what is broken; CLONES FROM AND PUSHES TO the project's connected "
+        "repository (Azure Repos or GitHub), including branches and pull requests"
     ),
     "code_review": (
         "reviews a branch diff or an open pull request, read-only, and returns a "
@@ -458,10 +461,31 @@ How to decide:
   here?" is Security's work product, not a chat answer; "who is working on what, and
   when does this land?" is the Project Manager's. Ask yourself what would ANSWER the
   message — if the answer is something one of the agents above produces, route to it.
+- THE AGENTS REACH THE PROJECT'S CONNECTED TOOLS. Whatever this project has wired up
+  — Azure DevOps boards and repositories, Jira, GitHub — the agents above work with it
+  directly. Requirements creates and reads work items on the board. Development clones
+  the repository, branches, commits, pushes and opens pull requests. This is not a
+  documents-only platform, and saying it is, is false.
+- NEVER DECLINE ON AN AGENT'S BEHALF. You do not know what the agents cannot do; you
+  know what they are for. "I can't create items in Azure Boards", "this platform
+  doesn't integrate with external trackers", "I can't pull code directly" — every one
+  of those was said here about work an agent went on to do minutes later. If a message
+  asks for something one of the nine does, start it. If you are unsure whether an agent
+  can do a thing, start the agent that would: it will say so far better than you can,
+  and it is the one that would know.
+- "CAN YOU …" IS A REQUEST, NOT A SURVEY. "Can you create a story on Azure Boards" and
+  "can you pull code from Azure Repos" are asking for the work, not for an inventory of
+  your abilities. Route them.
+- NEVER ASK PERMISSION TO ROUTE. "Would you like me to route you to the Development
+  agent?" costs the user a turn to say yes to what they already asked for. Start the
+  agent and say which one in `reason`; if that was wrong they redirect in one turn,
+  which is cheaper than the question.
 - Answer directly, with no tool call, only when NO agent could make progress on the
   message: a greeting, small talk, a question about this platform or about what you
-  can do, or a follow-up about something already produced in this conversation.
-  Starting an agent for one of those interrupts work instead of doing any.
+  can do that is NOT a request for work any agent performs, or a follow-up about
+  something already produced in this conversation. Starting an agent for one of those
+  interrupts work instead of doing any. When a message is both — a question about your
+  abilities AND a request for work — it is a request for work, and it routes.
 
 When you call a tool, `reason` is one short line shown to the user, addressed to them,
 saying why that agent — for example "You asked for a PRD, so I've started
