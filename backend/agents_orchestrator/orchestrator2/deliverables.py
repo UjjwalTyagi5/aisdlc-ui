@@ -96,6 +96,93 @@ def derive_title(agent_id: str, body: str) -> str:
     return f"{DISPLAY_NAME.get(agent_id, agent_id)} Report"
 
 
+#: How much of the reply the refusal check reads. An agent that cannot do the work
+#: says so before it says anything else — all three refusals observed live declared it
+#: inside the first 250 characters. Reading the WHOLE body instead would reject a real
+#: report that happens to say "I cannot cover the sandbox here" in its last section,
+#: and rejecting real documents is the failure this area keeps producing from the
+#: other direction.
+_REFUSAL_WINDOW_CHARS = 700
+
+#: FIRST PERSON, deliberately. A security review is MADE of sentences about what
+#: cannot be done — "the endpoint cannot validate the total", "sessions are unable to
+#: survive a refresh" — and those are its findings. What disqualifies a document is the
+#: AGENT saying it did not do the work, not the subject matter saying something is
+#: broken. Matching "cannot" without the pronoun would make Security unable to file a
+#: review at all, which is a worse bug than the one this fixes.
+_REFUSAL_OPENING_RE = re.compile(
+    r"(?i)\bI\s+(?:"
+    r"can(?:no|')?t\b"
+    r"|can\s+not\b"
+    r"|(?:a|')m\s+unable\b"
+    r"|am\s+not\s+able\b"
+    r"|do(?:\s+not|n't)\s+have\s+access\b"
+    r"|need\s+to\s+stop\s+here\b"
+    r")"
+)
+
+#: A section title that announces the work did not happen. Narrow on purpose: only
+#: phrases that cannot be a heading in a document that DID get produced. "What I Can
+#: Do" is deliberately absent — it is a plausible heading in a real plan, and every
+#: refusal that used it also declared itself in the first person above.
+_REFUSAL_HEADING_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,6}\s+.*\b("
+    r"not\s+possible"
+    r"|cannot\s+proceed"
+    r"|can't\s+proceed"
+    r"|unable\s+to\s+proceed"
+    r"|missing\s+prerequisites"
+    r")\b"
+)
+
+
+#: A link into the platform's own generated-artifact mount. Agents that export a
+#: document write it to `{FILES}/<user>/<segment>/<run>/output/` and hand back a
+#: `/generated/...` URL over it, so a reply carrying one of these is a message ABOUT a
+#: document, not the document.
+#:
+#: Requires the URL FORM, not the bare word: a design document is free to discuss a
+#: `/generated/` directory in prose without announcing its own location. The scheme
+#: and host are left open because `AGENTIC_BASE_URL` differs per deployment.
+_GENERATED_LINK_RE = re.compile(r"(?i)https?://[^\s)]*/generated/[^\s)]+")
+
+
+def announces_a_saved_file(body: str) -> bool:
+    """Is this reply telling the user where a document went, rather than being one?
+
+    FOUND BY RUNNING ALL NINE AGENTS LIVE. The other three of the six captured
+    deliverables were exactly this: "📄 Download Your PRD" over a link to
+    `coffee_ordering_app_prd.docx`, and "Plan Summary" over a link to
+    `Coffee_Ordering_App_Delivery_Plan.pdf`. Between these and the refusals, NOT ONE of
+    the nine agents filed an actual document.
+
+    The file itself reaches the panel through `pointers_for_run`, which synthesises a
+    file tree for every stage that wrote something — so declining to file the
+    announcement beside it loses nothing, and the link stays in the chat where a link
+    belongs.
+    """
+    return bool(_GENERATED_LINK_RE.search(body))
+
+
+def looks_like_a_refusal(body: str) -> bool:
+    """Is this the agent explaining that it could NOT do the work?
+
+    FOUND BY RUNNING ALL NINE AGENTS LIVE. Three of six captured deliverables were
+    refusals: "⚠️ Security Review Not Possible", "Cannot Proceed — Missing
+    Prerequisites", "What I Can Do". Every one of them clears the structure rule —
+    real headings, well over 400 characters — because a good refusal is structured.
+    That is the door the structure rule cannot close.
+
+    It is also the worst thing to file. A user opening Deliverables sees a Security
+    Review filed under Security whose content is the opposite of what its title
+    promises, and the tab stops meaning anything.
+    """
+    return bool(
+        _REFUSAL_OPENING_RE.search(body[:_REFUSAL_WINDOW_CHARS])
+        or _REFUSAL_HEADING_RE.search(body)
+    )
+
+
 def looks_like_a_document(body: str) -> bool:
     """Is this a produced DOCUMENT, or is it conversation?
 
@@ -114,10 +201,20 @@ def looks_like_a_document(body: str) -> bool:
     document that closes with "let me know if you'd like changes" is still a document,
     and punishing an agent for being conversational about its own output would empty
     the tab for the opposite reason.
+
+      · COMPLETION. A refusal is structured too — see `looks_like_a_refusal`. Three of
+        the six deliverables captured in the first all-nine live run were agents
+        explaining, in good markdown, that they could not do the work.
+
+      · FIRST-HAND-NESS. So is a summary of a document saved elsewhere — see
+        `announces_a_saved_file`. That was the other three, which together meant not
+        one of the nine agents filed an actual document.
     """
     if len(body) < MIN_DELIVERABLE_CHARS:
         return False
-    return len(_HEADING_LINE_RE.findall(body)) >= _MIN_HEADINGS
+    if len(_HEADING_LINE_RE.findall(body)) < _MIN_HEADINGS:
+        return False
+    return not looks_like_a_refusal(body) and not announces_a_saved_file(body)
 
 
 def render(agent_id: str, reply_text: str) -> list[dict]:

@@ -413,9 +413,16 @@ def _glob_user_scoped_dir(run_id: str, rel_suffix: str, *, segment: str = "orche
     return None
 
 
+# Stages that export into the shared per-run `output/` directory. All three write
+# through different tools — the Project Manager's plan export, `architecture.py`, and
+# Testing's `finalize.py` — but land in the same place, because `session_id` is the
+# run id for every agent the Orchestrator dispatches.
+_ORCHESTRATOR_OUTPUT_STAGES = {"plan", "design", "testing"}
+
 # Stages whose generated output isn't in its own dedicated location (dev workspace,
-# testing's `output/`, docs' own root) yet — populated under a shared `generated/<stage>`
-# tree once each agent starts writing there (later task). Fail-soft: None until then.
+# the shared `output/` above, docs' own root) yet — populated under a shared
+# `generated/<stage>` tree once each agent starts writing there (later task).
+# Fail-soft: None until then.
 _GENERATED_STAGE_DIRS = {"security", "code_review", "deployment"}
 
 
@@ -434,7 +441,18 @@ async def _run_stage_output_dir(
                      dir — has its own richer fallback chain incl. re-clone).
     requirements  -> `{FILES}/<user>/requirements_agent/<run_id>/output` (planning.py
                      markdown_to_docx / markdowntodoc — BRD/MoM/Risk Register docx).
-    testing       -> `{FILES}/<user>/orchestrator/<run_id>/output` (Nodes/finalize.py).
+    plan | design | testing
+                  -> `{FILES}/<user>/orchestrator/<run_id>/output` — the Project
+                     Manager's plan export, `architecture.py`'s HLD/LLD docx, and
+                     Testing's `Nodes/finalize.py` all write here.
+
+                     `plan` and `design` were MISSING from this mapping and returned
+                     None. Found by running all nine agents against the real stack:
+                     the Project Manager produced
+                     `Coffee_Ordering_App_Delivery_Plan.pdf`, wrote it to exactly the
+                     path `testing` resolves fine, and it never appeared in
+                     Deliverables. Silent by construction — a stage with no directory
+                     is indistinguishable from a stage that generated nothing.
     documentation -> `{DOCS_OUTPUT_ROOT}/<project_id>/<run_id>` (doc_tools._output_dir).
     security | code_review | deployment
                   -> `{FILES}/<user>/orchestrator/<run_id>/generated/<stage>` (a later
@@ -447,7 +465,7 @@ async def _run_stage_output_dir(
     if stage == "requirements":
         return _glob_user_scoped_dir(run_id, "output", segment="requirements_agent")
 
-    if stage == "testing":
+    if stage in _ORCHESTRATOR_OUTPUT_STAGES:
         return _glob_user_scoped_dir(run_id, "output")
 
     if stage == "documentation":
