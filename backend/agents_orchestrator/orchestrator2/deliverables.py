@@ -31,10 +31,20 @@ from shared.services.orchestrator.artifacts_view import parse_design_markdown
 
 logger = logging.getLogger(__name__)
 
-#: Below this, a reply is conversation rather than a document. An agent asking
-#: "which service did you mean?" must not create a deliverable; a PRD must. The
-#: value is the Copilot's, kept so behaviour does not shift under the rename.
-MIN_DELIVERABLE_CHARS = 200
+#: A floor, not the test. Nothing shorter than this can be a document, but passing it
+#: proves nothing on its own — see `looks_like_a_document`.
+#:
+#: This USED to be the whole rule, inherited from the Copilot and never re-examined.
+#: It produced eight "Development Report" rows in one session, every one an ordinary
+#: chat message: listing the branches in a repo is well over 200 characters.
+MIN_DELIVERABLE_CHARS = 400
+
+#: A document announces its own structure. Two or more markdown headings is the signal
+#: that survives across agents — a PRD, a design doc, a security review and a test plan
+#: all have them, and none of "here are the branches", "shall I go ahead?" or "created
+#: and switched to X" does.
+_HEADING_LINE_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+\S")
+_MIN_HEADINGS = 2
 
 #: User-facing agent names. `plan` is the PROJECT MANAGER agent and is never
 #: called "Plan agent" or "PM agent" anywhere a user can read it.
@@ -86,6 +96,30 @@ def derive_title(agent_id: str, body: str) -> str:
     return f"{DISPLAY_NAME.get(agent_id, agent_id)} Report"
 
 
+def looks_like_a_document(body: str) -> bool:
+    """Is this a produced DOCUMENT, or is it conversation?
+
+    "a deliverable is the document created — a proper document created and saved, for
+    eg design docs for design agent — not normal chats."
+
+    Length alone cannot answer that, and using it produced a Deliverables tab holding
+    eight chat messages. Two things do:
+
+      · STRUCTURE. A document carries markdown headings; a chat reply does not. A PRD, a
+        design doc, a security review and a test plan all have them. "Here are the
+        branches", "Shall I go ahead?" and "Created and switched to X" do not.
+    A "does it end in a question" check was tried and REMOVED: every conversational
+    reply it would have caught already fails the structure test, so it was a branch no
+    test could kill. And it would have been wrong at the edges anyway — a design
+    document that closes with "let me know if you'd like changes" is still a document,
+    and punishing an agent for being conversational about its own output would empty
+    the tab for the opposite reason.
+    """
+    if len(body) < MIN_DELIVERABLE_CHARS:
+        return False
+    return len(_HEADING_LINE_RE.findall(body)) >= _MIN_HEADINGS
+
+
 def render(agent_id: str, reply_text: str) -> list[dict]:
     """Turn one agent turn into deliverable rows. PURE — no IO, no database.
 
@@ -94,7 +128,7 @@ def render(agent_id: str, reply_text: str) -> list[dict]:
     the same document can never collide on a slug.
     """
     body = (reply_text or "").strip()
-    if len(body) < MIN_DELIVERABLE_CHARS:
+    if not looks_like_a_document(body):
         return []
 
     if agent_id == "design":

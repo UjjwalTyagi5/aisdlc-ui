@@ -16,6 +16,12 @@ _RUN = "11111111-1111-1111-1111-111111111111"
 _TENANT = "22222222-2222-2222-2222-222222222222"
 _OTHER_TENANT = "33333333-3333-3333-3333-333333333333"
 
+#: A real document. The old fixture was a 400-character blob of "x", which stopped
+#: being a deliverable when STRUCTURE replaced LENGTH as the rule — the change
+#: that stopped the Deliverables tab filling with chat messages.
+_DOC = ("# Report" + chr(10) * 2 + "## Findings" + chr(10) + "a" * 260
+        + chr(10) * 2 + "## Next steps" + chr(10) + "b" * 260)
+
 
 def _at(minute: int) -> dt.datetime:
     return dt.datetime(2026, 9, 6, 10, minute, tzinfo=dt.timezone.utc)
@@ -184,7 +190,7 @@ async def test_capture_appends_and_never_updates(monkeypatch):
     from agents_orchestrator.orchestrator2 import deliverables
     added = []
     _fake_factory(monkeypatch, [], added=added)
-    body = "x" * 400
+    body = _DOC
     await deliverables.capture("security", body, run_id=_RUN, tenant_id=_TENANT,
                                project_id=None)
     await deliverables.capture("security", body, run_id=_RUN, tenant_id=_TENANT,
@@ -201,7 +207,7 @@ async def test_capture_records_the_project_it_ran_for(monkeypatch):
     added = []
     _fake_factory(monkeypatch, [], added=added)
     project = "55555555-5555-5555-5555-555555555555"
-    await deliverables.capture("plan", "x" * 400, run_id=_RUN, tenant_id=_TENANT,
+    await deliverables.capture("plan", _DOC, run_id=_RUN, tenant_id=_TENANT,
                                project_id=project)
     assert str(added[0].project_id) == project
     assert str(added[0].tenant_id) == _TENANT
@@ -224,7 +230,7 @@ async def test_a_write_failure_is_typed_not_swallowed(monkeypatch):
     from agents_orchestrator.orchestrator2 import deliverables
     _fake_factory(monkeypatch, [], added=[], fail_on_commit=True)
     with pytest.raises(deliverables.DeliverableWriteError):
-        await deliverables.capture("security", "x" * 400, run_id=_RUN,
+        await deliverables.capture("security", _DOC, run_id=_RUN,
                                    tenant_id=_TENANT, project_id=None)
 
 
