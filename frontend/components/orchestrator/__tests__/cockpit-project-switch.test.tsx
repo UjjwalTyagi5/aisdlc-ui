@@ -85,9 +85,21 @@ vi.mock("@/lib/api/projects", () => ({
 }));
 
 vi.mock("@/lib/api/models", () => ({
+  // One RUNNABLE offering. An empty `/model/options` now closes the composer (the
+  // project has no keyed provider connection behind any granted model), which is
+  // not the state these tests are about.
   getModelOptions: vi.fn(async () => ({
-    options: [],
-    default_offering_id: null,
+    options: [
+      {
+        offering_id: "off-1",
+        provider_id: "prov-1",
+        display_name: "Anthropic",
+        provider: "anthropic",
+        model_id: "claude-opus-4-5",
+        is_default: true,
+      },
+    ],
+    default_offering_id: "off-1",
     default_model_id: null,
   })),
 }));

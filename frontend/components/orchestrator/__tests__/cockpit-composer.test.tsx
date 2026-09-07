@@ -61,10 +61,28 @@ vi.mock("@/lib/api/projects", () => ({
   })),
   listProjects: vi.fn(async () => ({ items: [], total: 0, page: 1, pageSize: 100 })),
 }));
+/**
+ * One RUNNABLE offering, not the empty list this stub used to hold.
+ *
+ * An empty `/model/options` stopped being a "don't care": it is now the project
+ * that has no keyed provider connection behind any granted model, and the cockpit
+ * closes the composer for it (see `cockpit-no-runnable-model.test.tsx`). Everything
+ * below is about routing and run creation, which presuppose a project that can
+ * actually answer a turn.
+ */
 vi.mock("@/lib/api/models", () => ({
   getModelOptions: vi.fn(async () => ({
-    options: [],
-    default_offering_id: null,
+    options: [
+      {
+        offering_id: "off-1",
+        provider_id: "prov-1",
+        display_name: "Anthropic",
+        provider: "anthropic",
+        model_id: "claude-opus-4-5",
+        is_default: true,
+      },
+    ],
+    default_offering_id: "off-1",
     default_model_id: null,
   })),
 }));

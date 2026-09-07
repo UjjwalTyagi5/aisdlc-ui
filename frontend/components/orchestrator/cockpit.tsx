@@ -293,6 +293,17 @@ export function OrchestratorCockpit({
     enabled: !!projectId,
     staleTime: 30_000,
   });
+  /**
+   * True only once `/model/options` has ANSWERED with nothing.
+   *
+   * `isSuccess`, not `data?.options ?? []`: an in-flight request is not evidence of a
+   * missing key, and a composer that closes while the list loads asserts something the
+   * app has not yet verified. An error leaves it open too — the request failing says
+   * nothing about whether a model exists, and locking the user out over a transient
+   * 500 is worse than letting the turn try.
+   */
+  const noRunnableModel = modelOptionsQ.isSuccess && modelOptionsQ.data.options.length === 0;
+
   const offeringId = React.useMemo(() => {
     if (!modelKey) return null;
     const { provider, model_id, credentialId } = splitModelKey(modelKey);
@@ -503,18 +514,24 @@ export function OrchestratorCockpit({
   // The composer says WHY it is closed rather than sitting greyed out with no
   // explanation — "nothing happens when I type" was the old cockpit's whole
   // failure mode.
-  const composerDisabled = !canDrive || !projectId || socket.busy;
+  const composerDisabled = !canDrive || !projectId || noRunnableModel || socket.busy;
   const composerPlaceholder = !canDrive
     ? "Read-only — only this project's Project Admin can drive the Orchestrator."
     : !projectId
       ? "Pick a project to start."
-      : socket.busy
-        ? agent
-          ? `The ${agentLabel(agent)} agent is working…`
-          : "Working…"
-        : agent
-          ? `Message the ${agentLabel(agent)} agent`
-          : "Describe the work — the Orchestrator picks the agent.";
+      : noRunnableModel
+        ? // Not "no models granted": models may well be granted, and a Project Admin
+          // looking at the Models screen will see them ticked. What is missing is a
+          // provider connection with a working key behind any of them, which is the
+          // only thing that decides whether a turn can be answered.
+          "No model this project can run — a provider still needs a working key."
+        : socket.busy
+          ? agent
+            ? `The ${agentLabel(agent)} agent is working…`
+            : "Working…"
+          : agent
+            ? `Message the ${agentLabel(agent)} agent`
+            : "Describe the work — the Orchestrator picks the agent.";
 
   const shell =
     variant === "page"
@@ -595,9 +612,11 @@ export function OrchestratorCockpit({
             <ProjectPicker value={projectId} onValueChange={handleProjectChange} />
           )}
 
+          {/* No `workspaceId`: the picker no longer resolves credential state per
+              Business Unit. `/model/options` answers per PROJECT, which is the only
+              scope that decides whether a turn on THIS project can be answered. */}
           <ModelPicker
             projectId={projectId}
-            workspaceId={project?.workspaceId ?? null}
             value={modelKey}
             onValueChange={handleModelChange}
             onOptionsResolved={handleOptionsResolved}
