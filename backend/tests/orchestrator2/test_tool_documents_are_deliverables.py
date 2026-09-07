@@ -59,21 +59,52 @@ _DESIGN_DOC = (
     + ("No schema change is required for a presentation-only update. " * 8)
 )
 
-_RECEIPT = (
-    "SAVED: http://localhost:8004/generated/af57932d/orchestrator/9de55574/output/"
-    "Design_Document_Change_Duplicate_Table_Color_to_Pink.docx\n\n"
-)
+def _real_receipt(markdown: str) -> str:
+    """The document with the receipt the exporter ACTUALLY prepends.
+
+    Built by CALLING `_with_save_receipt` rather than by writing out what it is assumed
+    to produce. The first version of this file invented the receipt — one tidy
+    `SAVED: <url>` line — and the stripping regex was written to match the invention.
+    The real thing carries trailing prose (`— download: …`) and a second line
+    (`(Written automatically …)`), so it survived stripping, its `/generated/` link made
+    `announces_a_saved_file` reject the whole document as an announcement, and the
+    panel kept showing "Binary file. This file can't be displayed as text." — while
+    every test in this file passed.
+    """
+    from agents_orchestrator.design_architecture_agent.agents.architecture import (
+        _with_save_receipt,
+    )
+
+    return _with_save_receipt(
+        "SAVED: High_Level_Design_HLD_CSS_Color_Change_Feature.docx — download: "
+        "http://localhost:8004/generated/af57932d/orchestrator/9de55574/output/"
+        "High_Level_Design_HLD_CSS_Color_Change_Feature.docx",
+        markdown,
+    )
+
+
+def _real_receipt_without_link(markdown: str) -> str:
+    """The exporter's other shape, for when no download URL could be built."""
+    from agents_orchestrator.design_architecture_agent.agents.architecture import (
+        _with_save_receipt,
+    )
+
+    return _with_save_receipt(
+        "SAVED: High_Level_Design.docx (in this run's output folder; no download link "
+        "was built)",
+        markdown,
+    )
 
 
 def test_a_tool_result_carrying_a_document_becomes_a_deliverable():
     """The reported case. Without this the panel has only the .docx."""
-    rows = _rendered("design", _RECEIPT + _DESIGN_DOC)
+    rows = _rendered("design", _real_receipt(_DESIGN_DOC))
     assert rows, "the design document produced through a tool was not captured"
 
 
 def test_the_captured_document_keeps_its_diagrams():
     """What the user actually asked for — the diagrams, not a download link."""
-    rows = _rendered("design", _RECEIPT + _DESIGN_DOC)
+    rows = _rendered("design", _real_receipt(_DESIGN_DOC))
     body = "\n".join(r["content"] for r in rows)
     assert "```mermaid" in body, "the diagrams were stripped out of the document"
     assert "graph TD" in body
@@ -82,10 +113,21 @@ def test_the_captured_document_keeps_its_diagrams():
 def test_the_save_receipt_is_not_part_of_the_document():
     """It is a line the exporter prepends, not prose the reader wants — and left in,
     `announces_a_saved_file` rejects the whole document as a mere announcement."""
-    rows = _rendered("design", _RECEIPT + _DESIGN_DOC)
+    rows = _rendered("design", _real_receipt(_DESIGN_DOC))
     body = "\n".join(r["content"] for r in rows)
     assert "SAVED:" not in body
     assert "/generated/" not in body
+
+
+def test_the_other_receipt_shape_is_stripped_too():
+    """`_write_architecture_docx` has two receipts: one with a download link and one
+    without. Only the first was ever exercised, and the pattern that missed both was
+    written against neither."""
+    rows = _rendered("design", _real_receipt_without_link(_DESIGN_DOC))
+    assert rows, "the no-link receipt shape left the document unrecognisable"
+    body = chr(10).join(r["content"] for r in rows)
+    assert "SAVED:" not in body
+    assert "Written automatically" not in body
 
 
 def test_a_tool_result_that_is_not_a_document_is_not_captured():
@@ -110,7 +152,7 @@ def test_design_sections_are_split_the_way_a_streamed_design_document_is():
     """A tool-produced design document must land in the panel the same shape as one the
     agent streamed — otherwise the same document looks different depending on how it
     happened to be produced."""
-    rows = _rendered("design", _RECEIPT + _DESIGN_DOC)
+    rows = _rendered("design", _real_receipt(_DESIGN_DOC))
     titles = [r["title"] for r in rows]
     assert "High-Level Design (HLD)" in titles
     assert "Database Schema" in titles
@@ -240,7 +282,7 @@ async def test_a_document_returned_by_a_tool_reaches_capture(monkeypatch, _stub_
     """The reported bug, driven through the real turn."""
     captures = []
     await _turn(monkeypatch, _GraphEmitting(
-        _ToolChunk(_RECEIPT + _DESIGN_DOC),
+        _ToolChunk(_real_receipt(_DESIGN_DOC)),
         _TextChunk("Your design document is ready."),
     ), captures)
 
@@ -255,7 +297,7 @@ async def test_the_document_is_captured_before_the_reply(monkeypatch, _stub_mode
     sentences announcing it."""
     captures = []
     await _turn(monkeypatch, _GraphEmitting(
-        _ToolChunk(_RECEIPT + _DESIGN_DOC),
+        _ToolChunk(_real_receipt(_DESIGN_DOC)),
         _TextChunk("Your design document is ready."),
     ), captures)
 
@@ -270,7 +312,7 @@ async def test_the_tool_output_is_still_not_streamed_into_the_chat(
     """The whole document must not arrive as the agent's own words."""
     captures = []
     events = await _turn(monkeypatch, _GraphEmitting(
-        _ToolChunk(_RECEIPT + _DESIGN_DOC),
+        _ToolChunk(_real_receipt(_DESIGN_DOC)),
         _TextChunk("Your design document is ready."),
     ), captures)
 

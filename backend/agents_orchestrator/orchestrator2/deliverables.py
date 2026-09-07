@@ -225,7 +225,24 @@ def looks_like_a_document(body: str) -> bool:
 #: body carrying a `/generated/` link, which is right for a CHAT reply that points at a
 #: document stored elsewhere and wrong for a tool result that IS the document with a
 #: receipt stapled on. Stripping keeps one rule instead of carving an exception into it.
-_SAVE_RECEIPT_RE = re.compile(r"(?im)^[ \t]*SAVED:[ \t]*\S+[ \t]*$")
+#: MATCHED TO THE WHOLE LINE, not to a filename. An earlier version required the line
+#: to END at the URL (`SAVED:\s*\S+$`) — a shape the exporter never produces. Both real
+#: receipts carry trailing prose:
+#:
+#:     SAVED: High_Level_Design.docx — download: http://…/generated/…/x.docx
+#:     SAVED: High_Level_Design.docx (in this run's output folder; no download link…)
+#:
+#: and a second line follows: "(Written automatically — do NOT call save_architecture
+#: …)". So the receipt survived stripping, its `/generated/` link made
+#: `announces_a_saved_file` reject the whole document as a mere announcement, and the
+#: panel went on showing "Binary file. This file can't be displayed as text."
+#:
+#: The pattern was written against a fixture invented for the test rather than against
+#: `_with_save_receipt`, which is exactly why the tests passed and the product did not.
+#: The tests now build their input from that function.
+_SAVE_RECEIPT_RE = re.compile(
+    r"(?im)^[ \t]*(?:SAVED:.*|\(Written automatically[^\n]*\))[ \t]*$"
+)
 
 
 def strip_save_receipt(tool_output: Any) -> str:
