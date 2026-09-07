@@ -217,6 +217,40 @@ def looks_like_a_document(body: str) -> bool:
     return not looks_like_a_refusal(body) and not announces_a_saved_file(body)
 
 
+#: The receipt an exporter prepends to the document it just wrote — see
+#: `design_architecture_agent/agents/architecture.py::_with_save_receipt`. It names the
+#: saved file so the model can quote the link rather than inventing one.
+#:
+#: It has to come off before the document is judged. `announces_a_saved_file` rejects a
+#: body carrying a `/generated/` link, which is right for a CHAT reply that points at a
+#: document stored elsewhere and wrong for a tool result that IS the document with a
+#: receipt stapled on. Stripping keeps one rule instead of carving an exception into it.
+_SAVE_RECEIPT_RE = re.compile(r"(?im)^[ \t]*SAVED:[ \t]*\S+[ \t]*$")
+
+
+def strip_save_receipt(tool_output: Any) -> str:
+    """A tool's output with the exporter's `SAVED: <url>` receipt removed.
+
+    REPORTED: the Design agent wrote a complete architecture document — the user
+    downloaded the .docx and every table and diagram was there — and the panel showed
+    "Binary file. This file can't be displayed as text." The document lived in a tool
+    result, which `dispatch` reports as activity and whose content it drops, so
+    `capture` (which reads the streamed reply) had nothing to store and the only trace
+    was the file itself.
+
+    THIS DOES NOT STREAM ANYTHING. The existing reasoning stands: forwarding a tool
+    result as a `stream_chunk` puts it in the transcript as if the agent had said it.
+    The document becomes a deliverable the panel renders — mermaid and all — while the
+    chat keeps the short summary the agent actually wrote.
+
+    Judged by exactly the same rule as a streamed reply, deliberately: most tool
+    results are status lines, ids and JSON, and capturing those refills the tab with
+    the noise the document rule exists to keep out. A refusal returned by a tool is
+    still not a deliverable.
+    """
+    return _SAVE_RECEIPT_RE.sub("", str(tool_output or "")).strip()
+
+
 def render(agent_id: str, reply_text: str) -> list[dict]:
     """Turn one agent turn into deliverable rows. PURE — no IO, no database.
 
@@ -425,3 +459,30 @@ async def latest_per_agent(run_id: str, tenant_id: str) -> dict[str, Any]:
     for row in await _load(run_id, tenant_id):  # already newest-first
         latest.setdefault(row["agent"], row)
     return latest
+
+
+
+async def capture_tool_document(
+    agent_id: str,
+    tool_output: Any,
+    *,
+    run_id: str,
+    tenant_id: str,
+    project_id: str | None,
+) -> list[dict]:
+    """Persist a document an agent produced through a tool.
+
+    Delegates to `capture` with the receipt removed, rather than reimplementing the
+    write: one persistence path means a tool-produced document and a streamed one land
+    as the same shape of row, and a change to how deliverables are stored cannot apply
+    to only one of them.
+
+    Returns `[]` — writing nothing — when the tool output was not a document, which is
+    most of the time.
+    """
+    body = strip_save_receipt(tool_output)
+    if not body:
+        return []
+    return await capture(
+        agent_id, body, run_id=run_id, tenant_id=tenant_id, project_id=project_id,
+    )

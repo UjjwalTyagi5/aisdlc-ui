@@ -241,6 +241,17 @@ def _stream_text(content: Any) -> str:
     )
 
 
+#: How much tool output one turn will hold for possible capture. Generous enough for
+#: a full architecture document (the reported one ran ~40 KB of markdown) and bounded,
+#: because nothing else limits what a tool may return.
+MAX_TOOL_DOCUMENT_CHARS = 120_000
+
+
+def _tool_text_budget_left(collected: list[str]) -> bool:
+    """Whether another tool output may be kept for capture this turn."""
+    return sum(len(part) for part in collected) < MAX_TOOL_DOCUMENT_CHARS
+
+
 def _is_tool_result(message: Any) -> bool:
     """Whether this streamed message is a tool RESULT rather than the agent's prose.
 
@@ -377,6 +388,11 @@ async def run_agent(
     # from the graph's state — so a deliverable is exactly the reply that was
     # displayed, never a different rendering of it.
     reply_parts: list[str] = []
+    # Tool outputs that might be documents — the Design agent's architecture docx is
+    # written by a tool and named in two sentences of chat, so its content is here and
+    # nowhere else. Bounded, because a tool can return a very large blob and this is
+    # held for the length of the turn.
+    tool_documents: list[str] = []
     # Only a turn that ran to completion is captured. See the capture block below.
     turn_completed = False
     # Bound BEFORE the try for the same reason `agent_id` is: the `finally` resets it,
@@ -551,6 +567,16 @@ async def run_agent(
                             # forwarding it as a `stream_chunk` put it in the transcript as
                             # if the agent had said it — so it is reported as activity and
                             # its text is not streamed.
+                            #
+                            # KEPT, THOUGH, because a document can live in here. The
+                            # Design agent writes its architecture docx through a tool
+                            # and replies in chat with two sentences naming the file, so
+                            # dropping this content left the panel with only a binary it
+                            # could not render. Collected now and captured after the
+                            # turn — a deliverable, not a chat message.
+                            tool_output = _stream_text(getattr(chunk, "content", None))
+                            if tool_output and _tool_text_budget_left(tool_documents):
+                                tool_documents.append(tool_output)
                             yield {
                                 "type": "tool.call",
                                 "name": _tool_name(getattr(chunk, "name", None)),
@@ -716,6 +742,34 @@ async def run_agent(
                 "orchestrator2 could not record development artifacts (agent=%s "
                 "run=%s)", agent_id, run_id,
             )
+
+        # Documents an agent produced through a TOOL, captured before the reply.
+        #
+        # REPORTED: the Design agent wrote a complete architecture document — every
+        # table and diagram present in the downloaded .docx — and the panel showed
+        # "Binary file. This file can't be displayed as text." The document was in a
+        # tool result, whose content this turn used to drop, so nothing reached
+        # Deliverables and the only trace was the file.
+        #
+        # Judged by the same document rule as a reply, so a status line or a JSON blob
+        # is still not a deliverable, and a refusal returned by a tool is still not one.
+        # BEFORE the reply, so when a turn produces both, the document is what the
+        # panel opens rather than the two sentences announcing it.
+        for output in tool_documents:
+            try:
+                from_tool = await deliverables.capture_tool_document(
+                    agent_id, output, run_id=run_id, tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+            except Exception:  # noqa: BLE001 - never costs the turn; the reply follows
+                logger.exception(
+                    "orchestrator2 could not persist a tool document (agent=%s "
+                    "run=%s)", agent_id, run_id,
+                )
+                continue
+            if from_tool:
+                yield {"type": "deliverable.ready", "run_id": run_id,
+                       "agent": agent_id, "deliverables": from_tool}
 
         try:
             produced = await deliverables.capture(
