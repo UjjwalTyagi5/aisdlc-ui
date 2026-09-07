@@ -47,6 +47,7 @@ import {
   snapshotStageVersion, toBackendStage, type ArtifactVersion,
 } from "@/lib/api/artifact-versions";
 import { qk } from "@/lib/api/query-keys";
+import { getProject } from "@/lib/api/projects";
 import { hasPermission } from "@/lib/auth/permissions";
 import { ownerRoleLabel } from "@/lib/roles";
 import type { Phase, ProjectId } from "@/lib/schemas";
@@ -175,6 +176,18 @@ export function StageVersionPanel({
   // comparing against email instead would silently never match.
   const me = session?.user.id ?? null;
 
+  // WHETHER THIS PANEL SHOULD EXIST AT ALL on this project. Versions gate what agents
+  // may read ONLY when `enforceArtifactPublication` is on; with it off — which is the
+  // default and, at the time of writing, true of every project — agents read the
+  // stage's live working payload and a published version changes nothing. Showing a
+  // freeze-then-sign-off ceremony that decides nothing teaches people the approval on
+  // this screen is theatre, which is exactly the wrong lesson for the screen next to it
+  // where document approval DOES decide something.
+  const projectQ = useQuery({
+    queryKey: qk.projects.detail(projectId),
+    queryFn: () => getProject(projectId),
+  });
+
   const versionsQ = useQuery({
     queryKey: qk.artifactVersions.forStage(projectId, phase),
     queryFn: () => listStageVersions(projectId, phase),
@@ -264,6 +277,15 @@ export function StageVersionPanel({
 
   const versions = versionsQ.data ?? [];
   const published = versions.find((v) => v.status === "published");
+
+  // Placed here rather than at the top of the component ON PURPOSE: every hook above
+  // must run on every render, so this cannot be an early return before them.
+  //
+  // Renders NOTHING, not a disabled panel or an explanation. Somebody who has not
+  // turned publication on is not missing a feature they were looking for — the setting
+  // that turns this on is on the project's Settings page, which is where the question
+  // "should this project gate its hand-offs?" belongs.
+  if (!projectQ.data?.enforceArtifactPublication) return null;
 
   return (
     <section className={cn("space-y-3", className)}>
