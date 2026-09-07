@@ -124,6 +124,7 @@ from agents_orchestrator.orchestrator2 import (
 )
 from config.ws_helper import (
     reset_session_id,
+    set_consequential_approved,
     set_orchestrator_run,
     set_provider_kind,
     set_session_id,
@@ -131,6 +132,7 @@ from config.ws_helper import (
     set_user_id,
 )
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
+from shared.authz.consequential import is_approval_message
 from shared.services.model_resolver import (
     ModelNotEnabledError,
     NoModelConfiguredError,
@@ -460,6 +462,20 @@ async def run_agent(
             # stage here, which the stage-owner permissions do not otherwise say —
             # `project_admin` holds approval for `documentation` and `plan` alone.
             set_orchestrator_run(True)
+            # DID THE USER APPROVE, on this turn? `authorize_consequential`'s second
+            # half reads this, and nothing in orchestrator2 ever set it — so a user
+            # who typed "yes" was asked again, and again. Reported: "the system
+            # continues to block the write operation despite your multiple approvals",
+            # while the same agent through its standalone wrapper wrote to the board
+            # fine. That wrapper calls this; this engine skips wrappers.
+            #
+            # Set UNCONDITIONALLY from the current message, never only when it is an
+            # approval: consent is for one action, and a yes that persisted would
+            # authorise every later turn in the conversation.
+            #
+            # `is_approval_message` is the shared helper the standalone path uses. Two
+            # notions of "yes" is how one surface accepts what the other refuses.
+            set_consequential_approved(is_approval_message(text))
             # Which board/repo provider the agent's tools are talking to. Without it
             # they default to azure_devops, which is right today and silently wrong the
             # first time a project selects GitHub.
@@ -649,6 +665,7 @@ async def run_agent(
             # including a standalone agent's request, where the stage owner really
             # does decide.
             set_orchestrator_run(False)
+            set_consequential_approved(False)
 
     # ── deliverable capture ──────────────────────────────────────────────────
     #
