@@ -117,6 +117,9 @@ from typing import Any, AsyncIterator, Mapping
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents_orchestrator.orchestrator2 import connectors, deliverables, mcp
+from config.ws_helper import (
+    reset_session_id, set_provider_kind, set_session_id, set_user_id,
+)
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.services.model_resolver import (
     ModelNotEnabledError,
@@ -362,6 +365,10 @@ async def run_agent(
     reply_parts: list[str] = []
     # Only a turn that ran to completion is captured. See the capture block below.
     turn_completed = False
+    # Bound BEFORE the try for the same reason `agent_id` is: the `finally` resets it,
+    # and a failure before it was assigned would raise NameError from inside the
+    # cleanup — the failure channel losing the failure.
+    _session_token = None
 
     try:
         # ── BYOK, project-scoped ─────────────────────────────────────────────
@@ -413,6 +420,36 @@ async def run_agent(
             # credential is usually a project-scoped PERSONAL one, and resolving it
             # without the turn's user yields a connector with no PAT, which the agent
             # reports exactly as it reports having no connector at all.
+            # ── the agent's own per-run context ──────────────────────────────
+            #
+            # The agents' tools do not take a working directory or a user. They build
+            # both from contextvars in `config/ws_helper`, which the standalone
+            # `*_agent_api.py` wrappers set and this engine — skipping those wrappers
+            # by D10a — did not.
+            #
+            # The cost was visible: the Development agent cloned the repo, said so, and
+            # the Deliverables tab showed "No files yet", because the clone was keyed on
+            # `get_session_id()` returning None while `runs.py::_run_dev_work_dir` looked
+            # under the RUN id. Its docstring says "session_id == run_id"; that was true
+            # of the wrapper and had to be made true here.
+            #
+            # SESSION ID IS THE RUN ID, matching the deliverables and the LangGraph
+            # thread, so one conversation is one id everywhere. The user is the turn's
+            # own, because the work_dir path is `files/<user>/orchestrator/<run>/project`.
+            _session_token = set_session_id(run_id)
+            set_user_id(user_id)
+            # Which board/repo provider the agent's tools are talking to. Without it
+            # they default to azure_devops, which is right today and silently wrong the
+            # first time a project selects GitHub.
+            try:
+                set_provider_kind(
+                    await connectors.connector_kind_for(
+                        agent_id, tenant_id=tenant_id, project_id=str(project_id or "")
+                    )
+                )
+            except Exception:  # noqa: BLE001 - a refinement, never fatal
+                pass
+
             # The project's connector AND its MCP servers, both bound for this turn
             # only. The old engine wraps every turn in exactly these two; this engine
             # had neither. The connector gap announced itself — the Development agent
@@ -576,6 +613,14 @@ async def run_agent(
         # it was created, so this cannot retract a value a still-running node is
         # using.
         _clear_run_model_context()
+        # The agent context names a run and a person. Left set, the next turn on this
+        # socket — possibly another run — would clone into the previous one's directory.
+        if _session_token is not None:
+            try:
+                reset_session_id(_session_token)
+            except Exception:  # noqa: BLE001 - nothing useful remains to do
+                pass
+            set_user_id("")
 
     # ── deliverable capture ──────────────────────────────────────────────────
     #
