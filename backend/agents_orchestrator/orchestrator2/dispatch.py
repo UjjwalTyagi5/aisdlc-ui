@@ -126,7 +126,9 @@ from config.ws_helper import (
     reset_session_id,
     set_consequential_approved,
     set_orchestrator_run,
+    set_project_id,
     set_provider_kind,
+    set_run_id,
     set_session_id,
     set_tenant_id,
     set_user_id,
@@ -457,6 +459,14 @@ async def run_agent(
             # Reported: Requirements refused to create Azure Board work items for a
             # Project Admin who had just confirmed them.
             set_tenant_id(tenant_id)
+            # THE PROJECT, which decides which boards, connectors and models the
+            # agent's tools can reach. `planning._stage_boards` reads it to answer
+            # "which board does this stage have", and with it unset the Requirements
+            # agent reported "no Azure DevOps board is connected to this project" on a
+            # project that has one connected.
+            set_project_id(str(project_id) if project_id else None)
+            # THE RUN, which the agents' own tools attribute their work to.
+            set_run_id(run_id)
             # This turn is the Orchestrator's, and `ws.py` has already verified the
             # caller administers the run's project. Per §1.5 that person owns every
             # stage here, which the stage-owner permissions do not otherwise say —
@@ -666,6 +676,11 @@ async def run_agent(
             # does decide.
             set_orchestrator_run(False)
             set_consequential_approved(False)
+            set_project_id(None)
+            set_run_id(None)
+            # Back to the module default rather than left pointing at this turn's
+            # provider, which would be silently wrong for the next project.
+            set_provider_kind("")
 
     # ── deliverable capture ──────────────────────────────────────────────────
     #
