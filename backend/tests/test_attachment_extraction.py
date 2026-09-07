@@ -80,61 +80,28 @@ def test_a_png_extracts_to_a_placeholder_not_to_text(tmp_path):
     from shared.tools.document_tools import extract_file_text, extraction_succeeded
 
     png = tmp_path / "Screenshot 2026-09-02 004837.png"
-    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    png.write_bytes(bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10]) + bytes(32))
 
     out = extract_file_text(str(png))
     assert out.strip() != ""              # non-empty, which is what fooled the caller
     assert extraction_succeeded(out) is False
 
 
-# ── both chat paths route it to a message that helps ─────────────────────────
-
-
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "module",
-    [
-        "agents_orchestrator.requirements_agent.requirements_agent_api",
-        "agents_orchestrator.design_architecture_agent.design_architecture_agent_api",
-    ],
-)
-def test_neither_chat_path_treats_a_placeholder_as_content(module):
-    import importlib
-    import inspect
-
-    src = inspect.getsource(importlib.import_module(module))
-    assert "_extracted_ok(_txt)" in src, "still using truthiness on extracted text"
-    assert "if _txt and _txt.strip():" not in src
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "module",
-    [
-        "agents_orchestrator.requirements_agent.requirements_agent_api",
-        "agents_orchestrator.design_architecture_agent.design_architecture_agent_api",
-    ],
-)
-def test_an_unreadable_attachment_names_the_limit_instead_of_a_path(module):
+def test_an_unreadable_attachment_names_the_limit_instead_of_a_path(tmp_path):
     """The old hint was "please use the following files <path>", which pointed the agent
     at a file tool that cannot read an image either. The replacement has to (a) stop the
     agent opening it, (b) stop it pretending it looked, and (c) say what WOULD work."""
-    import importlib
-    import inspect
+    from shared.tools.document_tools import attachment_message_contents
 
-    import re
+    png = tmp_path / "diagram.png"
+    png.write_bytes(bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10]) + bytes(32))
 
-    src = inspect.getsource(importlib.import_module(module))
-    # The message is written across several adjacent string literals, so compare on a
-    # whitespace- and quote-normalised form rather than guessing at the line breaks.
-    flat = re.sub(r'"\s*\n\s*"', "", src)
-    flat = re.sub(r"\s+", " ", flat)
+    message = attachment_message_contents([str(png)])[0]
 
-    assert "could not be read as text" in flat
-    assert "do not call a file tool on it" in flat
-    assert "do not claim to have looked at it" in flat
-    # And it must offer the formats that actually work.
+    assert "could not be read as text" in message
+    assert "do not call a file tool on it" in message
+    assert "do not claim to have looked at it" in message
     for fmt in (".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"):
-        assert fmt in src, f"{fmt} not offered as an alternative"
-    # The old dead-end hint is gone.
-    assert "please use the following files {', '.join(_unread)}" not in src
+        assert fmt in message, f"{fmt} not offered as an alternative"
+    assert "please use the following files" not in message

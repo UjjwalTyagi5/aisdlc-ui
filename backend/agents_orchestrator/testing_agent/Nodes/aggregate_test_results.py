@@ -42,13 +42,32 @@ async def aggregate_test_results(state: SuperAgentState) -> Dict[str, Any]:
     # output_artifact_field, shell_exit_code) that aren't part of the
     # GeneratedTestSet schema. Filter to known fields when constructing the
     # pydantic model; route the parsed artifacts to dedicated fields below.
-    sets = [
-        GeneratedTestSet(**{k: v for k, v in s.items() if k in _GENERATED_TEST_SET_FIELDS})
-        for s in raw_test_sets
-    ]
+    # ONE UNUSABLE ENTRY MUST NOT DISCARD THE REST. This was a list comprehension, so a
+    # single skill handing back `{}` — no skill_name, no test_file_path, no
+    # test_framework — raised ValidationError out of the whole node and took every OTHER
+    # skill's passing results, the defect log and the QA report down with it. Fanning out
+    # to skills that fail independently is the entire point of dispatch; the fan-in has
+    # to hold that property too. Built one at a time, and an entry that cannot be built
+    # is recorded as a skill failure below rather than dropped silently — "the aggregator
+    # skipped it" and "the skill produced nothing" must not look the same in the report.
+    sets: list[GeneratedTestSet] = []
+    malformed: list[str] = []
+    for raw in raw_test_sets:
+        if not isinstance(raw, dict):
+            malformed.append(f"aggregate: discarded a non-dict test set ({type(raw).__name__})")
+            continue
+        try:
+            sets.append(
+                GeneratedTestSet(**{k: v for k, v in raw.items() if k in _GENERATED_TEST_SET_FIELDS})
+            )
+        except Exception as exc:  # noqa: BLE001 — the reason is carried into the report
+            name = str(raw.get("skill_name") or "unknown")
+            malformed.append(f"{name}: produced no usable test set ({exc.__class__.__name__})")
+            logger.warning("aggregate: unusable test set from %s: %s", name, exc)
+
     failures = [
         SkillFailure(skill_name=f.split(":", 1)[0], reason=f)
-        for f in (state.get("skill_failures") or [])
+        for f in list(state.get("skill_failures") or []) + malformed
     ]
 
     defects: list = []

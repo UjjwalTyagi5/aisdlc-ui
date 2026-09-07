@@ -40,11 +40,15 @@ async def _resolve_llm(state) -> object:
         state.get("tenant_id", ""), state.get("model_id"), offering_id=state.get("offering_id"))
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     from langchain_litellm import ChatLiteLLM
+    from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
     return ChatLiteLLM(
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
         api_base=resolved.base_url,
         api_key=resolved.api_key,
+        # The BYOK key must be the one litellm uses — see
+        # shared/services/model_resolver.litellm_key_kwargs.
+        **litellm_key_kwargs(resolved.litellm_provider, resolved.api_key),
         temperature=0,
         max_retries=1,
     )

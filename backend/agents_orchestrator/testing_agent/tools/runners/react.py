@@ -163,9 +163,60 @@ class ReactRunner(LanguageRunner):
             main = sandbox.run(["npm", "install"], cwd=work_dir, timeout_s=900)
         if not main.ok:
             return main
-        # Best-effort: install jest-junit. If the repo already has it, this is a no-op.
-        sandbox.run(["npm", "install", "--no-save", "jest-junit"], cwd=work_dir, timeout_s=300)
+        # ONE CALL, NOT TWO. `npm install --no-save <pkg>` reconciles node_modules
+        # against package.json, which PRUNES anything previously installed --no-save:
+        # a second such call silently removed the jest-junit installed by the first,
+        # and the run died on "Could not resolve a module for a custom reporter:
+        # jest-junit" after appearing to install it. Everything the harness adds goes
+        # in together.
+        self._ensure_harness_deps(work_dir, sandbox)
         return main
+
+    # Packages the HARNESS needs that the repo under test has no reason to carry:
+    #   · jest-junit — our reports/results.xml comes from this reporter
+    #   · @testing-library/* — skills/unit/SKILL.md tells the model to write
+    #     "jest + react-testing-library" tests, so the generated file imports it.
+    #     The runner installed only jest-junit, so every generated suite died on
+    #     "Cannot find module '@testing-library/react'" and the run said "No tests
+    #     collected" — blaming the repo for a dependency the agent's own prompt
+    #     asked for. The .NET runner already injects its equivalents.
+    #   · jest-environment-jsdom — component tests need a DOM; jest 28+ unbundled it.
+    _HARNESS_DEPS = (
+        "jest-junit",
+        "@testing-library/react",
+        "@testing-library/jest-dom",
+        # code_gen_prompt tells the model to drive interactions with userEvent, and
+        # the single-file template lists it — but a cloned repo need not have it.
+        "@testing-library/user-event",
+        "jest-environment-jsdom",
+    )
+
+    def _ensure_harness_deps(self, work_dir: str, sandbox: SandboxRunner) -> None:
+        """Install the packages our reporter and the generated tests import.
+
+        --no-save so the repo's package.json is never rewritten: the agent is testing
+        this checkout, not modifying it (and for a cloned repo those edits could end
+        up in the tests PR). A failure is logged and swallowed — a repo that already
+        has these still runs fine.
+        """
+        node_modules = os.path.join(work_dir, "node_modules")
+        missing = [
+            pkg for pkg in self._HARNESS_DEPS
+            if not os.path.isdir(os.path.join(node_modules, *pkg.split("/")))
+        ]
+        if not missing:
+            logger.info("react: harness deps already present")
+            return
+        logger.info("react: installing harness deps %s", ", ".join(missing))
+        res = sandbox.run(
+            ["npm", "install", "--no-save", "--no-audit", *missing],
+            cwd=work_dir, timeout_s=600,
+        )
+        if not res.ok:
+            logger.warning(
+                "react: could not install %s (tests importing them will fail to "
+                "run): %s", ", ".join(missing), (res.stderr or "")[:300],
+            )
 
     def run_tests(self, work_dir: str, sandbox: SandboxRunner) -> CmdResult:
         os.makedirs(os.path.join(work_dir, "reports"), exist_ok=True)

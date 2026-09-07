@@ -54,6 +54,7 @@ const KIND_BRAND: Record<ConnectorKind, { mark: string; bg: string }> = {
   azure_devops: { mark: "AB", bg: "#0078D7" }, // Azure Boards blue
   github: { mark: "GH", bg: "#1F2328" }, // GitHub near-black
   azure_repos: { mark: "AR", bg: "#C8511B" }, // Azure Repos orange
+  azure_pipelines: { mark: "AP", bg: "#2560E0" }, // Azure Pipelines blue
   github_actions: { mark: "GA", bg: "#2088FF" }, // GitHub Actions blue
   slack: { mark: "S", bg: "#4A154B" }, // Slack aubergine
   ms_teams: { mark: "T", bg: "#4B53BC" }, // Teams indigo

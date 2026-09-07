@@ -301,10 +301,57 @@ async def list_providers(
     return out
 
 
+def _probe_failure_reason(exc: Exception) -> str:
+    """A short, user-facing reason for a failed probe — never the credential.
+
+    "Key rejected" was printed for EVERY failure, including the ones that never
+    reached the provider at all. An api_base with no scheme makes httpx build a
+    relative URL and the call dies locally; an api_base pointing at the wrong
+    vendor answers 404. In both cases the key was never tested, and telling
+    someone their key is bad sends them to re-issue a credential that was always
+    fine. Distinguish the cases the message would otherwise misattribute.
+    """
+    text = str(exc)
+    name = type(exc).__name__
+    if "AuthenticationError" in name or "authentication_error" in text or "invalid x-api-key" in text:
+        return "The provider rejected this key."
+    if "NotFoundError" in name or '"code":"404"' in text or "model_not_found" in text:
+        return (
+            "Reached an endpoint, but it has no such model. Check the API base — a "
+            "blank one goes to the provider's own API; a URL for a different vendor "
+            "or gateway answers 404 for this model."
+        )
+    if "PermissionDenied" in name or "permission_error" in text:
+        return "The key is valid but not permitted to use this model."
+    if "RateLimit" in name:
+        return "The provider rate-limited the check. Wait a moment and test again."
+    if "/v1/messages" in text and "://" not in text.split("AnthropicException - ")[-1][:12]:
+        return (
+            "The API base is not a URL. Leave it blank to use the provider's own "
+            "API, or enter a full URL including https://."
+        )
+    if "APIConnectionError" in name or "ConnectError" in name or "Timeout" in name:
+        return "Could not reach that endpoint. Check the API base and your network."
+    return f"The check failed ({name})."
+
+
 async def _probe_model(provider: str, model: str, api_key: str, api_base: str | None = None) -> bool:
     """Small live completion to validate the key. Returns True on success.
-    Wrapped so tests can monkeypatch it without network. Never logs the key.
-    `api_base` targets a custom/self-hosted/OpenAI-compatible endpoint.
+
+    Kept as the bool-returning entry point every existing caller (and every test that
+    monkeypatches it) already uses; `_probe_model_with_reason` carries the diagnosis.
+    """
+    ok, _ = await _probe_model_with_reason(provider, model, api_key, api_base)
+    return ok
+
+
+async def _probe_model_with_reason(
+    provider: str, model: str, api_key: str, api_base: str | None = None,
+) -> tuple[bool, str]:
+    """Run the probe and return (ok, human-readable reason when it failed).
+
+    Never logs or returns the key. `api_base` targets a custom/self-hosted/
+    OpenAI-compatible endpoint.
 
     16 tokens, not 1: reasoning models (GPT-5 family, o-series, ...) spend part of
     their budget on an invisible reasoning trace before any visible output token —
@@ -323,7 +370,7 @@ async def _probe_model(provider: str, model: str, api_key: str, api_base: str | 
         kwargs["api_base"] = api_base
     try:
         await litellm.acompletion(**kwargs)
-        return True
+        return True, ""
     except Exception as exc:  # noqa: BLE001 — any provider/auth error => invalid
         # Newer reasoning models on Azure/OpenAI reject `max_tokens` outright and
         # name their own replacement in the error text — swap it in and retry once
@@ -332,7 +379,7 @@ async def _probe_model(provider: str, model: str, api_key: str, api_base: str | 
             retry_kwargs = {**kwargs, "max_completion_tokens": kwargs.pop("max_tokens")}
             try:
                 await litellm.acompletion(**retry_kwargs)
-                return True
+                return True, ""
             except Exception as retry_exc:  # noqa: BLE001
                 exc = retry_exc
         # Log the provider's actual message (not just the class) so verify failures are
@@ -342,7 +389,7 @@ async def _probe_model(provider: str, model: str, api_key: str, api_base: str | 
             "model verify failed provider=%s model=%s err=%s: %s",
             provider, model, type(exc).__name__, str(exc)[:600],
         )
-        return False
+        return False, _probe_failure_reason(exc)
 
 
 async def probe_provider(
@@ -361,7 +408,7 @@ async def probe_provider(
     """
     api_key = (api_key or "").strip()
     if not api_key:
-        return {"status": "invalid"}
+        return {"status": "invalid", "reason": "No API key was supplied."}
     probe_model = (model or "").strip()
     if not probe_model:
         from shared.services.model_catalog import models_for_provider
@@ -369,8 +416,16 @@ async def probe_provider(
         probe_model = models[0]["model_id"] if models else ""
     if not probe_model:
         raise InvalidModelError(f"no model to probe for provider {provider!r}")
-    ok = await _probe_model(provider, probe_model, api_key, (api_base or "").strip() or None)
-    return {"status": "valid" if ok else "invalid"}
+    ok, reason = await _probe_model_with_reason(
+        provider, probe_model, api_key, (api_base or "").strip() or None,
+    )
+    # The REASON is the point of this endpoint. Returning only valid/invalid meant the
+    # dialog could say nothing but "Key rejected", so a wrong API base — the actual
+    # cause both times this was reported — read as a bad credential.
+    out: dict = {"status": "valid" if ok else "invalid"}
+    if not ok:
+        out["reason"] = reason
+    return out
 
 
 async def verify_provider(tenant_id: str, provider_id: str) -> dict:

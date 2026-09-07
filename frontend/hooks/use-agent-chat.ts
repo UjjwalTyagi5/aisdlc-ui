@@ -471,10 +471,19 @@ function applyEvent(
             ...m,
             content: m.content + (typeof event.delta === "string" ? event.delta : ""),
           };
-        case "artifact.updated":
-          return typeof event.artifactId === "string"
-            ? { ...m, citations: [...(m.citations ?? []), event.artifactId] }
-            : m;
+        case "artifact.updated": {
+          // UPDATED, NOT APPENDED. The artifactId is deliberately deterministic —
+          // `artifact:<runId>:<filename>`, so the same file always maps to the same
+          // artifact — and an agent emits `file_generated` more than once for one
+          // file (a re-broadcast, or a document written and then registered). Pushing
+          // unconditionally put the same id in this list twice, and the citation chips
+          // key on it, so React warned about duplicate keys and reserved the right to
+          // drop or duplicate the chip. One artifact, one entry.
+          if (typeof event.artifactId !== "string") return m;
+          const citations = m.citations ?? [];
+          if (citations.includes(event.artifactId)) return m;
+          return { ...m, citations: [...citations, event.artifactId] };
+        }
         case "run.completed":
           return { ...m, streaming: false };
         case "code.diff": {

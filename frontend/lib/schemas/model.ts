@@ -275,7 +275,14 @@ export const VerifyResult = z.object({ id: z.string(), status: ModelProviderStat
 
 /** Stateless pre-save credential check (BU Admin's "Test" button, spec §5) — no
  *  provider row exists yet, so there's no `id` to carry, unlike `VerifyResult`. */
-export const ProbeResult = z.object({ status: ModelProviderStatus });
+/** `reason` is present only on failure — a short, user-facing diagnosis (wrong API
+ *  base, unreachable endpoint, model not on that endpoint) so the dialog can stop
+ *  reporting every failure as a rejected key. Optional: a backend that predates it
+ *  still parses. */
+export const ProbeResult = z.object({
+  status: ModelProviderStatus,
+  reason: z.string().nullish(),
+});
 
 export const ModelOption = z.object({
   /** Stable id of the exact provider connection + model. The unit of selection. */

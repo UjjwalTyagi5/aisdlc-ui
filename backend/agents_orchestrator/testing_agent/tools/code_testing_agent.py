@@ -22,6 +22,10 @@ class GraphState(TypedDict, total=False):
     function_names: list
     plan_test_case_count: int
     plan_summary: str
+    # Skills whose generation crashed before producing a runnable file. Passed
+    # through so the summary can say WHY there is nothing to run — see
+    # summarize_node.
+    skill_failures: list
 
 # --- 2. Utility Function to run shell commands ---
 def run_command(command: List[str], cwd: str) -> tuple[bool, str, str]:
@@ -195,6 +199,13 @@ def summarize_node(state: GraphState) -> GraphState:
         test_failures=failures_list or None,
         narrative_intro=narrative_intro,
         test_plan_summary=plan_summary,
+        # WITHOUT THIS THE REASON IS DROPPED. The .NET/React path (Nodes/execute.py)
+        # passes skill_failures; this Python path did not, so a skill that crashed
+        # before writing a test file — an Azure 429, a generation error — was
+        # reported as "No tests collected" with nothing to explain it. Observed on
+        # a real rate-limited run: state carried the RateLimitError the whole time
+        # and the user was shown an empty suite instead.
+        skill_failures=(state.get("skill_failures") or None),
     )
     print("\n--- FINAL SUMMARY ---")
     print(summary)
