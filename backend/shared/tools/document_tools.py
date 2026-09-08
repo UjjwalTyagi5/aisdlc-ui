@@ -32,7 +32,7 @@ def extraction_succeeded(text: str) -> bool:
 def extract_file_text(file_path: str) -> str:
     """Return plain text from any supported file type.
 
-    Supports: .pdf, .docx, .doc, .txt, .md, .csv, .xlsx, .xls
+    Supports: .pdf, .docx, .doc, .pptx, .txt, .md, .csv, .xlsx, .xls
     Returns an error string (not an exception) so callers get a readable message —
     check it with `extraction_succeeded` before treating the result as content.
     """
@@ -48,6 +48,25 @@ def extract_file_text(file_path: str) -> str:
             from docx import Document
             doc = Document(file_path)
             return "\n".join(p.text for p in doc.paragraphs)
+
+        elif ext == ".pptx":
+            # SLIDE BY SLIDE, and numbered. A deck's meaning is partly its ordering —
+            # "the risks slide" is a thing people refer to — and flattening every shape
+            # into one blob loses which text sat with which. `.ppt` is deliberately
+            # absent: python-pptx cannot read the legacy binary format, so accepting it
+            # would upload a file no agent can ever read.
+            from pptx import Presentation
+            deck = Presentation(file_path)
+            out: list[str] = []
+            for i, slide in enumerate(deck.slides, start=1):
+                said = [
+                    shape.text.strip()
+                    for shape in slide.shapes
+                    if getattr(shape, "has_text_frame", False) and shape.text.strip()
+                ]
+                if said:
+                    out.append(f"--- Slide {i} ---\n" + "\n".join(said))
+            return "\n\n".join(out)
 
         elif ext in (".txt", ".md"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
