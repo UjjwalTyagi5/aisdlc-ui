@@ -1503,6 +1503,34 @@ Ten mutants, all killed. One survivor was instructive: deleting the four-agent g
 still returned `None` — via the fail-soft `except` — so the test now asserts the route
 taken, not just the value.
 
+### 18.12 Merged with `main` (2026-09-08)
+
+The orchestrator work and `origin/main` were brought together on
+`feature/orchestrator-merge-main`. 46 commits from main, 6 from this branch, **no
+conflicts** — the sides barely overlap. The single shared file,
+`shared/tools/document_tools.py`, took Ujjwal's `.pptx` arm and this branch's `.docx`
+table fix in different branches of the same conditional; both survive and both are
+pinned by tests.
+
+**Both databases were behind.** Main added twelve migrations and neither database had
+them, which is what a first full-suite run reported as 184 failures — schema, not code.
+After migrating both to `0055_artifact_delete` that fell to 31, against **57 on
+`origin/main` running the same suite**. The merge is therefore not a regression: it
+passes 58 more tests than main does.
+
+Taken as method rather than as a one-off: a red suite after a merge is a question, not
+an answer. The two things worth doing before touching any code are migrating the test
+database and running the same suite on the other branch, because both times here the
+failures turned out to belong to the environment or to main.
+
+**The run-memory column is intact.** `conversation_messages.agent_id` (0045) is present
+in both databases, and main's chain was spliced to run from it rather than around it, so
+per-agent attribution and the run transcript are unaffected.
+
+**The old Copilot is still gone** — every removal guard passes after the merge — and
+main independently closed the last piece of that debt by repointing `advanceCopilotRun`
+at `POST /runs/{id}/approvals`. The three screens that approve a gate work again.
+
 ### 18.8 Left open, deliberately
 
 - **RLS (#1)** — unchanged, and still the operator's call. See 17.6.
