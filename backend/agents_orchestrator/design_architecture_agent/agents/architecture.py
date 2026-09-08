@@ -1,7 +1,9 @@
 """Design & Architecture Agent — LangGraph workflow (Azure OpenAI).
 
 Tools:
-- read_document       — extract text from uploaded local files
+- read_uploaded_file  — extract text from an uploaded local file (by path)
+- read_document       — read an APPROVED project document (by id), from
+                       shared/tools/project_documents.make_document_tools
 - generate_architecture — produce HLD/LLD/C4/API/DB/ADR from text or context
 - generate_architecture_from_context — architecture from conversation context only
 - update_response     — refine/update previously generated content
@@ -360,11 +362,20 @@ def _with_save_receipt(receipt: str, markdown: str) -> str:
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @tool
-def read_document(file_path: str) -> str:
+def read_uploaded_file(file_path: str) -> str:
     """Read a local uploaded file and return its text content.
 
-    Supports .txt, .md, .csv, .xlsx, .xls, .docx, .pdf.
-    Call this first whenever the user sends a file path.
+    Supports .txt, .md, .csv, .xlsx, .xls, .docx, .pptx, .pdf.
+    Call this first whenever the user sends a file PATH. To read an approved project
+    document by its id, use `read_document` instead — a different tool.
+
+    NAMED APART FROM `read_document` DELIBERATELY. This agent binds both, and until the
+    rename both were called `read_document`: the provider refuses a request whose tool
+    names repeat, so every Design turn came back as "the model provider rejected the
+    request as malformed" while other agents on the same model worked. Even where the
+    API tolerated it, two readers under one name taking different arguments is a
+    coin-flip for the model — the same reasoning that kept the Documentation agent out
+    of the SharePoint fan-out.
 
     Args:
         file_path: Absolute path to the uploaded file.
@@ -382,7 +393,7 @@ async def generate_architecture(document_text: str, custom_prompt: str = "") -> 
     from document text or requirements.
 
     Args:
-        document_text: Full text extracted from uploaded documents (use read_document first).
+        document_text: Full text extracted from uploaded documents (use read_uploaded_file first).
         custom_prompt: Additional focus area or instructions from the user.
     """
     broadcast_log(manager, "Generating architecture from document...", level="INFO")
@@ -985,7 +996,7 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     _SHAREPOINT_TOOLS = []
 
 tools = [
-    read_document,
+    read_uploaded_file,
     # The project's requirements, ON DEMAND. Replaced the Design page's automatic
     # injection, which pushed every board item into context before the user had typed.
     read_project_requirements,
@@ -1158,7 +1169,7 @@ must be derived from the requirements provided — not invented.
    when the user wants images embedded in the document; its URLs expire in ~30 days,
    so never present them as permanent. If Figma is not connected, the tools say so —
    carry on from the written requirements rather than stopping.
-1. If the user provides file paths → call read_document for EACH file first.
+1. If the user provides file paths → call read_uploaded_file for EACH file first.
 2. Pass extracted text to generate_architecture.
 3. If no files → use generate_architecture_from_context with conversation context.
 4. VALIDATION LOOPS (run after generation, before asking to save):
@@ -1406,7 +1417,7 @@ Rules that prevent most parse failures:
 
 ── ABSOLUTE RULES ────────────────────────────────────────────────────────────
 - NEVER write architecture as a plain-text reply. ALWAYS call a tool first.
-- NEVER say you cannot access files — always call read_document.
+- NEVER say you cannot access files — always call read_uploaded_file for a path, or read_document for an approved project document.
 - EVERY architecture output MUST have at least one ```mermaid``` block.
 - HIGH-LEVEL DESIGN MUST include a high-level architecture diagram (Mermaid graph/flowchart).
 - LOW-LEVEL DESIGN MUST include BOTH a component/class diagram (Mermaid classDiagram
@@ -1610,7 +1621,8 @@ _TOOL_ARG_HINTS: dict[str, str] = {
     ),
     "generate_architecture": (
         "generate_architecture requires 'requirements_text' (the extracted requirements text). "
-        "Read the source document first with read_document, then pass the result here."
+        "Read the source first with read_uploaded_file (a path) or read_document (a "
+        "project document id), then pass the result here."
     ),
     "render_diagram_via_kroki": (
         "render_diagram_via_kroki requires 'diagram_type' (e.g. 'plantuml') and 'source' (the raw diagram source code)."
