@@ -388,3 +388,46 @@ describe("what a sent turn says it carried", () => {
     expect(turn.attachments ?? []).toEqual([]);
   });
 });
+
+/**
+ * The chip has to still be there after the turn goes.
+ *
+ * Reported from a live run: the BRD attached, the agent read it, and neither the
+ * composer chip nor the name on the sent message was on screen. The backend held the
+ * file and had answered the listing with it, so whatever dropped it did so on this
+ * side — and the tell in the server log was a SECOND `POST /runs`, which only happens
+ * when `runIdRef` has been cleared. Clearing it disables the chips query, whose data
+ * lives under the old run's key, so the chips vanish and nothing refetches.
+ */
+describe("the chips outlive the turn", () => {
+  it("keeps the chip on screen after the message is sent", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+
+    sendMessage("turn this into stories");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByTestId("orchestrator-attachments").textContent).toContain("brd.md");
+  });
+
+  it("mints exactly one run across attaching and then sending", async () => {
+    // The second POST /runs in the live log is the symptom, not the cause: a run
+    // created after the upload has no attachments, and the chips query moves to a key
+    // nothing has ever filled.
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+    sendMessage("and now the criteria");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    expect(createRun).toHaveBeenCalledTimes(1);
+    const turn = sendTurn.mock.calls[0]![0] as { resolveRunId: () => Promise<string> };
+    await expect(turn.resolveRunId()).resolves.toBe("run-1");
+    expect(createRun).toHaveBeenCalledTimes(1);
+  });
+});
