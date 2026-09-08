@@ -667,6 +667,19 @@ async def request_artifact_deletion(
     title = (artifact.blob_path or "").rsplit("/", 1)[-1] or artifact.artifact_type
     user_id = getattr(request.state, "user_id", "") or ""
 
+    # RESOLVED, NOT GUESSED. `request.state` carries no role — the JWT middleware sets
+    # only user_id, jti and token_exp — so reading `state.platform_role` silently gave
+    # every requester "contributor", and a Project Admin's deletion was filed as though
+    # a contributor had asked. Harmless for the approver here (this type is TYPE_ROUTED
+    # to the document's owner), but it is the requester's identity in the timeline and
+    # it was wrong. `actor_display_name` likewise turns the id into a person.
+    from shared.authz.effective_role import (  # noqa: PLC0415
+        actor_display_name, effective_platform_role,
+    )
+
+    actor_name = await actor_display_name(db, request)
+    actor_role = await effective_platform_role(db, request)
+
     # THE UNIT THE PROJECT LIVES IN, read from the project rather than assumed.
     # `create_request` requires it — the approver's binding is checked against this
     # scope, so a request with the wrong workspace lands in a queue whose owner
@@ -679,8 +692,8 @@ async def request_artifact_deletion(
         db,
         tenant_id=str(tenant_id),
         initiator_id=user_id,
-        initiator_name=user_id,
-        initiator_role=getattr(request.state, "platform_role", "") or "contributor",
+        initiator_name=actor_name,
+        initiator_role=actor_role,
         request_type="artifact_delete",
         title=f"Delete {title}",
         description=reason,
