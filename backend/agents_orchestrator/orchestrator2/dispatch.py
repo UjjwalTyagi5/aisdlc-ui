@@ -121,6 +121,7 @@ from agents_orchestrator.orchestrator2 import (
     deliverables,
     dev_artifacts,
     mcp,
+    workspace,
 )
 from config.ws_helper import (
     reset_session_id,
@@ -513,6 +514,37 @@ async def run_agent(
                 )
             except Exception:  # noqa: BLE001 - a refinement, never fatal
                 pass
+
+            # THE REPOSITORY, for the four agents that read one.
+            #
+            # Code Review, Security, Documentation and Deployment resolve their repo
+            # through `s.work_dir` on their own session state, filled by a
+            # `get_prepared()` call that lives in each `*_agent_api.py` wrapper — which
+            # this engine skips. So through the Orchestrator every one of their repo
+            # tools answered "no workspace prepared", with this run's own Development
+            # checkout sitting on disk next to it.
+            #
+            # It did not look like a failure, which is why it lasted. The agents
+            # answered from the CONVERSATION instead — describing code they had never
+            # opened, and filing a document indistinguishable from a real review.
+            # `runs.code_review_artifacts` and `runs.security_artifacts` stayed NULL on
+            # those runs while standalone runs of the same week carried a real unified
+            # diff and a real SBOM.
+            #
+            # Reported as: "they should know which repo the development was done in.
+            # They should be able to pull that."
+            #
+            # The eighth instance of the pattern, and the one
+            # `test_run_context_is_complete.py` could not catch — it compares the
+            # `ws_helper` contextvars the wrappers set, and this is session-state
+            # assignment. `test_workspace_binding.py` covers it directly.
+            workspace.bind(
+                agent_id,
+                run_id=run_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
 
             # The project's connector AND its MCP servers, both bound for this turn
             # only. The old engine wraps every turn in exactly these two; this engine

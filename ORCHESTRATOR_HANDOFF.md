@@ -392,7 +392,15 @@ pending, which sent at least one reader at finished work.
 6. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
    exceptions". Seen after a low-memory event; the Orchestrator's own routes were
    unaffected. Not diagnosed.
-7. **The Design agent's document does not reach the Orchestrator CHAT as text.**
+7. **RESOLVED (2026-09-08) — the repo-reading agents had no workspace.** Code Review,
+   Security, Documentation and Deployment read `s.work_dir`, filled only by the
+   wrapper's `get_prepared()`. Through the Orchestrator they answered from the
+   conversation instead of the code. Fixed by `orchestrator2/workspace.py`; see
+   `orchestrator_instruction.md` §18.11. Kept listed because it is the eighth instance
+   of the wrapper-gap pattern and the FIRST that `test_run_context_is_complete.py`
+   could not catch — that guard only compares `ws_helper` contextvars, so any future
+   per-run state held as session-state assignment is still invisible to it.
+8. **The Design agent's document does not reach the Orchestrator CHAT as text.**
    Nothing registers a socket under a run id and the tool result carrying it is emitted
    as `tool.call`, not `stream_chunk`. The user gets the file plus a reply naming it —
    the same shape Requirements and the Project Manager have. Forwarding the text needs

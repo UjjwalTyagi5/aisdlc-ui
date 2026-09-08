@@ -1450,6 +1450,59 @@ deleting the line rather than by testing it.
 this machine's dev server — a probe file served by `localhost:3000` to `curl` here comes
 back 404 in that browser. Unit and mutation coverage only.
 
+### 18.11 The repo-reading agents get the run's checkout (2026-09-08)
+
+**Reported:** "those agents do code review and security after development has been done,
+they should know which repo the development was done in. They should be able to pull
+that." Correct, and they could not.
+
+Code Review, Security, Documentation and Deployment resolve their repository through
+`s.work_dir` on their own session state. That field is filled by a single
+`get_prepared()` call living in each agent's `*_agent_api.py` wrapper — which this
+engine skips by D10a. Through the Orchestrator every one of their repo tools returned
+"no workspace prepared", with the run's own Development checkout on disk beside them.
+Measured on run `9de55574`: 155 files present, `_work_dir()` → `None` for all three.
+
+**Why it survived so long.** It never looked like a failure. The agents did not stop —
+they answered from the CONVERSATION, describing code they had never opened, and filed a
+document indistinguishable from a real review. The tell was only in the database:
+`code_review_artifacts` and `security_artifacts` were NULL on Orchestrator run
+`c0345c1f`, while standalone runs of the same week carried a real 6.7 KB unified diff
+(`072633af`) and a real SBOM with severity counts (`23914f8b`).
+
+**The fix** is `orchestrator2/workspace.py`, called from the turn alongside the other
+per-run context. Two sources, in order: the run's own Development checkout
+(`files/<user>/orchestrator/<run>/project`), then a target prepared on the standalone
+page — the same in-memory `(tenant, project)` entry the wrapper reads. The run's own
+checkout wins, because in a conversation where Development has just written the code
+that is what "now review it" means, and a stale prepared target would otherwise be
+reviewed silently.
+
+Nothing is invented. With no checkout and nothing prepared it binds nothing and the
+agent goes on saying it has no workspace. An empty directory does not count either:
+the Development agent's `_get_work_dir` calls `makedirs` on every turn, so the path
+exists as soon as any agent has run, and accepting it would hand Security an empty tree
+and get back a clean scan.
+
+Git facts are read from the repository, never guessed — head SHA, branch, remote — and
+**the PAT is stripped from the remote URL**, which the Development agent's clone embeds
+inline and which is otherwise rendered into the agent's context and stored on its
+artifact. Code Review additionally gets a diff computed against the base branch, because
+`analyze_diff` takes diff text as an argument and would otherwise have a repository and
+nothing to say about what changed in it.
+
+**Why the guard missed it.** `test_run_context_is_complete.py` compares the `ws_helper`
+contextvar setters the wrappers use against what the turn establishes. This state is not
+a contextvar — it is a lookup plus direct attribute assignment — so the guard was blind
+to it by construction rather than by oversight. `test_workspace_binding.py` covers it
+directly, and pins the turn's call.
+
+**Verified live**, same probe before and after: `search_repo` now returns a real hit in
+`Program.cs`, `scan_secrets` runs gitleaks, `generate_sbom` returns real components.
+Ten mutants, all killed. One survivor was instructive: deleting the four-agent guard
+still returned `None` — via the fail-soft `except` — so the test now asserts the route
+taken, not just the value.
+
 ### 18.8 Left open, deliberately
 
 - **RLS (#1)** — unchanged, and still the operator's call. See 17.6.
