@@ -3,15 +3,16 @@ import Link from "next/link";
 import { ShieldAlert } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { PwcMark } from "@/components/brand/pwc-mark";
-import { SignInBrandPanel } from "@/components/landing/sign-in-brand-panel";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { isLocalAuth, isMockAuth, isOidcEnabled } from "@/lib/auth/mode";
+import {
+  SIGN_IN_SURFACE,
+  SignInBrandLockup,
+  SignInMethod,
+  SignInTerms,
+  signInDescription,
+  signInTitle,
+} from "@/components/landing/sign-in-content";
+import { isMockAuth, isOidcEnabled } from "@/lib/auth/mode";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
-
-import { Auth0SignInButton } from "./auth0-signin-button";
-import { EmailPasswordForm } from "./email-password-form";
-import { MockSignInPanel } from "./mock-signin-panel";
 
 export const metadata: Metadata = { title: "Sign in" };
 
@@ -36,6 +37,19 @@ function lookupError(code?: string): { title: string; message: string } | null {
   return code in ERRORS ? ERRORS[code as keyof typeof ERRORS] : null;
 }
 
+/**
+ * `/login` — the same sign-in as the landing popup, on its own page.
+ *
+ * ONE CENTERED CARD, not a two-column layout. This route used to put a marketing panel
+ * beside the form while the popup had already become the form alone, on a newer
+ * surface. It is not a cosmetic difference: an expired session and every emailed
+ * password link land here, so the older-looking one was what a returning user saw
+ * first. Everything inside the card now comes from `sign-in-content.tsx`, shared with
+ * the popup.
+ *
+ * What stays here, because the popup has no use for it: the error banner (this is
+ * where `?error=` lands) and the `?from=` redirect.
+ */
 export default async function LoginPage({
   searchParams,
 }: {
@@ -47,104 +61,57 @@ export default async function LoginPage({
   const err = lookupError(error);
 
   return (
-    <main className="bg-background relative min-h-dvh">
-      {/* THE SAME SURFACE AS THE LANDING POPUP. This route had drifted to a flat
-          panel with plain type and older copy, which mattered more than it sounds:
-          /login is where an expired session and every emailed password link land, so
-          the drifted one was the first thing a returning user saw. */}
-      <div
-        aria-hidden
-        className="bg-mesh pointer-events-none absolute inset-0 -z-10 opacity-70"
-      />
+    <main className="bg-background relative grid min-h-dvh place-items-center px-6 py-12">
+      {/* The same atmosphere the popup sits on, so the two read as one product. Both
+          layers are decorative and pointer-events-none, so neither can intercept a
+          click on the form. */}
+      <div aria-hidden className="bg-mesh pointer-events-none absolute inset-0 -z-10 opacity-70" />
       <div
         aria-hidden
         className="from-primary/5 via-background to-background pointer-events-none absolute inset-x-0 top-0 -z-10 h-80 bg-gradient-to-b"
       />
 
-      <div className="mx-auto grid min-h-dvh w-full max-w-6xl grid-cols-1 items-center gap-12 px-6 py-12 lg:grid-cols-[1fr_420px] lg:py-0">
-        {/* Marketing column — shared with the landing popup so the two cannot
-            disagree about what the product says about itself. */}
-        <SignInBrandPanel className="hidden py-12 lg:flex" />
+      <section className="w-full max-w-lg space-y-4" aria-label="Sign in">
+        {err && (
+          <Alert variant="destructive">
+            <ShieldAlert />
+            <AlertTitle>{err.title}</AlertTitle>
+            <AlertDescription>{err.message}</AlertDescription>
+          </Alert>
+        )}
 
-        {/* Sign-in column */}
-        <section className="mx-auto w-full max-w-md space-y-4" aria-label="Sign in">
-          {/* Mobile brand mark — visible below lg */}
-          <div className="flex flex-col items-center gap-2 pt-4 text-center lg:hidden">
-            <PwcMark size={48} />
-            <h1 className="text-2xl font-semibold tracking-tight">SDLC Platform</h1>
-            <p className="text-muted-foreground text-xs font-medium tracking-wider uppercase">
-              Powered by PwC
-            </p>
+        <div className={SIGN_IN_SURFACE}>
+          {/* Contained to the card's own box, exactly as in the popup. */}
+          <div
+            aria-hidden
+            className="bg-mesh pointer-events-none absolute inset-0 -z-10 rounded-2xl opacity-80"
+          />
+          <SignInBrandLockup />
+          <div className="space-y-1.5 text-center">
+            <h1 className="font-display text-2xl tracking-tight">{signInTitle()}</h1>
+            <p className="text-muted-foreground text-sm">{signInDescription()}</p>
           </div>
+          <SignInMethod redirectTo={redirectTo} />
+          <SignInTerms />
+        </div>
 
-          {err && (
-            <Alert variant="destructive">
-              <ShieldAlert />
-              <AlertTitle>{err.title}</AlertTitle>
-              <AlertDescription>{err.message}</AlertDescription>
-            </Alert>
-          )}
-
-          <Card className="border-line-soft/60 bg-panel-elevated/80 shadow-2xl backdrop-blur-2xl">
-            <CardHeader>
-              <CardTitle className="font-display text-2xl tracking-tight">
-                {isLocalAuth
-                  ? `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`
-                  : isMockAuth || !isOidcEnabled
-                    ? "Continue (mock mode)"
-                    : `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`}
-              </CardTitle>
-              <CardDescription>
-                {isLocalAuth
-                  ? "Use the email and password set up by your administrator."
-                  : isMockAuth || !isOidcEnabled
-                    ? "Auth0 isn't configured — using a local session cookie. Pick a role to preview permissions."
-                    : `Use your work account. Enterprise SSO is configured by your ${BUSINESS_UNIT_LABEL.toLowerCase()} admin.`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-4">
-              {/* Local email+password (Phase 3) takes precedence when AUTH_MODE=local.
-                  Otherwise: Auth0 button when OIDC is enabled and not mock; else mock. */}
-              {isLocalAuth ? (
-                <EmailPasswordForm redirectTo={redirectTo} />
-              ) : !isMockAuth && isOidcEnabled ? (
-                <Auth0SignInButton redirectTo={redirectTo} />
-              ) : (
-                <MockSignInPanel redirectTo={redirectTo} />
-              )}
-            </CardContent>
-          </Card>
-
-          {!isMockAuth && isOidcEnabled && (
-            <p className="text-muted-foreground text-center text-xs">
-              Trouble signing in?{" "}
-              <Link href="#" className="text-foreground underline underline-offset-2">
-                Contact your admin
-              </Link>{" "}
-              or{" "}
-              <a
-                href="mailto:support@example.test"
-                className="text-foreground underline underline-offset-2"
-              >
-                email support
-              </a>
-              .
-            </p>
-          )}
-
+        {!isMockAuth && isOidcEnabled && (
           <p className="text-muted-foreground text-center text-xs">
-            By continuing you agree to the{" "}
-            <a href="#" className="underline underline-offset-2">
-              terms of service
-            </a>{" "}
-            and{" "}
-            <a href="#" className="underline underline-offset-2">
-              privacy policy
+            Trouble signing in?{" "}
+            <Link href="#" className="text-foreground underline underline-offset-2">
+              Contact your admin
+            </Link>{" "}
+            or{" "}
+            <a
+              href="mailto:support@example.test"
+              className="text-foreground underline underline-offset-2"
+            >
+              email support
             </a>
             .
           </p>
-        </section>
-      </div>
+        )}
+      </section>
     </main>
   );
 }

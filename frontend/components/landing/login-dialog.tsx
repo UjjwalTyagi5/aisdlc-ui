@@ -1,19 +1,22 @@
 "use client";
 
-import { PwcMark } from "@/components/brand/pwc-mark";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { Auth0SignInButton } from "@/app/(auth)/login/auth0-signin-button";
-import { EmailPasswordForm } from "@/app/(auth)/login/email-password-form";
-import { MockSignInPanel } from "@/app/(auth)/login/mock-signin-panel";
-import { isLocalAuth, isMockAuth, isOidcEnabled } from "@/lib/auth/mode";
-import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
-
+import {
+  SIGN_IN_SURFACE,
+  SignInBrandLockup,
+  SignInMethod,
+  SignInTerms,
+  signInDescription,
+  signInTitle,
+} from "@/components/landing/sign-in-content";
 
 /**
- * Sign-in as a small, centered popup on the marketing landing — just the
- * form, no marketing copy (that's what the page behind it is for). Reuses
- * the same EmailPasswordForm as /login, so behaviour (tier redirect, errors)
- * matches.
+ * Sign-in as a small, centered popup on the marketing landing — just the form, no
+ * marketing copy (that's what the page behind it is for).
+ *
+ * Everything inside comes from `sign-in-content.tsx`, shared with the `/login` route so
+ * the two cannot disagree about the wording, the auth mode on offer, or the surface.
+ * They had drifted twice before that module existed.
  */
 export function LoginDialog({
   open,
@@ -26,53 +29,21 @@ export function LoginDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-line-soft/50 bg-panel-elevated/60 flex flex-col gap-5 rounded-2xl p-8 shadow-2xl backdrop-blur-2xl sm:max-w-lg sm:rounded-2xl sm:p-10">
-        {/* Ambient brand-glow, same surface language as /login — the popup was
-            a flat translucent box with nothing behind it, which is what read
-            as plain next to the full page's mesh glow. Contained to the
-            dialog's own box: a fixed-position ancestor is a containing block,
-            so this never bleeds past the rounded corners. */}
+      <DialogContent className={`${SIGN_IN_SURFACE} sm:max-w-lg sm:rounded-2xl`}>
+        {/* Ambient brand-glow. Contained to the dialog's own box: a fixed-position
+            ancestor is a containing block, so this never bleeds past the corners. */}
         <div aria-hidden className="bg-mesh pointer-events-none absolute inset-0 -z-10 rounded-2xl opacity-80" />
-        <div className="flex items-center justify-center gap-3">
-          <PwcMark size={40} />
-          <span className="font-display text-sm font-bold tracking-tight">SDLC Platform</span>
-        </div>
+        <SignInBrandLockup />
         <div className="space-y-1.5 text-center">
+          {/* Radix's own title and description, so the dialog stays labelled for a
+              screen reader. The words are the shared ones. */}
           <DialogTitle className="font-display text-2xl tracking-tight">
-            {isLocalAuth
-              ? `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`
-              : isMockAuth || !isOidcEnabled
-                ? "Continue (mock mode)"
-                : `Sign in to your ${BUSINESS_UNIT_LABEL.toLowerCase()}`}
+            {signInTitle()}
           </DialogTitle>
-          <DialogDescription>
-            {isLocalAuth
-              ? "Use the email and password set up by your administrator."
-              : isMockAuth || !isOidcEnabled
-                ? "Auth0 isn't configured — using a local session cookie. Pick a role to preview permissions."
-                : `Use your work account. Enterprise SSO is configured by your ${BUSINESS_UNIT_LABEL.toLowerCase()} admin.`}
-          </DialogDescription>
+          <DialogDescription>{signInDescription()}</DialogDescription>
         </div>
-        {/* Mirrors the branching in app/(auth)/login/page.tsx so this popup and
-            the dedicated /login route never disagree about which auth mode is live. */}
-        {isLocalAuth ? (
-          <EmailPasswordForm redirectTo={redirectTo} />
-        ) : !isMockAuth && isOidcEnabled ? (
-          <Auth0SignInButton redirectTo={redirectTo} />
-        ) : (
-          <MockSignInPanel redirectTo={redirectTo} />
-        )}
-        <p className="text-muted-foreground text-center text-xs">
-          By continuing you agree to the{" "}
-          <a href="#" className="underline underline-offset-2">
-            terms of service
-          </a>{" "}
-          and{" "}
-          <a href="#" className="underline underline-offset-2">
-            privacy policy
-          </a>
-          .
-        </p>
+        <SignInMethod redirectTo={redirectTo} />
+        <SignInTerms />
       </DialogContent>
     </Dialog>
   );
