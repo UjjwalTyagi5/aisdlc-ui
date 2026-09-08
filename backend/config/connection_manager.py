@@ -26,7 +26,18 @@ class ConnectionManager:
         Called as soon as session_id is known (first message from client).
         Subsequent broadcast() calls with a matching session_id will only
         reach websockets registered under that session.
+
+        A NEW SOCKET FOR A SESSION MEANS A NEW TURN, which is why any cancellation
+        against it is cleared here. The chat BFF opens one WebSocket per turn, so this
+        runs exactly once per turn — and without it, stopping one turn would cancel every
+        later turn on the same conversation until the TTL expired. That is a far worse
+        bug than the one cancellation exists to fix: a Stop button that silently breaks
+        the chat.
         """
+        from config.turn_cancellation import clear as _clear_cancellation  # noqa: PLC0415
+
+        _clear_cancellation(session_id)
+
         old = self._ws_to_session.get(id(websocket))
         if old and old != session_id:
             self._session_connections[old] = [
@@ -81,6 +92,20 @@ class ConnectionManager:
         them hands it to someone else.
         """
         session_id = message.get("session_id")
+
+        # STOP LANDS HERE, and this is the only place it could land cheaply. An agent
+        # notices a closed socket at its next `receive_text()`, which does not run until
+        # the turn it is inside has finished — so closing the connection made the chat go
+        # quiet while the agent kept generating and kept running tools. Every agent's
+        # output already funnels through this method (around sixty call sites), so
+        # raising here unwinds whichever loop is producing it without teaching nine
+        # separate stream loops a new convention.
+        if session_id:
+            from config.turn_cancellation import TurnCancelled, is_cancelled  # noqa: PLC0415
+
+            if is_cancelled(session_id):
+                raise TurnCancelled(session_id)
+
         if session_id:
             # Addressed to a session: its own sockets, or none. `.get` rather than a
             # membership test, so a session whose sockets have all disconnected is

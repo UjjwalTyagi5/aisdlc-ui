@@ -18,6 +18,7 @@ import { type NextRequest } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { mapWsToSseEvent } from "@/lib/bff/ws-to-sse";
 import { mintWsTicket, fastapiWsUrl } from "@/lib/bff/ws-ticket";
+import { bffFetch } from "@/lib/bff/client";
 
 /** Minimal chat request body. */
 interface ChatRequest {
@@ -146,7 +147,7 @@ export async function POST(req: NextRequest) {
   // "button that does nothing" the Orchestrator cockpit deliberately refuses to ship.
   void openChatWsBridge(
     session, runId, message, context, wsPath, writeSse, closeStream, agentParams,
-    req.signal,
+    req.signal, sessionId,
   );
 
   return new Response(readable, {
@@ -171,6 +172,8 @@ async function openChatWsBridge(
   agentParams?: Record<string, unknown>,
   /** Aborted when the browser stops reading — a Stop press, or the tab going away. */
   signal?: AbortSignal,
+  /** The chat session, so the agent can be told to stop the turn it is inside. */
+  sessionId?: string,
 ): Promise<void> {
   let ws: WebSocket | null = null;
   try {
@@ -230,6 +233,21 @@ async function openChatWsBridge(
     if (done) return;
     done = true;
     clearIdle();
+    // TELL THE AGENT, out of band. Closing the socket below is not enough on its own:
+    // an agent notices a closed connection only at its next `receive_text()`, which does
+    // not run until the turn it is inside has finished — so it would keep generating,
+    // keep spending tokens and keep running tools whose output arrives minutes later.
+    // This request reaches the process on a different connection and marks the session,
+    // and the agent unwinds at the next thing it tries to emit.
+    if (sessionId) {
+      void bffFetch(`/conversations/${encodeURIComponent(sessionId)}/cancel`, {
+        session,
+        method: "POST",
+      }).catch(() => {
+        // Best effort: the socket still closes below, so the user is not left waiting
+        // on output either way.
+      });
+    }
     writeSse({
       type: "run.completed", runId, status: "cancelled", at: new Date().toISOString(),
     });

@@ -192,7 +192,7 @@ describe("stopping a turn in flight", () => {
       <AgentChatDrawer
         open
         onOpenChange={() => {}}
-        title="Requirements"
+        context={{ page: "Requirements" }}
         messages={[]}
         onSend={vi.fn()}
         {...props}
