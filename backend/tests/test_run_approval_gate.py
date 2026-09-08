@@ -184,3 +184,114 @@ async def test_the_org_admin_wildcard_still_passes(run_at_requirements):
         json={"decision": "approve", "reason": "org admin override"},
     )
     assert r.status_code == 200, r.text
+
+
+# -- closing the gate ---------------------------------------------------------
+#
+# THE HALF THAT WAS MISSING. A gate IS `runs.gate_pending = true` —
+# `approvals._pending_gates` derives the whole queue from that column, and
+# `_handle_artifact_ready` sets it when an agent finishes a stage. Clearing it lived in
+# `copilot_advance`, which Phase 5A deleted with the rest of the Copilot, and nothing
+# inherited the job. So this route recorded a decision beside a run that went on looking
+# undecided, and the gate sat in every eligible queue permanently.
+
+
+async def _gate_pending(org: str, run: str) -> bool:
+    async with get_db_session_for_tenant(org) as s:
+        return (await s.execute(
+            text("SELECT gate_pending FROM runs WHERE id = CAST(:r AS uuid)"),
+            {"r": run},
+        )).scalar()
+
+
+async def _raise_the_gate(org: str, run: str) -> None:
+    """What `_handle_artifact_ready` does when an agent finishes a stage."""
+    async with get_db_session_for_tenant(org) as s:
+        await s.execute(
+            text("UPDATE runs SET gate_pending = true, current_stage = 'requirements' "
+                 "WHERE id = CAST(:r AS uuid)"),
+            {"r": run},
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_approving_closes_the_gate(run_at_requirements):
+    """Otherwise the queue row never clears and the same decision is asked for forever."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+    assert await _gate_pending(t["org"], t["run"]) is True
+
+    user = await _actor_who_can_see_the_run(t)
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(
+            user, t["org"], t["bu"], ["artifact:view", "artifact:approve_requirements"]
+        ),
+        json={"decision": "approve", "reason": "signed off"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert await _gate_pending(t["org"], t["run"]) is False
+
+
+@pytest.mark.asyncio
+async def test_rejecting_closes_the_gate_too(run_at_requirements):
+    """A rejection sends the stage back; it does not leave the run paused waiting for
+    the same person to answer the same question again."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+
+    user = await _actor_who_can_see_the_run(t)
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(
+            user, t["org"], t["bu"], ["artifact:view", "artifact:approve_requirements"]
+        ),
+        json={"decision": "reject", "reason": "acceptance criteria are thin"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert await _gate_pending(t["org"], t["run"]) is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_decision_leaves_the_gate_open(run_at_requirements):
+    """NON-VACUITY for the two above, and a rule in its own right: the gate closes
+    because the decision was ACCEPTED, not merely because the route was called. A caller
+    without the stage's permission must leave the run exactly as it was."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+
+    user = await _actor_who_can_see_the_run(t)
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(user, t["org"], t["bu"], ["artifact:view"]),
+        json={"decision": "approve"},
+    )
+
+    assert r.status_code == 403, r.text
+    assert await _gate_pending(t["org"], t["run"]) is True
+
+
+@pytest.mark.asyncio
+async def test_the_past_tense_the_ui_sends_is_accepted(run_at_requirements):
+    """The gate UI posts "approved"/"rejected" — that is what it sent to the retired
+    copilot route, and three live screens still speak that way. Normalised rather than
+    refused: teaching them a new vocabulary in the same change that fixes the routing
+    would be two changes wearing one coat."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+
+    user = await _actor_who_can_see_the_run(t)
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(
+            user, t["org"], t["bu"], ["artifact:view", "artifact:approve_requirements"]
+        ),
+        json={"decision": "approved", "reason": "past tense from the queue"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["decision"] == "approve"
+    assert await _gate_pending(t["org"], t["run"]) is False

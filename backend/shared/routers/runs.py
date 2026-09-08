@@ -26,7 +26,7 @@ import os
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import delete, false as sa_false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,9 +65,25 @@ def _user_id(request: Request) -> str:
 
 
 class ApprovalIn(BaseModel):
+    #: "approve" or "reject". Normalised below, because the gate UI has always sent the
+    #: past tense ("approved"/"rejected") — that is what `advanceCopilotRun` posted to
+    #: the retired copilot route, and rejecting those spellings here would break the
+    #: three screens that decide gates rather than teach them a new vocabulary.
     decision: str
     reason: Optional[str] = None
     idempotencyKey: Optional[str] = None
+
+    @field_validator("decision")
+    @classmethod
+    def _normalise(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        canonical = {
+            "approve": "approve", "approved": "approve",
+            "reject": "reject", "rejected": "reject",
+        }.get(v)
+        if canonical is None:
+            raise ValueError("decision must be 'approve' or 'reject'")
+        return canonical
 
 
 @runs_router.post(
@@ -940,6 +956,20 @@ async def record_approval(
         )
 
     now = datetime.now(timezone.utc)
+
+    # THE GATE IS CLOSED HERE, and until now nothing closed it anywhere.
+    #
+    # A gate is DERIVED — `approvals._pending_gates` selects runs with
+    # `gate_pending = true` — and `_handle_artifact_ready` is what sets the flag when an
+    # agent finishes a stage. Clearing it lived in `copilot_advance`, which Phase 5A
+    # deleted along with the rest of the Copilot. Nothing inherited the job, so every
+    # gate ever raised stayed in every eligible queue permanently, and this route
+    # recorded a decision beside a run that went on looking undecided.
+    #
+    # Both decisions close it. A rejection does not leave the run paused waiting for the
+    # same person to answer again — the stage is sent back, and re-running it is what
+    # raises the next gate.
+    run.gate_pending = False
 
     audit = AuditEvent(
         tenant_id=uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id,
