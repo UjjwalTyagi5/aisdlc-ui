@@ -69,9 +69,16 @@ function renderList(items: Row[]) {
   );
 }
 
-const FIVE = ["alpha.pdf", "beta.docx", "gamma.png", "delta.pdf", "epsilon.txt"].map(
-  (t) => doc(t),
-);
+/** A MIXED set. Five approved documents would hide the status dropdown — correctly, as
+ *  there would be nothing to choose between — so the fixture has to contain a real
+ *  choice for the filter tests to be testing the filter rather than its absence. */
+const FIVE = [
+  doc("alpha.pdf"),
+  doc("beta.docx"),
+  doc("gamma.png", "pending"),
+  doc("delta.pdf"),
+  doc("epsilon.txt", "rejected"),
+];
 
 describe("the documents panel", () => {
   it("hides the toolbar when there is little to sift", () => {
@@ -85,6 +92,15 @@ describe("the documents panel", () => {
     renderList(FIVE);
     expect(screen.getByLabelText("Search documents")).toBeTruthy();
     expect(screen.getByLabelText("Filter by status")).toBeTruthy();
+  });
+
+  it("drops the status filter when every document shares one status", () => {
+    /** A dropdown whose only options are "Any status" and the status everything already
+     *  has cannot change the screen. Offering it teaches people that filters do
+     *  nothing, which is worse than the space it saves. */
+    renderList(["a.pdf", "b.pdf", "c.pdf", "d.pdf", "e.pdf"].map((t) => doc(t)));
+    expect(screen.getByLabelText("Search documents")).toBeTruthy();
+    expect(screen.queryByLabelText("Filter by status")).toBeNull();
   });
 
   it("narrows the list to what was typed", async () => {

@@ -177,6 +177,20 @@ export function DocumentList({
     [source, stage],
   );
 
+  /** The statuses on this screen, normalised the way the chip is: anything that is
+   *  neither approved nor rejected reads as pending. */
+  const presentStatuses = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          scoped.map((a) =>
+            a.status === "approved" || a.status === "rejected" ? a.status : "pending",
+          ),
+        ),
+      ).sort(),
+    [scoped],
+  );
+
   const documents = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     return scoped.filter((a) => {
@@ -262,28 +276,40 @@ export function DocumentList({
           furniture; the threshold is where scanning the list stops being faster than
           typing. Hidden rather than disabled, so it does not read as broken. */}
       {scoped.length > 3 && (
-        <div className="flex gap-2">
+        // SEARCH ON ITS OWN ROW, matching the Stories toolbar beside it — and for the
+        // reason that toolbar needed fixing: this column is ~390px, and a `flex-1`
+        // input sharing a row with a fixed-width select collapses towards a sliver as
+        // soon as anything else joins it.
+        <div className="flex flex-col gap-2">
           <Input
             placeholder="Search documents…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="h-8 flex-1 font-sans text-sm"
+            className="h-8 w-full font-sans text-sm"
             aria-label="Search documents"
           />
-          <Select
-            value={statusFilter}
-            onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
-          >
-            <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Any status</SelectItem>
-              <SelectItem value="approved">Approved</SelectItem>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="rejected">Rejected</SelectItem>
-            </SelectContent>
-          </Select>
+          {/* ONLY THE STATUSES ACTUALLY PRESENT. Offering "Rejected" on a list with no
+              rejected document is an option whose only outcome is an empty screen.
+              Derived from `scoped`, not from `documents`, so choosing one status does
+              not delete every other option and strand the person on it. */}
+          {presentStatuses.length > 1 && (
+            <Select
+              value={statusFilter}
+              onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
+            >
+              <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Any status</SelectItem>
+                {presentStatuses.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s === "approved" ? "Approved" : s === "rejected" ? "Rejected" : "Pending"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
       )}
 
