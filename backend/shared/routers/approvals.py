@@ -88,6 +88,11 @@ class ApprovalGateOut(BaseModel):
     title: str
     summary: str
     requestedBy: str
+    #: The raw actor id behind `requestedBy`, for matching against the viewer.
+    #: `requestedBy` is a rendered EMAIL and cannot be compared to an identity id, so
+    #: "raised by me" needs the id alongside the label. None on a run gate: an agent
+    #: raised it and there is no person to match.
+    requestedById: Optional[str] = None
     requestedAt: str
     #: The uploader's reason, on document rows. An approver's first question is "why am
     #: I being asked to accept this", and making them open another page to find out is
@@ -229,6 +234,7 @@ async def _pending_documents(db: AsyncSession, request: Request) -> list[Approva
             # that finished the stage. Naming them is what lets an approver tell an
             # expected upload from one they should ask about.
             requestedBy=relabel(r.uploaded_by, labels) or "agent",
+            requestedById=r.uploaded_by,
             requestedAt=r.created_at.astimezone(timezone.utc).isoformat(),
             note=r.upload_note,
             artifact=GateArtifactRef(id=str(r.id), title=name, type=r.artifact_type or "document"),

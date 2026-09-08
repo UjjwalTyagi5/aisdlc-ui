@@ -97,6 +97,10 @@ export const ApprovalGate = z.object({
   summary: z.string(),
   /** "agent" or a person's display name. */
   requestedBy: z.string(),
+  /** The raw actor id behind `requestedBy`. `requestedBy` is a rendered email and
+   *  cannot be compared to an identity id, so "raised by me" needs this. Null on a run
+   *  gate, which an agent raised. */
+  requestedById: z.string().nullish(),
   requestedAt: Timestamp,
   /** ISO SLA deadline when one applies — powers the countdown. */
   deadline: Timestamp.nullish(),

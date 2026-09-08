@@ -21,7 +21,9 @@ import {
 import { RequestTable } from "@/components/requests/request-table";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
+import { ROLE_META } from "@/lib/roles";
 import { hasPermission } from "@/lib/auth/permissions";
+import { listApprovals } from "@/lib/api/approvals";
 import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
 import { listProjects } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
@@ -81,10 +83,28 @@ export default function RequestsAndApprovalsPage() {
   });
 
   const requests = React.useMemo(() => requestsQ.data ?? [], [requestsQ.data]);
+
+  // Governance tier (org_admin, bu_admin) holds no agent access at all (PRD §14.8),
+  // so no gate or document approval ever routes to them — same test `ApprovalQueue`
+  // makes before deciding whether to fetch.
+  const isGovernanceTier = role !== null && ROLE_META[role].governanceOnly;
   const identityId = scope?.identityId ?? null;
+  // THE SAME QUERY THE INBOX BELOW RUNS, deduped by react-query on the shared key —
+  // so the tiles and the list can never be counting different things. A governance-tier
+  // viewer never sees gates (PRD §14.8), and `ApprovalQueue` skips the fetch for them
+  // for the same reason.
+  const gatesQ = useQuery({
+    queryKey: qk.approvals.list({}),
+    queryFn: () => listApprovals({}),
+    enabled: !isGovernanceTier,
+  });
+  const awaiting = React.useMemo(
+    () => (isGovernanceTier ? [] : (gatesQ.data ?? [])),
+    [gatesQ.data, isGovernanceTier],
+  );
   const counts = React.useMemo(
-    () => countRequests(requests, identityId),
-    [requests, identityId],
+    () => countRequests(requests, identityId, awaiting),
+    [requests, identityId, awaiting],
   );
 
   // Keep the open sheet in step with a refetch — after a decision it would
@@ -122,12 +142,21 @@ export default function RequestsAndApprovalsPage() {
 
   const unitBindings = bindings.filter((b) => b.kind === "business_unit");
   const projectBindings = bindings.filter((b) => b.kind === "project");
+  // NAMED FROM WHERE YOU ARE BOUND, not from what you administer — those are two
+  // different questions and this chip asks the first. A Project Admin bound at
+  // business-unit scope administers no unit by design (that split is what keeps Users
+  // and Roles & Access out of their nav), so `managedBusinessUnitIds` is empty for them
+  // and the chip read "BUSINESS UNIT / 0 business units" — a scope indicator reporting
+  // that the viewer is nowhere. They are in Lending; they simply do not run it.
   const scopeName = isOrgWide
     ? null
     : level === "business_unit"
       ? ((managedBusinessUnitIds.length === 1
           ? unitBindings.find((b) => b.scopeId === managedBusinessUnitIds[0])?.scopeName
-          : undefined) ?? `${managedBusinessUnitIds.length} business units`)
+          : undefined) ??
+        (unitBindings.length === 1
+          ? unitBindings[0]!.scopeName
+          : `${unitBindings.length} business units`))
       : projectBindings.length === 1
         ? projectBindings[0]!.scopeName
         : `${projectBindings.length} projects`;
