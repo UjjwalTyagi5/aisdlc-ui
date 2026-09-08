@@ -90,6 +90,18 @@ const PHASE_BADGE_CLASS: Record<string, string> = {
   documentation: "text-info bg-info/10",
 };
 
+/** "stories" -> "story", "artifacts" -> "artifact".
+ *
+ * A naive `replace(/s$/, "")` produced "storie", which is what shipped for one commit.
+ * English plurals in `-ies` come from a `-y` singular, so that case has to be handled
+ * before the general one — and the general one only strips an `s` that is actually
+ * there, so a noun that is already singular survives.
+ */
+function singular(noun: string): string {
+  if (noun.endsWith("ies")) return `${noun.slice(0, -3)}y`;
+  return noun.endsWith("s") ? noun.slice(0, -1) : noun;
+}
+
 /** The board's own work-item type — "Epic", "Bug", "User Story" — or null.
  *
  * Lives on the story BODY, not on `artifact.type`, which is "story" for every row a
@@ -324,11 +336,10 @@ export function ArtifactList({
         <p className="text-muted-foreground text-xs">
           {selectedIds && selectedIds.size > 0
             ? `${selectedIds.size} ${
-                selectedIds.size === 1 ? noun.replace(/s$/, "") : noun
+                selectedIds.size === 1 ? singular(noun) : noun
               } scoped to the agent.`
-            : `Tick a circle to scope the agent to that ${noun.replace(
-                /s$/,
-                "",
+            : `Tick a circle to scope the agent to that ${singular(
+                noun,
               )}. Opening one only shows it.`}
         </p>
       )}

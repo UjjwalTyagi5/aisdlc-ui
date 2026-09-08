@@ -185,9 +185,25 @@ describe("the scope checkboxes", () => {
         onToggleSelect={() => {}}
       />,
     );
-    expect(screen.getByText(/Tick a circle to scope the agent/i)).toBeTruthy();
+    // SINGULARISED PROPERLY. A naive `replace(/s$/, "")` on "stories" gives "storie",
+    // which is what shipped for one commit and read as a typo in the product.
+    expect(screen.getByText(/scope the agent to that story\./i)).toBeTruthy();
     // And says plainly that opening a story is NOT the same act.
     expect(screen.getByText(/Opening one only shows it/i)).toBeTruthy();
+  });
+
+  it("singularises a plural ending in -ies", () => {
+    /** The general "strip a trailing s" rule is wrong for exactly this shape, and
+     *  "stories" is the noun this component is used with most. */
+    render(
+      <ArtifactList
+        items={[MIXED[0]] as never}
+        noun="stories"
+        selectedIds={new Set([(MIXED[0] as { id: string }).id])}
+        onToggleSelect={() => {}}
+      />,
+    );
+    expect(screen.getByText(/^1 story scoped to the agent\.$/i)).toBeTruthy();
   });
 
   it("counts them once some are ticked", () => {
