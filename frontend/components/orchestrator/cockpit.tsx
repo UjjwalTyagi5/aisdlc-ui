@@ -3,30 +3,37 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Info, Play, RotateCcw, Sparkles, SquarePlay, Workflow } from "lucide-react";
+import { AlertTriangle, FolderKanban, Info, Sparkles, Workflow } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { LoadingState } from "@/components/ui/loading-state";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
-import { RequestAccessButton } from "@/components/requests/request-access-button";
+import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
 import { ModelPicker, type ProjectModelOption } from "@/components/orchestrator/model-picker";
 import { ProjectPicker } from "@/components/orchestrator/project-picker";
 import { SessionRail } from "@/components/orchestrator/session-rail";
-import { StageRail } from "@/components/orchestrator/stage-rail";
 import { Thread } from "@/components/orchestrator/thread";
 import { useAccessScope } from "@/hooks/use-access-scope";
-import { roleAgentSplit } from "@/lib/agent-access";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
-import { getProject, listProjects } from "@/lib/api/projects";
-import { qk } from "@/lib/api/query-keys";
-import { PHASE_LABEL } from "@/lib/agents";
-import { TRACK_META } from "@/lib/tracks";
+import { canUseOrchestrator } from "@/lib/orchestrator/access";
+import { DeliverablesRead } from "@/lib/orchestrator/deliverables";
+import {
+  deleteConversation,
+  getConversationMessages,
+  listConversations,
+  renameConversation,
+} from "@/lib/api/conversations";
 import { splitModelKey } from "@/lib/orchestrator/types";
-import { useOrchestrator } from "@/lib/orchestrator/use-orchestrator";
+import {
+  useOrchestratorSocket,
+  type OrchestratorConnState,
+} from "@/lib/orchestrator/use-orchestrator-socket";
+import { getModelOptions } from "@/lib/api/models";
+import { getProject, listProjects } from "@/lib/api/projects";
+import { createRun, listRunAttachments, uploadRunAttachments } from "@/lib/api/runs";
+import { qk } from "@/lib/api/query-keys";
+import { TRACK_META } from "@/lib/tracks";
 import { freshStages, useOrchestratorStore } from "@/stores/orchestrator-store";
 import type { ProjectId } from "@/lib/schemas";
 
@@ -51,17 +58,29 @@ export interface OrchestratorCockpitProps {
 /**
  * The Orchestrator cockpit — one component behind two routes.
  *
- * Pick a project (or arrive with one), pick a model that project is allowed to
- * run on, and it executes that project's agent roster in hand-off order,
- * streaming each agent's turn and closing the gates it is permitted to close.
+ * Pick a project (or arrive with one) and a model that project is allowed to
+ * run on; the session rail keeps a history of conversations against this
+ * Business Unit's projects. There is no fixed agent order here — any agent
+ * can pick up work based on what the conversation asks for.
  *
- * SCOPE OF "AUTOMATIC" — auto-advance closes `safe` and `consequential` gates
- * on the run's behalf. It never closes a **mandatory** one: PRD §13 makes those
- * unwaivable by the owner *or* the fallback, so a sequencer that waived them
- * would not be automating the process, it would be routing around it. Those
- * stop the run and wait, which is what the inline gate control in the thread is
- * for.
+ * WHICH AGENT RUNS IS THE ORCHESTRATOR'S CHOICE BY DEFAULT. The picker starts on
+ * "Let the Orchestrator choose", and a message sent that way is ROUTED: the engine
+ * reads it, and the connection's earlier turns, and picks one of the nine or answers
+ * directly. Picking an agent overrides the router for that turn.
+ *
+ * The invariant the old required-picker stood for is unchanged, and now lives in the
+ * engine: nothing is chosen silently. Every routed turn announces its agent AND the
+ * reason in `agent.selected` before any of the agent's text, so a wrong choice is
+ * visible and correctable in one turn — which is exactly what the previous engine,
+ * advancing by list index, never told anyone.
+ *
+ * A RUN IS CREATED LAZILY, ON THE FIRST TURN. The socket resolves `run_id`
+ * against the caller's tenant and refuses anything it cannot verify, so the
+ * conversation needs a real `runs` row — but creating one on page load would
+ * litter every project with empty runs nobody started. The first message pays
+ * for it; the rest of the conversation reuses it.
  */
+
 export function OrchestratorCockpit({
   lockedProjectId,
   variant = "page",
@@ -74,6 +93,10 @@ export function OrchestratorCockpit({
   // contents before that would mismatch the server's empty render.
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
+
+  // The artifacts panel starts collapsed — there is nothing to show until a
+  // run has produced something, and an empty expanded panel is just noise.
+  const [artifactsCollapsed, setArtifactsCollapsed] = React.useState(true);
 
   const allSessions = useOrchestratorStore((s) => s.sessions);
   const activeSessionId = useOrchestratorStore((s) => s.activeSessionId);
@@ -92,11 +115,51 @@ export function OrchestratorCockpit({
     [sessions, activeSessionId],
   );
 
+  // ── History ───────────────────────────────────────────────────────────────
+  //
+  // The rail used to BE the store: zustand + localStorage, and it said so on screen.
+  // A chat survived neither a cleared browser nor a change of device, and none of it
+  // was auditable. It is now a view of the server, and the store keeps only the
+  // unsaved draft plus which row is selected.
+  //
+  // A saved chat's id IS its run id (backend `sessions.ensure_session`), which is what
+  // makes opening one also reopen its Deliverables, its LangGraph thread and its
+  // project scope — no mapping, no second identifier.
+  const [openedRunId, setOpenedRunId] = React.useState<string | null>(null);
+
   // ── Selection ─────────────────────────────────────────────────────────────
   const [pendingProjectId, setPendingProjectId] = React.useState<string | null>(null);
   const [pendingModelKey, setPendingModelKey] = React.useState<string | null>(null);
 
   const projectId = lockedProjectId ?? active?.projectId ?? pendingProjectId;
+
+  const historyQ = useQuery({
+    queryKey: ["orchestrator", "sessions", projectId],
+    queryFn: () => listConversations(projectId as ProjectId, "orchestrator"),
+    enabled: !!projectId,
+  });
+
+  /**
+   * What the rail shows: every saved chat on this project, plus the unsaved draft.
+   *
+   * The draft is local on purpose (spec D23). A run — and therefore a session — is
+   * minted by the first turn, so clicking "New" repeatedly cannot litter the database
+   * with conversations nobody used.
+   */
+  const railSessions = React.useMemo(() => {
+    const saved = (historyQ.data ?? []).map((s) => ({
+      id: s.id,
+      title: s.title || "Untitled chat",
+      projectId: String(projectId ?? ""),
+      status: "idle" as const,
+    }));
+    const drafts = sessions
+      .filter((s) => !saved.some((v) => v.id === s.id))
+      .map((s) => ({
+        id: s.id, title: s.title, projectId: s.projectId, status: s.status,
+      }));
+    return [...drafts, ...saved];
+  }, [historyQ.data, sessions, projectId]);
   const modelKey = active?.modelKey ?? pendingModelKey;
 
   const projectQ = useQuery({
@@ -123,29 +186,7 @@ export function OrchestratorCockpit({
     [projectsQ.data, project],
   );
 
-  const modelLabel = modelKey ? splitModelKey(modelKey).model_id : "no model";
-
-  const controls = useOrchestrator({
-    sessionId: active?.id ?? null,
-    projectName: project?.name ?? "this project",
-    track: project?.track ?? "greenfield",
-    modelLabel,
-    modelKey,
-  });
-
   // ── Session plumbing ──────────────────────────────────────────────────────
-
-  /** Ensure a session exists for the current project, and return its id. */
-  const ensureSession = React.useCallback((): string | null => {
-    if (!project) return null;
-    if (active && active.projectId === String(project.id)) return active.id;
-    return store.getState().createSession({
-      projectId: String(project.id),
-      projectName: project.name,
-      track: project.track,
-      modelKey,
-    });
-  }, [project, active, store, modelKey]);
 
   const handleProjectChange = React.useCallback(
     (id: string) => {
@@ -153,7 +194,11 @@ export function OrchestratorCockpit({
       setPendingModelKey(null);
       if (!active) return;
       const p = projectsQ.data?.items.find((x) => String(x.id) === id);
-      if (active.messages.length === 0) {
+      // Untouched means "has not run yet". It used to mean "has no local messages",
+      // which stopped being knowable once transcripts moved server-side — and this is
+      // the truer question anyway: a chat with a run has Deliverables and a LangGraph
+      // thread bound to its old project, so it must not be repointed.
+      if (!runIdRef.current && !openedRunId) {
         // Untouched session — repoint it rather than littering the rail.
         store.getState().retargetSession(active.id, {
           projectId: id,
@@ -172,7 +217,7 @@ export function OrchestratorCockpit({
         });
       }
     },
-    [active, store, projectsQ.data],
+    [active, store, projectsQ.data, openedRunId],
   );
 
   const handleModelChange = React.useCallback(
@@ -194,30 +239,293 @@ export function OrchestratorCockpit({
     [modelKey, active, store],
   );
 
-  // `ensureSession` leaves the new session active in the store, and the engine
-  // resolves the session at call time, so these need no deferral.
-  const handleRun = React.useCallback(
-    (objective?: string) => {
-      if (!ensureSession()) return;
-      controls.start(objective);
+  // ── Who may drive ─────────────────────────────────────────────────────────
+  //
+  // PROJECT ADMIN ONLY (`canUseOrchestrator`). The Orchestrator reaches all
+  // nine agents at once, so anyone who could drive it would effectively hold
+  // every agent's access — the exact `use`-tier leak the one-agent-one-role
+  // model removed (see lib/orchestrator/access.ts). Everyone else gets the
+  // read-only view below and drives their own owned agent from its own page.
+  //
+  // This is the UI's half of the answer only. The socket resolves the caller's
+  // role server-side and refuses before the handshake, because gating the UI is
+  // not access control — last time, typing the URL was enough.
+  const scopeReady = !scope.isLoading;
+  const canDrive = scopeReady && canUseOrchestrator(scope.role);
+
+  // ── The engine ────────────────────────────────────────────────────────────
+
+  // `null` is "let the Orchestrator choose", which is the DEFAULT and a real
+  // selection rather than an unanswered question. Picking an agent overrides the
+  // router for that turn. Phase 2 had no router, so the picker started empty and
+  // nothing could be sent until it was filled; that is no longer the shape of the
+  // decision, and leaving it would make the common case the one that needs work.
+
+
+  const socket = useOrchestratorSocket({ enabled: canDrive && !!projectId });
+  const { send: sendTurn, reset: resetSocket } = socket;
+
+  // The chosen model as the RUN's own field. `modelKey` identifies a provider
+  // connection + model; `offering_id` is the same thing in the runs API's
+  // vocabulary, so it is resolved here rather than sending a bare model id and
+  // letting the backend pick whichever connection serves it first.
+  const modelOptionsQ = useQuery({
+    queryKey: qk.model.options(projectId),
+    queryFn: () => getModelOptions(projectId!),
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+  /**
+   * True only once `/model/options` has ANSWERED with nothing.
+   *
+   * `isSuccess`, not `data?.options ?? []`: an in-flight request is not evidence of a
+   * missing key, and a composer that closes while the list loads asserts something the
+   * app has not yet verified. An error leaves it open too — the request failing says
+   * nothing about whether a model exists, and locking the user out over a transient
+   * 500 is worse than letting the turn try.
+   */
+  const noRunnableModel = modelOptionsQ.isSuccess && modelOptionsQ.data.options.length === 0;
+
+  const offeringId = React.useMemo(() => {
+    if (!modelKey) return null;
+    const { provider, model_id, credentialId } = splitModelKey(modelKey);
+    const options = modelOptionsQ.data?.options ?? [];
+    const sameModel = options.filter(
+      (o) => o.provider === provider && o.model_id === model_id,
+    );
+    const exact = credentialId
+      ? sameModel.find((o) => o.provider_id === credentialId)
+      : undefined;
+    return (exact ?? sameModel[0])?.offering_id ?? null;
+  }, [modelKey, modelOptionsQ.data]);
+
+  // One run per conversation, created on the first turn and reused after.
+  const runIdRef = React.useRef<string | null>(null);
+  const creatingRunRef = React.useRef<Promise<string> | null>(null);
+  // The same value as `runIdRef`, held in state as well. The ref is what the send
+  // path reads synchronously; this is what the Deliverables panel renders against,
+  // and a ref alone would never re-render it — the run would exist and the panel
+  // would go on showing an empty tab.
+  const [runId, setRunId] = React.useState<string | null>(null);
+
+  // Declared alongside the run because the conversation-switch effect below clears the
+  // error, and that effect is written before the upload handler that sets it.
+  const [attaching, setAttaching] = React.useState(false);
+  const [attachError, setAttachError] = React.useState<string | null>(null);
+
+  const ensureRun = React.useCallback(async (): Promise<string> => {
+    if (runIdRef.current) return runIdRef.current;
+    // A chat opened from history already HAS a run — its id is the session id — so
+    // continuing it must rejoin that run rather than mint a new one. Without this the
+    // rail would look right while every reopened conversation silently started over,
+    // against a different LangGraph thread and different Deliverables.
+    if (openedRunId) {
+      runIdRef.current = openedRunId;
+      setRunId(openedRunId);
+      return openedRunId;
+    }
+    // Two quick turns must not mint two runs — the second awaits the first.
+    if (creatingRunRef.current) return creatingRunRef.current;
+    if (!projectId) throw new Error("no project is selected");
+    const pending = createRun({
+      project_id: projectId,
+      offering_id: offeringId,
+      // Only when the offering could not be resolved (the options list has not
+      // loaded, or the picked model is not among them): the backend resolves a
+      // bare model id itself. Null for both means the organization default.
+      model_id: offeringId ? null : (modelKey ? splitModelKey(modelKey).model_id : null),
+    }).then(({ runId: created }) => {
+      runIdRef.current = created;
+      setRunId(created);
+      return created;
+    });
+    creatingRunRef.current = pending;
+    try {
+      return await pending;
+    } finally {
+      creatingRunRef.current = null;
+    }
+  }, [projectId, offeringId, modelKey, openedRunId]);
+
+  // A different conversation is a different run and a different transcript.
+  //
+  // THE PROJECT IS PART OF THE KEY, not a fallback for when there is no session.
+  // It was `active?.id ?? projectId`, so with a session open the key was the session
+  // id alone — and `handleProjectChange` repoints the active session in place via
+  // `retargetSession`, which deliberately keeps that id. Switching project therefore
+  // changed the header, the model picker and the artifacts panel while this key stood
+  // still, so the reset below never ran: the next turn went out with the PREVIOUS
+  // project's `run_id`.
+  //
+  // That is not a privilege leak — the caller administers both projects and
+  // `_project_admin_tier_for_run` is satisfied — but `ws._resolve_run` reads
+  // `project_id` from the RUN row and never from the frame, so the turn enforced the
+  // old project's offering grant, spent the old project's budget with its BYOK key,
+  // and joined the old run's LangGraph thread, under a UI naming the new project.
+  const conversationKey = `${active?.id ?? ""}:${projectId ?? ""}`;
+  const lastConversationKey = React.useRef(conversationKey);
+  React.useEffect(() => {
+    if (lastConversationKey.current === conversationKey) return;
+    lastConversationKey.current = conversationKey;
+    runIdRef.current = null;
+    setRunId(null);
+    creatingRunRef.current = null;
+    setOpenDeliverableId(null);
+    // A different conversation is a different run, so a stale upload error must not
+    // follow it. The chips need no clearing: they are a query keyed on `runId`, which
+    // has just been nulled.
+    setAttachError(null);
+    resetSocket();
+  }, [conversationKey, resetSocket]);
+
+  /** Open a saved chat: adopt its run and replay its transcript. */
+  const openSession = React.useCallback(
+    async (id: string) => {
+      const saved = (historyQ.data ?? []).some((s) => s.id === id);
+      if (!saved) {
+        // A local draft: the existing selection path, which has no run yet.
+        store.getState().selectSession(id);
+        setOpenedRunId(null);
+        return;
+      }
+      // Hold the project before switching. A saved chat is not in the local store, so
+      // selecting it leaves `active` null — and `projectId` reads through `active`,
+      // so without this the project silently becomes null the moment a chat is
+      // opened, disabling the composer on the conversation the user just asked for.
+      if (projectId) setPendingProjectId(projectId);
+      store.getState().selectSession(id);
+      setOpenedRunId(id);
+      runIdRef.current = id;
+      setRunId(id);
+      setOpenDeliverableId(null);
+      const messages = await getConversationMessages(id);
+      socket.hydrate(
+        messages.map((m) => ({
+          id: m.id,
+          role: m.role === "user" ? ("user" as const) : ("agent" as const),
+          phase: null,
+          content: m.content,
+          createdAt: m.created_at ? Date.parse(m.created_at) : Date.now(),
+        })),
+      );
     },
-    [ensureSession, controls],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [historyQ.data, store, socket.hydrate, projectId],
   );
+
+  // ── Deliverables ───────────────────────────────────────────────────────────
+  //
+  // What the agents produced on this run: everything the socket has seen this
+  // session, plus whatever the run already held before it, replayed over REST so
+  // reopening a conversation shows its documents without waiting for another turn.
+  const [openDeliverableId, setOpenDeliverableId] = React.useState<string | null>(null);
+
+  const deliverablesQ = useQuery({
+    queryKey: ["orchestrator", "deliverables", runId],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/runs/${encodeURIComponent(runId as string)}/deliverables`,
+        { credentials: "include" },
+      );
+      if (!res.ok) throw new Error(`deliverables read failed: ${res.status}`);
+      return DeliverablesRead.parse(await res.json());
+    },
+    enabled: !!runId,
+  });
+
+  // The panel speaks `stage`; the wire speaks `agent`. ONE mapping, here at the
+  // boundary — the panel is shared with the still-live Copilot and must not be taught
+  // a second vocabulary.
+  //
+  // Socket rows come FIRST so a document produced this turn wins over the REST
+  // snapshot that predates it, and the de-dupe keeps the newer of the two.
+  const deliverables = React.useMemo(() => {
+    const seen = new Set<string>();
+    return [...socket.deliverables, ...(deliverablesQ.data?.deliverables ?? [])]
+      .filter((d) => {
+        if (seen.has(d.id)) return false;
+        seen.add(d.id);
+        return true;
+      })
+      .map((d) => ({
+        id: d.id,
+        stage: d.agent,
+        kind: d.kind,
+        title: d.title,
+        content: d.content ?? "",
+        url: d.url ?? undefined,
+        language: d.language ?? undefined,
+        source: d.source ?? undefined,
+        created_at: d.created_at ?? undefined,
+      }));
+  }, [socket.deliverables, deliverablesQ.data]);
+
+  // Re-read once a turn finishes, so a deliverable that was persisted but whose
+  // frame did not arrive (a reconnect mid-turn) still appears.
+  const busy = socket.busy;
+  React.useEffect(() => {
+    if (!busy && runId) void deliverablesQ.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, runId]);
 
   const handleSend = React.useCallback(
     (text: string) => {
-      if (!ensureSession()) return;
-      // A brand-new session has no transcript, so the first thing typed is the
-      // objective — `send` routes that into `start` itself.
-      controls.send(text);
+      if (!projectId) return;
+      // `agent` may be null — that is the routed path, and the hook omits the
+      // field entirely rather than sending a null the protocol does not declare.
+      sendTurn({ text, resolveRunId: ensureRun, modelKey });
     },
-    [ensureSession, controls],
+    [projectId, sendTurn, ensureRun, modelKey],
   );
 
-  // Above the early return below, because hooks cannot be called conditionally.
-  const reachableAgents = React.useMemo(
-    () => (scope.role ? roleAgentSplit(scope.role, project?.track).reachable : []),
-    [scope.role, project?.track],
+  // ── Attachments ───────────────────────────────────────────────────────────
+  //
+  // What the user gave this run. The backend feeds every stored attachment into every
+  // later turn — attachments are RUN-scoped, not turn-scoped, because this engine has
+  // no agent order and a BRD attached while Requirements answered is what Design needs
+  // three turns later.
+  //
+  // THE SERVER'S LIST IS THE ONLY SOURCE. Chips are rendered from what came back, never
+  // from the picked `File` objects, so a chip cannot appear for a file that was not
+  // stored — which is the failure this whole feature is written against: a user who
+  // sees a chip reads the agent's answer as informed.
+  const attachmentsQ = useQuery({
+    queryKey: ["orchestrator", "attachments", runId],
+    queryFn: () => listRunAttachments(runId as string),
+    enabled: !!runId,
+  });
+
+  const handleAttachFiles = React.useCallback(
+    async (files: File[]) => {
+      if (!files.length || !projectId) return;
+      setAttachError(null);
+      setAttaching(true);
+      try {
+        // The run FIRST. Runs are minted lazily on the first turn, and the upload route
+        // resolves the run through the same scope chokepoint the rest of `/runs/{id}`
+        // uses — so attaching before typing anything has to create it, or every
+        // conversation's first attachment 404s.
+        const id = await ensureRun();
+        await uploadRunAttachments(id, files);
+        await attachmentsQ.refetch();
+      } catch (err) {
+        // SHOWN, never swallowed. A silent failure here would leave the user believing
+        // the agent has a document it has never seen.
+        //
+        // `.message` IS the backend's reason, not a generic string:
+        // `ApiRequestError` already unwraps FastAPI's `{detail: "…"}` into it, so the
+        // store's own wording ("File type '.exe' is not accepted. Allowed: …") reaches
+        // the user — which is the only version that says what to do next. Reading a
+        // `.detail` off the error instead would find nothing and silently degrade to
+        // "Bad Request".
+        const message = (err as Error | null)?.message;
+        setAttachError(message || "That file could not be attached.");
+      } finally {
+        setAttaching(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId, ensureRun, attachmentsQ.refetch],
   );
 
   // ── Access ────────────────────────────────────────────────────────────────
@@ -226,34 +534,6 @@ export function OrchestratorCockpit({
       <RestrictedAccess description="The Orchestrator requires access to project artifacts." />
     );
   }
-  // ── Who may drive ─────────────────────────────────────────────────────────
-  //
-  // MEMBERSHIP PLUS AGENT REACH, not a Project Admin binding.
-  //
-  // The old rule was "only the Project Admin drives", which made this screen
-  // read-only for the people it is for. A Developer opening the Orchestrator on
-  // their own project was told to go to Approvals — but they are not waiting on
-  // a gate, they are trying to run the Development agent they own.
-  //
-  // What actually bounds a person here is the same thing that bounds them
-  // everywhere else: the agents their role reaches in this project
-  // (`AGENT_OWNERSHIP` via `roleAgentSplit`). A BA drives Requirements and
-  // Design; a Developer drives Development; the Project Admin reaches every
-  // agent and so drives the whole roster — which is the PRD reading, arrived at
-  // by their access rather than by a special case for them.
-  //
-  // Two conditions, both necessary:
-  //   1. You are bound to the project (`projectIds`), or org-wide. Reaching an
-  //      agent in the abstract is not standing to run it on someone else's work.
-  //   2. Your role reaches at least one agent in this project's track. The
-  //      governance tier reaches none by design (PRD §14.8), so they still get
-  //      the read-only view — correctly, since they never run agents.
-  const scopeReady = !scope.isLoading;
-  const reachesAnyAgent = reachableAgents.length > 0;
-  const inProject = (id: string | null) =>
-    scope.isOrgWide || (id !== null && scope.projectIds.includes(id));
-  const canDrive =
-    scopeReady && reachesAnyAgent && (projectId ? inProject(projectId) : true);
 
   if (!mounted) {
     return (
@@ -264,17 +544,32 @@ export function OrchestratorCockpit({
   }
 
   // With no session yet, show the roster the project *would* run rather than an
-  // empty rail: before you start anything is precisely when "which agents, who
-  // owns their gates, and what is the project already holding on" is the
-  // question — the read-only control view this rail replaced answered it
-  // without needing a run either.
+  // empty rail: before you start anything is precisely when "which agents does
+  // this project have, and what is it already holding on" is the question —
+  // the read-only control view this rail replaced answered it without needing
+  // a run either.
   const stages = active?.stages ?? (project ? freshStages(project.track) : []);
-  const status = active?.status ?? "idle";
-  const paused = status === "paused";
-  const complete = status === "complete";
   const trackMeta = project ? TRACK_META[project.track] : null;
-  const ready = !!project && !!modelKey;
-  const parkedOnGate = stages[active?.cursor ?? 0]?.status === "awaiting_gate";
+
+  // The composer says WHY it is closed rather than sitting greyed out with no
+  // explanation — "nothing happens when I type" was the old cockpit's whole
+  // failure mode.
+  const composerDisabled = !canDrive || !projectId || noRunnableModel || socket.busy;
+  const composerPlaceholder = !canDrive
+    ? "Read-only — only this project's Project Admin can drive the Orchestrator."
+    : !projectId
+      ? "Pick a project to start."
+      : noRunnableModel
+        ? // Not "no models granted": models may well be granted, and a Project Admin
+          // looking at the Models screen will see them ticked. What is missing is a
+          // provider connection with a working key behind any of them, which is the
+          // only thing that decides whether a turn can be answered.
+          "No model this project can run — a provider still needs a working key."
+        : socket.busy
+          ? "Working…"
+          : // The only line that now tells the user an agent is chosen for them. The
+            // picker used to say so; with the picker gone this is load-bearing.
+            "Describe the work — the Orchestrator picks the agent.";
 
   const shell =
     variant === "page"
@@ -287,9 +582,11 @@ export function OrchestratorCockpit({
     <div className={cn("flex min-h-0", shell)}>
       <div className="hidden md:block">
         <SessionRail
-          sessions={sessions}
-          activeId={active?.id ?? null}
-          onSelect={(id) => store.getState().selectSession(id)}
+          // Saved chats from the server, plus the unsaved draft. The rail stopped
+          // being the store and became a view of it.
+          sessions={railSessions}
+          activeId={active?.id ?? openedRunId}
+          onSelect={(id) => void openSession(id)}
           onCreate={() => {
             if (!project) return;
             store.getState().createSession({
@@ -299,14 +596,32 @@ export function OrchestratorCockpit({
               modelKey,
             });
           }}
-          onRename={(id, title) => store.getState().renameSession(id, title)}
-          onDelete={(id) => store.getState().deleteSession(id)}
+          onRename={(id, title) => {
+            store.getState().renameSession(id, title);
+            // A saved chat's title lives on the server; a draft's does not exist there
+            // yet, so the call is best-effort and the rail refetches either way.
+            void renameConversation(id, title).catch(() => {}).finally(() => {
+              void historyQ.refetch();
+            });
+          }}
+          onDelete={(id) => {
+            store.getState().deleteSession(id);
+            if (openedRunId === id) {
+              setOpenedRunId(null);
+              runIdRef.current = null;
+              setRunId(null);
+              resetSocket();
+            }
+            void deleteConversation(id).catch(() => {}).finally(() => {
+              void historyQ.refetch();
+            });
+          }}
           projectName={projectName}
         />
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* ── Top bar: the pickers, and the run controls ──────────────────── */}
+        {/* ── Top bar: project and model pickers ──────────────────────────── */}
         <header className="border-line-soft bg-panel-elevated/60 flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2.5 backdrop-blur-sm md:px-6">
           {!locked && (
             <span className="mr-1 flex items-center gap-2">
@@ -335,55 +650,27 @@ export function OrchestratorCockpit({
             <ProjectPicker value={projectId} onValueChange={handleProjectChange} />
           )}
 
+          {/* No `workspaceId`: the picker no longer resolves credential state per
+              Business Unit. `/model/options` answers per PROJECT, which is the only
+              scope that decides whether a turn on THIS project can be answered. */}
           <ModelPicker
             projectId={projectId}
-            workspaceId={project?.workspaceId ?? null}
             value={modelKey}
             onValueChange={handleModelChange}
             onOptionsResolved={handleOptionsResolved}
           />
 
-          <div className="ml-auto flex items-center gap-3">
-            <span className="hidden items-center gap-2 lg:flex">
-              <Switch
-                id="auto-advance"
-                checked={active?.autoAdvance ?? true}
-                onCheckedChange={(v) => active && store.getState().setAutoAdvance(active.id, v)}
-                disabled={!active || !canDrive}
-              />
-              <Label htmlFor="auto-advance" className="text-[12px] font-normal">
-                Auto-advance
-              </Label>
-            </span>
+          {/* NO AGENT PICKER. Removed 2026-09-07 at the user's request: it offered
+              the same nine agents as the project's own agent tiles, one control away
+              from them and under different rules — the Orchestrator reaches all nine
+              for a Project Admin, the tiles are owner-scoped per agent.
 
-            {canDrive &&
-              (controls.busy ? (
-                <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={controls.stop}>
-                  Stop
-                </Button>
-              ) : complete || (active && active.messages.length > 0 && !paused) ? (
-                <Button size="sm" className="h-8 gap-1.5" disabled={!ready} onClick={() => handleRun()}>
-                  <RotateCcw className="size-3.5" aria-hidden />
-                  Restart run
-                </Button>
-              ) : paused ? (
-                <Button
-                  size="sm"
-                  className="h-8 gap-1.5"
-                  onClick={controls.resume}
-                  disabled={parkedOnGate}
-                  title={parkedOnGate ? "Decide the open gate in the thread to continue" : undefined}
-                >
-                  <SquarePlay className="size-3.5" aria-hidden />
-                  Resume
-                </Button>
-              ) : (
-                <Button size="sm" className="h-8 gap-1.5" disabled={!ready} onClick={() => handleRun()}>
-                  <Play className="size-3.5" aria-hidden />
-                  Run pipeline
-                </Button>
-              ))}
-          </div>
+              Naming an agent in the CONVERSATION still works and is untouched:
+              `router.prefilter` answers "run the security agent" without spending a
+              model call. A model's decision needs a way to be overridden by the person
+              talking to it; the conversation is where this engine puts every other
+              decision, so it is where this one belongs too. `ws.py` still accepts an
+              `agent` field — nothing sends one now. */}
         </header>
 
         {/* Silent while the scope is still resolving — "you cannot drive this"
@@ -393,89 +680,90 @@ export function OrchestratorCockpit({
           <div className="border-line-soft text-muted-foreground flex shrink-0 items-start gap-2 border-b px-4 py-2 text-[12.5px] md:px-6">
             <Info className="mt-px size-4 shrink-0" aria-hidden />
             <p>
-              {/* Two genuinely different reasons, and conflating them was the
-                  old copy's failure: it told a Developer that driving "is the
-                  Project Admin's role" when in fact they drive their own
-                  agents, and were only blocked because they are not on this
-                  project. */}
-              {!reachesAnyAgent ? (
-                <>
-                  Your role has no agent access, so there is nothing here for you to run —
-                  the Orchestrator drives agents, and yours is a governance role. You approve
-                  what others run from{" "}
-                  <Link href="/approvals" className="text-brand-bright underline underline-offset-2">
-                    Requests &amp; Approvals
-                  </Link>
-                  .
-                </>
+              Read-only — the Orchestrator reaches every agent on this project at once, so
+              only its Project Admin may drive it.{" "}
+              {projectId ? (
+                <Link
+                  href={`/projects/${projectId}`}
+                  className="text-brand-bright underline underline-offset-2"
+                >
+                  Run the agent you own from the project
+                </Link>
               ) : (
-                <>
-                  Read-only — you&apos;re not a member of{" "}
-                  <span className="text-foreground font-medium">
-                    {project?.name ?? "this project"}
-                  </span>
-                  . Reaching an agent elsewhere isn&apos;t standing to run it on this team&apos;s
-                  work; ask its Project Admin to add you, or{" "}
-                  <RequestAccessButton
-                    variant="ghost"
-                    size="sm"
-                    label="request access"
-                    prefill={{
-                      type: "access_request",
-                      title: `Access to ${project?.name ?? "this project"}`,
-                      description: "Requesting to join this project as a contributor.",
-                      // Not `project?.id`: `project` comes from GET /projects/:id,
-                      // which 404s for exactly the person this button is for — not
-                      // a member, so the detail fetch is refused before the name
-                      // or id in the response body ever reaches them. `projectId`
-                      // (the route param, resolved above independently of that
-                      // fetch) is what's actually known good here; falling back to
-                      // the fetched object would silently raise a project-less
-                      // request, which is the one thing this button exists to not do.
-                      projectId: projectId ?? undefined,
-                      workspaceId: project?.workspaceId ?? undefined,
-                    }}
-                  />
-                  .
-                </>
-              )}
+                "Run the agent you own from the project"
+              )}{" "}
+              instead.
             </p>
           </div>
         )}
 
         <div className="flex min-h-0 flex-1">
           <Thread
-            messages={active?.messages ?? []}
-            busy={controls.busy}
-            disabled={!ready || !canDrive}
-            placeholder={
-              !project
-                ? "Pick a project to begin…"
-                : !modelKey
-                  ? "Pick a model to begin…"
-                  : !canDrive
-                    ? "Read-only — you cannot drive this Orchestrator"
-                    : (active?.messages.length ?? 0) === 0
-                      ? `What should the ${project.name} pipeline achieve? Enter starts the run.`
-                      : "Message the Orchestrator…"
-            }
+            messages={socket.messages}
+            // No Stop affordance: this engine has no cancel, and a button that
+            // does nothing is worse than no button. The composer simply waits.
+            busy={false}
+            disabled={composerDisabled}
+            placeholder={composerPlaceholder}
             onSend={handleSend}
-            onStop={controls.stop}
-            onGateDecision={controls.decideGate}
+            onStop={() => {}}
+            // What the run already holds, from the server. The attach control shares
+            // `composerDisabled`, so it closes for a reader, for a project with no
+            // runnable model, and while a turn is in flight — the last of those is not
+            // a requirement (a file attached mid-turn would simply be read by the NEXT
+            // turn) but keeping one disabled state means the composer cannot end up
+            // half-open in a way nobody reasoned about.
+            attachments={attachmentsQ.data ?? []}
+            onAttachFiles={(files) => void handleAttachFiles(files)}
+            attaching={attaching}
+            attachError={attachError}
+            footerSlot={
+              <ThreadFooter
+                error={socket.error}
+                connState={socket.connState}
+                canDrive={canDrive}
+              />
+            }
             emptySlot={
               <EmptyThread
                 projectName={project?.name ?? null}
                 trackLabel={trackMeta ? `Track ${trackMeta.number} · ${trackMeta.label}` : null}
-                stageCount={stages.length}
-                firstStage={stages[0] ? PHASE_LABEL[stages[0].phase] : null}
-                ready={ready && canDrive}
-                onRun={() => handleRun()}
+                agentCount={stages.length}
               />
             }
           />
 
           <div className={cn("hidden", variant === "page" ? "xl:block" : "lg:block")}>
-            <StageRail stages={stages} cursor={active?.cursor ?? 0} projectId={projectId} />
+            <ArtifactsPanel
+              // The REAL run, not "". The panel resolves the Development code tree
+              // and every per-agent file tree against this id, so an empty string
+              // rendered a permanently empty tree — indistinguishable from a repo the
+              // agent had failed to pull.
+              runId={runId ?? ""}
+              // Drives which group is expanded AND the Development code tree, which
+              // the panel synthesises only while Development is the active agent.
+              // This was "" too, so that tree never appeared at all.
+              activeStage={socket.activeAgent ?? ""}
+              // What its agents produced. This was a literal [] — a declared
+              // interface with no data behind it, which on screen is exactly what an
+              // agent that produced nothing looks like.
+              tabLabel="Deliverables"
+              artifacts={deliverables}
+              openArtifactId={openDeliverableId}
+              onSelectArtifact={setOpenDeliverableId}
+              streamingArtifactId={null}
+              // The live feed: which agent was chosen and why, what it is thinking,
+              // and every tool it runs. `tool.call` has been declared in the protocol
+              // and rendered by this panel from the start, but nothing emitted it and
+              // nothing recorded it, so the tab was wired to a literal `[]` — a
+              // declared interface with no data behind it, which on screen is
+              // indistinguishable from an agent that never uses tools.
+              activity={socket.activity}
+              working={socket.busy}
+              connectionStatus={socket.connState}
+              collapsed={artifactsCollapsed}
+              onToggle={() => setArtifactsCollapsed((v) => !v)}
+            />
           </div>
         </div>
       </div>
@@ -483,20 +771,49 @@ export function OrchestratorCockpit({
   );
 }
 
+/**
+ * The strip above the composer.
+ *
+ * An `error` event is rendered HERE as well as in the thread, because a failure
+ * that only reaches the console is a failure the user experiences as silence —
+ * the exact behaviour this engine was rebuilt to remove.
+ */
+function ThreadFooter({
+  error,
+  connState,
+  canDrive,
+}: {
+  error: string | null;
+  connState: OrchestratorConnState;
+  canDrive: boolean;
+}) {
+  if (error) {
+    return (
+      <div className="border-destructive/40 bg-destructive/[0.06] text-destructive mx-4 mb-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-[12.5px] md:mx-6">
+        <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+        <span>{error}</span>
+      </div>
+    );
+  }
+  if (!canDrive) return null;
+  if (connState === "connecting" || connState === "reconnecting") {
+    return (
+      <p className="text-muted-foreground mx-4 mb-2 text-[11.5px] md:mx-6">
+        {connState === "connecting" ? "Connecting…" : "Reconnecting…"}
+      </p>
+    );
+  }
+  return null;
+}
+
 function EmptyThread({
   projectName,
   trackLabel,
-  stageCount,
-  firstStage,
-  ready,
-  onRun,
+  agentCount,
 }: {
   projectName: string | null;
   trackLabel: string | null;
-  stageCount: number;
-  firstStage: string | null;
-  ready: boolean;
-  onRun: () => void;
+  agentCount: number;
 }) {
   return (
     <div className="mx-auto flex max-w-lg flex-col items-center gap-3 py-16 text-center">
@@ -509,20 +826,18 @@ function EmptyThread({
       <p className="text-muted-foreground max-w-md text-[13px] leading-relaxed">
         {projectName && trackLabel ? (
           <>
-            <span className="text-foreground">{trackLabel}</span> — {stageCount} agents, starting at{" "}
-            <span className="text-foreground">{firstStage}</span>. Each agent hands its artifacts to
-            the next automatically. Mandatory gates stop the run and wait for you.
+            <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
+            roster.{" "}
+            {/* No "pick one yourself above" any more — the picker is gone and the
+                Orchestrator always chooses. Naming an agent in the message still
+                works, which is what this now points at. */}
+            Describe the work — the Orchestrator picks the agent, and says which and
+            why. Name one in your message to steer it.
           </>
         ) : (
-          "Choose a project and one of the models it is allowed to run on. The Orchestrator then executes that project's agent roster in hand-off order."
+          "Choose a project and one of the models it is allowed to run on, then describe the work."
         )}
       </p>
-      {ready && (
-        <Button size="sm" className="mt-1 gap-1.5" onClick={onRun}>
-          <Play className="size-3.5" aria-hidden />
-          Run the pipeline
-        </Button>
-      )}
     </div>
   );
 }

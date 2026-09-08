@@ -60,8 +60,16 @@ def _to_ref(user_id: str, session_id: str, path: pathlib.Path) -> AttachmentRef:
     )
 
 
-def save_attachment(user_id: str, session_id: str, filename: str, data: bytes) -> AttachmentRef:
-    """Validate + write one attachment; return its reference (incl. /generated download URL)."""
+def validate_attachment(filename: str, data: bytes) -> str:
+    """Check one upload and return the safe name it would be stored under.
+
+    Split out of `save_attachment` so a MULTI-FILE upload can be checked in full before
+    anything is written. Validating as it writes leaves a rejected batch half-stored:
+    the caller is told the upload failed while the files that happened to pass are on
+    disk — and, for an Orchestrator run, are then read into every subsequent agent
+    prompt. `save_attachment` still calls this, so there is one set of rules and one
+    place to change them.
+    """
     name = _safe_name(filename)
     ext = pathlib.Path(name).suffix.lower()
     if ext not in ALLOWED_ATTACHMENT_EXTS:
@@ -73,6 +81,12 @@ def save_attachment(user_id: str, session_id: str, filename: str, data: bytes) -
         raise AttachmentError(
             f"File '{name}' is too large ({len(data) // (1024 * 1024)} MB). Max 10 MB."
         )
+    return name
+
+
+def save_attachment(user_id: str, session_id: str, filename: str, data: bytes) -> AttachmentRef:
+    """Validate + write one attachment; return its reference (incl. /generated download URL)."""
+    name = validate_attachment(filename, data)
     target_dir = _session_dir(user_id, session_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / name

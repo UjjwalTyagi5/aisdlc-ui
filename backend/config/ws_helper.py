@@ -34,6 +34,36 @@ CONSEQUENTIAL_APPROVED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "consequential_approved", default=False
 )
 
+# Is this turn running inside the ORCHESTRATOR, whose caller has already been verified
+# as the administrator of the run's project?
+#
+# `orchestrator_instruction.md` §1.5: "Only a Project Admin can use the Orchestrator,
+# because only that role has access to all agents" and "there is no sign-off and no gate
+# in the Orchestrator". So inside it the stage-owner half of the Consequential check
+# does not apply — a `project_admin` holds only `artifact:approve_documentation` and
+# `artifact:approve_plan`, and would otherwise be refused ownership of the seven stages
+# they demonstrably do own here.
+#
+# DEFAULT False, AND CLEARED IN THE TURN'S `finally`. A leaked True would carry the
+# exemption into whatever ran next on the same worker, including a standalone agent's
+# request, where the stage owner genuinely does decide.
+#
+# This is NOT the consent flag above and does not weaken it. Ownership answers "may this
+# person authorise it"; consent answers "did they, for this action". The Orchestrator
+# settles the first by construction and still asks the second.
+ORCHESTRATOR_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "orchestrator_run", default=False
+)
+
+def set_orchestrator_run(value: bool) -> None:
+    ORCHESTRATOR_RUN.set(bool(value))
+
+def get_orchestrator_run() -> bool:
+    try:
+        return bool(ORCHESTRATOR_RUN.get())
+    except LookupError:
+        return False
+
 def set_tenant_id(tenant_id):
     TENANT_ID.set(str(tenant_id) if tenant_id else None)
 

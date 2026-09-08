@@ -7,11 +7,16 @@ before/after source code) are exactly the class of message that hit this fallbac
 on the Copilot/pipeline surface, which never calls manager.register_session --
 leaking one tenant's source code to every other open WebSocket on the process.
 
-broadcast_to_session is the new, narrower method: it sends ONLY to connections
+broadcast_to_session is the narrower method: it sends ONLY to connections
 registered for the given session_id, and does nothing at all -- no fallback -- when
-that session has no registered connections. These tests assert that security
-property directly, and confirm the existing broadcast() fallback behaviour (used by
-broadcast_log and friends) is untouched.
+that session has no registered connections.
+
+UPDATE: broadcast() itself has since been narrowed the same way, because leaving its
+fallback in place left the leak described above live for all 79 of its call sites --
+and orchestrator2, which never calls register_session, took that branch on every
+single run. A message naming a session nobody holds now goes to nobody. A message
+naming no session at all still goes to everyone, which is what agents_cleared and the
+legacy paths actually mean.
 """
 from __future__ import annotations
 
@@ -93,16 +98,45 @@ async def test_broadcast_to_session_with_missing_session_id_sends_to_nobody():
     ws.send_text.assert_not_called()
 
 
-async def test_broadcast_still_falls_back_to_all_connections_when_unregistered():
-    """Confirm this fix did NOT change broadcast()'s existing fallback behaviour --
-    broadcast_log and other pre-existing callers must keep working exactly as
-    before; only the NEW broadcast_to_session method is narrowed."""
+async def test_broadcast_no_longer_falls_back_when_the_session_names_nobody():
+    """REVERSED, deliberately. This test used to assert the opposite.
+
+    The C1 fix above added `broadcast_to_session` and left `broadcast`'s fallback
+    alone so "broadcast_log and other pre-existing callers keep working exactly as
+    before". That left the leak this module's own docstring describes — one tenant's
+    payload reaching every open socket — live for all 79 `broadcast()` call sites.
+    The decision was "do not break existing callers", not "the leak is acceptable".
+
+    What settled it: orchestrator2 never calls `register_session` at all, so EVERY
+    Orchestrator run takes the fallback. And in that case the fallback cannot be
+    doing its job — the intended reader is not on any of those sockets, so the only
+    thing it achieves is delivery to strangers. A fallback that never reaches its
+    audience is not compatibility, it is only the leak.
+
+    The documented fallback survives: a message with NO session_id still reaches
+    everyone, because `agents_cleared` and the legacy paths genuinely address no one
+    session. See tests/test_broadcast_never_leaks_across_sessions.py.
+    """
     manager = ConnectionManager()
     ws1 = _fake_ws()
     ws2 = _fake_ws()
     manager.active_connections.extend([ws1, ws2])
 
     await manager.broadcast({"type": "activity_update", "session_id": "unregistered-session"})
+
+    ws1.send_text.assert_not_awaited()
+    ws2.send_text.assert_not_awaited()
+
+
+async def test_broadcast_without_a_session_id_still_reaches_everyone():
+    """The half of the fallback that was always legitimate, and must not be lost
+    along with the half that leaked."""
+    manager = ConnectionManager()
+    ws1 = _fake_ws()
+    ws2 = _fake_ws()
+    manager.active_connections.extend([ws1, ws2])
+
+    await manager.broadcast({"type": "agents_cleared"})
 
     ws1.send_text.assert_awaited_once()
     ws2.send_text.assert_awaited_once()

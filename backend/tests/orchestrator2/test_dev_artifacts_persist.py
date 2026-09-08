@@ -1,0 +1,479 @@
+"""The Development agent's clone and PR reach the run row.
+
+FOUND IN THE LIVE UI. Signed in, opened the Orchestrator on project `reall`, asked it
+to pull code from ADO, answered its questions, and watched it reply:
+
+    ✅ Cloned Company successfully. Here are the branches: ...
+
+The clone was genuinely on disk —
+`files/<user>/orchestrator/<run_id>/project/` held `.git` and the checked-out tree —
+and `_run_dev_work_dir` resolved it. But the run row's `development_artifacts` was
+`None`, and stayed `None`.
+
+`grep -rn "development_artifacts" agents_orchestrator/orchestrator2/` returned NOTHING.
+orchestrator2 never wrote it. The standalone wrapper it replaced did
+(`development_agent_api._persist_pr_to_run`), so this is the same shape of gap as the
+connector binding, the MCP tools and the per-run contextvars: state the standalone
+`*_agent_api.py` provided that `orchestrator2` skipped.
+
+WHAT IT COSTS. `deliverables.pointers_for_run` emits the `dev-code` ("Repository
+code") and `dev-pr` ("Pull request") pointers ONLY when `dev_artifacts["repo_url"]` /
+`["pr_url"]` are set. With the column `None`, neither can ever fire for an
+orchestrator2 run — the panel cannot link the pulled repo or the raised PR, no matter
+how well the clone worked.
+"""
+import uuid
+from contextlib import asynccontextmanager
+
+import pytest
+
+
+_RUN = "9de55574-d9ca-44c5-8c2f-3b1ad04006f0"
+_TENANT = "dfee0d2f-345e-430e-8084-7ab7276cc5b8"
+
+
+class _Row:
+    def __init__(self):
+        self.id = uuid.UUID(_RUN)
+        self.tenant_id = uuid.UUID(_TENANT)
+        self.development_artifacts = None
+
+
+def _fake_factory(monkeypatch, row):
+    """Patch the session factory, and let the row be mutated as the real one is."""
+    import shared.db as shared_db
+
+    class _Result:
+        def __init__(self, item):
+            self._item = item
+
+        def scalars(self):
+            return self
+
+        def first(self):
+            return self._item
+
+    class _Session:
+        def __init__(self):
+            self.committed = False
+
+        async def execute(self, stmt):
+            return _Result(row)
+
+        async def commit(self):
+            self.committed = True
+
+    session = _Session()
+
+    @asynccontextmanager
+    async def _fake(tenant_id):
+        yield session
+
+    monkeypatch.setattr(shared_db, "get_db_session_for_tenant", _fake)
+    return session
+
+
+def _dev_session(**fields):
+    """Stand-in for the Development agent's in-memory session."""
+    class _Artifacts:
+        def __init__(self):
+            self.repo_url = fields.get("repo_url")
+            self.branch_name = fields.get("branch_name")
+            self.pr_url = fields.get("pr_url")
+
+        def model_dump(self):
+            return {"repo_url": self.repo_url, "branch_name": self.branch_name,
+                    "pr_url": self.pr_url}
+
+    class _Session:
+        dev_artifacts = _Artifacts()
+
+    return _Session()
+
+
+@pytest.mark.asyncio
+async def test_a_clone_is_recorded_on_the_run(monkeypatch):
+    """The whole bug: the agent cloned, and the run row learned nothing."""
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    row = _Row()
+    _fake_factory(monkeypatch, row)
+    monkeypatch.setattr(
+        da, "_dev_session",
+        lambda run_id: _dev_session(repo_url="https://dev.azure.com/x/_git/Company",
+                                    branch_name="main"),
+    )
+
+    await da.persist(_RUN, tenant_id=_TENANT)
+    assert row.development_artifacts, "the clone was not recorded on the run"
+    assert row.development_artifacts["repo_url"].endswith("/Company")
+    assert row.development_artifacts["branch_name"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_artifacts_produce_the_panel_pointers(monkeypatch):
+    """Ties this to what the user actually sees. Recording a shape
+    `pointers_for_run` does not read would be a write nobody benefits from."""
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+    from agents_orchestrator.orchestrator2.deliverables import pointers_for_run
+
+    row = _Row()
+    _fake_factory(monkeypatch, row)
+    monkeypatch.setattr(
+        da, "_dev_session",
+        lambda run_id: _dev_session(repo_url="https://dev.azure.com/x/_git/Company",
+                                    pr_url="https://dev.azure.com/x/_git/Company/pullrequest/7"),
+    )
+
+    await da.persist(_RUN, tenant_id=_TENANT)
+    ids = {p["id"] for p in pointers_for_run(row.development_artifacts)}
+    assert ids == {"dev-code", "dev-pr"}
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_written_when_the_agent_pulled_nothing(monkeypatch):
+    """An empty `development_artifacts` would make `pointers_for_run` emit a code tree
+    over a clone that does not exist — an empty tree reads as a pull that FAILED,
+    which is worse than no tree at all."""
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    row = _Row()
+    session = _fake_factory(monkeypatch, row)
+    monkeypatch.setattr(da, "_dev_session", lambda run_id: _dev_session())
+
+    await da.persist(_RUN, tenant_id=_TENANT)
+    assert row.development_artifacts is None
+    assert not session.committed, "an empty write still cost a commit"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_pull_never_opens_a_database_session(monkeypatch):
+    """Pins the early return, which the no-op check further down otherwise makes look
+    redundant — mutation showed removing it changed no observable outcome.
+
+    It is not redundant: EVERY agent's turn calls `persist`, and only Development ever
+    has anything to record. Without the early return, all nine agents pay a
+    tenant-scoped session and a SELECT on every turn to discover there is nothing to
+    write.
+    """
+    import shared.db as shared_db
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    opened = []
+
+    @asynccontextmanager
+    async def _counting(tenant_id):
+        opened.append(tenant_id)
+        raise AssertionError("a database session was opened for an empty pull")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(shared_db, "get_db_session_for_tenant", _counting)
+    monkeypatch.setattr(da, "_dev_session", lambda run_id: _dev_session())
+
+    await da.persist(_RUN, tenant_id=_TENANT)
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_does_not_erase_what_an_earlier_one_recorded(monkeypatch):
+    """A conversation clones once and raises a PR several turns later. Replacing the
+    whole column each turn would drop `repo_url` the moment a turn knew only the PR."""
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    row = _Row()
+    _fake_factory(monkeypatch, row)
+
+    monkeypatch.setattr(
+        da, "_dev_session",
+        lambda run_id: _dev_session(repo_url="https://dev.azure.com/x/_git/Company",
+                                    branch_name="main"),
+    )
+    await da.persist(_RUN, tenant_id=_TENANT)
+
+    # A later turn: the session now knows the PR. `repo_url` must survive.
+    monkeypatch.setattr(
+        da, "_dev_session",
+        lambda run_id: _dev_session(pr_url="https://dev.azure.com/x/_git/Company/pullrequest/7"),
+    )
+    await da.persist(_RUN, tenant_id=_TENANT)
+
+    assert row.development_artifacts["repo_url"].endswith("/Company")
+    assert row.development_artifacts["branch_name"] == "main"
+    assert row.development_artifacts["pr_url"].endswith("/pullrequest/7")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_session_is_not_an_error(monkeypatch):
+    """Every agent's turn calls this; only Development has a session to read. An
+    exception here would fail turns for the other eight."""
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    row = _Row()
+    _fake_factory(monkeypatch, row)
+
+    def _boom(run_id):
+        raise KeyError(run_id)
+
+    monkeypatch.setattr(da, "_dev_session", _boom)
+    await da.persist(_RUN, tenant_id=_TENANT)  # must not raise
+    assert row.development_artifacts is None
+
+
+@pytest.mark.asyncio
+async def test_the_write_is_scoped_to_the_runs_tenant(monkeypatch):
+    """RLS is inert in this deployment — the app connects as a rolbypassrls
+    superuser — so the tenant-scoped session is what actually stands between tenants.
+    """
+    import shared.db as shared_db
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    seen = {}
+
+    @asynccontextmanager
+    async def _fake(tenant_id):
+        seen["tenant"] = tenant_id
+
+        class _S:
+            async def execute(self, stmt):
+                class _R:
+                    def scalars(self_inner):
+                        return self_inner
+
+                    def first(self_inner):
+                        return None
+                return _R()
+
+            async def commit(self):
+                pass
+        yield _S()
+
+    monkeypatch.setattr(shared_db, "get_db_session_for_tenant", _fake)
+    monkeypatch.setattr(
+        da, "_dev_session",
+        lambda run_id: _dev_session(repo_url="https://dev.azure.com/x/_git/Company"),
+    )
+    await da.persist(_RUN, tenant_id=_TENANT)
+    assert seen["tenant"] == _TENANT
+
+
+# ── the turn actually calls it ───────────────────────────────────────────────
+#
+# `persist` being correct is worth nothing if `dispatch` never reaches it — the same
+# gap this module exists to close, one layer up. Mutation found it: deleting the call
+# from `dispatch.py` broke no test.
+#
+# Driven through the registry-substitution harness the other dispatch tests use, so
+# the REAL `run_agent` path runs. An earlier version of this file stubbed a
+# `dispatch._run_graph` that does not exist, which quietly asserted nothing.
+
+
+class _ScriptedGraph:
+    def __init__(self, messages):
+        self._messages = messages
+
+    async def astream(self, state, stream_mode=None, config=None):
+        for message in self._messages:
+            yield (message, {})
+
+
+class _FailingGraph:
+    async def astream(self, state, stream_mode=None, config=None):
+        raise RuntimeError("the provider refused")
+        yield  # pragma: no cover — makes this an async generator
+
+
+@pytest.fixture()
+def _stub_model_resolution(monkeypatch):
+    from agents_orchestrator.orchestrator2 import dispatch
+    from shared.services import model_resolver as mr
+
+    async def _fake_resolve(tenant_id, requested_model_id=None, **kwargs):
+        return mr.ResolvedModel(
+            provider="anthropic", litellm_provider="anthropic", model="m",
+            api_key="k", base_url=None, alias="tenant:t1:p1",
+        )
+
+    monkeypatch.setattr(dispatch, "resolve_model_for_run", _fake_resolve)
+    mr.set_resolved_model(None)
+    mr.set_run_project(None)
+    yield
+    mr.set_resolved_model(None)
+    mr.set_run_project(None)
+
+
+async def _turn(monkeypatch, *, graph):
+    """One `development` turn against `graph`."""
+    from agents_orchestrator.orchestrator2 import dispatch
+    from agents_orchestrator.orchestrator2 import registry as reg
+
+    monkeypatch.setitem(
+        reg.REGISTRY, "development",
+        reg.AgentCapability(
+            agent_id="development",
+            load_graph=lambda: graph,
+            load_prompt=lambda: "SYS",
+            mode="stream",
+        ),
+    )
+
+    async def _no_capture(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(dispatch.deliverables, "capture", _no_capture)
+    return [e async for e in dispatch.run_agent(
+        "development", text="pull the code", run_id=_RUN, tenant_id=_TENANT,
+        model_id=None, offering_id=None, project_id=None, user_id="u1",
+        context="", reason="r")]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_records_the_development_artifacts(
+    monkeypatch, _stub_model_resolution,
+):
+    from agents_orchestrator.orchestrator2 import dispatch
+    from langchain_core.messages import AIMessageChunk
+
+    calls = []
+
+    async def _fake_persist(run_id, *, tenant_id):
+        calls.append((run_id, tenant_id))
+        return None
+
+    monkeypatch.setattr(dispatch.dev_artifacts, "persist", _fake_persist)
+    await _turn(monkeypatch, graph=_ScriptedGraph([AIMessageChunk(content="cloned")]))
+
+    assert calls == [(_RUN, _TENANT)], (
+        "a completed turn did not record the Development agent's clone"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_records_nothing(monkeypatch, _stub_model_resolution):
+    """Same rule the deliverable capture follows: a turn that did not complete has
+    produced nothing to point at."""
+    from agents_orchestrator.orchestrator2 import dispatch
+
+    calls = []
+
+    async def _fake_persist(run_id, *, tenant_id):
+        calls.append(run_id)
+
+    monkeypatch.setattr(dispatch.dev_artifacts, "persist", _fake_persist)
+    events = await _turn(monkeypatch, graph=_FailingGraph())
+
+    assert any(e["type"] == "error" for e in events), "the turn was meant to fail"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_persist_failure_does_not_fail_the_turn(
+    monkeypatch, _stub_model_resolution,
+):
+    """`persist` promises never to raise, but the CALL SITE must not rest on that
+    promise — the guarantee has to hold at the layer that would lose the turn."""
+    from agents_orchestrator.orchestrator2 import dispatch
+    from langchain_core.messages import AIMessageChunk
+
+    async def _boom(run_id, *, tenant_id):
+        raise RuntimeError("the database is on fire")
+
+    monkeypatch.setattr(dispatch.dev_artifacts, "persist", _boom)
+    events = await _turn(monkeypatch, graph=_ScriptedGraph([AIMessageChunk(content="x")]))
+
+    assert events[-1]["type"] == "stream_end", (
+        "a failed artifact write cost the user the end of their turn"
+    )
+
+
+
+# ── the session lookup has to be real ────────────────────────────────────────
+
+
+def test_the_development_session_is_actually_reachable():
+    """CAUGHT LIVE. Every test above monkeypatches `_dev_session`, so none of them
+    ever imported what it imports.
+
+    It imported `agents_orchestrator.development_agent.session`, which does not exist —
+    the module is `development_agent.config.session_state`. The ImportError was caught
+    by `persist`'s "no session for this run is the normal case" guard and returned
+    None, so `runs.development_artifacts` stayed null on every run, and the panel's
+    code tree was only ever the synthetic one the frontend draws while Development is
+    the ACTIVE agent. Switch agents and it vanished.
+
+    The fail-soft was right and hid the bug anyway: a broken import and an absent
+    session were indistinguishable. This asserts the real thing resolves.
+    """
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    session = da._dev_session("some-run-id-that-has-no-session")
+    assert session is not None, "the real session lookup could not be imported"
+    # The fields `_collect` reads, on the real object rather than a stand-in.
+    for field in ("repo_url", "branch_name", "pr_url"):
+        assert hasattr(session, field) or hasattr(
+            getattr(session, "dev_artifacts", object()), field
+        ), f"the real session exposes no {field} for _collect to read"
+
+
+def test_a_session_that_cloned_is_collected_from_the_real_object():
+    """The shape end to end, against the real DevSessionState rather than a fake with
+    the fields the fake's author remembered."""
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session, get_session,
+    )
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-collect-test"
+    try:
+        session = get_session(run)
+        session.repo_url = "https://dev.azure.com/x/_git/Company"
+        session.branch_name = "feature/duplicate-table-pink"
+        session.pr_url = "https://dev.azure.com/x/_git/Company/pullrequest/34"
+
+        found = da._collect(da._dev_session(run))
+        assert found["repo_url"].endswith("/Company")
+        assert found["branch_name"] == "feature/duplicate-table-pink"
+        assert found["pr_url"].endswith("/pullrequest/34")
+    finally:
+        clear_session(run)
+
+
+def test_an_untouched_session_collects_nothing():
+    """`get_session` CREATES on miss, so every agent's turn gets an empty state rather
+    than an error. That must read as "nothing to record", not as a row of blanks."""
+    from agents_orchestrator.development_agent.config.session_state import clear_session
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-empty-test"
+    try:
+        assert da._collect(da._dev_session(run)) == {}
+    finally:
+        clear_session(run)
+
+
+
+def test_a_status_the_graph_never_updates_is_not_persisted():
+    """`DevelopmentArtifacts.status` defaults to "not_started" and nothing maintains
+    it, so carrying it wrote `status: "not_started"` next to a real pull request URL —
+    a row that contradicts itself. Nothing reads it; omitting it is the honest move.
+    """
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    assert "status" not in da._FIELDS
+
+
+def test_a_real_session_yields_only_fields_that_are_true():
+    from agents_orchestrator.development_agent.config.session_state import (
+        clear_session, get_session,
+    )
+    from agents_orchestrator.orchestrator2 import dev_artifacts as da
+
+    run = "real-session-no-status-test"
+    try:
+        session = get_session(run)
+        session.repo_url = "https://dev.azure.com/x/_git/Company"
+        session.pr_url = "https://dev.azure.com/x/_git/Company/pullrequest/34"
+        found = da._collect(da._dev_session(run))
+        assert set(found) <= {"repo_url", "branch_name", "pr_url", "pr_title"}
+        assert "status" not in found
+    finally:
+        clear_session(run)

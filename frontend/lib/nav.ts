@@ -1,5 +1,6 @@
 import { ROLE_ORDER, type PlatformRole } from "@/lib/roles";
 import { AGENT_DEFAULT_OWNER_ROLE } from "@/lib/governance";
+import { canUseOrchestrator } from "@/lib/orchestrator/access";
 import {
   Activity,
   Boxes,
@@ -64,6 +65,17 @@ const AGENT_STUDIO_GLOBAL_HIDDEN: readonly PlatformRole[] = ROLE_ORDER.filter(
   (r) => !AGENT_STUDIO_TIER_OWNERS.has(r),
 );
 
+/**
+ * Roles that may see the Orchestrator entry — derived from `canUseOrchestrator`
+ * (`lib/orchestrator/access.ts`), the single source of truth for who may drive
+ * it, rather than a second hardcoded `["project_admin"]`. Two literals that
+ * happen to agree today is exactly the drift that let `cockpit.tsx` disagree
+ * with `access.ts` before this was caught — see that file's history.
+ */
+const ORCHESTRATOR_VISIBLE_ROLES: readonly PlatformRole[] = ROLE_ORDER.filter((r) =>
+  canUseOrchestrator(r),
+);
+
 export interface NavItem {
   label: string;
   href: string;
@@ -72,6 +84,20 @@ export interface NavItem {
   requireRole?: Role;
   /** A single required permission, or an array meaning "any of these" (OR). */
   requirePermission?: string | string[];
+  /**
+   * Allow-list of platform roles that may see this entry at all — distinct
+   * from `requireRole` above, which checks the coarse legacy MVP-0 session
+   * role (`admin` | `member` | `viewer`) and is read by nothing today. This
+   * checks the PRD role model (`PlatformRole`) directly, for an entry whose
+   * gate is a role identity rather than a permission string — e.g. the
+   * Orchestrator, which is Project-Admin-only regardless of what permissions
+   * a role happens to hold.
+   *
+   * Unlike `hideForRoles` (a denylist applied on top of a permission check),
+   * this is the whole check: unset when `ctx.role` is not yet known (still
+   * loading), same as every other role-aware filter here.
+   */
+  requirePlatformRole?: readonly PlatformRole[];
   hiddenInSidebar?: boolean;
   /** PRD section that specifies this screen — surfaced in dev tooling only. */
   prdSection?: string;
@@ -146,32 +172,29 @@ export const deliverNav: NavItem[] = [
   },
   {
     /**
-     * The cross-project auto-sequencing cockpit — pick a project, pick one of
-     * the models it is allowed to run on, and it executes that project's agent
-     * roster in hand-off order.
+     * The cockpit that reaches all nine agents at once — pick a project, pick
+     * one of the models it is allowed to run on, and drive its agent roster.
      *
      * Distinct from the per-project Orchestrator at
-     * `/projects/[id]/orchestrator`, which is the PRD §34.11 reading (a
-     * conversation partner that never auto-advances). Both routes are live;
-     * this entry points at the sequencing one because that is the surface you
-     * come to the sidebar to start work in.
+     * `/projects/[id]/orchestrator`, which is the same cockpit with the
+     * project fixed. Both routes are live; this entry points at the picker
+     * variant because that is the surface you come to the sidebar to start
+     * work in.
      *
-     * Gated on `artifact:view` and nothing else, deliberately matching
-     * `/projects/[id]/orchestrator`: anyone who can open that page can open
-     * this one. Driving is narrower than opening — the page itself renders
-     * read-only for everyone but the Project Admin (PRD §15.5–§15.11), the
-     * same split the per-project page already makes.
+     * Restricted to `project_admin` via `requirePlatformRole`, not a
+     * permission: reaching all nine agents at once is exactly what
+     * `AGENT_OWNERSHIP` reserves for the Project Admin fallback (see
+     * `lib/orchestrator/access.ts::canUseOrchestrator`). Any other role that
+     * could open this page would thereby hold every agent's access — the
+     * privilege leak the one-agent-one-role model was built to remove. No
+     * `hideForRoles` needed on top: an allow-list of one role already
+     * excludes the governance tier along with everyone else.
      */
     label: "Orchestrator",
     href: "/orchestrator",
     icon: Workflow,
     segment: "orchestrator",
-    requirePermission: "artifact:view",
-    // Hidden from the governance tier for the same reason as Agent Studio: it
-    // is a cockpit for RUNNING a project's agent roster, and neither admin tier
-    // has agent access at all (PRD §14.8). They govern who may run what; the
-    // running itself belongs to the delivery roles inside a project.
-    hideForRoles: ["org_admin", "bu_admin"],
+    requirePlatformRole: ORCHESTRATOR_VISIBLE_ROLES,
     prdSection: "§34.11",
   },
   {
@@ -632,6 +655,10 @@ function visibleTo(item: NavItem, perms: string[], ctx?: NavContext): boolean {
   if (ctx?.role === "contributor") return false;
 
   if (!holds(perms, item.requirePermission)) return false;
+
+  if (ctx?.role && item.requirePlatformRole && !item.requirePlatformRole.includes(ctx.role)) {
+    return false;
+  }
 
   if (ctx?.role && item.hideForRoles?.includes(ctx.role)) return false;
 

@@ -155,11 +155,19 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
     # front, but each node re-enters asyncio in an executor thread, which can drop
     # the contextvar — so fall back here too. Enterprise still fails CLOSED; local
     # dev uses ANTHROPIC_API_KEY (mirrors every other agent's env fallback).
-    from config.env import AGENT_RUNTIME_MODE
-    if AGENT_RUNTIME_MODE == "enterprise" or not ANTHROPIC_API_KEY:
+    # OPT-IN. Guarding on runtime mode alone left this live on every non-enterprise
+    # deployment with a key in its environment, so a BYOK run whose contextvar was
+    # dropped spent the PLATFORM's key instead of the project's — bypassing its grant
+    # and its budget, silently, with an answer that looked fine.
+    from config.env import AGENT_RUNTIME_MODE, ALLOW_PLATFORM_MODEL_FALLBACK
+    if (AGENT_RUNTIME_MODE == "enterprise"
+            or not ALLOW_PLATFORM_MODEL_FALLBACK
+            or not ANTHROPIC_API_KEY):
         raise RuntimeError(
             "No BYOK model resolved for this testing run. An administrator must "
-            "configure and verify a model provider in Org Settings → Model Providers."
+            "configure and verify a model provider in Org Settings → Model Providers. "
+            "(Set ALLOW_PLATFORM_MODEL_FALLBACK=true only for local development with "
+            "no provider configured.)"
         )
     params = dict(
         model=ANTHROPIC_MODEL,

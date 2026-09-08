@@ -40,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.authz.can_perform import visible_project_ids
 from shared.authz.read_scope import (
     administered_workspace_ids,
+    administered_workspace_ids_for,
+    is_org_wide_for,
     is_org_wide,
     live_binding,
 )
@@ -166,14 +168,37 @@ async def project_admin_tier(
     applies the same edit directly. Both "may administer the project"; only one of
     them is the person the request would be routed to.
     """
-    if is_org_wide(request):
+    return await project_admin_tier_for(
+        db,
+        user_id=getattr(request.state, "user_id", "") or "",
+        permissions=getattr(request.state, "permissions", []),
+        project=project,
+    )
+
+
+async def project_admin_tier_for(
+    db: AsyncSession, *, user_id: str, permissions: Any, project: Any
+) -> str | None:
+    """`project_admin_tier`, addressed by identity rather than by a `Request`.
+
+    THE RULE LIVES HERE, and `project_admin_tier` is a wrapper that pulls the two
+    values out of `request.state`. The split exists because the Orchestrator WebSocket
+    has to ask this question and has no `Request`: it resolves the caller's identity
+    and permissions from a redeemed single-use ticket. Answering it there with a second
+    hand-written query would be the mistake `live_binding`'s docstring records — one
+    rule written four ways, disagreeing — and this one decides whether a Project Admin
+    of project A may drive all nine agents against project B's run, on B's model grant
+    and B's budget.
+    """
+    if is_org_wide_for(permissions):
         return "org"
 
-    administered = await administered_workspace_ids(db, request)
+    administered = await administered_workspace_ids_for(
+        db, user_id=user_id, permissions=permissions
+    )
     if administered is not None and str(project.workspace_id) in administered:
         return "unit"
 
-    user_id = getattr(request.state, "user_id", "") or ""
     own = (
         await db.execute(
             text(

@@ -21,8 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 # Importing routers for chat and development functionalities
-from agents_orchestrator.orchestrator.orchestrator_api import orchestrator_router
-from agents_orchestrator.orchestrator.copilot_api import copilot_router
+from agents_orchestrator.orchestrator2.ws import orchestrator2_router
 from agents_orchestrator.requirements_agent.requirements_agent_api import requirement_router_orchestrator
 from agents_orchestrator.design_architecture_agent.design_architecture_agent_api import design_router_orchestrator
 from agents_orchestrator.pm_agent.pm_agent_api import pm_router_orchestrator
@@ -66,6 +65,7 @@ from shared.authz.token_epoch import is_token_stale
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
 from shared.authz.catalog import assert_rbac_catalog
+from agents_orchestrator.orchestrator2.registry import validate_registry
 from shared.auth.bootstrap import seed_org_admins
 from shared.authz.resolver import resolve_permissions_for_user, PermissionResolutionError
 from shared.db import engine, get_db_session_for_tenant, get_db_session_superuser, RESOLVED_POSTGRES_CONN_STRING
@@ -599,6 +599,15 @@ async def lifespan(app: FastAPI):
             _catalog_session, autorepair=RBAC_CATALOG_AUTOREPAIR
         )
 
+    # Orchestrator2 capability registry boot guard (spec §11.2). The old engine
+    # returned None for an unmapped agent and logged a warning: six of nine agents
+    # ran with no system prompt and the Project Manager agent (`plan`) could not
+    # run at all, and because it failed soft, the symptom was a vague answer, never
+    # an error anyone could chase. This is fatal, not a warning, for the same
+    # reason the RBAC catalogue guard above is fatal: a capability gap must be
+    # impossible to ship, not something a user discovers by being ignored.
+    validate_registry()
+
     # Seed the single organization + its env-listed org admin(s). Idempotent.
     # No-op unless ORG_ADMIN_EMAILS and ORG_ADMIN_PASSWORD are both set.
     await seed_org_admins()
@@ -966,8 +975,16 @@ app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/ingestio
 # The legacy evaluator stays at /sdlc/agent/deployment_orchestrator below.
 from agents_orchestrator.deployment_agent.deployment_standalone_api import deployment_standalone_router
 app.include_router(deployment_standalone_router, prefix="/sdlc/agent/deployment", tags=["deployment"], dependencies=[_VIEW_DEP])
-app.include_router(orchestrator_router, prefix="/sdlc/agent/orchestrator", tags=["orchestrator"], dependencies=[_VIEW_DEP])
-app.include_router(copilot_router, prefix="/sdlc/agent/copilot", tags=["copilot"], dependencies=[_VIEW_DEP])
+# Orchestrator (Phase 2 engine) — one WebSocket that dispatches an explicitly named
+# agent. `_VIEW_DEP` is carried for consistency with the agent mounts above and to
+# give any future REST route on this router the same floor, but it is a DELIBERATE
+# NO-OP for WebSockets (require_permission returns early for ws scopes: the HTTP JWT
+# middleware never runs for them). The real gate is inside the handler and is much
+# narrower than a floor permission: `ws.py` resolves the caller's platform role from
+# the redeemed ticket and refuses anyone who is not a Project Admin before accepting
+# the handshake. Read it there, not here — the last Orchestrator route was "gated" in
+# four places in the UI and open to anyone who typed the URL.
+app.include_router(orchestrator2_router, prefix="/sdlc/agent/orchestrator2", tags=["orchestrator2"], dependencies=[_VIEW_DEP])
 
 app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/requirement_orchestrator", tags=["requirement-orchestrator"], dependencies=[_VIEW_DEP])
 app.include_router(requirement_router_orchestrator, prefix="/sdlc/agent/ingestion_orchestrator", tags=["ingestion-orchestrator"], dependencies=[_VIEW_DEP])
@@ -1261,4 +1278,11 @@ async def get_my_permissions(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("process_api:app", host="0.0.0.0", port=80, log_level="info")
+    uvicorn.run(
+        "process_api:app", host="0.0.0.0", port=80, log_level="info",
+        # Bounds an inbound WebSocket frame at the PROTOCOL layer, before any handler
+        # sees it. orchestrator2/ws.py repeats the check because the CLI path
+        # (`uv run uvicorn ...`) never executes this line, and neither path covers
+        # every deployment.
+        ws_max_size=1_000_000,
+    )

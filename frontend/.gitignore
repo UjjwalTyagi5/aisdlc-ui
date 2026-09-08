@@ -79,3 +79,7 @@ package-lock.json
 
 # Deployment audit trail — local working record, never pushed
 AUDIT_LOG.md
+
+# Playwright browsers + traces
+test-results/
+playwright-report/

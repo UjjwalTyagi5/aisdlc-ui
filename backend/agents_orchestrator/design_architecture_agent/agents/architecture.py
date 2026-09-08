@@ -109,7 +109,16 @@ async def _llm_generate_async(prompt: str, system: str = "") -> str:
             if delta:
                 full_text.append(delta)
                 if session_id:
-                    await manager.broadcast({
+                    # broadcast_to_session, NOT broadcast. `broadcast` falls back to
+                    # EVERY active connection when the session id has no registered
+                    # socket, and an Orchestrator run has none: orchestrator2's socket
+                    # layer never touches this ConnectionManager. So a design document
+                    # generated through the Orchestrator was streamed, token by token,
+                    # onto whatever unrelated legacy agent socket happened to be open.
+                    # This method exists for payloads that must never fan out and never
+                    # falls back. The Design page is unaffected — it registers the
+                    # session on every frame before the graph runs.
+                    await manager.broadcast_to_session({
                         "type": "stream_chunk",
                         "content": delta,
                         "session_id": session_id,
@@ -223,6 +232,131 @@ async def _markdown_to_docx(markdown_string: str, docx_path: str) -> str:
     return result
 
 
+# ── Saving the document the agent just generated ───────────────────────────────
+#
+# These four helpers exist because of ONE LIVE INCIDENT, twice over. Run through the
+# Orchestrator, the Design agent's entire reply was 104 characters:
+#
+#     "The architecture document has been generated. Would you like me to save it as
+#      a .docx file for download?"
+#
+# and nothing reached disk. The Project Manager had written
+# `Coffee_Ordering_App_Delivery_Plan.pdf` into `files/<user>/orchestrator/<run>/output/`
+# on the same run; the Design agent's Deliverables heading was empty. The prompt had
+# told the model to OFFER a save, and an offer is a question — an Orchestrator turn
+# ends when the agent stops talking, so nobody ever answered it.
+#
+# Generating a document and writing it down are one act, so the generating tools now do
+# both. `save_architecture` remains for a DIFFERENT name or format, which is the only
+# thing the user still has to ask for.
+#
+# They deliberately live next to `_markdown_to_docx`: that is the function that turns a
+# document into a file, and this is the policy about when it runs. `_design_output_dir`
+# and `_design_broadcast_file` are defined further down the module and resolved at call
+# time.
+
+
+def _architecture_filename(markdown: str) -> str:
+    """A filename derived from the document's own title.
+
+    Design, the Project Manager and Testing all write into the SAME
+    `orchestrator/<run>/output/` directory (see tests/orchestrator2/
+    test_stage_output_dirs.py for the mapping), and a run can design more than once.
+    A fixed `architecture.docx` therefore silently overwrites the previous design and
+    tells a reader of the file tree nothing — which is why the Project Manager's export
+    is `Coffee_Ordering_App_Delivery_Plan.pdf` and not `plan.pdf`.
+
+    Falls back to `architecture.docx` when the document has no level-1 heading, or when
+    its heading survives slugging as nothing usable. Two designs with the SAME title
+    still collide; that is the pre-existing behaviour of every save tool here and is not
+    something this function claims to solve.
+    """
+    match = re.search(r"(?m)^\s{0,3}#\s+(.+?)\s*$", markdown or "")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", match.group(1) if match else "").strip("_")
+    # 80 characters, not the filesystem's limit: the run directory and the user id are
+    # already in the path, and a name longer than this is not read, only scrolled.
+    return f"{slug[:80]}.docx" if slug else "architecture.docx"
+
+
+async def _write_architecture_docx(content: str, filename: str) -> tuple[str, str]:
+    """Write ONE architecture .docx into this run's output directory and announce it.
+
+    Returns `(path, download_url)`. An empty url means the announcement failed, NOT
+    that nothing was written — `_design_broadcast_file` swallows its own errors and
+    returns "" so that a dead websocket cannot cost the user the file.
+    """
+    full_path = os.path.join(_design_output_dir(), filename)
+    await _markdown_to_docx(content, full_path)
+    url = await _design_broadcast_file(filename, full_path)
+    return full_path, url
+
+
+async def _autosave_architecture(markdown: str) -> str:
+    """Save a freshly generated architecture document, unasked, and return a receipt.
+
+    Returns a one-line "SAVED: …" receipt the model can quote, or "" when nothing was
+    written — which happens in two cases, both of which must leave the caller holding
+    the document:
+
+    · NO SESSION CONTEXT. Outside a run there is no user and no session id, and the
+      path would be `files/None/orchestrator/None/output/` behind a `/generated/None/…`
+      URL that resolves for nobody. An unasked-for save declines rather than littering;
+      an explicit `save_architecture` is still free to write wherever it is told.
+
+    · THE WRITE FAILED. The document is minutes of work and real tokens against the
+      tenant's own provider. Trading it for an OSError would be the more expensive bug,
+      so the failure is logged at exception level and the receipt comes back empty —
+      the CALLER then returns the document unchanged, so the user can still be shown it
+      and `save_architecture` can still retry.
+
+    What this does NOT do is tell the user the save failed. The model is handed no
+    receipt, so it says nothing about a file, which reads as a document that was
+    generated but not saved — true, and the closest honest thing available here.
+    """
+    if not (markdown and markdown.strip()):
+        return ""
+    user_id, session_id = get_user_id(), get_session_id()
+    if not user_id or not session_id:
+        logger.info(
+            "design auto-save skipped — no run context (user set: %s, session set: %s)",
+            bool(user_id), bool(session_id),
+        )
+        return ""
+    filename = _architecture_filename(markdown)
+    try:
+        _path, url = await _write_architecture_docx(markdown, filename)
+    except Exception:  # noqa: BLE001 — never let the save cost the generation
+        logger.exception("design auto-save failed for %s", filename)
+        return ""
+    if url:
+        return f"SAVED: {filename} — download: {url}"
+    # Honest about the half-success: the file exists, the link does not.
+    return f"SAVED: {filename} (in this run's output folder; no download link was built)"
+
+
+def _with_save_receipt(receipt: str, markdown: str) -> str:
+    """The tool's return value: the receipt, then the document itself.
+
+    THE RECEIPT GOES IN FRONT, and that placement is load-bearing.
+    `shared/services/orchestrator/artifacts_view.parse_design_markdown` splits the
+    document on its `##` headers and DISCARDS everything before the first one, so a
+    receipt at the front is dropped by the panel; a receipt appended at the end would
+    be rendered inside the document's last section.
+
+    The document is still returned whole. That return value is the only channel both
+    surfaces share: the standalone WS loop accumulates it into `final_content`, which
+    is what `_persist_design_artifacts` parses the eight design sections out of.
+    """
+    if not receipt:
+        return markdown
+    return (
+        f"{receipt}\n"
+        "(Written automatically — do NOT call save_architecture for this document "
+        "again unless the user asks for a different name or a different format.)\n\n"
+        f"{markdown}"
+    )
+
+
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @tool
@@ -258,8 +392,14 @@ async def generate_architecture(document_text: str, custom_prompt: str = "") -> 
     mermaid_match = re.search(r"```mermaid(.*?)```", result, re.DOTALL)
     if mermaid_match:
         shared.mermaid = mermaid_match.group(1).strip()
+    # Stashed here for the same reason generate_architecture_from_context stashes it —
+    # a later "save it as a PDF" falls back to this attribute when the model cannot
+    # echo a large document into a tool argument. This path did not stash, so the
+    # fallback was empty for anyone who designed from an UPLOADED file.
+    shared.last_architecture = result
+    receipt = await _autosave_architecture(result)
     broadcast_log(manager, "Architecture generation complete.", level="INFO")
-    return result
+    return _with_save_receipt(receipt, result)
 
 
 @tool
@@ -298,8 +438,9 @@ Do not leave any table cells empty in required sections."""
     mermaid_match = re.search(r"```mermaid(.*?)```", result, re.DOTALL)
     if mermaid_match:
         shared.mermaid = mermaid_match.group(1).strip()
+    receipt = await _autosave_architecture(result)
     broadcast_log(manager, "Context-based architecture generation complete.", level="INFO")
-    return result
+    return _with_save_receipt(receipt, result)
 
 
 @tool
@@ -373,40 +514,18 @@ async def save_architecture(filename: str = "", content: str = "") -> str:
     if not filename.endswith(".docx"):
         filename += ".docx"
     broadcast_log(manager, f"Saving architecture document: {filename}", level="INFO")
-    session_id = get_session_id()
-    user_id = get_user_id()
-    out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
-    full_path = os.path.join(out_dir, filename)
-    result = await _markdown_to_docx(content, full_path)
+    # ONE WRITE PATH, shared with the automatic save the generating tools now perform.
+    # This tool used to open-code the directory, the conversion, the file_generated
+    # broadcast and the artifact registration; `_design_broadcast_file` already did the
+    # last two identically for every other design export. Two copies of "where a design
+    # document goes" is how the automatic save and the asked-for one end up disagreeing
+    # about the directory, and only one of them appears in Deliverables.
+    full_path, _dl_url = await _write_architecture_docx(content, filename)
     broadcast_log(manager, f"Architecture document saved: {filename}", level="INFO")
-    # Broadcast file_generated directly from the tool so the saved doc reliably
-    # surfaces on the main screen (the post-stream WS-handler broadcast depends on
-    # shared.output_file surviving across the tools-node task context, which it may
-    # not). Mirrors the requirements agent's behaviour.
-    _dl_url = ""
-    try:
-        file_size = os.path.getsize(full_path) if os.path.exists(full_path) else 0
-        _dl_url = getattr(shared, "output_file_url", "") or f"{AGENTIC_BASE_URL}/generated/{user_id}/orchestrator/{session_id}/output/{os.path.basename(full_path)}"
-        await manager.broadcast({
-            "type": "file_generated",
-            "session_id": session_id,
-            "filename": os.path.basename(full_path),
-            "url": _dl_url,
-            "file_size": file_size,
-            "agent_name": "Design Agent",
-        })
-    except Exception as _exc:  # noqa: BLE001 — surfacing is best-effort
-        logger.warning("save_architecture: file_generated broadcast failed: %s", _exc)
-    # Persist the saved .docx as a project Artifact so it shows in the artifacts panel.
-    try:
-        from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
-        await register_generated_file(os.path.basename(full_path), full_path, _dl_url, stage="design")
-    except Exception:  # noqa: BLE001 — best-effort
-        logger.debug("save_architecture register_generated_file failed", exc_info=True)
     # Return the real download URL so the agent presents a working link (not a fabricated one).
     if _dl_url:
         return f"Saved '{filename}'. Download it here: {_dl_url}"
-    return result
+    return f"Saved '{filename}' to this run's output folder (no download link could be built)."
 
 
 @tool
@@ -930,6 +1049,8 @@ DO NOT CALL IT on a greeting. "hi" is not a request to design anything.
 ── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, THEN APPROVED) ────────────────────
 Every document you generate is recorded in the project's artifacts automatically, as
 AWAITING APPROVAL. You do NOT ask whether to save it, and there is no tool to call.
+- The generating tool has ALREADY written the .docx and already handed you its
+  download link on a "SAVED:" line. Creating the file is not something you ask for.
 - After generating a document, tell the user it is ready and give the download link.
 - Then say it has been submitted for approval, and that a project admin decides whether
   it joins the project's shared record.
@@ -1222,11 +1343,20 @@ Mermaid cannot render natively:
 The tool returns a markdown image tag — include it directly in your response.
 
 ── POST-TOOL RESPONSE ────────────────────────────────────────────────────────
-After a generate_architecture or generate_architecture_from_context tool call
-completes, the full document has already been streamed to the user in real time.
-Respond with 1-2 sentences ONLY — e.g. "Architecture document generated. Would
-you like me to save it as a .docx file?" Do NOT repeat or summarise the tool
-output.
+generate_architecture and generate_architecture_from_context SAVE the document
+themselves. Their result opens with a "SAVED:" line naming the .docx and carrying
+its download link. Quote that link exactly as it was given to you and never invent
+one — a made-up /generated/ URL is indistinguishable from a real one and 404s.
+
+On the Design page the full document has already been streamed to the user in real
+time as it was generated, so Do NOT repeat or summarise the tool output at length —
+sending it back shows the same document twice. Through the Orchestrator the user
+sees only what YOU say, so your reply has to stand on its own there.
+
+Reply in 2-4 sentences: the filename, the download link exactly as returned, the
+## section headings the document contains, and that it is awaiting a project
+admin's approval. NEVER offer to save it and NEVER ask whether to save it — it is
+already saved, and an offer is how a turn ends with no document anywhere.
 
 ── MERMAID THAT ACTUALLY RENDERS ─────────────────────────────────────────────
 A diagram that fails to parse shows the reader an error box instead of a diagram,
@@ -1294,11 +1424,15 @@ The user has already provided requirements/user stories in the structured pipeli
 context. When asked to generate/design/save, follow this EXACT tool sequence:
   STEP 1 — call `generate_architecture_from_context` with the user stories passed as
            the `context` argument (a single string). This returns the full markdown
-           architecture document. Do NOT call markdowntodoc or save_architecture yet.
-  STEP 2 — take the markdown the tool returned and call `save_architecture` with that
-           markdown as `content` and a `filename` like "design.docx".
-NEVER call `markdowntodoc` directly, and NEVER call any save tool with an empty
-`content` — you must generate the architecture in STEP 1 first. NEVER end a turn with
+           architecture document AND writes it to a .docx; the result opens with the
+           "SAVED:" line carrying the filename and the download link.
+  STEP 2 — reply with that filename, that link, and the sections you produced. There
+           is no second save to make.
+Call `save_architecture`, `save_architecture_pdf` or `export_document` ONLY when the
+user asks for a different filename or a different format — calling one on the document
+you just generated writes the same document a second time under a second name, and the
+user then has two files and no idea which is current. NEVER call `markdowntodoc`
+directly, and NEVER call any save tool with an empty `content`. NEVER end a turn with
 only "I'll generate it now" and no tool call: that is a hard failure. Do not ask for
 requirements you already have.
 """
