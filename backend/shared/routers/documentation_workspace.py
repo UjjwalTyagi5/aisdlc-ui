@@ -92,7 +92,15 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
     tenant_id: str = request.state.tenant_id
     azure = False
     try:
-        org_url, pat = await ado_repos.resolve_auth(tenant_id)
+        # SCOPED, like every other caller. A tenant-only lookup misses the
+        # project-scoped personal PAT that is the ONLY place this platform stores
+        # Azure DevOps credentials for a Project Admin, so this reported "not
+        # connected" for a project that plainly is.
+        org_url, pat = await ado_repos.resolve_auth(
+            tenant_id,
+            project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+        )
         azure = bool(org_url and pat)
     except Exception:
         azure = False
@@ -132,25 +140,48 @@ class PrepareDocRequest(BaseModel):
 async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Request) -> dict:
     """Clone the branch (or PR source) read-only and detect languages + upstream artifacts."""
     tenant_id: str = request.state.tenant_id
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    # `project_id` AND `owner_id`, or the credential is never found. Azure DevOps PATs
+    # live in `project_integration_credentials`, saved per user per project — that is
+    # the only place this platform keeps them, deliberately, so nobody borrows anybody
+    # else's token. `resolve_auth` checks there only when BOTH are supplied; passing the
+    # tenant alone looks exclusively for a tenant-wide connector, which by design does
+    # not exist. `dev_workspace.py` passes both; this route was written without them and
+    # so could never open a workspace for a Project Admin.
+    org_url, pat = await ado_repos.resolve_auth(
+        tenant_id,
+        project_id=project_id,
+        owner_id=getattr(request.state, "user_id", "") or "",
+    )
 
     branch = (body.branch or "").strip()
     pr_title = ""
     if body.mode == "pr":
         if not body.pr_id:
             raise HTTPException(status_code=400, detail="pr_id required for mode=pr")
-        pr = await ado_repos.get_pull_request(
-            body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
-        )
+        try:
+            pr = await ado_repos.get_pull_request(
+                body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
+            )
+        except RuntimeError as exc:  # same unconfigured-connector path as below
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not pr:
             raise HTTPException(status_code=404, detail="PR not found")
         branch, pr_title = pr["source_branch"], pr["title"]
     if not branch:
         raise HTTPException(status_code=400, detail="branch is required")
 
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
+    # A MISSING CONNECTOR IS NOT A CRASH. `resolve_clone_url` raises RuntimeError with
+    # an actionable sentence — "Azure DevOps is not configured. Connect Azure DevOps on
+    # the Integrations page." — and nothing caught it, so FastAPI turned it into a bare
+    # 500 "Internal Server Error". The dialog then simply did nothing, with the one
+    # message that would have explained why thrown away. The clone below already had
+    # this handling; the calls before it did not.
+    try:
+        remote_url = await ado_repos.resolve_clone_url(
+            body.ado_project, body.repo_name, pat=pat, org_url=org_url
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if remote_url is None:
         raise HTTPException(status_code=404, detail=f"Repo '{body.repo_name}' not found")
 
