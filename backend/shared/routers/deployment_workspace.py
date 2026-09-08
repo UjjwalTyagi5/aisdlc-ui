@@ -85,22 +85,29 @@ async def _github_actions_available(tenant_id: str) -> bool:
 async def list_deploy_connectors(project_id: str, request: Request) -> dict:
     """Which deployment connectors are available for this tenant (best-effort)."""
     tenant_id: str = request.state.tenant_id
-    azure = False
+    # AS THE VIEWER, and per provider. Source credentials are per person, per project —
+    # a bare resolve_auth(tenant_id) finds nothing now that the shared rung is gone, and
+    # this tile would report "not available" to somebody who has a credential.
+    from shared.services import repo_source  # noqa: PLC0415
+
     try:
-        # AS THE VIEWER. Azure DevOps credentials are per person, per project — a bare
-        # resolve_auth(tenant_id) finds nothing now that the shared rung is gone, and
-        # this tile would report "not available" to somebody who has a credential.
-        org_url, pat = await ado_repos.resolve_auth(
+        sources = await repo_source.available(
             tenant_id, project_id=project_id,
             owner_id=getattr(request.state, "user_id", "") or "",
         )
-        azure = bool(org_url and pat)
-    except Exception:
-        azure = False
+    except Exception:  # noqa: BLE001
+        sources = []
+    azure = "ado" in sources
+    # TWO DIFFERENT QUESTIONS, kept apart. Whether GitHub can host the SOURCE is a
+    # credential this caller holds; whether GitHub Actions can RUN the deployment is a
+    # tenant-level connector. A project can have either without the other, and merging
+    # them would offer a pipeline with nowhere to clone from, or the reverse.
+    github_source = "github" in sources
     github = await _github_actions_available(tenant_id)
     return {
         "connectors": [
             {"kind": "azure_pipelines", "label": "Azure Pipelines", "available": azure},
+            {"kind": "github", "label": "GitHub", "available": github_source},
             {"kind": "github_actions", "label": "GitHub Actions", "available": github},
             {"kind": "argocd", "label": "Argo CD (GitOps)", "available": True},
         ]
@@ -108,13 +115,34 @@ async def list_deploy_connectors(project_id: str, request: Request) -> dict:
 
 
 @deployment_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")
-async def list_open_prs(project_id: str, ado_project: str, repo: str, request: Request) -> list[dict]:
-    return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id
-    )
+async def list_open_prs(
+    project_id: str, ado_project: str, repo: str, request: Request,
+    provider: str | None = None,
+) -> list[dict]:
+    """Open pull requests, from whichever host this project's source lives on.
+
+    THE PATH STILL SAYS `ado` and that is now only a name — the route serves GitHub
+    too. Renaming it means moving five routers, their BFF proxies and every caller in
+    one go, which is churn for a cosmetic gain; the behaviour is what mattered, and a
+    GitHub project's PR picker returned an Azure DevOps error before this.
+    """
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        _chosen, prs = await repo_source.list_pull_requests(
+            request.state.tenant_id, ado_project, repo,
+            project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+            provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return prs
 
 
 class PrepareDeployRequest(BaseModel):
+    #: Which host to clone from. Omitted, the project's only configured source is used.
+    provider: str | None = None
     mode: str = "branch"             # "branch" | "pr"
     ado_project: str
     repo_name: str
@@ -136,29 +164,35 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
     # since the shared rung was removed, and the clone then failed with a 500 the
     # dialog swallowed silently.
     owner_id = getattr(request.state, "user_id", "") or ""
-    org_url, pat = await ado_repos.resolve_auth(
-        tenant_id, project_id=project_id, owner_id=owner_id
-    )
-    if not (org_url and pat):
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        chosen, _base, secret = await repo_source.resolve(
+            tenant_id, project_id=project_id, owner_id=owner_id, provider=body.provider,
+        )
+    except RuntimeError as exc:
+        # THE SHAPE THE DIALOG ALREADY HANDLES. It branches on `code`, so a plain string
+        # here would render as an unexplained failure — and the message still has to name
+        # the credential as THEIRS, because that is the whole point of per-person tokens.
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "no_credential",
                 "message": (
-                    "You have no Azure DevOps credential on this project. Add one under "
-                    "Integrations — it is yours alone, and the deployment is prepared "
-                    "and recorded as you."
+                    f"{exc} It is yours alone, and the deployment is prepared and "
+                    "recorded as you."
                 ),
             },
-        )
+        ) from exc
 
     branch = (body.branch or "").strip()
     pr_title = ""
     if body.mode == "pr":
         if not body.pr_id:
             raise HTTPException(status_code=400, detail="pr_id required for mode=pr")
-        pr = await ado_repos.get_pull_request(
-            body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
+        _p, pr = await repo_source.get_pull_request(
+            tenant_id, body.ado_project, body.repo_name, body.pr_id,
+            project_id=project_id, owner_id=owner_id, provider=chosen,
         )
         if not pr:
             raise HTTPException(status_code=404, detail="PR not found")
@@ -166,22 +200,20 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
     if not branch:
         raise HTTPException(status_code=400, detail="branch is required")
 
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
-    if remote_url is None:
-        raise HTTPException(status_code=404, detail=f"Repo '{body.repo_name}' not found")
-
     work_dir = str(ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "deployment")
     try:
-        result = await asyncio.to_thread(ado_repos.clone_into, work_dir, remote_url, branch, pat)
+        result = await repo_source.clone(
+            tenant_id, body.ado_project, body.repo_name, branch, work_dir,
+            project_id=project_id, owner_id=owner_id, provider=chosen,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not clone the branch: {exc}")
+    remote_url = result.get("remote_url", "")
 
     deploy_via = body.deploy_via or await asyncio.to_thread(_detect_deploy_via, work_dir)
 
     set_prepared(tenant_id, project_id, {
-        "work_dir": work_dir, "repo_url": remote_url, "pat": pat,
+        "work_dir": work_dir, "repo_url": remote_url, "pat": secret, "provider": chosen,
         "mode": body.mode, "ado_project": body.ado_project, "repo_name": body.repo_name,
         "source_branch": branch, "pr_id": body.pr_id or "", "head_sha": result.get("commit_sha", ""),
         "environment": body.environment, "deploy_via": deploy_via,
@@ -190,7 +222,7 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
     })
 
     return {
-        "status": "ready", "mode": body.mode, "repo_name": body.repo_name,
+        "status": "ready", "provider": chosen, "mode": body.mode, "repo_name": body.repo_name,
         "ado_project": body.ado_project, "branch": branch, "pr_id": body.pr_id,
         "pr_title": pr_title, "head_sha": result.get("commit_sha", ""),
         "environment": body.environment, "deploy_via": deploy_via,

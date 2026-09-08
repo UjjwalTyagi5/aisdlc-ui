@@ -125,10 +125,29 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
 
 
 @documentation_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")
-async def list_open_prs(project_id: str, ado_project: str, repo: str, request: Request) -> list[dict]:
-    return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id
-    )
+async def list_open_prs(
+    project_id: str, ado_project: str, repo: str, request: Request,
+    provider: str | None = None,
+) -> list[dict]:
+    """Open pull requests, from whichever host this project's source lives on.
+
+    THE PATH STILL SAYS `ado` and that is now only a name — the route serves GitHub
+    too. Renaming it means moving five routers, their BFF proxies and every caller in
+    one go, which is churn for a cosmetic gain; the behaviour is what mattered, and a
+    GitHub project's PR picker returned an Azure DevOps error before this.
+    """
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        _chosen, prs = await repo_source.list_pull_requests(
+            request.state.tenant_id, ado_project, repo,
+            project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+            provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return prs
 
 
 class PrepareDocRequest(BaseModel):
