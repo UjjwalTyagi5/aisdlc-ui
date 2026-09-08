@@ -16,6 +16,7 @@ import { PageTitle } from "@/components/app/page-title";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PersonaBadge } from "@/components/app/scope-indicator";
@@ -89,8 +90,17 @@ function asPlatformRole(name: string): PlatformRole | null {
 
 export default function MyAccessPage() {
   const session = useSession({ required: true });
-  const { role, scope, isOrgWide, allBindings, managedBusinessUnitIds, managedProjectIds, isLoading } =
-    useAccessScope();
+  const {
+    role, scope, isOrgWide, allBindings, managedBusinessUnitIds, managedProjectIds,
+    isLoading,
+    // WITHOUT THIS, A FAILED LOAD LOOKED LIKE AN EMPTY ONE. `allBindings` is [] both
+    // when the fetch failed and when the person genuinely holds nothing, so the page
+    // told somebody with two live bindings that they "aren't assigned to anything yet"
+    // — a plausible, wrong story about their access. `use-access-scope` exposes three
+    // states and its own docstring warns against collapsing them into two; this page
+    // was doing exactly that.
+    isError, refetch,
+  } = useAccessScope();
   const customRoles = useAllCustomRoles();
   const roleLabel = React.useCallback(
     (name: string) => resolveRoleLabel(name, customRoles),
@@ -171,7 +181,7 @@ export default function MyAccessPage() {
       {/* A just-registered account lands here with nothing at all. Without this it
           would read the two "you have none" empty states below as a fault rather
           than as the normal state of an account waiting on an admin. */}
-      {!isLoading && permissions.length === 0 && allBindings.length === 0 && (
+      {!isLoading && !isError && permissions.length === 0 && allBindings.length === 0 && (
         <div
           className="border-brand-bright/30 bg-brand-bright/5 flex items-start gap-3 rounded-2xl border p-4"
           style={{ ...RISE, animationDelay: "0.02s" }}
@@ -191,6 +201,25 @@ export default function MyAccessPage() {
 
       {isLoading ? (
         <LoadingState variant="card" />
+      ) : isError ? (
+        /* THE COMMONEST CAUSE IS A STALE SESSION, and it is worth naming. Changing
+           somebody's roles bumps their token epoch, so a session open at that moment is
+           refused outright rather than quietly keeping the access it just lost — which
+           is correct, and lands the person here with every request 401ing. Retrying
+           cannot help until they sign in again, so the copy says so instead of offering
+           only a button that will fail again. */
+        <ErrorState
+          title="Couldn't load your access"
+          description={
+            <>
+              This usually means your session is out of date — roles changing is what
+              does it, and a session cannot keep access it no longer has. Sign out and
+              back in to pick up your current roles. This is not a statement about what
+              you hold; nothing here could be read.
+            </>
+          }
+          onRetry={refetch}
+        />
       ) : (
         <>
           {/* ── Reach ────────────────────────────────────────────────────── */}
