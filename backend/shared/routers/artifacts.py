@@ -556,6 +556,18 @@ async def delete_artifact(
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, artifact.project_id)
 
+    # OWNERSHIP, NOT MERELY `artifact:delete`. Nine of the thirteen roles hold that
+    # permission — developer, qa, data_engineer among them — and none of those owns
+    # every agent. Without this check the whole approval gate was one HTTP call wide:
+    # a Developer could DELETE a Requirements document outright and skip the owner
+    # entirely, while the same person pressing the same button in the UI would have
+    # raised a request. The permission says "may take part in deleting"; this says
+    # "may decide THIS document", which is the actual question.
+    #
+    # Same helper as approve/reject and as the deletion-request route, so there is one
+    # definition of ownership rather than four that can drift apart.
+    await _artifact_for_decision(db, request, artifact_id)
+
     blob_path = artifact.blob_path
     # A legacy row holds a LOCAL FILESYSTEM path, not a blob name (see the note in
     # download_artifact). Handing it to delete_blob would ask Azure to delete a blob

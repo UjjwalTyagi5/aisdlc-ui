@@ -375,3 +375,38 @@ async def test_an_owner_deletes_outright_instead_of_asking(project):
             "WHERE project_id = CAST(:p AS uuid) AND type = 'artifact_delete'"
         ), {"p": project["project"]})).scalar()
     assert raised == 0, "an owner should not have to ask anybody"
+
+
+async def test_a_non_owner_cannot_delete_through_the_raw_delete_route(project):
+    """THE BYPASS THIS CLOSES, and it was one HTTP call wide.
+
+    `DELETE /artifacts/{id}` was gated on `artifact:delete` alone — a permission nine of
+    the thirteen roles hold, developer and qa among them, none of whom owns every agent.
+    So the same person who would have raised a request by pressing Delete in the UI could
+    destroy the document outright by calling the API directly, skipping the owner
+    entirely. The permission answers "may take part in deleting"; ownership answers "may
+    decide THIS document", and only the second is the gate.
+    """
+    import httpx
+    from config.auth.jwt import create_access_token
+    from process_api import app
+
+    art = await _document(project, stage="design")
+    user = await _user_who_can_see_the_project(project)
+
+    token = create_access_token(
+        user_id=user, tenant_id=project["org"],
+        # Holds artifact:delete and can see the project — but owns neither the design
+        # agent (`artifact:approve_design`) nor the project (`approve`).
+        permissions=["artifact:delete", "artifact:view", "project:read"],
+        platform_role="developer",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as cl:
+        r = await cl.delete(
+            f"/artifacts/{art}", headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert r.status_code in (403, 404), r.text
+    assert await _exists(project, art), "a non-owner destroyed the document"

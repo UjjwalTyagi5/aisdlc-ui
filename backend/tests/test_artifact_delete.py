@@ -125,8 +125,16 @@ def patched(monkeypatch):
         async def _visible(db, request, project_id):
             return None
 
+        async def _decidable(db, request, artifact_id):
+            return artifact, run
+
         monkeypatch.setattr(mod, "_get_artifact_or_404", _get)
         monkeypatch.setattr(mod, "_assert_project_visible", _visible)
+        # DELETE now demands OWNERSHIP, not just `artifact:delete` — nine of thirteen
+        # roles hold that permission and none of them owns every agent. Stubbed here
+        # for the same reason as the two above: this file is about what happens after
+        # authorisation. The refusal itself is asserted separately, below.
+        monkeypatch.setattr(mod, "_artifact_for_decision", _decidable)
 
     return _install
 
