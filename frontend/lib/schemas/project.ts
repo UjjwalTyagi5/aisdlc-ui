@@ -170,7 +170,12 @@ export type Project = z.infer<typeof Project>;
 
 export const ProjectCreateInput = z.object({
   name: z.string().min(1).max(200),
-  template: ProjectTemplate,
+  /** OPTIONAL, AND NOTHING STORES IT. `projects` has no template column, so the
+   *  backend accepts this into `ProjectCreateIn.template`, defaults it to "blank" and
+   *  discards it; `ProjectOut` then hardcodes "blank" on the way back. Kept on the
+   *  contract so an older client still validates, but no caller sends it any more —
+   *  the pickers that did were asking for a choice that changed nothing. */
+  template: ProjectTemplate.optional(),
   /** Delivery track chosen at creation (PRD §6). */
   track: DeliveryTrack.default("greenfield"),
   description: z.string().max(2000).optional(),

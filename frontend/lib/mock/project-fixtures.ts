@@ -56,7 +56,9 @@ export function createProjectRecord(input: ProjectCreateInput, creator: ProjectC
     approvalDecidedBy: null,
     approvalDecidedAt: null,
     approvalReason: null,
-    template: input.template,
+    // Mirrors the real backend, which has no template column and always answers
+    // "blank" whatever the caller sent.
+    template: input.template ?? "blank",
     track: input.track,
     archived: false,
     owners: [creator.userRef as Project["owners"][number]],
@@ -95,7 +97,7 @@ export function createProjectRecord(input: ProjectCreateInput, creator: ProjectC
       projectId: created.id,
       projectName: created.name,
       title: `New project: ${created.name}`,
-      summary: `${creator.displayName} requested a new ${input.template.replace("_", " ")} project on ${input.track.replace("_", " ")}${workspace ? ` in ${workspace.displayName}` : ""}.`,
+      summary: `${creator.displayName} requested a new ${input.track.replace("_", " ")} project${workspace ? ` in ${workspace.displayName}` : ""}.`,
       requestedBy: creator.displayName,
       targetRef: created.id,
     });

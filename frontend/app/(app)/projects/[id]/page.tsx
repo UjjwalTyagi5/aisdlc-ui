@@ -13,7 +13,6 @@ import {
 import { formatDistanceToNow } from "date-fns";
 
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -51,15 +50,8 @@ import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-
 import { canRaiseType } from "@/lib/requests/routing";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { useScopedBusinessUnits } from "@/hooks/use-scoped-business-units";
-import type { Artifact, Project, ProjectId } from "@/lib/schemas";
+import type { Artifact, ProjectId } from "@/lib/schemas";
 import type { Phase } from "@/lib/schemas/enums";
-
-const TEMPLATE_LABEL: Record<Project["template"], string> = {
-  web_app: "Web app",
-  microservice: "Microservice",
-  data_pipeline: "Data pipeline",
-  blank: "Blank",
-};
 
 export default function ProjectOverviewPage() {
   const params = useParams<{ id: string }>();
@@ -217,7 +209,10 @@ export default function ProjectOverviewPage() {
           layout (PRD §32.1) — this row is the overview's actions only. */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">{TEMPLATE_LABEL[project.template]}</Badge>
+          {/* THE TEMPLATE BADGE IS GONE. `projects` has no template column, and
+              `ProjectOut.from_orm_project` hardcodes `template="blank"` — so this read
+              "Blank" on every project ever created and could never read anything else.
+              A badge with one possible value is a label pretending to be data. */}
           <DeliveryStatusPicker
             status={project.deliveryStatus}
             canEdit={canSetDeliveryStatus}
