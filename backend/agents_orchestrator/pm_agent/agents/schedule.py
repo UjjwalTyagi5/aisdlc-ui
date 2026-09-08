@@ -634,6 +634,18 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     _SHAREPOINT_TOOLS = []
     logger.warning("PM agent: project document tools unavailable")
 
+try:
+    from shared.tools.project_team import make_team_tools  # noqa: PLC0415
+
+    # THE PEOPLE, which every other tool here is blind to. Sprints, capacity and work
+    # items all come off the board; the board knows a display name on a ticket and
+    # nothing about roles, agent access, or what somebody did in this platform. Bound to
+    # this stage like the rest — never taken from a tool argument.
+    _TEAM_TOOLS = make_team_tools("plan")
+except Exception:  # noqa: BLE001
+    _TEAM_TOOLS = []
+    logger.warning("PM agent: project team tools unavailable")
+
 tools = [
     read_project_inputs,
     list_sprints,
@@ -649,6 +661,7 @@ tools = [
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_TEAM_TOOLS,
 ]
 
 
@@ -675,6 +688,32 @@ requirements exist produces a plan for a system nobody asked for.
 
 Do NOT call it when the user describes the work themselves — their words are the input
 then.
+
+── THE PEOPLE ON THIS PROJECT ────────────────────────────────────────────────
+`list_project_members` is the roster: who is on the project, the role each holds, and
+which agents they own, may use, or were granted individually. Call it before answering
+anything about the team — who does what, who could pick something up, who a decision
+routes to. The board knows a display name on a ticket; only this knows the roles.
+
+`member_activity` is what they have actually done. It reports TWO sources and you must
+keep them apart in your answer:
+
+  platform — runs, approvals, uploads and other recorded actions here.
+  board    — work items currently assigned to them on Jira or Azure DevOps.
+
+Somebody with no platform activity and four tickets in progress is working on the board.
+Reporting either number alone as "their activity" is a false summary. Name the source.
+
+ON SKILLS AND PERFORMANCE, which you will be asked about. This platform stores no skills
+table and no rating. It stores the ROLE somebody was given and the WORK they have done —
+answer from those two, say that is what you are answering from, and say plainly that
+anything further is not recorded. Do not grade people, do not infer competence from a
+count of events, and do not compare colleagues on a number. A confident-sounding
+judgement about a person, built from an event count, is the worst thing you could
+produce here.
+
+WHEN THE ROSTER IS EMPTY that is a fact about the project, not a tool failure: nobody
+has been assigned yet, and a Project Admin does that on the Members page.
 
 ── WHAT YOU DO ───────────────────────────────────────────────────────────────
 WORK BREAKDOWN, ESTIMATION, SCHEDULING, RESOURCE PLANNING, RISK TRACKING, STATUS
