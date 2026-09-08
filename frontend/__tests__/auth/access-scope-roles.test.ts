@@ -19,7 +19,8 @@ import { describe, expect, it } from "vitest";
  * at least two.
  */
 
-const ADMIN_ROLES = new Set(["org_admin", "bu_admin", "project_admin"]);
+const UNIT_ADMIN_ROLES = new Set(["org_admin", "bu_admin"]);
+const PROJECT_ADMIN_ROLES = new Set(["org_admin", "bu_admin", "project_admin"]);
 
 /** The resolution as `app/api/auth/access-scope/route.ts` performs it. */
 function resolve(
@@ -48,9 +49,9 @@ function resolve(
     projectRole: (p: { id: string; workspaceId: string | null }) =>
       roleFor(p.id, p.workspaceId),
     administersProject: (p: { id: string; workspaceId: string | null }) =>
-      ADMIN_ROLES.has(heldRole.get(p.id) ?? "") ||
-      ADMIN_ROLES.has((p.workspaceId ? heldRole.get(p.workspaceId) : undefined) ?? ""),
-    administersUnit: (id: string) => ADMIN_ROLES.has(heldRole.get(id) ?? ""),
+      PROJECT_ADMIN_ROLES.has(heldRole.get(p.id) ?? "") ||
+      PROJECT_ADMIN_ROLES.has((p.workspaceId ? heldRole.get(p.workspaceId) : undefined) ?? ""),
+    administersUnit: (id: string) => UNIT_ADMIN_ROLES.has(heldRole.get(id) ?? ""),
     units,
   };
 }
@@ -117,6 +118,30 @@ describe('who gets the "You administer" badge', () => {
 
   it("does not administer a unit it merely contributes into", () => {
     expect(bruno().administersUnit(PAYMENTS)).toBe(false);
-    expect(bruno().administersUnit(LENDING)).toBe(true);
+  });
+
+  it("does not count a PROJECT ADMIN as administering the unit they are bound to", () => {
+    /** THE REGRESSION THIS CAUGHT, and it was mine. One role set answered both
+     *  questions, so a Project Admin bound at unit scope landed in
+     *  `managedBusinessUnitIds` — which is exactly what the sidebar gates Users and
+     *  Roles & Access on. An org-wide people directory and the tenant's whole
+     *  permission model appeared in their nav.
+     *
+     *  Bruno's Lending binding IS `project_admin` at business-unit scope: that is how
+     *  the platform grants him his projects. It is not a claim on the unit. */
+    expect(bruno().administersUnit(LENDING)).toBe(false);
+    // And the projects it grants are still his.
+    expect(bruno().administersProject(TEST_DEMO)).toBe(true);
+  });
+
+  it("counts a REAL unit admin as administering the unit", () => {
+    /** Non-vacuity: the distinction is between roles, not a blanket false. */
+    const r = resolve(
+      [{ scopeId: LENDING, role: "bu_admin" }],
+      [TEST_DEMO],
+      [LENDING],
+      "bu_admin",
+    );
+    expect(r.administersUnit(LENDING)).toBe(true);
   });
 });

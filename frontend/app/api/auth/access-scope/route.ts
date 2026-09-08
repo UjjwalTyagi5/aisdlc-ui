@@ -37,12 +37,23 @@ import type { AccessScopeOut, ScopeBinding } from "@/lib/schemas/access-scope";
  */
 export const dynamic = "force-dynamic";
 
-/** Roles whose binding means "runs this scope", as opposed to working inside it.
+/** Roles that administer a BUSINESS UNIT itself.
  *
- *  A `project_admin` binding at BUSINESS-UNIT scope administers that unit's projects —
- *  which is how the platform actually grants a Project Admin their reach — so the same
- *  set answers for both kinds of scope. */
-const ADMIN_ROLES = new Set(["org_admin", "bu_admin", "project_admin"]);
+ *  `project_admin` is deliberately absent, and one set for both scopes was a real bug:
+ *  `managedBusinessUnitIds` is what the sidebar gates Users and Roles & Access on, so
+ *  including a Project Admin there put an org-wide people directory and the tenant's
+ *  whole permission model in their nav. Those pages carry `requireScope:
+ *  "business_unit"` for precisely that reason — "administering a unit, not merely
+ *  holding member:manage", as the nav says. A Project Admin bound at unit scope
+ *  administers that unit's PROJECTS, which is a different claim. */
+const UNIT_ADMIN_ROLES = new Set(["org_admin", "bu_admin"]);
+
+/** Roles whose binding means "runs this project".
+ *
+ *  Includes `project_admin` at either scope: a unit-scoped project_admin binding is how
+ *  the platform actually grants a Project Admin their projects, without a per-project
+ *  row for each. */
+const PROJECT_ADMIN_ROLES = new Set(["org_admin", "bu_admin", "project_admin"]);
 
 interface WorkspaceRow {
   id: string;
@@ -162,16 +173,16 @@ export async function GET() {
       // everything, because that is what org-wide means.
       managedBusinessUnitIds: isOrgWide
         ? businessUnitIds
-        : businessUnitIds.filter((id) => ADMIN_ROLES.has(heldRole.get(id) ?? "")),
+        : businessUnitIds.filter((id) => UNIT_ADMIN_ROLES.has(heldRole.get(id) ?? "")),
       projectIds,
       managedProjectIds: isOrgWide
         ? projectIds
         : projects
             .filter((p) => {
               const own = heldRole.get(String(p.id)) ?? "";
-              if (ADMIN_ROLES.has(own)) return true;
+              if (PROJECT_ADMIN_ROLES.has(own)) return true;
               const unit = p.workspaceId ? heldRole.get(String(p.workspaceId)) : undefined;
-              return ADMIN_ROLES.has(unit ?? "");
+              return PROJECT_ADMIN_ROLES.has(unit ?? "");
             })
             .map((p) => String(p.id)),
       actingBindings: bindings,
