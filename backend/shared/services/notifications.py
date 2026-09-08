@@ -167,31 +167,39 @@ async def emit(
 
     notification_id = str(_uuid.uuid4())
     try:
-        await db.execute(
-            text(
-                "INSERT INTO notifications "
-                "  (id, tenant_id, kind, title, body, href, project_id, run_id, "
-                "   recipient_user_id, recipient_role, recipient_scope_kind, "
-                "   recipient_scope_id) "
-                "VALUES (CAST(:id AS uuid), CAST(:t AS uuid), :kind, :title, :body, :href, "
-                "        CAST(:pid AS uuid), CAST(:rid AS uuid), :user, :role, "
-                "        :scope_kind, CAST(:scope_id AS uuid))"
-            ),
-            {
-                "id": notification_id,
-                "t": tenant_id,
-                "kind": kind,
-                "title": title,
-                "body": body,
-                "href": href,
-                "pid": project_id,
-                "rid": run_id,
-                "user": recipient_user_id,
-                "role": recipient_role,
-                "scope_kind": recipient_scope_kind if recipient_role else None,
-                "scope_id": recipient_scope_id if recipient_role else None,
-            },
-        )
+        # A SAVEPOINT, because "never raises" was not enough to keep this best-effort.
+        # A failed INSERT aborts the whole Postgres transaction, so `except` here
+        # returned None while leaving every LATER statement in the caller's
+        # transaction failing with InFailedSQLTransactionError — the operation being
+        # announced was rolled back BY its own announcement. Found when a new `kind`
+        # hit ck_notification_kind and took the artifact publication down with it.
+        # The savepoint confines the damage to this insert.
+        async with db.begin_nested():
+            await db.execute(
+                text(
+                    "INSERT INTO notifications "
+                    "  (id, tenant_id, kind, title, body, href, project_id, run_id, "
+                    "   recipient_user_id, recipient_role, recipient_scope_kind, "
+                    "   recipient_scope_id) "
+                    "VALUES (CAST(:id AS uuid), CAST(:t AS uuid), :kind, :title, :body, "
+                    "        :href, CAST(:pid AS uuid), CAST(:rid AS uuid), :user, :role, "
+                    "        :scope_kind, CAST(:scope_id AS uuid))"
+                ),
+                {
+                    "id": notification_id,
+                    "t": tenant_id,
+                    "kind": kind,
+                    "title": title,
+                    "body": body,
+                    "href": href,
+                    "pid": project_id,
+                    "rid": run_id,
+                    "user": recipient_user_id,
+                    "role": recipient_role,
+                    "scope_kind": recipient_scope_kind if recipient_role else None,
+                    "scope_id": recipient_scope_id if recipient_role else None,
+                },
+            )
         return notification_id
     except Exception:  # noqa: BLE001 — announcing must not break the thing announced
         logger.exception(

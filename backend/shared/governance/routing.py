@@ -25,7 +25,10 @@ than trusted from the client.
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 # ── the catalogue ────────────────────────────────────────────────────────────
 
@@ -46,6 +49,8 @@ REQUEST_TYPES: tuple[str, ...] = (
     "role_assignment",
     "cross_bu_assignment",
     "model_provider_access",
+    "artifact_consumption",
+    "artifact_delete",
     "other",
 )
 
@@ -72,6 +77,8 @@ REQUEST_TYPE_LABEL: dict[str, str] = {
     "role_assignment": "Role assignment",
     "cross_bu_assignment": "Cross-unit contributor",
     "model_provider_access": "Model provider access",
+    "artifact_consumption": "Artifact consumption",
+    "artifact_delete": "Delete a document",
     "other": "Other",
 }
 
@@ -96,25 +103,56 @@ PHASES: tuple[str, ...] = (
 
 # Who owns each agent — the role that signs its gate off, and therefore the role
 # that decides stage two of an agent-access request. Mirrors
-# frontend/lib/roles.ts::AGENT_OWNER_ROLE, which encodes decisions the raw
-# involvement table cannot express: Development is BUILT by the Developer and
-# APPROVED by the Architect (never self-approval), and Documentation's owner is
-# the Project Admin because acceptance there is automatic.
+# frontend/lib/roles.ts::AGENT_OWNER_ROLE, which is the spec. Since main's
+# "One agent, one role" change a delivery role reaches exactly the agents it OWNS,
+# so the gate has to sit with the role that can open the agent — see the per-entry
+# notes on `development` and `documentation` below.
+# KEYED ON BACKEND STAGE NAMES (progression.STAGE_ORDER), with the UI names from
+# frontend/lib/schemas/enums.ts::Phase as explicit aliases below.
+#
+# THE BUG THIS SHAPE EXISTS TO PREVENT. This map used to hold only the UI name
+# `review`, while `consequential.py::_owner_label` calls it with the BACKEND stage
+# name `code_review`. The miss fell through to a `"project_admin"` default, so the
+# platform told users to get Code Review sign-off from a Project Admin — who does not
+# hold `artifact:approve_code_review` and therefore could not give it. `plan` was
+# missing for the same reason and resolved to project_admin rather than scrum_master;
+# it looked fine only because project_admin happens to hold `artifact:approve_plan`.
+#
+# Every entry here must agree with `_PHASE_PERMISSION` in shared/authz/permissions.py:
+# the named owner has to actually hold the stage's approve permission, or the advice
+# and the enforcement point at different people. Pinned by
+# tests/test_agent_ownership_is_single_sourced.py.
 AGENT_OWNER_ROLE: dict[str, str] = {
+    # The nine pipeline agents — these are the ones a run can sit at.
     "requirements": "ba",
     "design": "architect",
-    "development": "architect",
-    "review": "architect",
+    "plan": "scrum_master",
+    # MOVED FROM `architect` by frontend/lib/roles.ts (main, "One agent, one role"):
+    # the Architect no longer REACHES the Development agent, so leaving the gate
+    # there routed every development sign-off to a role that cannot open it.
+    # Per-person self-approval prevention still applies — one developer's work is
+    # approved by another, or by the Project Admin fallback.
+    "development": "developer",
+    "code_review": "architect",
     "security": "security_engineer",
     "testing": "qa",
     "deployment": "devops_engineer",
-    "documentation": "project_admin",
+    # The BA owns Documentation in the one-agent-one-role matrix, so the gate
+    # follows the access. project_admin remains the fallback approver.
+    "documentation": "ba",
+    # Track-specific agents. Not in AGENT_REGISTRY, so no run ever sits at one and
+    # they have no artifact:approve_* permission — but agent-access requests are
+    # routed for them from the catalogue, so they need an owner.
     "discovery": "architect",
     "strategy": "architect",
     "migration_mapping": "architect",
     "validation": "qa",
     "data_engineering": "data_engineer",
 }
+
+# UI name -> backend stage name. The frontend says `review`; the backend stage is
+# `code_review`. Callers may pass either.
+_PHASE_ALIASES: dict[str, str] = {"review": "code_review"}
 
 # ── who decides what ─────────────────────────────────────────────────────────
 
@@ -158,6 +196,14 @@ GOVERNANCE_APPROVER_ROLE: dict[str, str] = {
     "role_assignment": "bu_admin",
     # Onboarding a provider is an organization-wide act whoever asks.
     "model_provider_access": "org_admin",
+    # Inert, like every other TYPE_ROUTED entry whose approver the service
+    # computes: kept so this map stays exhaustive over REQUEST_TYPES. The real
+    # value is `agent_owner_role(producing_stage)`.
+    "artifact_consumption": "project_admin",
+    # Inert like the other TYPE_ROUTED entries whose approver is computed: the real
+    # value is `agent_owner_role(stage)` for an agent-level document, and the Project
+    # Admin for a project-wide one, which no map keyed by type can express.
+    "artifact_delete": "project_admin",
     # SIDEWAYS to a SPECIFIC Business Unit Admin — the one who owns the
     # contributor being borrowed, found via the request's workspace_id. Climbing
     # from the requester would land it with the BORROWING unit's admin, who
@@ -181,6 +227,17 @@ TYPE_ROUTED: frozenset[str] = frozenset(
         "agent_access",
         "role_assignment",
         "cross_bu_assignment",
+        # The approver is the OWNER OF THE PRODUCING STAGE, which varies per
+        # request rather than per tier — `create_request` sets it explicitly,
+        # exactly as `agent_access` does for its stage two. Tier routing would
+        # send a Developer's ask to their Project Admin, who does not own the
+        # design they want to read.
+        "artifact_consumption",
+        # Same shape: the person who may agree to LOSE a document is the one who
+        # approved it in the first place — the owner of the stage it belongs to.
+        # Tier routing would hand it to the requester's Project Admin, who may not own
+        # the agent whose record is about to lose a file.
+        "artifact_delete",
         # `model_credential` is deliberately ABSENT. Its meaning is "make a model
         # available to my project", and who can grant that depends on who asks:
         # a contributor needs their Project Admin (who holds model:manage), a
@@ -268,6 +325,13 @@ SYSTEM_RAISED: frozenset[str] = frozenset(
         # thing to raise by hand would ask them to describe an edit in prose that
         # the form already captured exactly.
         "project_settings_change",
+        # Filed when an agent needs a version the gate refuses it, never chosen
+        # from the picker: the requester is answering "I hit this wall", not
+        # composing an ask.
+        "artifact_consumption",
+        # Filed by pressing Delete on a document, never composed in the request
+        # picker: the requester is naming a file, not describing an ask in prose.
+        "artifact_delete",
         "agent_default_org",
         "agent_default_workspace",
         "agent_default_project",
@@ -373,9 +437,37 @@ def can_escalate(current_approver_role: Optional[str], requester_role: Optional[
 # ── the two-stage type ───────────────────────────────────────────────────────
 
 
+class UnknownAgentPhase(KeyError):
+    """Raised for a phase that names no agent. Deliberately not a soft default."""
+
+
 def agent_owner_role(phase: str) -> str:
-    """The role that owns this agent, and so decides stage two."""
-    return AGENT_OWNER_ROLE.get(phase, "project_admin")
+    """The role that owns this agent, and so decides stage two.
+
+    RAISES on an unknown phase rather than answering "project_admin". A plausible
+    wrong answer here is worse than an error: it names an approver who cannot
+    approve, and nothing anywhere reports a problem.
+
+    Use `agent_owner_role_or_none` where the phase is genuinely optional.
+    """
+    role = agent_owner_role_or_none(phase)
+    if role is None:
+        raise UnknownAgentPhase(
+            f"{phase!r} names no agent; expected one of {sorted(AGENT_OWNER_ROLE)} "
+            f"or an alias in {sorted(_PHASE_ALIASES)}"
+        )
+    return role
+
+
+def agent_owner_role_or_none(phase: Optional[str]) -> Optional[str]:
+    """The owning role, or None when *phase* names no agent.
+
+    For the callers where an absent phase is a real state rather than a bug — a
+    governance request whose payload never carried one.
+    """
+    if not phase:
+        return None
+    return AGENT_OWNER_ROLE.get(_PHASE_ALIASES.get(phase, phase))
 
 
 def agent_access_approver(stage: str, phase: str) -> str:
@@ -385,7 +477,19 @@ def agent_access_approver(stage: str, phase: str) -> str:
     stages cannot drift: the queue, the decide step and the "who sees this"
     preview all have to name the same person.
     """
-    return "project_admin" if stage == "project_admin" else agent_owner_role(phase)
+    if stage == "project_admin":
+        return "project_admin"
+    owner = agent_owner_role_or_none(phase)
+    if owner is None:
+        # Stage two with no resolvable phase. The request cannot name an owner, so the
+        # Project Admin who advanced it stays accountable — but this is a data problem,
+        # not a routing decision, and it used to happen silently.
+        logger.warning(
+            "agent_access request reached stage %r with unresolvable phase %r; "
+            "falling back to project_admin", stage, phase,
+        )
+        return "project_admin"
+    return owner
 
 
 def next_agent_access_stage(stage: Optional[str], phase: str) -> Optional[str]:
@@ -399,4 +503,14 @@ def next_agent_access_stage(stage: Optional[str], phase: str) -> Optional[str]:
     """
     if stage != "project_admin":
         return None
-    return None if agent_owner_role(phase) == "project_admin" else "agent_owner"
+    owner = agent_owner_role_or_none(phase)
+    if owner is None:
+        # No phase recorded, so no owner can be identified and there is nobody to
+        # advance to. One approver, asked once — same outcome as Documentation, but
+        # for a different and worse reason, so it is logged rather than assumed.
+        logger.warning(
+            "agent_access request has no resolvable phase (%r); "
+            "no owner stage will follow the Project Admin", phase,
+        )
+        return None
+    return None if owner == "project_admin" else "agent_owner"

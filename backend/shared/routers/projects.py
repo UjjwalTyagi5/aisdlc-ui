@@ -189,6 +189,12 @@ class ProjectCreateIn(BaseModel):
         return self
 
 
+# The delivery statuses a person may set (0054). Mirrors ProjectDeliveryStatus in
+# frontend/lib/schemas/project.ts and ck_project_delivery_status in the database —
+# see tests/test_db_enums_match_the_code.py for why the third copy is checked.
+_DELIVERY_STATUSES = ("not_started", "in_progress", "on_hold", "completed")
+
+
 class ProjectPatchIn(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -199,6 +205,24 @@ class ProjectPatchIn(BaseModel):
     tool_access_modes: Optional[dict[str, str]] = None
     # 0 clears the cap (inherit workspace / unlimited); positive sets it.
     monthlyBudgetUsd: Optional[float] = None
+    # Read ONLY published artifact versions on this project. Off everywhere by
+    # default: turning it on for a project whose stages have never published makes
+    # every agent correctly report "no approved upstream", which is the right
+    # answer and looks exactly like an outage to whoever is watching.
+    enforceArtifactPublication: Optional[bool] = None
+    # Where the project stands as delivery work. VALIDATED HERE rather than left to the
+    # CHECK constraint: a bad value should be a 422 naming the field, not a 500 from a
+    # refused statement that has already aborted the transaction.
+    deliveryStatus: Optional[str] = None
+
+    @field_validator("deliveryStatus")
+    @classmethod
+    def _check_delivery_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _DELIVERY_STATUSES:
+            raise ValueError(
+                f"deliveryStatus must be one of {', '.join(_DELIVERY_STATUSES)}"
+            )
+        return v
 
     @field_validator("tool_access_modes")
     @classmethod
@@ -783,6 +807,12 @@ def _board_item_url(connector: Any, board: str, source_key: str, detail: dict) -
     "/{project_id}/ingest-board",
     dependencies=[Depends(require_permission("run:create"))],
 )
+# THE DECORATOR BELONGS TO THIS FUNCTION, and used to sit above _board_item_url —
+# the helper directly beneath it. FastAPI happily registered the helper as the
+# route, so POST /ingest-board tried to resolve `connector: Any`, `board`,
+# `source_key` and `detail` from the request and blew up, while `ingest_board`
+# below was never routed at all. "Pull stories" returned a 500 for every board and
+# every project; the picker worked because listing boards is a different route.
 async def ingest_board(
     project_id: str,
     request: Request,
@@ -1083,6 +1113,23 @@ async def patch_project(
         await db.refresh(project)
         return ProjectOut.from_orm_project(project)
 
+    # DELIVERY STATUS IS APPLIED DIRECTLY, AT EVERY ADMIN TIER, and deliberately does
+    # NOT go through the settings queue below. That queue exists for edits which change
+    # how the project RUNS — its budget, its connectors, its tool access — where a
+    # Project Admin proposes and their Business Unit Admin decides. "We have started"
+    # is not that: it is a label describing work the Project Admin is already doing,
+    # and routing it for approval would leave the pill unchanged until somebody else
+    # signed off, which is indistinguishable from the dead button this fixes.
+    if body.deliveryStatus is not None:
+        project.delivery_status = body.deliveryStatus
+        changes.pop("deliveryStatus", None)
+        # Nothing else was sent, so there is nothing to queue. Returning here also
+        # keeps a lone status change from filing an empty approval request.
+        if not changes:
+            await db.flush()
+            await db.refresh(project)
+            return ProjectOut.from_orm_project(project)
+
     if tier == "project":
         return await _queue_settings_change(db, request, project, changes)
 
@@ -1098,6 +1145,8 @@ async def patch_project(
         project.connectors = body.connectors or None
     if body.monthlyBudgetUsd is not None:
         project.monthly_budget_usd = body.monthlyBudgetUsd or None  # 0 clears the cap
+    if body.enforceArtifactPublication is not None:
+        project.enforce_artifact_publication = body.enforceArtifactPublication
     await db.flush()
     await db.refresh(project)
     from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415

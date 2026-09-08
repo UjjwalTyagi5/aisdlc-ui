@@ -15,6 +15,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { DocumentList } from "@/components/app/document-list";
+import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { MarkdownMessage } from "@/components/app/markdown-message";
 import { DocTargetDialog } from "@/components/app/doc-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
@@ -176,6 +178,16 @@ export default function DocumentationPage() {
           {/* Split: left doc list + viewer */}
           <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr] overflow-hidden">
             <aside className="min-h-0 overflow-auto border-r">
+          <StageVersionPanel
+            projectId={id}
+            phase="documentation"
+            className="mb-3 shrink-0"
+          />
+          <DocumentList
+            projectId={id}
+            stage="documentation"
+            className="mb-4 shrink-0"
+          />
               <div className="text-muted-foreground border-b px-3 py-2 text-[11px] font-medium uppercase tracking-wider">
                 Documents{docs.length > 0 && <span className="ml-1 lowercase opacity-70">({docs.length})</span>}
               </div>

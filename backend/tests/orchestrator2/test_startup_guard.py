@@ -135,6 +135,21 @@ async def test_a_registry_gap_stops_the_process(monkeypatch):
     monkeypatch.setattr(process_api, "get_db_session_superuser", _catalog_session)
     monkeypatch.setattr(process_api, "assert_rbac_catalog", _catalog_ok)
 
+    # Two more startup steps that run BEFORE the registry guard, added on the artifact
+    # branch and stubbed here exactly as the assertion below instructs. `assert_agent_
+    # ownership` compares code to code and needs no session; `warn_unheld_owner_roles`
+    # opens one per tenant, and the stub session above is a bare `object()`, so leaving
+    # it live raises AttributeError several frames before the guard is reached — which
+    # is what this test caught when the branches merged.
+    def _ownership_ok():
+        return None
+
+    async def _owner_roles_ok(_session_factory):
+        return None
+
+    monkeypatch.setattr(process_api, "assert_agent_ownership", _ownership_ok)
+    monkeypatch.setattr(process_api, "warn_unheld_owner_roles", _owner_roles_ok)
+
     from fastapi import FastAPI
 
     with pytest.raises(BaseException) as caught:

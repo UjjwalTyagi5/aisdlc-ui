@@ -8,7 +8,7 @@ Do NOT import from config.env â€” no connection strings belong in model def
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -89,6 +89,26 @@ class Project(Base):
     # (migration 0024). THE access decision for connectors — see
     # shared/authz/connector_grants.py. NULL / a missing key means "both".
     tool_access_modes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Whether agents on this project may read ONLY published artifact versions
+    # (migration 0046). FALSE means today's behaviour exactly: consumers take the
+    # latest working payload, published or not.
+    #
+    # DEFAULT FALSE AND NOT NULL ON PURPOSE. Enabling it for a project whose stages
+    # have never published makes every agent correctly report "no approved upstream",
+    # which is the right answer and is indistinguishable from an outage to whoever is
+    # looking. That has to be a switch somebody throws, not a migration that lands.
+    enforce_artifact_publication: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Where the project stands as DELIVERY WORK, set by a person (0054) — distinct
+    # from `approval_status`, which is the creation gate, and from whatever the agents
+    # happen to be running right now. Constrained to _DELIVERY_STATUSES by
+    # ck_project_delivery_status; see the migration for why that CHECK exists.
+    delivery_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_started",
+        server_default=text("'not_started'"),
+    )
     # TOTAL USD cost budget (0032). NULL = inherit workspace / unlimited. The name is
     # historical: spend accumulates over the project's life and never resets (see
     # shared/services/budget_store.py).
@@ -153,13 +173,188 @@ class Run(Base):
     artifacts: Mapped[list["Artifact"]] = relationship(back_populates="run")
 
 
+class ArtifactConsumptionGrant(Base):
+    """Permission for one consuming stage to read one non-published version (0047).
+
+    NARROW ON PURPOSE: one version, one consumer. Not "design may read drafts", which
+    would be a standing licence indistinguishable from turning enforcement off. The
+    next draft is a new question.
+
+    Revoked, never deleted — a run that read under this grant has to stay explicable.
+    """
+    __tablename__ = "artifact_consumption_grants"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifact_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    consumer_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+
+    __table_args__ = (
+        UniqueConstraint("version_id", "consumer_stage",
+                         name="uq_consumption_grant_version_consumer"),
+    )
+
+
+class ArtifactConsumption(Base):
+    """Which published version a run read, and when (migration 0046).
+
+    THE QUESTION THIS ANSWERS is "what did this deployment actually build on", a month
+    later, when something has gone wrong. Today it has no answer at all — every
+    consumer takes the latest non-null payload ordered by `created_at desc`, so there
+    is no record that a particular run read a particular thing.
+
+    ONE ROW PER READ, not per (run, version) pair. An agent may legitimately call its
+    upstream-read tool more than once in a turn, and collapsing those would discard the
+    fact that it did. `consumed_at` separates them.
+
+    `producing_stage` and `version` are denormalised deliberately: the evidence view
+    answers without a join, and the row still means something if the version it points
+    at is ever removed.
+    """
+    __tablename__ = "artifact_consumptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    #: NULLABLE since 0053 — a document read has no version. Exactly one of
+    #: `version_id` / `artifact_id` is set, enforced by a CHECK.
+    version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifact_versions.id", ondelete="CASCADE"), index=True
+    )
+    #: Set when a run read a DOCUMENT directly — a project-level one, which belongs to
+    #: no stage and so has no version to point at, or a covered one fetched on its own.
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    #: Denormalised from the version. None for a project-level document, which belongs
+    #: to no stage by definition.
+    producing_stage: Mapped[str | None] = mapped_column(String(32))
+    version: Mapped[int | None] = mapped_column(Integer)
+    consumer_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    consumed_by: Mapped[str | None] = mapped_column(String(255))
+    # True when the read was allowed by an owner-issued grant rather than by the
+    # version being published (0050). An exception listed identically to routine
+    # approved work is how a reviewer learns to stop reading the column.
+    via_grant: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ArtifactVersion(Base):
+    """A frozen, numbered snapshot of one stage's artifact payload (migration 0045).
+
+    THE SECOND ARTIFACT SHAPE, made approvable. `Artifact` above is a blob document
+    and already carries its own approval columns. The actual HAND-OFF between agents
+    is `runs.{stage}_artifacts` — a JSONB column written IN PLACE, with no history —
+    so approving it would be theatre: the approval record survives, the thing it
+    approved does not.
+
+    `runs.{stage}_artifacts` stays the agent's working draft. Publishing COPIES it
+    here; a new run creates version N+1 and never edits N.
+
+    IMMUTABILITY IS ENFORCED BY A DATABASE TRIGGER (`artifact_versions_freeze`), not
+    by this class. Do not add setters for `payload`, `content_hash`, `covers` or the
+    identity columns expecting them to work — an UPDATE touching any of them raises.
+    Only the lifecycle columns move.
+    """
+    __tablename__ = "artifact_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    # A BACKEND stage name (progression.STAGE_ORDER) — `code_review`, never the UI's
+    # `review`. Those two diverging is what left the owner map wrong for months.
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    # SET NULL, not CASCADE: a version outlives the run that made it, because deleting
+    # a run must not destroy the evidence of what was approved.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # `artifacts.id` values this version signs off, so a design document and its
+    # diagram publish as one unit. Deliberately not a FK: it is a list, and those rows
+    # keep their own independent approval_status.
+    covers: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+    # draft | published | rejected | superseded. Defaults to the UNPUBLISHED value so
+    # a writer that has not been taught about this column fails closed.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="draft", server_default="draft"
+    )
+    # NOT NULL because it is half of the self-publication check, which the schema
+    # enforces: published_by <> produced_by.
+    produced_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    published_by: Mapped[str | None] = mapped_column(String(255))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "stage", "version",
+                         name="uq_artifact_versions_project_stage_version"),
+    )
+
+
 class Artifact(Base):
-    """A blob-backed output file (DOCX, PDF, diagram PNG, etc.). Immutable after creation."""
+    """A blob-backed output file (DOCX, PDF, diagram PNG, etc.). Immutable after creation.
+
+    SCOPE (migration 0052). A document belongs to a PROJECT, and optionally to one
+    AGENT:
+
+        stage IS NULL     project-level — a policy, a standard. Every agent may read
+                          it once approved.
+        stage = 'design'  agent-level — filed under that agent, and readable by every
+                          agent once approved. This used to additionally require a
+                          published version to name it in `artifact_versions.covers`;
+                          approval is the whole gate now.
+
+    Before 0052 both facts were recovered by joining to `Run`, so a document was only
+    "the Design agent's" by accident of which run produced it, and a project-wide one
+    could not exist. `blob_path_for` had emitted the project/agent path all along.
+    """
     __tablename__ = "artifacts"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    #: The producing agent, or None for a project-level document. A BACKEND stage name
+    #: (`code_review`, never the UI's `review`).
+    stage: Mapped[str | None] = mapped_column(String(32))
+    #: NULLABLE since 0052: a document outlives the run that made it, and a
+    #: hand-uploaded one never had one. SET NULL, so deleting a run cannot destroy an
+    #: approved document.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    #: Who put it here — deliberately distinct from `approved_by`. Collapsing the two
+    #: would make self-approval invisible.
+    uploaded_by: Mapped[str | None] = mapped_column(String(255))
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     blob_url: Mapped[str | None] = mapped_column(Text)
     blob_path: Mapped[str | None] = mapped_column(Text)
@@ -180,7 +375,7 @@ class Artifact(Base):
     # rather than edits to it.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    run: Mapped["Run"] = relationship(back_populates="artifacts")
+    run: Mapped["Run | None"] = relationship(back_populates="artifacts")
 
 
 class OrchestratorDeliverable(Base):

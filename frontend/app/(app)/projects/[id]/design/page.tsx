@@ -18,6 +18,8 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentList } from "@/components/app/document-list";
+import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
 import { MonacoViewer } from "@/components/app/monaco-viewer";
@@ -73,7 +75,7 @@ export default function DesignPage() {
     queryFn: () => getProject(projectId),
   });
   const artifactsQ = useQuery({
-    queryKey: qk.artifacts.forProject(projectId),
+    queryKey: qk.artifacts.forProject(projectId, "design"),
     queryFn: () => listArtifacts(projectId, { phase: "design" }),
   });
   // The upstream Requirements-phase stories — the Design agent designs FROM these.
@@ -267,6 +269,19 @@ export default function DesignPage() {
           aria-label="Design artifacts"
           className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
         >
+          <StageVersionPanel
+            projectId={projectId}
+            phase="design"
+            className="mb-3 shrink-0"
+          />
+          {/* Documents and the design artifact list are separate: one is rows with
+              bytes and an approver, the other is what the agent produced. */}
+          <DocumentList
+            projectId={projectId}
+            items={artifactsQ.data ?? null}
+            stage="design"
+            className="mb-4 shrink-0"
+          />
           <ArtifactList
             items={artifactsQ.isLoading ? null : designs}
             selectedId={selected?.id}

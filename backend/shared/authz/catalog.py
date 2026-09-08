@@ -260,6 +260,147 @@ class RbacCatalogDriftError(RuntimeError):
     """The database's RBAC catalogue does not match the code's."""
 
 
+class AgentOwnershipError(RuntimeError):
+    """An agent's named owner cannot approve that agent's stage."""
+
+
+def verify_agent_ownership() -> list[str]:
+    """Every pipeline stage's owning role must hold that stage's approve permission.
+
+    THE FAILURE THIS CATCHES, which shipped and was live: the owner map was keyed on
+    UI phase names while callers passed backend stage names, so `code_review` missed
+    and fell through to a `"project_admin"` default. The product told users to get
+    Code Review sign-off from a Project Admin, who does not hold
+    `artifact:approve_code_review` and could not give it. Nothing errored, because a
+    wrong-but-plausible answer looks exactly like a right one.
+
+    Pure — no IO. Compares three maps that must agree:
+      · progression.STAGE_ORDER      — the stages a run can sit at
+      · routing.AGENT_OWNER_ROLE     — who owns each
+      · permissions._PHASE_PERMISSION / _ROLE_PERMISSIONS — who may approve each
+
+    Returns a list of human-readable problems; empty means consistent.
+    """
+    from shared.authz.permissions import (  # noqa: PLC0415 — import cycle
+        _PHASE_PERMISSION, _ROLE_PERMISSIONS,
+    )
+    from shared.governance.routing import (  # noqa: PLC0415 — import cycle
+        agent_owner_role_or_none,
+    )
+    from shared.services.orchestrator.progression import STAGE_ORDER  # noqa: PLC0415
+
+    problems: list[str] = []
+    for stage in STAGE_ORDER:
+        permission = _PHASE_PERMISSION.get(stage)
+        if permission is None:
+            problems.append(
+                f"stage {stage!r} is in STAGE_ORDER but has no entry in "
+                f"_PHASE_PERMISSION, so its gate can never be approved"
+            )
+            continue
+        owner = agent_owner_role_or_none(stage)
+        if owner is None:
+            problems.append(
+                f"stage {stage!r} has no owner in routing.AGENT_OWNER_ROLE"
+            )
+            continue
+        if permission not in _ROLE_PERMISSIONS.get(owner, ()):
+            holders = sorted(
+                r for r, ps in _ROLE_PERMISSIONS.items() if permission in ps
+            )
+            problems.append(
+                f"stage {stage!r} is owned by {owner!r}, which does not hold "
+                f"{permission!r} — the named owner cannot approve it "
+                f"(holders: {holders or 'NOBODY'})"
+            )
+    return problems
+
+
+def assert_agent_ownership() -> None:
+    """Boot guard for `verify_agent_ownership`. Raises rather than logging.
+
+    Fatal on purpose, and safe to be fatal: this compares code against code, so a
+    failure is a bug a developer introduced, never a state a deployment can be in.
+    """
+    problems = verify_agent_ownership()
+    if not problems:
+        logger.info("agent ownership: verified, every stage owner can approve its gate")
+        return
+    for line in problems:
+        logger.error("agent ownership: %s", line)
+    raise AgentOwnershipError(
+        f"{len(problems)} agent ownership problem(s): " + "; ".join(problems)
+    )
+
+
+async def warn_unheld_owner_roles(session: AsyncSession) -> list[str]:
+    """Report owning roles that no active user holds, per tenant.
+
+    A permission granted to nobody is indistinguishable from a bug. This session
+    `artifact:approve_deployment` was correct and no user held `devops_engineer`, so
+    no human could approve a deployment and the feature read as broken for days.
+
+    WARNS, never raises — unlike `assert_agent_ownership` this compares code against
+    *data*, and a fresh tenant that has not hired a DevOps engineer yet is a normal
+    state, not a bug. Refusing to boot over it would be wrong.
+    """
+    from shared.governance.routing import (  # noqa: PLC0415 — import cycle
+        agent_owner_role_or_none,
+    )
+    from shared.services.orchestrator.progression import STAGE_ORDER  # noqa: PLC0415
+
+    owners: dict[str, list[str]] = {}
+    for stage in STAGE_ORDER:
+        owner = agent_owner_role_or_none(stage)
+        if owner is not None:
+            owners.setdefault(owner, []).append(stage)
+    if not owners:
+        return []
+
+    # `role_bindings` has FORCE RLS keyed on app.current_tenant_id, and the app role is
+    # not a Postgres superuser — so a query that does not set it reads ZERO ROWS and
+    # every role looks unstaffed... or, as written first, every role looks staffed
+    # because the tenant list came from the same empty read. That version reported
+    # "every stage owner role has a holder in every tenant" against 17 real bindings
+    # it could not see. The tenant list must therefore come from `organizations`,
+    # which carries no RLS, and each tenant's read must set the GUC first.
+    tenants = [
+        r.id for r in (await session.execute(
+            text("SELECT id::text AS id FROM organizations")
+        )).fetchall()
+    ]
+
+    gaps: list[str] = []
+    for tenant_id in tenants:
+        # Transaction-local (the `true`), so it does not leak past this session.
+        await session.execute(
+            text("SELECT set_config('app.current_tenant_id', :t, true)"),
+            {"t": tenant_id},
+        )
+        held = {
+            r.role_name for r in (await session.execute(
+                text(
+                    "SELECT DISTINCT rb.role_name FROM role_bindings rb "
+                    "JOIN users u ON u.id = rb.user_id "
+                    "WHERE rb.role_name = ANY(CAST(:roles AS text[])) "
+                    "  AND rb.status = 'active' AND u.active "
+                    "  AND (rb.expires_at IS NULL OR rb.expires_at > now())"
+                ),
+                {"roles": list(owners)},
+            )).fetchall()
+        }
+        gaps.extend(
+            f"tenant {tenant_id}: no active user holds {role!r}, so the "
+            f"{', '.join(stages)} gate(s) have no one to approve them"
+            for role, stages in owners.items() if role not in held
+        )
+    for line in gaps:
+        logger.warning("agent ownership: %s", line)
+    if not gaps:
+        logger.info("agent ownership: every stage owner role has a holder in every tenant")
+    return gaps
+
+
 async def assert_rbac_catalog(session: AsyncSession, *, autorepair: bool = False) -> None:
     """Boot guard: verify the catalogue, and refuse to start if it has drifted.
 

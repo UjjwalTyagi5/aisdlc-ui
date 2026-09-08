@@ -105,3 +105,51 @@ def test_an_unreadable_attachment_names_the_limit_instead_of_a_path(tmp_path):
     for fmt in (".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"):
         assert fmt in message, f"{fmt} not offered as an alternative"
     assert "please use the following files" not in message
+
+
+# -- presentations ------------------------------------------------------------
+
+
+def test_a_pptx_is_accepted_for_upload():
+    """IT WAS NOT, and `chat_artifacts` generates decks in that very format — so the
+    platform produced a file its own upload refused, and a design deck, the most obvious
+    thing to attach to a Design agent, was the one thing you could not attach."""
+    from shared.services.attachment_store import ALLOWED_ATTACHMENT_EXTS
+
+    assert ".pptx" in ALLOWED_ATTACHMENT_EXTS
+
+
+def test_ppt_is_still_refused():
+    """DELIBERATE, not an oversight. python-pptx cannot read the legacy binary format,
+    so accepting `.ppt` would store a file no agent could ever read — worse than
+    refusing it, because the refusal at least says why."""
+    from shared.services.attachment_store import ALLOWED_ATTACHMENT_EXTS
+
+    assert ".ppt" not in ALLOWED_ATTACHMENT_EXTS
+
+
+def test_a_pptx_extracts_slide_by_slide(tmp_path):
+    """ACCEPTING IT IS HALF THE JOB. A format that uploads but extracts to
+    "[Binary file: deck.pptx]" is the exact failure this file was written about: the
+    placeholder is a non-empty string, so the agent is told to use it as content.
+    """
+    from pptx import Presentation
+
+    from shared.tools.document_tools import extract_file_text, extraction_succeeded
+
+    deck = Presentation()
+    for title, body in (("Delivery Risks", "Vendor lock-in"), ("Timeline", "Q3 pilot")):
+        slide = deck.slides.add_slide(deck.slide_layouts[1])
+        slide.shapes.title.text = title
+        slide.placeholders[1].text = body
+    path = tmp_path / "deck.pptx"
+    deck.save(str(path))
+
+    text = extract_file_text(str(path))
+
+    assert extraction_succeeded(text), text
+    assert "Delivery Risks" in text and "Q3 pilot" in text
+    # ORDERING IS PART OF THE MEANING — "the risks slide" is a thing people say, so the
+    # slide boundaries survive rather than being flattened into one blob.
+    assert "--- Slide 1 ---" in text and "--- Slide 2 ---" in text
+    assert text.index("Delivery Risks") < text.index("Timeline")

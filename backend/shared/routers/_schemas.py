@@ -108,6 +108,14 @@ class ProjectOut(BaseModel):
     # Per-(stage, tool) read/write mode, "{agent_id}::{connector|mcp}::{ref}" ->
     # "read" | "write" | "both". Absent key = "both" (migration 0024).
     toolAccessModes: dict[str, str] = {}
+    # Where the project stands as delivery work (0054), set by a person. The picker on
+    # the Overview page existed for a while with nothing behind it: PATCH answered 200
+    # and dropped the field, and this schema's absence meant the frontend's own
+    # `.default("not_started")` supplied the value the success toast then reported.
+    deliveryStatus: str = "not_started"
+    # Whether agents on this project read ONLY published artifact versions (0046).
+    # False everywhere by default; the settings page is where it is turned on.
+    enforceArtifactPublication: bool = False
     # TOTAL cost budget (0032). None = inherit workspace / unlimited. The field name
     # is historical — spend is accumulated over the project's life, not per month
     # (shared/services/budget_store.py).
@@ -162,6 +170,13 @@ class ProjectOut(BaseModel):
             mcpServers=getattr(project, "mcp_servers", None) or {},
             connectors=getattr(project, "connectors", None) or {},
             toolAccessModes=getattr(project, "tool_access_modes", None) or {},
+            # `or "not_started"`, not just a getattr default: the column is NOT NULL
+            # but this classmethod is also handed fixture doubles and freshly
+            # constructed rows whose attribute is still None.
+            deliveryStatus=getattr(project, "delivery_status", None) or "not_started",
+            enforceArtifactPublication=bool(
+                getattr(project, "enforce_artifact_publication", False)
+            ),
             monthlyBudgetUsd=float(_budget) if _budget is not None else None,
             monthlySpendUsd=round(float(spend_usd or 0.0), 4),
             lastActivityAt=_iso(project.updated_at),
@@ -553,6 +568,15 @@ class ArtifactOut(BaseModel):
     projectId: str
     runId: Optional[str]
     type: str
+    #: "agent" when this document belongs to one stage, "project" when it is
+    #: project-wide. What makes "which agent uploaded this" visible on the screen.
+    scope: str = "agent"
+    #: The owning stage, or None for a project-level document. A BACKEND stage name.
+    stage: Optional[str] = None
+    uploadedBy: Optional[str] = None
+    #: Written on every approval since the gate shipped, and never surfaced until now.
+    approvedBy: Optional[str] = None
+    approvedAt: Optional[str] = None
     phase: str
     title: str
     version: int
@@ -571,8 +595,16 @@ class ArtifactOut(BaseModel):
     updatedAt: str
 
     @classmethod
-    def from_orm_artifact(cls, artifact: Any, run_stage: str, project_id: str) -> "ArtifactOut":
-        """Build an ArtifactOut from an ORM Artifact + owning run_stage + project_id."""
+    def from_orm_artifact(
+        cls, artifact: Any, run_stage: str | None = None, project_id: str | None = None,
+    ) -> "ArtifactOut":
+        """Build an ArtifactOut from an ORM Artifact.
+
+        SCOPE COMES OFF THE ROW since migration 0052. `run_stage`/`project_id` remain
+        as fallbacks for the synthesised story projections, which have no row behind
+        them — every real artifact carries its own project and stage, and a document
+        with no run has no other source for either.
+        """
         import hashlib
         from shared.services.artifact_store import is_blob_path  # noqa: PLC0415
 
@@ -624,12 +656,31 @@ class ArtifactOut(BaseModel):
         else:
             download_path = ""
 
+        # The row is authoritative; the arguments are the fallback for synthesised
+        # projections. `phase` stays a non-empty string for the frontend enum, so a
+        # PROJECT-LEVEL document (stage NULL) is reported through `scope` below rather
+        # than by inventing a phase it does not belong to.
+        _stage = getattr(artifact, "stage", None) or run_stage
+        _project = str(getattr(artifact, "project_id", None) or project_id or "")
+
         return cls(
             id=str(artifact.id),
-            projectId=project_id,
-            runId=str(artifact.run_id),
+            projectId=_project,
+            # NULLABLE since 0052 — a hand-uploaded document never had a run.
+            runId=str(artifact.run_id) if artifact.run_id else None,
             type=artifact.artifact_type,
-            phase=run_stage or "requirements",
+            scope="project" if _stage is None else "agent",
+            stage=_stage,
+            uploadedBy=getattr(artifact, "uploaded_by", None),
+            approvedBy=getattr(artifact, "approved_by", None),
+            # NOT `_iso(...)` unguarded: it returns the EPOCH for None, which is
+            # right for a required timestamp and absurd for this one — a pending
+            # document would report "approved 1 Jan 1970".
+            approvedAt=(
+                _iso(artifact.approved_at)
+                if getattr(artifact, "approved_at", None) else None
+            ),
+            phase=_stage or "requirements",
             title=title,
             version=1,
             contentHash=content_hash,

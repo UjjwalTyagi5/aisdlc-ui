@@ -2433,6 +2433,22 @@ _BOARD_TOOLS = [
 
 
 # Convert tools to async
+from shared.tools.sharepoint_artifacts import make_sharepoint_tools
+
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Reads the project's approved documents — its own and the project-wide ones. Bound
+    # to this stage, which is what the evidence trail records as the reader.
+    _DOCUMENT_TOOLS = make_document_tools("requirements")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
+#: Bound to THIS agent and THIS stage. The connector resolves its access level
+#: against `agent_id`, and `stage` decides which documents belong to this screen —
+#: both come from here, never from a tool argument the model could set.
+_SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="requirements", stage="requirements")
+
 tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # PDF output, and the explicit save the user is asked for before
          # anything is written to the project's shared artifact storage.
@@ -2443,7 +2459,15 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          template_pdd, generate_planning_sheet, generate_user_stories, revise_user_stories,
          write_requirements_artifact,
          run_nlp_quality_check, run_requirement_smell_check, run_spectral_lint,
-         *_BOARD_TOOLS]
+         *_BOARD_TOOLS,
+         # SharePoint, publishing APPROVED documents only — see
+         # shared/tools/sharepoint_artifacts. The Documentation agent has its own
+         # publish tool that files whatever it generated this session; that source is
+         # right for that agent and wrong here, so this reads the artifacts table and
+         # refuses anything an owner has not accepted. There is no delete tool, here or
+         # anywhere: taking a file out of the business's library is a person's job.
+         *_DOCUMENT_TOOLS,
+         *_SHAREPOINT_TOOLS]
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
@@ -2781,6 +2805,24 @@ EXTENSION you pass:
   Slides       generate_ppt
 Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
 If they ask for a format not listed here, say which ones are available.
+
+Anything you generate is filed as a project document AWAITING APPROVAL — it is not part
+of the project's record until its owner accepts it on the Documents panel. Say so when
+you produce one, rather than implying the work is finished.
+
+── SHAREPOINT ────────────────────────────────────────────────────────────────────────
+  publish_approved_to_sharepoint   file APPROVED documents into the library
+  list_sharepoint_documents        what is already filed there
+  read_sharepoint_document         read one, by an id from the list
+
+- ONLY when the user explicitly asks to publish or file something to SharePoint. It is
+  a separate destination, never an automatic step after generating a document.
+- ONLY APPROVED documents can go. A deck you just generated is pending, so it CANNOT be
+  published yet — say that it needs its owner's approval first rather than trying and
+  reporting the refusal as a failure.
+- You CANNOT delete or overwrite anything in SharePoint, and there is no tool that can.
+  If the user asks you to remove a file from there, say plainly that it has to be done
+  in SharePoint by a person.
 
 ── HANDOFF RULES (CRITICAL) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ALWAYS call build_requirements_payload before emitting any HANDOFF.

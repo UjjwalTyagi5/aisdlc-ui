@@ -7,6 +7,7 @@ import {
   DeploymentActionResult,
   DeploymentRequest,
   PrepareDeployResult,
+  PreparedDeployState,
   ReleaseResponse,
 } from "@/lib/schemas/deployment";
 
@@ -87,3 +88,11 @@ export const refreshDeployment = (projectId: ProjectId, deploymentId: string) =>
     method: "POST",
     schema: DeploymentActionResult,
   });
+
+/** The target already prepared for this project, if any.
+ *
+ *  The page used to keep this in React state alone, so a refresh discarded it and the
+ *  screen offered to set up a deployment that was already set up — with Chat disabled
+ *  the whole time, because it is gated on the same state. */
+export const getPreparedDeploy = (projectId: ProjectId) =>
+  api(`/deployment/${enc(projectId)}/deploy/prepared`, { schema: PreparedDeployState });

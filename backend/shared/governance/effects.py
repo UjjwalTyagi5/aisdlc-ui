@@ -154,6 +154,10 @@ async def apply_on_approve(db: AsyncSession, request: dict[str, Any]) -> Optiona
         return await _apply_mcp_server(db, request)
     if rtype == "agent_access":
         return await _apply_agent_access(db, request)
+    if rtype == "artifact_consumption":
+        return await _apply_artifact_consumption(db, request)
+    if rtype == "artifact_delete":
+        return await _apply_artifact_delete(db, request)
     if rtype == "cross_bu_assignment":
         return await _apply_cross_bu_assignment(db, request)
     if rtype == "user_onboarding":
@@ -268,6 +272,11 @@ _SETTINGS_FIELDS: dict[str, str] = {
     "connectors": "connectors",
     "mcpServers": "mcp_servers",
     "toolAccessModes": "tool_access_modes",
+    # Whether agents on this project may read only PUBLISHED artifact versions.
+    # Routed through the same governed change as every other setting on purpose:
+    # switching it on makes every agent correctly refuse unapproved upstream work,
+    # which is a visible change to how the project runs, not a preference.
+    "enforceArtifactPublication": "enforce_artifact_publication",
 }
 
 # The JSONB ones, which have to be bound as JSON text rather than a dict.
@@ -1137,6 +1146,139 @@ async def _apply_mcp_server(db: AsyncSession, request: dict[str, Any]) -> str:
     logger.info("mcp_server approved: unit %s -> mcp %s", workspace_id, target_ref)
     return "MCP server granted to the business unit."
 
+
+
+async def _apply_artifact_delete(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Destroy the document this request named: the stored bytes AND the row.
+
+    IRREVERSIBLE, WHICH IS WHY IT IS A REQUEST AT ALL. Uploading a document is gated
+    on somebody accepting it; removing one from the record was not gated on anything,
+    so a single click could undo an approval nobody was asked about. The asymmetry was
+    the bug.
+
+    ORDER IS BLOB THEN ROW, and if the blob cannot be deleted the row STAYS and the
+    effect raises. Orphaned BYTES with no row are invisible and harmless; an orphaned
+    ROW pointing at a file that is still there is a document the product claims to have
+    destroyed and has not. The audit trail is the governance request itself, which is
+    written before any of this and survives whatever happens here.
+
+    IDEMPOTENT ON A MISSING ROW. A request approved twice, or a document deleted by an
+    administrator between the ask and the answer, must not fail the decision — the
+    outcome being requested is already true.
+    """
+    payload = request.get("payload") or {}
+    artifact_id = payload.get("artifactId")
+    project_id = request.get("projectId") or payload.get("projectId")
+
+    if not artifact_id:
+        raise EffectNotAvailable(
+            "artifact_delete", "This request does not name a document to delete."
+        )
+    if not project_id:
+        raise EffectNotAvailable(
+            "artifact_delete", "This request names no project to apply to."
+        )
+
+    row = (await db.execute(
+        text(
+            "SELECT id::text AS id, blob_path, blob_url, stage "
+            "FROM artifacts "
+            "WHERE id = CAST(:a AS uuid) AND project_id = CAST(:p AS uuid)"
+        ),
+        {"a": str(artifact_id), "p": str(project_id)},
+    )).mappings().first()
+
+    if row is None:
+        # Already gone. Reporting this plainly beats failing the decision, and beats
+        # claiming a deletion this call did not perform.
+        return "that document no longer exists; nothing was deleted"
+
+    title = (row["blob_path"] or "").rsplit("/", 1)[-1] or "the document"
+
+    from shared.services.artifact_store import (  # noqa: PLC0415
+        get_blob_client, is_blob_path,
+    )
+
+    blob_path = row["blob_path"]
+    tenant_id = str(request.get("tenantId") or "")
+    # A legacy row holds a LOCAL FILESYSTEM path, not a blob name. Handing that to
+    # delete_blob asks Azure to remove a blob called `C:\pwc_work\...`, which answers
+    # "not found" and reads exactly like success.
+    if blob_path and is_blob_path(blob_path, tenant_id):
+        client = get_blob_client()
+        if client is not None:
+            try:
+                await client.delete_blob(blob_path)
+            except Exception as exc:  # noqa: BLE001
+                # Type name only: an Azure error can carry a SAS token or account URL.
+                raise EffectNotAvailable(
+                    "artifact_delete",
+                    "The stored file could not be deleted "
+                    f"({type(exc).__name__}), so the document was kept.",
+                ) from exc
+
+    await db.execute(
+        text("DELETE FROM artifacts WHERE id = CAST(:a AS uuid)"),
+        {"a": str(artifact_id)},
+    )
+    return f"deleted {title}"
+
+
+async def _apply_artifact_consumption(db: AsyncSession, request: dict[str, Any]) -> str:
+    """Grant one consuming stage the right to read one non-published version.
+
+    NARROW BY CONSTRUCTION: the grant names a single `version_id` and a single
+    `consumer_stage`. It is not "design may read drafts" — that would be a standing
+    licence indistinguishable from turning enforcement off, and the next draft is a
+    new question that deserves asking again.
+
+    The grant carries the REASON the owner gave. A later reader deciding whether it
+    still applies needs to know what was being allowed and why, and "approved" on its
+    own does not survive the month.
+    """
+    payload = request.get("payload") or {}
+    version_id = payload.get("versionId")
+    consumer_stage = payload.get("consumerStage")
+    project_id = request.get("projectId") or payload.get("projectId")
+    decided_by = request.get("decidedBy") or request.get("currentApproverRole") or "unknown"
+
+    if not version_id or not consumer_stage:
+        raise EffectNotAvailable(
+            "artifact_consumption",
+            "This request does not name a version and a consuming stage.",
+        )
+    if not project_id:
+        raise EffectNotAvailable(
+            "artifact_consumption", "This request names no project to apply to."
+        )
+
+    # ON CONFLICT DO NOTHING, not DO UPDATE: a live grant already covering this pair
+    # is the outcome being asked for. Re-granting would move `granted_by` to whoever
+    # happened to decide the duplicate, rewriting who actually allowed it.
+    await db.execute(
+        text(
+            "INSERT INTO artifact_consumption_grants "
+            "  (tenant_id, project_id, version_id, consumer_stage, granted_by, "
+            "   reason, request_id) "
+            "VALUES (CAST(:t AS uuid), CAST(:p AS uuid), CAST(:v AS uuid), :c, :g, "
+            "        :r, CAST(:rq AS uuid)) "
+            "ON CONFLICT (version_id, consumer_stage) DO NOTHING"
+        ),
+        {
+            "t": str(request.get("tenantId")),
+            "p": str(project_id),
+            "v": str(version_id),
+            "c": consumer_stage,
+            "g": str(decided_by),
+            "r": (request.get("description") or request.get("summary")
+                  or "approved without a stated reason"),
+            "rq": str(request.get("id")),
+        },
+    )
+    return (
+        f"{consumer_stage} may read artifact version {version_id} "
+        f"in project {project_id}"
+    )
 
 async def _apply_agent_access(db: AsyncSession, request: dict[str, Any]) -> str:
     """Grant the requester the extra agent access their final approver just

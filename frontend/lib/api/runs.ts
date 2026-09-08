@@ -103,31 +103,45 @@ export const submitApproval = (id: RunId, input: ApprovalSubmitInput) =>
     schema: ApprovalEvent,
   });
 
-/** Response from the conversational advance endpoint. */
-export const CopilotAdvanceResult = z.object({
-  current_stage: z.string().nullable(),
-  status: z.string(),
+/** What `POST /runs/{id}/approvals` answers with. */
+export const GateDecisionResult = z.object({
+  runId: z.string(),
+  decision: z.string(),
+  reason: z.string().nullable(),
+  idempotencyKey: z.string().nullable(),
+  recordedAt: z.string(),
 });
-export type CopilotAdvanceResult = z.infer<typeof CopilotAdvanceResult>;
+export type GateDecisionResult = z.infer<typeof GateDecisionResult>;
 
 /**
- * Resolve a run's gate — the Copilot's Approve/Reject, and the ONLY way a run
- * advances.
+ * Resolve a run's gate — Approve or Reject on a stage that is paused for a human.
  *
- * It replaced the `hitl.decision` signal, which needed a workflow engine to
- * receive it. The server re-checks the stage's approve permission before any state
- * change, so this is not a thinner path than the one it replaced — it is the same
- * check without the engine.
+ * IT USED TO POST TO `/runs/{id}/copilot/advance`, AND THAT ROUTE NO LONGER EXISTS.
+ * Phase 5A deleted the Copilot: the BFF proxy is asserted gone by
+ * `no-copilot-surface.test.ts` and the FastAPI route by `test_old_engines_are_gone.py`.
+ * Nothing repointed this caller, so every Approve and Reject on the three screens that
+ * use it — the approvals queue, the run drawer and the run conversation — was getting
+ * Next's own 404.
  *
- * `reason` is free text and carries a clarification's ANSWER as well as a
- * rejection's explanation; both are recorded on the audit event.
+ * `POST /runs/{id}/approvals` is where the behaviour went. It re-checks the stage's
+ * approve permission, enforces that whoever started a run cannot approve its output,
+ * writes the audit event, and clears `gate_pending` so the gate leaves every queue.
+ *
+ * THE STAGE IS NOT SENT ANY MORE, deliberately. The server reads the run's own
+ * `current_stage` and refuses a caller-supplied one — taking it from the body would let
+ * a caller name a stage they can approve and record the decision against a run sitting
+ * at a different one. The parameter is kept in the signature and ignored so the three
+ * call sites did not all have to change in the same commit as the routing fix.
+ *
+ * `reason` is free text and carries a clarification's ANSWER as well as a rejection's
+ * explanation; both land on the audit event.
  */
 export const advanceCopilotRun = (
   id: RunId,
-  input: { decision: "approved" | "rejected"; stage: string; reason?: string },
+  input: { decision: "approved" | "rejected"; stage?: string; reason?: string },
 ) =>
-  api(`/runs/${encodeURIComponent(id)}/copilot/advance`, {
+  api(`/runs/${encodeURIComponent(id)}/approvals`, {
     method: "POST",
-    body: input,
-    schema: CopilotAdvanceResult,
+    body: { decision: input.decision, reason: input.reason },
+    schema: GateDecisionResult,
   });

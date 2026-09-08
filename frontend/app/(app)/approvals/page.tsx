@@ -133,7 +133,6 @@ export default function RequestsAndApprovalsPage() {
         : `${projectBindings.length} projects`;
 
   const mayRaise = canRaiseRequest(role);
-  const isOrgAdmin = role === "org_admin";
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -174,8 +173,13 @@ export default function RequestsAndApprovalsPage() {
       <RequestSummaryCards counts={counts} />
 
       <Tabs defaultValue="inbox" className="space-y-4">
-        {!isOrgAdmin && (
-          <TabsList>
+        {/* SHOWN TO EVERYONE, ORG ADMINS INCLUDED. These three tabs used to be hidden
+            from an Org Admin on the reasoning that their inbox was the whole story. It
+            is not: the inbox only holds requests routed to YOUR role and deliberately
+            excludes your own, so an Org Admin who raised anything had no lane in which
+            it could appear — they saw an empty page and no tab to click. Found while
+            checking why a document deletion "never reached" this screen. */}
+        <TabsList>
             <TabsTrigger value="inbox">
               Inbox
               {inboxRequests.length > 0 && (
@@ -193,8 +197,7 @@ export default function RequestsAndApprovalsPage() {
               )}
             </TabsTrigger>
             <TabsTrigger value="all">All</TabsTrigger>
-          </TabsList>
-        )}
+        </TabsList>
 
         {/* ── Inbox: requests routed to this role, then the agent gates ───── */}
         <TabsContent value="inbox" className="space-y-6">
@@ -234,8 +237,7 @@ export default function RequestsAndApprovalsPage() {
           <ApprovalQueue />
         </TabsContent>
 
-        {!isOrgAdmin && (
-          <TabsContent value="mine">
+        <TabsContent value="mine">
             {requestsQ.isLoading ? (
               <LoadingState variant="list" rows={3} />
             ) : (
@@ -246,11 +248,9 @@ export default function RequestsAndApprovalsPage() {
                 emptyDescription="Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
               />
             )}
-          </TabsContent>
-        )}
+        </TabsContent>
 
-        {!isOrgAdmin && (
-          <TabsContent value="all">
+        <TabsContent value="all">
             {requestsQ.isLoading ? (
               <LoadingState variant="list" rows={4} />
             ) : (
@@ -261,8 +261,7 @@ export default function RequestsAndApprovalsPage() {
                 emptyDescription="Requests raised in the business units and projects you can see appear here."
               />
             )}
-          </TabsContent>
-        )}
+        </TabsContent>
       </Tabs>
 
       <RaiseRequestDialog

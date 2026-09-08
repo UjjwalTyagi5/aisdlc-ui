@@ -8,6 +8,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  FileText,
   GitBranch,
   GitPullRequest,
   ListChecks,
@@ -20,6 +21,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { DocumentList } from "@/components/app/document-list";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
@@ -45,7 +47,7 @@ import type {
 } from "@/lib/schemas/security";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "summary" | "findings" | "sbom";
+type Tab = "summary" | "findings" | "sbom" | "documents";
 
 const SIGNOFF_META: Record<string, { label: string; cls: string }> = {
   pass: { label: "Pass", cls: "bg-success/15 text-success border-success/30" },
@@ -267,6 +269,14 @@ export default function SecurityPage() {
                 </span>
               )}
             </TabBtn>
+            {/* DOCUMENTS AS A TAB, because this page has no side column to put them in
+                — it is a scan viewer, full width. Every other stage screen shows the
+                project's documents for its own agent; this one showed none, so a
+                Security document could be uploaded and approved with nowhere on the
+                Security page to see it. */}
+            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>
+              Documents
+            </TabBtn>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -276,6 +286,10 @@ export default function SecurityPage() {
               <SummaryView artifact={artifact} busy={chat.busy} />
             ) : tab === "findings" ? (
               <FindingsView artifact={artifact} />
+            ) : tab === "documents" ? (
+              <div className="p-4">
+                <DocumentList projectId={id} stage="security" />
+              </div>
             ) : (
               <SbomView artifact={artifact} />
             )}

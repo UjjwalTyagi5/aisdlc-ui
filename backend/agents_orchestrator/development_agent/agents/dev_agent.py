@@ -82,6 +82,25 @@ class DevAgentState(TypedDict):
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Bound to this agent's stage: it decides what "its own agent" means for a document
+    # and is what the evidence trail records as the reader. Never a tool argument — a
+    # prompt could then claim to be another agent.
+    _DOCUMENT_TOOLS = make_document_tools("development")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
+try:
+    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+
+    # Publishes APPROVED documents only, and cannot delete anything from the library.
+    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="development", stage="development")
+except Exception:  # noqa: BLE001
+    _SHAREPOINT_TOOLS = []
+
+
 tools = [
     read_file,
     write_file,
@@ -118,6 +137,8 @@ tools = [
     generate_database_migration,
     lint_and_validate_code,
     execute_code_in_sandbox,
+    *_DOCUMENT_TOOLS,
+    *_SHAREPOINT_TOOLS,
 ]
 
 _tool_map = {t.name: t for t in tools}

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { LoadingState } from "@/components/ui/loading-state";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
+import { RunEvidence } from "@/components/app/run-evidence";
 import { RunDetailDrawer } from "@/components/app/run-detail-drawer";
 import { cancelRun, deleteRun, getRun } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
@@ -135,13 +136,21 @@ export default function RunDetailPage() {
           onRetry={() => runQ.refetch()}
         />
       ) : runQ.data ? (
-        <RunDetailDrawer
-          run={runQ.data}
-          open
-          onOpenChange={(v) => {
-            if (!v) router.push("/runs");
-          }}
-        />
+        <>
+          <RunDetailDrawer
+            run={runQ.data}
+            open
+            onOpenChange={(v) => {
+              if (!v) router.push("/runs");
+            }}
+          />
+          {/* What this run built on. Beside the run itself because that is where the
+              question is asked — "why did this deploy do that" starts here, and the
+              answer is which approved artifacts it read. */}
+          <div className="mt-4">
+            <RunEvidence projectId={runQ.data.projectId} runId={id} />
+          </div>
+        </>
       ) : null}
 
       <Dialog open={confirmDelete} onOpenChange={(v) => !deleteMutation.isPending && setConfirmDelete(v)}>

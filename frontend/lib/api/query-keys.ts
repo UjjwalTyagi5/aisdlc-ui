@@ -50,8 +50,37 @@ export const qk = {
   },
   artifacts: {
     all: () => ["artifacts"] as const,
-    forProject: (id: ProjectId) => ["artifacts", "project", id] as const,
+    /** A project's artifacts, optionally narrowed to one phase.
+     *
+     * THE PHASE IS PART OF THE KEY because it is part of the REQUEST. Four call sites
+     * fetched `listArtifacts(projectId, { phase })` with four different phases and
+     * cached them all under one key: whichever loaded first won, so opening Plan after
+     * Requirements showed Requirements' documents and stories under a Plan heading.
+     *
+     * Omitting `phase` still yields the bare `["artifacts", "project", id]`, which is a
+     * PREFIX of every phased key — so the existing
+     * `invalidateQueries({ queryKey: forProject(id) })` calls keep clearing every
+     * phase's cache, which is what they were always meant to do. */
+    forProject: (id: ProjectId, phase?: string) =>
+      (phase
+        ? ["artifacts", "project", id, phase]
+        : ["artifacts", "project", id]) as readonly unknown[],
     detail: (id: ArtifactId) => ["artifacts", "detail", id] as const,
+  },
+  // Frozen stage payload versions and their publication state. Deliberately a
+  // separate namespace from `artifacts` above: that one is blob documents, this one
+  // is the JSONB hand-off between agents, and they have independent lifecycles.
+  artifactVersions: {
+    all: () => ["artifact-versions"] as const,
+    forStage: (id: ProjectId, phase: string) =>
+      ["artifact-versions", id, phase] as const,
+    published: (id: ProjectId, phase: string) =>
+      ["artifact-versions", id, phase, "published"] as const,
+    matrix: (id: ProjectId) => ["artifact-versions", id, "matrix"] as const,
+    runEvidence: (id: ProjectId, runId: string) =>
+      ["artifact-versions", id, "run", runId] as const,
+    versionConsumers: (id: ProjectId, phase: string, version: number) =>
+      ["artifact-versions", id, phase, version, "consumers"] as const,
   },
   connectors: {
     list: (workspaceId?: string | null) => ["connectors", workspaceId ?? ""] as const,

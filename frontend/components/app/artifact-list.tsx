@@ -90,6 +90,31 @@ const PHASE_BADGE_CLASS: Record<string, string> = {
   documentation: "text-info bg-info/10",
 };
 
+/** "stories" -> "story", "artifacts" -> "artifact".
+ *
+ * A naive `replace(/s$/, "")` produced "storie", which is what shipped for one commit.
+ * English plurals in `-ies` come from a `-y` singular, so that case has to be handled
+ * before the general one — and the general one only strips an `s` that is actually
+ * there, so a noun that is already singular survives.
+ */
+function singular(noun: string): string {
+  if (noun.endsWith("ies")) return `${noun.slice(0, -3)}y`;
+  return noun.endsWith("s") ? noun.slice(0, -1) : noun;
+}
+
+/** The board's own work-item type — "Epic", "Bug", "User Story" — or null.
+ *
+ * Lives on the story BODY, not on `artifact.type`, which is "story" for every row a
+ * board pull produces. `ingest_board` fetches every work item on the board, so one
+ * project's "stories" were an Epic and three Tasks about configuring the board itself;
+ * this is the field that tells them apart.
+ */
+function workItemTypeOf(a: Artifact): string | null {
+  const body = a.body as { workItemType?: unknown } | null | undefined;
+  const t = typeof body?.workItemType === "string" ? body.workItemType.trim() : "";
+  return t || null;
+}
+
 /** Immutable toggle for the multi-select story scope set. */
 export function toggleSelection(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
@@ -114,6 +139,11 @@ export interface ArtifactListProps {
    *  clicks, so an impatient second click cannot fire a second DELETE. */
   deletingId?: string | null;
   isLoading?: boolean;
+  /** What these rows ARE, for the search placeholder — "stories" on Requirements,
+   *  "artifacts" elsewhere. The box read "Filter artifacts…" above a list headed
+   *  "Stories (15)", which asks the reader to work out that the two are the same
+   *  thing. Plural, lowercase. */
+  noun?: string;
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
   className?: string;
@@ -130,6 +160,7 @@ export function ArtifactList({
   onDelete,
   deletingId,
   isLoading,
+  noun = "artifacts",
   emptyTitle = "No artifacts yet",
   emptyDescription = "Artifacts appear here once the agent runs.",
   className,
@@ -138,6 +169,34 @@ export function ArtifactList({
   const [typeFilter, setTypeFilter] = React.useState<"all" | ArtifactType>("all");
   const [statusFilter, setStatusFilter] = React.useState<"all" | Status>("all");
   const [sortKey, setSortKey] = React.useState<SortKey>("recent");
+  const [workItemFilter, setWorkItemFilter] = React.useState<string>("all");
+
+  // WHAT IS ACTUALLY IN THE LIST, which is what the dropdowns should offer. Derived
+  // from `items` rather than from the filtered result: narrowing to one status must not
+  // then remove every other option and strand the person on it.
+  const presentTypes = React.useMemo(
+    () => Array.from(new Set((items ?? []).map((a) => a.type))).sort(),
+    [items],
+  );
+  const presentStatuses = React.useMemo(
+    () => Array.from(new Set((items ?? []).map((a) => a.status))).sort(),
+    [items],
+  );
+  // THE BOARD'S OWN TYPE — Epic, Task, Bug, User Story — which is the one thing that
+  // actually varies across a pulled list. `a.type` is "story" for every row here, so
+  // the type filter above could never separate them; `ingest_board` pulls EVERY work
+  // item, and telling an Epic from a Bug is the distinction people want.
+  const presentWorkItems = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (items ?? [])
+            .map((a) => workItemTypeOf(a))
+            .filter((t): t is string => Boolean(t)),
+        ),
+      ).sort(),
+    [items],
+  );
 
   const filtered = React.useMemo(() => {
     if (!items) return [];
@@ -147,6 +206,9 @@ export function ArtifactList({
       next = next.filter((a) => a.title.toLowerCase().includes(q));
     }
     if (typeFilter !== "all") next = next.filter((a) => a.type === typeFilter);
+    if (workItemFilter !== "all") {
+      next = next.filter((a) => workItemTypeOf(a) === workItemFilter);
+    }
     if (statusFilter !== "all") next = next.filter((a) => a.status === statusFilter);
     next.sort((a, b) => {
       if (sortKey === "title") return a.title.localeCompare(b.title);
@@ -154,7 +216,14 @@ export function ArtifactList({
       return b.updatedAt.localeCompare(a.updatedAt);
     });
     return next;
-  }, [items, search, typeFilter, statusFilter, sortKey]);
+  }, [items, search, typeFilter, statusFilter, workItemFilter, sortKey]);
+
+  const selectedRowRef = React.useRef<HTMLLIElement | null>(null);
+  React.useEffect(() => {
+    // `nearest` rather than `center`: clicking a row that is already fully visible must
+    // not jerk the list to re-centre it under the pointer.
+    selectedRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
     if (!onSelect || filtered.length === 0) return;
@@ -170,56 +239,76 @@ export function ArtifactList({
 
   return (
     <div className={cn("flex min-h-0 flex-col gap-3", className)}>
-      {/* Filter toolbar */}
-      <div className="flex flex-col gap-2 sm:flex-row">
+      {/* Filter toolbar.
+          SEARCH GETS ITS OWN ROW. It was `flex-1` beside two w-32 selects and the sort
+          button, and this list lives in a ~390px sidebar — the fixed widths ate the
+          row and collapsed the input to a ~30px sliver with no visible placeholder. It
+          looked like a stray empty box, so the search may as well not have existed. */}
+      <div className="flex flex-col gap-2">
         <Input
-          placeholder="Filter artifacts…"
+          placeholder={`Filter ${noun}…`}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="h-8 flex-1 font-sans text-sm"
-          aria-label="Filter artifacts"
+          className="h-8 w-full font-sans text-sm"
+          aria-label={`Filter ${noun}`}
         />
         <div className="flex gap-2">
-          <Select value={typeFilter} onValueChange={(v) => setTypeFilter(v as typeof typeFilter)}>
-            <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by type">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All types</SelectItem>
-              {(Object.keys(TYPE_ICON) as ArtifactType[]).map((t) => (
-                <SelectItem key={t} value={t}>
-                  {t.replace(/_/g, " ")}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select
-            value={statusFilter}
-            onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
-          >
-            <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Any status</SelectItem>
-              {(
-                [
-                  "draft",
-                  "queued",
-                  "running",
-                  "awaiting_approval",
-                  "approved",
-                  "rejected",
-                  "failed",
-                  "merged",
-                ] as const
-              ).map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s.replace(/_/g, " ")}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* ONLY WHEN THERE IS A CHOICE TO MAKE. This offered every type the platform
+              knows about regardless of what was in the list, so on Requirements — where
+              all fifteen rows are stories — nine of the ten options could only empty the
+              screen. A filter whose options mostly produce "no results" teaches people
+              to stop touching filters. */}
+          {presentTypes.length > 1 && (
+            <Select value={typeFilter} onValueChange={(v) => setTypeFilter(v as typeof typeFilter)}>
+              <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by type">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All types</SelectItem>
+                {presentTypes.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t.replace(/_/g, " ")}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {presentStatuses.length > 1 && (
+            <Select
+              value={statusFilter}
+              onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
+            >
+              <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Any status</SelectItem>
+                {presentStatuses.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s.replace(/_/g, " ")}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {presentWorkItems.length > 1 && (
+            <Select value={workItemFilter} onValueChange={setWorkItemFilter}>
+              <SelectTrigger
+                className="h-8 w-32 font-sans text-xs"
+                aria-label="Filter by work item type"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All work items</SelectItem>
+                {presentWorkItems.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
             <SelectTrigger
               className="h-8 w-12 px-2"
@@ -237,6 +326,24 @@ export function ArtifactList({
         </div>
       </div>
 
+      {/* WHAT THE CIRCLES ARE FOR. They set the agent's SCOPE, which is a different
+          question from which row is open — clicking a story to read it must not quietly
+          change what the agent operates on. Unlabelled, though, a circle beside a
+          highlighted row simply reads as a selection radio that has stopped working,
+          which is exactly how it was reported. The only explanation was an aria-label
+          no sighted reader ever sees. */}
+      {onToggleSelect && (
+        <p className="text-muted-foreground text-xs">
+          {selectedIds && selectedIds.size > 0
+            ? `${selectedIds.size} ${
+                selectedIds.size === 1 ? singular(noun) : noun
+              } scoped to the agent.`
+            : `Tick a circle to scope the agent to that ${singular(
+                noun,
+              )}. Opening one only shows it.`}
+        </p>
+      )}
+
       {isLoading && <LoadingState variant="list" rows={5} />}
 
       {!isLoading && filtered.length === 0 && (
@@ -245,7 +352,10 @@ export function ArtifactList({
 
       {!isLoading && filtered.length > 0 && (
         <ul
-          className="focus-visible:outline-none"
+          // CAPPED AND SCROLLED, like the Documents panel above it. Fifteen stories ran
+          // past the fold and took the rest of the column with them; the list should be
+          // a fixed share of the sidebar however many the board returns.
+          className="max-h-[26rem] overflow-y-auto focus-visible:outline-none"
           onKeyDown={onKeyDown}
           tabIndex={0}
           role="listbox"
@@ -257,7 +367,16 @@ export function ArtifactList({
             const phaseBadgeClass = PHASE_BADGE_CLASS[a.phase] ?? "text-muted-foreground bg-muted";
             const isBlob = BLOB_TYPES.has(a.type) && !!a.downloadUrl;
             return (
-              <li key={a.id} role="option" aria-selected={active} className="flex items-center gap-2">
+              <li
+                key={a.id}
+                role="option"
+                aria-selected={active}
+                // SCROLLED INTO VIEW, because this list now has its own scrollbar. A
+                // selected row below the fold is invisible however it is styled, and
+                // arrow-key navigation walks straight off the bottom without it.
+                ref={active ? selectedRowRef : undefined}
+                className="flex items-center gap-2"
+              >
                 {onToggleSelect && (
                   <Checkbox
                     className="size-4 shrink-0 rounded-full"
@@ -273,8 +392,14 @@ export function ArtifactList({
                     "group flex min-w-0 flex-1 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
                     "hover:bg-surface-1 hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                    // SELECTION MUST NOT LOOK LIKE HOVER. `active` used `bg-surface-1`
+                    // — the very token the hover rule above sets — so the row you had
+                    // opened was styled identically to whichever row the pointer
+                    // happened to be over, and on a list of fifteen there was nothing
+                    // to say which one the detail pane belonged to. The brand border
+                    // and heavier surface are reserved for selection alone.
                     active
-                      ? "bg-surface-1 border-line-soft"
+                      ? "border-[oklch(var(--brand-bright))] bg-surface-2 shadow-sm"
                       : "border-transparent hover:border-line-soft",
                     "mb-1",
                   )}

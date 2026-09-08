@@ -173,10 +173,21 @@ async def read_requirements_payload() -> str:
     Returns the requirements JSON, or a note that none exists (brownfield review).
     """
     s = get_session(get_session_id())
-    art = await _read_artifact_column(s, "requirements_payload")
-    if not art:
-        return "No requirements artifact found for this project (brownfield review — judge the diff on its own merits)."
-    return json.dumps(art)[:12000]
+    from shared.services.artifact_consumption import describe, read_upstream_for_agent
+
+    result = await read_upstream_for_agent(
+        tenant_id=s.tenant_id, project_id=s.project_id, stage="requirements",
+        consumer_stage="code_review",
+        # The pre-phase-3 read, unchanged. It is DUAL-MODE — in pipeline mode it reads
+        # THIS run's column rather than the project's latest — and that distinction has
+        # to survive for projects that have not opted in to enforcement.
+        legacy_reader=lambda: _read_artifact_column(s, "requirements_payload"),
+    )
+    if not result.found:
+        if result.unenforced:
+            return "No requirements artifact found for this project (brownfield review — judge the diff on its own merits)."
+        return describe(result)
+    return json.dumps(result.payload)[:12000]
 
 
 @tool
@@ -186,10 +197,20 @@ async def read_design_artifacts() -> str:
     Returns the design JSON, or a note that none exists.
     """
     s = get_session(get_session_id())
-    art = await _read_artifact_column(s, "design_artifacts")
-    if not art:
-        return "No design artifact found for this project (review without design-conformance checks)."
-    return json.dumps(art)[:12000]
+    from shared.services.artifact_consumption import describe, read_upstream_for_agent
+
+    result = await read_upstream_for_agent(
+        tenant_id=s.tenant_id, project_id=s.project_id, stage="design",
+        consumer_stage="code_review",
+        legacy_reader=lambda: _read_artifact_column(s, "design_artifacts"),
+    )
+    if not result.found:
+        if result.unenforced:
+            return "No design artifact found for this project (review without design-conformance checks)."
+        # Reviewing against an UNAPPROVED design is worse than reviewing without one:
+        # findings would be raised against a contract nobody has agreed to.
+        return describe(result)
+    return json.dumps(result.payload)[:12000]
 
 
 @tool

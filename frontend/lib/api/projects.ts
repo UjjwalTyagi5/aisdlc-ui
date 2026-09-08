@@ -76,6 +76,10 @@ export interface ProjectUpdatePatch {
   connectors?: Record<string, string[]>;
   /** Access mode per assigned tool — see ToolAccessMode (lib/schemas/project.ts). */
   tool_access_modes?: Record<string, ToolAccessMode>;
+  /** Read ONLY published artifact versions on this project (migration 0046).
+   *  A project-tier admin's change is QUEUED for their BU Admin like every other
+   *  setting here — switching it on visibly changes how the project runs. */
+  enforceArtifactPublication?: boolean;
   /** Monthly USD cost cap; 0/null clears it (inherit workspace). Migration 0032. */
   monthlyBudgetUsd?: number | null;
   /** Validity period of the cap — see lib/schemas/budget-window.ts. */
