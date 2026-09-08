@@ -231,6 +231,11 @@ export default function SecurityPage() {
         </div>
       </div>
 
+      {/* DOCUMENTS DO NOT DEPEND ON A SCAN, so the no-scan state cannot swallow them.
+          The first version of this tab lived inside the branch below and was therefore
+          unreachable on exactly the projects that have no scan yet — which is every new
+          one. A document can be uploaded and approved for this stage before any scan
+          has ever run. */}
       {!prepared && !hasScan && !scansQ.isLoading ? (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
@@ -245,6 +250,12 @@ export default function SecurityPage() {
                 </Button>
               }
             />
+            {/* Shown, not tabbed away behind a bar whose other tabs do not exist here.
+                A lone unselected tab beside an empty state reads as broken. */}
+            <div className="mt-10">
+              <h2 className="mb-3 text-sm font-medium">Documents</h2>
+              <DocumentList projectId={id} stage="security" />
+            </div>
           </div>
         </div>
       ) : (

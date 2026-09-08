@@ -266,6 +266,9 @@ export default function CodeReviewPage() {
           />
         </div>
       ) : !prepared && !hasReview && !reviewsQ.isLoading ? (
+        /* DOCUMENTS DO NOT DEPEND ON A REVIEW, so the no-review state cannot swallow
+           them. The first version of this tab lived only in the branch below and was
+           unreachable on exactly the projects with no review yet — every new one. */
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
             {/* Two different empty pages. With reviews on file the reader is not
@@ -286,6 +289,12 @@ export default function CodeReviewPage() {
                 </Button>
               }
             />
+            {/* Shown, not tabbed away: the tab bar below belongs to the review that
+                does not exist yet. */}
+            <div className="mt-10">
+              <h2 className="mb-3 text-sm font-medium">Documents</h2>
+              <DocumentList projectId={id} stage="code_review" />
+            </div>
           </div>
         </div>
       ) : (
