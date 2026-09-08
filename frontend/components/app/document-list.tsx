@@ -145,6 +145,29 @@ export interface DocumentListProps {
   /** The stage this screen belongs to — what an upload from here is filed under.
    *  A BACKEND stage name. */
   stage: string;
+  /** Heading, when "Documents" is the wrong word. Design lists diagrams and specs
+   *  alongside the files, so it says "Design artifacts". */
+  title?: string;
+  description?: string;
+  /**
+   * SELECTION, when this list is also the page's navigation.
+   *
+   * Design used to stack TWO lists in one sidebar: this one, and an `ArtifactList`
+   * whose types included `document`, `presentation` and `diagram` — exactly what
+   * `_artifact_type_for` produces. Both matched the same rows, so every generated
+   * design document was rendered twice, once with approval controls and once as a
+   * selectable row. Giving this list the selection the other one had is what let the
+   * duplicate go.
+   *
+   * Omitted, rows are not selectable and nothing changes for the pages that only
+   * needed a document list.
+   */
+  selectedId?: string | null;
+  onSelect?: (a: Artifact) => void;
+  /** Called after a delete completes. Design uses it to drop `?artifact=` from the URL
+   *  when the deleted row was the selected one — otherwise a copied link points at an
+   *  artifact that no longer exists. */
+  onDeleted?: (a: Artifact) => void;
   className?: string;
 }
 
@@ -152,6 +175,11 @@ export function DocumentList({
   projectId,
   items,
   stage,
+  title,
+  description,
+  selectedId,
+  onSelect,
+  onDeleted,
   className,
 }: DocumentListProps) {
   const session = useSession();
@@ -166,7 +194,7 @@ export function DocumentList({
   // than a second copy here. `ArtifactList` on Requirements, Design and StageWorkbench
   // uses the same one, and a delete that asks for approval on one screen and destroys
   // outright on another is the kind of inconsistency you discover by losing a file.
-  const deletion = useDeleteArtifact(projectId);
+  const deletion = useDeleteArtifact(projectId, onDeleted ? { onDeleted } : undefined);
 
   const canUpload = hasPermission(session, "run:create");
   // The stage's own permission, or project administration for the project-wide ones.
@@ -289,10 +317,10 @@ export function DocumentList({
     <section className={cn("space-y-3", className)}>
       <header className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium">Documents</h3>
+          <h3 className="text-sm font-medium">{title ?? "Documents"}</h3>
           <p className="text-muted-foreground text-xs">
-            Uploaded and generated files. Approved ones are part of the project&apos;s
-            record.
+            {description ??
+              "Uploaded and generated files. Approved ones are part of the project's record."}
           </p>
         </div>
         {canUpload && (
@@ -412,7 +440,10 @@ export function DocumentList({
 
       {scoped.length === 0 ? (
         <EmptyState
-          title="No documents yet"
+          // FOLLOWS THE HEADING. On Design this list is called "Design artifacts", and
+          // an empty state underneath announcing "No documents yet" reads as a
+          // different, missing section.
+          title={title ? `No ${title.toLowerCase()} yet` : "No documents yet"}
           description={
             canUpload
               ? "Upload one, or run the agent to generate it. Nothing is part of the record until it is approved."
@@ -467,7 +498,18 @@ export function DocumentList({
             const pending = norm === "pending";
             const busy = busyId === a.id;
             return (
-              <li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
+              <li
+                key={a.id}
+                className={cn(
+                  "flex flex-wrap items-center gap-x-3 gap-y-1 p-3",
+                  onSelect && "cursor-pointer",
+                  // The SAME selected treatment `artifact-list` uses, so a row does not
+                  // look different depending on which screen is showing it.
+                  selectedId === a.id &&
+                    "border-l-2 border-[oklch(var(--brand-bright))] bg-surface-2",
+                )}
+                onClick={onSelect ? () => onSelect(a) : undefined}
+              >
                 <FileText className="text-muted-foreground h-4 w-4 shrink-0" />
                 <span className="truncate text-sm font-medium">{a.title}</span>
 

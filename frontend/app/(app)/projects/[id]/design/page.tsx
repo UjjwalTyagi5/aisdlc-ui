@@ -17,7 +17,6 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ApprovalCard } from "@/components/app/approval-card";
-import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
 import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
@@ -28,7 +27,6 @@ import { OpenApiViewer } from "@/components/app/openapi-viewer";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
-import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
@@ -110,8 +108,8 @@ export default function DesignPage() {
 
   const approval = useArtifactApproval(projectId);
 
-  const deletion = useDeleteArtifact(projectId, {
-    onDeleted: (a) => {
+  const onArtifactDeleted = React.useCallback(
+    (a: { id: string }) => {
       // `selected` resolves through designs.find(), so it goes null on its own once the
       // list refetches — but ?artifact= would linger in the URL, and a copied link would
       // point at an artifact that no longer exists.
@@ -122,7 +120,8 @@ export default function DesignPage() {
         router.replace(`/projects/${projectId}/design${qs ? `?${qs}` : ""}`);
       }
     },
-  });
+    [selectedFromUrl, searchParams, router, projectId],
+  );
 
   // Chat drawer — talk directly to the Design agent. It consumes the imported user
   // stories through `context.requirements` (the backend formats pipeline_context
@@ -275,25 +274,29 @@ export default function DesignPage() {
             phase="design"
             className="mb-3 shrink-0"
           />
-          {/* Documents and the design artifact list are separate: one is rows with
-              bytes and an approver, the other is what the agent produced. */}
+          {/* ONE LIST, NOT TWO. This sidebar used to stack a DocumentList above an
+              ArtifactList whose DESIGN_TYPES included "document", "presentation" and
+              "diagram" — exactly the types `_artifact_type_for` assigns to a generated
+              file. Both matched the same rows, so every document the Design agent
+              produced appeared twice: once with its approval state and once as a
+              selectable row with a delete button. Two empty states stacked on a new
+              project made the duplication obvious even with nothing in it.
+
+              The merged list does both jobs. It selects (driving the detail pane on the
+              right) and it carries the approval state and actions, which the artifact
+              list never had — so a design artifact can now be raised and approved like
+              anything else in the project's record. */}
           <DocumentList
             projectId={projectId}
             items={artifactsQ.data ?? null}
             stage="design"
-            className="mb-4 shrink-0"
-          />
-          <ArtifactList
-            items={artifactsQ.isLoading ? null : designs}
+            title="Design artifacts"
+            description="Diagrams, specifications and generated files. Approved ones are part of the project's record."
             selectedId={selected?.id}
             onSelect={selectArtifact}
-            onDelete={deletion.onDelete}
-            deletingId={deletion.deletingId}
-            isLoading={artifactsQ.isLoading}
-            emptyTitle="No design artifacts yet"
-            emptyDescription="Trigger the Design agent once Requirements are approved."
+            onDeleted={onArtifactDeleted}
+            className="min-h-0 flex-1"
           />
-          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
