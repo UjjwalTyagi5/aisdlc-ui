@@ -85,6 +85,7 @@ from typing import Any, NamedTuple, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from agents_orchestrator.orchestrator2.attachments import attachment_context
 from agents_orchestrator.orchestrator2.context import handoff_context
 from agents_orchestrator.orchestrator2 import sessions
 from agents_orchestrator.orchestrator2.dispatch import run_agent
@@ -779,6 +780,31 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 # "nothing has been produced yet" and had it re-ask the user for work
                 # the run already contained.
                 context = await handoff_context(run_id, tenant_id, agent_id)
+
+                # What the USER gave this run, alongside what the run has produced.
+                #
+                # A SEPARATE READ, and a separate block. `handoff_context` answers
+                # "what has this run produced" and is keyed by run and tenant;
+                # attachments answer "what did this person give it" and are keyed by
+                # (user, run), because `attachment_store` files uploads under the
+                # uploader. `user_id` is the TICKET's — never the frame's — for the
+                # same reason `project_id` is the run row's: the store is keyed by
+                # uploader, so honouring a client-named user would read somebody
+                # else's documents into this agent's prompt.
+                #
+                # FIRST in the string, and labelled as the user's input. An attachment
+                # rendered under the deliverables' "WORK ALREADY ON THIS RUN" heading
+                # would have the agent citing the user's own draft back to them as a
+                # completed artifact.
+                #
+                # This RAISES when the listing failed, and the turn is then refused by
+                # the handler below — deliberately, and for the reason `handoff_context`
+                # raises: an agent run without a document the user can see in the
+                # composer will report that nothing was attached, and the user will
+                # read that answer as informed.
+                attached = await attachment_context(run_id, user_id=user_id)
+                if attached:
+                    context = f"{attached}\n\n{context}" if context else attached
 
                 _remember(history, "user", text)
                 await sessions.record_turn(

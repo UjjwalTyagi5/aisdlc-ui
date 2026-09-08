@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, false as sa_false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,12 @@ from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Project, Run
+from shared.services.attachment_store import (
+    AttachmentError,
+    list_attachments,
+    save_attachment,
+    validate_attachment,
+)
 
 logger = logging.getLogger(__name__)
 from shared.routers._schemas import (
@@ -301,6 +307,76 @@ async def get_run_deliverables(
     stored = await deliverables_for_run(str(run.id), str(tenant_id))
     pointers = pointers_for_run(dev_artifacts, stages_with_files)
     return {"deliverables": stored + pointers}
+
+
+@runs_router.post("/{run_id}/attachments")
+async def upload_run_attachments(
+    run_id: str,
+    request: Request,
+    files: List[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Store files the user attached to an Orchestrator run, and return their refs.
+
+    NOT `POST /conversations/{session_id}/attachments`, even though the Orchestrator's
+    session id IS its run id. That route authorises through
+    `conversation_service.session_owner`, and the Orchestrator's conversation row is
+    created by the SOCKET on the first turn (`orchestrator2.sessions.ensure_session`) —
+    so attaching a file before sending the first message would 404 against a run that
+    genuinely exists. This one resolves through `_get_run_or_404`, the same
+    tenant-and-scope chokepoint the run's other routes use, which holds from the moment
+    the run row exists.
+
+    THE FILE IS FILED UNDER THE AUTHENTICATED CALLER, never a value from the request.
+    `attachment_store` keys uploads by uploader and
+    `orchestrator2.attachments.attachment_context` reads them back under the socket
+    TICKET's user; letting a caller name the owner would be a way to plant a document
+    into somebody else's agent prompt.
+
+    THE WHOLE BATCH IS VALIDATED BEFORE ANYTHING IS WRITTEN. Rejecting as it wrote would
+    leave the run holding files the user was told were not accepted — and an
+    Orchestrator run reads every stored attachment into every later turn, so those files
+    would go on reaching agents after the upload had reported failure.
+    """
+    tenant_id = request.state.tenant_id
+    await _get_run_or_404(db, run_id, tenant_id, request=request)
+
+    user_id = _user_id(request)
+    payloads: list[tuple[str, bytes]] = []
+    for f in files:
+        data = await f.read()
+        try:
+            validate_attachment(f.filename or "upload", data)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payloads.append((f.filename or "upload", data))
+
+    refs = [
+        save_attachment(user_id, run_id, filename, data)
+        for filename, data in payloads
+    ]
+    return {"attachments": refs}
+
+
+@runs_router.get("/{run_id}/attachments")
+async def get_run_attachments(
+    run_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The files this caller attached to the run, so a reopened chat can show them.
+
+    Without this the chips vanish on reload while the attachments keep reaching every
+    turn — the user can no longer see what the agent is being given, which is its own
+    kind of lie about what the agent knows.
+
+    Scoped to the CALLER's own uploads, matching what the socket actually reads: a run
+    driven by two Project Admins gives each turn only its own driver's files, and a
+    listing that showed both would describe a prompt that is never assembled.
+    """
+    tenant_id = request.state.tenant_id
+    await _get_run_or_404(db, run_id, tenant_id, request=request)
+    return {"attachments": list_attachments(_user_id(request), run_id)}
 
 
 @runs_router.get("/{run_id}/transcript")

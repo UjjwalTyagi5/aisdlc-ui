@@ -31,7 +31,7 @@ import {
 } from "@/lib/orchestrator/use-orchestrator-socket";
 import { getModelOptions } from "@/lib/api/models";
 import { getProject, listProjects } from "@/lib/api/projects";
-import { createRun } from "@/lib/api/runs";
+import { createRun, listRunAttachments, uploadRunAttachments } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { TRACK_META } from "@/lib/tracks";
 import { freshStages, useOrchestratorStore } from "@/stores/orchestrator-store";
@@ -308,6 +308,11 @@ export function OrchestratorCockpit({
   // would go on showing an empty tab.
   const [runId, setRunId] = React.useState<string | null>(null);
 
+  // Declared alongside the run because the conversation-switch effect below clears the
+  // error, and that effect is written before the upload handler that sets it.
+  const [attaching, setAttaching] = React.useState(false);
+  const [attachError, setAttachError] = React.useState<string | null>(null);
+
   const ensureRun = React.useCallback(async (): Promise<string> => {
     if (runIdRef.current) return runIdRef.current;
     // A chat opened from history already HAS a run — its id is the session id — so
@@ -366,6 +371,10 @@ export function OrchestratorCockpit({
     setRunId(null);
     creatingRunRef.current = null;
     setOpenDeliverableId(null);
+    // A different conversation is a different run, so a stale upload error must not
+    // follow it. The chips need no clearing: they are a query keyed on `runId`, which
+    // has just been nulled.
+    setAttachError(null);
     resetSocket();
   }, [conversationKey, resetSocket]);
 
@@ -467,6 +476,56 @@ export function OrchestratorCockpit({
       sendTurn({ text, resolveRunId: ensureRun, modelKey });
     },
     [projectId, sendTurn, ensureRun, modelKey],
+  );
+
+  // ── Attachments ───────────────────────────────────────────────────────────
+  //
+  // What the user gave this run. The backend feeds every stored attachment into every
+  // later turn — attachments are RUN-scoped, not turn-scoped, because this engine has
+  // no agent order and a BRD attached while Requirements answered is what Design needs
+  // three turns later.
+  //
+  // THE SERVER'S LIST IS THE ONLY SOURCE. Chips are rendered from what came back, never
+  // from the picked `File` objects, so a chip cannot appear for a file that was not
+  // stored — which is the failure this whole feature is written against: a user who
+  // sees a chip reads the agent's answer as informed.
+  const attachmentsQ = useQuery({
+    queryKey: ["orchestrator", "attachments", runId],
+    queryFn: () => listRunAttachments(runId as string),
+    enabled: !!runId,
+  });
+
+  const handleAttachFiles = React.useCallback(
+    async (files: File[]) => {
+      if (!files.length || !projectId) return;
+      setAttachError(null);
+      setAttaching(true);
+      try {
+        // The run FIRST. Runs are minted lazily on the first turn, and the upload route
+        // resolves the run through the same scope chokepoint the rest of `/runs/{id}`
+        // uses — so attaching before typing anything has to create it, or every
+        // conversation's first attachment 404s.
+        const id = await ensureRun();
+        await uploadRunAttachments(id, files);
+        await attachmentsQ.refetch();
+      } catch (err) {
+        // SHOWN, never swallowed. A silent failure here would leave the user believing
+        // the agent has a document it has never seen.
+        //
+        // `.message` IS the backend's reason, not a generic string:
+        // `ApiRequestError` already unwraps FastAPI's `{detail: "…"}` into it, so the
+        // store's own wording ("File type '.exe' is not accepted. Allowed: …") reaches
+        // the user — which is the only version that says what to do next. Reading a
+        // `.detail` off the error instead would find nothing and silently degrade to
+        // "Bad Request".
+        const message = (err as Error | null)?.message;
+        setAttachError(message || "That file could not be attached.");
+      } finally {
+        setAttaching(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId, ensureRun, attachmentsQ.refetch],
   );
 
   // ── Access ────────────────────────────────────────────────────────────────
@@ -648,6 +707,16 @@ export function OrchestratorCockpit({
             placeholder={composerPlaceholder}
             onSend={handleSend}
             onStop={() => {}}
+            // What the run already holds, from the server. The attach control shares
+            // `composerDisabled`, so it closes for a reader, for a project with no
+            // runnable model, and while a turn is in flight — the last of those is not
+            // a requirement (a file attached mid-turn would simply be read by the NEXT
+            // turn) but keeping one disabled state means the composer cannot end up
+            // half-open in a way nobody reasoned about.
+            attachments={attachmentsQ.data ?? []}
+            onAttachFiles={(files) => void handleAttachFiles(files)}
+            attaching={attaching}
+            attachError={attachError}
             footerSlot={
               <ThreadFooter
                 error={socket.error}
