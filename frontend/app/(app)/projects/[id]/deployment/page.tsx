@@ -4,7 +4,7 @@ import * as React from "react";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Boxes, CheckCircle2, FileCode2, GitBranch, GitPullRequest, MessageSquare,
+  Boxes, CheckCircle2, FileCode2, FileText, GitBranch, GitPullRequest, MessageSquare,
   Rocket, ScrollText, ShieldCheck, ShieldAlert, Sparkles,
 } from "lucide-react";
 
@@ -18,6 +18,7 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { CodeViewer } from "@/components/app/code-viewer";
 import { DeployTargetDialog } from "@/components/app/deploy-target-dialog";
 import { DeploymentApprovals } from "@/components/app/deployment-approvals";
+import { DocumentList } from "@/components/app/document-list";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -28,7 +29,7 @@ import { qk } from "@/lib/api/query-keys";
 import type { PrepareDeployResult, DeploymentArtifact } from "@/lib/schemas/deployment";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments";
+type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments" | "documents";
 
 const RISK: Record<string, string> = {
   critical: "bg-destructive/15 text-destructive border-destructive/30",
@@ -184,6 +185,12 @@ export default function DeploymentPage() {
             <TabBtn active={tab === "runbooks"} onClick={() => setTab("runbooks")} icon={ScrollText}>Runbooks</TabBtn>
             <TabBtn active={tab === "compliance"} onClick={() => setTab("compliance")} icon={Boxes}>Compliance</TabBtn>
             <TabBtn active={tab === "deployments"} onClick={() => setTab("deployments")} icon={ShieldAlert}>Deployments</TabBtn>
+            {/* DOCUMENTS, and note it is NOT the "Artifacts" tab beside it — that one
+                lists the release package's generated FILES, which live in the release
+                payload and are never approved by anybody. These are the project's
+                approved documents for this stage. Two different things that would read
+                as one if this were folded into that tab. */}
+            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>Documents</TabBtn>
             {rel?.pr_url && (
               <a className="ml-auto" href={rel.pr_url} target="_blank" rel="noreferrer">
                 <Button variant="outline" size="sm"><GitPullRequest className="size-4" aria-hidden />View deployment PR</Button>
@@ -193,6 +200,8 @@ export default function DeploymentPage() {
           <div className="min-h-0 flex-1 overflow-auto">
             {tab === "deployments" ? (
               <div className="p-4"><DeploymentApprovals projectId={id} /></div>
+            ) : tab === "documents" ? (
+              <div className="p-4"><DocumentList projectId={id} stage="deployment" /></div>
             ) : !rel && chat.busy ? (
               <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={Sparkles} title="Assessing…"
                 description="Cloning, detecting the connector, generating the deployment package, and scoring release risk. This takes a moment." variant="plain" /></div>

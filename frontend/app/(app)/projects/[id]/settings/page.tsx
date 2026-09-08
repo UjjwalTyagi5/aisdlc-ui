@@ -516,10 +516,27 @@ export default function ProjectSettingsPage() {
                   exists — publish from each stage&apos;s page first.
                 </p>
               )}
-              {/* The rules themselves, beside the switch that applies them. Deciding
-                  whether to turn this on is exactly when somebody needs to see how
-                  much is currently published. */}
-              <ArtifactAccessMatrix projectId={projectId} />
+              {/* The rules themselves, beside the switch that applies them — deciding
+                  whether to turn this on is exactly when somebody needs to see how much
+                  is currently published.
+
+                  COLLAPSED WHILE IT IS OFF, though, because while it is off the table
+                  describes nothing: nine rows of padlocks under its own warning that
+                  agents read the latest draft regardless of what it says. A grid that
+                  announces it is inert is furniture, and it was the largest thing on
+                  this page. Open once enforcement is on, when every row is live. */}
+              {project.enforceArtifactPublication ? (
+                <ArtifactAccessMatrix projectId={projectId} />
+              ) : (
+                <details className="group">
+                  <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-xs">
+                    Show what these rules would be
+                  </summary>
+                  <div className="mt-3">
+                    <ArtifactAccessMatrix projectId={projectId} />
+                  </div>
+                </details>
+              )}
             </CardContent>
           </Card>
 
