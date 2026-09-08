@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, MessageSquare, Play } from "lucide-react";
+import { MessageSquare, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -16,6 +16,7 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
+import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
@@ -372,26 +373,13 @@ export default function RequirementsPage() {
                 the MAIN screen (RED), per the agent-page design language. */}
             {chat.documents.length > 0 && (
               <div className="mx-auto max-w-3xl px-4 pt-4 md:px-6">
-                <section className="rounded-lg border bg-muted/20 p-3">
-                  <h3 className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">
-                    Generated documents
-                  </h3>
-                  <ul className="space-y-1">
-                    {chat.documents.map((d) => (
-                      <li key={d.id}>
-                        <a
-                          href={d.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
-                        >
-                          <FileText className="size-3.5" aria-hidden />
-                          {d.name ?? "document"}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <GeneratedDocuments
+                  documents={chat.documents}
+                  projectId={projectId}
+                  stage="requirements"
+                  artifacts={artifactsQ.data ?? null}
+                  className="rounded-lg border bg-muted/20 p-3"
+                />
               </div>
             )}
             {selected && selected.body.kind === "story" ? (

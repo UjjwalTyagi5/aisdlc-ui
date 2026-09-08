@@ -4,7 +4,7 @@ import * as React from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileText, MessageSquare } from "lucide-react";
+import { MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -19,6 +19,7 @@ import { useAgentChat } from "@/hooks/use-agent-chat";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
+import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
@@ -301,26 +302,13 @@ export default function DesignPage() {
                 MAIN screen, per the self-contained agent-page design language. */}
             {chat.documents.length > 0 && (
               <div className="mx-auto max-w-5xl px-4 pt-4 md:px-6">
-                <section className="bg-muted/20 rounded-lg border p-3">
-                  <h3 className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">
-                    Generated documents
-                  </h3>
-                  <ul className="space-y-1">
-                    {chat.documents.map((d) => (
-                      <li key={d.id}>
-                        <a
-                          href={d.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
-                        >
-                          <FileText className="size-3.5" aria-hidden />
-                          {d.name ?? "document"}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <GeneratedDocuments
+                  documents={chat.documents}
+                  projectId={projectId}
+                  stage="design"
+                  artifacts={artifactsQ.data ?? null}
+                  className="bg-muted/20 rounded-lg border p-3"
+                />
               </div>
             )}
             {selected ? (
