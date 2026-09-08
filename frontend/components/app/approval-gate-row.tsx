@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ClarificationCard } from "@/components/app/clarification-card";
 import { advanceCopilotRun } from "@/lib/api/runs";
+import { approveArtifact, rejectArtifact } from "@/lib/api/artifacts";
 import { PHASE_LABEL } from "@/lib/agents";
 import { CAPABILITY_CLASS_META } from "@/lib/capability-class";
 import type { ApprovalDecision, ApprovalGate } from "@/lib/schemas";
@@ -34,12 +35,29 @@ export function ApprovalGateRow({
   // and replay safety comes from the gate being closed after the first decision
   // rather than from a key the client invents.
   const decide = useMutation({
-    mutationFn: (input: { decision: ApprovalDecision; reason?: string }) =>
-      advanceCopilotRun(gate.runId, {
+    // `void`, because the two branches resolve to different shapes (an artifact row
+    // versus a run decision) and neither result is read — `onSuccess` only needs to
+    // know that it worked.
+    mutationFn: async (input: { decision: ApprovalDecision; reason?: string }): Promise<void> => {
+      // A DOCUMENT IS NOT A RUN. Its decision lives on the artifact row
+      // (`POST /artifacts/{id}/approve`), not on a run's gate, and it may have no run
+      // at all — an uploaded document never had one. Routing it through
+      // `advanceCopilotRun` would send `null` as a run id and fail at the URL.
+      if (gate.type === "document") {
+        const artifactId = gate.artifact?.id;
+        if (!artifactId) throw new Error("This document gate has no artifact to decide.");
+        if (input.decision === "approve") await approveArtifact(artifactId);
+        else await rejectArtifact(artifactId, input.reason);
+        return;
+      }
+      // `gate.phase` is non-null for every run gate; the schema only admits null for
+      // the document case handled above.
+      await advanceCopilotRun(gate.runId!, {
         decision: input.decision === "approve" ? "approved" : "rejected",
-        stage: gate.phase,
+        stage: gate.phase ?? undefined,
         reason: input.reason,
-      }),
+      });
+    },
     onSuccess: (_data, vars) => {
       toast.success(
         vars.decision === "approve"
@@ -60,9 +78,10 @@ export function ApprovalGateRow({
   // reason — the endpoint records it on the audit event and lets the stage carry on.
   const answer = useMutation({
     mutationFn: (text: string) =>
-      advanceCopilotRun(gate.runId, {
+      // Clarifications are raised by a run, so both are present here.
+      advanceCopilotRun(gate.runId!, {
         decision: "approved",
-        stage: gate.phase,
+        stage: gate.phase ?? undefined,
         reason: text,
       }),
     onSuccess: () => {
@@ -82,7 +101,7 @@ export function ApprovalGateRow({
   return (
     <li className="space-y-2">
       <GateMeta gate={gate} />
-      {gate.type === "approval" ? (
+      {gate.type === "approval" || gate.type === "document" ? (
         <ApprovalCard
           status="awaiting_approval"
           title={gate.title}
@@ -91,7 +110,14 @@ export function ApprovalGateRow({
           pendingDecision={pendingDecision}
           onApprove={() => decide.mutate({ decision: "approve" })}
           onReject={(reason) => decide.mutate({ decision: "reject", reason })}
-          onRetry={() => decide.mutate({ decision: "retry" })}
+          // NO RETRY ON A DOCUMENT. Retry re-runs the stage that produced the
+          // artifact; a document somebody uploaded has no agent to send it back to,
+          // and offering the button would promise an action with nothing behind it.
+          onRetry={
+            gate.type === "document"
+              ? undefined
+              : () => decide.mutate({ decision: "retry" })
+          }
         />
       ) : gate.type === "clarification" ? (
         <ClarificationCard
@@ -138,7 +164,10 @@ function GateMeta({ gate }: { gate: ApprovalGate }) {
           "border-line-soft text-muted-foreground",
         )}
       >
-        {PHASE_LABEL[gate.phase]}
+        {/* A project-wide document belongs to no stage, so there is no phase to
+            label it with — and "Requirements" would be a lie about which agent owns
+            it. */}
+        {gate.phase ? PHASE_LABEL[gate.phase] : "Project-wide"}
       </span>
 
       {/* Which class is being decided — a Sign-off is audited distinctly from

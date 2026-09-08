@@ -4,6 +4,20 @@ A *gate* is a run paused for a human. There is no approvals table: the run row
 itself carries the state (`gate_pending` + `current_stage`), so a gate is derived,
 not stored, and cannot drift from the run it belongs to.
 
+A PENDING DOCUMENT IS THE SECOND SOURCE, and it was missing entirely. Uploading a
+document to a stage raises a real approval — `artifacts.approval_status = 'pending'`,
+decided by `POST /artifacts/{id}/approve` — but nothing listed it here, so it appeared
+only in the Documents panel of the one stage page it belonged to. Somebody whose job is
+to approve things went to Requests & Approvals, the page that exists to answer "what is
+waiting on me", and was told nothing was.
+
+DERIVED FOR THE SAME REASON, and it is what makes the first-approver rule work. A
+document has two equal approvers: the stage's owning role and the project's
+administrator, either of whom may decide it (`_artifact_for_decision`). Because this
+reads `approval_status` rather than storing a task per approver, the moment either one
+approves, the row leaves BOTH queues on the next fetch — there is no second copy to
+withdraw, and no way for one to go stale.
+
 Only approval gates exist here. Clarifications are run state rather
 than a column, so `?type=clarification` correctly returns nothing today instead of
 inventing rows — the queue shows what the database can actually prove is waiting.
@@ -58,11 +72,16 @@ class GateArtifactRef(BaseModel):
 class ApprovalGateOut(BaseModel):
     id: str
     type: str
-    runId: str
+    # OPTIONAL SINCE DOCUMENTS JOINED THE QUEUE. A run gate always has both; an
+    # uploaded document has neither by nature — `artifacts.run_id` is nullable (a
+    # document outlives the run that produced it, and an uploaded one never had one)
+    # and `stage` is NULL for a project-wide document, which belongs to no agent.
+    # Run gates still always populate them.
+    runId: Optional[str] = None
     projectId: str
     projectName: str
-    phase: str
-    agentType: str
+    phase: Optional[str] = None
+    agentType: Optional[str] = None
     requiredPermission: str
     capabilityClass: str
     mandatory: bool
@@ -133,6 +152,73 @@ async def _pending_gates(db: AsyncSession, request: Request) -> list[ApprovalGat
     return gates
 
 
+async def _pending_documents(db: AsyncSession, request: Request) -> list[ApprovalGateOut]:
+    """Documents waiting on a person, as queue rows.
+
+    Scoped by the same `allowed_workspace_ids` the run gates use, so this cannot widen
+    what a viewer sees; `requiredPermission` then decides whose queue it lands in, and
+    the endpoint that actually takes the decision re-checks everything anyway.
+
+    `story` rows are excluded. They are projections of a run's requirements payload with
+    synthesised ids and no blob — there is nothing to approve and no approver, so a row
+    for one would sit in the queue forever with no way to clear it.
+    """
+    allowed = await allowed_workspace_ids(db, request)
+    scoped = allowed is not None
+    clause = " AND p.workspace_id = ANY(CAST(:ws AS uuid[]))" if scoped else ""
+
+    rows = (await db.execute(
+        text(
+            "SELECT a.id, a.stage, a.run_id, a.blob_path, a.artifact_type, "
+            "       a.uploaded_by, a.created_at, "
+            "       p.id AS project_id, p.display_name AS project_name "
+            "FROM artifacts a JOIN projects p ON p.id = a.project_id "
+            "WHERE a.approval_status = 'pending' AND a.artifact_type <> 'story'"
+            + clause +
+            " ORDER BY a.created_at ASC"
+        ),
+        {"ws": allowed or []},
+    )).fetchall()
+
+    out: list[ApprovalGateOut] = []
+    for r in rows:
+        stage = r.stage
+        ui_phase = _PHASE_TO_UI.get(stage, stage) if stage else None
+        # THE TWO APPROVERS, expressed as the one permission the queue filters on.
+        # A stage document names its owning role's permission; a project-wide one has
+        # no owning role, so it names `approve`, which is what project administration
+        # carries. The frontend additionally lets a Project Admin see every gate on
+        # their project, which is the other half of the same rule.
+        permission = _PHASE_PERMISSION.get(stage or "", "approve")
+        name = (r.blob_path or "").rsplit("/", 1)[-1] or "document"
+        scope_label = f"{ui_phase.replace('_', ' ')} " if ui_phase else "project-wide "
+        out.append(ApprovalGateOut(
+            # Namespaced so it cannot collide with a run gate's `{run}:{phase}`.
+            id=f"artifact:{r.id}",
+            type="document",
+            runId=str(r.run_id) if r.run_id else None,
+            projectId=str(r.project_id),
+            projectName=r.project_name,
+            phase=ui_phase,
+            agentType=ui_phase,
+            requiredPermission=permission,
+            capabilityClass="consequential",
+            mandatory=False,
+            title=f"{name} awaiting approval",
+            summary=(
+                f"{r.project_name} — a {scope_label}document is waiting for an owner "
+                "to accept it into the project's record."
+            ),
+            # The person who put it there, unlike a run gate, which is always the agent
+            # that finished the stage. Naming them is what lets an approver tell an
+            # expected upload from one they should ask about.
+            requestedBy=r.uploaded_by or "agent",
+            requestedAt=r.created_at.astimezone(timezone.utc).isoformat(),
+            artifact=GateArtifactRef(id=str(r.id), title=name, type=r.artifact_type or "document"),
+        ))
+    return out
+
+
 @approvals_router.get(
     "",
     response_model=list[ApprovalGateOut],
@@ -148,7 +234,11 @@ async def list_gates(
         return []
     if type == "approval":
         return [g for g in gates if g.type == "approval"]
-    return gates
+    # Oldest first ACROSS BOTH SOURCES, so a document waiting three days is not sorted
+    # below a gate raised this morning purely because it came from a different table.
+    merged = gates + await _pending_documents(db, request)
+    merged.sort(key=lambda g: g.requestedAt)
+    return merged
 
 
 # ── approval REQUESTS ────────────────────────────────────────────────────────
