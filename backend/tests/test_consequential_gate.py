@@ -457,3 +457,127 @@ def test_consent_set_inside_a_node_would_not_reach_the_caller():
         return get_consequential_approved()
 
     assert asyncio.run(outer()) is False
+
+
+# ── the project's administrator owns every stage of it ───────────────────────
+#
+# REPORTED FROM THE PRODUCT: a Project Admin asked the Requirements agent to create an
+# Azure DevOps project, said "yes create", and was told "a Business Analyst has to
+# approve, and you don't hold that approval permission for the Requirements stage" —
+# on their own project.
+#
+# `_PHASE_PERMISSION` names one permission per stage and `project_admin` holds only
+# `artifact:approve_plan` and `artifact:approve_documentation`, so seven of the nine
+# stages refused them. The Orchestrator already had an exemption for exactly this, and
+# the comment above it says so; it stopped at the socket, so the identical action
+# refused when the same person asked the agent directly — which is the route most people
+# take.
+#
+# Everywhere else on the platform already treats them as an equal approver:
+# AGENT_OWNERSHIP gives project_admin `owner` on every phase, `_artifact_for_decision`
+# accepts stage-permission OR project administration, and so does the archive route.
+
+
+PROJECT = "11111111-1111-1111-1111-111111111111"
+
+
+def _project_context(project_id):
+    import config.ws_helper as ws
+
+    return patch.object(ws, "get_project_id", lambda: project_id)
+
+
+async def _ask_on_project(stage, *, perms, tier, project_id=PROJECT):
+    """`owner_approved` with a project in context and a stubbed administration tier.
+
+    `project_admin_tier_for` is stubbed rather than exercised: it has its own tests and
+    a live database, and what is under test here is whether this gate CONSULTS it.
+    """
+    from shared.authz.consequential import owner_approved
+
+    async def _resolve(_u, _t):
+        return perms
+
+    async def _tier(_db, *, user_id, permissions, project):
+        return tier
+
+    class _Proj:
+        id = project_id
+        workspace_id = "22222222-2222-2222-2222-222222222222"
+
+    class _Session:
+        async def get(self, _model, _id):
+            return _Proj()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_a):
+            return False
+
+    ctx_user, ctx_tenant = _context(OWNER)
+    with ctx_user, ctx_tenant, _project_context(project_id), \
+            patch("shared.authz.resolver.resolve_permissions_for_user", _resolve), \
+            patch("shared.authz.project_scope.project_admin_tier_for", _tier), \
+            patch("shared.db.get_db_session_for_tenant", lambda _t: _Ctx()):
+        return await owner_approved(stage)
+
+
+@pytest.mark.unit
+async def test_a_project_admin_may_authorise_a_requirements_action():
+    """THE HEADLINE. They hold no `artifact:approve_requirements` and never will."""
+    ok, why = await _ask_on_project("requirements", perms=NO_PERMS, tier="project")
+
+    assert ok is True, why
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stage", ["design", "development", "security", "deployment"])
+async def test_it_holds_for_every_stage_they_administer(stage):
+    """Seven of the nine refused, so one stage passing proves very little."""
+    ok, why = await _ask_on_project(stage, perms=NO_PERMS, tier="project")
+
+    assert ok is True, why
+
+
+@pytest.mark.unit
+async def test_someone_who_does_not_administer_this_project_is_still_refused():
+    """NON-VACUITY, and the hole a bare role check would have opened. The tier is
+    resolved against THIS project — a Project Admin of a different one gets nothing."""
+    ok, why = await _ask_on_project("requirements", perms=NO_PERMS, tier=None)
+
+    assert ok is False
+    assert "business analyst" in why.lower()
+
+
+@pytest.mark.unit
+async def test_no_project_in_context_is_still_a_refusal():
+    """A background or project-less turn cannot administer anything, so the widening
+    must not become a way through for a caller with no project at all."""
+    ok, why = await _ask_on_project("requirements", perms=NO_PERMS, tier="project",
+                                    project_id=None)
+
+    assert ok is False
+
+
+@pytest.mark.unit
+async def test_an_unresolvable_administration_check_refuses():
+    """FAILS CLOSED, like every other uncertainty in this module. An error looking up
+    who administers the project is not permission."""
+    from shared.authz.consequential import owner_approved
+
+    async def _resolve(_u, _t):
+        return NO_PERMS
+
+    def _boom(_t):
+        raise RuntimeError("database unreachable")
+
+    ctx_user, ctx_tenant = _context(OWNER)
+    with ctx_user, ctx_tenant, _project_context(PROJECT), \
+            patch("shared.authz.resolver.resolve_permissions_for_user", _resolve), \
+            patch("shared.db.get_db_session_for_tenant", _boom):
+        ok, why = await owner_approved("requirements")
+
+    assert ok is False
+    assert "business analyst" in why.lower()
