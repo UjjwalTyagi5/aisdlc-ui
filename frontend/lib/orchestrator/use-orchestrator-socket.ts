@@ -65,6 +65,14 @@ export interface OrchestratorTurnInput {
    */
   agent?: OrchestratorAgentId | null;
   /**
+   * Files stored on the run since the last turn, stamped on the echoed user message.
+   *
+   * NOT sent to the server: the backend reads the run's own attachment store, so a
+   * list on the frame would be a second, divergable source for what the agent gets.
+   * This is display only — what the user's own bubble says it carried.
+   */
+  attachments?: ReadonlyArray<{ name: string; url: string }>;
+  /**
    * Resolves the REAL run this turn belongs to, awaited before the frame goes out.
    *
    * A callback rather than a value so the run can be created lazily, on the first
@@ -657,7 +665,13 @@ export function useOrchestratorSocket(
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const send = React.useCallback(
-    ({ text, agent = null, resolveRunId, modelKey = null }: OrchestratorTurnInput) => {
+    ({
+      text,
+      agent = null,
+      resolveRunId,
+      modelKey = null,
+      attachments,
+    }: OrchestratorTurnInput) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       setError(null);
@@ -684,6 +698,9 @@ export function useOrchestratorSocket(
         phase: null,
         content: trimmed,
         createdAt: Date.now(),
+        // Omitted entirely when empty, so `m.attachments` is falsy on a turn that
+        // carried nothing and the thread draws no empty rule under the bubble.
+        ...(attachments?.length ? { attachments } : {}),
       });
       mutateBubble((m) => m);
 

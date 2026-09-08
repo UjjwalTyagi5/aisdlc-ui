@@ -136,6 +136,30 @@ export function Thread({
                       <span className="text-[11px] font-medium">You</span>
                     </div>
                     <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
+                    {/* What went WITH this turn. The composer's chips say what the run
+                        holds, which is a different statement and cannot answer "did the
+                        PRD go with that one?" — it looks the same whether the file went
+                        with this turn or three turns later. */}
+                    {m.attachments && m.attachments.length > 0 && (
+                      <div
+                        data-testid={`message-attachments-${m.id}`}
+                        className="border-primary-foreground/25 mt-2 flex flex-wrap gap-1.5 border-t pt-2"
+                      >
+                        {m.attachments.map((a) => (
+                          <a
+                            key={a.url || a.name}
+                            href={a.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={a.name}
+                            className="bg-primary-foreground/15 hover:bg-primary-foreground/25 inline-flex max-w-[200px] items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors"
+                          >
+                            <Paperclip className="size-3 shrink-0" aria-hidden />
+                            <span className="truncate">{a.name}</span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               );

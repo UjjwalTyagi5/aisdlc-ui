@@ -29,6 +29,48 @@ def extraction_succeeded(text: str) -> bool:
     return bool(t) and not t.startswith(_PLACEHOLDER_PREFIXES)
 
 
+
+def _docx_text(file_path: str) -> str:
+    """A .docx's text, TABLES INCLUDED, in the order the document holds them.
+
+    `doc.paragraphs` is only the body's top-level paragraphs; a table's cells are not
+    among them. Reading it alone dropped every table — and the documents this platform
+    is given put their requirements in tables almost by convention, so what reached the
+    agent was the narrative with every FR, NFR, data field and risk removed. Nothing
+    reported it: prose extracts fine, so `extraction_succeeded` was true, and the agent
+    filled the gap by inventing requirements that were never in the document.
+
+    Walking the body element keeps document order, which matters as much as
+    completeness — appending the tables after the prose would file the functional
+    requirements under whatever section happened to come last.
+    """
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = Document(file_path)
+    lines: list[str] = []
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            text = Paragraph(child, doc).text.strip()
+            if text:
+                lines.append(text)
+        elif child.tag == qn("w:tbl"):
+            for row in Table(child, doc).rows:
+                # A cell can hold several paragraphs — an author pressing Enter inside
+                # one — and splitting on that newline would orphan the tail of a
+                # requirement onto its own line, away from the ID that names it.
+                cells = [" ".join(c.text.split()) for c in row.cells]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+                # A row with nothing in it is layout, not content. Kept out, so a spacer
+                # row does not arrive as a line of bare separators to interpret.
+
+    return "\n".join(lines)
+
+
 def extract_file_text(file_path: str) -> str:
     """Return plain text from any supported file type.
 
@@ -45,9 +87,7 @@ def extract_file_text(file_path: str) -> str:
                 return "\n".join(page.extract_text() or "" for page in reader.pages)
 
         elif ext in (".docx", ".doc"):
-            from docx import Document
-            doc = Document(file_path)
-            return "\n".join(p.text for p in doc.paragraphs)
+            return _docx_text(file_path)
 
         elif ext == ".pptx":
             # SLIDE BY SLIDE, and numbered. A deck's meaning is partly its ordering —
