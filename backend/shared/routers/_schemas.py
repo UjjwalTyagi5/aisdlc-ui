@@ -633,6 +633,12 @@ class ArtifactOut(BaseModel):
         # that read like a decision. Migration 0040 gave it one.
         _approval = getattr(artifact, "approval_status", None) or "approved"
         status = {
+            # DRAFT IS NOT PENDING, and the difference is whose turn it is. A draft was
+            # produced by an agent and nobody has put it forward yet, so it sits in no
+            # approval queue; pending means somebody asked for a decision. Mapping draft
+            # to awaiting_approval — which the fallback below would do — is what filled a
+            # BA's queue with every throwaway iteration of a document.
+            "draft": "draft",
             "pending": "awaiting_approval",
             "approved": "approved",
             "rejected": "rejected",

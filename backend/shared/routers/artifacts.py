@@ -373,6 +373,78 @@ async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id
 
 
 @artifacts_router.post(
+    "/artifacts/{artifact_id}/submit",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("run:create"))],
+)
+async def submit_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Put a draft forward for approval.
+
+    RECORDING AND ASKING ARE TWO ACTS, and separating them is the whole point. An agent
+    writes every file it produces as a `draft` — recorded, listed, downloadable by the
+    people on the project, and in NOBODY's approval queue. Most of those are working
+    iterations: ask for a BRD three times and two of them are dead the moment the third
+    exists. Sending all three to an approver is how a queue stops being read.
+
+    So this is the moment somebody says "this one". It moves `draft` to `pending`, which
+    is what `GET /approvals` derives its rows from.
+
+    `run:create`, NOT `approve` — deliberately the same permission as uploading. Putting
+    work forward is producing, not accepting; the person who ran the agent may raise
+    their own output, and the owner still decides it afterwards. Making this need the
+    approve permission would mean only an approver could ask for an approval.
+
+    IDEMPOTENT, and it never walks a decision backwards. Re-submitting something already
+    pending is a no-op rather than an error — a double click is not a mistake worth a
+    500. An approved or rejected artifact is refused outright: "raise for approval"
+    must never quietly reopen a decision somebody already took.
+    """
+    # SAME SCOPING AS THE DOWNLOAD ROUTE: the id resolves through a join on
+    # `Run.tenant_id`, so another tenant's id is a 404 rather than a submission, and
+    # project visibility is checked separately because being in the tenant is not the
+    # same as being on the project.
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+
+    if artifact.approval_status in ("approved", "rejected"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"That document is already {artifact.approval_status}; it cannot be put "
+                "forward again."
+            ),
+        )
+    if artifact.approval_status == "pending":
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
+
+    artifact.approval_status = "pending"
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_submit",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(artifact.project_id),
+                "stage": artifact.stage,
+                "artifact_type": artifact.artifact_type,
+            },
+        )
+    )
+    await db.flush()
+    await db.refresh(artifact)
+    logger.info("Artifact %s submitted for approval", artifact_id)
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
+
+
+@artifacts_router.post(
     "/artifacts/{artifact_id}/approve",
     response_model=ArtifactOut,
     dependencies=[Depends(require_permission("approve"))],

@@ -93,6 +93,13 @@ export const approveArtifact = (id: ArtifactId) =>
 
 /** Decline a generated document. Its pending bytes are deleted; the row is kept as
  *  the record that it was produced and refused. */
+/** Move a draft to pending — the moment somebody asks for a decision on it. */
+export const submitArtifact = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}/submit`, {
+    method: "POST",
+    schema: Artifact,
+  });
+
 export const rejectArtifact = (id: ArtifactId, reason?: string) =>
   api(`/artifacts/${encodeURIComponent(id)}/reject`, {
     method: "POST",

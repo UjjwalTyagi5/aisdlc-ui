@@ -422,3 +422,112 @@ async def test_the_agent_path_can_carry_a_note_too(project):
     assert "note" in inspect.signature(register_generated_file).parameters
     src = inspect.getsource(register_generated_file)
     assert "upload_note=" in src, "the note is accepted but never stored"
+
+
+# -- drafts wait on nobody -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_draft_is_not_in_anyones_queue(project):
+    """THE NOISE THIS REMOVES. An agent records every file it produces — ask for three
+    passes at a document and two are dead the moment the third exists. Sending all three
+    to an approver is how a queue stops being read, so a draft is recorded and waits on
+    nobody until somebody puts it forward."""
+    await _document(project, status="draft", name="brd-draft-1.docx")
+    ba = await _ba(project)
+    admin = await _project_admin(project)
+
+    assert _queue(ba, project, ["artifact:view", "artifact:approve_requirements"]) == []
+    assert _queue(admin, project, ["artifact:view", "approve"]) == []
+
+
+@pytest.mark.asyncio
+async def test_submitting_a_draft_puts_it_in_the_queue(project):
+    """And the other half: raising it is what asks for the decision."""
+    art = await _document(project, status="draft", name="brd-final.docx")
+    ba = await _ba(project)
+    perms = ["artifact:view", "run:create", "approve", "artifact:approve_requirements"]
+    hdr = _headers(ba, project["org"], project["bu"], perms)
+
+    r = _client().post(f"/artifacts/{art}/submit", headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "awaiting_approval"
+
+    rows = _queue(ba, project, perms)
+    assert [x["artifact"]["id"] for x in rows] == [art]
+
+
+@pytest.mark.asyncio
+async def test_raising_needs_only_the_permission_to_produce_work(project):
+    """`run:create`, NOT `approve`. Asking for a decision is producing, not accepting —
+    requiring the approve permission would mean only an approver could request an
+    approval, which is nobody's idea of a workflow."""
+    art = await _document(project, status="draft")
+    dev = f"dev-{_uuid.uuid4()}"
+    await grant_role(dev, project["proj"], "developer",
+                     tenant_id=project["org"], scope_kind="project")
+
+    r = _client().post(
+        f"/artifacts/{art}/submit",
+        headers=_headers(dev, project["org"], project["bu"],
+                         ["artifact:view", "run:create"]))
+
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_raising_twice_is_a_no_op_rather_than_an_error(project):
+    """A double click is not a mistake worth a 500."""
+    art = await _document(project, status="draft")
+    ba = await _ba(project)
+    hdr = _headers(ba, project["org"], project["bu"], ["artifact:view", "run:create"])
+
+    assert _client().post(f"/artifacts/{art}/submit", headers=hdr).status_code == 200
+    again = _client().post(f"/artifacts/{art}/submit", headers=hdr)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decided", ["approved", "rejected"])
+async def test_a_decided_document_cannot_be_raised_again(project, decided):
+    """"Raise for approval" must never quietly reopen a decision somebody already took —
+    least of all a rejection, where re-asking is how a refused document creeps back in."""
+    art = await _document(project, status=decided)
+    ba = await _ba(project)
+
+    r = _client().post(
+        f"/artifacts/{art}/submit",
+        headers=_headers(ba, project["org"], project["bu"],
+                         ["artifact:view", "run:create"]))
+
+    assert r.status_code == 409, r.text
+    assert decided in r.json()["detail"]
+
+
+def test_agent_generated_files_are_recorded_as_drafts():
+    """THE DEFAULT THE WHOLE CHANGE RESTS ON, and a mutation run caught its absence:
+    deleting `approval_status="draft"` from `register_generated_file` left every test in
+    this file green, because they all insert their own rows and none exercised the
+    writer.
+
+    Source-level because the function is best-effort by design — it swallows its own
+    failures, so a run that never reached `store_artifact` looks identical to one that
+    did. `upload_artifact` is deliberately NOT covered by this: choosing a file and
+    pressing Upload IS putting something forward, so a hand upload is pending.
+    """
+    import inspect
+
+    from shared.services.chat_artifacts import register_generated_file
+
+    src = inspect.getsource(register_generated_file)
+
+    assert 'approval_status="draft"' in src, (
+        "agent-generated files must start as drafts, or every working iteration lands "
+        "in an approver's queue"
+    )
+    # Both branches: the one that uploads bytes and the one that records a row without.
+    assert src.count('approval_status="draft"') >= 2, (
+        "the no-bytes branch still records a pending artifact"
+    )

@@ -91,11 +91,67 @@ describe("what the card says about a generated document", () => {
 
   it("matches by filename, which is the only field the two sides share", () => {
     /** The chat list is in-memory with its own ids; the artifact is a database row
-     *  created independently. A near-miss on the name is a different document. */
+     *  created independently. A near-miss on the name is a different document.
+     *
+     *  Scoped to the row, because `brd-v2.docx` now also appears as a history entry —
+     *  a page-wide "is Approved anywhere" query would find that one and pass for the
+     *  wrong reason. */
     renderCard([doc("brd.docx")], [artifact("brd-v2.docx", "approved")]);
 
-    expect(screen.getByRole("button", { name: /Add to Documents/i })).toBeTruthy();
-    expect(screen.queryByText(/^Approved$/i)).toBeNull();
+    const row = screen.getByText("brd.docx").closest("li")!;
+    expect(row.textContent).toContain("Add to Documents");
+    expect(row.textContent).not.toContain("Approved");
+  });
+
+  it("offers to raise a draft, and only a draft", () => {
+    /** THE POINT OF THE DRAFT STATE. An agent records what it produces; asking for a
+     *  decision is a separate act, so nothing reaches an approver until somebody points
+     *  at one. Ask for three passes and two are dead by the time the third exists. */
+    renderCard([doc("brd.docx")], [artifact("brd.docx", "draft")]);
+
+    expect(screen.getByText(/^Draft$/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Raise for approval/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Add to Documents/i })).toBeNull();
+  });
+
+  it("does not offer to raise something already pending", () => {
+    /** NON-VACUITY: the button follows the state rather than appearing on everything.
+     *  Raising a pending document again would ask for a decision already asked for. */
+    renderCard([doc("brd.docx")], [artifact("brd.docx", "awaiting_approval")]);
+
+    expect(screen.queryByRole("button", { name: /Raise for approval/i })).toBeNull();
+    expect(screen.getByText(/Pending approval/i)).toBeTruthy();
+  });
+});
+
+describe("the history beyond this chat session", () => {
+  it("lists recent documents the open session did not produce", () => {
+    /** `documents` is the OPEN session's list, so a file generated yesterday vanished
+     *  from this card on reload while still sitting in the project's record — the card
+     *  looked like the whole history when it was a keyhole onto it. */
+    renderCard([doc("today.docx")], [
+      artifact("yesterday.docx", "approved"),
+      artifact("last-week.pptx", "draft"),
+    ]);
+
+    expect(screen.getByText("yesterday.docx")).toBeTruthy();
+    expect(screen.getByText("last-week.pptx")).toBeTruthy();
+  });
+
+  it("does not list a document twice when it is in both", () => {
+    /** The session document and its artifact row are the same file; showing both would
+     *  read as two documents with the same name. */
+    renderCard([doc("brd.docx")], [artifact("brd.docx", "draft")]);
+
+    expect(screen.getAllByText("brd.docx")).toHaveLength(1);
+  });
+
+  it("caps the card at ten rows", () => {
+    /** A "recent" list that grows without bound stops being recent. */
+    const many = Array.from({ length: 25 }, (_, i) => artifact(`doc-${i}.docx`, "approved"));
+    renderCard([doc("today.docx")], many);
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(10);
   });
 
   it("still names a document that has no file behind it", () => {

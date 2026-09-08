@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { CheckCircle2, Clock, FileText, Loader2, Upload, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { uploadArtifact } from "@/lib/api/artifacts";
+import { submitArtifact, uploadArtifact } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import type { Artifact, ProjectId } from "@/lib/schemas";
 
@@ -43,12 +43,17 @@ export interface GeneratedDoc {
 
 /** `null` while the artifact list is still loading — "not recorded" must not be
  *  guessed from an answer that has not arrived. */
-type Standing = "approved" | "pending" | "rejected" | "absent" | "unknown";
+type Standing = "draft" | "approved" | "pending" | "rejected" | "absent" | "unknown";
+
+function matchFor(name: string, artifacts: Artifact[] | null): Artifact | undefined {
+  return artifacts?.find((a) => a.title === name);
+}
 
 function standingOf(name: string, artifacts: Artifact[] | null): Standing {
   if (artifacts === null) return "unknown";
-  const match = artifacts.find((a) => a.title === name);
+  const match = matchFor(name, artifacts);
   if (!match) return "absent";
+  if (match.status === "draft") return "draft";
   if (match.status === "approved") return "approved";
   if (match.status === "rejected") return "rejected";
   return "pending";
@@ -58,6 +63,13 @@ const CHIP: Record<
   Exclude<Standing, "absent" | "unknown">,
   { label: string; icon: React.ComponentType<{ className?: string }>; className: string }
 > = {
+  draft: {
+    // NEUTRAL. A draft is waiting on nobody — colouring it like pending is what made
+    // every working iteration look like an outstanding task in somebody's queue.
+    label: "Draft",
+    icon: FileText,
+    className: "border-border bg-muted text-muted-foreground",
+  },
   approved: {
     label: "Approved",
     icon: CheckCircle2,
@@ -118,7 +130,37 @@ export function GeneratedDocuments({
     onError: (e: Error) => toast.error(e.message || "Couldn't add it to Documents"),
   });
 
-  if (documents.length === 0) return null;
+  const raise_ = useMutation({
+    mutationFn: async (doc: GeneratedDoc) => {
+      const match = matchFor(doc.name ?? "document", artifacts);
+      if (!match) throw new Error("That document is not in the project's record yet.");
+      await submitArtifact(match.id);
+    },
+    onMutate: (doc) => setBusy(doc.id),
+    onSettled: () => setBusy(null),
+    onSuccess: () => {
+      toast.success("Raised for approval");
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
+      void queryClient.invalidateQueries({ queryKey: qk.approvals.list({}) });
+    },
+    onError: (e: Error) => toast.error(e.message || "Couldn't raise it for approval"),
+  });
+
+  // THE LAST TEN FOR THIS STAGE, not just this conversation. `documents` is the open
+  // session's list, so a file generated yesterday vanished from this card the moment the
+  // page reloaded — while still sitting in the project's record, which made the card
+  // look like the whole history when it was a keyhole onto it.
+  //
+  // Session documents come first and in their own order: they are what just happened,
+  // and the reader is usually looking for the one the agent named a second ago.
+  const seen = new Set(documents.map((d) => d.name ?? "document"));
+  const recent: GeneratedDoc[] = (artifacts ?? [])
+    .filter((a) => a.type !== "story" && !seen.has(a.title))
+    .slice(0, Math.max(0, 10 - documents.length))
+    .map((a) => ({ id: `artifact-${a.id}`, name: a.title, url: a.downloadUrl ?? null }));
+
+  const rows = [...documents, ...recent];
+  if (rows.length === 0) return null;
 
   return (
     <section className={className}>
@@ -126,7 +168,7 @@ export function GeneratedDocuments({
         Generated documents
       </h3>
       <ul className="space-y-1.5">
-        {documents.map((d) => {
+        {rows.map((d) => {
           const name = d.name ?? "document";
           const standing = standingOf(name, artifacts);
           const chip = standing === "absent" || standing === "unknown" ? null : CHIP[standing];
@@ -164,8 +206,29 @@ export function GeneratedDocuments({
                 </span>
               )}
 
+              {/* THE ASK, and it is the only place one is made. An agent records what
+                  it produces as a draft — ask for three passes at a document and two of
+                  them are dead the moment the third exists — so nothing reaches an
+                  approver until somebody points at one. */}
+              {standing === "draft" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-[11px]"
+                  disabled={busy === d.id}
+                  onClick={() => raise_.mutate(d)}
+                >
+                  {busy === d.id ? (
+                    <Loader2 className="size-3 animate-spin" aria-hidden />
+                  ) : (
+                    <Upload className="size-3" aria-hidden />
+                  )}
+                  Raise for approval
+                </Button>
+              )}
+
               {/* ONLY WHEN IT IS GENUINELY ABSENT. Offering this beside a document that
-                  is already pending would invite a duplicate row and teach people that
+                  is already recorded would invite a duplicate row and teach people that
                   the automatic path cannot be trusted. */}
               {standing === "absent" && d.url && (
                 <Button

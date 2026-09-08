@@ -43,7 +43,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useSession } from "@/hooks/use-session";
 import {
-  approveArtifact, listArtifacts, rejectArtifact, uploadArtifact,
+  approveArtifact, listArtifacts, rejectArtifact, submitArtifact, uploadArtifact,
 } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -85,7 +85,33 @@ function waitingOn(a: Artifact): string {
   }
 }
 
+/** The filter's vocabulary, which is the chip's vocabulary: anything not decided and
+ *  not a draft is something somebody is waiting on. */
+function normalisedStatus(a: Artifact): "draft" | "approved" | "rejected" | "pending" {
+  if (a.status === "draft") return "draft";
+  if (a.status === "approved") return "approved";
+  if (a.status === "rejected") return "rejected";
+  return "pending";
+}
+
+const STATUS_FILTER_LABEL: Record<string, string> = {
+  draft: "Draft",
+  approved: "Approved",
+  rejected: "Rejected",
+  pending: "Pending",
+};
+
 function statusChip(a: Artifact) {
+  if (a.status === "draft") {
+    // NEUTRAL, NOT AMBER. Amber says "somebody is waiting"; a draft is waiting on
+    // nobody — its author has not put it forward. Colouring it like pending is what
+    // made every agent iteration look like an outstanding task.
+    return {
+      label: "Draft",
+      cls: "border-border bg-muted text-muted-foreground",
+      Icon: FileText,
+    };
+  }
   if (a.status === "approved") {
     return {
       label: "Approved",
@@ -134,7 +160,7 @@ export function DocumentList({
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [search, setSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<
-    "all" | "approved" | "pending" | "rejected"
+    "all" | "draft" | "approved" | "pending" | "rejected"
   >("all");
   // DELETION IS A REQUEST, NOT AN ACTION, and it comes from the SHARED hook rather
   // than a second copy here. `ArtifactList` on Requirements, Design and StageWorkbench
@@ -178,24 +204,22 @@ export function DocumentList({
     [source, stage],
   );
 
-  /** The statuses on this screen, normalised the way the chip is: anything that is
-   *  neither approved nor rejected reads as pending. */
+  /** The statuses on this screen, normalised the way the chip is. `draft` is its own
+   *  value: folding it into pending would hide the one distinction this filter is now
+   *  most useful for — "what is actually waiting on somebody". */
   const presentStatuses = React.useMemo(
-    () =>
-      Array.from(
-        new Set(
-          scoped.map((a) =>
-            a.status === "approved" || a.status === "rejected" ? a.status : "pending",
-          ),
-        ),
-      ).sort(),
+    () => Array.from(new Set(scoped.map(normalisedStatus))).sort(),
     [scoped],
   );
 
   const documents = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     return scoped.filter((a) => {
-      if (statusFilter !== "all" && (a.status ?? "pending") !== statusFilter) return false;
+      // THROUGH THE SAME NORMALISER THE OPTIONS ARE BUILT FROM. This compared the raw
+      // `a.status` against the option value, and the option for a waiting document is
+      // "pending" while the status itself is "awaiting_approval" — so choosing Pending
+      // matched nothing and emptied the list. One function now answers both.
+      if (statusFilter !== "all" && normalisedStatus(a) !== statusFilter) return false;
       // Title only. The approver's email is on the row too, but matching it would make
       // typing a colleague's name return documents they merely signed, which is a
       // different question from "find the file I am thinking of".
@@ -222,6 +246,20 @@ export function DocumentList({
     // The backend says WHY: a rejected extension, an oversized file, an unknown stage.
     // Three different things the user has to act on differently.
     onError: (e: Error) => toast.error(e.message || "Upload failed"),
+  });
+
+  const raise_ = useMutation({
+    mutationFn: (a: Artifact) => submitArtifact(a.id),
+    onMutate: (a) => setBusyId(a.id),
+    onSettled: () => setBusyId(null),
+    onSuccess: () => {
+      toast.success("Raised for approval");
+      void refresh();
+      // It has just entered somebody's queue, so the count beside Requests & Approvals
+      // is now wrong until this lands.
+      void queryClient.invalidateQueries({ queryKey: qk.approvals.list({}) });
+    },
+    onError: (e: Error) => toast.error(e.message || "Couldn't raise it for approval"),
   });
 
   const decide = useMutation({
@@ -363,7 +401,7 @@ export function DocumentList({
                 <SelectItem value="all">Any status</SelectItem>
                 {presentStatuses.map((s) => (
                   <SelectItem key={s} value={s}>
-                    {s === "approved" ? "Approved" : s === "rejected" ? "Rejected" : "Pending"}
+                    {STATUS_FILTER_LABEL[s] ?? "Pending"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -417,7 +455,16 @@ export function DocumentList({
             const mayDecide = isProjectWide
               ? canApproveProject
               : canApproveStage || canApproveProject;
-            const pending = a.status !== "approved" && a.status !== "rejected";
+            // THREE STATES, NOT TWO. A draft is recorded but nobody has put it
+            // forward, so it is in no approval queue and there is nothing to decide on
+            // it yet — offering Approve here would let an owner accept a document its
+            // author had not finished with. `pending` means somebody asked.
+            // THROUGH THE NORMALISER, not an exact string. The backend spells a waiting
+            // document "awaiting_approval", older rows and fixtures say "pending", and
+            // matching one spelling silently drops the Approve button for the other.
+            const norm = normalisedStatus(a);
+            const isDraft = norm === "draft";
+            const pending = norm === "pending";
             const busy = busyId === a.id;
             return (
               <li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
@@ -475,6 +522,23 @@ export function DocumentList({
                         <Download className="h-3.5 w-3.5" />
                         <span className="sr-only">Download {a.title}</span>
                       </a>
+                    </Button>
+                  )}
+                  {/* WHOEVER CAN PRODUCE WORK CAN ASK FOR A DECISION ON IT, which is
+                      the same permission as uploading — asking is producing, not
+                      accepting. The owner still decides afterwards. */}
+                  {isDraft && canUpload && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => raise_.mutate(a)}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        "Raise for approval"
+                      )}
                     </Button>
                   )}
                   {pending && mayDecide && (
