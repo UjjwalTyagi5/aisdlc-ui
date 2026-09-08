@@ -18,6 +18,15 @@ _FILES_ROOT = pathlib.Path(__file__).resolve().parents[2] / "files"
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10 MB per file
 ALLOWED_ATTACHMENT_EXTS = {
     ".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx", ".xls", ".csv",
+    # .pptx WAS MISSING while `chat_artifacts` generates decks in that very format —
+    # so the platform produced a file its own upload refused, and a design deck, the
+    # most obvious thing to attach to a Design agent, was the one thing you could not
+    # attach. `extract_file_text` reads it slide by slide.
+    #
+    # `.ppt` is deliberately NOT here: python-pptx cannot read the legacy binary
+    # format, so accepting it would store a file no agent could ever read — worse
+    # than refusing it, because the refusal at least says so.
+    ".pptx",
     ".png", ".jpg", ".jpeg", ".gif", ".webp",
 }
 

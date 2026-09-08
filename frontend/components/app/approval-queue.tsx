@@ -78,13 +78,31 @@ export function ApprovalQueue() {
     enabled: canSeeGovernance,
   });
 
-  // Role-scoping: "mine" keeps only gates the viewer can action.
+  // Role-scoping: "mine" keeps only gates the viewer can action — BY EITHER ROUTE.
+  //
+  // A Project Admin owns every agent on their project, so they and the stage's own role
+  // are equal approvers; `record_approval` accepts both. Filtering on the stage
+  // permission alone hid every gate from the Project Admin, who then could not reach a
+  // decision the server would happily have taken — the queue was stricter than the rule
+  // it was meant to reflect.
+  //
+  // MATCHED ON THE ROLE, NOT ON `approve`. That permission is held by seven roles
+  // including QA and Architect, so using it here would put a Requirements gate in a QA's
+  // queue — visible, clickable and refused by the server. The platform role is the
+  // signal that actually means "administers projects".
+  //
+  // The server still decides: it re-checks the stage permission or administration OF
+  // THIS PROJECT, and a Project Admin elsewhere in the tenant is refused. This filter is
+  // about what is worth showing, not about what is allowed.
   const visible = React.useMemo(() => {
     if (isGovernanceTier) return [];
     const all = gatesQ.data ?? [];
     if (scope === "all") return all;
-    return all.filter((g) => hasPermission(session, g.requiredPermission));
-  }, [gatesQ.data, scope, session, isGovernanceTier]);
+    const administersProjects = role === "project_admin";
+    return all.filter(
+      (g) => administersProjects || hasPermission(session, g.requiredPermission),
+    );
+  }, [gatesQ.data, scope, session, isGovernanceTier, role]);
 
   // Each governance approval routes to exactly one role — never show a BU
   // Admin's project/model requests to an Org Admin or vice versa.

@@ -25,6 +25,8 @@ import {
 } from "@/components/ui/tabs";
 
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { DocumentList } from "@/components/app/document-list";
+import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RepoPickerDialog } from "@/components/app/repo-picker-dialog";
 import { RepoFileTree } from "@/components/app/repo-file-tree";
@@ -244,6 +246,16 @@ export default function DevelopmentPage() {
       <div className="grid flex-1 gap-0 overflow-hidden md:grid-cols-[300px_1fr] xl:grid-cols-[340px_1fr]">
         {/* Left panel — repo explorer / PRs */}
         <aside className="flex min-h-0 flex-col overflow-hidden border-b md:border-b-0 md:border-r">
+          <StageVersionPanel
+            projectId={projectId}
+            phase="development"
+            className="mb-3 shrink-0"
+          />
+          <DocumentList
+            projectId={projectId}
+            stage="development"
+            className="mb-4 shrink-0"
+          />
           {/* Segmented header */}
           <div className="flex items-center gap-1 border-b p-2">
             <SegBtn active={leftTab === "files"} onClick={() => setLeftTab("files")} icon={Files}>

@@ -114,6 +114,45 @@ def require_permission(perm: str, *, run_param: str | None = None):
     return _dep
 
 
+def require_stage_approval(param: str = "stage"):
+    """Require the approve permission belonging to the stage named in the PATH.
+
+    `require_permission` takes one fixed string, but a route like
+    `/projects/{project_id}/stages/{stage}/versions/{version}/publish` needs a
+    different permission per stage — `artifact:approve_design` for design,
+    `artifact:approve_testing` for testing. Hardcoding one would either grant
+    Requirements' approver the right to sign off a deployment, or need nine
+    near-identical routes.
+
+    FAILS CLOSED ON AN UNKNOWN STAGE. A stage with no entry in `_PHASE_PERMISSION` is
+    refused rather than waved through — the same rule `runs.py` applies to run gates,
+    and the reason the five track agents (which have no approve permission because
+    they are not in AGENT_REGISTRY) cannot be published to by accident.
+
+    Delegates to `require_permission` once resolved, so the denial metric, the audit
+    row and the opaque 403 body are identical to every other protected route.
+    """
+
+    async def _dep(conn: HTTPConnection) -> None:
+        if conn.scope.get("type") == "websocket":
+            return
+        from shared.authz.permissions import _PHASE_PERMISSION  # noqa: PLC0415
+
+        stage = conn.path_params.get(param) or ""
+        perm = _PHASE_PERMISSION.get(stage)
+        if not perm:
+            # Deliberately the same opaque 403 as a permission denial: telling the
+            # caller "that stage does not exist" is a probe oracle for the pipeline.
+            logger.warning(
+                "stage approval refused: %r has no entry in _PHASE_PERMISSION", stage,
+            )
+            raise HTTPException(status_code=403, detail="Forbidden")
+        await require_permission(perm)(conn)
+
+    _dep.__rbac_require_permission__ = True  # boot-scan sentinel (D-05)
+    return _dep
+
+
 def require_any_permission(*perms: str, run_param: str | None = None):
     """Like require_permission, but grants access if the caller holds ANY of `perms`.
 

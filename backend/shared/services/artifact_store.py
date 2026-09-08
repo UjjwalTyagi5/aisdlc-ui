@@ -261,12 +261,14 @@ async def store_artifact(
     db: AsyncSession,
     *,
     tenant_id: str,
-    run_id: str,
     artifact_type: str,
     filename: str,
     data: bytes,
+    run_id: str | None = None,
     project_id: str | None = None,
     agent: str | None = None,
+    stage: str | None = None,
+    uploaded_by: str | None = None,
     content_type: str = "application/octet-stream",
     blob_client: Any = None,
 ) -> Artifact:
@@ -281,19 +283,30 @@ async def store_artifact(
     configured or the upload failed — the row still exists so the document is listed
     and the failure is visible, rather than the run silently producing nothing.
     """
-    if not tenant_id or not run_id:
+    if not tenant_id:
         # Refusing beats writing to a path with an empty segment, which would collapse
         # two tenants' documents into one prefix.
-        raise ValueError("store_artifact requires a tenant_id and a run_id")
+        raise ValueError("store_artifact requires a tenant_id")
+    if not run_id and not project_id:
+        # An agent-produced document has a run; a hand-uploaded one has a project.
+        # With neither there is nothing to scope the row to and nowhere sensible to
+        # file the bytes.
+        raise ValueError("store_artifact requires a run_id or a project_id")
 
     # The business unit is DERIVED, never passed in. A caller that supplied both a
     # project and a workspace could supply a mismatched pair, and the resulting path
     # would file the artifact under a unit that does not own it.
     workspace_id = await _workspace_for_project(db, project_id) if project_id else None
 
+    # Allocated up front because it doubles as the path segment for a document with no
+    # run. The run segment exists so two runs producing `brd.docx` do not overwrite each
+    # other (`upload_bytes` overwrites by default); an upload needs the same protection,
+    # and its own id is unique by construction.
+    artifact_id = _uuid.uuid4()
+
     blob_name = blob_path_for(
         tenant_id,
-        run_id,
+        run_id or str(artifact_id),
         artifact_type,
         filename,
         workspace_id=workspace_id,
@@ -331,8 +344,15 @@ async def store_artifact(
             )
 
     artifact = Artifact(
-        id=_uuid.uuid4(),
+        id=artifact_id,
         run_id=run_id,
+        # SCOPE ON THE ROW (0052), not recovered by joining to the run. `stage` falls
+        # back to `agent` because generated documents already pass the producing agent
+        # here — the two names are the same fact, and requiring callers to pass both
+        # would let them disagree.
+        project_id=project_id,
+        stage=stage or agent,
+        uploaded_by=uploaded_by,
         tenant_id=tenant_id,
         artifact_type=artifact_type,
         # Set on APPROVAL, when the bytes reach the final path. A pending artifact with

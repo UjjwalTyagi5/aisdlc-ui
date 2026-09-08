@@ -62,6 +62,16 @@ export const GOVERNANCE_APPROVER_ROLE: Record<GovernanceApprovalType, PlatformRo
   // map keyed by type — `lib/requests/routing.ts::agentAccessApprover` derives
   // it, and the request carries the stage it has reached.
   agent_access: "project_admin",
+  // INERT, like every other entry whose approver the service computes.
+  // Kept so this Record stays exhaustive over GovernanceApprovalType — the
+  // real approver is the OWNER of the producing stage, resolved per request
+  // (shared/services/governance_requests.py). Mirrors the backend map.
+  artifact_consumption: "project_admin",
+  // Inert like the other computed entries: the real approver is the owner of the
+  // document's own stage, or the Project Admin for a project-wide one. The Record
+  // must stay exhaustive over the type union, which is what stops a new type being
+  // added without a decision.
+  artifact_delete: "project_admin",
 };
 
 /**

@@ -204,24 +204,37 @@ async def read_upstream_artifacts() -> str:
     out: dict = {k: None for k in cols}
     if not s.tenant_id or not s.project_id:
         return json.dumps(out)
-    from sqlalchemy import select
-    from shared.db import get_db_session_for_tenant
-    from shared.models.orm import Run
 
-    try:
+    from shared.services.artifact_consumption import describe, read_upstream_for_agent
+
+    async def _legacy(column: str):
+        """The pre-phase-3 read, unchanged: the project's latest non-null value for
+        one `runs` column, asking nothing about approval."""
+        from sqlalchemy import select
+        from shared.db import get_db_session_for_tenant
+        from shared.models.orm import Run
+
         async with get_db_session_for_tenant(s.tenant_id) as db:
-            for key, col in cols.items():
-                row = (
-                    await db.execute(
-                        select(getattr(Run, col))
-                        .where(Run.project_id == uuid.UUID(s.project_id), getattr(Run, col).isnot(None))
-                        .order_by(Run.created_at.desc()).limit(1)
-                    )
-                ).scalars().first()
-                if row:
-                    out[key] = row
-    except Exception:
-        pass
+            col = getattr(Run, column)
+            return (await db.execute(
+                select(col)
+                .where(Run.project_id == uuid.UUID(s.project_id), col.isnot(None))
+                .order_by(Run.created_at.desc()).limit(1)
+            )).scalars().first()
+
+    for key, col in cols.items():
+        result = await read_upstream_for_agent(
+            tenant_id=s.tenant_id, project_id=s.project_id,
+            # `key` is already the BACKEND stage name for all six (code_review, not
+            # review), which is what the version tables are keyed on.
+            stage=key, consumer_stage="documentation",
+            legacy_reader=lambda c=col: _legacy(c),
+        )
+        out[key] = result.payload if result.found else None
+        # Documentation compiles what it is given. Without this it would silently
+        # publish a document with a whole section missing, and read as complete.
+        if not result.found and not result.unenforced:
+            out[f"{key}_status"] = describe(result)
     return json.dumps(out, default=str)[:20000]
 
 

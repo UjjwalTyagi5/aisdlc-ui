@@ -30,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Separator } from "@/components/ui/separator";
+import { ArtifactAccessMatrix } from "@/components/app/artifact-access-matrix";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -49,6 +50,7 @@ import {
   getProject,
   restoreProject,
   updateProject,
+  type ProjectUpdatePatch,
 } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import type { AgentType, ProjectId } from "@/lib/schemas";
@@ -212,8 +214,7 @@ export default function ProjectSettingsPage() {
   );
 
   const updateMutation = useMutation({
-    mutationFn: (patch: { name?: string; description?: string }) =>
-      updateProject(projectId, patch),
+    mutationFn: (patch: ProjectUpdatePatch) => updateProject(projectId, patch),
     onSuccess: (p) => reportSaved(p, "Project updated"),
     onError: (err) =>
       toast.error("Couldn't update", {
@@ -480,6 +481,64 @@ export default function ProjectSettingsPage() {
               })
             }
           />
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Artifact publication</CardTitle>
+              <CardDescription>
+                When on, agents on this project read only artifact versions a human has
+                published, and refuse unapproved upstream work rather than quietly
+                using the draft.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="enforce-publication" className="font-normal">
+                  Require published upstream artifacts
+                </Label>
+                <Switch
+                  id="enforce-publication"
+                  checked={project.enforceArtifactPublication ?? false}
+                  disabled={updateMutation.isPending}
+                  onCheckedChange={(v) =>
+                    updateMutation.mutate({ enforceArtifactPublication: v })
+                  }
+                />
+              </div>
+              {/* Said plainly BEFORE the switch is thrown. On a project that has never
+                  published anything, every agent will immediately and correctly report
+                  "no approved upstream" — which is the right answer and is
+                  indistinguishable from an outage to whoever is looking at it. */}
+              {!project.enforceArtifactPublication && (
+                <p className="text-muted-foreground text-xs">
+                  Nothing has to change today. Turning this on before each stage has
+                  published a version will make agents report that no approved upstream
+                  exists — publish from each stage&apos;s page first.
+                </p>
+              )}
+              {/* The rules themselves, beside the switch that applies them — deciding
+                  whether to turn this on is exactly when somebody needs to see how much
+                  is currently published.
+
+                  COLLAPSED WHILE IT IS OFF, though, because while it is off the table
+                  describes nothing: nine rows of padlocks under its own warning that
+                  agents read the latest draft regardless of what it says. A grid that
+                  announces it is inert is furniture, and it was the largest thing on
+                  this page. Open once enforcement is on, when every row is live. */}
+              {project.enforceArtifactPublication ? (
+                <ArtifactAccessMatrix projectId={projectId} />
+              ) : (
+                <details className="group">
+                  <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-xs">
+                    Show what these rules would be
+                  </summary>
+                  <div className="mt-3">
+                    <ArtifactAccessMatrix projectId={projectId} />
+                  </div>
+                </details>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

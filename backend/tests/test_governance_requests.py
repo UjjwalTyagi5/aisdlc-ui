@@ -196,13 +196,29 @@ def test_agent_access_second_stage_is_the_agents_owner():
     assert routing.next_agent_access_stage("project_admin", "security") == "agent_owner"
 
 
-def test_agent_access_has_one_stage_where_the_project_admin_owns_the_agent():
-    """Documentation's owner IS the Project Admin — acceptance there is automatic.
+def test_agent_access_collapses_to_one_stage_when_the_project_admin_owns_the_agent():
+    """The mechanism, exercised with a synthetic owner rather than a real phase.
 
-    Advancing would hand the request back to the person who just decided it.
+    This used to assert it of `documentation`, whose owner WAS the Project Admin.
+    "One agent, one role" moved that gate to `ba`, so no pipeline stage is
+    project_admin-owned any more and the example no longer demonstrates anything —
+    but the branch it covers still exists, and would be needed the moment a stage
+    returns to project_admin ownership.
+
+    Why the branch matters: advancing would hand the request back to the person who
+    just decided stage one, which is a second signature from the same pen.
     """
-    assert routing.agent_owner_role("documentation") == "project_admin"
-    assert routing.next_agent_access_stage("project_admin", "documentation") is None
+    original = dict(routing.AGENT_OWNER_ROLE)
+    try:
+        routing.AGENT_OWNER_ROLE["documentation"] = "project_admin"
+        assert routing.next_agent_access_stage("project_admin", "documentation") is None
+    finally:
+        routing.AGENT_OWNER_ROLE.clear()
+        routing.AGENT_OWNER_ROLE.update(original)
+
+    # And with the real map, every stage genuinely advances to a second person.
+    assert routing.agent_owner_role("documentation") == "ba"
+    assert routing.next_agent_access_stage("project_admin", "documentation") == "agent_owner"
 
 
 def test_every_type_has_an_approver_floor():

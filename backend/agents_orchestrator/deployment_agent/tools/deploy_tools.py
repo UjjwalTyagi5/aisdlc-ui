@@ -148,31 +148,54 @@ async def inspect_repo() -> str:
     })
 
 
-@tool
-async def read_upstream_artifacts() -> str:
-    """Read this project's latest testing + security artifacts (gate evidence), if any."""
-    s = get_session(get_session_id())
-    if not s.tenant_id or not s.project_id:
-        return json.dumps({"testing": None, "security": None})
+async def _latest_run_column(tenant_id: str, project_id: str, column: str):
+    """The project's latest non-null value for one `runs` column.
+
+    THE PRE-PHASE-3 BEHAVIOUR, kept verbatim and used unchanged when a project has not
+    switched `enforce_artifact_publication` on. It asks nothing about approval, which
+    is precisely why it is now behind a flag rather than the only path.
+    """
     from sqlalchemy import select
     from shared.db import get_db_session_for_tenant
     from shared.models.orm import Run
 
-    out = {"testing": None, "security": None}
-    try:
-        async with get_db_session_for_tenant(s.tenant_id) as db:
-            for col, key in (("testing_artifacts", "testing"), ("security_artifacts", "security")):
-                row = (
-                    await db.execute(
-                        select(getattr(Run, col))
-                        .where(Run.project_id == uuid.UUID(s.project_id), getattr(Run, col).isnot(None))
-                        .order_by(Run.created_at.desc()).limit(1)
-                    )
-                ).scalars().first()
-                if row:
-                    out[key] = row
-    except Exception:
-        pass
+    async with get_db_session_for_tenant(tenant_id) as db:
+        col = getattr(Run, column)
+        return (await db.execute(
+            select(col)
+            .where(Run.project_id == uuid.UUID(project_id), col.isnot(None))
+            .order_by(Run.created_at.desc()).limit(1)
+        )).scalars().first()
+
+
+@tool
+async def read_upstream_artifacts() -> str:
+    """Read this project's approved testing + security artifacts (gate evidence), if any.
+
+    When the project enforces artifact publication, this returns ONLY versions a human
+    has signed off — and says so plainly when nothing has been. Deploying on unapproved
+    test or security evidence is the exact failure the gate exists to prevent, so there
+    is no fallback to the draft.
+    """
+    s = get_session(get_session_id())
+    from shared.services.artifact_consumption import describe, read_upstream_for_agent
+
+    out: dict = {"testing": None, "security": None}
+    if not s.tenant_id or not s.project_id:
+        return json.dumps(out)
+
+    for stage, column in (("testing", "testing_artifacts"),
+                          ("security", "security_artifacts")):
+        result = await read_upstream_for_agent(
+            tenant_id=s.tenant_id, project_id=s.project_id, stage=stage,
+            consumer_stage="deployment",
+            legacy_reader=lambda c=column: _latest_run_column(s.tenant_id, s.project_id, c),
+        )
+        # `None` alone cannot distinguish "not produced" from "produced but not
+        # approved", and an agent told only `null` will assume the former and proceed.
+        out[stage] = result.payload if result.found else None
+        if not result.found and not result.unenforced:
+            out[f"{stage}_status"] = describe(result)
     return json.dumps(out, default=str)[:12000]
 
 

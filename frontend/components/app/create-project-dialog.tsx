@@ -109,8 +109,8 @@ interface ContributorRow {
 // No repository-template picker at creation — the delivery track alone
 // selects the agent roster (PRD §6); every project starts from a blank
 // scaffold and the project settings page is where connectors/repos get
-// wired up, not a canned template.
-const DEFAULT_TEMPLATE: Project["template"] = "blank";
+// wired up, not a canned template. The field is no longer sent at all: the
+// backend has no column for it and answers "blank" regardless.
 
 const cleanMap = (m: StageMap): Record<string, string[]> =>
   Object.fromEntries(Object.entries(m).filter(([, ids]) => ids.length > 0));
@@ -386,7 +386,6 @@ export function CreateProjectDialog({
         // `undefined`. The `as unknown as Project` cast below is what let this
         // ship — it silences exactly the check that would have caught it.
         deliveryStatus: "not_started",
-        template: DEFAULT_TEMPLATE,
         track: input.track,
         archived: false,
         owners: [],
@@ -434,7 +433,6 @@ export function CreateProjectDialog({
     mutation.mutate({
       name: values.name,
       track: values.track,
-      template: DEFAULT_TEMPLATE,
       description: values.description || undefined,
       workspaceId: values.workspaceId,
       ownerId: ownerId || undefined,

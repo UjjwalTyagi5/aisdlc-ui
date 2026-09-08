@@ -285,6 +285,19 @@ export const Artifact = z.object({
   projectId: ProjectId,
   runId: RunId.nullable(),
   type: ArtifactType,
+  /** "agent" when this document belongs to one stage, "project" when it is
+   *  project-wide (a policy, a standard). What makes the producing agent visible. */
+  scope: z.enum(["agent", "project"]).default("agent"),
+  /** The owning stage, or null for a project-level document. A BACKEND stage name
+   *  (`code_review`, not the UI's `review`), so compare with care. */
+  stage: z.string().nullish(),
+  /** Who put the document forward. Deliberately distinct from `approvedBy` —
+   *  collapsing the two would make self-approval invisible. */
+  uploadedBy: z.string().nullish(),
+  /** Who accepted it, and when. Written on every approval since the gate shipped and
+   *  surfaced for the first time here. Null while pending or rejected. */
+  approvedBy: z.string().nullish(),
+  approvedAt: Timestamp.nullish(),
   phase: Phase,
   title: z.string(),
   version: z.number().int().positive(),

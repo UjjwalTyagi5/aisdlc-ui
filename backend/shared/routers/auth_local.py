@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import uuid as _uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
@@ -411,3 +412,85 @@ async def validate_reset_token(token: str = "") -> dict:
     async with get_db_session_superuser() as s:
         status = await password_setup.inspect(s, token)
     return {"status": status}
+
+
+class BindingOut(BaseModel):
+    """One role binding, as the caller's own access page needs it."""
+    kind: str
+    scopeId: str
+    scopeName: str
+    role: str
+    parentId: Optional[str] = None
+    parentName: Optional[str] = None
+    status: str
+
+
+@auth_local_router.get(
+    "/auth/bindings", response_model=list[BindingOut], dependencies=[Depends(public())]
+)
+async def my_bindings(request: Request) -> list[BindingOut]:
+    """The caller's OWN role bindings, each with the role it actually grants.
+
+    WHY THIS EXISTS. `/api/auth/access-scope` had to report a role per binding and had no
+    source for one — FastAPI exposed the caller's permissions and their effective
+    platform role, but never which role they hold WHERE. So it stamped the single
+    effective role onto every binding, and a Project Admin in one unit who contributes to
+    a project in another was shown as "Project Admin · You administer" on both. The page
+    that exists to say what you may do was overstating it, which is the one direction an
+    access page must not be wrong in.
+
+    NO PARAMETERS, AND THAT IS THE SECURITY PROPERTY. The user id comes from the JWT and
+    nowhere else, so this cannot be pointed at anybody else's bindings. `public()` marks
+    it for the boot scan in the same sense `/auth/me` is: authentication is required by
+    the middleware, and there is no further permission to hold — reading your own
+    bindings is not an act that needs authorising.
+
+    ORGANIZATION-SCOPED BINDINGS ARE RETURNED TOO, unfiltered. An org-wide role is the
+    reason someone sees everything, so hiding it would make the page's own explanation of
+    their reach incomplete.
+    """
+    user_id = getattr(request.state, "user_id", "") or ""
+    tenant_id = str(getattr(request.state, "tenant_id", "") or "")
+    if not user_id or not tenant_id:
+        return []
+
+    async with get_db_session_superuser() as s:
+        # THE GUC, OR THIS READS ZERO. `role_bindings` has FORCE ROW LEVEL SECURITY keyed
+        # on `app.current_tenant_id`, and the app role is NOT a Postgres superuser — so
+        # without this the query returns an empty list rather than an error, and the
+        # access page would report "no bindings" for somebody who holds three. The name
+        # is `app.current_tenant_id`; `app.tenant_id` silently matches nothing.
+        await s.execute(
+            text("SELECT set_config('app.current_tenant_id', :t, true)"), {"t": tenant_id}
+        )
+        # Names resolved by LEFT JOIN per scope kind: a binding's `scope_id` points at a
+        # different table depending on `scope_kind`, and there is no FK that could carry
+        # the name. A scope whose row has since gone renders as its id rather than
+        # vanishing — a binding you still hold is not made irrelevant by a tidied-up
+        # target, and dropping it would understate reach.
+        rows = (await s.execute(text(
+            "SELECT rb.scope_kind, rb.scope_id::text AS scope_id, "
+            "       COALESCE(rb.role_name, 'custom') AS role, rb.status, "
+            "       COALESCE(w.display_name, p.display_name, o.display_name) AS scope_name, "
+            "       p.workspace_id::text AS parent_id, pw.display_name AS parent_name "
+            "FROM role_bindings rb "
+            "LEFT JOIN workspaces w ON w.id::text = rb.scope_id::text "
+            "LEFT JOIN projects p ON p.id::text = rb.scope_id::text "
+            "LEFT JOIN workspaces pw ON pw.id = p.workspace_id "
+            "LEFT JOIN organizations o ON o.id::text = rb.scope_id::text "
+            "WHERE rb.user_id = :u AND rb.tenant_id = CAST(:t AS uuid) "
+            "ORDER BY rb.created_at"
+        ), {"u": user_id, "t": tenant_id})).mappings().all()
+
+    return [
+        BindingOut(
+            kind=r["scope_kind"],
+            scopeId=r["scope_id"],
+            scopeName=r["scope_name"] or r["scope_id"],
+            role=r["role"],
+            parentId=r["parent_id"],
+            parentName=r["parent_name"],
+            status=r["status"],
+        )
+        for r in rows
+    ]
