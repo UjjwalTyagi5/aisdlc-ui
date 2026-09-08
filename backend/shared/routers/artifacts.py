@@ -632,21 +632,33 @@ async def request_artifact_deletion(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Ask the document's owner to delete it. Nothing is destroyed here.
+    """Delete the document if you own it; otherwise ask the person who does.
 
-    THE ASYMMETRY THIS CLOSES. Uploading a document is gated on somebody accepting it;
-    removing one was gated on nothing but holding `artifact:delete`, which most roles
-    do. So a single click could undo an approval nobody was asked about, and the record
-    would simply be missing a file with only an audit line to say so.
+    TWO OUTCOMES, AND THE STATUS CODE SAYS WHICH:
 
-    ROUTED TO THE OWNER OF THE DOCUMENT'S OWN STAGE — the person whose Approve put it
-    in the record is the person who may agree to lose it. A project-wide document has
-    no stage and goes to the Project Admin instead. Both decisions live in
-    `governance_requests.create_request`; this route only supplies the phase.
+        204  you own this agent — deleted outright, same as the DELETE route
+        202  you do not — a governance request was raised and nothing was destroyed
 
-    202, NOT 204. Nothing has been deleted yet, and answering 204 would tell the client
-    the file is gone while it is still there — the same class of lie as the PATCH that
-    returned 200 and dropped the field.
+    Who "owns" is not a second opinion: it is `_artifact_for_decision`, the same helper
+    the approve and reject routes use. A Project Admin owns every agent on their
+    project; a stage's own role (`artifact:approve_<stage>`) owns that agent. Making
+    those people file a request would ask them for permission they already hold, and it
+    could not even complete — self-approval is blocked, so the request would escalate
+    away from the one person entitled to answer it.
+
+    THE ASYMMETRY THIS CLOSES, for everybody else. Uploading a document is gated on
+    somebody accepting it; removing one was gated on nothing but holding
+    `artifact:delete`, which most roles do — so a contributor could undo an approval
+    nobody was asked about and leave the record missing a file.
+
+    A REQUEST IS ROUTED TO THE OWNER OF THE DOCUMENT'S OWN STAGE — the person whose
+    Approve put it in the record. A project-wide document has no stage and goes to the
+    Project Admin. Both decisions live in `governance_requests.create_request`; this
+    route only supplies the phase.
+
+    202 RATHER THAN 204 ON THE REQUEST PATH, because nothing has been deleted yet and
+    204 would tell the client the file is gone while it is still there — the same class
+    of lie as the PATCH that returned 200 and dropped the field.
 
     A REASON IS REQUIRED. The approver is being asked to destroy something
     irreversibly; "approve this deletion" with no stated why is not a decision anybody
@@ -666,6 +678,30 @@ async def request_artifact_deletion(
 
     title = (artifact.blob_path or "").rsplit("/", 1)[-1] or artifact.artifact_type
     user_id = getattr(request.state, "user_id", "") or ""
+
+    # AN OWNER DELETES; EVERYONE ELSE ASKS.
+    #
+    # A Project Admin owns every agent on their project by default, and the stage's own
+    # role owns its agent — that is exactly what `_artifact_for_decision` already
+    # enforces for ACCEPTING a document (`artifact:approve_<stage>` OR project
+    # administration). Requiring one of those people to file a request and wait would be
+    # asking them for permission they already hold, and worse, it could never complete:
+    # `decide_request` blocks self-approval, so the request escalates away from the very
+    # person entitled to answer it. Three of those went nowhere on test-demo.
+    #
+    # REUSED, NOT REIMPLEMENTED. This calls the same helper the approve/reject routes
+    # use rather than re-deriving the rule — a second copy of "who owns this document"
+    # is precisely the drift that made owners unable to approve in the first place.
+    try:
+        await _artifact_for_decision(db, request, artifact_id)
+        may_decide = True
+    except HTTPException:
+        may_decide = False
+
+    if may_decide:
+        # Straight to the existing destructive route, which owns the audit-then-blob-
+        # then-row ordering and the 502 when storage refuses. It answers 204.
+        return await delete_artifact(artifact_id, request, db)
 
     # RESOLVED, NOT GUESSED. `request.state` carries no role — the JWT middleware sets
     # only user_id, jti and token_exp — so reading `state.platform_role` silently gave

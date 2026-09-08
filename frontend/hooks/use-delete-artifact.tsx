@@ -1,16 +1,23 @@
 "use client";
 
 /**
- * ASK to delete an artifact. NOTHING IS DELETED BY THIS HOOK.
+ * Delete an artifact if you own it; otherwise ask the person who does.
  *
- * It used to call `deleteArtifact` and destroy the row and its file on the spot. That is
- * the asymmetry the approval work removed: uploading a document is gated on somebody
- * accepting it, while removing one was gated on nothing beyond `artifact:delete`, which
- * most roles hold — so one confirmed click could undo an approval nobody was asked about.
+ * IT USED TO DESTROY IT UNCONDITIONALLY, which was the asymmetry the approval work
+ * removed: uploading a document is gated on somebody accepting it, while removing one
+ * was gated on nothing beyond `artifact:delete`, which most roles hold — so one
+ * confirmed click could undo an approval nobody was asked about.
  *
- * It now raises a governance request routed to the owner of the artifact's own stage —
- * the person whose Approve put it in the record — or to the Project Admin for a
- * project-wide one. The file goes when they approve it, from Requests & Approvals.
+ * WHO OWNS WHAT IS THE BACKEND'S CALL, and this hook does not try to predict it. A
+ * Project Admin owns every agent on their project by default, and a stage's own role
+ * (`artifact:approve_<stage>`) owns its agent — the same rule the approve and reject
+ * routes already use. Those people delete outright; sending them through an approval
+ * would ask for permission they already hold and could never complete anyway, because
+ * self-approval is blocked and the request would escalate away from them.
+ *
+ * Everyone else raises a governance request routed to the stage's owner — or to the
+ * Project Admin for a project-wide document, which has no stage to own it — and the
+ * file goes only when they approve from Requests & Approvals.
  *
  * ONE HOOK RATHER THAN FOUR COPIES. `ArtifactList` renders on the Design page, the
  * Requirements page and `StageWorkbench`, and `DocumentList` has a delete control of its
@@ -75,18 +82,24 @@ export function useDeleteArtifact(
   const mutation = useMutation({
     mutationFn: ({ artifact, why }: { artifact: Artifact; why: string }) =>
       requestArtifactDeletion(artifact.id, why),
-    onSuccess: (_data, { artifact }) => {
-      // SAYS REQUESTED, NEVER DELETED. The file is still there until the owner agrees,
-      // and a toast claiming otherwise would be the same lie as a 204 from a call that
-      // destroyed nothing.
-      toast.success(`Deletion of ${artifact.title} sent to its owner for approval`);
-      // The artifact list is UNCHANGED — nothing was removed — but the request queues
-      // are, so those are what actually need refreshing.
+    onSuccess: ({ deleted }, { artifact }) => {
+      // THE TOAST FOLLOWS WHAT ACTUALLY HAPPENED. An owner's click destroys the file;
+      // everyone else's raises a request and destroys nothing. Saying "sent for
+      // approval" after a real deletion — or "deleted" after a request — is the same
+      // class of lie as a 204 from a call that removed nothing.
+      toast.success(
+        deleted
+          ? `Deleted ${artifact.title}`
+          : `Deletion of ${artifact.title} sent to its owner for approval`,
+      );
       void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
       void queryClient.invalidateQueries({ queryKey: qk.governanceApprovals.list() });
       setPending(null);
       setReason("");
-      onDeleted?.(artifact);
+      // Only when it is actually gone: the callers use this to clear a detail pane
+      // showing the artifact, and closing it on a mere request would suggest the file
+      // had already been removed.
+      if (deleted) onDeleted?.(artifact);
     },
     onError: (error: unknown) => {
       // The backend's own message: "say why this should be deleted" and a permission
@@ -110,13 +123,15 @@ export function useDeleteArtifact(
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Request deletion</DialogTitle>
+          <DialogTitle>Delete this document?</DialogTitle>
           <DialogDescription>
-            {/* Names the artifact and says who decides, because "are you sure?" alone
-                tells the user neither what they lose nor what happens next. */}
-            <span className="font-medium">{pending?.title}</span> and its stored file will
-            be removed once the owner of its stage approves. Nothing is deleted now — the
-            request appears in Requests &amp; Approvals.
+            {/* Deliberately covers BOTH outcomes rather than promising one. The client
+                cannot know which applies without asking the server — ownership is the
+                backend's call — and a dialog that promised "nothing is deleted now" to
+                a Project Admin, who owns every agent, would be wrong every time. */}
+            <span className="font-medium">{pending?.title}</span> and its stored file are
+            removed. If you own this agent that happens now; otherwise the owner is asked
+            first and nothing changes until they approve.
           </DialogDescription>
         </DialogHeader>
         <Textarea
@@ -140,7 +155,7 @@ export function useDeleteArtifact(
             }
             disabled={!reason.trim() || mutation.isPending}
           >
-            {mutation.isPending ? "Sending…" : "Send for approval"}
+            {mutation.isPending ? "Working…" : "Delete"}
           </Button>
         </DialogFooter>
       </DialogContent>

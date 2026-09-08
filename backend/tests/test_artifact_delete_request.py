@@ -281,6 +281,8 @@ async def test_the_route_raises_a_request_and_deletes_nothing(project):
             json={"reason": "duplicate upload"},
         )
 
+    # 202 BECAUSE THIS CALLER DOES NOT OWN THE STAGE. The user has artifact:delete and
+    # an org binding, but not `artifact:approve_design` — so they must ask.
     assert r.status_code == 202, r.text
     assert await _exists(project, art), "the route deleted the document itself"
 
@@ -325,3 +327,51 @@ async def test_the_route_refuses_a_deletion_with_no_reason(project):
 
     assert r.status_code == 422, r.text
     assert await _exists(project, art)
+
+
+async def test_an_owner_deletes_outright_instead_of_asking(project):
+    """A PROJECT ADMIN OWNS EVERY AGENT, and a stage's own role owns its agent — the
+    same rule `_artifact_for_decision` already applies to accepting a document. Making
+    those people file a request would ask for permission they already hold, and it could
+    never complete: self-approval is blocked, so the request escalates away from the only
+    person entitled to answer it. Three such requests sat unanswerable on a live project.
+
+    204 and the row is GONE — no governance request is raised at all.
+    """
+    import httpx
+    from config.auth.jwt import create_access_token
+    from process_api import app
+
+    art = await _document(project, stage="design")
+    user = await _user_who_can_see_the_project(project)
+
+    token = create_access_token(
+        user_id=user, tenant_id=project["org"],
+        # `artifact:approve_design` is what makes this caller the design agent's owner.
+        permissions=[
+            "artifact:delete", "artifact:view", "project:read",
+            "artifact:approve_design", "approve",
+        ],
+        platform_role="project_admin",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as cl:
+        r = await cl.post(
+            f"/artifacts/{art}/deletion-request",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"reason": "duplicate upload"},
+        )
+
+    assert r.status_code == 204, r.text
+    assert not await _exists(project, art), "an owner's delete did not remove the row"
+
+    async with get_db_session_superuser() as s:
+        await s.execute(
+            text("SELECT set_config('app.current_tenant_id', :t, true)"),
+            {"t": project["org"]})
+        raised = (await s.execute(text(
+            "SELECT count(*) FROM governance_requests "
+            "WHERE project_id = CAST(:p AS uuid) AND type = 'artifact_delete'"
+        ), {"p": project["project"]})).scalar()
+    assert raised == 0, "an owner should not have to ask anybody"

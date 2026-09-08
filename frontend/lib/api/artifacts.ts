@@ -32,25 +32,40 @@ export const updateArtifact = (id: ArtifactId, patch: ArtifactPatch) =>
     schema: Artifact,
   });
 
-/** Ask the document's owner to delete it. NOTHING IS DELETED BY THIS CALL.
+/** Delete the document if you own it; otherwise ask the person who does.
  *
- * The backend answers 202 with the governance request it raised, routed to the owner
- * of the document's own stage — the person whose Approve put it in the record — or to
- * the Project Admin for a project-wide one. It appears in that person's Requests &
- * Approvals queue, and the file is destroyed only when they approve.
+ * TWO OUTCOMES, and the caller must say the right thing about each:
  *
- * A REASON IS REQUIRED and the backend 422s without one: the approver is being asked
- * to destroy something irreversibly.
+ *   204  you own this agent — the file and its row are GONE
+ *   202  you do not — a request was raised and nothing was destroyed
  *
- * `deleteArtifact` below still exists and still deletes outright. It is the
- * administrator's break-glass path, not what the Documents list calls.
+ * A Project Admin owns every agent on their project, and a stage's own role owns its
+ * agent. Sending those people through an approval would ask them for permission they
+ * already hold, and it could not complete anyway: self-approval is blocked, so the
+ * request escalates away from the only person entitled to answer it.
+ *
+ * Resolves to `{ deleted }` so the UI can pick its wording. The BFF states that
+ * explicitly rather than leaving it to be inferred from an empty body: `bffFetch`
+ * collapses a 204 to `undefined`, so "deleted" and "the backend returned nothing" would
+ * otherwise look identical, and a wrong guess would report a request raised while the
+ * file was actually gone.
+ *
+ * A REASON IS REQUIRED and the backend 422s without one.
+ *
+ * `deleteArtifact` below still deletes outright with no ownership test. It is the
+ * administrator's break-glass path, not what any list calls.
  */
-export const requestArtifactDeletion = (id: ArtifactId, reason: string) =>
-  api(`/artifacts/${encodeURIComponent(id)}/deletion-request`, {
+export const requestArtifactDeletion = async (
+  id: ArtifactId,
+  reason: string,
+): Promise<{ deleted: boolean }> => {
+  const res = (await api(`/artifacts/${encodeURIComponent(id)}/deletion-request`, {
     method: "POST",
     body: { reason },
-    schema: z.unknown(),
-  });
+    schema: z.object({ deleted: z.boolean() }).passthrough(),
+  })) as { deleted: boolean };
+  return { deleted: res.deleted };
+};
 
 /** Permanently delete an artifact and its stored file. Irreversible.
  *
