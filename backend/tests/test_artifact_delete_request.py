@@ -87,6 +87,33 @@ async def _exists(project, artifact_id) -> bool:
         )).scalar() == 1
 
 
+async def _user_who_can_see_the_project(project) -> str:
+    """A real user WITH AN ORG-SCOPED BINDING.
+
+    The binding is not decoration: `_assert_project_visible` resolves reach from
+    `role_bindings`, so a user holding the right permissions in their token but no
+    binding gets a flat 404 — the project is not merely refused, it is invisible. That
+    is the correct behaviour and it is also how the first version of this test failed.
+    """
+    user = str(_uuid.uuid4())
+    async with get_db_session_superuser() as s:
+        await s.execute(
+            text("SELECT set_config('app.current_tenant_id', :t, true)"),
+            {"t": project["org"]})
+        await s.execute(text(
+            "INSERT INTO users (id, tenant_id, email, active) "
+            "VALUES (:i, CAST(:t AS uuid), :e, true)"
+        ), {"i": user, "t": project["org"], "e": f"{user[:8]}@example.com"})
+        await s.execute(text(
+            "INSERT INTO role_bindings "
+            "  (id, user_id, scope_kind, scope_id, role_name, tier, status, tenant_id) "
+            "VALUES (gen_random_uuid(), :u, 'organization', :o, 'org_admin', "
+            "        'governance', 'active', CAST(:t AS uuid))"
+        ), {"u": user, "o": project["org"], "t": project["org"]})
+        await s.commit()
+    return user
+
+
 # -- the type is registered end to end ----------------------------------------
 
 
@@ -220,3 +247,81 @@ async def test_a_document_in_another_project_is_not_deleted(project):
 
     assert "no longer exists" in note
     assert await _exists(project, art), "the document was deleted from another project"
+
+
+# -- the route itself ---------------------------------------------------------
+#
+# THE GAP THIS CLOSES. The first version of this file tested the routing decision and
+# the effect — both ends — and never called the endpoint in between. It shipped with
+# `create_request(...)` missing its required `workspace_id`, which is a TypeError on the
+# very first real click and cannot be caught by testing either end in isolation.
+
+
+async def test_the_route_raises_a_request_and_deletes_nothing(project):
+    """The whole point of the endpoint: a request exists afterwards, the file does not
+    go anywhere, and the response is 202 rather than a 204 that would claim it had."""
+    import httpx
+    from config.auth.jwt import create_access_token
+    from process_api import app
+
+    art = await _document(project, stage="design")
+    user = await _user_who_can_see_the_project(project)
+
+    token = create_access_token(
+        user_id=user, tenant_id=project["org"],
+        permissions=["artifact:delete", "artifact:view", "project:read"],
+        platform_role="org_admin",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as cl:
+        r = await cl.post(
+            f"/artifacts/{art}/deletion-request",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"reason": "duplicate upload"},
+        )
+
+    assert r.status_code == 202, r.text
+    assert await _exists(project, art), "the route deleted the document itself"
+
+    async with get_db_session_superuser() as s:
+        await s.execute(
+            text("SELECT set_config('app.current_tenant_id', :t, true)"),
+            {"t": project["org"]})
+        row = (await s.execute(text(
+            "SELECT type, status, payload FROM governance_requests "
+            "WHERE project_id = CAST(:p AS uuid) AND type = 'artifact_delete'"
+        ), {"p": project["project"]})).mappings().first()
+    assert row is not None, "no governance request was raised"
+    # Against the CATALOGUE, not a guessed literal: the real value is "submitted" and
+    # a hardcoded list here would be a fourth copy of a set the code already owns.
+    assert row["status"] in routing.OPEN_STATUSES
+    assert (row["payload"] or {}) != {}
+
+
+async def test_the_route_refuses_a_deletion_with_no_reason(project):
+    """422, not a request nobody can act on. The approver is being asked to destroy
+    something irreversibly."""
+    import httpx
+    from config.auth.jwt import create_access_token
+    from process_api import app
+
+    art = await _document(project, stage="design")
+    user = await _user_who_can_see_the_project(project)
+
+    token = create_access_token(
+        user_id=user, tenant_id=project["org"],
+        permissions=["artifact:delete", "artifact:view", "project:read"],
+        platform_role="org_admin",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as cl:
+        r = await cl.post(
+            f"/artifacts/{art}/deletion-request",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"reason": "   "},
+        )
+
+    assert r.status_code == 422, r.text
+    assert await _exists(project, art)

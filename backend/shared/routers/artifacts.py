@@ -667,6 +667,12 @@ async def request_artifact_deletion(
     title = (artifact.blob_path or "").rsplit("/", 1)[-1] or artifact.artifact_type
     user_id = getattr(request.state, "user_id", "") or ""
 
+    # THE UNIT THE PROJECT LIVES IN, read from the project rather than assumed.
+    # `create_request` requires it — the approver's binding is checked against this
+    # scope, so a request with the wrong workspace lands in a queue whose owner
+    # `decider_covers_scope` then refuses.
+    project = await _get_or_404(db, str(artifact.project_id), tenant_id)
+
     from shared.services import governance_requests as gov  # noqa: PLC0415
 
     req = await gov.create_request(
@@ -678,6 +684,7 @@ async def request_artifact_deletion(
         request_type="artifact_delete",
         title=f"Delete {title}",
         description=reason,
+        workspace_id=str(project.workspace_id) if project.workspace_id else "",
         project_id=str(artifact.project_id),
         target_ref=str(artifact.id),
         # `phase` is what decides the approver: the document's own stage, or None for a
