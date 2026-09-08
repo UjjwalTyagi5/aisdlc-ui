@@ -90,6 +90,19 @@ const PHASE_BADGE_CLASS: Record<string, string> = {
   documentation: "text-info bg-info/10",
 };
 
+/** The board's own work-item type — "Epic", "Bug", "User Story" — or null.
+ *
+ * Lives on the story BODY, not on `artifact.type`, which is "story" for every row a
+ * board pull produces. `ingest_board` fetches every work item on the board, so one
+ * project's "stories" were an Epic and three Tasks about configuring the board itself;
+ * this is the field that tells them apart.
+ */
+function workItemTypeOf(a: Artifact): string | null {
+  const body = a.body as { workItemType?: unknown } | null | undefined;
+  const t = typeof body?.workItemType === "string" ? body.workItemType.trim() : "";
+  return t || null;
+}
+
 /** Immutable toggle for the multi-select story scope set. */
 export function toggleSelection(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
@@ -114,6 +127,11 @@ export interface ArtifactListProps {
    *  clicks, so an impatient second click cannot fire a second DELETE. */
   deletingId?: string | null;
   isLoading?: boolean;
+  /** What these rows ARE, for the search placeholder — "stories" on Requirements,
+   *  "artifacts" elsewhere. The box read "Filter artifacts…" above a list headed
+   *  "Stories (15)", which asks the reader to work out that the two are the same
+   *  thing. Plural, lowercase. */
+  noun?: string;
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
   className?: string;
@@ -130,6 +148,7 @@ export function ArtifactList({
   onDelete,
   deletingId,
   isLoading,
+  noun = "artifacts",
   emptyTitle = "No artifacts yet",
   emptyDescription = "Artifacts appear here once the agent runs.",
   className,
@@ -138,6 +157,7 @@ export function ArtifactList({
   const [typeFilter, setTypeFilter] = React.useState<"all" | ArtifactType>("all");
   const [statusFilter, setStatusFilter] = React.useState<"all" | Status>("all");
   const [sortKey, setSortKey] = React.useState<SortKey>("recent");
+  const [workItemFilter, setWorkItemFilter] = React.useState<string>("all");
 
   // WHAT IS ACTUALLY IN THE LIST, which is what the dropdowns should offer. Derived
   // from `items` rather than from the filtered result: narrowing to one status must not
@@ -150,6 +170,21 @@ export function ArtifactList({
     () => Array.from(new Set((items ?? []).map((a) => a.status))).sort(),
     [items],
   );
+  // THE BOARD'S OWN TYPE — Epic, Task, Bug, User Story — which is the one thing that
+  // actually varies across a pulled list. `a.type` is "story" for every row here, so
+  // the type filter above could never separate them; `ingest_board` pulls EVERY work
+  // item, and telling an Epic from a Bug is the distinction people want.
+  const presentWorkItems = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (items ?? [])
+            .map((a) => workItemTypeOf(a))
+            .filter((t): t is string => Boolean(t)),
+        ),
+      ).sort(),
+    [items],
+  );
 
   const filtered = React.useMemo(() => {
     if (!items) return [];
@@ -159,6 +194,9 @@ export function ArtifactList({
       next = next.filter((a) => a.title.toLowerCase().includes(q));
     }
     if (typeFilter !== "all") next = next.filter((a) => a.type === typeFilter);
+    if (workItemFilter !== "all") {
+      next = next.filter((a) => workItemTypeOf(a) === workItemFilter);
+    }
     if (statusFilter !== "all") next = next.filter((a) => a.status === statusFilter);
     next.sort((a, b) => {
       if (sortKey === "title") return a.title.localeCompare(b.title);
@@ -166,7 +204,7 @@ export function ArtifactList({
       return b.updatedAt.localeCompare(a.updatedAt);
     });
     return next;
-  }, [items, search, typeFilter, statusFilter, sortKey]);
+  }, [items, search, typeFilter, statusFilter, workItemFilter, sortKey]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
     if (!onSelect || filtered.length === 0) return;
@@ -189,11 +227,11 @@ export function ArtifactList({
           looked like a stray empty box, so the search may as well not have existed. */}
       <div className="flex flex-col gap-2">
         <Input
-          placeholder="Filter artifacts…"
+          placeholder={`Filter ${noun}…`}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="h-8 w-full font-sans text-sm"
-          aria-label="Filter artifacts"
+          aria-label={`Filter ${noun}`}
         />
         <div className="flex gap-2">
           {/* ONLY WHEN THERE IS A CHOICE TO MAKE. This offered every type the platform
@@ -234,6 +272,24 @@ export function ArtifactList({
               </SelectContent>
             </Select>
           )}
+          {presentWorkItems.length > 1 && (
+            <Select value={workItemFilter} onValueChange={setWorkItemFilter}>
+              <SelectTrigger
+                className="h-8 w-32 font-sans text-xs"
+                aria-label="Filter by work item type"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All work items</SelectItem>
+                {presentWorkItems.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
             <SelectTrigger
               className="h-8 w-12 px-2"
@@ -259,7 +315,10 @@ export function ArtifactList({
 
       {!isLoading && filtered.length > 0 && (
         <ul
-          className="focus-visible:outline-none"
+          // CAPPED AND SCROLLED, like the Documents panel above it. Fifteen stories ran
+          // past the fold and took the rest of the column with them; the list should be
+          // a fixed share of the sidebar however many the board returns.
+          className="max-h-[26rem] overflow-y-auto focus-visible:outline-none"
           onKeyDown={onKeyDown}
           tabIndex={0}
           role="listbox"

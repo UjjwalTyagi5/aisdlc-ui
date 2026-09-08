@@ -350,6 +350,7 @@ export default function RequirementsPage() {
             Stories{stories.length ? ` (${stories.length})` : ""}
           </h3>
           <ArtifactList
+            noun="stories"
             items={artifactsQ.isLoading ? null : stories}
             selectedId={selected?.id}
             onSelect={selectArtifact}
