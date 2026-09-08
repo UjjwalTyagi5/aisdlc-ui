@@ -34,6 +34,16 @@ const MOCK_SESSION: Session = {
 
 const mockFetch = vi.fn();
 
+// HOISTED, SO IT BELONGS HERE. `vi.mock` is lifted to the top of the file whatever the
+// indentation suggests — written inside the first test it read as local to that test
+// while applying to every one of them, which is half of why this file was order-
+// dependent.
+vi.mock("@/lib/bff/jwt", () => ({
+  mintBffToken: vi.fn().mockRejectedValue(
+    new Error("mintBffToken is not permitted in local mode."),
+  ),
+}));
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -56,12 +66,6 @@ describe("mintWsTicket", () => {
     vi.doMock("next/headers", () => ({
       cookies: async () => ({ get: () => ({ value: "backend-issued-token" }) }),
     }));
-    vi.mock("@/lib/bff/jwt", () => ({
-      mintBffToken: vi.fn().mockRejectedValue(
-        new Error("mintBffToken is not permitted in local mode."),
-      ),
-    }));
-
     const { mintBffToken } = await import("@/lib/bff/jwt");
     const { mintWsTicket } = await import("@/lib/bff/ws-ticket");
 
@@ -89,6 +93,14 @@ describe("mintWsTicket", () => {
       getAuth0: vi.fn(() => ({
         getAccessToken: vi.fn().mockResolvedValue({ token: "auth0-access-token" }),
       })),
+    }));
+    // STATED, NOT INHERITED. `vi.doMock` registrations outlive `vi.resetModules()`, so
+    // without this the cookie from the local-mode test above was still in place and this
+    // one resolved a backend token instead of the Auth0 one — but only when it happened
+    // to run second, which is exactly the shape of a test that passes alone and fails in
+    // a full run.
+    vi.doMock("next/headers", () => ({
+      cookies: async () => ({ get: () => undefined }),
     }));
 
     const { mintWsTicket } = await import("@/lib/bff/ws-ticket");
