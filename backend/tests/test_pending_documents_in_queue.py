@@ -294,3 +294,39 @@ async def test_a_document_in_another_unit_is_not_in_the_queue(project):
     rows = _queue(user, project, ["artifact:view", "artifact:approve_requirements"])
 
     assert [r["projectId"] for r in rows] == []
+
+
+@pytest.mark.asyncio
+async def test_the_metrics_tile_counts_the_same_things_the_queue_lists(project):
+    """A summary that contradicts what it summarises is worse than no summary.
+
+    `/approvals/metrics` counted `_pending_gates` alone and filtered on
+    `type == "approval"`, so a project whose only pending item was a document reported
+    "0 approvals pending" on the dashboard while the queue underneath showed it.
+    """
+    await _document(project)
+    user = await _ba(project)
+    perms = ["artifact:view", "artifact:approve_requirements"]
+
+    rows = _queue(user, project, perms)
+    r = _client().get(
+        "/approvals/metrics",
+        headers=_headers(user, project["org"], project["bu"], perms))
+    assert r.status_code == 200, r.text
+
+    assert len(rows) == 1
+    assert r.json()["approvals"] == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_the_metrics_tile_clears_with_the_queue(project):
+    """NON-VACUITY: the count follows the decision, rather than being a constant that
+    happened to match once."""
+    art = await _document(project)
+    user = await _ba(project)
+    perms = ["artifact:view", "approve", "artifact:approve_requirements"]
+    hdr = _headers(user, project["org"], project["bu"], perms)
+
+    assert _client().post(f"/artifacts/{art}/approve", headers=hdr).status_code == 200
+
+    assert _client().get("/approvals/metrics", headers=hdr).json()["approvals"] == 0

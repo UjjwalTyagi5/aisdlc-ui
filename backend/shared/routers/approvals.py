@@ -392,14 +392,21 @@ async def queue_metrics(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ) -> ApprovalQueueMetricsOut:
-    gates = await _pending_gates(db, request)
+    # BOTH SOURCES, or this tile disagrees with the list under it. Counting only run
+    # gates would report "0 approvals pending" on a project whose only pending item is
+    # a document — while the queue itself showed it — and a summary that contradicts
+    # the thing it summarises is worse than no summary.
+    waiting = await _pending_gates(db, request) + await _pending_documents(db, request)
     now = datetime.now(tz=timezone.utc)
     oldest = 0
-    if gates:
-        oldest_at = min(datetime.fromisoformat(g.requestedAt) for g in gates)
+    if waiting:
+        oldest_at = min(datetime.fromisoformat(g.requestedAt) for g in waiting)
         oldest = max(0, int((now - oldest_at).total_seconds() // 60))
     return ApprovalQueueMetricsOut(
-        approvals=sum(1 for g in gates if g.type == "approval"),
+        # `document` counts as an approval: it is one thing waiting on a person, which
+        # is what the tile means. The type distinction matters to the row that renders
+        # it, not to the count.
+        approvals=sum(1 for g in waiting if g.type in ("approval", "document")),
         clarifications=0,
         oldestMinutes=oldest,
         generatedAt=now.isoformat(),
