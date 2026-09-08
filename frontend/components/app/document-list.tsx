@@ -508,7 +508,25 @@ export function DocumentList({
                   selectedId === a.id &&
                     "border-l-2 border-[oklch(var(--brand-bright))] bg-surface-2",
                 )}
-                onClick={onSelect ? () => onSelect(a) : undefined}
+                // A CLICKABLE ROW HAS TO BE REACHABLE BY KEYBOARD. Putting onClick on a
+                // bare <li> made the row respond to a mouse and to nothing else — it was
+                // not focusable, not in the accessibility tree as an interactive thing,
+                // and unusable without a pointer. `artifact-list` selects with a real
+                // control for the same reason.
+                {...(onSelect
+                  ? {
+                      role: "button" as const,
+                      tabIndex: 0,
+                      "aria-pressed": selectedId === a.id,
+                      onClick: () => onSelect(a),
+                      onKeyDown: (e: React.KeyboardEvent) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelect(a);
+                        }
+                      },
+                    }
+                  : {})}
               >
                 <FileText className="text-muted-foreground h-4 w-4 shrink-0" />
                 <span className="truncate text-sm font-medium">{a.title}</span>

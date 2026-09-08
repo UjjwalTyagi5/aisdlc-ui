@@ -16,7 +16,6 @@ import { DocumentCard } from "@/components/app/document-card";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
-import { ApprovalCard } from "@/components/app/approval-card";
 import { DocumentList } from "@/components/app/document-list";
 import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
@@ -37,7 +36,6 @@ import type {
   ArtifactId,
   ArtifactType,
   ProjectId,
-  UserRef,
 } from "@/lib/schemas";
 
 const DESIGN_TYPES: ArtifactType[] = [
@@ -59,15 +57,8 @@ export default function DesignPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, role } = useSession({ required: true });
+  const { role } = useSession({ required: true });
 
-  const me: UserRef = {
-    id: user.id as UserRef["id"],
-    name: user.name,
-    email: user.email,
-    avatarUrl: user.avatarUrl,
-    initials: user.initials,
-  };
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -185,14 +176,11 @@ export default function DesignPage() {
         e.preventDefault();
         const prev = designs[Math.max(0, idx - 1)];
         if (prev) selectArtifact(prev);
-      } else if (e.key === "a" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        decisionMutation.mutate({ id: selected.id, status: "approved" });
-      } else if (e.key === "r" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        document
-          .querySelector<HTMLButtonElement>('[data-testid="approval-reject"]')
-          ?.click();
+      // NO `a`/`r` SHORTCUTS ANY MORE. They drove the approval card that used to be on
+      // this pane: `r` clicked its reject button by test id, which no longer exists, and
+      // `a` would have become an approve with no visible control beside it — a
+      // keystroke that silently accepts a document into the project's record is the
+      // last thing this screen should offer.
       } else if (e.key === "c") {
         e.preventDefault();
         setChatOpen((o) => !o);
@@ -329,46 +317,26 @@ export default function DesignPage() {
 
                 <ArtifactViewer artifact={selected} approval={approval} />
 
-                <ApprovalCard
-                  status={selected.status}
-                  title="Gate: Architect review"
-                  description="Approval accepts the design and unlocks Development."
-                  decidedBy={
-                    selected.status === "approved" || selected.status === "rejected"
-                      ? me
-                      : undefined
-                  }
-                  decidedAt={
-                    selected.status === "approved" || selected.status === "rejected"
-                      ? selected.updatedAt
-                      : undefined
-                  }
-                  onApprove={
-                    selected.status === "awaiting_approval"
-                      ? () =>
-                          decisionMutation.mutate({ id: selected.id, status: "approved" })
-                      : undefined
-                  }
-                  onReject={
-                    selected.status === "awaiting_approval"
-                      ? (reason) =>
-                          decisionMutation.mutate({
-                            id: selected.id,
-                            status: "rejected",
-                            reason,
-                          })
-                      : undefined
-                  }
-                  onAskAgent={() => setChatOpen(true)}
-                  pending={decisionMutation.isPending}
-                  pendingDecision={
-                    decisionMutation.isPending && decisionMutation.variables
-                      ? decisionMutation.variables.status === "approved"
-                        ? "approve"
-                        : "reject"
-                      : null
-                  }
-                />
+                {/* THE APPROVAL CARD USED TO SIT HERE, and it was three wrong things
+                    at once.
+
+                    It was a THIRD place to decide the same document — the list row on
+                    the left already offers Approve/Reject, and Requests & Approvals is
+                    the queue built for exactly this.
+
+                    It DESCRIBED THE WRONG CONSEQUENCE: "Approval accepts the design and
+                    unlocks Development" is the STAGE gate's copy (lib/agents.ts). What
+                    the buttons actually did was accept one document into the project's
+                    record, which unlocks nothing. An approval control that misstates
+                    what approving does is worse than no control.
+
+                    And it INVENTED THE DECIDER: `decidedBy={me}` is whoever is looking
+                    at the screen, not whoever decided. It only ever read correctly for
+                    the person who had just clicked it.
+
+                    The status is still visible — `ArtifactViewer` shows it, and the row
+                    on the left carries the chip and the actions. Nothing was lost by
+                    removing this except the ability to be told the wrong thing. */}
               </div>
             ) : (
               <EmptyState
