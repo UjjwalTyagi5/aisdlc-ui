@@ -80,8 +80,9 @@ export default async function LoginPage({
           </Alert>
         )}
 
-        <div className={SIGN_IN_SURFACE}>
-          {/* Contained to the card's own box, exactly as in the popup. */}
+        {/* `relative` is THIS host's, not the shared surface's: it is what contains the
+            glow below. The dialog must not inherit it — see SIGN_IN_SURFACE. */}
+        <div data-testid="sign-in-card" className={`${SIGN_IN_SURFACE} relative`}>
           <div
             aria-hidden
             className="bg-mesh pointer-events-none absolute inset-0 -z-10 rounded-2xl opacity-80"

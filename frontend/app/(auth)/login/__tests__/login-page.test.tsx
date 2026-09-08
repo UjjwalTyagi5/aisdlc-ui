@@ -96,6 +96,18 @@ describe("the sign-in route matches the landing popup", () => {
     expect(screen.getAllByText("SDLC Platform")).toHaveLength(1);
   });
 
+  it("contains its own glow, rather than letting it cover the page", async () => {
+    // The card's mesh layer is `absolute inset-0`, so the card must be the positioned
+    // ancestor. Without `relative` the glow resolves against `main` and washes the
+    // whole viewport. It cannot live in the shared surface — see the dialog, which
+    // `relative` un-centers.
+    await renderPage();
+
+    const card = screen.getByTestId("sign-in-card");
+    expect(card.className.split(/\s+/)).toContain("relative");
+    expect(card.querySelector(".bg-mesh")).toBeInTheDocument();
+  });
+
   it("keeps the terms line", async () => {
     await renderPage();
 

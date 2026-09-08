@@ -88,8 +88,15 @@ export function SignInTerms() {
 
 /**
  * The card's own surface, shared so the popup and the route cannot look like different
- * products. Translucent panel, soft border, heavy blur, rounded — with the mesh glow
- * behind it, contained to the card's own box so it never bleeds past the corners.
+ * products: translucent panel, soft border, heavy blur, rounded.
+ *
+ * NO POSITIONING UTILITY BELONGS IN HERE. `DialogContent` centers itself with
+ * `fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2` and merges this string
+ * through `cn()`; tailwind-merge keeps the last utility of a group, so a `relative`
+ * here replaced `fixed`, the popup fell out of its centering, and clicking Sign in
+ * dimmed the landing page and showed nothing. The page's card needs `relative` for its
+ * own mesh glow — it adds that itself, because `fixed` already gives the dialog a
+ * containing block and it needs no such thing.
  */
 export const SIGN_IN_SURFACE =
-  "border-line-soft/50 bg-panel-elevated/60 relative flex flex-col gap-5 rounded-2xl p-8 shadow-2xl backdrop-blur-2xl sm:p-10";
+  "border-line-soft/50 bg-panel-elevated/60 flex flex-col gap-5 rounded-2xl p-8 shadow-2xl backdrop-blur-2xl sm:p-10";
