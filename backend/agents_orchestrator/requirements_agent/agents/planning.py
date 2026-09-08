@@ -2435,6 +2435,15 @@ _BOARD_TOOLS = [
 # Convert tools to async
 from shared.tools.sharepoint_artifacts import make_sharepoint_tools
 
+try:
+    from shared.tools.project_documents import make_document_tools  # noqa: PLC0415
+
+    # Reads the project's approved documents — its own and the project-wide ones. Bound
+    # to this stage, which is what the evidence trail records as the reader.
+    _DOCUMENT_TOOLS = make_document_tools("requirements")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
 #: Bound to THIS agent and THIS stage. The connector resolves its access level
 #: against `agent_id`, and `stage` decides which documents belong to this screen —
 #: both come from here, never from a tool argument the model could set.
@@ -2457,6 +2466,7 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # right for that agent and wrong here, so this reads the artifacts table and
          # refuses anything an owner has not accepted. There is no delete tool, here or
          # anywhere: taking a file out of the business's library is a person's job.
+         *_DOCUMENT_TOOLS,
          *_SHAREPOINT_TOOLS]
 
 

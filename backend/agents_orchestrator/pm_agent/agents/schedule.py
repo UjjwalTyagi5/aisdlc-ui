@@ -622,6 +622,16 @@ try:
     _DOCUMENT_TOOLS = make_document_tools("plan")
 except Exception:  # noqa: BLE001
     _DOCUMENT_TOOLS = []
+
+try:
+    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+
+    # Publishes APPROVED documents only, and cannot delete anything from the library —
+    # see shared/tools/sharepoint_artifacts. `agent_id` and `stage` are bound here and
+    # never taken from a tool argument, or a prompt could claim another agent's grant.
+    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="plan", stage="plan")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _SHAREPOINT_TOOLS = []
     logger.warning("PM agent: project document tools unavailable")
 
 tools = [
@@ -638,6 +648,7 @@ tools = [
     save_plan,
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
+    *_SHAREPOINT_TOOLS,
 ]
 
 

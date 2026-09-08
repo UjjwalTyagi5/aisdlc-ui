@@ -29,6 +29,7 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ApprovalCard } from "@/components/app/approval-card";
 import { ArtifactList } from "@/components/app/artifact-list";
+import { DocumentList } from "@/components/app/document-list";
 import { DocumentCard } from "@/components/app/document-card";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -37,6 +38,7 @@ import { useSession } from "@/hooks/use-session";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { GATE_POLICY } from "@/lib/agents";
+import { toBackendStage } from "@/lib/api/artifact-versions";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { getRunSteps, listRuns } from "@/lib/api/runs";
@@ -293,6 +295,22 @@ export function StageWorkbench({
           aria-label={`${title} artifacts`}
           className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
         >
+          {/* DOCUMENTS ABOVE THE ARTIFACT LIST, same as the hand-built stage pages.
+              Documents and the stage's own artifacts are separate things — a document
+              is a blob somebody approved into the record, an artifact row is what the
+              agent produced — and this shell showed only the second, so every stage
+              using it had no way to see or approve its documents at all.
+
+              `items` is this page's PHASE-FILTERED list; `DocumentList` narrows further
+              to this stage's documents plus the project-wide ones, so a project policy
+              still appears here without another agent's files leaking in. */}
+          <DocumentList
+            projectId={projectId}
+            items={artifactsQ.isLoading ? null : items}
+            stage={toBackendStage(phase)}
+            className="mb-4 shrink-0"
+          />
+
           <ArtifactList
             items={artifactsQ.isLoading ? null : items}
             selectedId={selected?.id}

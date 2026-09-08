@@ -59,6 +59,16 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 
+try:
+    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+
+    # Publishes APPROVED documents only, and cannot delete anything from the library —
+    # see shared/tools/sharepoint_artifacts. `agent_id` and `stage` are bound here and
+    # never taken from a tool argument, or a prompt could claim another agent's grant.
+    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="code_review", stage="code_review")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _SHAREPOINT_TOOLS = []
+
 _tools = [
     run_semgrep_scan,
     analyze_diff,
@@ -68,6 +78,7 @@ _tools = [
     read_design_artifacts,
     submit_code_review,
     *_DOCUMENT_TOOLS,
+    *_SHAREPOINT_TOOLS,
 ]
 
 
