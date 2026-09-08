@@ -356,6 +356,7 @@ export default function CodeReviewPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         disabledReason={
           prepared || hasReview
             ? undefined

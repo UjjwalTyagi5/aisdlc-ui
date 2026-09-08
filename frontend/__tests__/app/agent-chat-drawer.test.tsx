@@ -176,3 +176,55 @@ describe("AgentChatDrawer — code.diff rendering", () => {
     expect(screen.queryByRole("button", { name: /src\/x\.ts/i })).not.toBeInTheDocument();
   });
 });
+
+describe("stopping a turn in flight", () => {
+  /**
+   * `use-agent-chat` has exposed a `cancel` since it was written and NOTHING called it,
+   * so a long or wrong answer had to be waited out — the only escape was closing the
+   * drawer, which loses the turn without stopping it.
+   *
+   * The button REPLACES Send rather than sitting beside it. Send is already disabled
+   * while the agent works, so the one button in the composer is always the one action
+   * available, and Stop appears where the hand already is.
+   */
+  function drawer(props: Partial<React.ComponentProps<typeof AgentChatDrawer>> = {}) {
+    return render(
+      <AgentChatDrawer
+        open
+        onOpenChange={() => {}}
+        title="Requirements"
+        messages={[]}
+        onSend={vi.fn()}
+        {...props}
+      />,
+    );
+  }
+
+  it("offers Stop while the agent is working", async () => {
+    const onStop = vi.fn();
+    drawer({ busy: true, onStop });
+
+    await userEvent.click(screen.getByRole("button", { name: /stop the agent/i }));
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
+  });
+
+  it("goes back to Send once the turn ends", () => {
+    /** NON-VACUITY: the control follows `busy`, so Stop is not left behind offering to
+     *  cancel a turn that already finished. */
+    drawer({ busy: false, onStop: vi.fn() });
+
+    expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /stop the agent/i })).toBeNull();
+  });
+
+  it("shows no Stop when the host cannot cancel", () => {
+    /** THE ORCHESTRATOR'S RULE, kept: its engine has no cancel, and a button that does
+     *  nothing is worse than no button. Omitting `onStop` leaves the composer exactly as
+     *  it was. */
+    drawer({ busy: true });
+
+    expect(screen.queryByRole("button", { name: /stop the agent/i })).toBeNull();
+  });
+});

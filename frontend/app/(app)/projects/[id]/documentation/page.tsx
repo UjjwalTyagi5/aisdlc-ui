@@ -268,7 +268,7 @@ export default function DocumentationPage() {
       <AgentChatDrawer
         open={chatOpen} onOpenChange={setChatOpen}
         context={{ page: "Documentation", artifactTitle: targetChip ?? undefined }}
-        messages={chat.messages} onSend={chat.send} busy={chat.busy}
+        messages={chat.messages} onSend={chat.send} busy={chat.busy} onStop={chat.cancel}
         disabledReason={prepared ? undefined : "Open a docs workspace first."}
         starterSuggestions={["Generate the full documentation set.", "Write the API reference.", "Generate release notes for this branch."]}
       />

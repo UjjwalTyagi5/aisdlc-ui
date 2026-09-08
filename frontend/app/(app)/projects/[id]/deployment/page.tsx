@@ -237,6 +237,7 @@ export default function DeploymentPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         sessions={chat.sessions}
         activeSessionId={chat.sessionId}
         onSelectSession={chat.selectSession}

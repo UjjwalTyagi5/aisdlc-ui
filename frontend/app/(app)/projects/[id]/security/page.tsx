@@ -321,6 +321,7 @@ export default function SecurityPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         disabledReason={
           prepared || hasScan ? undefined : "Select a branch or PR to scan first (Select target)."
         }

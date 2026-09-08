@@ -139,7 +139,15 @@ export async function POST(req: NextRequest) {
     });
   };
 
-  void openChatWsBridge(session, runId, message, context, wsPath, writeSse, closeStream, agentParams);
+  // THE CLIENT'S ABORT HAS TO REACH THE AGENT. Without this the browser could stop
+  // reading and the upstream WS stayed open — the agent kept generating, kept spending
+  // tokens, and kept whatever side effects its tools were mid-way through. A Stop
+  // button on top of that would have stopped the DISPLAY and nothing else, which is the
+  // "button that does nothing" the Orchestrator cockpit deliberately refuses to ship.
+  void openChatWsBridge(
+    session, runId, message, context, wsPath, writeSse, closeStream, agentParams,
+    req.signal,
+  );
 
   return new Response(readable, {
     headers: {
@@ -161,6 +169,8 @@ async function openChatWsBridge(
   writeSse: (event: unknown) => void,
   closeStream: () => void,
   agentParams?: Record<string, unknown>,
+  /** Aborted when the browser stops reading — a Stop press, or the tab going away. */
+  signal?: AbortSignal,
 ): Promise<void> {
   let ws: WebSocket | null = null;
   try {
@@ -210,6 +220,33 @@ async function openChatWsBridge(
     clearIdle();
     idleTimer = setTimeout(() => finish("approved"), IDLE_FALLBACK_MS);
   };
+
+  // Closing the socket is the strongest signal this layer has. Whether the agent's own
+  // handler unwinds immediately is its business, but the connection it is writing to is
+  // gone, and nothing further is billed to the user's screen. `cancelled`, not
+  // `failed`: the run did not break, somebody stopped it, and the transcript should not
+  // accuse the agent of an error the user caused.
+  const onAbort = () => {
+    if (done) return;
+    done = true;
+    clearIdle();
+    writeSse({
+      type: "run.completed", runId, status: "cancelled", at: new Date().toISOString(),
+    });
+    try {
+      ws?.close();
+    } catch {
+      // Already closing.
+    }
+    closeStream();
+  };
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   ws.onopen = () => {
     // Send the chat message once the WS handshake completes.
