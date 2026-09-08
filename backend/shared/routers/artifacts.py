@@ -155,11 +155,23 @@ async def list_artifacts_for_project(
                 .order_by(Run.updated_at.desc())
             )
         ).scalars().all()
+        # "HAS A STORY PAYLOAD" IS NOT "HAS STORIES", and conflating them made an empty
+        # pull invisible. This used to skip any run whose synthesis came back empty, so
+        # ingesting a board project with no work items fell through to the PREVIOUS
+        # ingest and re-displayed its stories — the user pulled from an empty project,
+        # was told "no work items", and watched the list keep showing fifteen from
+        # somewhere else. Nothing errored; the page simply refused to change.
+        #
+        # The skip exists for a real case: a chat run never writes `requirements_payload`
+        # at all, and must not shadow the ingest that did. That is a MISSING key, which
+        # is a different thing from a key holding an empty list. An ingest that found
+        # nothing wrote `stories: []` deliberately, and it is the newest answer.
         for r in req_runs:
-            synth = story_artifacts_from_run(r, str(project.id))
-            if synth:
-                result.extend(synth)
-                break
+            payload = getattr(r, "requirements_payload", None) or {}
+            if not isinstance(payload, dict) or "stories" not in payload:
+                continue
+            result.extend(story_artifacts_from_run(r, str(project.id)))
+            break
 
     return await _with_actor_emails(db, tenant_id, result)
 
