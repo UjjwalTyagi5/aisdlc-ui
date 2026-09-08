@@ -109,7 +109,9 @@ async def owner_approved(stage: str) -> Tuple[bool, str]:
     raise a gate and wait for a human, not to hand background runs a blanket exemption.
     Tracked in `help/requirements-design-e2e-plan.md` §5.
     """
-    from config.ws_helper import get_tenant_id, get_user_id  # noqa: PLC0415
+    from config.ws_helper import (  # noqa: PLC0415
+        get_orchestrator_run, get_tenant_id, get_user_id,
+    )
 
     owner = _owner_label(stage)
     user_id = get_user_id() or ""
@@ -128,6 +130,24 @@ async def owner_approved(stage: str) -> Tuple[bool, str]:
             stage, user_id, type(exc).__name__,
         )
         return False, _UNRESOLVABLE
+
+    # THE ORCHESTRATOR'S CALLER OWNS EVERY STAGE, and the socket has already proved it:
+    # `orchestrator2/ws.py` refuses any turn from someone who does not administer the
+    # run's project. `orchestrator_instruction.md` §1.5 — "only a Project Admin can use
+    # the Orchestrator, because only that role has access to all agents", and "there is
+    # no sign-off and no gate in the Orchestrator".
+    #
+    # Without this a Project Admin is refused ownership of seven of the nine stages,
+    # because `project_admin` holds `artifact:approve_documentation` and
+    # `artifact:approve_plan` and nothing else. Reported: they asked Requirements to
+    # create the stories for a change they had just driven Development through, said
+    # "yes", and were told to go and ask somebody else.
+    #
+    # Placed AFTER the actor checks, never before: the exemption says a known person
+    # owns every stage here, not that an unknown one does. A background run with no
+    # user still refuses, exempt or not.
+    if get_orchestrator_run():
+        return True, ""
 
     from shared.services.orchestrator.gate_routing import can_user_approve  # noqa: PLC0415
 

@@ -273,6 +273,75 @@ _PUBLIC_PREFIXES: tuple[str, ...] = ("/webhooks/", "/generated", "/static", "/sc
 _SIGNALS_IN_BODY_PROTECTED_PATHS: set[str] = {"/runs/{run_id}/signals/{name}"}
 
 
+# ── WebSocket routes ─────────────────────────────────────────────────────────
+#
+# A WebSocket route cannot carry `require_permission`: there is no request/response
+# cycle to hang a dependency on. Each one authenticates INSIDE its handler — redeeming
+# a single-use ticket and resolving the caller's role BEFORE accepting the connection.
+#
+# Until Phase 5 the boot scan skipped them entirely (`if not isinstance(route,
+# APIRoute): continue`), so no socket was ever checked for having made an authz
+# decision at all. That is how `/projects/[id]/orchestrator` shipped in Phase 1 with no
+# access check while its three sibling surfaces were gated: nothing systemic looked.
+#
+# This set records the decision per path, so the scan can tell "checked, and it
+# authenticates in-handler" apart from "nobody has looked". A socket that is not listed
+# FAILS THE BOOT, which is the whole point.
+#
+# AUDITED, 2026-09-07. `tests/test_ws_route_coverage.py` now asserts that every
+# socket here redeems a single-use ticket BEFORE it accepts, reading the handler
+# with docstrings stripped so prose cannot satisfy it. The audit found four
+# `/test-ws` debug sockets that accepted unauthenticated and echoed whatever they
+# were sent; they are deleted. The rest passed.
+#
+# Adding a path here is still a decision, not a formality: It records the sockets that existed when the scan
+# was extended. Confirming that each one's in-handler check is real, and correct, is
+# tracked as carried debt — saying otherwise here would be prose asserting a guarantee
+# the code does not provide, which this codebase has done enough times already.
+_WS_IN_HANDLER_AUTH_PATHS: set[str] = {
+    "/sdlc/agent/code-review/ws",
+    "/sdlc/agent/deployment/ws",
+    "/sdlc/agent/deployment_orchestrator/ws",
+    "/sdlc/agent/design/ws",
+    "/sdlc/agent/design_orchestrator/ws",
+    "/sdlc/agent/development/ws",
+    "/sdlc/agent/development_orchestrator/ws",
+    "/sdlc/agent/documentation/ws",
+    "/sdlc/agent/ingestion/ws",
+    "/sdlc/agent/ingestion_orchestrator/ws",
+    "/sdlc/agent/orchestrator2/ws",
+    "/sdlc/agent/plan/ws",
+    "/sdlc/agent/requirement/ws",
+    "/sdlc/agent/requirement_orchestrator/ws",
+    "/sdlc/agent/security/ws",
+    "/sdlc/agent/testing/ws",
+    "/sdlc/agent/testing_orchestrator/ws",
+}
+
+
+def websocket_route_paths(app) -> list[str]:
+    """Every WebSocket route path registered on `app`."""
+    out: list[str] = []
+    for route in app.routes:
+        if route.__class__.__name__ in ("APIWebSocketRoute", "WebSocketRoute"):
+            path = getattr(route, "path", "")
+            if path:
+                out.append(path)
+    return out
+
+
+def _ws_route_is_recorded(route) -> bool:
+    """Whether this socket has a recorded authz decision."""
+    return getattr(route, "path", "") in _WS_IN_HANDLER_AUTH_PATHS
+
+
+def unrecorded_websocket_routes(app) -> list[str]:
+    """WebSocket paths with no recorded authz decision, sorted."""
+    return sorted(
+        p for p in websocket_route_paths(app) if p not in _WS_IN_HANDLER_AUTH_PATHS
+    )
+
+
 def _route_has_require_permission(route: APIRoute) -> bool:
     """Return True if any of the route's resolved dependencies carries the
     require_permission boot-scan sentinel (__rbac_require_permission__)."""
@@ -321,4 +390,16 @@ def assert_all_routes_protected(app) -> None:
             "nor public()/allowlist-marked, and ship with NO conscious authz decision "
             "(fail-open is structurally impossible; mark each route explicitly): "
             + ", ".join(offenders)
+        )
+
+    # WebSocket routes, which the loop above cannot see. Reported separately so the two
+    # failures are never confused: an unprotected HTTP route is missing a dependency, an
+    # unrecorded socket is missing a DECISION.
+    unrecorded = unrecorded_websocket_routes(app)
+    if unrecorded:
+        raise RuntimeError(
+            "D-05: the following websocket routes have no recorded authz decision. A "
+            "socket cannot carry require_permission (no request/response cycle), so it "
+            "must authenticate in-handler and be listed in _WS_IN_HANDLER_AUTH_PATHS. "
+            "Check what each one actually does before adding it: " + ", ".join(unrecorded)
         )

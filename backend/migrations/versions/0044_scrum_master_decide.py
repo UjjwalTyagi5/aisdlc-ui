@@ -40,12 +40,32 @@ Revision ID: 0044_scrum_master_decide
 id fails at the very END — every statement succeeds, then the version stamp raises
 StringDataRightTruncation and the whole transaction rolls back. See 0037.)
 
-Revises: 0043_deployments
+Revises: 0045_message_agent_id
+
+RE-POINTED WHEN main WAS MERGED IN. This branch and main both grew from
+`0043_deployments`, so both numbered their next migration 0044 — main's
+`0044_orchestrator_deliverables` / `0045_message_agent_id`, and this one. Two roots on
+the same parent is two alembic HEADS, and `alembic upgrade head` refuses to choose
+between them.
+
+Splicing this chain onto main's makes one line again:
+
+    0043 -> 0044_orchestrator_deliverables -> 0045_message_agent_id
+         -> 0044_scrum_master_decide -> ... -> 0055_artifact_delete
+
+THE FILENAME NUMBERS NOW READ OUT OF ORDER, and that is the lesser evil. Alembic keys
+on the `revision` string, not the filename, and every database already stamped at one of
+these ids — the dev and test ones are at 0055_artifact_delete — would be orphaned by a
+renumber: `alembic_version` would name a revision that no longer exists. Misleading
+numbering is a reading annoyance; a stamp pointing at nothing is an unmigratable
+database.
+
+Revises (originally): 0043_deployments
 """
 from alembic import op
 
 revision = "0044_scrum_master_decide"
-down_revision = "0043_deployments"
+down_revision = "0045_message_agent_id"
 branch_labels = None
 depends_on = None
 

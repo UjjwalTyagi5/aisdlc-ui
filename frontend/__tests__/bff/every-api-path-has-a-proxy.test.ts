@@ -109,7 +109,30 @@ function matches(request: string[], handler: string[]): boolean {
  * below deletes the alternative: an allowlist that outlives its problem starts hiding
  * the next one.
  */
-const KNOWN_MISSING = new Set<string>([]);
+/**
+ * Paths deliberately left without a proxy, each with the reason it is not simply a bug
+ * somebody forgot. Empty is the goal; an entry here is a debt with a note on it.
+ */
+const KNOWN_MISSING = new Set<string>([
+  // BROKEN ON main, NOT BY THE MERGE THAT SURFACED IT — recorded rather than papered
+  // over, because the honest fix is a product decision and not a route.
+  //
+  // Phase 5A removed the Copilot: `app/api/runs/[id]/copilot` is asserted deleted by
+  // lib/orchestrator/__tests__/no-copilot-surface.test.ts, and the backend route is
+  // asserted gone by tests/orchestrator2/test_old_engines_are_gone.py. But
+  // `advanceCopilotRun` in lib/api/runs.ts still posts here, and THREE LIVE COMPONENTS
+  // still call it — ApprovalGateRow (Requests & Approvals), RunDetailDrawer (/runs) and
+  // RunConversation (/runs/[id]/conversation). Approving a gate from any of them gets
+  // Next's 404.
+  //
+  // ADDING THE PROXY WOULD NOT FIX IT: FastAPI no longer serves the path either, so the
+  // 404 would simply move one layer down. Nor is `POST /runs/{id}/approvals` a drop-in
+  // replacement — its own docstring says it records an AuditEvent and does NOT advance
+  // the run, so repointing would make the button look like it worked while the run
+  // stayed exactly where it was. That is a worse failure than the 404, because nothing
+  // says anything went wrong.
+  "/runs/*/copilot/advance",
+]);
 
 describe("BFF coverage", () => {
   it("finds both sides, so the assertion below is not vacuous", () => {

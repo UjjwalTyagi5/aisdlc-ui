@@ -6,7 +6,7 @@ import { Check, MessageSquare, Pencil, Plus, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { OrchestratorSession, SessionStatus } from "@/lib/orchestrator/types";
+import type { SessionStatus } from "@/lib/orchestrator/types";
 
 /** A quiet dot per run state — the rail is a list, not a dashboard. */
 const STATUS_DOT: Record<SessionStatus, string> = {
@@ -20,13 +20,28 @@ const STATUS_DOT: Record<SessionStatus, string> = {
 const STATUS_TITLE: Record<SessionStatus, string> = {
   idle: "Not started",
   running: "Running",
-  paused: "Paused at a gate",
+  paused: "Paused",
   complete: "Complete",
   failed: "Failed",
 };
 
+/**
+ * What the rail needs from a chat — and nothing more.
+ *
+ * It used to take a whole `OrchestratorSession`, which carried the transcript, the
+ * stage list and the model key. Since Phase 5B the list comes from the server, where a
+ * chat is a row with an id and a title; demanding the local shape would have meant
+ * inventing five fields the rail never reads.
+ */
+export interface RailSession {
+  id: string;
+  title: string;
+  projectId: string;
+  status: SessionStatus;
+}
+
 export interface SessionRailProps {
-  sessions: OrchestratorSession[];
+  sessions: RailSession[];
   activeId: string | null;
   onSelect: (id: string) => void;
   onCreate: () => void;
@@ -48,7 +63,7 @@ export function SessionRail({
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState("");
 
-  const beginEdit = (s: OrchestratorSession) => {
+  const beginEdit = (s: RailSession) => {
     setEditingId(s.id);
     setDraft(s.title);
   };
@@ -166,7 +181,7 @@ export function SessionRail({
 
       <div className="border-line-soft text-muted-foreground flex items-start gap-2 border-t px-3 py-2.5 text-[11px] leading-relaxed">
         <MessageSquare className="mt-px size-3.5 shrink-0" aria-hidden />
-        <span>Sessions are stored in this browser only.</span>
+        <span>Chats are saved to this project and open on any device.</span>
       </div>
     </aside>
   );

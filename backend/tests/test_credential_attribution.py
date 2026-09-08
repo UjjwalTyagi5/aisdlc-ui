@@ -67,8 +67,9 @@ _KNOWN_GAPS = {
         "writes pages to Confluence/SharePoint as the platform, not the author",
     "agents_orchestrator/design_architecture_agent/tools/figma_tools.py":
         "reads Figma as the platform",
-    "agents_orchestrator/orchestrator/copilot_api.py":
-        "one of two call sites still ownerless",
+    # copilot_api.py was here — "one of two call sites still ownerless". Phase 5
+    # deleted the file, so the ownerless call site is gone rather than fixed. Same
+    # outcome for attribution, and worth saying which it was.
     # The queue workers. Fixing these is NOT a one-line change: the task payload
     # carries model_id and project_id and no user at all, so the enqueuing side has to
     # start recording who asked before the worker can act as them. Until then a board

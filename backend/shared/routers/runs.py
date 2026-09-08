@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, false as sa_false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,12 @@ from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Project, Run
+from shared.services.attachment_store import (
+    AttachmentError,
+    list_attachments,
+    save_attachment,
+    validate_attachment,
+)
 
 logger = logging.getLogger(__name__)
 from shared.routers._schemas import (
@@ -239,6 +245,140 @@ async def get_run_artifacts(
     return {"artifacts": sections_from_run(run)}
 
 
+@runs_router.get("/{run_id}/deliverables")
+async def get_run_deliverables(
+    run_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Panel-ready deliverables for an Orchestrator run (reload/replay). Tenant-scoped.
+
+    NOT `/artifacts`. That endpoint reads the run's `*_artifacts` columns, which the
+    STANDALONE agents write and which carry an approval concept. The Orchestrator's
+    agents share their names and capability and are a different thing; their output
+    lives in `orchestrator_deliverables` and is never gated, because the person
+    driving it is a Project Admin who already owns all nine agents.
+
+    Resolved through `_get_run_or_404` like every other route in this module, so the
+    tenant filter and the caller-scope check are not things this endpoint could
+    forget on its own. The deliverables read is scoped to the CALLER's tenant, not
+    the run's: reading with `run.tenant_id` would make the query agree with whatever
+    row came back, laundering a scoping bug upstream into a successful cross-tenant
+    read instead of an empty one.
+    """
+    tenant_id = request.state.tenant_id
+    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
+
+    from agents_orchestrator.orchestrator2.deliverables import (
+        deliverables_for_run,
+        pointers_for_run,
+    )
+    from agents_orchestrator.orchestrator2.registry import AGENT_IDS
+
+    dev_artifacts = getattr(run, "development_artifacts", None)
+
+    # Which agents actually wrote files to disk. Checked HERE rather than inside
+    # `pointers_for_run`, which stays pure: this is the only layer that can look at
+    # the disk. An agent that generated nothing gets no tree, because an empty tree
+    # reads as a pull that failed rather than as a stage with no files.
+    dir_by_stage: dict[str, str] = {}
+    for agent_id in AGENT_IDS:
+        if agent_id == "development":
+            continue  # already covered by its own code-tree pointer
+        try:
+            directory = await _run_stage_output_dir(
+                str(run.id), agent_id,
+                development_artifacts=dev_artifacts,
+                tenant_id=str(tenant_id),
+                project_id=str(run.project_id) if run.project_id else None,
+            )
+        except Exception:  # noqa: BLE001 - a missing tree must not fail the whole read
+            continue
+        if directory and os.path.isdir(directory) and os.listdir(directory):
+            dir_by_stage[agent_id] = directory
+
+    # Several stages resolve one shared directory, and it may be shown only once.
+    # The run's own stage owns the shared directory when it is one of the agents
+    # that write there — see `_dedupe_by_directory`.
+    stages_with_files = _dedupe_by_directory(
+        dir_by_stage, prefer=getattr(run, "stage", None),
+    )
+
+    stored = await deliverables_for_run(str(run.id), str(tenant_id))
+    pointers = pointers_for_run(dev_artifacts, stages_with_files)
+    return {"deliverables": stored + pointers}
+
+
+@runs_router.post("/{run_id}/attachments")
+async def upload_run_attachments(
+    run_id: str,
+    request: Request,
+    files: List[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Store files the user attached to an Orchestrator run, and return their refs.
+
+    NOT `POST /conversations/{session_id}/attachments`, even though the Orchestrator's
+    session id IS its run id. That route authorises through
+    `conversation_service.session_owner`, and the Orchestrator's conversation row is
+    created by the SOCKET on the first turn (`orchestrator2.sessions.ensure_session`) —
+    so attaching a file before sending the first message would 404 against a run that
+    genuinely exists. This one resolves through `_get_run_or_404`, the same
+    tenant-and-scope chokepoint the run's other routes use, which holds from the moment
+    the run row exists.
+
+    THE FILE IS FILED UNDER THE AUTHENTICATED CALLER, never a value from the request.
+    `attachment_store` keys uploads by uploader and
+    `orchestrator2.attachments.attachment_context` reads them back under the socket
+    TICKET's user; letting a caller name the owner would be a way to plant a document
+    into somebody else's agent prompt.
+
+    THE WHOLE BATCH IS VALIDATED BEFORE ANYTHING IS WRITTEN. Rejecting as it wrote would
+    leave the run holding files the user was told were not accepted — and an
+    Orchestrator run reads every stored attachment into every later turn, so those files
+    would go on reaching agents after the upload had reported failure.
+    """
+    tenant_id = request.state.tenant_id
+    await _get_run_or_404(db, run_id, tenant_id, request=request)
+
+    user_id = _user_id(request)
+    payloads: list[tuple[str, bytes]] = []
+    for f in files:
+        data = await f.read()
+        try:
+            validate_attachment(f.filename or "upload", data)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payloads.append((f.filename or "upload", data))
+
+    refs = [
+        save_attachment(user_id, run_id, filename, data)
+        for filename, data in payloads
+    ]
+    return {"attachments": refs}
+
+
+@runs_router.get("/{run_id}/attachments")
+async def get_run_attachments(
+    run_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The files this caller attached to the run, so a reopened chat can show them.
+
+    Without this the chips vanish on reload while the attachments keep reaching every
+    turn — the user can no longer see what the agent is being given, which is its own
+    kind of lie about what the agent knows.
+
+    Scoped to the CALLER's own uploads, matching what the socket actually reads: a run
+    driven by two Project Admins gives each turn only its own driver's files, and a
+    listing that showed both would describe a prompt that is never assembled.
+    """
+    tenant_id = request.state.tenant_id
+    await _get_run_or_404(db, run_id, tenant_id, request=request)
+    return {"attachments": list_attachments(_user_id(request), run_id)}
+
+
 @runs_router.get("/{run_id}/transcript")
 async def get_run_transcript(
     run_id: str,
@@ -257,7 +397,10 @@ async def get_run_transcript(
         messages.append({
             "role": role,
             "content": r.get("content") or "",
-            "stage": r.get("author_id") if role == "agent" else None,
+            # The AGENT, not `author_id` — which is the user who typed at it, and
+            # was what every replayed agent turn used to be labelled with. Null for a
+            # turn from before migration 0045, which is honest: nothing recorded it.
+            "stage": r.get("agent_id") if role == "agent" else None,
         })
     return {"messages": messages}
 
@@ -356,9 +499,64 @@ def _glob_user_scoped_dir(run_id: str, rel_suffix: str, *, segment: str = "orche
     return None
 
 
+# Stages that export into the shared per-run `output/` directory. All three write
+# through different tools — the Project Manager's plan export, `architecture.py`, and
+# Testing's `finalize.py` — but land in the same place, because `session_id` is the
+# run id for every agent the Orchestrator dispatches.
+#
+# ORDERED, because they share a directory and only one of them may show it. See
+# `_dedupe_by_directory`. The order is the one these agents typically run in, so the
+# earliest contributor owns the heading.
+_ORCHESTRATOR_OUTPUT_STAGES: tuple[str, ...] = ("design", "plan", "testing")
+
+
+def _dedupe_by_directory(
+    by_stage: dict[str, str], *, prefer: str | None = None,
+) -> set[str]:
+    """Keep one stage per distinct directory, `prefer` first and then
+    `_ORCHESTRATOR_OUTPUT_STAGES` order.
+
+    `plan`, `design` and `testing` all resolve the SAME path, so mapping all three
+    made the panel render the identical files once per heading — the Testing agent's
+    `test_plan.xlsx` showing up under Design. Wrong attribution is worse than none: an
+    empty heading reads as "nothing produced yet", a populated one reads as evidence.
+
+    `prefer` is the run's own stage. It is right whenever a run exercised one of the
+    sharing agents — which is the common case — and it is what stops the Project
+    Manager's delivery plan being filed under Design purely because Design sorts
+    first.
+
+    WHAT THIS DOES NOT DO is attribute correctly in general. Nothing on disk records
+    which agent wrote which file; the agents share the directory, and `runs.stage` is
+    set once at creation and never updated, because orchestrator2 deliberately writes
+    no position back to a run. So a long conversation where Design and the Project
+    Manager both exported shows both documents under whichever the run was opened for.
+    Exact attribution needs the agents writing into per-agent subdirectories, which is
+    a change to the agents rather than to this read path.
+
+    The order is a fixed tuple rather than set iteration order: the winner has to be
+    the same on every read, or the same run files its documents under a different
+    agent each time the panel refreshes.
+    """
+    seen: dict[str, str] = {}
+    ordered = [prefer] if prefer and prefer in by_stage else []
+    ordered += [s for s in _ORCHESTRATOR_OUTPUT_STAGES if s in by_stage]
+    ordered += sorted(
+        s for s in by_stage
+        if s not in _ORCHESTRATOR_OUTPUT_STAGES and s != prefer
+    )
+    for stage in ordered:
+        # Normalised because the same directory reached through two stages can come
+        # back spelled differently — `glob` preserves whatever case and separators the
+        # caller handed it, and on Windows both vary.
+        key = os.path.normcase(os.path.normpath(by_stage[stage]))
+        seen.setdefault(key, stage)
+    return set(seen.values())
+
 # Stages whose generated output isn't in its own dedicated location (dev workspace,
-# testing's `output/`, docs' own root) yet — populated under a shared `generated/<stage>`
-# tree once each agent starts writing there (later task). Fail-soft: None until then.
+# the shared `output/` above, docs' own root) yet — populated under a shared
+# `generated/<stage>` tree once each agent starts writing there (later task).
+# Fail-soft: None until then.
 _GENERATED_STAGE_DIRS = {"security", "code_review", "deployment"}
 
 
@@ -377,7 +575,18 @@ async def _run_stage_output_dir(
                      dir — has its own richer fallback chain incl. re-clone).
     requirements  -> `{FILES}/<user>/requirements_agent/<run_id>/output` (planning.py
                      markdown_to_docx / markdowntodoc — BRD/MoM/Risk Register docx).
-    testing       -> `{FILES}/<user>/orchestrator/<run_id>/output` (Nodes/finalize.py).
+    plan | design | testing
+                  -> `{FILES}/<user>/orchestrator/<run_id>/output` — the Project
+                     Manager's plan export, `architecture.py`'s HLD/LLD docx, and
+                     Testing's `Nodes/finalize.py` all write here.
+
+                     `plan` and `design` were MISSING from this mapping and returned
+                     None. Found by running all nine agents against the real stack:
+                     the Project Manager produced
+                     `Coffee_Ordering_App_Delivery_Plan.pdf`, wrote it to exactly the
+                     path `testing` resolves fine, and it never appeared in
+                     Deliverables. Silent by construction — a stage with no directory
+                     is indistinguishable from a stage that generated nothing.
     documentation -> `{DOCS_OUTPUT_ROOT}/<project_id>/<run_id>` (doc_tools._output_dir).
     security | code_review | deployment
                   -> `{FILES}/<user>/orchestrator/<run_id>/generated/<stage>` (a later
@@ -390,7 +599,7 @@ async def _run_stage_output_dir(
     if stage == "requirements":
         return _glob_user_scoped_dir(run_id, "output", segment="requirements_agent")
 
-    if stage == "testing":
+    if stage in _ORCHESTRATOR_OUTPUT_STAGES:
         return _glob_user_scoped_dir(run_id, "output")
 
     if stage == "documentation":
@@ -707,6 +916,29 @@ async def record_approval(
         )
 
     actor_id = getattr(request.state, "user_id", "system")
+
+    # §1.5: WHOEVER RAN THE AGENT IS NEVER THE ONE WHO ACCEPTS ITS OWN OUTPUT.
+    #
+    # The permission check above answers "may this ROLE approve this stage". That is a
+    # different question, and it passes for exactly the person this rule exists to
+    # stop: a BA who starts a Requirements run holds artifact:approve_requirements by
+    # definition. Both checks are needed.
+    #
+    # This lived in copilot_api._handle_gate_decision until Phase 5 retired that
+    # engine, which left the rule enforced NOWHERE and `runs.created_by` — migration
+    # 0038, added to serve it — with no consumer. This is where it lives now.
+    #
+    # A run with no recorded initiator is NOT blocked: `created_by` is nullable
+    # (webhook runs, and rows predating 0038), and refusing there would make every
+    # historical run permanently unapprovable. The rule cannot be applied, so it is
+    # not — deliberately, rather than by omission.
+    initiator = getattr(run, "created_by", None)
+    if initiator and actor_id and str(initiator) == str(actor_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: the person who started a run cannot approve its output",
+        )
+
     now = datetime.now(timezone.utc)
 
     audit = AuditEvent(
@@ -735,220 +967,6 @@ async def record_approval(
     )
 
 
-class CopilotAdvanceIn(BaseModel):
-    """Request body for POST /runs/{run_id}/copilot/advance."""
-    decision: str
-    stage: str
-    reason: Optional[str] = None
-
-
-class CopilotAdvanceOut(BaseModel):
-    current_stage: Optional[str]
-    status: str
-
-
-@runs_router.post("/{run_id}/copilot/advance", response_model=CopilotAdvanceOut)
-async def copilot_advance(
-    run_id: str,
-    body: CopilotAdvanceIn,
-    request: Request,
-    db: AsyncSession = Depends(get_db_session),
-):
-    """Advance (or re-run) a run at a gate.
-
-    Chat-driven progression: for a Copilot-driven run there is no workflow, so the
-    gate decision mutates run state directly here. RBAC mirrors signals.py — the
-    caller MUST hold the stage's approve permission (_PHASE_PERMISSION), enforced
-    server-side (NO self-approval bypass). A caller lacking it gets 403 BEFORE any
-    state change.
-
-      approved → current_stage = progression.next_stage(stage); None ⇒ status=complete,
-                 current_stage=complete; else status=running, gate_pending=False.
-      rejected → current_stage stays = stage, gate_pending=False, status=running
-                 (re-run this stage conversationally).
-
-    All state is tenant-scoped (T-M4-03). The approval is recorded as a best-effort
-    AuditEvent.
-    """
-    from shared.authz.permissions import _PHASE_PERMISSION, has_permission
-    from shared.services.orchestrator import progression
-
-    tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
-
-    stage = body.stage or run.current_stage or run.stage or "requirements"
-    decision = (body.decision or "").lower()
-    if decision not in ("approved", "rejected"):
-        raise HTTPException(status_code=422, detail="decision must be 'approved' or 'rejected'")
-
-    # ── Phase-permission gate (mirrors signals.py — fail-closed) ──────────────
-    actor_permissions: list[str] = getattr(request.state, "permissions", []) or []
-    required_permission = _PHASE_PERMISSION.get(stage)
-    if not required_permission or not has_permission(actor_permissions, required_permission):
-        # Unknown/uncovered phase OR missing permission ⇒ 403 before any mutation
-        # (no permission-name leak, no self-approval bypass).
-        raise HTTPException(
-            status_code=403,
-            detail="Forbidden: actor lacks the required approval permission for this phase",
-        )
-
-    actor_id = getattr(request.state, "user_id", "system")
-
-    if decision == "approved":
-        nxt = progression.next_stage(stage)
-        if nxt is None:
-            run.status = "complete"
-            run.current_stage = "complete"
-        else:
-            run.current_stage = nxt
-            run.status = "running"
-        run.gate_pending = False
-    else:  # rejected — re-run the same stage conversationally
-        run.current_stage = stage
-        run.gate_pending = False
-        run.status = "running"
-
-    # Best-effort audit trail — never blocks the advance.
-    try:
-        audit = AuditEvent(
-            tenant_id=uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id,
-            actor_id=actor_id,
-            event_type="run.approved" if decision == "approved" else "run.rejected",
-            resource_type="run",
-            resource_id=str(run.id),
-            payload={
-                "decision": decision,
-                "stage": stage,
-                "reason": body.reason,
-                "conversational": True,
-                "actor_name": actor_id,
-                "project_id": str(run.project_id) if run.project_id else None,
-            },
-        )
-        db.add(audit)
-    except Exception as exc:  # noqa: BLE001 — audit is best-effort
-        logger.warning("copilot_advance audit skipped (run=%s): %s", run_id, type(exc).__name__)
-
-    await db.commit()
-    await db.refresh(run)
-    return CopilotAdvanceOut(current_stage=run.current_stage, status=run.status)
-
-
-class CopilotSetStageIn(BaseModel):
-    """Request body for POST /runs/{run_id}/copilot/set-stage."""
-    stage: str
-
-
-# Reuses CopilotAdvanceOut's shape (current_stage, status) — same response contract.
-CopilotSetStageOut = CopilotAdvanceOut
-
-
-@runs_router.post("/{run_id}/copilot/set-stage", response_model=CopilotSetStageOut)
-async def copilot_set_stage(
-    run_id: str,
-    body: CopilotSetStageIn,
-    request: Request,
-    db: AsyncSession = Depends(get_db_session),
-):
-    """Repoint a run's ACTIVE stage to ANY known pipeline stage (Copilot left-rail jump).
-
-    Lets the user click a prior stage (e.g. Development) in the Copilot left rail
-    to re-activate that agent even after the pipeline has moved on / completed —
-    the Copilot WS re-reads run.current_stage on the next chat turn (`_active_stage`
-    -> `_graph_for`) and routes to that agent's run-keyed checkpoint. This endpoint
-    only repoints state; it does NOT touch the WS routing or copilot_advance.
-
-    RBAC mirrors copilot_advance: the caller MUST hold the TARGET stage's approve
-    permission (via can_user_approve, same _PHASE_PERMISSION + has_permission
-    primitives — admin:*/org_admin wildcard passes), enforced BEFORE any mutation
-    (fail-closed, no self-approval bypass). Unknown stage -> 400 before the RBAC
-    check even runs (no need to leak permission requirements for a bogus stage).
-
-    All state is tenant-scoped (T-M4-03). The change is recorded as a best-effort
-    AuditEvent, same pattern as copilot_advance.
-    """
-    from shared.services.orchestrator import progression
-    from shared.services.orchestrator.gate_routing import can_user_approve
-
-    tenant_id = request.state.tenant_id
-    run = await _get_run_or_404(db, run_id, tenant_id, request=request)
-
-    stage = body.stage
-    if stage not in progression.STAGE_ORDER:
-        raise HTTPException(status_code=400, detail=f"Unknown stage: {stage!r}")
-
-    # ── Phase-permission gate (mirrors copilot_advance — fail-closed) ─────────
-    actor_permissions: list[str] = getattr(request.state, "permissions", []) or []
-    if not can_user_approve(actor_permissions, stage):
-        raise HTTPException(
-            status_code=403,
-            detail="Forbidden: actor lacks the required approval permission for this stage",
-        )
-
-    actor_id = getattr(request.state, "user_id", "system")
-
-    run.current_stage = stage
-    run.status = "running"
-    run.gate_pending = False
-
-    # Best-effort audit trail — never blocks the stage jump.
-    try:
-        audit = AuditEvent(
-            tenant_id=uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id,
-            actor_id=actor_id,
-            event_type="run.stage_set",
-            resource_type="run",
-            resource_id=str(run.id),
-            payload={
-                "stage": stage,
-                "conversational": True,
-                "actor_name": actor_id,
-                "project_id": str(run.project_id) if run.project_id else None,
-            },
-        )
-        db.add(audit)
-    except Exception as exc:  # noqa: BLE001 — audit is best-effort
-        logger.warning("copilot_set_stage audit skipped (run=%s): %s", run_id, type(exc).__name__)
-
-    await db.commit()
-    await db.refresh(run)
-    return CopilotSetStageOut(current_stage=run.current_stage, status=run.status)
-
-
-class CopilotCancelTurnOut(BaseModel):
-    """Response for POST /runs/{run_id}/copilot/cancel-turn."""
-    ok: bool
-
-
-@runs_router.post(
-    "/{run_id}/copilot/cancel-turn",
-    response_model=CopilotCancelTurnOut,
-    dependencies=[Depends(require_permission("run:create"))],
-)
-async def copilot_cancel_turn(
-    run_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db_session),
-):
-    """Stop the Copilot's in-flight conversational turn for this run.
-
-    Unlike POST /{run_id}/cancel (which stops the whole run), this
-    only signals the live WS turn to stop streaming — the run stays open and the
-    user can keep chatting. The Copilot WS processes a turn synchronously per
-    frame, so Stop can't come over the same socket; it flips a cooperative flag
-    the streaming loop checks between chunks (see copilot_api.request_turn_cancel).
-
-    Tenant-scoped (T-M4-03); best-effort — a no-op if no turn is in flight.
-    """
-    tenant_id = request.state.tenant_id
-    # Tenant-scoped existence check (also gives a clean 404 for a bogus id).
-    await _get_run_or_404(db, run_id, tenant_id, request=request)
-    try:
-        from agents_orchestrator.orchestrator.copilot_api import request_turn_cancel
-        request_turn_cancel(run_id)
-    except Exception as exc:  # noqa: BLE001 — signalling is best-effort
-        logger.warning("copilot_cancel_turn signal failed (run=%s): %s", run_id, type(exc).__name__)
-    return CopilotCancelTurnOut(ok=True)
 
 
 async def _get_run_or_404(
