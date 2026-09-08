@@ -44,7 +44,7 @@ export default function RequirementsPage() {
     queryFn: () => getProject(projectId),
   });
   const artifactsQ = useQuery({
-    queryKey: qk.artifacts.forProject(projectId),
+    queryKey: qk.artifacts.forProject(projectId, "requirements"),
     queryFn: () => listArtifacts(projectId, { phase: "requirements" }),
   });
   const runsQ = useQuery({

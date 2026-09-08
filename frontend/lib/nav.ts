@@ -557,6 +557,10 @@ export const segmentLabels: Record<string, string> = {
   members: "Members",
   requirements: "Requirements",
   design: "Design",
+  // "Project Manager", matching PHASE_LABEL.plan — the agent is named for the job it
+  // does. Absent from this map, `prettySegment` fell back to title-casing the URL
+  // segment, so the breadcrumb read "Plan" above a page headed "Project Manager".
+  plan: "Project Manager",
   development: "Development",
   review: "Code Review",
   "code-review": "Code Review",

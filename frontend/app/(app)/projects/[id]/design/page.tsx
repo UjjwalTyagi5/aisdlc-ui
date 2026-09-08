@@ -75,7 +75,7 @@ export default function DesignPage() {
     queryFn: () => getProject(projectId),
   });
   const artifactsQ = useQuery({
-    queryKey: qk.artifacts.forProject(projectId),
+    queryKey: qk.artifacts.forProject(projectId, "design"),
     queryFn: () => listArtifacts(projectId, { phase: "design" }),
   });
   // The upstream Requirements-phase stories — the Design agent designs FROM these.

@@ -50,7 +50,21 @@ export const qk = {
   },
   artifacts: {
     all: () => ["artifacts"] as const,
-    forProject: (id: ProjectId) => ["artifacts", "project", id] as const,
+    /** A project's artifacts, optionally narrowed to one phase.
+     *
+     * THE PHASE IS PART OF THE KEY because it is part of the REQUEST. Four call sites
+     * fetched `listArtifacts(projectId, { phase })` with four different phases and
+     * cached them all under one key: whichever loaded first won, so opening Plan after
+     * Requirements showed Requirements' documents and stories under a Plan heading.
+     *
+     * Omitting `phase` still yields the bare `["artifacts", "project", id]`, which is a
+     * PREFIX of every phased key — so the existing
+     * `invalidateQueries({ queryKey: forProject(id) })` calls keep clearing every
+     * phase's cache, which is what they were always meant to do. */
+    forProject: (id: ProjectId, phase?: string) =>
+      (phase
+        ? ["artifacts", "project", id, phase]
+        : ["artifacts", "project", id]) as readonly unknown[],
     detail: (id: ArtifactId) => ["artifacts", "detail", id] as const,
   },
   // Frozen stage payload versions and their publication state. Deliberately a

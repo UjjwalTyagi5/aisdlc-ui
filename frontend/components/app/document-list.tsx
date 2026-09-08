@@ -34,15 +34,11 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog";
-import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useSession } from "@/hooks/use-session";
 import {
-  approveArtifact, listArtifacts, rejectArtifact, requestArtifactDeletion,
-  uploadArtifact,
+  approveArtifact, listArtifacts, rejectArtifact, uploadArtifact,
 } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -104,20 +100,17 @@ export function DocumentList({
   const queryClient = useQueryClient();
   const inputRef = React.useRef<HTMLInputElement>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
-  // DELETION IS A REQUEST, NOT AN ACTION, so this holds the document being asked
-  // about and the reason being written — not a "confirm?" flag. The approver needs
-  // the why, and collecting it after the click would mean a second dialog.
-  const [deleting, setDeleting] = React.useState<Artifact | null>(null);
-  const [deleteReason, setDeleteReason] = React.useState("");
+  // DELETION IS A REQUEST, NOT AN ACTION, and it comes from the SHARED hook rather
+  // than a second copy here. `ArtifactList` on Requirements, Design and StageWorkbench
+  // uses the same one, and a delete that asks for approval on one screen and destroys
+  // outright on another is the kind of inconsistency you discover by losing a file.
+  const deletion = useDeleteArtifact(projectId);
 
   const canUpload = hasPermission(session, "run:create");
   // The stage's own permission, or project administration for the project-wide ones.
   // Mirrors the route; see the note above about this being UX rather than the rule.
   const canApproveStage = hasPermission(session, `artifact:approve_${stage}`);
   const canApproveProject = hasPermission(session, "approve");
-  // ASKING is what this permission now buys, not doing. The request goes to the
-  // document's owner; the backend gates the same way.
-  const canRequestDelete = hasPermission(session, "artifact:delete");
 
   // Only fetches when the caller did not supply the list — otherwise this is inert
   // and the parent's data is used as-is.
@@ -170,21 +163,6 @@ export function DocumentList({
       void refresh();
     },
     onError: (e: Error) => toast.error(e.message || "Could not decide this document"),
-  });
-
-  const requestDelete = useMutation({
-    mutationFn: ({ a, reason }: { a: Artifact; reason: string }) =>
-      requestArtifactDeletion(a.id, reason),
-    onSuccess: () => {
-      // Says REQUESTED, never "deleted". The file is still there until the owner
-      // agrees, and a success toast claiming otherwise would be the same lie as a
-      // 204 from a call that deleted nothing.
-      toast.success("Deletion sent to the document's owner for approval");
-      setDeleting(null);
-      setDeleteReason("");
-      void refresh();
-    },
-    onError: (e: Error) => toast.error(e.message || "Could not request deletion"),
   });
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -306,15 +284,15 @@ export function DocumentList({
                       </Button>
                     </>
                   )}
-                  {canRequestDelete && (
+                  {/* `onDelete` is undefined when the viewer lacks `artifact:delete`,
+                      which hides the control rather than showing a disabled one. */}
+                  {deletion.onDelete && (
                     <Button
                       size="sm"
                       variant="ghost"
                       aria-label={`Request deletion of ${a.title}`}
-                      onClick={() => {
-                        setDeleting(a);
-                        setDeleteReason("");
-                      }}
+                      disabled={deletion.deletingId === a.id}
+                      onClick={() => deletion.onDelete?.(a)}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
@@ -326,55 +304,8 @@ export function DocumentList({
         </ul>
       )}
 
-      <Dialog
-        open={deleting != null}
-        onOpenChange={(o) => {
-          if (!o) {
-            setDeleting(null);
-            setDeleteReason("");
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Request deletion</DialogTitle>
-            <DialogDescription>
-              {deleting?.title} will be removed from the project&apos;s record — the
-              file and the row — once its owner approves. Nothing is deleted now.
-            </DialogDescription>
-          </DialogHeader>
-
-          {/* REQUIRED, and the backend 422s without it. Somebody is being asked to
-              destroy something irreversibly, and "approve this deletion" with no
-              stated why is not a decision anyone can take responsibly. */}
-          <Textarea
-            value={deleteReason}
-            onChange={(e) => setDeleteReason(e.target.value)}
-            placeholder="Why should this document be deleted?"
-            aria-label="Reason for deletion"
-            rows={3}
-          />
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={!deleteReason.trim() || requestDelete.isPending}
-              onClick={() => {
-                if (deleting) {
-                  requestDelete.mutate({ a: deleting, reason: deleteReason.trim() });
-                }
-              }}
-            >
-              {requestDelete.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : null}
-              Send for approval
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Rendered once; the hook owns the dialog, its reason box and the request. */}
+      {deletion.dialog}
     </section>
   );
 }

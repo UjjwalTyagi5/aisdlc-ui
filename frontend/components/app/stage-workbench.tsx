@@ -99,7 +99,7 @@ export function StageWorkbench({
     queryFn: () => getProject(projectId),
   });
   const artifactsQ = useQuery({
-    queryKey: qk.artifacts.forProject(projectId),
+    queryKey: qk.artifacts.forProject(projectId, phase),
     queryFn: () => listArtifacts(projectId, { phase }),
   });
   const runsQ = useQuery({
