@@ -36,6 +36,25 @@ export interface RequestCounts {
  * `pending`; there is no history lane for it to move into. The alternative, keeping a
  * decided copy around to count, is the stored queue this deliberately is not.
  */
+/**
+ * The items a given person put forward — requests they raised, documents they uploaded.
+ *
+ * EXPORTED SO THERE IS EXACTLY ONE COPY OF THE PREDICATE. The "Raised by me" tile and
+ * the "My requests" tab both answer this question, and answering it twice is how a tile
+ * reading 1 ends up above a tab saying "You haven't raised anything" — which is the bug
+ * this whole area keeps producing in new places.
+ *
+ * A NULL identity matches nothing. Null `requestedById` (a run gate, raised by an agent)
+ * must not become "everyone's" — that is the one answer worse than "nobody's".
+ */
+export function raisedBy<T extends { requestedById?: string | null }>(
+  items: T[],
+  identityId: string | null,
+): T[] {
+  if (!identityId) return [];
+  return items.filter((i) => i.requestedById === identityId);
+}
+
 export function countRequests(
   requests: GovernanceApproval[],
   viewerIdentityId: string | null,
@@ -49,15 +68,15 @@ export function countRequests(
     if (OPEN_REQUEST_STATUSES.includes(r.status)) pending++;
     else if (r.status === "approved") approved++;
     else if (r.status === "rejected") rejected++;
-    if (viewerIdentityId && r.requestedById === viewerIdentityId) mine++;
   }
-  for (const g of awaiting) {
-    pending++;
-    // MATCHED ON THE ID, NOT THE LABEL. `requestedBy` is a rendered email; comparing
-    // it to an identity id would never match and "Raised by me" would silently stay 0
-    // for the person who uploaded the document.
-    if (viewerIdentityId && g.requestedById === viewerIdentityId) mine++;
-  }
+  pending += awaiting.length;
+  // MATCHED ON THE ID, NOT THE LABEL, and through the SAME helper the "My requests" tab
+  // filters with. `requestedBy` is a rendered email; comparing it to an identity id
+  // would never match and this tile would sit at 0 for the person who uploaded the
+  // document.
+  mine =
+    raisedBy(requests, viewerIdentityId).length +
+    raisedBy(awaiting, viewerIdentityId).length;
   return { total: requests.length + awaiting.length, pending, approved, rejected, mine };
 }
 

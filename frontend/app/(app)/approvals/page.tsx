@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 
 import { PageTitle } from "@/components/app/page-title";
@@ -11,12 +11,14 @@ import { ErrorState } from "@/components/ui/error-state";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ApprovalQueue } from "@/components/app/approval-queue";
+import { ApprovalGateRow } from "@/components/app/approval-gate-row";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { RaiseRequestDialog } from "@/components/requests/raise-request-dialog";
 import { RequestDetailSheet } from "@/components/requests/request-detail-sheet";
 import {
   RequestSummaryCards,
   countRequests,
+  raisedBy,
 } from "@/components/requests/request-summary-cards";
 import { RequestTable } from "@/components/requests/request-table";
 import { useSession } from "@/hooks/use-session";
@@ -29,7 +31,7 @@ import { listProjects } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import { canRaiseRequest } from "@/lib/requests/routing";
 import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
-import type { GovernanceApproval } from "@/lib/schemas";
+import type { ApprovalGate, GovernanceApproval } from "@/lib/schemas";
 
 /**
  * Requests & Approvals — the personal queue, and the place you raise things.
@@ -62,8 +64,40 @@ import type { GovernanceApproval } from "@/lib/schemas";
  * With only the inbox left, the tab bar names nothing worth choosing between,
  * so it goes too and the inbox is simply the page.
  */
+/** One lane of derived approvals under a heading, or nothing at all.
+ *
+ * Deliberately NOT `ApprovalQueue`: that component owns the Inbox's own fetch, its
+ * mine/all toggle and its governance rows. Here the list is already filtered by the
+ * tab, and a second scope toggle inside a tab that is itself a scope would be a
+ * control arguing with its container.
+ */
+function AwaitingLane({
+  gates,
+  heading,
+  onResolved,
+}: {
+  gates: ApprovalGate[];
+  heading: string;
+  onResolved: () => void;
+}) {
+  if (gates.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-muted-foreground font-mono text-[10px] tracking-[0.14em] uppercase">
+        {heading}
+      </h2>
+      <ul className="space-y-4">
+        {gates.map((g) => (
+          <ApprovalGateRow key={g.id} gate={g} onResolved={onResolved} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function RequestsAndApprovalsPage() {
   const session = useSession({ required: true });
+  const queryClient = useQueryClient();
   const { scope, role, level, isOrgWide, bindings, managedBusinessUnitIds } = useAccessScope();
 
   const [raiseOpen, setRaiseOpen] = React.useState(false);
@@ -128,9 +162,22 @@ export default function RequestsAndApprovalsPage() {
   );
 
   const myRequests = React.useMemo(
-    () => (identityId ? requests.filter((r) => r.requestedById === identityId) : []),
+    () => raisedBy(requests, identityId),
     [requests, identityId],
   );
+
+  // THE SAME TWO LANES THE TILES COUNT. Counting documents into "Raised by me" without
+  // showing them here would have been the original bug moved one level down: the tile
+  // reading 1 above a tab saying "You haven't raised anything". A document you uploaded
+  // IS something you raised — it is waiting on an owner exactly like a request is.
+  const myAwaiting = React.useMemo(
+    () => raisedBy(awaiting, identityId),
+    [awaiting, identityId],
+  );
+
+  const refreshApprovals = React.useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: qk.approvals.list({}) });
+  }, [queryClient]);
 
   const canSeeQueue =
     hasPermission(session, "artifact:view") || hasPermission(session, "workspace:manage");
@@ -266,30 +313,48 @@ export default function RequestsAndApprovalsPage() {
           <ApprovalQueue />
         </TabsContent>
 
-        <TabsContent value="mine">
+        <TabsContent value="mine" className="space-y-6">
             {requestsQ.isLoading ? (
               <LoadingState variant="list" rows={3} />
             ) : (
-              <RequestTable
-                requests={myRequests}
-                onOpen={setSelected}
-                emptyTitle="You haven't raised anything"
-                emptyDescription="Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
-              />
+              // The empty state belongs to the WHOLE tab, so it is suppressed when the
+              // other lane has something — "You haven't raised anything" above a
+              // document you uploaded five minutes ago is the contradiction this fix is
+              // about, not a smaller version of it.
+              (myRequests.length > 0 || myAwaiting.length === 0) && (
+                <RequestTable
+                  requests={myRequests}
+                  onOpen={setSelected}
+                  emptyTitle="You haven't raised anything"
+                  emptyDescription="Use Raise request when you need something you don't have — a model for your project, a connector or MCP server, agent access, budget headroom, or someone onboarded."
+                />
+              )
             )}
+            <AwaitingLane
+              gates={myAwaiting}
+              heading="Documents you put forward"
+              onResolved={refreshApprovals}
+            />
         </TabsContent>
 
-        <TabsContent value="all">
+        <TabsContent value="all" className="space-y-6">
             {requestsQ.isLoading ? (
               <LoadingState variant="list" rows={4} />
             ) : (
-              <RequestTable
-                requests={requests}
-                onOpen={setSelected}
-                emptyTitle="No requests in scope"
-                emptyDescription="Requests raised in the business units and projects you can see appear here."
-              />
+              (requests.length > 0 || awaiting.length === 0) && (
+                <RequestTable
+                  requests={requests}
+                  onOpen={setSelected}
+                  emptyTitle="No requests in scope"
+                  emptyDescription="Requests raised in the business units and projects you can see appear here."
+                />
+              )
             )}
+            <AwaitingLane
+              gates={awaiting}
+              heading="Awaiting a decision"
+              onResolved={refreshApprovals}
+            />
         </TabsContent>
       </Tabs>
 

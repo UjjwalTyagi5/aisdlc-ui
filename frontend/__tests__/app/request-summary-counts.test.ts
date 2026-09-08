@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countRequests } from "@/components/requests/request-summary-cards";
+import { countRequests, raisedBy } from "@/components/requests/request-summary-cards";
 import type { ApprovalGate, GovernanceApproval } from "@/lib/schemas";
 
 /**
@@ -106,5 +106,31 @@ describe('"Raised by me"', () => {
     const c = countRequests([], null, [gate({ requestedById: null })]);
 
     expect(c.mine).toBe(0);
+  });
+});
+
+describe("the tile and the tab cannot disagree", () => {
+  it("counts exactly what the My requests tab lists", () => {
+    /** THE INVARIANT, made structural rather than asserted twice. Both the "Raised by
+     *  me" tile and the "My requests" tab call `raisedBy`, so there is one copy of the
+     *  predicate. Answering this question in two places is precisely how a tile reading
+     *  1 ended up above a tab saying "You haven't raised anything". */
+    const requests = [request({ requestedById: ME }), request()];
+    const gates = [gate({ requestedById: ME }), gate()];
+
+    const c = countRequests(requests, ME, gates);
+
+    expect(c.mine).toBe(
+      raisedBy(requests, ME).length + raisedBy(gates, ME).length,
+    );
+    expect(c.mine).toBe(2);
+  });
+
+  it("attributes nothing to a viewer with no identity", () => {
+    /** NON-VACUITY: null must not match null `requestedById`. */
+    const gates = [gate({ requestedById: null })];
+
+    expect(raisedBy(gates, null)).toEqual([]);
+    expect(countRequests([], null, gates).mine).toBe(0);
   });
 });
