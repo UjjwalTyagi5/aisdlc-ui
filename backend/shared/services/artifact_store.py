@@ -269,6 +269,7 @@ async def store_artifact(
     agent: str | None = None,
     stage: str | None = None,
     uploaded_by: str | None = None,
+    upload_note: str | None = None,
     content_type: str = "application/octet-stream",
     blob_client: Any = None,
 ) -> Artifact:
@@ -353,6 +354,7 @@ async def store_artifact(
         project_id=project_id,
         stage=stage or agent,
         uploaded_by=uploaded_by,
+        upload_note=upload_note,
         tenant_id=tenant_id,
         artifact_type=artifact_type,
         # Set on APPROVAL, when the bytes reach the final path. A pending artifact with

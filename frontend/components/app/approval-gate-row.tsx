@@ -12,7 +12,7 @@ import { ApprovalCard } from "@/components/app/approval-card";
 import { ClarificationCard } from "@/components/app/clarification-card";
 import { advanceCopilotRun } from "@/lib/api/runs";
 import { approveArtifact, rejectArtifact } from "@/lib/api/artifacts";
-import { PHASE_LABEL } from "@/lib/agents";
+import { PHASE_LABEL, phaseHref } from "@/lib/agents";
 import { CAPABILITY_CLASS_META } from "@/lib/capability-class";
 import type { ApprovalDecision, ApprovalGate } from "@/lib/schemas";
 
@@ -205,11 +205,32 @@ function GateMeta({ gate }: { gate: ApprovalGate }) {
           {gate.artifact.title}
         </span>
       )}
+      {/* WHY THIS IS BEING ASKED, from whoever put it forward. Without it the approver
+          has a filename and a name and has to go and ask. */}
+      {gate.note && (
+        <span
+          className="text-muted-foreground w-full basis-full italic"
+          title={gate.note}
+        >
+          &ldquo;{gate.note}&rdquo;
+        </span>
+      )}
+      {/* A HAND-UPLOADED DOCUMENT HAS NO RUN, so "Open run" would link to
+          `/runs/null`. It has somewhere better to go anyway: the stage page whose
+          Documents panel holds it, or the project itself when it belongs to no stage.
+          An approver following this link wants to see the document in context, not the
+          run that happened to produce it. */}
       <Link
-        href={`/runs/${gate.runId}`}
+        href={
+          gate.runId
+            ? `/runs/${gate.runId}`
+            : gate.phase
+              ? phaseHref(gate.projectId, gate.phase)
+              : `/projects/${gate.projectId}`
+        }
         className="text-brand-bright ml-auto inline-flex items-center gap-1 underline-offset-2 hover:underline"
       >
-        Open run
+        {gate.runId ? "Open run" : "Open documents"}
         <ExternalLink className="size-3" aria-hidden />
       </Link>
     </div>

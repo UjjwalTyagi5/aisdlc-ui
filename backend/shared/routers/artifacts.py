@@ -904,6 +904,7 @@ async def upload_artifact(
     file: UploadFile = File(...),
     stage: Optional[str] = Form(default=None),
     artifact_type: str = Form(default="document"),
+    note: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Add a document to a project by hand.
@@ -924,6 +925,10 @@ async def upload_artifact(
     demanding project administration for something that looks agent-level on screen.
 
     NO run_id. This is the case migration 0052 made `run_id` nullable for.
+
+    `note` IS THE UPLOADER'S REASON, and it is capped here rather than in the database.
+    A length the schema enforced would reject the whole upload — losing the file over a
+    long sentence — so an over-long note is truncated and the document still lands.
     """
     tenant_id = request.state.tenant_id
     uploader = getattr(request.state, "user_id", None)
@@ -963,6 +968,9 @@ async def upload_artifact(
         stage=stage,
         agent=stage,
         uploaded_by=uploader,
+        # Truncated, not refused: see the docstring. Blank-only notes become None so
+        # the UI has one empty case to render rather than two.
+        upload_note=(note or "").strip()[:2000] or None,
         artifact_type=artifact_type,
         filename=filename,
         data=data,

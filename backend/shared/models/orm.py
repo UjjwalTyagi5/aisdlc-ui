@@ -355,6 +355,10 @@ class Artifact(Base):
     #: Who put it here — deliberately distinct from `approved_by`. Collapsing the two
     #: would make self-approval invisible.
     uploaded_by: Mapped[str | None] = mapped_column(String(255))
+    #: Why this was put forward, in the uploader's words. Nullable and staying that
+    #: way — requiring one gets "." typed into a box, and a meaningless note is worse
+    #: than none because the approver still has to read it.
+    upload_note: Mapped[str | None] = mapped_column(Text)
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     blob_url: Mapped[str | None] = mapped_column(Text)
     blob_path: Mapped[str | None] = mapped_column(Text)

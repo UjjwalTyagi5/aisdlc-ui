@@ -294,6 +294,8 @@ export const Artifact = z.object({
   /** Who put the document forward. Deliberately distinct from `approvedBy` —
    *  collapsing the two would make self-approval invisible. */
   uploadedBy: z.string().nullish(),
+  /** Why it was put forward, in the uploader's or the agent's words. */
+  uploadNote: z.string().nullish(),
   /** Who accepted it, and when. Written on every approval since the gate shipped and
    *  surfaced for the first time here. Null while pending or rejected. */
   approvedBy: z.string().nullish(),

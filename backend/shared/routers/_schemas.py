@@ -574,6 +574,8 @@ class ArtifactOut(BaseModel):
     #: The owning stage, or None for a project-level document. A BACKEND stage name.
     stage: Optional[str] = None
     uploadedBy: Optional[str] = None
+    #: Why it was put forward, in the uploader's or the agent's words.
+    uploadNote: Optional[str] = None
     #: Written on every approval since the gate shipped, and never surfaced until now.
     approvedBy: Optional[str] = None
     approvedAt: Optional[str] = None
@@ -672,6 +674,7 @@ class ArtifactOut(BaseModel):
             scope="project" if _stage is None else "agent",
             stage=_stage,
             uploadedBy=getattr(artifact, "uploaded_by", None),
+            uploadNote=getattr(artifact, "upload_note", None),
             approvedBy=getattr(artifact, "approved_by", None),
             # NOT `_iso(...)` unguarded: it returns the EPOCH for None, which is
             # right for a required timestamp and absurd for this one — a pending

@@ -92,7 +92,8 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
 _LAST_UPLOAD_OK: dict[str, bool] = {}
 
 async def register_generated_file(
-    filename: str, file_path: str, url: str, *, stage: str, consented: bool | None = None
+    filename: str, file_path: str, url: str, *, stage: str,
+    consented: bool | None = None, note: str | None = None,
 ) -> None:
     """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
 
@@ -108,6 +109,12 @@ async def register_generated_file(
 
     `consented` is vestigial — kept in the signature for callers that still pass it,
     and no longer consulted.
+
+    `note` IS THE AGENT'S REASON for putting this forward, and it matters more here than
+    on a hand upload. A person uploading a file was in the conversation that produced it;
+    an approver receiving one an agent generated has no such context, and "why am I being
+    asked to accept this" is the first thing they need. Optional, because an agent with
+    nothing specific to say should say nothing rather than pad.
     """
     try:
         tenant_id = get_tenant_id()
@@ -195,6 +202,7 @@ async def register_generated_file(
                     data=data,
                     project_id=project_id,
                     agent=stage,
+                    upload_note=(note or "").strip()[:2000] or None,
                     content_type=content_type or "application/octet-stream",
                     blob_client=get_blob_client(),
                 )

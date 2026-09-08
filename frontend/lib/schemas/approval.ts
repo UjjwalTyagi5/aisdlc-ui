@@ -100,6 +100,8 @@ export const ApprovalGate = z.object({
   requestedAt: Timestamp,
   /** ISO SLA deadline when one applies — powers the countdown. */
   deadline: Timestamp.nullish(),
+  /** The uploader's reason, on document gates. */
+  note: z.string().nullish(),
   /** Approval gates only. */
   artifact: GateArtifactRef.nullish(),
   /** Clarification gates only. */

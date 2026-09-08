@@ -34,6 +34,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -202,12 +203,19 @@ export function DocumentList({
     });
   }, [scoped, search, statusFilter]);
 
+  // The file waiting on a note, and the note itself. Null when nothing is staged.
+  const [staged, setStaged] = React.useState<File | null>(null);
+  const [note, setNote] = React.useState("");
+
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
 
   const upload = useMutation({
-    mutationFn: (file: File) => uploadArtifact(projectId, file, { stage }),
+    mutationFn: ({ file, note }: { file: File; note: string }) =>
+      uploadArtifact(projectId, file, { stage, note }),
     onSuccess: (a) => {
+      setStaged(null);
+      setNote("");
       toast.success(`${a.title} uploaded — waiting for approval`);
       void refresh();
     },
@@ -233,7 +241,10 @@ export function DocumentList({
     // Reset first: picking the SAME file twice fires no change event otherwise, so a
     // retry after a failed upload would appear to do nothing.
     e.target.value = "";
-    if (file) upload.mutate(file);
+    // STAGED, NOT SENT. Uploading on pick left no moment to say why, and the note is
+    // worth most on the documents somebody deliberately puts forward. The upload is
+    // still one more click, not a dialog to dismiss.
+    if (file) setStaged(file);
   };
 
   return (
@@ -271,6 +282,54 @@ export function DocumentList({
           </>
         )}
       </header>
+
+      {/* THE NOTE, ASKED FOR ONCE AND NEVER REQUIRED. An approver's first question is
+          "why am I being asked to accept this", and the answer used to live only in
+          whatever conversation happened around the upload. Optional on purpose: a
+          mandatory box gets "." typed into it, and a meaningless note is worse than
+          none because the approver still has to read it. */}
+      {staged && (
+        <div className="border-line-soft bg-surface-2 space-y-2 rounded-lg border p-3">
+          <div className="flex items-center gap-2 text-xs">
+            <FileText className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="truncate font-medium">{staged.name}</span>
+          </div>
+          <Textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={2}
+            maxLength={2000}
+            placeholder="Why are you putting this forward? (optional)"
+            aria-label="Note for the approver"
+            className="text-xs"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={upload.isPending}
+              onClick={() => {
+                setStaged(null);
+                setNote("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={upload.isPending}
+              onClick={() => upload.mutate({ file: staged, note })}
+            >
+              {upload.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" />
+              )}
+              Upload
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* SHOWN ONLY ONCE THERE IS SOMETHING TO SIFT. A search box above two documents is
           furniture; the threshold is where scanning the list stops being faster than
@@ -392,6 +451,18 @@ export function DocumentList({
                         ? `added by ${a.uploadedBy}`
                         : ""}
                 </span>
+
+                {/* THE UPLOADER'S REASON, shown to whoever has to decide. It sits on
+                    its own line rather than in the meta run above, because that line is
+                    scanned and this is read. */}
+                {a.uploadNote && (
+                  <span
+                    className="text-muted-foreground w-full basis-full text-xs italic"
+                    title={a.uploadNote}
+                  >
+                    &ldquo;{a.uploadNote}&rdquo;
+                  </span>
+                )}
 
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                   {/* `downloadUrl` IS the decision, not a hint. The backend sets it

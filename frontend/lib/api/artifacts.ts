@@ -116,12 +116,15 @@ export const rejectArtifact = (id: ArtifactId, reason?: string) =>
 export async function uploadArtifact(
   projectId: ProjectId,
   file: File,
-  opts: { stage?: string | null; artifactType?: string } = {},
+  opts: { stage?: string | null; artifactType?: string; note?: string } = {},
 ): Promise<Artifact> {
   const form = new FormData();
   form.append("file", file);
   if (opts.stage) form.append("stage", opts.stage);
   if (opts.artifactType) form.append("artifact_type", opts.artifactType);
+  // Only when there is something to say — an empty field must not become an empty
+  // note, so the approver's "why" is either present or absent, never blank.
+  if (opts.note?.trim()) form.append("note", opts.note.trim());
 
   const res = await fetch(
     `/api/projects/${encodeURIComponent(projectId)}/artifacts/upload`,

@@ -89,6 +89,10 @@ class ApprovalGateOut(BaseModel):
     summary: str
     requestedBy: str
     requestedAt: str
+    #: The uploader's reason, on document rows. An approver's first question is "why am
+    #: I being asked to accept this", and making them open another page to find out is
+    #: how a queue turns into a list people skip.
+    note: Optional[str] = None
     deadline: Optional[str] = None
     artifact: Optional[GateArtifactRef] = None
     question: Optional[str] = None
@@ -170,7 +174,7 @@ async def _pending_documents(db: AsyncSession, request: Request) -> list[Approva
     rows = (await db.execute(
         text(
             "SELECT a.id, a.stage, a.run_id, a.blob_path, a.artifact_type, "
-            "       a.uploaded_by, a.created_at, "
+            "       a.uploaded_by, a.upload_note, a.created_at, "
             "       p.id AS project_id, p.display_name AS project_name "
             "FROM artifacts a JOIN projects p ON p.id = a.project_id "
             "WHERE a.approval_status = 'pending' AND a.artifact_type <> 'story'"
@@ -179,6 +183,18 @@ async def _pending_documents(db: AsyncSession, request: Request) -> list[Approva
         ),
         {"ws": allowed or []},
     )).fetchall()
+
+    # WHO UPLOADED IT, AS A NAME. `uploaded_by` stores `request.state.user_id` — the JWT
+    # `sub`, a UUID — so the queue rendered "09e55932-a6c1-4d8c-b6ed-7df2d013b879" where
+    # an approver expects a colleague. `shared/services/actor_labels` exists for exactly
+    # this and its docstring even cites that id; the Documents list already used it and
+    # this queue did not. One lookup for the whole response, not one per row.
+    from shared.services.actor_labels import actor_labels, relabel  # noqa: PLC0415
+
+    labels = await actor_labels(
+        db, str(getattr(request.state, "tenant_id", "") or ""),
+        [r.uploaded_by for r in rows],
+    )
 
     out: list[ApprovalGateOut] = []
     for r in rows:
@@ -212,8 +228,9 @@ async def _pending_documents(db: AsyncSession, request: Request) -> list[Approva
             # The person who put it there, unlike a run gate, which is always the agent
             # that finished the stage. Naming them is what lets an approver tell an
             # expected upload from one they should ask about.
-            requestedBy=r.uploaded_by or "agent",
+            requestedBy=relabel(r.uploaded_by, labels) or "agent",
             requestedAt=r.created_at.astimezone(timezone.utc).isoformat(),
+            note=r.upload_note,
             artifact=GateArtifactRef(id=str(r.id), title=name, type=r.artifact_type or "document"),
         ))
     return out
