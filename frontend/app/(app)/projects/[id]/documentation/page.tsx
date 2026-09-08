@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   BookText, Boxes, Download, FileText, GitBranch, GitPullRequest, History,
   ListChecks, MessageSquare, Notebook, ScrollText, Sparkles, BookOpen,
+  Users, GraduationCap,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -32,7 +33,8 @@ const TYPE_LABEL: Record<string, string> = {
   doc_set: "Doc set", overview: "Overview", sdd: "Design", api_reference: "API",
   code_summary: "Code", changelog: "Changelog", release_notes: "Release notes",
   rtm: "RTM", run_summary: "Run summary", compliance: "Compliance",
-  runbook_update: "Runbook update", knowledge_article: "Knowledge article", custom: "Doc",
+  runbook_update: "Runbook update", knowledge_article: "Knowledge article",
+  handover: "Handover", kt: "KT", custom: "Doc",
 };
 
 interface QuickAction { key: string; label: string; icon: React.ComponentType<{ className?: string }>; prompt: string; }
@@ -45,6 +47,8 @@ const QUICK_ACTIONS: QuickAction[] = [
   { key: "compliance", label: "Compliance pack", icon: Boxes, prompt: "Generate a SOC 2 / ISO 27001 compliance evidence pack from the available gate decisions, sign-offs, SBOM, and audit trail, and save it." },
   { key: "runbook_update", label: "Runbook update", icon: ScrollText, prompt: "Read the existing runbook for this system from the connected Azure DevOps Wiki or SharePoint, diff it against what changed on this branch/PR, and save a runbook update covering the sections that need to change and their updated content." },
   { key: "knowledge_article", label: "Knowledge article", icon: BookOpen, prompt: "Check whether a knowledge article already exists for the issue fixed on this branch/PR. If one exists, propose an update to it; if not, generate a new knowledge article from the standard template. Save it." },
+  { key: "handover", label: "Handover pack", icon: Users, prompt: "Produce a handover document for a team taking over ownership of this system. Ground it in the repo, the approved project documents and any connected runbook: scope of the handover and what is excluded, systems and the access each needs, how it is deployed, monitored and rolled back, work in flight, known risks with severity, and key contacts with the escalation path. Where something is genuinely undocumented, say so and name who to ask." },
+  { key: "kt", label: "KT document", icon: GraduationCap, prompt: "Produce a knowledge-transfer document for somebody joining this project. Ground it in the repo and the approved project documents: what the system does and who depends on it, an architecture tour referencing real paths, the environments and the exact steps to run it locally, the common tasks they will be asked to do, and where everything lives. Expand every project-specific acronym." },
 ];
 
 export default function DocumentationPage() {

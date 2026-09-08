@@ -209,6 +209,22 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         project_id = _effective_project
         s.project_id = _effective_project
 
+        # THE TOOL CONTEXT, and without it several of this agent's tools are inert
+        # rather than broken — which is why nobody noticed. `chat_artifacts` and
+        # `shared/tools/project_documents` both read the tenant and project from
+        # `ws_helper` contextvars, and this handler was the only agent entry point that
+        # never set them: the requirements, design and PM APIs all do. So
+        # `list_project_documents` answered "no project context in this session" and a
+        # generated document was never recorded as an artifact at all. Both failures
+        # look like "there is nothing here" rather than an error.
+        #
+        # `doc_tools._sharepoint_session` already worked around this by reading
+        # `s.project_id` off the session state; setting the contextvars fixes it at the
+        # source instead, for every tool that expects the same convention.
+        from config.ws_helper import set_project_id, set_tenant_id  # noqa: PLC0415
+        set_tenant_id(_effective_tenant or None)
+        set_project_id(_effective_project or None)
+
         if not s.target_bound:
             prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
             if prepared:
