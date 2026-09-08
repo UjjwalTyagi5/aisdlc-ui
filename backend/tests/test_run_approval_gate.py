@@ -295,3 +295,70 @@ async def test_the_past_tense_the_ui_sends_is_accepted(run_at_requirements):
     assert r.status_code == 200, r.text
     assert r.json()["decision"] == "approve"
     assert await _gate_pending(t["org"], t["run"]) is False
+
+
+# -- the project admin is the stage owner's PEER -------------------------------
+#
+# A Project Admin owns every agent on their project by default, so they and the stage's
+# own role are equal approvers: either may decide, whoever gets there first, and one
+# decision closes the gate. `_artifact_for_decision` has always worked that way for
+# documents; this route had only the stage-permission half, so a Project Admin could not
+# sign off a stage on their own project — and the queue could not even show them the
+# gate, because it lists what the viewer's permissions cover.
+
+
+async def _project_admin(t) -> str:
+    """Bound as `project_admin` ON THE PROJECT — administration, not a stage permission."""
+    user = f"padmin-{_uuid.uuid4()}"
+    await grant_role(user, t["proj"], "project_admin", tenant_id=t["org"], scope_kind="project")
+    return user
+
+
+@pytest.mark.asyncio
+async def test_a_project_admin_can_approve_without_the_stage_permission(run_at_requirements):
+    """THE POINT. No `artifact:approve_requirements` in the token at all — the token
+    carries `approve`, which is what a Project Admin actually holds — and the decision is
+    accepted because they administer the project."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+    user = await _project_admin(t)
+
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(user, t["org"], t["bu"], ["artifact:view", "approve"]),
+        json={"decision": "approve", "reason": "signed off by the project admin"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert await _gate_pending(t["org"], t["run"]) is False
+
+
+@pytest.mark.asyncio
+async def test_administering_a_DIFFERENT_project_is_not_enough(run_at_requirements):
+    """NON-VACUITY, and the rule that keeps the widening narrow. Holding project_admin
+    somewhere else in the tenant must not approve THIS project's gates — otherwise the
+    second route would be "any admin anywhere", which is not what administering a project
+    means."""
+    t = run_at_requirements
+    await _raise_the_gate(t["org"], t["run"])
+
+    other_project = str(_uuid.uuid4())
+    async with get_db_session_for_tenant(t["org"]) as s:
+        await s.execute(text(
+            "INSERT INTO projects (id, workspace_id, tenant_id, display_name) "
+            "VALUES (:i, :w, :t, 'Somewhere Else')"
+        ), {"i": other_project, "w": t["bu"], "t": t["org"]})
+        await s.commit()
+
+    user = f"elsewhere-{_uuid.uuid4()}"
+    await grant_role(user, other_project, "project_admin", tenant_id=t["org"],
+                     scope_kind="project")
+
+    r = _client().post(
+        f"/runs/{t['run']}/approvals",
+        headers=_headers(user, t["org"], t["bu"], ["artifact:view", "approve"]),
+        json={"decision": "approve"},
+    )
+
+    assert r.status_code in (403, 404), r.text
+    assert await _gate_pending(t["org"], t["run"]) is True

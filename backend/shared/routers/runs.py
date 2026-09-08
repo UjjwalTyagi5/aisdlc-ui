@@ -923,8 +923,40 @@ async def record_approval(
     stage = run.current_stage or run.stage or "requirements"
     actor_permissions: list[str] = getattr(request.state, "permissions", []) or []
     required_permission = _PHASE_PERMISSION.get(stage)
-    if not required_permission or not has_permission(actor_permissions, required_permission):
-        # Unknown/uncovered stage OR missing permission ⇒ 403 before anything is
+
+    # TWO EQUAL APPROVERS, matching `_artifact_for_decision` — the stage's own owner, or
+    # whoever administers the project. A Project Admin owns every agent on their project
+    # by default, so the two are peers: either may decide, whoever gets there first, and
+    # one decision closes the gate. Neither waits on the other and nothing escalates.
+    #
+    # THIS ROUTE ONLY HAD THE FIRST HALF, which is why a Project Admin could not sign off
+    # a stage on their own project — and why the queue could not even show them the
+    # gate, since it lists what the viewer's permissions cover. Documents already worked
+    # this way; run gates were the outlier.
+    #
+    # `assert_can_administer_project` is the same helper the settings and document routes
+    # use, so administration has ONE definition rather than a second one invented here.
+    # It answers 404 for someone who does not run the project; caught and turned into the
+    # 403 this route already returns, so the refusal reads the same whichever half failed
+    # and neither leaks which permission was missing.
+    may_approve = bool(required_permission) and has_permission(
+        actor_permissions, required_permission
+    )
+    if not may_approve and required_permission:
+        from shared.authz.project_scope import (  # noqa: PLC0415
+            assert_can_administer_project,
+        )
+
+        project = await db.get(Project, run.project_id)
+        if project is not None:
+            try:
+                await assert_can_administer_project(db, request, project)
+                may_approve = True
+            except HTTPException:
+                may_approve = False
+
+    if not may_approve:
+        # Unknown/uncovered stage OR neither route to approval ⇒ 403 before anything is
         # written (no permission-name leak, consistent with copilot_advance).
         raise HTTPException(
             status_code=403,
