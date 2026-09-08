@@ -34,6 +34,10 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useSession } from "@/hooks/use-session";
@@ -100,6 +104,10 @@ export function DocumentList({
   const queryClient = useQueryClient();
   const inputRef = React.useRef<HTMLInputElement>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
+  const [search, setSearch] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState<
+    "all" | "approved" | "pending" | "rejected"
+  >("all");
   // DELETION IS A REQUEST, NOT AN ACTION, and it comes from the SHARED hook rather
   // than a second copy here. `ArtifactList` on Requirements, Design and StageWorkbench
   // uses the same one, and a delete that asks for approval on one screen and destroys
@@ -121,7 +129,10 @@ export function DocumentList({
   });
   const source = items === undefined ? ownQ.data : items;
 
-  const documents = React.useMemo(
+  // FILTERING IS SEPARATE FROM SCOPING. `scoped` is what belongs on this screen at all;
+  // `documents` is what the person is currently looking for within that. Collapsing the
+  // two would make an empty search look like an empty project.
+  const scoped = React.useMemo(
     () =>
       (source ?? []).filter(
         (a) =>
@@ -138,6 +149,17 @@ export function DocumentList({
       ),
     [source, stage],
   );
+
+  const documents = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return scoped.filter((a) => {
+      if (statusFilter !== "all" && (a.status ?? "pending") !== statusFilter) return false;
+      // Title only. The approver's email is on the row too, but matching it would make
+      // typing a colleague's name return documents they merely signed, which is a
+      // different question from "find the file I am thinking of".
+      return !q || a.title.toLowerCase().includes(q);
+    });
+  }, [scoped, search, statusFilter]);
 
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
@@ -209,7 +231,36 @@ export function DocumentList({
         )}
       </header>
 
-      {documents.length === 0 ? (
+      {/* SHOWN ONLY ONCE THERE IS SOMETHING TO SIFT. A search box above two documents is
+          furniture; the threshold is where scanning the list stops being faster than
+          typing. Hidden rather than disabled, so it does not read as broken. */}
+      {scoped.length > 3 && (
+        <div className="flex gap-2">
+          <Input
+            placeholder="Search documents…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 flex-1 font-sans text-sm"
+            aria-label="Search documents"
+          />
+          <Select
+            value={statusFilter}
+            onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
+          >
+            <SelectTrigger className="h-8 w-32 font-sans text-xs" aria-label="Filter by status">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any status</SelectItem>
+              <SelectItem value="approved">Approved</SelectItem>
+              <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="rejected">Rejected</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {scoped.length === 0 ? (
         <EmptyState
           title="No documents yet"
           description={
@@ -218,8 +269,30 @@ export function DocumentList({
               : "Nothing has been added to this project's record yet."
           }
         />
+      ) : documents.length === 0 ? (
+        // A DIFFERENT ANSWER FROM "no documents yet", because the situations differ: the
+        // project HAS documents and this filter excludes them all. Saying "none yet"
+        // here would send someone looking for a missing upload.
+        <p className="text-muted-foreground rounded-md border border-dashed p-3 text-xs">
+          No documents match. {scoped.length} on this screen —{" "}
+          <button
+            type="button"
+            className="underline underline-offset-2"
+            onClick={() => {
+              setSearch("");
+              setStatusFilter("all");
+            }}
+          >
+            clear the filters
+          </button>
+          .
+        </p>
       ) : (
-        <ul className="divide-y rounded-md border">
+        // CAPPED AND SCROLLED. Every document added made this panel taller and pushed
+        // Stories further down the page — at fifteen documents the list below it was
+        // off-screen entirely. `max-h` with its own overflow keeps the panel a fixed
+        // share of the column no matter how much lands in it.
+        <ul className="max-h-80 divide-y overflow-y-auto rounded-md border">
           {documents.map((a) => {
             const chip = statusChip(a);
             const isProjectWide = a.scope === "project";
