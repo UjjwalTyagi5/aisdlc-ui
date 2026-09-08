@@ -22,14 +22,28 @@ import type { Phase } from "@/lib/schemas/enums";
  * routing decides what is theirs to act on.
  */
 
-/** First role that owns this phase's gate — the one the UI names as the approver. */
-function owningRoleFor(phase: Phase): string {
-  const owner = ROLE_ORDER.find((role: PlatformRole) => {
-    const involvement = AGENT_OWNERSHIP[role][phase];
-    return involvement === "owner" || involvement === "primary";
-  });
-  // No owner in the matrix means the Project Admin fallback approves it — the
-  // same fallback the gate itself falls back to, so naming it is accurate.
+/** First role that owns this phase's gate — the one the UI names as the approver.
+ *
+ * THE FALLBACK IS EXCLUDED FROM THE SEARCH, and leaving it in made this function
+ * return "Project Admin" for every gate ever queued. `project_admin` is `ALL_OWNER`
+ * in the matrix — it is the fallback approver on every agent, by design — and it sits
+ * at index 3 of ROLE_ORDER, ahead of `ba` and every other delivery role. So `find`
+ * matched it first, always, and a Requirements gate owned by a Business Analyst was
+ * labelled with the fallback instead of its actual owner. The comment here used to say
+ * "no owner in the matrix means the Project Admin fallback approves it", describing a
+ * branch that was in fact the only outcome.
+ *
+ * A null phase is the genuine no-owner case: a project-wide document belongs to no
+ * stage, so no delivery role owns it and project administration really is the answer.
+ */
+function owningRoleFor(phase: Phase | null): string {
+  const owner = phase
+    ? ROLE_ORDER.find((role: PlatformRole) => {
+        if (role === "project_admin") return false;
+        const involvement = AGENT_OWNERSHIP[role][phase];
+        return involvement === "owner" || involvement === "primary";
+      })
+    : undefined;
   return owner ? ROLE_META[owner].label : ROLE_META.project_admin.label;
 }
 
@@ -43,7 +57,7 @@ export async function GET(req: NextRequest) {
   return Response.json(
     gates.map((gate) => ({
       ...gate,
-      waitingForRole: owningRoleFor(gate["phase"] as Phase),
+      waitingForRole: owningRoleFor(gate["phase"] as Phase | null),
     })),
   );
 }

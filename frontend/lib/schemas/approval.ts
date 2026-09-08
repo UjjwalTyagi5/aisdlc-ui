@@ -6,9 +6,7 @@ import { Timestamp } from "./primitives";
 
 export const ApprovalEvent = z.object({
   id: ApprovalId,
-  /** Null on a document gate: `artifacts.run_id` is nullable, and an uploaded
-   *  document never had a run. Always present on a run gate. */
-  runId: RunId.nullable(),
+  runId: RunId,
   artifactId: ArtifactId.nullable(),
   decision: ApprovalDecision,
   decidedBy: UserId,
@@ -63,7 +61,9 @@ export const ApprovalGate = z.object({
   /** Stable gate id (e.g. `${runId}:${phase}`) — the decision route param. */
   id: z.string().min(1),
   type: ApprovalGateType,
-  runId: RunId,
+  /** Null on a document gate: `artifacts.run_id` is nullable, and an uploaded
+   *  document never had a run. Always present on a run gate. */
+  runId: RunId.nullable(),
   projectId: ProjectId,
   projectName: z.string(),
   /** Null on a PROJECT-WIDE document, which belongs to no stage and so to no agent. */
