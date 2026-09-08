@@ -20,7 +20,6 @@ import {
   ProjectsToolbar,
   resolveProjectsView,
   type ProjectsToolbarState,
-  type TemplateFilter,
 } from "@/components/app/projects-toolbar";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 import { useRawSession } from "@/components/auth/session-provider";
@@ -63,7 +62,6 @@ export default function ProjectsPage() {
 
   const toolbarState: ProjectsToolbarState = {
     search: searchParams.get("q") ?? "",
-    template: (searchParams.get("template") as TemplateFilter) || "all",
     sort: (searchParams.get("sort") as ProjectsToolbarState["sort"]) || "recent",
     showArchived: searchParams.get("archived") === "1",
     view,
@@ -81,7 +79,6 @@ export default function ProjectsPage() {
         }
       };
       if (patch.search !== undefined) set("q", patch.search);
-      if (patch.template !== undefined) set("template", patch.template, "all");
       if (patch.sort !== undefined) set("sort", patch.sort, "recent");
       if (patch.showArchived !== undefined) set("archived", patch.showArchived ? "1" : "");
       // Default-aware: writing ?view= for the view this viewer already defaults to
@@ -123,27 +120,23 @@ export default function ProjectsPage() {
   );
 
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: qk.projects.list({ ...filters, template: toolbarState.template }),
+    queryKey: qk.projects.list(filters),
     queryFn: () => listProjects(filters),
     placeholderData: (prev) => prev,
   });
   const { data: workspaces = [] } = useWorkspaces();
   const { scope, level, isOrgWide, managedProjectIds, projectIds } = useAccessScope();
 
-  // Client-side finishing moves: template filter + sort (server handles search/archive/page).
+  // Client-side finishing move: sort (the server handles search/archive/page).
   const items = React.useMemo(() => {
     const base = data?.items ?? [];
-    let next = base.slice();
-    if (toolbarState.template !== "all") {
-      next = next.filter((p) => p.template === toolbarState.template);
-    }
+    const next = base.slice();
     next.sort((a, b) => {
       if (toolbarState.sort === "name") return a.name.localeCompare(b.name);
-      if (toolbarState.sort === "template") return a.template.localeCompare(b.template);
       return b.lastActivityAt.localeCompare(a.lastActivityAt);
     });
     return next;
-  }, [data, toolbarState.template, toolbarState.sort]);
+  }, [data, toolbarState.sort]);
 
   // Group by Business Unit (PRD §12 scope hierarchy) — the org-wide project
   // count is meaningless on its own; which BU owns what is the real question.
@@ -343,11 +336,11 @@ export default function ProjectsPage() {
         // an active filter that matched nothing, or a genuinely empty scope.
         // They previously all rendered as the same "no projects" card, which
         // reads as a broken page to the one person who most needs clarity.
-        (unbound && !toolbarState.search && toolbarState.template === "all" ? (
+        (unbound && !toolbarState.search ? (
           <NoScopeAccess resource="projects" />
         ) : (
           <EmptyProjects
-            isFiltered={!!toolbarState.search || toolbarState.template !== "all"}
+            isFiltered={!!toolbarState.search}
             canCreate={canCreate}
             onCreateProject={() => setDialogOpen(true)}
           />
