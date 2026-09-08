@@ -108,3 +108,60 @@ describe("filtering a story list", () => {
     expect(list?.className).toContain("overflow-y-auto");
   });
 });
+
+/**
+ * Which row is the open one.
+ *
+ * SELECTION LOOKED LIKE HOVER. The active row set `bg-surface-1`, which is the token the
+ * hover rule sets — so the row whose story filled the detail pane was styled exactly
+ * like whichever row the pointer happened to be over, and on a list of fifteen nothing
+ * said which was which.
+ */
+describe("showing which story is open", () => {
+  const selected = MIXED[1]! as { id: string };
+
+  it("marks the open row for assistive tech", () => {
+    render(
+      <ArtifactList
+        items={MIXED as never}
+        noun="stories"
+        selectedId={selected.id}
+        onSelect={() => {}}
+      />,
+    );
+    const open = screen.getAllByRole("option").find((o) => o.getAttribute("aria-selected") === "true");
+    expect(open).toBeTruthy();
+    expect(open?.textContent).toContain("Payments epic");
+  });
+
+  it("styles it differently from hover rather than identically", () => {
+    /** THE ACTUAL BUG. `bg-surface-1` is the hover token; reusing it made the two
+     *  states indistinguishable. Asserted on the class because jsdom paints nothing. */
+    const { container } = render(
+      <ArtifactList
+        items={MIXED as never}
+        noun="stories"
+        selectedId={selected.id}
+        onSelect={() => {}}
+      />,
+    );
+    const buttons = Array.from(container.querySelectorAll("li button"));
+    const openBtn = buttons.find((b) => b.textContent?.includes("Payments epic"));
+    const otherBtn = buttons.find((b) => b.textContent?.includes("Login flow"));
+
+    expect(openBtn?.className).toContain("bg-surface-2");
+    expect(openBtn?.className).toContain("brand-bright");
+    // The unselected row carries neither, so the distinction is real rather than
+    // something every row happens to have.
+    expect(otherBtn?.className).not.toContain("bg-surface-2");
+    expect(otherBtn?.className).not.toContain("brand-bright");
+  });
+
+  it("marks nothing when no story is open", () => {
+    render(<ArtifactList items={MIXED as never} noun="stories" onSelect={() => {}} />);
+    const anyOpen = screen
+      .getAllByRole("option")
+      .some((o) => o.getAttribute("aria-selected") === "true");
+    expect(anyOpen).toBe(false);
+  });
+});

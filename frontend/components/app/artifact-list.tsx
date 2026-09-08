@@ -206,6 +206,13 @@ export function ArtifactList({
     return next;
   }, [items, search, typeFilter, statusFilter, workItemFilter, sortKey]);
 
+  const selectedRowRef = React.useRef<HTMLLIElement | null>(null);
+  React.useEffect(() => {
+    // `nearest` rather than `center`: clicking a row that is already fully visible must
+    // not jerk the list to re-centre it under the pointer.
+    selectedRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
     if (!onSelect || filtered.length === 0) return;
     const idx = filtered.findIndex((a) => a.id === selectedId);
@@ -330,7 +337,16 @@ export function ArtifactList({
             const phaseBadgeClass = PHASE_BADGE_CLASS[a.phase] ?? "text-muted-foreground bg-muted";
             const isBlob = BLOB_TYPES.has(a.type) && !!a.downloadUrl;
             return (
-              <li key={a.id} role="option" aria-selected={active} className="flex items-center gap-2">
+              <li
+                key={a.id}
+                role="option"
+                aria-selected={active}
+                // SCROLLED INTO VIEW, because this list now has its own scrollbar. A
+                // selected row below the fold is invisible however it is styled, and
+                // arrow-key navigation walks straight off the bottom without it.
+                ref={active ? selectedRowRef : undefined}
+                className="flex items-center gap-2"
+              >
                 {onToggleSelect && (
                   <Checkbox
                     className="size-4 shrink-0 rounded-full"
@@ -346,8 +362,14 @@ export function ArtifactList({
                     "group flex min-w-0 flex-1 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
                     "hover:bg-surface-1 hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                    // SELECTION MUST NOT LOOK LIKE HOVER. `active` used `bg-surface-1`
+                    // — the very token the hover rule above sets — so the row you had
+                    // opened was styled identically to whichever row the pointer
+                    // happened to be over, and on a list of fifteen there was nothing
+                    // to say which one the detail pane belonged to. The brand border
+                    // and heavier surface are reserved for selection alone.
                     active
-                      ? "bg-surface-1 border-line-soft"
+                      ? "border-[oklch(var(--brand-bright))] bg-surface-2 shadow-sm"
                       : "border-transparent hover:border-line-soft",
                     "mb-1",
                   )}
