@@ -211,9 +211,14 @@ describe("a pending document names who it waits on", () => {
       </QueryClientProvider>,
     );
 
-    // Requirements is owned by the BA; a Project Admin is the fallback on every agent,
-    // so both are named rather than only the fallback.
-    expect(screen.getByText(/waiting on .*Business Analyst.* or a project admin/i)).toBeTruthy();
+    // Requirements is owned by the BA, and a Project Admin owns every agent on their
+    // project — PEERS, not an escalation. "either can approve" is the load-bearing
+    // half: without it the line reads as a fallback used when the BA is unavailable,
+    // which misdescribes both who may act and how many approvals are needed.
+    expect(
+      screen.getByText(/waiting on .*Business Analyst.* or Project Admin/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/either can approve/i)).toBeTruthy();
   });
 
   it("says WAITING ON YOU to someone who can decide it", async () => {

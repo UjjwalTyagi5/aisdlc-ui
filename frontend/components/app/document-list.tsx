@@ -60,24 +60,27 @@ function stageLabel(stage?: string | null): string {
 
 /** Who a pending document is waiting on.
  *
- * MIRRORS `_artifact_for_decision`: the stage's own owner, or project administration
- * for a project-wide document, which has no owning agent. Named rather than left to
- * "Pending", because a status that says something is stuck without saying whose move it
- * is sends people to ask in chat — which is the question this column exists to answer.
+ * MIRRORS `_artifact_for_decision`: the stage's own owner, or project administration —
+ * a project-wide document has no owning agent, so administration is the only route.
+ * Named rather than left to "Pending", because a status that says something is stuck
+ * without saying whose move it is sends people to ask in chat.
  *
- * A Project Admin is the fallback approver on every agent, so they are mentioned as the
- * alternative rather than presented as the only route: naming just them would hide the
- * owner whose decision this properly is.
+ * TWO EQUAL APPROVERS, NOT AN ESCALATION. A Project Admin owns every agent on their
+ * project, so they and the stage's own role are peers here: either may decide, whoever
+ * gets there first, and one approval closes it. Nothing waits for the other and nothing
+ * is escalated to anybody. The wording says "either can approve" for that reason —
+ * "X or a project admin" reads as a fallback used when X is unavailable, which would
+ * misdescribe both who may act and how many decisions are needed.
  */
 function waitingOn(a: Artifact): string {
-  if (a.scope === "project" || !a.stage) return "a project admin";
+  if (a.scope === "project" || !a.stage) return "a Project Admin";
   const phase = (a.stage === "code_review" ? "review" : a.stage) as Phase;
   try {
-    return `${ownerRoleLabel(phase)} or a project admin`;
+    return `${ownerRoleLabel(phase)} or Project Admin — either can approve`;
   } catch {
-    // An unknown stage is not worth crashing a list over — the fallback approver is
-    // correct for every agent regardless of who else owns it.
-    return "a project admin";
+    // An unknown stage is not worth crashing a list over, and a Project Admin can
+    // decide any document on their project whatever agent it belongs to.
+    return "a Project Admin";
   }
 }
 
