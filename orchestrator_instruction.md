@@ -1410,6 +1410,46 @@ already dead. There is now a test asserting the mapper declares what the loader 
 
 Verified against the reported run: **0 characters before, 4,896 after.**
 
+### 18.10 A turn says which files it carried (2026-09-08)
+
+The composer already drew a chip per stored file, from `GET /runs/{id}/attachments`. It
+was not enough. That row answers *what does this run hold?* — and the backend feeds
+**every** stored attachment into **every** turn, so the row is unchanged from the moment
+a file lands until the run ends. The question a user actually asks is narrower and comes
+later: looking back at their own message, *did the PRD go with THAT one?* The run-level
+row cannot answer it, because it looks identical whether the file went with this turn,
+the one before, or two turns after.
+
+So a sent turn now carries its own names, stamped on the user's bubble — the same
+gesture `agent-chat-drawer.tsx` makes in the standalone agent chats, because it is the
+same question in both surfaces.
+
+**Only the files stored since the last turn.** `announcedAttachmentsRef` in the cockpit
+holds what has already been named. Without it the whole run list would be stamped on
+every bubble, and one PRD attached once would read as five uploads across five turns.
+The set is keyed on url, not name: the url is
+`/generated/{user}/attachments/{run_id}/{name}`, so an entry cannot collide with a file
+on another run — which is why it is deliberately **not** cleared when the conversation
+switches. Clearing it changes exactly one case, and changes it for the worse: reopening
+a conversation left and returned to would re-announce a file an earlier turn had already
+carried.
+
+**The names never reach the wire.** `use-orchestrator-socket` takes them for display and
+omits them from the frame. The backend builds the agent's context from the run's own
+attachment store; a list on the frame would be a second source for the same thing, free
+to diverge the moment an upload landed between the cockpit's last refetch and the send.
+A test asserts no sent frame carries the field.
+
+**Mutation testing.** Seven mutants, all killed. Two survived first time and both were
+real: nothing fed `Thread` an empty attachment list (the hook omits the field rather
+than stamping `[]`, so no test covered a component that also takes messages from
+`hydrate`), and the conversation-switch reset turned out to be redundant — killed by
+deleting the line rather than by testing it.
+
+**Not verified in a live browser.** The Chrome available to this session does not reach
+this machine's dev server — a probe file served by `localhost:3000` to `curl` here comes
+back 404 in that browser. Unit and mutation coverage only.
+
 ### 18.8 Left open, deliberately
 
 - **RLS (#1)** — unchanged, and still the operator's call. See 17.6.

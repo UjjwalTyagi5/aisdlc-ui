@@ -312,6 +312,25 @@ export function OrchestratorCockpit({
   // error, and that effect is written before the upload handler that sets it.
   const [attaching, setAttaching] = React.useState(false);
   const [attachError, setAttachError] = React.useState<string | null>(null);
+  /**
+   * Which stored files have already been named on a sent turn.
+   *
+   * The backend feeds EVERY attachment on the run into EVERY turn, so a turn's chips
+   * are not a claim about what the agent can see — they answer the narrower question
+   * the user asks looking back at their own message: which files went with THIS one.
+   * Without this set the run's whole list would be stamped on every bubble, and one
+   * PRD attached once would read as five uploads across five turns.
+   *
+   * Keyed on url, which is unique per stored file; the name is not (the same BRD can
+   * be attached to two different runs, and re-attaching one file overwrites in place).
+   *
+   * NOT cleared when the conversation switches, and it does not need to be: the url is
+   * `/generated/{user}/attachments/{run_id}/{name}`, so an entry cannot match a file on
+   * another run. Clearing it would be actively worse on the ONE case it changes —
+   * reopening a conversation left and returned to, where it would re-announce a file on
+   * the next turn that an earlier turn already carried.
+   */
+  const announcedAttachmentsRef = React.useRef<Set<string>>(new Set());
 
   const ensureRun = React.useCallback(async (): Promise<string> => {
     if (runIdRef.current) return runIdRef.current;
@@ -468,16 +487,6 @@ export function OrchestratorCockpit({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, runId]);
 
-  const handleSend = React.useCallback(
-    (text: string) => {
-      if (!projectId) return;
-      // `agent` may be null — that is the routed path, and the hook omits the
-      // field entirely rather than sending a null the protocol does not declare.
-      sendTurn({ text, resolveRunId: ensureRun, modelKey });
-    },
-    [projectId, sendTurn, ensureRun, modelKey],
-  );
-
   // ── Attachments ───────────────────────────────────────────────────────────
   //
   // What the user gave this run. The backend feeds every stored attachment into every
@@ -526,6 +535,30 @@ export function OrchestratorCockpit({
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [projectId, ensureRun, attachmentsQ.refetch],
+  );
+
+
+  const handleSend = React.useCallback(
+    (text: string) => {
+      if (!projectId) return;
+      // Everything stored since the last turn went out. Read from the SERVER's list,
+      // like the chips are — a name taken from the picked `File` would appear on the
+      // bubble whether or not the upload landed, which is the failure this whole
+      // feature is written against.
+      const fresh = (attachmentsQ.data ?? []).filter(
+        (a) => !announcedAttachmentsRef.current.has(a.url || a.name),
+      );
+      for (const a of fresh) announcedAttachmentsRef.current.add(a.url || a.name);
+      // `agent` may be null — that is the routed path, and the hook omits the
+      // field entirely rather than sending a null the protocol does not declare.
+      sendTurn({
+        text,
+        resolveRunId: ensureRun,
+        modelKey,
+        attachments: fresh.map((a) => ({ name: a.name, url: a.url })),
+      });
+    },
+    [projectId, sendTurn, ensureRun, modelKey, attachmentsQ.data],
   );
 
   // ── Access ────────────────────────────────────────────────────────────────

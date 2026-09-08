@@ -380,10 +380,19 @@ pending, which sent at least one reader at finished work.
    routing one. Pinned by a test in
    `frontend/components/runs/__tests__/no-route-reaches-the-deleted-copilot.test.tsx`
    so it cannot be mistaken for fixed.
-5. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
+5. **Live browser verification is not available from this session.** The Chrome the
+   `claude-in-chrome` tools drive does not reach this machine's dev server: a file
+   served from `frontend/public` returns its contents to `curl` on localhost:3000 and
+   **404s** in that browser, and `/orchestrator` there renders a pre-Phase-5 build
+   ("PIPELINE", "Auto-advance", "Run pipeline") whose strings exist nowhere in the
+   source tree. Surviving a clean `.next` wipe and a dev-server restart rules out a
+   stale build. Anything needing on-screen confirmation has to be checked in the
+   user's own browser — do not read a screenshot from that tool as evidence about
+   this working tree.
+6. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
    exceptions". Seen after a low-memory event; the Orchestrator's own routes were
    unaffected. Not diagnosed.
-6. **The Design agent's document does not reach the Orchestrator CHAT as text.**
+7. **The Design agent's document does not reach the Orchestrator CHAT as text.**
    Nothing registers a socket under a run id and the tool result carrying it is emitted
    as `tool.call`, not `stream_chunk`. The user gets the file plus a reply naming it —
    the same shape Requirements and the Project Manager have. Forwarding the text needs
