@@ -253,7 +253,6 @@ export default function SecurityPage() {
             {/* Shown, not tabbed away behind a bar whose other tabs do not exist here.
                 A lone unselected tab beside an empty state reads as broken. */}
             <div className="mt-10">
-              <h2 className="mb-3 text-sm font-medium">Documents</h2>
               <DocumentList projectId={id} stage="security" />
             </div>
           </div>

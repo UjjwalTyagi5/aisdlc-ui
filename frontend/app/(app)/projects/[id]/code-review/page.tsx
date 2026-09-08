@@ -292,7 +292,6 @@ export default function CodeReviewPage() {
             {/* Shown, not tabbed away: the tab bar below belongs to the review that
                 does not exist yet. */}
             <div className="mt-10">
-              <h2 className="mb-3 text-sm font-medium">Documents</h2>
               <DocumentList projectId={id} stage="code_review" />
             </div>
           </div>

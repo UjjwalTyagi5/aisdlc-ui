@@ -155,7 +155,6 @@ export default function DocumentationPage() {
               they were unreachable on exactly the projects that have never run the
               agent. */}
           <div className="mx-auto max-w-xl px-4 pb-12">
-            <h2 className="mb-3 text-sm font-medium">Documents</h2>
             <DocumentList projectId={id} stage="documentation" />
           </div>
         </div>

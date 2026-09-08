@@ -178,7 +178,6 @@ export default function DeploymentPage() {
                 prepared branch, so a Documents tab there alone would be unreachable on
                 exactly the projects that have never deployed — every new one. */}
             <div className="mt-10">
-              <h2 className="mb-3 text-sm font-medium">Documents</h2>
               <DocumentList projectId={id} stage="deployment" />
             </div>
           </div>
