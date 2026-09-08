@@ -47,7 +47,8 @@ import {
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
 import { PHASE_LABEL } from "@/lib/agents";
-import type { Artifact, ProjectId } from "@/lib/schemas";
+import { ownerRoleLabel } from "@/lib/roles";
+import type { Artifact, Phase, ProjectId } from "@/lib/schemas";
 import { cn } from "@/lib/utils";
 
 /** The backend stage name; the UI's Phase union says `review`. */
@@ -55,6 +56,29 @@ function stageLabel(stage?: string | null): string {
   if (!stage) return "Project-wide";
   const phase = (stage === "code_review" ? "review" : stage) as keyof typeof PHASE_LABEL;
   return PHASE_LABEL[phase] ?? stage;
+}
+
+/** Who a pending document is waiting on.
+ *
+ * MIRRORS `_artifact_for_decision`: the stage's own owner, or project administration
+ * for a project-wide document, which has no owning agent. Named rather than left to
+ * "Pending", because a status that says something is stuck without saying whose move it
+ * is sends people to ask in chat — which is the question this column exists to answer.
+ *
+ * A Project Admin is the fallback approver on every agent, so they are mentioned as the
+ * alternative rather than presented as the only route: naming just them would hide the
+ * owner whose decision this properly is.
+ */
+function waitingOn(a: Artifact): string {
+  if (a.scope === "project" || !a.stage) return "a project admin";
+  const phase = (a.stage === "code_review" ? "review" : a.stage) as Phase;
+  try {
+    return `${ownerRoleLabel(phase)} or a project admin`;
+  } catch {
+    // An unknown stage is not worth crashing a list over — the fallback approver is
+    // correct for every agent regardless of who else owns it.
+    return "a project admin";
+  }
 }
 
 function statusChip(a: Artifact) {
@@ -320,7 +344,10 @@ export function DocumentList({
                   {chip.label}
                 </Badge>
 
-                {/* WHO AND WHEN — the question this screen exists to answer. */}
+                {/* WHO AND WHEN — the question this screen exists to answer. For a
+                    document still waiting, "who" is the person it is waiting ON, not
+                    just who put it there: "Pending" alone tells you something is stuck
+                    without telling you whose move it is. */}
                 <span className="text-muted-foreground truncate text-xs">
                   {a.status === "approved" && a.approvedBy
                     ? `${a.approvedBy}${
@@ -328,9 +355,13 @@ export function DocumentList({
                           ? ` · ${new Date(a.approvedAt).toLocaleDateString()}`
                           : ""
                       }`
-                    : a.uploadedBy
-                      ? `added by ${a.uploadedBy}`
-                      : ""}
+                    : pending
+                      ? `${a.uploadedBy ? `added by ${a.uploadedBy} · ` : ""}${
+                          mayDecide ? "waiting on you" : `waiting on ${waitingOn(a)}`
+                        }`
+                      : a.uploadedBy
+                        ? `added by ${a.uploadedBy}`
+                        : ""}
                 </span>
 
                 <div className="ml-auto flex shrink-0 items-center gap-2">

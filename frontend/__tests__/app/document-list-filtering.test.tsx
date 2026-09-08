@@ -185,3 +185,78 @@ describe("who may decide a document", () => {
     expect(screen.queryByRole("button", { name: /^Approve$/ })).toBeNull();
   });
 });
+
+/**
+ * What a pending row says about whose move it is.
+ *
+ * "Pending" alone tells you something is stuck without telling you who can unstick it,
+ * which is how a status badge turns into a message in chat asking around. The row names
+ * the stage's owner — or says "you" when the viewer is the one who can act.
+ */
+describe("a pending document names who it waits on", () => {
+  it("names the stage's owner to someone who cannot decide", async () => {
+    vi.resetModules();
+    vi.doMock("@/hooks/use-session", () => ({
+      useSession: () => ({ user: { id: "u3" }, permissions: ["run:create"] }),
+    }));
+    const { DocumentList: Fresh } = await import("@/components/app/document-list");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <Fresh
+          projectId={"p1" as never}
+          stage="requirements"
+          items={[{ ...doc("scope.pdf", "pending"), uploadedBy: "bruno@abcbank.com" }] as never}
+        />
+      </QueryClientProvider>,
+    );
+
+    // Requirements is owned by the BA; a Project Admin is the fallback on every agent,
+    // so both are named rather than only the fallback.
+    expect(screen.getByText(/waiting on .*Business Analyst.* or a project admin/i)).toBeTruthy();
+  });
+
+  it("says WAITING ON YOU to someone who can decide it", async () => {
+    /** The same row, different viewer. Naming a role at a person who is that role reads
+     *  as someone else's problem. */
+    vi.resetModules();
+    vi.doMock("@/hooks/use-session", () => ({
+      useSession: () => ({ user: { id: "u1" }, permissions: ["approve", "run:create"] }),
+    }));
+    const { DocumentList: Fresh } = await import("@/components/app/document-list");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <Fresh
+          projectId={"p1" as never}
+          stage="requirements"
+          items={[{ ...doc("scope.pdf", "pending"), uploadedBy: "bruno@abcbank.com" }] as never}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText(/waiting on you/i)).toBeTruthy();
+  });
+
+  it("says nothing about waiting once the document is approved", async () => {
+    /** Non-vacuity: the phrase must come from the pending state, not be printed on
+     *  every row regardless. */
+    vi.resetModules();
+    vi.doMock("@/hooks/use-session", () => ({
+      useSession: () => ({ user: { id: "u1" }, permissions: ["approve"] }),
+    }));
+    const { DocumentList: Fresh } = await import("@/components/app/document-list");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <Fresh
+          projectId={"p1" as never}
+          stage="requirements"
+          items={[{ ...doc("done.pdf"), approvedBy: "bruno@abcbank.com" }] as never}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText(/waiting on/i)).toBeNull();
+  });
+});
