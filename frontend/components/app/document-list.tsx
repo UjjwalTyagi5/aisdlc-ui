@@ -296,7 +296,15 @@ export function DocumentList({
           {documents.map((a) => {
             const chip = statusChip(a);
             const isProjectWide = a.scope === "project";
-            const mayDecide = isProjectWide ? canApproveProject : canApproveStage;
+            // BOTH HALVES OF THE BACKEND RULE. `_artifact_for_decision` accepts the
+            // stage's own owner OR project administration, and this had only the first
+            // — so a Project Admin, who owns every agent on their project but need not
+            // hold `artifact:approve_<stage>` for any of them, saw their own upload
+            // stuck on "Pending" with no button to accept it. The server would have
+            // taken the approval; the screen never offered it.
+            const mayDecide = isProjectWide
+              ? canApproveProject
+              : canApproveStage || canApproveProject;
             const pending = a.status !== "approved" && a.status !== "rejected";
             const busy = busyId === a.id;
             return (

@@ -136,3 +136,52 @@ describe("the documents panel", () => {
     expect(list?.className).toContain("overflow-y-auto");
   });
 });
+
+/**
+ * Who is offered Approve / Reject.
+ *
+ * THE UI GATE MUST MIRROR `_artifact_for_decision`, which accepts the stage's own owner
+ * OR project administration. Having only the first is what left a Project Admin looking
+ * at their own upload stuck on "Pending" with no button — the server would have taken
+ * the approval, the screen never offered it. A gate that is stricter than the backend is
+ * not "safe"; it is a feature that silently does not exist.
+ */
+describe("who may decide a document", () => {
+  const pendingDoc = { ...doc("scope.pdf", "pending") };
+
+  it("offers Approve to a project admin who lacks the stage permission", async () => {
+    vi.resetModules();
+    vi.doMock("@/hooks/use-session", () => ({
+      // `approve` is project administration. NO `artifact:approve_requirements` —
+      // which is exactly bruno's real binding.
+      useSession: () => ({ user: { id: "u1" }, permissions: ["approve", "run:create"] }),
+    }));
+    const { DocumentList: Fresh } = await import("@/components/app/document-list");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <Fresh projectId={"p1" as never} stage="requirements" items={[pendingDoc] as never} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: /^Approve$/ })).toBeTruthy();
+  });
+
+  it("offers nothing to someone holding neither", async () => {
+    /** Non-vacuity: proves the button above is the permission talking, not the row
+     *  simply always rendering one. */
+    vi.resetModules();
+    vi.doMock("@/hooks/use-session", () => ({
+      useSession: () => ({ user: { id: "u2" }, permissions: ["run:create"] }),
+    }));
+    const { DocumentList: Fresh } = await import("@/components/app/document-list");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <Fresh projectId={"p1" as never} stage="requirements" items={[pendingDoc] as never} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByRole("button", { name: /^Approve$/ })).toBeNull();
+  });
+});
