@@ -90,20 +90,22 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
     the data exists when a doc-target picker is built.
     """
     tenant_id: str = request.state.tenant_id
-    azure = False
+    # ASKED PER PROVIDER, not hard-coded to one. `repo_source.available` checks each
+    # backend for a usable credential, scoped to this project and caller — the same
+    # project-scoped lookup that is the ONLY place this platform stores a Project
+    # Admin's source credential.
+    from shared.services import repo_source  # noqa: PLC0415
+
     try:
-        # SCOPED, like every other caller. A tenant-only lookup misses the
-        # project-scoped personal PAT that is the ONLY place this platform stores
-        # Azure DevOps credentials for a Project Admin, so this reported "not
-        # connected" for a project that plainly is.
-        org_url, pat = await ado_repos.resolve_auth(
+        sources = await repo_source.available(
             tenant_id,
             project_id=project_id,
             owner_id=getattr(request.state, "user_id", "") or "",
         )
-        azure = bool(org_url and pat)
-    except Exception:
-        azure = False
+    except Exception:  # noqa: BLE001
+        sources = []
+    azure = "ado" in sources
+    github = "github" in sources
 
     sharepoint = False
     try:
@@ -116,6 +118,7 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
     return {
         "connectors": [
             {"kind": "azure_repos", "label": "Azure Repos", "available": azure},
+            {"kind": "github", "label": "GitHub", "available": github},
             {"kind": "sharepoint", "label": "SharePoint", "available": sharepoint},
         ]
     }
@@ -129,6 +132,10 @@ async def list_open_prs(project_id: str, ado_project: str, repo: str, request: R
 
 
 class PrepareDocRequest(BaseModel):
+    #: Which host to clone from. Omitted, the project's only configured source is used;
+    #: with both connected, the picker names one. Never guessed at silently — a clone
+    #: from the wrong host is a confusing failure, not a graceful fallback.
+    provider: str | None = None
     mode: str = "branch"             # "branch" | "pr"
     ado_project: str
     repo_name: str
@@ -140,18 +147,19 @@ class PrepareDocRequest(BaseModel):
 async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Request) -> dict:
     """Clone the branch (or PR source) read-only and detect languages + upstream artifacts."""
     tenant_id: str = request.state.tenant_id
-    # `project_id` AND `owner_id`, or the credential is never found. Azure DevOps PATs
+    owner_id = getattr(request.state, "user_id", "") or ""
+    # `project_id` AND `owner_id`, or the credential is never found. Source credentials
     # live in `project_integration_credentials`, saved per user per project — that is
     # the only place this platform keeps them, deliberately, so nobody borrows anybody
-    # else's token. `resolve_auth` checks there only when BOTH are supplied; passing the
-    # tenant alone looks exclusively for a tenant-wide connector, which by design does
-    # not exist. `dev_workspace.py` passes both; this route was written without them and
-    # so could never open a workspace for a Project Admin.
-    org_url, pat = await ado_repos.resolve_auth(
-        tenant_id,
-        project_id=project_id,
-        owner_id=getattr(request.state, "user_id", "") or "",
-    )
+    # else's token. The façade threads both through to whichever backend answers.
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        chosen, _base, _secret = await repo_source.resolve(
+            tenant_id, project_id=project_id, owner_id=owner_id, provider=body.provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     branch = (body.branch or "").strip()
     pr_title = ""
@@ -159,8 +167,9 @@ async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Reques
         if not body.pr_id:
             raise HTTPException(status_code=400, detail="pr_id required for mode=pr")
         try:
-            pr = await ado_repos.get_pull_request(
-                body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
+            _p, pr = await repo_source.get_pull_request(
+                tenant_id, body.ado_project, body.repo_name, body.pr_id,
+                project_id=project_id, owner_id=owner_id, provider=chosen,
             )
         except RuntimeError as exc:  # same unconfigured-connector path as below
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -170,39 +179,31 @@ async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Reques
     if not branch:
         raise HTTPException(status_code=400, detail="branch is required")
 
-    # A MISSING CONNECTOR IS NOT A CRASH. `resolve_clone_url` raises RuntimeError with
-    # an actionable sentence — "Azure DevOps is not configured. Connect Azure DevOps on
-    # the Integrations page." — and nothing caught it, so FastAPI turned it into a bare
-    # 500 "Internal Server Error". The dialog then simply did nothing, with the one
-    # message that would have explained why thrown away. The clone below already had
-    # this handling; the calls before it did not.
-    try:
-        remote_url = await ado_repos.resolve_clone_url(
-            body.ado_project, body.repo_name, pat=pat, org_url=org_url
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if remote_url is None:
-        raise HTTPException(status_code=404, detail=f"Repo '{body.repo_name}' not found")
-
+    # A MISSING OR UNREACHABLE SOURCE IS NOT A CRASH. These raise RuntimeError carrying
+    # an actionable sentence, and nothing used to catch them, so FastAPI turned it into a
+    # bare 500 and the dialog simply did nothing with the one message that explained why.
     work_dir = str(ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "documentation")
     try:
-        result = await asyncio.to_thread(ado_repos.clone_into, work_dir, remote_url, branch, pat)
+        result = await repo_source.clone(
+            tenant_id, body.ado_project, body.repo_name, branch, work_dir,
+            project_id=project_id, owner_id=owner_id, provider=chosen,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not clone the branch: {exc}")
+    remote_url = result.get("remote_url", "")
 
     languages = await asyncio.to_thread(_detect_languages, work_dir)
     upstream_summary = await _upstream_summary(tenant_id, project_id)
 
     set_prepared(tenant_id, project_id, {
-        "work_dir": work_dir, "repo_url": remote_url, "pat": pat,
+        "work_dir": work_dir, "repo_url": remote_url, "pat": _secret, "provider": chosen,
         "mode": body.mode, "ado_project": body.ado_project, "repo_name": body.repo_name,
         "source_branch": branch, "pr_id": body.pr_id or "", "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,
     })
 
     return {
-        "status": "ready", "mode": body.mode, "repo_name": body.repo_name,
+        "status": "ready", "provider": chosen, "mode": body.mode, "repo_name": body.repo_name,
         "ado_project": body.ado_project, "branch": branch, "pr_id": body.pr_id,
         "pr_title": pr_title, "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,
