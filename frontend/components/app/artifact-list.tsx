@@ -314,6 +314,25 @@ export function ArtifactList({
         </div>
       </div>
 
+      {/* WHAT THE CIRCLES ARE FOR. They set the agent's SCOPE, which is a different
+          question from which row is open — clicking a story to read it must not quietly
+          change what the agent operates on. Unlabelled, though, a circle beside a
+          highlighted row simply reads as a selection radio that has stopped working,
+          which is exactly how it was reported. The only explanation was an aria-label
+          no sighted reader ever sees. */}
+      {onToggleSelect && (
+        <p className="text-muted-foreground text-xs">
+          {selectedIds && selectedIds.size > 0
+            ? `${selectedIds.size} ${
+                selectedIds.size === 1 ? noun.replace(/s$/, "") : noun
+              } scoped to the agent.`
+            : `Tick a circle to scope the agent to that ${noun.replace(
+                /s$/,
+                "",
+              )}. Opening one only shows it.`}
+        </p>
+      )}
+
       {isLoading && <LoadingState variant="list" rows={5} />}
 
       {!isLoading && filtered.length === 0 && (

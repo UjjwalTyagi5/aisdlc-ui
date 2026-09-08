@@ -165,3 +165,48 @@ describe("showing which story is open", () => {
     expect(anyOpen).toBe(false);
   });
 });
+
+/**
+ * What the round checkboxes are for.
+ *
+ * They set the AGENT'S SCOPE, which is a different question from which row is open —
+ * clicking a story to read it must not quietly change what the agent works on. But an
+ * unlabelled circle beside a highlighted row reads as a selection radio that has stopped
+ * working, which is exactly how it was reported. The only explanation was an aria-label
+ * no sighted reader ever sees.
+ */
+describe("the scope checkboxes", () => {
+  it("says what they do when none are ticked", () => {
+    render(
+      <ArtifactList
+        items={MIXED as never}
+        noun="stories"
+        selectedIds={new Set()}
+        onToggleSelect={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Tick a circle to scope the agent/i)).toBeTruthy();
+    // And says plainly that opening a story is NOT the same act.
+    expect(screen.getByText(/Opening one only shows it/i)).toBeTruthy();
+  });
+
+  it("counts them once some are ticked", () => {
+    const two = new Set([(MIXED[0] as { id: string }).id, (MIXED[1] as { id: string }).id]);
+    render(
+      <ArtifactList
+        items={MIXED as never}
+        noun="stories"
+        selectedIds={two}
+        onToggleSelect={() => {}}
+      />,
+    );
+    expect(screen.getByText(/2 stories scoped to the agent/i)).toBeTruthy();
+  });
+
+  it("says nothing where there are no circles", () => {
+    /** Non-vacuity: the hint belongs to the checkboxes, not to every list. The Design
+     *  page renders this component without `onToggleSelect`. */
+    render(<ArtifactList items={MIXED as never} noun="stories" />);
+    expect(screen.queryByText(/scope the agent/i)).toBeNull();
+  });
+});
