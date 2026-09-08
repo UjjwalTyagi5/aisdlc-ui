@@ -37,6 +37,13 @@ import type { AccessScopeOut, ScopeBinding } from "@/lib/schemas/access-scope";
  */
 export const dynamic = "force-dynamic";
 
+/** Roles whose binding means "runs this scope", as opposed to working inside it.
+ *
+ *  A `project_admin` binding at BUSINESS-UNIT scope administers that unit's projects —
+ *  which is how the platform actually grants a Project Admin their reach — so the same
+ *  set answers for both kinds of scope. */
+const ADMIN_ROLES = new Set(["org_admin", "bu_admin", "project_admin"]);
+
 interface WorkspaceRow {
   id: string;
   displayName: string;
@@ -48,6 +55,14 @@ interface ProjectRow {
   workspaceId?: string | null;
 }
 
+/** One row of `GET /auth/bindings` — a scope the caller holds, and the role it grants. */
+interface HeldBinding {
+  kind: string;
+  scopeId: string;
+  role: string;
+  status: string;
+}
+
 export async function GET() {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
@@ -56,9 +71,19 @@ export async function GET() {
   const isOrgWide = session.permissions?.includes("admin:*") ?? false;
 
   try {
-    const [units, projectPage] = await Promise.all([
+    const [units, projectPage, heldBindings] = await Promise.all([
       bffFetch("/workspaces", { session }) as Promise<WorkspaceRow[]>,
       bffFetch("/projects", { session }) as Promise<{ items?: ProjectRow[] } | ProjectRow[]>,
+      // The caller's REAL bindings, each with the role it actually grants. Fetched
+      // server-side like the other two rather than proxied to the browser: nothing in
+      // the UI wants this list on its own, and an endpoint that exists only to feed
+      // this one is a smaller surface unexposed.
+      (bffFetch("/auth/bindings", { session }) as Promise<HeldBinding[]>).catch(
+        // DEGRADE, DO NOT FAIL. Without it the roles are less precise; without the
+        // whole response the access page cannot render at all, and "no access" is a
+        // far worse answer than "your role, imprecisely".
+        () => [] as HeldBinding[],
+      ),
     ]);
     const projects = Array.isArray(projectPage) ? projectPage : (projectPage.items ?? []);
 
@@ -66,11 +91,48 @@ export async function GET() {
     const projectIds = projects.map((p) => String(p.id));
     const unitName = new Map(units.map((u) => [String(u.id), u.displayName]));
 
+    // THE ROLE A SCOPE ACTUALLY GRANTS, not the caller's one effective role stamped on
+    // everything. That is what this file used to do, and it made a Project Admin in one
+    // unit who merely CONTRIBUTES to a project in another read "Project Admin · You
+    // administer" on both — an access page overstating authority, which is the one
+    // direction it must not be wrong in.
+    const heldRole = new Map(
+      heldBindings.filter((b) => b.status === "active").map((b) => [b.scopeId, b.role]),
+    );
+
+    /** The role a UNIT is listed with when nothing is bound to the unit itself.
+     *
+     *  A unit can be in reach purely because of a project inside it — which is exactly
+     *  how a Project Admin in one unit ends up seeing another where they only
+     *  contribute. Naming the role they hold IN that unit is the truthful answer;
+     *  falling through to their platform role labelled a unit they administer nothing
+     *  in "Project Admin", which is the overstatement this whole change is about. */
+    const roleFromProjectsIn = new Map<string, string>();
+    for (const p of projects) {
+      const own = heldRole.get(String(p.id));
+      const unit = p.workspaceId ? String(p.workspaceId) : null;
+      if (!own || !unit || roleFromProjectsIn.has(unit)) continue;
+      roleFromProjectsIn.set(unit, own);
+    }
+
+    /** The explicit binding on this scope, else the one it inherits reach FROM.
+     *
+     *  Reach is not always explicit: a Business Unit Admin sees every project in their
+     *  unit without holding a per-project binding, so a project falls back to the unit
+     *  above it. A unit falls back to what is held inside it. Only when neither exists
+     *  does the platform role answer — and by then it is the only thing known. */
+    const roleFor = (scopeId: string, parentId?: string | null): string =>
+      heldRole.get(scopeId) ??
+      (parentId ? heldRole.get(parentId) : undefined) ??
+      roleFromProjectsIn.get(scopeId) ??
+      role ??
+      "contributor";
+
     const unitBindings: ScopeBinding[] = units.map((u) => ({
       kind: "business_unit",
       scopeId: String(u.id),
       scopeName: u.displayName,
-      role: role ?? "contributor",
+      role: roleFor(String(u.id)),
       parentId: null,
       parentName: null,
       status: "active",
@@ -80,7 +142,7 @@ export async function GET() {
       kind: "project",
       scopeId: String(p.id),
       scopeName: p.name,
-      role: role ?? "contributor",
+      role: roleFor(String(p.id), p.workspaceId ? String(p.workspaceId) : null),
       parentId: p.workspaceId ? String(p.workspaceId) : null,
       parentName: p.workspaceId ? (unitName.get(String(p.workspaceId)) ?? null) : null,
       status: "active",
@@ -92,11 +154,26 @@ export async function GET() {
       level: isOrgWide ? "organization" : businessUnitIds.length > 0 ? "business_unit" : "project",
       isOrgWide,
       businessUnitIds,
-      managedBusinessUnitIds:
-        isOrgWide || role === "bu_admin" ? businessUnitIds : [],
+      // ADMINISTERED, NOT MERELY VISIBLE. These decide the "You administer" badge, and
+      // they were derived from the caller's one effective role — so a Project Admin was
+      // told they administer EVERY project they can see, including one in another unit
+      // where they are only a contributor. Now a scope is managed when the caller holds
+      // an administering binding ON IT, or on the unit above it. Org-wide is still
+      // everything, because that is what org-wide means.
+      managedBusinessUnitIds: isOrgWide
+        ? businessUnitIds
+        : businessUnitIds.filter((id) => ADMIN_ROLES.has(heldRole.get(id) ?? "")),
       projectIds,
-      managedProjectIds:
-        isOrgWide || role === "bu_admin" || role === "project_admin" ? projectIds : [],
+      managedProjectIds: isOrgWide
+        ? projectIds
+        : projects
+            .filter((p) => {
+              const own = heldRole.get(String(p.id)) ?? "";
+              if (ADMIN_ROLES.has(own)) return true;
+              const unit = p.workspaceId ? heldRole.get(String(p.workspaceId)) : undefined;
+              return ADMIN_ROLES.has(unit ?? "");
+            })
+            .map((p) => String(p.id)),
       actingBindings: bindings,
       allBindings: bindings,
       // The backend keys people by their user id; there is no separate identity
