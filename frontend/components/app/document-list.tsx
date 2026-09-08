@@ -149,6 +149,11 @@ export interface DocumentListProps {
    *  alongside the files, so it says "Design artifacts". */
   title?: string;
   description?: string;
+  /** Empty-state copy, when the page can say something more useful than the generic
+   *  line — the Project Manager's "No plan yet" explains what the agent would produce,
+   *  which is worth more to somebody staring at an empty screen. */
+  emptyTitle?: string;
+  emptyDescription?: string;
   /**
    * SELECTION, when this list is also the page's navigation.
    *
@@ -177,6 +182,8 @@ export function DocumentList({
   stage,
   title,
   description,
+  emptyTitle,
+  emptyDescription,
   selectedId,
   onSelect,
   onDeleted,
@@ -443,11 +450,14 @@ export function DocumentList({
           // FOLLOWS THE HEADING. On Design this list is called "Design artifacts", and
           // an empty state underneath announcing "No documents yet" reads as a
           // different, missing section.
-          title={title ? `No ${title.toLowerCase()} yet` : "No documents yet"}
+          title={
+            emptyTitle ?? (title ? `No ${title.toLowerCase()} yet` : "No documents yet")
+          }
           description={
-            canUpload
+            emptyDescription ??
+            (canUpload
               ? "Upload one, or run the agent to generate it. Nothing is part of the record until it is approved."
-              : "Nothing has been added to this project's record yet."
+              : "Nothing has been added to this project's record yet.")
           }
         />
       ) : documents.length === 0 ? (

@@ -27,14 +27,12 @@ import { LoadingState } from "@/components/ui/loading-state";
 
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
-import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
 import { DocumentCard } from "@/components/app/document-card";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
-import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { GATE_POLICY } from "@/lib/agents";
 import { toBackendStage } from "@/lib/api/artifact-versions";
@@ -123,8 +121,10 @@ export function StageWorkbench({
 
   const approval = useArtifactApproval(projectId);
 
-  const deletion = useDeleteArtifact(projectId, {
-    onDeleted: (a) => {
+  // The list owns the delete now; this stays because the PAGE owns the URL, and a
+  // deleted artifact must not be left named in ?artifact=.
+  const onArtifactDeleted = React.useCallback(
+    (a: { id: string }) => {
       // Drop ?artifact= when the deleted one was open, so a copied link does not point
       // at an artifact that no longer exists.
       if (searchParams.get("artifact") === a.id) {
@@ -134,7 +134,8 @@ export function StageWorkbench({
         router.replace(`/projects/${projectId}/${routeSegment}${qs ? `?${qs}` : ""}`);
       }
     },
-  });
+    [searchParams, router, projectId, routeSegment],
+  );
 
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
@@ -295,24 +296,26 @@ export function StageWorkbench({
               `items` is this page's PHASE-FILTERED list; `DocumentList` narrows further
               to this stage's documents plus the project-wide ones, so a project policy
               still appears here without another agent's files leaking in. */}
+          {/* ONE LIST. This stacked a DocumentList above an ArtifactList and handed
+              BOTH the same `items`, so every document appeared twice — once with its
+              approval state and once as a selectable row. On a project with nothing in
+              it that showed as two empty states one above the other, which is how it
+              got noticed on the Project Manager page.
+
+              The merged list selects (driving the detail pane) and carries the status
+              chip with Approve/Reject/Raise, which the artifact list never had. */}
           <DocumentList
             projectId={projectId}
             items={artifactsQ.isLoading ? null : items}
             stage={toBackendStage(phase)}
-            className="mb-4 shrink-0"
-          />
-
-          <ArtifactList
-            items={artifactsQ.isLoading ? null : items}
-            selectedId={selected?.id}
-            onSelect={selectArtifact}
-            onDelete={deletion.onDelete}
-            deletingId={deletion.deletingId}
-            isLoading={artifactsQ.isLoading}
+            title={`${title} artifacts`}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
+            selectedId={selected?.id}
+            onSelect={selectArtifact}
+            onDeleted={onArtifactDeleted}
+            className="min-h-0 flex-1"
           />
-          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
