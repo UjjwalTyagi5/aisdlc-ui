@@ -60,6 +60,58 @@ def _create_excel_bytes(df: pd.DataFrame) -> bytes:
     return output_buffer.getvalue()
 
 
+#: Sent instead of a summary when the plan came back with no cases at all. States the
+#: outcome and asks for the one thing that would fix it, rather than describing a plan
+#: that does not exist.
+_EMPTY_PLAN_MESSAGE = (
+    "I finished, but I could not derive a single test case from what I was given. "
+    "Tell me what to test — a requirement, a function, or a repository and branch — "
+    "and I will write the plan."
+)
+
+
+def _plan_summary_prompt(user_prompt: str, cases: list) -> str:
+    """The prompt for the one-paragraph summary that accompanies a finished plan.
+
+    THE PLAN GOES IN THE PROMPT. This used to send only a count and the sentence
+    "You can find the plan in the Excel file", as a bare string — which
+    `ChatModel.invoke` turns into a single HumanMessage, so the model read it as the
+    USER claiming to hold a spreadsheet and asking nothing. On run
+    4d9ba955-4ec6-4bc0-a0e1-dd81ac5e0991 it answered the only way that turn can be
+    answered: "I don't have access to any Excel file ... describe the 24 test cases
+    you've created." Neither Excel nor 24 came from the user; both came from that
+    prompt. `package_final_reports` wrote the real plan out regardless, so the user
+    got a refusal in chat and `test_plan.xlsx` beside it.
+
+    So: no file is named (the model has no filesystem, and naming one is what invited
+    the refusal), the request is fenced as a quotation rather than spoken in the
+    agent's own first person, and every case the count claims is rendered below it —
+    a truncating renderer would let the model assert a number it was never shown.
+
+    What this does NOT guarantee: that the model's reply is a good summary, or that
+    it never asks a question anyway. A prompt cannot promise that. It guarantees only
+    that nothing in the prompt refers to content the model was not handed.
+    """
+    rendered = "\n".join(
+        f"- {c.test_case_id} [{c.scenario_type}] {c.feature_or_function_tested}"
+        f" — {c.test_summary}"
+        for c in cases
+    )
+    return (
+        "You are a QA agent that has just finished writing a test plan. Write the "
+        "short chat message that goes with it.\n\n"
+        "The request you worked from:\n"
+        f"\"\"\"\n{user_prompt}\n\"\"\"\n\n"
+        f"The plan you produced, all {len(cases)} test cases:\n"
+        f"{rendered}\n\n"
+        "Write 3 to 5 sentences for the person who asked: the plan is ready, what it "
+        "covers, and the balance of happy-path, error and edge cases. The plan above "
+        "is complete and is the only material you need. Do not ask for anything, do "
+        "not ask the reader any questions, and do not offer to write a plan — it is "
+        "already written."
+    )
+
+
 async def generate_final_message(state: SuperAgentState):
     logger.info("Generating final user message...")
     blog("Generating final summary...")
@@ -72,16 +124,20 @@ async def generate_final_message(state: SuperAgentState):
 
     if state.get("test_execution_summary"):
         message = state.get("test_execution_summary")
-    elif state.get("test_plan"):
-        num_cases = len(state["test_plan"].test_cases)
-        prompt = (
-            f"I have generated a detailed test plan with {num_cases} cases for '{user_prompt}'. "
-            f"You can find the plan in the Excel file."
-        )
+    elif state.get("test_plan") and state["test_plan"].test_cases:
+        cases = state["test_plan"].test_cases
+        prompt = _plan_summary_prompt(user_prompt, cases)
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, get_llm().invoke, prompt)
         record_response_usage(response)
         message = response.content
+    elif state.get("test_plan"):
+        # A TestPlan with no cases. `generate_test_plan` returns exactly that when it
+        # had no analysis to work from (Nodes/plan.py:26-29), and a pydantic model
+        # holding an empty list is still truthy — so this used to fall into the branch
+        # above and ask the model to describe "a detailed test plan with 0 cases".
+        # There is nothing to summarise, so nothing is sent and no tokens are spent.
+        message = _EMPTY_PLAN_MESSAGE
     else:
         message = "Processing is complete."
 

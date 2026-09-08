@@ -11,7 +11,49 @@ import {
   paginated,
 } from "@/lib/schemas";
 
-import { api } from "./client";
+import { AttachmentRef } from "./conversations";
+import { api, API_BASE, ApiRequestError } from "./client";
+
+const AttachmentsEnvelope = z.object({ attachments: z.array(AttachmentRef) });
+
+/**
+ * Attach files to an Orchestrator run.
+ *
+ * NOT `uploadAttachments` from `./conversations`, which posts to
+ * `/conversations/{id}/attachments`. That endpoint authorises through the conversation
+ * row, and the Orchestrator's conversation row is created by the SOCKET on the first
+ * turn — so attaching before typing anything 404s against a run that exists. This one
+ * resolves the run itself and holds from the moment the run does.
+ *
+ * Multipart, so a raw fetch rather than `api()`.
+ */
+export async function uploadRunAttachments(
+  runId: string,
+  files: File[],
+): Promise<AttachmentRef[]> {
+  const form = new FormData();
+  for (const f of files) form.append("files", f, f.name);
+  const res = await fetch(
+    `${API_BASE}/runs/${encodeURIComponent(runId)}/attachments`,
+    { method: "POST", credentials: "include", body: form },
+  );
+  if (!res.ok) {
+    throw new ApiRequestError(res.status, await res.json().catch(() => null), res.statusText);
+  }
+  return AttachmentsEnvelope.parse(await res.json()).attachments;
+}
+
+/**
+ * The files already attached to a run.
+ *
+ * The backend feeds EVERY stored attachment into EVERY later turn, so a composer that
+ * forgot its chips on reload would be describing a prompt that is not the one being
+ * sent — the user could no longer see what the agent is being given.
+ */
+export const listRunAttachments = (runId: string) =>
+  api(`/runs/${encodeURIComponent(runId)}/attachments`, {
+    schema: AttachmentsEnvelope,
+  }).then((r) => r.attachments);
 
 export const createRun = (body: {
   project_id: string;

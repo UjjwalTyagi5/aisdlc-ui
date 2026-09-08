@@ -51,6 +51,12 @@ uv run alembic upgrade head
 
 Skip the two `psql` lines to migrate an existing database in place.
 
+> **BOTH DATABASES NEED IT.** `alembic upgrade head` migrates whichever database
+> `backend/.env` points at. The test database is a SEPARATE one (`sdlc_product_test`,
+> see "Test database" below) and does **not** follow along — migrate it too, or the
+> suite fails against a schema that no longer matches the models. Section 7 below has
+> the one-liner.
+
 > `psql` is not on PATH after a default Windows install — hence the full path. Adjust
 > `16` to your major version. Creating the database is the one step with no Python
 > equivalent here; everything after it runs through `uv`.
@@ -158,8 +164,18 @@ That applies the same statements but does **not** verify them — prefer the Pyt
 
 ```powershell
 cd backend
-uv run uvicorn process_api:app --reload --port 8001
+uv run uvicorn process_api:app --reload --port 8004 --ws-max-size 1000000
 ```
+
+Two notes on that command:
+
+- **Port 8004, not 8001.** `frontend/.env.local` sets
+  `FASTAPI_INTERNAL_URL=http://localhost:8004`, so the BFF calls 8004; a backend on
+  8001 leaves every request failing.
+- **`--ws-max-size`** bounds an inbound WebSocket frame at the protocol layer.
+  `orchestrator2/ws.py` enforces the same 1 MB bound itself, so omitting the flag
+  degrades the protection rather than removing it — the frame still arrives, it is
+  just refused before being parsed.
 
 > **Keep `watchfiles` installed.** It is pinned in `requirements.txt`/`pyproject.toml`
 > and `--reload` depends on it. Without it uvicorn silently falls back to `StatReload`,
@@ -362,6 +378,52 @@ Legitimate when no provider is onboarded. If one *is* onboarded, check
 `uv run alembic current` is at head first.
 
 ---
+
+## Migrating a fresh laptop, including the test database
+
+Everything a machine that has never run this needs, in order. Run it from `backend`.
+
+```powershell
+# 1. the app database (migrations/env.py reads backend/.env)
+uv run alembic upgrade head
+uv run python -m scripts.grant_app_role     # required after any migration adding tables
+
+# 2. the TEST database. A DIFFERENT database, and alembic does not visit it on its
+#    own: migrations/env.py loads `.env` by name, so pointing it elsewhere means
+#    overriding the migrations DSN for one command. `.env.test` documents this too.
+$env:POSTGRES_MIGRATIONS_CONN_STRING =
+    "postgresql+asyncpg://postgres:<password>@localhost:5433/sdlc_product_test"
+uv run alembic upgrade head
+Remove-Item Env:\POSTGRES_MIGRATIONS_CONN_STRING
+```
+
+Take the password from `backend/.env.test`, which already holds the exact string on its
+`POSTGRES_MIGRATIONS_CONN_STRING` line. **Check the database name before running it** —
+pointing this at the app database is the shape of mistake that once had a cleanup
+fixture delete real dev data (see "Test database" below).
+
+**Verify both, rather than trusting the log** — a migration whose transaction rolls
+back still prints `Running upgrade …` on the way in:
+
+```sql
+SELECT version_num FROM alembic_version;
+```
+
+### What each recent migration is for, and what breaks without it
+
+| Revision | Adds | Symptom if missing |
+|---|---|---|
+| `0044_orchestrator_deliverables` | the `orchestrator_deliverables` table | the Deliverables tab is permanently empty; agent output is never stored |
+| `0045_message_agent_id` | `conversation_messages.agent_id` | the run's memory degrades **silently-ish**: every agent is told "the conversation for this run could not be read", so an agent switched into mid-conversation starts from nothing — the exact bug that migration exists to fix |
+
+`0045` is the one to check before a demo. Its failure mode is not a crash: the
+Orchestrator keeps working, agents keep answering, and only the *memory* is gone. That
+looks like the model being forgetful rather than a missing column.
+
+> **Naming new migrations:** `alembic_version.version_num` is `varchar(32)`. A longer
+> revision id runs the DDL and then fails to record itself, leaving the database
+> migrated and alembic convinced it is not. `0045_message_agent_id` is 21 characters;
+> the first draft was 33 and hit exactly this.
 
 ## Test database
 

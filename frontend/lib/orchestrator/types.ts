@@ -1,30 +1,24 @@
+import { PHASE_LABEL } from "@/lib/agents";
+import type { OrchestratorAgentId } from "@/lib/orchestrator/protocol";
 import type { Phase } from "@/lib/schemas/enums";
 
 /**
- * The auto-sequencing Orchestrator — a cross-project cockpit that *runs* the
- * project's agent roster in hand-off order rather than waiting to be driven
- * stage by stage.
+ * The Orchestrator — a cockpit that reaches every agent on a project (global
+ * `/orchestrator`) or one project's agents (`/projects/[id]/orchestrator`,
+ * the same component with the project fixed).
  *
- * NOTE ON PRD §34.11 — the per-project Orchestrator
- * (`app/(app)/projects/[id]/orchestrator/page.tsx`) is deliberately the
- * opposite of this: "a conversation partner, not an automatic sequencer.
- * Nothing runs a fixed script, and nothing auto-advances." That page is
- * untouched and remains the PRD-conformant surface. This one is the
- * agentcore-style cockpit — an explicit, opt-outable auto-sequencer — and the
- * two are separate routes precisely so the PRD reading is not overwritten by
- * this one.
- *
- * The one rule the sequencer never bends: a **mandatory** gate
- * (`GATE_POLICY[phase].mandatory`) always pauses the run. A mandatory
- * checkpoint cannot be waived by the owner or the fallback (PRD §13), so
- * auto-approving one would not be "faster" — it would be unrecoverable.
+ * Per PRD §34.11: "a conversation partner, not an automatic sequencer.
+ * Nothing runs a fixed script, and nothing auto-advances." Any agent can pick
+ * up work at any time, based on what the conversation asks for — there is no
+ * hand-off order, no stage-index progression, and no gates or sign-off.
+ * Project-Admin-only (`lib/orchestrator/access.ts`): driving it reaches every
+ * agent on the project at once.
  */
 
 /** Where one stage stands inside a single orchestrated run. */
 export type StageRunStatus =
   | "pending"
   | "running"
-  | "awaiting_gate"
   | "approved"
   | "rejected"
   | "skipped";
@@ -49,15 +43,6 @@ export interface OrchestratorMessage {
   createdAt: number;
   /** `provider::model_id` of the model that answered — agent turns only. */
   modelKey?: string | null;
-  /**
-   * Set on the turn that closes a stage. `decided` stays undefined while the
-   * gate is open, which is what renders the inline approve/reject control.
-   */
-  gate?: {
-    phase: Phase;
-    mandatory: boolean;
-    decided?: "approved" | "rejected";
-  };
 }
 
 export type SessionStatus = "idle" | "running" | "paused" | "complete" | "failed";
@@ -77,10 +62,6 @@ export interface OrchestratorSession {
   updatedAt: number;
   messages: OrchestratorMessage[];
   stages: StageRun[];
-  /** Index into `stages` the sequencer is on. */
-  cursor: number;
-  /** Off → every gate pauses, mandatory or not (manual hand-off). */
-  autoAdvance: boolean;
   status: SessionStatus;
 }
 
@@ -105,3 +86,34 @@ export const splitModelKey = (key: string) => {
   const [provider = "", model_id = "", credentialId = ""] = key.split("::");
   return { provider, model_id, credentialId: credentialId || null };
 };
+
+/**
+ * The wire's agent id → the platform's phase id.
+ *
+ * Identical for eight of the nine. `code_review` is the exception: the engine's
+ * registry calls it `code_review`, every phase-keyed surface in this app calls it
+ * `review`, and mapping here is cheaper than renaming an identifier that sits in
+ * route paths, artifact rows and the API contract.
+ */
+export const PHASE_FOR_AGENT: Record<OrchestratorAgentId, Phase> = {
+  requirements: "requirements",
+  design: "design",
+  plan: "plan",
+  development: "development",
+  code_review: "review",
+  security: "security",
+  testing: "testing",
+  deployment: "deployment",
+  documentation: "documentation",
+};
+
+/**
+ * What to CALL an agent in front of a user.
+ *
+ * Routed through `PHASE_LABEL` so there is exactly one answer per agent across
+ * the app — which is how `plan` reads as "Project Manager" here, never "Plan"
+ * and never "PM": the agent is named for the job it does, and only its internal
+ * id says `plan`.
+ */
+export const agentLabel = (id: OrchestratorAgentId): string =>
+  PHASE_LABEL[PHASE_FOR_AGENT[id]];

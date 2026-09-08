@@ -280,7 +280,8 @@ export default function RunsPage() {
             runs={runsQ.isLoading ? null : items}
             projectNames={projectNameById}
             onRowClick={(r) =>
-              router.push(`/projects/${r.projectId}/copilot?run=${r.id}`)
+              // Read-only history. Continuing a chat is the Orchestrator rail's job.
+              router.push(`/runs/${r.id}/conversation`)
             }
           />
         </div>

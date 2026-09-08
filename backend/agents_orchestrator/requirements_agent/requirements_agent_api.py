@@ -326,16 +326,11 @@ async def import_ado_work_item(payload: WorkItemImportRequest):
     return {"status": "ok", "normalized": normalized, "summary": summary}
 
 
-@requirement_router_orchestrator.websocket("/test-ws")
-async def test_websocket(websocket: WebSocket):
-    await websocket.accept()
-    await websocket.send_text("WebSocket connection successful!")
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await websocket.send_text(f"Echo: {data}")
-    except WebSocketDisconnect:
-        pass
+# The `/test-ws` debug socket was removed in the Phase 5 follow-up audit. It called
+# `websocket.accept()` immediately and echoed whatever it was sent — an
+# unauthenticated socket mounted in the running app, invisible to every check until
+# the boot scan was taught to see WebSocket routes. Nothing referenced it.
+
 
 
 @requirement_router_orchestrator.websocket("/ws")

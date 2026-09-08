@@ -12,6 +12,7 @@ allowed set rather than filter rows after the fact.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import Request
 from sqlalchemy import text
@@ -106,9 +107,21 @@ _SCOPED_UNIT = f"{_SCOPED} AND {governs_unit()}"
 ORG_WIDE_PERMISSIONS = ("admin:*", "settings:manage")
 
 
-def is_org_wide(request: Request) -> bool:
-    perms = getattr(request.state, "permissions", []) or []
+def is_org_wide_for(permissions: Any) -> bool:
+    """Whether these permissions carry org-wide standing.
+
+    The rule itself, separated from where the permissions came from, so a caller that
+    holds them without a `Request` — the Orchestrator WebSocket, which resolves them
+    from a redeemed ticket — asks the SAME question rather than writing a second
+    version of it. `live_binding` in this module records what happens when a rule like
+    this gets restated: it was written four different ways and they disagreed.
+    """
+    perms = permissions or []
     return any(has_permission(perms, p) for p in ORG_WIDE_PERMISSIONS)
+
+
+def is_org_wide(request: Request) -> bool:
+    return is_org_wide_for(getattr(request.state, "permissions", []))
 
 
 async def allowed_workspace_ids(db: AsyncSession, request: Request) -> list[str] | None:
@@ -156,11 +169,24 @@ async def administered_workspace_ids(db: AsyncSession, request: Request) -> list
     A project-scoped binding lets you read the unit your project rolls up to; it
     does not make you an administrator of that unit, so it must not let you add
     members or grant roles there.
+
+    Thin wrapper over `administered_workspace_ids_for`, which is the same query
+    without the `Request`. See `is_org_wide_for` for why the split exists.
     """
-    if is_org_wide(request):
+    return await administered_workspace_ids_for(
+        db,
+        user_id=getattr(request.state, "user_id", "") or "",
+        permissions=getattr(request.state, "permissions", []),
+    )
+
+
+async def administered_workspace_ids_for(
+    db: AsyncSession, *, user_id: str, permissions: Any
+) -> list[str] | None:
+    """`administered_workspace_ids`, addressed by identity rather than by request."""
+    if is_org_wide_for(permissions):
         return None
 
-    user_id = getattr(request.state, "user_id", "") or ""
     if not user_id:
         return []
 
