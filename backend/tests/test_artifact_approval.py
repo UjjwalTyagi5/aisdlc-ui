@@ -94,11 +94,37 @@ class _Db:
     async def refresh(self, _obj):
         return None
 
+    async def execute(self, *_a, **_kw):
+        """The routes now resolve actor ids to emails before responding.
 
-def _artifact(status="pending"):
+        THIS FAKE ANSWERS "no such user", which is the interesting case: the route must
+        still return the decision with the raw id rather than blanking the approver.
+        Returning a canned email here would test the fake instead of the route.
+        """
+        class _R:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return []
+
+        return _R()
+
+
+def _artifact(status="pending", stage="design", project_id=None):
+    """A stand-in for an ORM Artifact.
+
+    `project_id` and `stage` are NOT optional decoration: since migration 0052 they are
+    the row's own scope, and the routes read them directly rather than joining to the
+    run. A fake missing them passes construction and fails inside the route, several
+    frames from the cause.
+    """
     return SimpleNamespace(
         id=uuid.uuid4(),
+        project_id=project_id or uuid.uuid4(),
+        stage=stage,
         run_id=uuid.uuid4(),
+        uploaded_by=None,
         tenant_id=TENANT,
         artifact_type="document",
         blob_url=None,

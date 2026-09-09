@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Filter, LayoutGrid, List, Search, Table2 } from "lucide-react";
+import { LayoutGrid, List, Search, Table2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -65,14 +65,6 @@ export interface ProjectsToolbarProps {
   canUseTable?: boolean;
 }
 
-const TEMPLATE_OPTIONS: Array<{ value: TemplateFilter; label: string }> = [
-  { value: "all", label: "All templates" },
-  { value: "web_app", label: "Web app" },
-  { value: "microservice", label: "Microservice" },
-  { value: "data_pipeline", label: "Data pipeline" },
-  { value: "blank", label: "Blank" },
-];
-
 export function ProjectsToolbar({
   value,
   onChange,
@@ -109,28 +101,11 @@ export function ProjectsToolbar({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {/* Filter icon + template select */}
-        <div className="flex items-center gap-1.5 rounded-[9px] border border-line-soft bg-panel-elevated px-3 h-9">
-          <Filter className="size-3.5 text-muted-foreground" aria-hidden />
-          <Select
-            value={value.template}
-            onValueChange={(v) => onChange({ template: v as TemplateFilter })}
-          >
-            <SelectTrigger
-              className="h-auto border-0 bg-transparent p-0 text-[12.5px] text-muted-foreground shadow-none focus:ring-0 focus-visible:ring-0 w-[110px]"
-              aria-label="Template filter"
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TEMPLATE_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value} className="font-mono text-xs">
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        {/* THE TEMPLATE FILTER IS GONE. `projects` has no template column and
+            `ProjectOut` hardcodes "blank", so every project carried the same value —
+            "All templates" returned everything and each of the other four returned
+            nothing at all. A filter whose options can only empty the screen teaches
+            people that filtering does nothing here. */}
 
         <Select
           value={value.sort}

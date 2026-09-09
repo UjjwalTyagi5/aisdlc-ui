@@ -9,13 +9,9 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   ArrowRight,
-  Boxes,
-  Building2,
   CheckCircle2,
-  Database,
   Globe,
   Globe2,
-  LayoutDashboard,
   Loader2,
   Lock,
   Mail,
@@ -56,7 +52,7 @@ import { useActiveWorkspace } from "@/hooks/use-workspaces";
 import { listConnectors } from "@/lib/api/connectors";
 import { createProject } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
-import type { Connector, ConnectorKind, ProjectTemplate } from "@/lib/schemas";
+import type { Connector, ConnectorKind } from "@/lib/schemas";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 
 // ───────── shared state + persistence ─────────
@@ -81,9 +77,10 @@ interface WizardState {
     scm: ConnectorKind | null;
     slack: boolean;
   };
+  /** The wizard step is still called `template` — it is the "create your first
+   *  project" step — but it no longer carries one. See the note where the picker was. */
   template: {
     projectName: string;
-    template: ProjectTemplate;
   };
 }
 
@@ -94,7 +91,7 @@ const INITIAL: WizardState = {
   workspace: { name: "", region: "us", retentionDays: 90 },
   identity: { mode: "invite", invites: [] },
   tools: { work: null, scm: null, slack: false },
-  template: { projectName: "", template: "web_app" },
+  template: { projectName: "" },
 };
 
 function loadState(): WizardState {
@@ -917,40 +914,7 @@ function ToolGroup({
 
 const templateSchema = z.object({
   projectName: z.string().min(2, "At least 2 characters").max(60),
-  template: z.enum(["web_app", "microservice", "data_pipeline", "blank"]),
 });
-
-const TEMPLATE_OPTIONS: Array<{
-  value: ProjectTemplate;
-  label: string;
-  description: string;
-  icon: React.ComponentType<{ className?: string }>;
-}> = [
-  {
-    value: "web_app",
-    label: "Web app",
-    description: "Frontend + API + DB, React/TS defaults.",
-    icon: LayoutDashboard,
-  },
-  {
-    value: "microservice",
-    label: "Microservice",
-    description: "Stateless service + health checks + image.",
-    icon: Boxes,
-  },
-  {
-    value: "data_pipeline",
-    label: "Data pipeline",
-    description: "Ingestion + transform + schema migrations.",
-    icon: Database,
-  },
-  {
-    value: "blank",
-    label: "Blank",
-    description: "No scaffold — bring your own.",
-    icon: Building2,
-  },
-];
 
 function TemplateStep({
   value,
@@ -997,8 +961,8 @@ function TemplateStep({
       <CardHeader>
         <CardTitle className="font-display font-semibold">Create your first project</CardTitle>
         <CardDescription>
-          Pick a template to seed sensible defaults. You can change these any time from
-          project settings.
+          Name it and we will create it in your business unit. Everything else — the
+          delivery track, connectors, agents — is set from project settings afterwards.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -1014,7 +978,6 @@ function TemplateStep({
               // be changed later from project settings (PRD §6).
               createMutation.mutate({
                 name: v.projectName,
-                template: v.template,
                 track: "greenfield",
                 workspaceId: activeWorkspace.id,
               });
@@ -1035,48 +998,16 @@ function TemplateStep({
               )}
             />
 
-            <FormField
-              control={form.control}
-              name="template"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Template</FormLabel>
-                  <FormControl>
-                    <RadioGroup
-                      value={field.value}
-                      onValueChange={field.onChange}
-                      className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-                    >
-                      {TEMPLATE_OPTIONS.map((t) => (
-                        <Label
-                          key={t.value}
-                          htmlFor={`onb-tpl-${t.value}`}
-                          className={cn(
-                            "border-line-soft flex cursor-pointer items-start gap-3 rounded-md border p-3",
-                            field.value === t.value && "border-primary bg-primary/5",
-                          )}
-                        >
-                          <RadioGroupItem
-                            id={`onb-tpl-${t.value}`}
-                            value={t.value}
-                            className="mt-0.5"
-                          />
-                          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                            <div className="flex items-center gap-2 text-sm font-medium">
-                              <t.icon className="size-4" aria-hidden />
-                              {t.label}
-                            </div>
-                            <p className="text-muted-foreground text-xs font-normal">
-                              {t.description}
-                            </p>
-                          </div>
-                        </Label>
-                      ))}
-                    </RadioGroup>
-                  </FormControl>
-                </FormItem>
-              )}
-            />
+            {/* THE TEMPLATE PICKER IS GONE. It offered Web app, Microservice, Data
+                pipeline and Blank, sent the choice to `createProject`, and the backend
+                accepted it into `ProjectCreateIn.template` and dropped it — `projects`
+                has no template column, and `ProjectOut` hardcodes "blank". So every
+                project came back Blank whatever was chosen here.
+
+                Asking somebody to choose is a promise that the choice matters. This one
+                seeded nothing, and the copy above said it would seed defaults. The
+                create-project dialog reached the same conclusion earlier and says so:
+                "the delivery track alone... not a canned template." */}
 
             <Separator className="bg-line-soft" />
 

@@ -64,7 +64,11 @@ from shared.auth.denylist import is_jti_denied
 from shared.authz.token_epoch import is_token_stale
 from config.auth.providers import extract_tenant_id, OIDC_PROVIDERS, resolve_provider_key
 from shared.authz.dependency import assert_all_routes_protected, public, require_permission
-from shared.authz.catalog import assert_rbac_catalog
+from shared.authz.catalog import (
+    assert_agent_ownership,
+    assert_rbac_catalog,
+    warn_unheld_owner_roles,
+)
 from agents_orchestrator.orchestrator2.registry import validate_registry
 from shared.auth.bootstrap import seed_org_admins
 from shared.authz.resolver import resolve_permissions_for_user, PermissionResolutionError
@@ -598,6 +602,12 @@ async def lifespan(app: FastAPI):
         await assert_rbac_catalog(
             _catalog_session, autorepair=RBAC_CATALOG_AUTOREPAIR
         )
+        # Every stage's named owner must actually hold that stage's approve
+        # permission. Fatal: it compares code against code, so a failure is a bug
+        # rather than a state a deployment can be in. Then a non-fatal pass over the
+        # data — an owning role nobody holds makes a correct gate look broken.
+        assert_agent_ownership()
+        await warn_unheld_owner_roles(_catalog_session)
 
     # Orchestrator2 capability registry boot guard (spec §11.2). The old engine
     # returned None for an unmapped agent and logged a warning: six of nine agents
@@ -1162,6 +1172,12 @@ from shared.routers.deployment_workspace import deployment_workspace_router
 app.include_router(deployment_workspace_router, prefix="/deployment", tags=["deployment-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.documentation_workspace import documentation_workspace_router
 app.include_router(documentation_workspace_router, prefix="/documentation", tags=["documentation-workspace"], dependencies=[_VIEW_DEP])
+# Artifact publication (phase 2). Per-route gates: artifact:view to read, run:create to
+# snapshot, and require_stage_approval() — artifact:approve_<stage>, resolved from the
+# path — to publish or reject. No _VIEW_DEP blanket: the decision routes need the
+# stage's own permission, and a blanket view gate would say nothing about that.
+from shared.routers.artifact_versions import artifact_versions_router
+app.include_router(artifact_versions_router, prefix="/artifact-versions", tags=["artifact-versions"])
 # MCP server registry (P-MCP). Per-route connector:view / connector:manage gates baked
 # into the router, so NO _VIEW_DEP floor here. Mounted only when MCP_ENABLED so the
 # feature is dark-launchable; absent flag → no MCP surface at all.

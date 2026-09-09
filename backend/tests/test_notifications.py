@@ -314,3 +314,43 @@ async def test_escalating_tells_both_the_new_queue_and_the_initiator(org):
         # And the person actually waiting.
         assert any(n["kind"] == "request_escalated"
                    for n in await svc.list_for(s, user_id="pa", role="project_admin"))
+
+
+@pytest.mark.asyncio
+async def test_a_refused_notification_does_not_poison_the_callers_transaction(org):
+    """THE BUG THIS CATCHES, which took an artifact publication down with it.
+
+    `emit` is documented as best-effort — "announcing must not break the thing
+    announced" — and wraps its INSERT in `except Exception`. That was not enough. A
+    failed statement ABORTS THE WHOLE POSTGRES TRANSACTION, so `emit` returned None
+    while every LATER statement in the caller's transaction died with
+    InFailedSQLTransactionError. The operation being announced was rolled back BY ITS
+    OWN ANNOUNCEMENT, and the traceback pointed at the innocent statement that came
+    next.
+
+    Found when a new `kind` hit `ck_notification_kind`. Fixed with a SAVEPOINT, which
+    confines the damage to the insert.
+
+    An invalid `kind` is used deliberately: it is refused by the DATABASE rather than
+    by `emit`'s own argument checks, which return early and never open a transaction.
+    """
+    async with get_db_session_for_tenant(org["org"]) as s:
+        result = await svc.emit(
+            s, tenant_id=org["org"], kind="not_a_registered_kind",
+            title="should not be written", recipient_user_id="alice")
+        assert result is None, "a kind the CHECK constraint refuses must not be written"
+
+        # THE ASSERTION THAT MATTERS: the session still works.
+        alive = (await s.execute(text("SELECT 1"))).scalar()
+        assert alive == 1, "the caller's transaction was aborted by the failed notice"
+
+        # And a real notification still goes through on the same session afterwards.
+        ok = await svc.emit(
+            s, tenant_id=org["org"], kind="request_approved",
+            title="the thing being announced", recipient_user_id="alice")
+        assert ok is not None
+
+    async with get_db_session_for_tenant(org["org"]) as s:
+        titles = [n["title"] for n in await svc.list_for(
+            s, user_id="alice", role="developer")]
+    assert titles == ["the thing being announced"]

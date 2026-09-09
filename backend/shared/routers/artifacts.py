@@ -18,11 +18,14 @@ Threat mitigations (T-M4-05):
 from __future__ import annotations
 
 import logging
+import os
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +37,7 @@ from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Artifact, AuditEvent, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
+from shared.services.actor_labels import actor_labels, relabel
 from shared.routers.projects import _get_or_404
 from shared.services.artifact_store import is_blob_path
 
@@ -75,6 +79,25 @@ async def _assert_project_visible(db: AsyncSession, request: Request, project_id
         raise HTTPException(status_code=404, detail="not found")
 
 
+async def _with_actor_emails(db, tenant_id, outs: list[ArtifactOut]) -> list[ArtifactOut]:
+    """Render `uploadedBy`/`approvedBy` as emails rather than JWT subject UUIDs.
+
+    ONE QUERY FOR THE WHOLE RESPONSE, not one per row — a Documents list is the place
+    this is called most and it would otherwise issue a lookup per document. An id we
+    cannot resolve is LEFT AS THE ID: a departed approver must still show as somebody.
+    """
+    labels = await actor_labels(
+        db, tenant_id,
+        [o.uploadedBy for o in outs] + [o.approvedBy for o in outs],
+    )
+    if not labels:
+        return outs
+    for o in outs:
+        o.uploadedBy = relabel(o.uploadedBy, labels)
+        o.approvedBy = relabel(o.approvedBy, labels)
+    return outs
+
+
 @artifacts_router.get("/projects/{project_id}/artifacts", response_model=List[ArtifactOut])
 async def list_artifacts_for_project(
     project_id: str,
@@ -95,20 +118,23 @@ async def list_artifacts_for_project(
     project = await _get_or_404(db, project_id, tenant_id)
     await _assert_project_visible(db, request, project.id)
 
+    # SCOPED BY THE ARTIFACT, not by the run that happened to produce it (0052). The
+    # join was the only way to know a document's project, which meant a document
+    # without a run could not be listed — and since 0052 that is every hand-uploaded
+    # one. The run is still joined (outer) because nothing else needs it, but it no
+    # longer decides membership.
     stmt = (
-        select(Artifact, Run)
-        .join(Run, Artifact.run_id == Run.id)
-        .where(Run.project_id == project.id)
-        .where(Run.tenant_id == tenant_id)
+        select(Artifact)
+        .where(Artifact.project_id == project.id)
+        .where(Artifact.tenant_id == tenant_id)
     )
     if phase:
-        stmt = stmt.where(Run.stage == phase)
+        # A PROJECT-LEVEL document is not "in" any phase, so filtering by one must not
+        # return it. It appears unfiltered, which is where it belongs.
+        stmt = stmt.where(Artifact.stage == phase)
 
-    rows = (await db.execute(stmt)).all()
-    result = [
-        ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
-        for artifact, run in rows
-    ]
+    rows = (await db.execute(stmt)).scalars().all()
+    result = [ArtifactOut.from_orm_artifact(artifact) for artifact in rows]
 
     # Materialize board-ingested stories (no structured-story table — they live in
     # Run.requirements_payload). Use the most recently WRITTEN requirements run that has
@@ -135,7 +161,7 @@ async def list_artifacts_for_project(
                 result.extend(synth)
                 break
 
-    return result
+    return await _with_actor_emails(db, tenant_id, result)
 
 
 @artifacts_router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
@@ -152,8 +178,9 @@ async def get_artifact(
     """
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
-    await _assert_project_visible(db, request, run.project_id)
-    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    await _assert_project_visible(db, request, artifact.project_id)
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.get("/artifacts/{artifact_id}/download")
@@ -181,7 +208,7 @@ async def download_artifact(
     """
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
-    await _assert_project_visible(db, request, run.project_id)
+    await _assert_project_visible(db, request, artifact.project_id)
 
     if getattr(artifact, "approval_status", "approved") != "approved":
         # The bytes are under the tenant's `_pending` prefix, not at blob_path. Serving
@@ -254,19 +281,81 @@ class ArtifactDecisionIn(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=2000)
 
 
-async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id: str):
-    """Resolve the artifact and refuse anyone who does not RUN this project.
+def _assert_uploadable(filename: str, data: bytes) -> None:
+    """Refuse a file the product cannot store or read.
 
-    `require_permission("approve")` on the route says the caller takes approval
-    decisions at all; it does not say which projects. `assert_can_administer_project`
-    is the second half: org-wide callers pass, everyone else must administer the
-    project's parent unit or hold a project_admin binding on the project itself.
-    Without it, any holder of `approve` anywhere in the tenant could accept another
-    team's documents into their shared record.
+    Reuses the chat-attachment rules rather than inventing a second list: the same
+    extensions `document_tools.extract_file_text` can actually read, and the same 10 MB
+    ceiling. Two different answers to "may I upload this?" on one product is how a user
+    learns the rules are arbitrary.
+    """
+    from shared.services.attachment_store import (  # noqa: PLC0415
+        ALLOWED_ATTACHMENT_EXTS, MAX_ATTACHMENT_BYTES,
+    )
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in ALLOWED_ATTACHMENT_EXTS:
+        raise ValueError(
+            f"{ext or 'that file type'} cannot be uploaded. "
+            f"Allowed: {', '.join(sorted(ALLOWED_ATTACHMENT_EXTS))}"
+        )
+    if not data:
+        raise ValueError("The file is empty.")
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise ValueError(
+            f"The file is {len(data) // (1024 * 1024)} MB; the limit is "
+            f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB."
+        )
+
+
+async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id: str):
+    """Resolve the artifact and refuse anyone who may not decide it.
+
+    TWO WAYS IN, and which ones apply depends on the document:
+
+        agent-level  (stage set)   the stage's OWNER (artifact:approve_<stage>)
+                                   OR project administration
+        project-level (stage NULL)                project administration
+
+    THE OWNER PATH IS THE POINT OF THIS. Approval used to demand
+    `assert_can_administer_project` for everything, so an Architect or QA who is not a
+    project admin could not accept their own stage's documents — the role that owns the
+    work could not sign it off. Same shape as the deployment routes, which do not demand
+    project administration for exactly this reason.
+
+    THE OWNER STILL HAS TO REACH THE PROJECT. `artifact:approve_design` is held
+    tenant-wide, so permission alone would let any Architect anywhere accept another
+    team's documents into their shared record — which is what the old
+    `assert_can_administer_project` was really guarding. `assert_can_read_project` is
+    the right strength here: a member of this project, not necessarily its admin.
+
+    PROJECT-LEVEL DOCUMENTS HAVE NO OWNING ROLE, so there is no stage permission to
+    check and administration is the only route. That is the whole distinction between
+    the two scopes.
+
+    The route keeps `require_permission("approve")` as its floor, so the boot scan
+    still sees a protected route and an unauthenticated caller never reaches here.
     """
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
-    project = await _get_or_404(db, str(run.project_id), tenant_id)
+    # From the ARTIFACT (0052). Reading it off the run made a document without one
+    # undecidable, and there is no reason a document's project should depend on
+    # whether the work that produced it still exists.
+    project = await _get_or_404(db, str(artifact.project_id), tenant_id)
+
+    stage = getattr(artifact, "stage", None)
+    if stage:
+        from shared.authz.permissions import _PHASE_PERMISSION, has_permission  # noqa: PLC0415
+        from shared.authz.project_scope import assert_can_read_project  # noqa: PLC0415
+
+        required = _PHASE_PERMISSION.get(stage)
+        perms = getattr(request.state, "permissions", []) or []
+        if required and has_permission(perms, required):
+            await assert_can_read_project(db, request, str(project.id))
+            return artifact, run
+        # An unknown stage falls through to administration rather than being waved
+        # past: a document filed under a stage nobody owns is not thereby everyone's.
+
     await assert_can_administer_project(db, request, project)
     return artifact, run
 
@@ -298,7 +387,8 @@ async def approve_artifact(
     if artifact.approval_status == "approved":
         # Idempotent: a double-click must not attempt a second move whose source has
         # already been deleted.
-        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
     if artifact.approval_status == "rejected":
         raise HTTPException(
             status_code=409,
@@ -340,8 +430,8 @@ async def approve_artifact(
             resource_type="artifact",
             resource_id=str(artifact.id),
             payload={
-                "project_id": str(run.project_id),
-                "stage": run.stage,
+                "project_id": str(artifact.project_id),
+                "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
                 "blob_path": artifact.blob_path,
             },
@@ -354,7 +444,8 @@ async def approve_artifact(
     # failed outright with "Could not refresh instance". The dependency's commit
     # persists both the artifact and the audit event.
     logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
-    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.post(
@@ -383,7 +474,8 @@ async def reject_artifact(
             detail="This artifact is already approved. Delete it instead of rejecting it.",
         )
     if artifact.approval_status == "rejected":
-        return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
     blob_client = getattr(request.app.state, "blob_client", None)
     if artifact.blob_path and blob_client is not None:
@@ -412,8 +504,8 @@ async def reject_artifact(
             resource_type="artifact",
             resource_id=str(artifact.id),
             payload={
-                "project_id": str(run.project_id),
-                "stage": run.stage,
+                "project_id": str(artifact.project_id),
+                "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
                 "reason": body.reason,
             },
@@ -421,7 +513,8 @@ async def reject_artifact(
     )
     # See approve_artifact: the request-scoped dependency owns the commit.
     logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
-    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.delete(
@@ -461,7 +554,19 @@ async def delete_artifact(
     """
     tenant_id = request.state.tenant_id
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
-    await _assert_project_visible(db, request, run.project_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+
+    # OWNERSHIP, NOT MERELY `artifact:delete`. Nine of the thirteen roles hold that
+    # permission — developer, qa, data_engineer among them — and none of those owns
+    # every agent. Without this check the whole approval gate was one HTTP call wide:
+    # a Developer could DELETE a Requirements document outright and skip the owner
+    # entirely, while the same person pressing the same button in the UI would have
+    # raised a request. The permission says "may take part in deleting"; this says
+    # "may decide THIS document", which is the actual question.
+    #
+    # Same helper as approve/reject and as the deletion-request route, so there is one
+    # definition of ownership rather than four that can drift apart.
+    await _artifact_for_decision(db, request, artifact_id)
 
     blob_path = artifact.blob_path
     # A legacy row holds a LOCAL FILESYSTEM path, not a blob name (see the note in
@@ -478,8 +583,8 @@ async def delete_artifact(
             resource_id=str(artifact.id),
             payload={
                 "run_id": str(artifact.run_id),
-                "project_id": str(run.project_id),
-                "stage": run.stage,
+                "project_id": str(artifact.project_id),
+                "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
                 "blob_path": blob_path,
                 "size_bytes": artifact.size_bytes,
@@ -523,6 +628,146 @@ async def delete_artifact(
     return Response(status_code=204)
 
 
+class DeletionRequestIn(BaseModel):
+    """Why this document should go. Required — see the route."""
+    reason: str
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/deletion-request",
+    status_code=202,
+    dependencies=[Depends(require_permission("artifact:delete"))],
+)
+async def request_artifact_deletion(
+    artifact_id: str,
+    body: DeletionRequestIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Delete the document if you own it; otherwise ask the person who does.
+
+    TWO OUTCOMES, AND THE STATUS CODE SAYS WHICH:
+
+        204  you own this agent — deleted outright, same as the DELETE route
+        202  you do not — a governance request was raised and nothing was destroyed
+
+    Who "owns" is not a second opinion: it is `_artifact_for_decision`, the same helper
+    the approve and reject routes use. A Project Admin owns every agent on their
+    project; a stage's own role (`artifact:approve_<stage>`) owns that agent. Making
+    those people file a request would ask them for permission they already hold, and it
+    could not even complete — self-approval is blocked, so the request would escalate
+    away from the one person entitled to answer it.
+
+    THE ASYMMETRY THIS CLOSES, for everybody else. Uploading a document is gated on
+    somebody accepting it; removing one was gated on nothing but holding
+    `artifact:delete`, which most roles do — so a contributor could undo an approval
+    nobody was asked about and leave the record missing a file.
+
+    A REQUEST IS ROUTED TO THE OWNER OF THE DOCUMENT'S OWN STAGE — the person whose
+    Approve put it in the record. A project-wide document has no stage and goes to the
+    Project Admin. Both decisions live in `governance_requests.create_request`; this
+    route only supplies the phase.
+
+    202 RATHER THAN 204 ON THE REQUEST PATH, because nothing has been deleted yet and
+    204 would tell the client the file is gone while it is still there — the same class
+    of lie as the PATCH that returned 200 and dropped the field.
+
+    A REASON IS REQUIRED. The approver is being asked to destroy something
+    irreversibly; "approve this deletion" with no stated why is not a decision anybody
+    can take responsibly, and the reason is what the audit answer rests on later.
+    """
+    tenant_id = request.state.tenant_id
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="Say why this document should be deleted — the approver is being "
+                   "asked to destroy it permanently.",
+        )
+
+    title = (artifact.blob_path or "").rsplit("/", 1)[-1] or artifact.artifact_type
+    user_id = getattr(request.state, "user_id", "") or ""
+
+    # AN OWNER DELETES; EVERYONE ELSE ASKS.
+    #
+    # A Project Admin owns every agent on their project by default, and the stage's own
+    # role owns its agent — that is exactly what `_artifact_for_decision` already
+    # enforces for ACCEPTING a document (`artifact:approve_<stage>` OR project
+    # administration). Requiring one of those people to file a request and wait would be
+    # asking them for permission they already hold, and worse, it could never complete:
+    # `decide_request` blocks self-approval, so the request escalates away from the very
+    # person entitled to answer it. Three of those went nowhere on test-demo.
+    #
+    # REUSED, NOT REIMPLEMENTED. This calls the same helper the approve/reject routes
+    # use rather than re-deriving the rule — a second copy of "who owns this document"
+    # is precisely the drift that made owners unable to approve in the first place.
+    try:
+        await _artifact_for_decision(db, request, artifact_id)
+        may_decide = True
+    except HTTPException:
+        may_decide = False
+
+    if may_decide:
+        # Straight to the existing destructive route, which owns the audit-then-blob-
+        # then-row ordering and the 502 when storage refuses. It answers 204.
+        return await delete_artifact(artifact_id, request, db)
+
+    # RESOLVED, NOT GUESSED. `request.state` carries no role — the JWT middleware sets
+    # only user_id, jti and token_exp — so reading `state.platform_role` silently gave
+    # every requester "contributor", and a Project Admin's deletion was filed as though
+    # a contributor had asked. Harmless for the approver here (this type is TYPE_ROUTED
+    # to the document's owner), but it is the requester's identity in the timeline and
+    # it was wrong. `actor_display_name` likewise turns the id into a person.
+    from shared.authz.effective_role import (  # noqa: PLC0415
+        actor_display_name, effective_platform_role,
+    )
+
+    actor_name = await actor_display_name(db, request)
+    actor_role = await effective_platform_role(db, request)
+
+    # THE UNIT THE PROJECT LIVES IN, read from the project rather than assumed.
+    # `create_request` requires it — the approver's binding is checked against this
+    # scope, so a request with the wrong workspace lands in a queue whose owner
+    # `decider_covers_scope` then refuses.
+    project = await _get_or_404(db, str(artifact.project_id), tenant_id)
+
+    from shared.services import governance_requests as gov  # noqa: PLC0415
+
+    req = await gov.create_request(
+        db,
+        tenant_id=str(tenant_id),
+        initiator_id=user_id,
+        initiator_name=actor_name,
+        initiator_role=actor_role,
+        request_type="artifact_delete",
+        title=f"Delete {title}",
+        description=reason,
+        workspace_id=str(project.workspace_id) if project.workspace_id else "",
+        project_id=str(artifact.project_id),
+        target_ref=str(artifact.id),
+        # `phase` is what decides the approver: the document's own stage, or None for a
+        # project-wide one. Passed rather than resolved here so one place owns routing.
+        phase=artifact.stage,
+        payload={
+            "artifactId": str(artifact.id),
+            "projectId": str(artifact.project_id),
+            "stage": artifact.stage,
+            "title": title,
+        },
+        # Filed by pressing Delete on a document, not composed in the request picker —
+        # so `can_raise_type` is not the gate here (see routing.SYSTEM_RAISED).
+        system_raised=True,
+    )
+    logger.info(
+        "Artifact %s deletion requested by %s (request=%s)",
+        artifact_id, user_id, req.get("id") if isinstance(req, dict) else req,
+    )
+    return req
+
+
 @artifacts_router.patch("/artifacts/{artifact_id}", response_model=ArtifactOut)
 async def patch_artifact(
     artifact_id: str,
@@ -549,7 +794,8 @@ async def patch_artifact(
             body.title,
             body.status,
         )
-    return ArtifactOut.from_orm_artifact(artifact, run.stage, str(run.project_id))
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 class ExportDocxIn(BaseModel):
@@ -611,10 +857,10 @@ async def export_artifact_docx(body: ExportDocxIn, request: Request):
 
 async def _get_artifact_or_404(
     db: AsyncSession, artifact_id: str, tenant_id: str
-) -> tuple[Artifact, Run]:
-    """Fetch an Artifact + its owning Run, scoped to tenant_id.
+) -> tuple[Artifact, Run | None]:
+    """Fetch an Artifact and its owning Run (which may be None), scoped to tenant_id.
 
-    Returns (Artifact, Run) tuple; raises 404 if not found or cross-tenant
+    Returns (Artifact, Run | None); raises 404 if not found or cross-tenant
     access is attempted (T-M4-05).
 
     A NON-UUID ID IS A 404, NOT A 500. Not every id the frontend holds addresses a row:
@@ -630,13 +876,121 @@ async def _get_artifact_or_404(
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=404, detail="Artifact not found")
 
+    # OUTER join, and the tenant comes from the ARTIFACT. An inner join on Run made
+    # every document without a run invisible — which since 0052 includes every
+    # hand-uploaded one — and scoping tenancy through the run meant a row could only be
+    # reached via work that produced it. `artifacts.tenant_id` has always been there;
+    # using it is both more direct and independent of whether a run survives.
     result = await db.execute(
         select(Artifact, Run)
-        .join(Run, Artifact.run_id == Run.id)
+        .outerjoin(Run, Artifact.run_id == Run.id)
         .where(Artifact.id == artifact_id)
-        .where(Run.tenant_id == tenant_id)
+        .where(Artifact.tenant_id == tenant_id)
     )
     row = result.first()
     if row is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return row[0], row[1]
+
+
+@artifacts_router.post(
+    "/projects/{project_id}/artifacts/upload",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("run:create"))],
+)
+async def upload_artifact(
+    project_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    stage: Optional[str] = Form(default=None),
+    artifact_type: str = Form(default="document"),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Add a document to a project by hand.
+
+    `run:create`, not the approve permission: putting a document forward is producing
+    work, not accepting it. Approval is the gate, and it is a separate decision by a
+    different person — `uploaded_by` is recorded apart from `approved_by` so that stays
+    visible.
+
+    PENDING, LIKE EVERY OTHER DOCUMENT. The bytes go to the `_pending` prefix with
+    `blob_url` NULL, so an uploaded file is listed and NOT downloadable until somebody
+    accepts it. One rule for generated and uploaded documents; two would make
+    "approved" mean different things in one list.
+
+    `stage` ABSENT MEANS PROJECT-LEVEL — a policy, a standard, something that is not one
+    agent's output. Present, it must name a real stage: a typo would file the document
+    under an agent nobody owns, and `_artifact_for_decision` would then fall through to
+    demanding project administration for something that looks agent-level on screen.
+
+    NO run_id. This is the case migration 0052 made `run_id` nullable for.
+    """
+    tenant_id = request.state.tenant_id
+    uploader = getattr(request.state, "user_id", None)
+    if not uploader:
+        # `uploaded_by` is half of the record of who put this forward; an anonymous
+        # upload would leave a document nobody is accountable for.
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    project = await _get_or_404(db, project_id, tenant_id)
+    await _assert_project_visible(db, request, project.id)
+
+    if stage:
+        from shared.services.orchestrator.progression import STAGE_ORDER  # noqa: PLC0415
+
+        if stage not in STAGE_ORDER:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{stage!r} is not a stage that owns documents; expected one of "
+                    f"{list(STAGE_ORDER)}, or omit it for a project-level document."
+                ),
+            )
+
+    data = await file.read()
+    filename = file.filename or "upload"
+    try:
+        _assert_uploadable(filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from shared.services.artifact_store import get_blob_client, store_artifact  # noqa: PLC0415
+
+    artifact = await store_artifact(
+        db,
+        tenant_id=str(tenant_id),
+        project_id=str(project.id),
+        stage=stage,
+        agent=stage,
+        uploaded_by=uploader,
+        artifact_type=artifact_type,
+        filename=filename,
+        data=data,
+        content_type=file.content_type or "application/octet-stream",
+        blob_client=getattr(request.app.state, "blob_client", None) or get_blob_client(),
+    )
+
+    db.add(
+        AuditEvent(
+            tenant_id=tenant_id,
+            actor_id=uploader,
+            event_type="artifact_upload",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(project.id),
+                "stage": stage,
+                "filename": filename,
+                "size_bytes": len(data),
+                # Whether the bytes actually landed. A row with no blob is still
+                # listed so the failure is visible rather than silent.
+                "stored": bool(getattr(artifact, "upload_succeeded", False)),
+            },
+        )
+    )
+    logger.info(
+        "Artifact %s uploaded to project %s (stage=%s) by %s",
+        artifact.id, project.id, stage or "project-level", uploader,
+    )
+    return (await _with_actor_emails(
+        db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]

@@ -34,6 +34,28 @@ export const updateProjectMemberRole = (
     schema: ProjectMember,
   });
 
+/** Change the agents this member reaches BEYOND their role's own.
+ *
+ * `role_bindings.extra_agents` is a stored column and the PATCH has always accepted it,
+ * but nothing sent it: the only caller posted `{ roleName }`. So an extra agent granted
+ * at project creation could never be taken away or added to afterwards — a one-sided
+ * door, and the wrong side to be stuck on for a grant.
+ *
+ * DISTINCT FROM THE ROLE'S OWN AGENTS, which are derived from the binding at read time
+ * and are not stored anywhere. This is the exception list, and only it is editable.
+ * Sending `[]` clears the extras and leaves the role's defaults untouched.
+ */
+export const updateProjectMemberAgents = (
+  projectId: ProjectId,
+  membershipId: string,
+  extraAgents: string[],
+) =>
+  api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(membershipId)}`, {
+    method: "PATCH",
+    body: { extraAgents },
+    schema: ProjectMember,
+  });
+
 export const removeProjectMember = (projectId: ProjectId, membershipId: string) =>
   api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(membershipId)}`, {
     method: "DELETE",

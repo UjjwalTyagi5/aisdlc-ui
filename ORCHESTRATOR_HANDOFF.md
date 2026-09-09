@@ -72,6 +72,50 @@ Later clarifications from the user:
 
 ---
 
+## 1a. Merged with `main` (2026-09-08)
+
+`feature/orchestrator-merge-main` = `feature/orchestrator-rebuild` + `origin/main`
+(46 commits, up to `3fdbdd78`). **No conflicts.** Only one file had been edited on both
+sides — `backend/shared/tools/document_tools.py` — and the two changes sat in different
+arms of the same `if/elif`: Ujjwal added `.pptx`, this branch replaced the `.docx` arm
+with `_docx_text`. Both are present and both are tested.
+
+**A clean merge is not proof.** What was actually verified:
+
+| Check | Result |
+|---|---|
+| Alembic heads | single — `0055_artifact_delete` |
+| App DB (`sdlc_product`) | migrated `0045_message_agent_id` → `0055`, backed up first |
+| Test DB (`sdlc_product_test`) | migrated to `0055` |
+| `conversation_messages.agent_id` | present in BOTH databases |
+| `grant_app_role` | re-run, 7 statements, every table readable by `sdlc_app` |
+| Backend `tests/` | 3,880 passed / 31 failed / 7 errors |
+| **`origin/main` alone, same suite** | **3,822 passed / 57 failed / 11 errors** |
+| Frontend | 815 passed, 97 files, typecheck and lint clean |
+| App boots | 340 routes, orchestrator2 WS mounted, 9 agents in the registry |
+
+The merge branch has FEWER failures than main's own baseline and more passing tests, so
+nothing here is a regression introduced by the merge. The remaining failures are the
+documented RLS-inert set, the live-e2e tests that need real scanners, and a group in
+`tests/test_project_business_unit.py` that **passes in isolation and fails inside the
+full suite on main too** — suite-order pollution, not a code defect, and pre-existing.
+
+**Migration numbering:** this branch added no migrations after `0045_message_agent_id`,
+so main's chain is authoritative and nothing needed renumbering. Ujjwal had already
+spliced `0045_message_agent_id` into the chain (`2125aeb4`); the run-memory column
+survives and the chain now runs `0045_message_agent_id → 0044_scrum_master_decide → …`.
+
+**The old Copilot stays gone.** All the removal guards still pass after the merge —
+`test_old_engines_are_gone.py` (9) plus `no-copilot-imports` / `no-copilot-surface` (6).
+`copilot_api.py`, `orchestrator_api.py`, `copilot_cards.py` and `stage_switch.py` are
+all absent.
+
+**Carried debt #4 is RESOLVED by main.** `advanceCopilotRun` no longer posts to the
+deleted `/runs/{id}/copilot/advance` — main repointed it at `POST /runs/{id}/approvals`,
+which re-checks the stage permission, blocks self-approval, writes the audit event and
+clears `gate_pending`. Only the function NAME is a legacy holdover, and its docstring
+says so. Nothing further to do.
+
 ## 2. Where everything lives
 
 ### Spec and decisions
@@ -371,7 +415,9 @@ pending, which sent at least one reader at finished work.
    item blocked on a decision rather than on work.
 2. **The BYOK "no env fallback" guarantee is one layer deep** — carried debt 5.
 3. **Context truncation** — carried debt 6. Needs a product decision, not a fix.
-4. **`advanceCopilotRun` posts to a deleted endpoint.** `frontend/lib/api/runs.ts`
+4. **RESOLVED on `main` (2026-09-08) — `advanceCopilotRun` now posts to
+   `POST /runs/<id>/approvals`.** Left here for the history only; there is no work
+   outstanding. Original note follows. ~~`frontend/lib/api/runs.ts`
    still calls `POST /runs/<id>/copilot/advance`, which the backend no longer defines
    (`tests/orchestrator2/test_old_engines_are_gone.py` asserts its absence). Three live
    components call it: `approval-gate-row`, `run-detail-drawer`, `run-conversation`.
@@ -380,10 +426,27 @@ pending, which sent at least one reader at finished work.
    routing one. Pinned by a test in
    `frontend/components/runs/__tests__/no-route-reaches-the-deleted-copilot.test.tsx`
    so it cannot be mistaken for fixed.
-5. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
+5. **Live browser verification is not available from this session.** The Chrome the
+   `claude-in-chrome` tools drive does not reach this machine's dev server: a file
+   served from `frontend/public` returns its contents to `curl` on localhost:3000 and
+   **404s** in that browser, and `/orchestrator` there renders a pre-Phase-5 build
+   ("PIPELINE", "Auto-advance", "Run pipeline") whose strings exist nowhere in the
+   source tree. Surviving a clean `.next` wipe and a dev-server restart rules out a
+   stale build. Anything needing on-screen confirmation has to be checked in the
+   user's own browser — do not read a screenshot from that tool as evidence about
+   this working tree.
+6. **`/projects/<id>` 500s in dev** — "Jest worker encountered 2 child process
    exceptions". Seen after a low-memory event; the Orchestrator's own routes were
    unaffected. Not diagnosed.
-6. **The Design agent's document does not reach the Orchestrator CHAT as text.**
+7. **RESOLVED (2026-09-08) — the repo-reading agents had no workspace.** Code Review,
+   Security, Documentation and Deployment read `s.work_dir`, filled only by the
+   wrapper's `get_prepared()`. Through the Orchestrator they answered from the
+   conversation instead of the code. Fixed by `orchestrator2/workspace.py`; see
+   `orchestrator_instruction.md` §18.11. Kept listed because it is the eighth instance
+   of the wrapper-gap pattern and the FIRST that `test_run_context_is_complete.py`
+   could not catch — that guard only compares `ws_helper` contextvars, so any future
+   per-run state held as session-state assignment is still invisible to it.
+8. **The Design agent's document does not reach the Orchestrator CHAT as text.**
    Nothing registers a socket under a run id and the tool result carrying it is emitted
    as `tool.call`, not `stream_chunk`. The user gets the file plus a reply naming it —
    the same shape Requirements and the Project Manager have. Forwarding the text needs

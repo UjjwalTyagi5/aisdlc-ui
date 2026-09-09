@@ -26,7 +26,7 @@ import os
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import delete, false as sa_false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,9 +65,25 @@ def _user_id(request: Request) -> str:
 
 
 class ApprovalIn(BaseModel):
+    #: "approve" or "reject". Normalised below, because the gate UI has always sent the
+    #: past tense ("approved"/"rejected") — that is what `advanceCopilotRun` posted to
+    #: the retired copilot route, and rejecting those spellings here would break the
+    #: three screens that decide gates rather than teach them a new vocabulary.
     decision: str
     reason: Optional[str] = None
     idempotencyKey: Optional[str] = None
+
+    @field_validator("decision")
+    @classmethod
+    def _normalise(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        canonical = {
+            "approve": "approve", "approved": "approve",
+            "reject": "reject", "rejected": "reject",
+        }.get(v)
+        if canonical is None:
+            raise ValueError("decision must be 'approve' or 'reject'")
+        return canonical
 
 
 @runs_router.post(
@@ -907,8 +923,40 @@ async def record_approval(
     stage = run.current_stage or run.stage or "requirements"
     actor_permissions: list[str] = getattr(request.state, "permissions", []) or []
     required_permission = _PHASE_PERMISSION.get(stage)
-    if not required_permission or not has_permission(actor_permissions, required_permission):
-        # Unknown/uncovered stage OR missing permission ⇒ 403 before anything is
+
+    # TWO EQUAL APPROVERS, matching `_artifact_for_decision` — the stage's own owner, or
+    # whoever administers the project. A Project Admin owns every agent on their project
+    # by default, so the two are peers: either may decide, whoever gets there first, and
+    # one decision closes the gate. Neither waits on the other and nothing escalates.
+    #
+    # THIS ROUTE ONLY HAD THE FIRST HALF, which is why a Project Admin could not sign off
+    # a stage on their own project — and why the queue could not even show them the
+    # gate, since it lists what the viewer's permissions cover. Documents already worked
+    # this way; run gates were the outlier.
+    #
+    # `assert_can_administer_project` is the same helper the settings and document routes
+    # use, so administration has ONE definition rather than a second one invented here.
+    # It answers 404 for someone who does not run the project; caught and turned into the
+    # 403 this route already returns, so the refusal reads the same whichever half failed
+    # and neither leaks which permission was missing.
+    may_approve = bool(required_permission) and has_permission(
+        actor_permissions, required_permission
+    )
+    if not may_approve and required_permission:
+        from shared.authz.project_scope import (  # noqa: PLC0415
+            assert_can_administer_project,
+        )
+
+        project = await db.get(Project, run.project_id)
+        if project is not None:
+            try:
+                await assert_can_administer_project(db, request, project)
+                may_approve = True
+            except HTTPException:
+                may_approve = False
+
+    if not may_approve:
+        # Unknown/uncovered stage OR neither route to approval ⇒ 403 before anything is
         # written (no permission-name leak, consistent with copilot_advance).
         raise HTTPException(
             status_code=403,
@@ -940,6 +988,20 @@ async def record_approval(
         )
 
     now = datetime.now(timezone.utc)
+
+    # THE GATE IS CLOSED HERE, and until now nothing closed it anywhere.
+    #
+    # A gate is DERIVED — `approvals._pending_gates` selects runs with
+    # `gate_pending = true` — and `_handle_artifact_ready` is what sets the flag when an
+    # agent finishes a stage. Clearing it lived in `copilot_advance`, which Phase 5A
+    # deleted along with the rest of the Copilot. Nothing inherited the job, so every
+    # gate ever raised stayed in every eligible queue permanently, and this route
+    # recorded a decision beside a run that went on looking undecided.
+    #
+    # Both decisions close it. A rejection does not leave the run paused waiting for the
+    # same person to answer again — the stage is sent back, and re-running it is what
+    # raises the next gate.
+    run.gate_pending = False
 
     audit = AuditEvent(
         tenant_id=uuid.UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id,

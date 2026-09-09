@@ -59,8 +59,15 @@ def test_agent_access_stage_two_owner_roles_hold_governance_decide():
     from shared.governance import routing
 
     owner_roles = set(routing.AGENT_OWNER_ROLE.values()) - {"project_admin"}
+    # scrum_master joined this set when routing.AGENT_OWNER_ROLE gained its missing
+    # `plan` entry. It was absent from 0037 only because the map had no `plan` key and
+    # `agent_owner_role()` answered a "project_admin" default for the miss, so Plan
+    # looked like a project_admin-owned agent. Granted by 0044.
     assert owner_roles == {
-        "ba", "architect", "qa", "devops_engineer", "security_engineer", "data_engineer",
+        "ba", "architect", "qa", "devops_engineer", "security_engineer",
+        "data_engineer", "scrum_master",
+        # Joined when "One agent, one role" moved the Development gate here.
+        "developer",
     }
     for role in owner_roles:
         assert "governance:decide" in _ROLE_PERMISSIONS[role], (
@@ -92,10 +99,25 @@ def test_contributor_is_the_read_only_floor():
     assert _ROLE_PERMISSIONS["custom"] == ["artifact:view"]
 
 
-def test_developer_cannot_approve():
+def test_developer_approves_only_the_stage_it_owns():
+    """SUPERSEDED RULE, NARROWED — not deleted.
+
+    This asserted the developer held NO `artifact:approve_*` at all, encoding
+    "Developer builds; Architect approves — never self-approval." That split ended
+    with frontend/lib/roles.ts's "One agent, one role" change: the Architect no
+    longer REACHES the Development agent, so the gate moved to `developer` rather
+    than sitting with a role that cannot open it.
+
+    What survives is the part that still bites. Self-approval prevention is now
+    per-PERSON rather than per-ROLE (the individual who ran a consequential action
+    cannot approve their own; it escalates), so the invariant worth pinning is that
+    a developer can approve its OWN stage and no other — a developer signing off
+    Security or Deployment would be a real widening.
+    """
     perms = _ROLE_PERMISSIONS["developer"]
     assert "run:create" in perms
-    assert not any(p.startswith("artifact:approve_") for p in perms)
+    approvals = {p for p in perms if p.startswith("artifact:approve_")}
+    assert approvals == {"artifact:approve_development"}
 
 
 def test_connector_view_granted_broadly_manage_restricted():

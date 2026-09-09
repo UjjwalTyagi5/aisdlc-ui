@@ -13,6 +13,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuPortal,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -30,6 +31,7 @@ import {
   addProjectMember,
   listProjectMembers,
   removeProjectMember,
+  updateProjectMemberAgents,
   updateProjectMemberRole,
 } from "@/lib/api/project-members";
 import { qk } from "@/lib/api/query-keys";
@@ -130,6 +132,32 @@ export default function ProjectMembersPage() {
     },
     onError: (err) =>
       toast.error("Couldn't update role", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  });
+
+  /** Grant or withdraw ONE extra agent, toggled from the member's menu.
+   *
+   *  `extra_agents` is stored per binding and the PATCH has always accepted it — but
+   *  nothing sent it, so an extra agent granted at creation was permanent. Toggling
+   *  sends the whole list because that is what the column holds; there is no
+   *  add/remove endpoint and inventing one here would be a second way to write the
+   *  same field.
+   */
+  const agentsMutation = useMutation({
+    mutationFn: ({ membershipId, extraAgents }: { membershipId: string; extraAgents: string[] }) =>
+      updateProjectMemberAgents(id, membershipId, extraAgents),
+    onSuccess: (member) => {
+      const n = member.extraAgents?.length ?? 0;
+      toast.success(
+        n === 0
+          ? "Extra agent access cleared — the role's own agents are unchanged"
+          : `${n} extra ${n === 1 ? "agent" : "agents"} granted`,
+      );
+      invalidate();
+    },
+    onError: (err) =>
+      toast.error("Couldn't change agent access", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -297,6 +325,60 @@ export default function ProjectMembersPage() {
                                 {r.label}
                               </DropdownMenuItem>
                             ))}
+                          </DropdownMenuSubContent>
+                        </DropdownMenuPortal>
+                      </DropdownMenuSub>
+                      {/* EXTRA AGENTS — the exception list, and the only part of agent
+                          access that is stored. The role's own agents are derived at
+                          read time and are changed by changing the role, above. Every
+                          agent on this project's track is offered; the ones the role
+                          already drives are disabled, because granting an agent
+                          somebody already reaches would write an exception that means
+                          nothing and then sit there looking like it does. */}
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>Extra agent access</DropdownMenuSubTrigger>
+                        <DropdownMenuPortal>
+                          <DropdownMenuSubContent>
+                            {roster.map((phase) => {
+                              const already = drives.includes(phase);
+                              const granted = (m.extraAgents ?? []).includes(phase);
+                              return (
+                                <DropdownMenuItem
+                                  key={phase}
+                                  disabled={already || agentsMutation.isPending}
+                                  onSelect={() => {
+                                    const current = m.extraAgents ?? [];
+                                    agentsMutation.mutate({
+                                      membershipId: m.membershipId,
+                                      extraAgents: granted
+                                        ? current.filter((p) => p !== phase)
+                                        : [...current, phase],
+                                    });
+                                  }}
+                                >
+                                  <span className="flex-1">{PHASE_LABEL[phase]}</span>
+                                  <span className="text-muted-foreground ml-2 font-mono text-[10px]">
+                                    {already ? "role" : granted ? "granted" : ""}
+                                  </span>
+                                </DropdownMenuItem>
+                              );
+                            })}
+                            {(m.extraAgents ?? []).length > 0 && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  disabled={agentsMutation.isPending}
+                                  onSelect={() =>
+                                    agentsMutation.mutate({
+                                      membershipId: m.membershipId,
+                                      extraAgents: [],
+                                    })
+                                  }
+                                >
+                                  Clear extra access
+                                </DropdownMenuItem>
+                              </>
+                            )}
                           </DropdownMenuSubContent>
                         </DropdownMenuPortal>
                       </DropdownMenuSub>

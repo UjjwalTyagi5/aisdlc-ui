@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Copy,
   FileDiff,
+  FileText,
   GitBranch,
   GitPullRequest,
   ListChecks,
@@ -22,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { DocumentList } from "@/components/app/document-list";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
   DropdownMenu,
@@ -43,7 +45,7 @@ import { qk } from "@/lib/api/query-keys";
 import type { PrepareResult, Severity, CodeReviewArtifact } from "@/lib/schemas/code-review";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "summary" | "findings" | "diff";
+type Tab = "summary" | "findings" | "diff" | "documents";
 
 const REC_META: Record<string, { label: string; cls: string }> = {
   approve: { label: "Approve", cls: "bg-success/15 text-success border-success/30" },
@@ -304,6 +306,12 @@ export default function CodeReviewPage() {
             <TabBtn active={tab === "diff"} onClick={() => setTab("diff")} icon={FileDiff}>
               Diff
             </TabBtn>
+            {/* DOCUMENTS AS A TAB — this page is a review viewer with no side column,
+                so there is nowhere else to put them. Without it a Code Review document
+                could be uploaded and approved with nowhere on this page to see it. */}
+            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>
+              Documents
+            </TabBtn>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -313,6 +321,12 @@ export default function CodeReviewPage() {
               <SummaryView artifact={artifact} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
             ) : tab === "findings" ? (
               <FindingsView artifact={artifact} onJump={() => setTab("diff")} />
+            ) : tab === "documents" ? (
+              <div className="p-4">
+                {/* The BACKEND stage name — the UI phase is `review`, the column says
+                    `code_review`, and passing the wrong one silently lists nothing. */}
+                <DocumentList projectId={id} stage="code_review" />
+              </div>
             ) : (
               <DiffView diff={diffText} files={prepared?.files ?? null} />
             )}

@@ -1410,6 +1410,127 @@ already dead. There is now a test asserting the mapper declares what the loader 
 
 Verified against the reported run: **0 characters before, 4,896 after.**
 
+### 18.10 A turn says which files it carried (2026-09-08)
+
+The composer already drew a chip per stored file, from `GET /runs/{id}/attachments`. It
+was not enough. That row answers *what does this run hold?* — and the backend feeds
+**every** stored attachment into **every** turn, so the row is unchanged from the moment
+a file lands until the run ends. The question a user actually asks is narrower and comes
+later: looking back at their own message, *did the PRD go with THAT one?* The run-level
+row cannot answer it, because it looks identical whether the file went with this turn,
+the one before, or two turns after.
+
+So a sent turn now carries its own names, stamped on the user's bubble — the same
+gesture `agent-chat-drawer.tsx` makes in the standalone agent chats, because it is the
+same question in both surfaces.
+
+**Only the files stored since the last turn.** `announcedAttachmentsRef` in the cockpit
+holds what has already been named. Without it the whole run list would be stamped on
+every bubble, and one PRD attached once would read as five uploads across five turns.
+The set is keyed on url, not name: the url is
+`/generated/{user}/attachments/{run_id}/{name}`, so an entry cannot collide with a file
+on another run — which is why it is deliberately **not** cleared when the conversation
+switches. Clearing it changes exactly one case, and changes it for the worse: reopening
+a conversation left and returned to would re-announce a file an earlier turn had already
+carried.
+
+**The names never reach the wire.** `use-orchestrator-socket` takes them for display and
+omits them from the frame. The backend builds the agent's context from the run's own
+attachment store; a list on the frame would be a second source for the same thing, free
+to diverge the moment an upload landed between the cockpit's last refetch and the send.
+A test asserts no sent frame carries the field.
+
+**Mutation testing.** Seven mutants, all killed. Two survived first time and both were
+real: nothing fed `Thread` an empty attachment list (the hook omits the field rather
+than stamping `[]`, so no test covered a component that also takes messages from
+`hydrate`), and the conversation-switch reset turned out to be redundant — killed by
+deleting the line rather than by testing it.
+
+**Not verified in a live browser.** The Chrome available to this session does not reach
+this machine's dev server — a probe file served by `localhost:3000` to `curl` here comes
+back 404 in that browser. Unit and mutation coverage only.
+
+### 18.11 The repo-reading agents get the run's checkout (2026-09-08)
+
+**Reported:** "those agents do code review and security after development has been done,
+they should know which repo the development was done in. They should be able to pull
+that." Correct, and they could not.
+
+Code Review, Security, Documentation and Deployment resolve their repository through
+`s.work_dir` on their own session state. That field is filled by a single
+`get_prepared()` call living in each agent's `*_agent_api.py` wrapper — which this
+engine skips by D10a. Through the Orchestrator every one of their repo tools returned
+"no workspace prepared", with the run's own Development checkout on disk beside them.
+Measured on run `9de55574`: 155 files present, `_work_dir()` → `None` for all three.
+
+**Why it survived so long.** It never looked like a failure. The agents did not stop —
+they answered from the CONVERSATION, describing code they had never opened, and filed a
+document indistinguishable from a real review. The tell was only in the database:
+`code_review_artifacts` and `security_artifacts` were NULL on Orchestrator run
+`c0345c1f`, while standalone runs of the same week carried a real 6.7 KB unified diff
+(`072633af`) and a real SBOM with severity counts (`23914f8b`).
+
+**The fix** is `orchestrator2/workspace.py`, called from the turn alongside the other
+per-run context. Two sources, in order: the run's own Development checkout
+(`files/<user>/orchestrator/<run>/project`), then a target prepared on the standalone
+page — the same in-memory `(tenant, project)` entry the wrapper reads. The run's own
+checkout wins, because in a conversation where Development has just written the code
+that is what "now review it" means, and a stale prepared target would otherwise be
+reviewed silently.
+
+Nothing is invented. With no checkout and nothing prepared it binds nothing and the
+agent goes on saying it has no workspace. An empty directory does not count either:
+the Development agent's `_get_work_dir` calls `makedirs` on every turn, so the path
+exists as soon as any agent has run, and accepting it would hand Security an empty tree
+and get back a clean scan.
+
+Git facts are read from the repository, never guessed — head SHA, branch, remote — and
+**the PAT is stripped from the remote URL**, which the Development agent's clone embeds
+inline and which is otherwise rendered into the agent's context and stored on its
+artifact. Code Review additionally gets a diff computed against the base branch, because
+`analyze_diff` takes diff text as an argument and would otherwise have a repository and
+nothing to say about what changed in it.
+
+**Why the guard missed it.** `test_run_context_is_complete.py` compares the `ws_helper`
+contextvar setters the wrappers use against what the turn establishes. This state is not
+a contextvar — it is a lookup plus direct attribute assignment — so the guard was blind
+to it by construction rather than by oversight. `test_workspace_binding.py` covers it
+directly, and pins the turn's call.
+
+**Verified live**, same probe before and after: `search_repo` now returns a real hit in
+`Program.cs`, `scan_secrets` runs gitleaks, `generate_sbom` returns real components.
+Ten mutants, all killed. One survivor was instructive: deleting the four-agent guard
+still returned `None` — via the fail-soft `except` — so the test now asserts the route
+taken, not just the value.
+
+### 18.12 Merged with `main` (2026-09-08)
+
+The orchestrator work and `origin/main` were brought together on
+`feature/orchestrator-merge-main`. 46 commits from main, 6 from this branch, **no
+conflicts** — the sides barely overlap. The single shared file,
+`shared/tools/document_tools.py`, took Ujjwal's `.pptx` arm and this branch's `.docx`
+table fix in different branches of the same conditional; both survive and both are
+pinned by tests.
+
+**Both databases were behind.** Main added twelve migrations and neither database had
+them, which is what a first full-suite run reported as 184 failures — schema, not code.
+After migrating both to `0055_artifact_delete` that fell to 31, against **57 on
+`origin/main` running the same suite**. The merge is therefore not a regression: it
+passes 58 more tests than main does.
+
+Taken as method rather than as a one-off: a red suite after a merge is a question, not
+an answer. The two things worth doing before touching any code are migrating the test
+database and running the same suite on the other branch, because both times here the
+failures turned out to belong to the environment or to main.
+
+**The run-memory column is intact.** `conversation_messages.agent_id` (0045) is present
+in both databases, and main's chain was spliced to run from it rather than around it, so
+per-agent attribution and the run transcript are unaffected.
+
+**The old Copilot is still gone** — every removal guard passes after the merge — and
+main independently closed the last piece of that debt by repointing `advanceCopilotRun`
+at `POST /runs/{id}/approvals`. The three screens that approve a gate work again.
+
 ### 18.8 Left open, deliberately
 
 - **RLS (#1)** — unchanged, and still the operator's call. See 17.6.

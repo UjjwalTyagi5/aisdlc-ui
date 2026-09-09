@@ -135,6 +135,12 @@ function renderCockpit() {
   );
 }
 
+function sendMessage(text: string) {
+  const composer = screen.getByRole("textbox", { name: /message the orchestrator/i });
+  fireEvent.change(composer, { target: { value: text } });
+  fireEvent.keyDown(composer, { key: "Enter" });
+}
+
 function attach(...files: File[]) {
   const input = screen.getByTestId("orchestrator-attach-input");
   fireEvent.change(input, { target: { files } });
@@ -292,3 +298,136 @@ describe("Orchestrator composer attachments", () => {
 });
 
 void React;
+
+/**
+ * The composer chips answer "what does this run hold?". Once a turn has gone, the user
+ * is looking at their own message asking a narrower question — "did the PRD go with
+ * THAT one?" — and the run-level list cannot answer it: it looks identical whether the
+ * file went with this turn or arrived two turns later.
+ *
+ * So the turn carries the names of the files that were attached SINCE the last one, and
+ * the thread stamps them on the bubble. Which is also why they are not re-sent: the
+ * backend does feed every stored attachment into every turn, but a name repeated on
+ * five consecutive bubbles reads as five uploads.
+ */
+describe("what a sent turn says it carried", () => {
+  it("carries the file that was attached before it", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+
+    sendMessage("turn this into stories");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    const turn = sendTurn.mock.calls[0]![0] as {
+      attachments?: Array<{ name: string; url: string }>;
+    };
+    expect(turn.attachments).toEqual([
+      { name: "brd.md", url: "/generated/u1/attachments/run-1/brd.md" },
+    ]);
+  });
+
+  it("does not repeat the same file on the next turn", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+
+    sendMessage("turn this into stories");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    sendMessage("now the acceptance criteria");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(2));
+
+    const second = sendTurn.mock.calls[1]![0] as {
+      attachments?: Array<{ name: string; url: string }>;
+    };
+    expect(second.attachments ?? []).toEqual([]);
+  });
+
+  it("carries only the newly attached file when a second one follows", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+    sendMessage("stories, please");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    attach(new File(["cols"], "scope.xlsx", { type: "application/vnd.ms-excel" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("orchestrator-attachments").textContent).toContain(
+        "scope.xlsx",
+      ),
+    );
+
+    sendMessage("and now against this scope");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(2));
+
+    const second = sendTurn.mock.calls[1]![0] as {
+      attachments?: Array<{ name: string; url: string }>;
+    };
+    expect(second.attachments).toEqual([
+      { name: "scope.xlsx", url: "/generated/u1/attachments/run-1/scope.xlsx" },
+    ]);
+  });
+
+  it("carries nothing when the turn had no file attached at all", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    sendMessage("what do you make of the ledger?");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    const turn = sendTurn.mock.calls[0]![0] as {
+      attachments?: Array<{ name: string; url: string }>;
+    };
+    expect(turn.attachments ?? []).toEqual([]);
+  });
+});
+
+/**
+ * The chip has to still be there after the turn goes.
+ *
+ * Reported from a live run: the BRD attached, the agent read it, and neither the
+ * composer chip nor the name on the sent message was on screen. The backend held the
+ * file and had answered the listing with it, so whatever dropped it did so on this
+ * side — and the tell in the server log was a SECOND `POST /runs`, which only happens
+ * when `runIdRef` has been cleared. Clearing it disables the chips query, whose data
+ * lives under the old run's key, so the chips vanish and nothing refetches.
+ */
+describe("the chips outlive the turn", () => {
+  it("keeps the chip on screen after the message is sent", async () => {
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+
+    sendMessage("turn this into stories");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByTestId("orchestrator-attachments").textContent).toContain("brd.md");
+  });
+
+  it("mints exactly one run across attaching and then sending", async () => {
+    // The second POST /runs in the live log is the symptom, not the cause: a run
+    // created after the upload has no attachments, and the chips query moves to a key
+    // nothing has ever filled.
+    renderCockpit();
+    await screen.findByRole("textbox", { name: /message the orchestrator/i });
+
+    attach(brd());
+    await screen.findByTestId("orchestrator-attachments");
+    sendMessage("and now the criteria");
+    await waitFor(() => expect(sendTurn).toHaveBeenCalledTimes(1));
+
+    expect(createRun).toHaveBeenCalledTimes(1);
+    const turn = sendTurn.mock.calls[0]![0] as { resolveRunId: () => Promise<string> };
+    await expect(turn.resolveRunId()).resolves.toBe("run-1");
+    expect(createRun).toHaveBeenCalledTimes(1);
+  });
+});

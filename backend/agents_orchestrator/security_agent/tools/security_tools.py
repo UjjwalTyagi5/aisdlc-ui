@@ -305,13 +305,26 @@ async def read_design_artifacts() -> str:
     if not s.tenant_id:
         return "No design artifact available."
     sid = get_session_id()
-    if await _run_exists(s.tenant_id, sid):
-        row = await _run_design_artifact(s.tenant_id, sid)
-    else:
-        row = await _latest_design_artifact(s.tenant_id, s.project_id)
-    if not row:
-        return "No design artifact found for this project (scan without a threat-model checklist)."
-    return json.dumps(row)[:12000]
+
+    from shared.services.artifact_consumption import describe, read_upstream_for_agent
+
+    async def _legacy():
+        """The dual-mode read, unchanged. Pipeline mode reads THIS run's row rather
+        than the project's latest, and that distinction has to survive for projects
+        that have not opted in to enforcement."""
+        if await _run_exists(s.tenant_id, sid):
+            return await _run_design_artifact(s.tenant_id, sid)
+        return await _latest_design_artifact(s.tenant_id, s.project_id)
+
+    result = await read_upstream_for_agent(
+        tenant_id=s.tenant_id, project_id=s.project_id, stage="design",
+        consumer_stage="security", legacy_reader=_legacy,
+    )
+    if not result.found:
+        if result.unenforced:
+            return "No design artifact found for this project (scan without a threat-model checklist)."
+        return describe(result)
+    return json.dumps(result.payload)[:12000]
 
 
 @tool
