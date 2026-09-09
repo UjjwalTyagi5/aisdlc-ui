@@ -13,11 +13,18 @@ import { bffProxy } from "@/lib/bff/proxy";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const agentId = req.nextUrl.searchParams.get("agent_id") ?? "";
+  // agent_id is OPTIONAL now. Sent blank it used to mean "an agent whose id is the
+  // empty string", which matched nothing; omitted it means every agent, which is what
+  // the project overview asks for.
+  const agentId = req.nextUrl.searchParams.get("agent_id");
   const projectId = req.nextUrl.searchParams.get("project_id");
-  const qs = new URLSearchParams({ agent_id: agentId });
+  const limit = req.nextUrl.searchParams.get("limit");
+  const qs = new URLSearchParams();
+  if (agentId) qs.set("agent_id", agentId);
   if (projectId) qs.set("project_id", projectId);
-  return bffProxy(`/conversations?${qs.toString()}`);
+  if (limit) qs.set("limit", limit);
+  const suffix = qs.toString();
+  return bffProxy(`/conversations${suffix ? `?${suffix}` : ""}`);
 }
 
 export async function POST(req: NextRequest) {

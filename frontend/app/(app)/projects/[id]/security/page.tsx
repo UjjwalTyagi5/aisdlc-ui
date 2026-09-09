@@ -36,6 +36,7 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ScanTargetDialog } from "@/components/app/scan-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
 import { listScans, getScan } from "@/lib/api/security";
@@ -96,6 +97,9 @@ export default function SecurityPage() {
   const [tab, setTab] = React.useState<Tab>("summary");
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [prepared, setPrepared] = React.useState<PrepareScanResult | null>(null);
   const [activeScanId, setActiveScanId] = React.useState<string | null>(null);
 
@@ -111,6 +115,7 @@ export default function SecurityPage() {
   });
 
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "security",
     // See the Code Review page: attachments are stored per session, so the durable
     // session has to exist before a file can be attached at all.

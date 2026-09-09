@@ -14,6 +14,7 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { ModelSelector } from "@/components/app/model-selector";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
 import { GeneratedDocuments } from "@/components/app/generated-documents";
@@ -184,7 +185,11 @@ export default function RequirementsPage() {
 
   // Chat drawer — streaming agent chat via /api/chat
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     // Talk directly to the Requirements agent's WS (self-contained agent page),
     // not the orchestrator — so the selected/all story refs in pipeline_context
     // actually reach the agent (the orchestrator rebuilds context and drops them).

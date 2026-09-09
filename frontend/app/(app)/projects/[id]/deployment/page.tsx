@@ -22,6 +22,7 @@ import { DocumentList } from "@/components/app/document-list";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
 import { getPreparedDeploy, getRelease } from "@/lib/api/deployment";
@@ -76,10 +77,14 @@ export default function DeploymentPage() {
   }, [preparedQ.data, prepared]);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [tab, setTab] = React.useState<Tab>("readiness");
   const [agentModel, setAgentModel] = React.useState<string>();
 
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "deployment",
     projectId: id,
     sessionKey: id,

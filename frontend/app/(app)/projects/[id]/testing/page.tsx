@@ -33,6 +33,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
 import { getUnitResult, openTestsPr, type UnitResult } from "@/lib/api/testing";
@@ -115,6 +116,9 @@ export default function TestingPage() {
   const [target, setTarget] = React.useState<TestTarget | null>(null);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [panelOpen, setPanelOpen] = React.useState(true);
   const [selectedType, setSelectedType] = React.useState<string>("unit");
   const [cfg, setCfg] = React.useState<Record<string, Record<string, string>>>({});
@@ -125,6 +129,7 @@ export default function TestingPage() {
 
   const queryClient = useQueryClient();
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "testing",
     projectId: id,
     sessionKey: id,
