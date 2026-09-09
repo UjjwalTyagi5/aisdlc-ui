@@ -234,13 +234,17 @@ ENABLE_LITELLM: bool = os.environ.get("ENABLE_LITELLM", "false").lower() == "tru
 ENABLE_WORKER_POOL: bool = os.environ.get("ENABLE_WORKER_POOL", "false").lower() == "true"
 WORKER_RECLAIM_TIMEOUT_MS: int = int(os.environ.get("WORKER_RECLAIM_TIMEOUT_MS", "60000"))
 
-# ── Langfuse LLM Observability (self-hosted OSS) ──
-# ENABLE_LANGFUSE gates all tracing: when false, build_agent_callbacks returns only
-# the AuditCallbackHandler and get_langfuse_client() returns None (zero behavior change).
+# ── Langfuse LLM Observability (shared self-hosted instance) ──
+# ENABLE_LANGFUSE gates all tracing: when false, langfuse_langchain_extras returns only
+# the Redis usage meter and get_langfuse_client() returns None (zero behavior change).
 # Keys + host are read by the langfuse SDK singleton (shared/observability) AND by the
 # read-only traces_router (shared/routers/traces.py) which proxies the Langfuse Public API.
+#
+# NO LOCALHOST DEFAULT. A default pointing at a container nobody runs turns a missing
+# setting into connection errors on every trace read; empty keys already disable tracing
+# cleanly, so an unset host should reach the same "off" state rather than a broken "on".
 ENABLE_LANGFUSE: bool = os.environ.get("ENABLE_LANGFUSE", "false").lower() == "true"
-LANGFUSE_HOST: str = os.environ.get("LANGFUSE_HOST", "http://localhost:3100")
+LANGFUSE_HOST: str = os.environ.get("LANGFUSE_HOST", "")
 LANGFUSE_PUBLIC_KEY: str = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.environ.get("LANGFUSE_SECRET_KEY", "")
 

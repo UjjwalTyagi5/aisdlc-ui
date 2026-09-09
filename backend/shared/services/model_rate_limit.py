@@ -176,9 +176,9 @@ def _client():
         _redis_failed = True
         return None
     try:
-        import redis.asyncio as aioredis  # noqa: PLC0415
+        from shared.redis_client import redis_from_url  # noqa: PLC0415
 
-        _redis = aioredis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+        _redis = redis_from_url(encoding="utf-8", decode_responses=True)
     except Exception:  # pragma: no cover - defensive
         logger.warning("model RPM limiter: Redis init failed; enforcement disabled", exc_info=True)
         _redis_failed = True

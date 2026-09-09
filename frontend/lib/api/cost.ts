@@ -9,18 +9,29 @@ import { api } from "./client";
 
 /**
  * Schema matching CostBreakdownRow from agentic_app/shared/routers/_schemas.py
- * (REQ-M9-07/08/09) — one aggregate row per (agent, model) pair.
+ * (REQ-M9-07/08/09) — one aggregate row per model, optionally per (agent, model).
  *
- * Grouped by model ALONE until now, which left agent-level attribution (PRD
- * FR-09) reachable only from a single project's own Cost tab: you could see
- * that Opus cost $31 across the organisation, but not which agent spent it, and
- * "which agent is expensive" is the question that decides where to tune a
- * prompt or downgrade a model. The page's own copy had promised both splits for
- * some time; this is the field that makes it true.
+ * `agentType` IS OPTIONAL, AND THAT IS NOT A STYLE CHOICE. The backend does not
+ * emit it: CostBreakdownRow in _schemas.py carries model/tokens/cost/callCount
+ * only, and tests/cost/test_cost_api.py asserts `"agentType" not in rows[0]`,
+ * because /cost is sourced from Langfuse's daily-metrics endpoint, which
+ * aggregates by model. Requiring the field here made this schema unparseable
+ * against the real API — harmless only while ENABLE_LANGFUSE was false and
+ * `rows` came back empty (an empty array parses fine), and a hard throw in
+ * CostDashboard on the first real row.
+ *
+ * Agent-level attribution (PRD FR-09) is still the question worth answering —
+ * "which agent is expensive" is what decides where to tune a prompt. Getting it
+ * back means one Langfuse query per agent_type tag, merged the way cost.py
+ * already fans out per workspace. Until that exists, the table hides the column
+ * rather than inventing a value for it.
  */
 export const CostBreakdownRow = z.object({
-  /** The agent that consumed it, as a pipeline phase (`PHASE_LABEL` renders it). */
-  agentType: Phase,
+  /**
+   * The agent that consumed it, as a pipeline phase (`PHASE_LABEL` renders it).
+   * Absent whenever the row came from a model-only aggregate — see above.
+   */
+  agentType: Phase.optional(),
   model: z.string(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),

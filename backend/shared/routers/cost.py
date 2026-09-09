@@ -48,6 +48,7 @@ from shared.services.budget_alloc import (
     assert_workspace_fits,
     effective_cap,
 )
+from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import (
     administered_workspace_ids,
@@ -312,6 +313,26 @@ async def get_cost_summary(
     just be a second number that can disagree with the first.
     """
     tenant_id = request.state.tenant_id
+
+    # SCOPE, NOT JUST TENANT. This took an arbitrary project_id and checked only that it
+    # belonged to the caller's tenant, so any cost:view holder — including a
+    # project_admin of a DIFFERENT project — could read any project's spend, budget and
+    # utilization by passing its id. That is the same class of finding
+    # docs/rbac-audit-2026-08-17.md section 4 fixed for /cost, /cost/budgets and
+    # /traces/project-summary; this endpoint was missed.
+    #
+    # 404 rather than 403, matching the traces twin: zeroes are themselves a fact about a
+    # project, and indistinguishable from "no spend yet", while a 403 would confirm the
+    # project exists.
+    if not is_org_wide(request):
+        visible = await visible_project_ids(
+            db,
+            user_id=getattr(request.state, "user_id", "") or "",
+            tenant_id=str(tenant_id),
+        )
+        if visible is not None and str(project_id) not in set(visible):
+            raise HTTPException(status_code=404, detail="project not found in this tenant")
+
     row = (await db.execute(
         text("SELECT id, monthly_budget_usd FROM projects WHERE id = :id AND tenant_id = :t"),
         {"id": project_id, "t": str(tenant_id)},

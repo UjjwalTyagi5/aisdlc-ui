@@ -45,16 +45,32 @@ def get_langfuse_client():
         if _init_attempted:
             return _client
         _init_attempted = True
-        if not (ENABLE_LANGFUSE and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        # LANGFUSE_HOST is part of the gate, not just the keys. The SDK falls back to
+        # its own default host when given an empty one, so an unset host would quietly
+        # ship this platform's prompts and outputs to Langfuse Cloud instead of failing
+        # closed. Requiring it here makes "not configured" mean "tracing off".
+        if not (
+            ENABLE_LANGFUSE
+            and LANGFUSE_HOST
+            and LANGFUSE_PUBLIC_KEY
+            and LANGFUSE_SECRET_KEY
+        ):
             _client = None
             return None
         try:
             from langfuse import Langfuse  # noqa: PLC0415
 
+            from shared.observability.redaction import mask_sensitive  # noqa: PLC0415
+
             _client = Langfuse(
                 public_key=LANGFUSE_PUBLIC_KEY,
                 secret_key=LANGFUSE_SECRET_KEY,
                 host=LANGFUSE_HOST,
+                # Redaction at write time (PRD 34.8). Attached to the client rather than
+                # to call sites: the SDK runs it over every input and output it
+                # serialises, so no agent route can forget it — and per-site discipline
+                # is precisely what failed for the trace attribution arguments.
+                mask=mask_sensitive,
             )
             logger.info("Langfuse tracing enabled: host=%s", LANGFUSE_HOST)
         except Exception:  # pragma: no cover - defensive

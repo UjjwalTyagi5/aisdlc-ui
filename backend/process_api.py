@@ -268,9 +268,9 @@ async def _handle_artifact_ready(payload: dict) -> None:
 
 async def _artifact_event_listener() -> None:
     """Subscribe to Redis artifact_events channel and route pipeline stage transitions."""
-    import redis.asyncio as aioredis
+    from shared.redis_client import redis_from_url
 
-    client = aioredis.from_url(REDIS_URL)
+    client = redis_from_url()
     pubsub = client.pubsub()
     await pubsub.subscribe(_ARTIFACT_CHANNEL)
     try:
@@ -511,9 +511,12 @@ async def lifespan(app: FastAPI):
     # ENABLE_SCIM flag so revocation is available from the moment tokens carry jti claims
     # (D-01, Wave A). In local dev without Redis, app.state.redis_denylist is None and
     # the denylist check is skipped (T-7.4-02: accepted residual risk for local dev).
-    import redis.asyncio as aioredis  # noqa: F811 — safe re-import for clarity
+    from shared.redis_client import redis_from_url  # noqa: PLC0415
     if REDIS_URL:
-        app.state.redis_denylist = aioredis.from_url(REDIS_URL)
+        # Bounded timeouts: this client is used by the auth middleware on EVERY
+        # request, and an unreachable Redis here used to stall each one for the full
+        # OS connect timeout before failing open as designed.
+        app.state.redis_denylist = redis_from_url()
         logger.info("Redis JTI denylist client initialized")
         # AuditRetryWorker (REQ-M8-05) — drains audit:dead_letter stream.
         # Started here because it requires Redis; gated on REDIS_URL being set.

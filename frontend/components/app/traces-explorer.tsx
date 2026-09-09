@@ -8,7 +8,6 @@ import { Waypoints } from "lucide-react";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
-import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Select,
   SelectContent,
@@ -31,7 +30,6 @@ import { AgentType, type TraceListItem, type TraceScore } from "@/lib/schemas";
 
 const ALL = "all";
 const AGENT_OPTIONS = AgentType.options;
-const STATUS_OPTIONS = ["approved", "failed", "running", "awaiting_approval"] as const;
 
 function avgScore(scores: TraceScore[]): string {
   if (scores.length === 0) return "—";
@@ -46,26 +44,26 @@ function fmtLatency(ms: number): string {
 export interface TracesExplorerProps {
   agent: string;
   project: string;
-  status: string;
+  user: string;
   onAgentChange: (v: string) => void;
   onProjectChange: (v: string) => void;
-  onStatusChange: (v: string) => void;
+  onUserChange: (v: string) => void;
 }
 
 export function TracesExplorer({
   agent,
   project,
-  status,
+  user,
   onAgentChange,
   onProjectChange,
-  onStatusChange,
+  onUserChange,
 }: TracesExplorerProps) {
   const router = useRouter();
 
   const filters: TraceFilters = {
     agent: agent === ALL ? undefined : agent,
     project: project === ALL ? undefined : project,
-    status: status === ALL ? undefined : status,
+    user: user === ALL ? undefined : user,
   };
 
   const tracesQ = useQuery({
@@ -80,18 +78,24 @@ export function TracesExplorer({
     return Array.from(map.entries());
   }, [tracesQ.data]);
 
+  // Member options, same derivation. Rows predating the attribution fix carry no
+  // userId, so this is empty until traced runs exist — and an empty select is worse
+  // than none, hence the conditional render below.
+  const userOptions = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const t of tracesQ.data ?? []) if (t.userId) ids.add(t.userId);
+    return Array.from(ids).map((id) => [id, id] as [string, string]);
+  }, [tracesQ.data]);
+
   return (
     <div className="space-y-4">
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         <FilterSelect label="Agent" value={agent} onChange={onAgentChange} options={AGENT_OPTIONS.map((a) => [a, a])} />
         <FilterSelect label="Project" value={project} onChange={onProjectChange} options={projectOptions} />
-        <FilterSelect
-          label="Status"
-          value={status}
-          onChange={onStatusChange}
-          options={STATUS_OPTIONS.map((s) => [s, s.replace(/_/g, " ")])}
-        />
+        {userOptions.length > 0 && (
+          <FilterSelect label="Member" value={user} onChange={onUserChange} options={userOptions} />
+        )}
       </div>
 
       {tracesQ.isError ? (
@@ -133,7 +137,6 @@ export function TracesExplorer({
                 <TableHead>Trace</TableHead>
                 <TableHead>Agent</TableHead>
                 <TableHead>Project</TableHead>
-                <TableHead>Status</TableHead>
                 <TableHead className="text-right">Latency</TableHead>
                 <TableHead className="text-right">Cost</TableHead>
                 <TableHead className="text-right">Spans</TableHead>
@@ -155,9 +158,6 @@ export function TracesExplorer({
                   </TableCell>
                   <TableCell className="font-mono text-[12px]">{t.agentType}</TableCell>
                   <TableCell className="text-muted-foreground text-[12px]">{t.projectName}</TableCell>
-                  <TableCell>
-                    <StatusBadge status={t.status} />
-                  </TableCell>
                   <TableCell className="text-right font-mono text-[12px] tabular-nums">
                     {fmtLatency(t.latencyMs)}
                   </TableCell>

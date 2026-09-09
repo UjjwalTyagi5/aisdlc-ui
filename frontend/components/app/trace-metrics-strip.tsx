@@ -7,8 +7,11 @@ import { formatUsd } from "@/components/app/cost-dashboard";
 import type { TraceMetrics } from "@/lib/schemas";
 
 export function TraceMetricsStrip({ metrics }: { metrics: TraceMetrics }) {
-  const errPct = (metrics.errorRate * 100).toFixed(1);
-  const errBad = metrics.errorRate > 0.05;
+  // The error tile appears only when there is a rate to show. The backend cannot
+  // derive one from the trace list (no span levels there) and now says so with null
+  // instead of 0.0 — and a green "0.0%" tile is not a neutral placeholder on a page
+  // people open to find out what went wrong.
+  const err = metrics.errorRate;
   const tiles = [
     {
       icon: Activity,
@@ -16,12 +19,16 @@ export function TraceMetricsStrip({ metrics }: { metrics: TraceMetrics }) {
       value: String(metrics.totalTraces),
       tone: "text-info bg-info/12",
     },
-    {
-      icon: AlertTriangle,
-      label: "Error rate",
-      value: `${errPct}%`,
-      tone: errBad ? "text-destructive bg-destructive/12" : "text-success bg-success/12",
-    },
+    ...(err == null
+      ? []
+      : [
+          {
+            icon: AlertTriangle,
+            label: "Error rate",
+            value: `${(err * 100).toFixed(1)}%`,
+            tone: err > 0.05 ? "text-destructive bg-destructive/12" : "text-success bg-success/12",
+          },
+        ]),
     {
       icon: Timer,
       label: "Latency p50 · p95",

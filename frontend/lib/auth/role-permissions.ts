@@ -36,6 +36,17 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "model:manage",
     "audit:view",
     "cost:view",
+    // Traces at unit scope (PRD §35: Organization Admin "All", Business Unit Admin
+    // "Unit", Project Admin "own projects"). This role held `audit:view` and
+    // `cost:view` but not `trace:view`, so the one governance role accountable for a
+    // unit got a 403 on the screen that shows what its agents actually did — while
+    // holding the audit trail describing the same runs.
+    //
+    // Unit scoping needs no extra work: `visible_project_ids` already resolves a
+    // business_unit binding to that unit's projects, so the permission is the only
+    // thing that was missing. Note this DOES widen who can read prompt and output
+    // previews, which is why it is a deliberate grant rather than an oversight fix.
+    "trace:view",
     "workspace:manage",
     // Tier 2 of the governance escalation chain (project_admin → bu_admin → org_admin).
     "governance:decide",

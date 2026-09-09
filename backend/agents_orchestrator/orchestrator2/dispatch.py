@@ -136,6 +136,7 @@ from config.ws_helper import (
 )
 from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
 from shared.authz.consequential import is_approval_message
+from shared.observability import agent_trace
 from shared.services.model_resolver import (
     ModelNotEnabledError,
     NoModelConfiguredError,
@@ -438,7 +439,40 @@ async def run_agent(
             set_resolved_model(resolved)
 
             graph = capability.load_graph()
-            config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
+
+            # OBSERVABILITY. This path had none: the orchestrator is the primary agent
+            # execution surface and every turn it ran was invisible to the Traces page,
+            # while the nine standalone agent routes were all instrumented. FR-08 asks
+            # for traces covering "agent/tool/model execution", and this is where most
+            # of that execution happens.
+            #
+            # Attached AFTER set_resolved_model so the offering is resolved, and after
+            # this block's own set_run_project (agent_trace re-sets it to the same
+            # value, which is idempotent and keeps the documented ordering above
+            # intact). Identity is passed explicitly rather than via `request`: this
+            # runs under a WebSocket, and every value below already came from the
+            # verified `runs` row rather than the client frame.
+            #
+            # SIDE EFFECT WORTH KNOWING: agent_trace also attaches the Redis usage
+            # meter, so orchestrator turns now count toward tpm_limit / cost_limit_usd
+            # and the usage_monthly rollup. They were not metered at all before, which
+            # means budgets have been under-counting the platform's busiest surface.
+            _lf_cbs, _lf_meta = await agent_trace(
+                session_id=run_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                agent_type=agent_id,
+                project_id=project_id,
+                model=model_id,
+                offering_id=offering_id,
+            )
+            config = {
+                "configurable": {"thread_id": run_id},
+                "recursion_limit": 100,
+                "callbacks": _lf_cbs,
+                "metadata": _lf_meta,
+            }
 
             # The project's connector, bound for this turn only.
             #

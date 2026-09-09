@@ -47,8 +47,7 @@ from shared.tools.document_tools import (
     attachment_paths_from_context,
 )
 from shared.db import get_db_session_for_tenant
-from shared.observability.callbacks import langfuse_langchain_extras
-from shared.services.budget_store import workspace_id_for_project
+from shared.observability.callbacks import agent_trace
 
 from .agents.schedule import PM_SYS_MESSAGE, app as planning_app
 
@@ -71,10 +70,9 @@ async def _run_config(session_id: str, tenant_id: str, user_id: str, project_id:
     configured for your organization" and points an administrator at a model that was
     never the problem — which is exactly what this route did before the line existed.
     """
-    workspace_id = await workspace_id_for_project(tenant_id or "", project_id)
-    callbacks, metadata = langfuse_langchain_extras(
+    callbacks, metadata = await agent_trace(
         session_id=session_id, tenant_id=tenant_id, user_id=user_id,
-        agent_type="plan", project_id=project_id, workspace_id=workspace_id,
+        agent_type="plan", project_id=project_id,
     )
     return {
         "configurable": {"thread_id": session_id},

@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Optional
 
-import redis.asyncio as aioredis
+from shared.redis_client import redis_from_url
 from sqlalchemy import select
 
 from config.env import REDIS_URL
@@ -93,7 +93,7 @@ async def publish_artifact_ready(
     tenant_id is included in the payload so _handle_artifact_ready can scope
     its DB session without a NULL-tenant query (T-M7.1-09 mitigation).
     """
-    client = aioredis.from_url(REDIS_URL)
+    client = redis_from_url()
     try:
         payload = json.dumps(
             {

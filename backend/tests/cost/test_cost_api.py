@@ -17,20 +17,12 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from config.env import POSTGRES_CONN_STRING
-
 TENANT_A = "00000000-0000-0000-0000-000000000001"
 TENANT_B = "00000000-0000-0000-0000-000000000002"
-
-_skip_no_db = pytest.mark.skipif(
-    not POSTGRES_CONN_STRING,
-    reason="POSTGRES_CONN_STRING not set — skipping live-DB cross-tenant isolation test",
-)
 
 
 def _make_db_session_override(rows: list[tuple]):
@@ -215,71 +207,57 @@ async def test_get_cost_no_token_returns_401():
     )
 
 
-@pytest.mark.integration
-@_skip_no_db
-@pytest.mark.asyncio
-async def test_get_cost_cross_tenant_isolation(mint_token, monkeypatch):
-    """T-9.2-05: a tenant-B agent_call_logs row is absent from tenant-A's GET /cost.
+@pytest.mark.unit
+async def test_get_cost_tenant_tag_is_server_derived(mint_token, monkeypatch):
+    """T-9.2-05: GET /cost is scoped by the CALLER'S tenant tag, never a supplied one.
 
-    Live-DB integration test (FORCE RLS on agent_call_logs). Seeds one row for
-    tenant A and one for tenant B via get_db_session_for_tenant (sets the RLS
-    GUC), then asserts tenant A's response total reflects ONLY its own row.
+    Rewritten from a live-DB test that seeded two tenants' `agent_call_logs` rows and
+    asserted tenant A's total stayed under tenant B's 999.0. That stopped testing
+    anything the day /cost moved onto Langfuse: the endpoint no longer reads
+    agent_call_logs at all, so the total was 0.0 and `0.0 < 999.0` passed without
+    exercising a single isolation code path.
+
+    The boundary that actually holds now is the tag on the outbound Langfuse query —
+    application-level, not Postgres RLS, because Langfuse is one shared project. So
+    that is what this asserts: the tenant tag matches the token's tenant, and query
+    parameters a caller controls cannot introduce another tenant's tag.
     """
     import httpx
     from process_api import app
-    from shared.authz.workspace import active_workspace_for_request
-    from shared.db import get_db_session_for_tenant
-    from shared.models.orm import AgentCallLog
+    from shared.db import get_db_session
 
-    # Restore the real workspace resolution for this live-DB test (the autouse
-    # fixture above patches it for the mocked-DB unit tests in this module).
-    monkeypatch.setattr(
-        "shared.authz.dependency.active_workspace_for_request", active_workspace_for_request
-    )
+    import config.env as _env
+    import shared.routers.traces as _traces
+    monkeypatch.setattr(_env, "ENABLE_LANGFUSE", True)
 
-    run_suffix = uuid.uuid4().hex[:8]
+    seen: list[list[str]] = []
 
+    async def _capture_lf_get(path, params):
+        seen.append(list(params.get("tags") or []))
+        return {"data": []}
+
+    monkeypatch.setattr(_traces, "_lf_get", _capture_lf_get)
+
+    app.dependency_overrides[get_db_session] = _make_db_session_override([])
     try:
-        async with get_db_session_for_tenant(TENANT_A) as session:
-            session.add(
-                AgentCallLog(
-                    tenant_id=uuid.UUID(TENANT_A),
-                    run_id=f"run-a-{run_suffix}",
-                    agent_type="requirements",
-                    model="claude-sonnet-4-6",
-                    input_tokens=100,
-                    output_tokens=50,
-                    cost_usd=Decimal("0.001000"),
-                    duration_ms=100,
-                )
+        token = mint_token(
+            user_id="u-iso",
+            tenant_id=TENANT_A,
+            permissions=["artifact:view", "cost:view", "settings:manage"],
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                # A caller-supplied tenant tag must not reach the Langfuse query.
+                f"/cost?window_days=1&tags=tenant:{TENANT_B}",
+                headers={"Authorization": f"Bearer {token}"},
             )
 
-        async with get_db_session_for_tenant(TENANT_B) as session:
-            session.add(
-                AgentCallLog(
-                    tenant_id=uuid.UUID(TENANT_B),
-                    run_id=f"run-b-{run_suffix}",
-                    agent_type="requirements",
-                    model="claude-sonnet-4-6",
-                    input_tokens=999999,
-                    output_tokens=999999,
-                    cost_usd=Decimal("999.000000"),
-                    duration_ms=100,
-                )
-            )
-    except Exception as exc:
-        pytest.skip(f"DB not reachable or setup incomplete: {exc}")
-
-    # Phase 6: tightened to cost:view. process_api _VIEW_DEP requires artifact:view too.
-    token = mint_token(user_id="u-iso", tenant_id=TENANT_A, permissions=["artifact:view", "cost:view"])
-    headers = {"Authorization": f"Bearer {token}"}
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        response = await client.get("/cost?window_days=1", headers=headers)
-
-    assert response.status_code == 200
-    data = response.json()
-    # Tenant A's total must NOT include tenant B's 999.0 cost row.
-    assert data["totalCostUsd"] < 999.0
+        assert response.status_code == 200
+        assert seen, "expected at least one Langfuse query"
+        for tags in seen:
+            assert f"tenant:{TENANT_A}" in tags
+            assert not any(TENANT_B in t for t in tags)
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)

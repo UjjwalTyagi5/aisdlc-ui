@@ -2,8 +2,8 @@
 
 Runs without a live Langfuse server (Langfuse is disabled via env in the test .env,
 and the read-API's Langfuse calls are monkeypatched). Validates:
-  - build_agent_callbacks / langfuse_langchain_extras are zero-behavior-change no-ops
-    when disabled (only the AuditCallbackHandler is returned).
+  - langfuse_langchain_extras is a zero-behavior-change no-op when disabled (only the
+    Redis usage meter is returned).
   - The traces_router maps representative Langfuse JSON onto the exact frontend
     contract, honouring the AgentType alias (code_review -> review), level lowering,
     and enum safety.
@@ -16,28 +16,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from shared.observability import build_agent_callbacks, langfuse_langchain_extras
+from shared.observability import langfuse_langchain_extras
 
 
 # ── Factory disabled-path (ENABLE_LANGFUSE is false in the test .env) ──────────
-
-def test_build_agent_callbacks_disabled_returns_audit_only(monkeypatch):
-    import contextlib
-
-    # Force the disabled state regardless of the live .env (ENABLE_LANGFUSE may be
-    # true locally). The contract: only the AuditCallbackHandler + a nullcontext.
-    monkeypatch.setattr("shared.observability.callbacks.get_langfuse_client", lambda: None)
-
-    callbacks, trace_cm = build_agent_callbacks(
-        run_id="run-1", tenant_id="t1", agent_type="design"
-    )
-    names = [type(c).__name__ for c in callbacks]
-    # Audit + the Redis usage meter are always present; Langfuse handler is not (disabled).
-    assert names == ["AuditCallbackHandler", "UsageMeterCallbackHandler"]
-    assert isinstance(trace_cm, contextlib.nullcontext)
-    with trace_cm:  # must be a usable no-op
-        pass
-
 
 def test_langfuse_extras_disabled_returns_meter_only(monkeypatch):
     monkeypatch.setattr("shared.observability.callbacks.get_langfuse_client", lambda: None)
@@ -90,8 +72,12 @@ def test_map_list_item_contract_and_agent_alias():
     assert row.latencyMs == 2500  # 2.5s -> 2500ms
     assert row.cost.usd == pytest.approx(0.012)
     assert row.spanCount == 2
-    assert row.status == "approved"  # list projection default
-    assert row.worstLevel == "default"
+    # Unset, NOT placeholders. The list endpoint returns observation ids rather than
+    # observations, so neither outcome nor worst level is knowable here; the previous
+    # "approved"/"default" defaults rendered a failed run green in the table and red
+    # only once opened. The detail path (below) still computes both.
+    assert row.status is None
+    assert row.worstLevel is None
     assert row.startedAt.startswith("2026-07-05")
 
 

@@ -1055,11 +1055,6 @@ class TraceScoreOut(BaseModel):
     comment: Optional[str] = None
 
 
-class SpanModelOut(BaseModel):
-    provider: str
-    id: str
-
-
 class SpanOut(BaseModel):
     """One node in the trace tree (a Langfuse observation)."""
 
@@ -1074,14 +1069,21 @@ class SpanOut(BaseModel):
     latencyMs: int
     status: str
     statusMessage: Optional[str] = None
-    model: Optional[SpanModelOut] = None
     cost: Optional[CostOut] = None
     inputPreview: Optional[str] = None
     outputPreview: Optional[str] = None
 
 
 class TraceListItemOut(BaseModel):
-    """Row in the traces table (list projection — no spans)."""
+    """Row in the traces table (list projection — no spans).
+
+    status AND worstLevel ARE OPTIONAL BECAUSE THE LIST PATH CANNOT KNOW THEM.
+    Langfuse's trace-list response carries observation *ids*, not observations, so
+    there are no per-span levels to fold into an outcome. They were previously
+    hardcoded to "approved"/"default", which meant a failed run rendered green in
+    the table and only turned red once opened — the table quietly disagreeing with
+    the detail view it links to. None now means "not known here"; the detail
+    endpoint, which does fetch observations, still fills both in."""
 
     id: str
     runId: Optional[str] = None
@@ -1089,14 +1091,18 @@ class TraceListItemOut(BaseModel):
     projectName: str
     name: str
     agentType: str
-    status: str
+    # The platform user whose turn produced this trace. On the LIST projection as well
+    # as the detail one, because the member filter and the "grouped by member" view
+    # (PRD 32.1 / 15.9) both operate on the table.
+    userId: Optional[str] = None
+    status: Optional[str] = None
     startedAt: str
     latencyMs: int
     cost: CostOut
     model: str
     spanCount: int
     environment: str
-    worstLevel: str
+    worstLevel: Optional[str] = None
     scores: List[TraceScoreOut] = []
 
 
@@ -1106,22 +1112,28 @@ class TraceOut(TraceListItemOut):
     spans: List[SpanOut] = []
     langfuseUrl: Optional[str] = None
     release: Optional[str] = None
-    userId: Optional[str] = None
 
 
 class TraceMetricsByAgentOut(BaseModel):
     agentType: str
     traceCount: int
-    errorRate: float
+    # None, not 0.0 — see TraceMetricsOut.errorRate.
+    errorRate: Optional[float] = None
     latencyP50Ms: int
     latencyP95Ms: int
     costUsd: float
 
 
 class TraceMetricsOut(BaseModel):
+    """Windowed metrics for the traces page header strip.
+
+    errorRate is Optional for the same reason status is on TraceListItemOut: it is
+    computed from span levels, and the list-based aggregate has none. Reporting 0.0
+    made the page state, in a tile of its own, that nothing had ever failed."""
+
     windowDays: int
     totalTraces: int
-    errorRate: float
+    errorRate: Optional[float] = None
     latencyP50Ms: int
     latencyP95Ms: int
     totalCostUsd: float

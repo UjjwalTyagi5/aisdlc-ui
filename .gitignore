@@ -67,3 +67,9 @@ backups/
 # the ignored .env does; the suffix must not be what decides whether they leak.
 backend/.env.bak*
 backend/.env.*.bak
+
+# Credential handover file from the shared-Langfuse team: live Postgres admin
+# password, an ADO PAT, Pinecone/Neo4j/AI-Search keys and two Azure client secrets.
+# It is reference material for wiring this app to their instance, not config this
+# app reads — and one `git add .` away from publishing all of it.
+langfuse_cred_help

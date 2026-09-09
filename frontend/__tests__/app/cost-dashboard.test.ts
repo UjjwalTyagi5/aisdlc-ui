@@ -79,6 +79,15 @@ describe("CostDashboard formatting helpers", () => {
   it("distinguishes two agents sharing a model", () => {
     expect(rowKey(ROW)).not.toBe(rowKey({ ...ROW, agentType: "testing" }));
   });
+
+  // Without an agent the backend groups by model alone, so the model is unique
+  // again. Interpolating the missing field would key every row "undefined::…"
+  // and collide them all.
+  it("keys on the model alone when the row carries no agent", () => {
+    const { agentType: _omitted, ...noAgent } = ROW;
+    expect(rowKey(noAgent)).toBe("claude-sonnet-4-6");
+    expect(rowKey(noAgent)).not.toBe(rowKey({ ...noAgent, model: "claude-opus-4-7" }));
+  });
 });
 
 describe("CostDashboard agent filter options", () => {
@@ -106,6 +115,25 @@ describe("CostDashboard agent filter options", () => {
 
   it("returns nothing for an empty breakdown", () => {
     expect(agentsInBreakdown([])).toEqual([]);
+  });
+
+  // The shape the live /cost endpoint actually returns: Langfuse's daily-metrics
+  // aggregates by model, with no agent dimension at all. An empty result is the
+  // signal the table uses to hide the Agent column and its filter.
+  it("returns nothing when no row carries an agent", () => {
+    const { agentType: _omitted, ...noAgent } = ROW;
+    expect(agentsInBreakdown([noAgent, { ...noAgent, model: "claude-opus-4-7" }])).toEqual([]);
+  });
+
+  it("ignores agent-less rows while ranking the ones that have an agent", () => {
+    const { agentType: _omitted, ...noAgent } = ROW;
+    expect(
+      agentsInBreakdown([
+        { ...noAgent, costUsd: 99 },
+        { ...ROW, agentType: "testing", costUsd: 5 },
+        { ...ROW, agentType: "development", costUsd: 30 },
+      ]),
+    ).toEqual(["development", "testing"]);
   });
 });
 

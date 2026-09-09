@@ -50,7 +50,7 @@ from config.env import AGENT_RUNTIME_MODE
 from config.websocket_utils import set_websocket_context
 from config.ws_helper import set_session_id, set_user_id
 from shared.audit import AuditCallbackHandler
-from shared.observability import langfuse_langchain_extras
+from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.db import get_db_session, get_db_session_for_tenant
 from shared.services.prompt_runtime import prompt_override_scope
@@ -283,7 +283,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             state["messages"].append(HumanMessage(content=_content))
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
-        _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="documentation", project_id=_project_id_from_message(message_data))
+        _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="documentation", project_id=_project_id_from_message(message_data))
         config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140, "callbacks": [audit, *_lf_cbs], "metadata": _lf_meta}
         await manager.broadcast({"type": "message_received", "session_id": session_id, "message": "Generating…"})
 

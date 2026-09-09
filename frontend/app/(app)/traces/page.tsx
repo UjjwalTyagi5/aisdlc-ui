@@ -31,12 +31,12 @@ export default function TracesPage() {
   // table share one source of truth — picking a project rescopes both together.
   const [agent, setAgent] = React.useState<string>(ALL);
   const [project, setProject] = React.useState<string>(ALL);
-  const [status, setStatus] = React.useState<string>(ALL);
+  const [user, setUser] = React.useState<string>(ALL);
 
   const filters: TraceFilters = {
     agent: agent === ALL ? undefined : agent,
     project: project === ALL ? undefined : project,
-    status: status === ALL ? undefined : status,
+    user: user === ALL ? undefined : user,
   };
 
   const metricsQ = useQuery({
@@ -90,10 +90,10 @@ export default function TracesPage() {
       <TracesExplorer
         agent={agent}
         project={project}
-        status={status}
+        user={user}
         onAgentChange={setAgent}
         onProjectChange={setProject}
-        onStatusChange={setStatus}
+        onUserChange={setUser}
       />
     </div>
   );

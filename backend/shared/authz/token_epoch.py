@@ -92,9 +92,9 @@ def _redis():
         if not REDIS_URL:
             logger.info("token_epoch: REDIS_URL unset — stale-token checks disabled")
         else:
-            import redis.asyncio as aioredis  # noqa: PLC0415
+            from shared.redis_client import redis_from_url  # noqa: PLC0415
 
-            client = aioredis.from_url(REDIS_URL)
+            client = redis_from_url()
     except Exception as exc:  # pragma: no cover - import/config failure
         logger.warning("token_epoch: no Redis client (%s)", type(exc).__name__)
     _clients[loop] = client

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { ProjectId, RunId, SpanId, TraceId } from "./ids";
-import { AgentType, LlmProvider, Status } from "./enums";
+import { AgentType, Status } from "./enums";
 import { Cost, Timestamp } from "./primitives";
 
 /** Span node kinds — mirrors Langfuse observation types. */
@@ -34,7 +34,6 @@ export const Span = z.object({
   latencyMs: z.number().int().nonnegative(),
   status: Status,
   statusMessage: z.string().nullish(),
-  model: z.object({ provider: LlmProvider, id: z.string() }).nullish(),
   cost: Cost.nullish(),
   /** Short preview only — full I/O is opened on demand (and lives in Langfuse). */
   inputPreview: z.string().nullish(),
@@ -50,15 +49,22 @@ export const TraceListItem = z.object({
   projectName: z.string(),
   name: z.string(),
   agentType: AgentType,
-  status: Status,
+  /** The member whose turn produced this trace — the Member filter runs on it. */
+  userId: z.string().nullish(),
+  /**
+   * Null on list rows. Langfuse's trace-list response carries observation *ids*,
+   * not observations, so the backend has no span levels to fold into an outcome
+   * and does not guess one. The detail endpoint fills it in.
+   */
+  status: Status.nullish(),
   startedAt: Timestamp,
   latencyMs: z.number().int().nonnegative(),
   cost: Cost,
   model: z.string(),
   spanCount: z.number().int().nonnegative(),
   environment: z.string(),
-  /** Worst span level present — drives the row's error chip. */
-  worstLevel: SpanLevel,
+  /** Worst span level present. Null on list rows — see `status`. */
+  worstLevel: SpanLevel.nullish(),
   scores: z.array(TraceScore),
 });
 export type TraceListItem = z.infer<typeof TraceListItem>;
@@ -68,7 +74,6 @@ export const Trace = TraceListItem.extend({
   spans: z.array(Span),
   langfuseUrl: z.string().nullish(),
   release: z.string().nullish(),
-  userId: z.string().nullish(),
 });
 export type Trace = z.infer<typeof Trace>;
 
@@ -76,7 +81,8 @@ export type Trace = z.infer<typeof Trace>;
 export const TraceMetricsByAgent = z.object({
   agentType: AgentType,
   traceCount: z.number().int().nonnegative(),
-  errorRate: z.number().min(0).max(1),
+  /** Null when unknown — see TraceMetrics.errorRate. */
+  errorRate: z.number().min(0).max(1).nullish(),
   latencyP50Ms: z.number().int().nonnegative(),
   latencyP95Ms: z.number().int().nonnegative(),
   costUsd: z.number().nonnegative(),
@@ -87,7 +93,12 @@ export type TraceMetricsByAgent = z.infer<typeof TraceMetricsByAgent>;
 export const TraceMetrics = z.object({
   windowDays: z.number().int().positive(),
   totalTraces: z.number().int().nonnegative(),
-  errorRate: z.number().min(0).max(1),
+  /**
+   * Null when the backend cannot compute it, which is the list-based aggregate's
+   * normal state — it has no span levels. The strip hides the tile rather than
+   * showing a 0% that reads as a measured all-clear.
+   */
+  errorRate: z.number().min(0).max(1).nullish(),
   latencyP50Ms: z.number().int().nonnegative(),
   latencyP95Ms: z.number().int().nonnegative(),
   totalCostUsd: z.number().nonnegative(),

@@ -216,6 +216,27 @@ async def test_the_cost_breakdown_refuses_a_foreign_unit(two_units):
     assert r.status_code == 404, r.text
 
 
+@pytest.mark.asyncio
+async def test_the_cost_summary_refuses_a_foreign_project(two_units):
+    """A project admin must not read a sibling project's spend by naming its id.
+
+    GET /cost/summary looked the project up by id AND tenant only, so every cost:view
+    holder could read any project's spend, budget and utilization in the tenant. Its
+    traces twin (/traces/project-summary) had already been fixed to refuse; this one was
+    missed, and the two now behave the same way for the same reason.
+    """
+    t = two_units
+    user = f"pa-{_uuid.uuid4()}"
+    await grant_role(user, t["proj_a"], "project_admin", tenant_id=t["org"],
+                     scope_kind="project")
+
+    c = _client()
+    hdr = _hdr(user, t["org"], ["artifact:view", "cost:view"])
+    assert c.get(f"/cost/summary?project_id={t['proj_b']}", headers=hdr).status_code == 404
+    # Their own project still answers.
+    assert c.get(f"/cost/summary?project_id={t['proj_a']}", headers=hdr).status_code == 200
+
+
 # ── traces ───────────────────────────────────────────────────────────────────
 
 

@@ -9,14 +9,17 @@
  *
  * The backend re-validates on POST, so this is UX only.
  *
- * DIVERGENCE NOTE — three entries below are *not* in the PRD §14.10 register
+ * DIVERGENCE NOTE — two entries below are *not* in the PRD §14.10 register
  * but exist in the shipped backend vocabulary, and are marked `legacy` so the
  * reconciliation is visible rather than silent:
  *   · workspace:manage — the code's name for Business-Unit administration
- *   · eval:view        — evaluation/quality visibility (PRD FR-08 implies it
- *                        but §14.10 does not register it)
  *   · artifact:approve_<phase> — the code's per-phase split of the PRD's
  *                        single `approve (owned agent)` permission
+ *
+ * `eval:view` used to be a third. It was granted to no role and required by no
+ * route — the eval endpoint gates on artifact:view — so it was a checkbox here
+ * that did nothing when ticked, and it has been removed from the vocabulary
+ * rather than left as an offer the backend would not honour.
  */
 export interface PermGroup {
   group: string;
@@ -183,7 +186,6 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         label: "View traces",
         grants: "View execution traces within scope.",
       },
-      { id: "eval:view", label: "View eval / quality", legacy: true },
     ],
   },
   {

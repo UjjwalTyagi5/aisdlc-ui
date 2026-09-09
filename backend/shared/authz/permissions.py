@@ -79,6 +79,12 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "connector:manage", "connector:view",
         "project:create", "project:update", "model:manage",
         "audit:view", "cost:view",
+        # Traces at unit scope (PRD §35). This role held audit:view and cost:view but
+        # not trace:view, so a Business Unit Admin got a 403 on the screen showing what
+        # their unit's agents did, while holding the audit trail of the same runs.
+        # visible_project_ids already resolves a business_unit binding to that unit's
+        # projects, so no scoping work was needed — only the grant.
+        "trace:view",
         "workspace:manage",
         # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
         "governance:decide",
@@ -308,7 +314,17 @@ _PERMISSION_CATALOG: list[str] = [
     # enforced by PATCH /projects/{id}.
     "project:create", "project:update", "model:manage", "settings:manage", "workspace:manage",
     # Observability
-    "audit:view", "cost:view", "trace:view", "eval:view",
+    # NO eval:view. It was in this catalogue, granted to no role, and required by no
+    # route — GET /runs/{run_id}/eval gates on artifact:view (eval.py:42). So it
+    # rendered as a checkbox on the Roles & Access page that changed nothing when
+    # ticked, which is the failure docs/rbac-audit-2026-08-17.md section 8 describes:
+    # "a permission the UI offers and the enforcement path ignores is worse than
+    # neither". Removed rather than wired, because nothing was waiting on it.
+    #
+    # If evaluation visibility ever needs its own gate, add the string back here AND a
+    # require_permission call site in the same change — a catalogue entry with no
+    # enforcement is what this deletion is undoing.
+    "audit:view", "cost:view", "trace:view",
     # Agent Studio
     "skill:edit", "skill:edit:project", "skill:promote", "skill:approve", "skill:import",
 ]
