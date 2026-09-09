@@ -947,7 +947,11 @@ async def record_approval(
             assert_can_administer_project,
         )
 
-        project = await db.get(Project, run.project_id)
+        # A RUN WITH NO PROJECT HAS NO ADMINISTRATOR, so there is nothing to ask. This
+        # used to call `db.get(Project, None)` regardless: a pointless round trip on
+        # every refusal, and the reason this route's own test could not reach the
+        # branch at all.
+        project = await db.get(Project, run.project_id) if run.project_id else None
         if project is not None:
             try:
                 await assert_can_administer_project(db, request, project)

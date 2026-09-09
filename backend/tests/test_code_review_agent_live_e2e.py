@@ -122,11 +122,35 @@ async def test_the_real_tool_loop_runs_semgrep_and_produces_a_persisted_review(v
     ]
     model = _ScriptedModel(script)
 
-    with patch.object(reviewer, "_resolve_model", return_value=model):
+    # THE NODE RESOLVES A MODEL BEFORE IT BUILDS ONE, and this test predates that. The
+    # agent gained a real `resolve_model_for_run` call — the fix for it silently falling
+    # back to a dead ANTHROPIC_API_KEY while a valid Azure key sat configured — and that
+    # call now runs first, fails with NoModelConfiguredError against a tenant that has
+    # no providers, and returns an apology instead of ever reaching the scripted model.
+    # The tool loop this test exists to prove never started.
+    #
+    # Patched, not configured: giving this tenant a real provider row would make the
+    # test depend on model configuration it is not about. The scripted model still
+    # drives every turn, and everything downstream of it stays the genuine code path.
+    from shared.services import model_resolver
+
+    async def _resolved(*_a, **_k):
+        return model_resolver.ResolvedModel(
+            provider="anthropic", litellm_provider="anthropic",
+            model="claude-sonnet-4-6", api_key="not-used-the-model-is-scripted",
+            base_url=None, alias="scripted",
+        )
+
+    with patch.object(reviewer, "_resolve_model", return_value=model),             patch.object(model_resolver, "resolve_model_for_run", _resolved):
         result = await reviewer.app.ainvoke(
             {
                 "messages": [HumanMessage(content="Please review the prepared change.")],
-                "tenant_id": "test-tenant",
+                # A UUID, because it reaches the database. `_resolve_model` is patched
+                # out, but the graph still asks for the tenant's model offerings on the
+                # way past, and `tenant_id` is a uuid column: 'test-tenant' failed that
+                # query with a DataError before the tool loop this test exists to
+                # exercise had run a single step.
+                "tenant_id": "00000000-0000-0000-0000-0000000000e2",
                 "model_id": None,
                 "offering_id": None,
             },

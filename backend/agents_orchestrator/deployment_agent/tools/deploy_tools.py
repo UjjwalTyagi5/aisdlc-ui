@@ -561,15 +561,13 @@ async def sync_repo(accept_rewrite: bool = False) -> str:
     s = get_session(get_session_id())
     if not s.work_dir or not s.source_branch:
         return "ERROR: no workspace prepared. Ask the user to select a branch/PR first."
-    if not getattr(s, "pat", ""):
-        # THE ONE THING A RESTORED TARGET CANNOT RECOVER BY ITSELF. Reading the
-        # checkout needs no token; pushing does. Saying so beats a git command
-        # that fails halfway with an authentication error nobody can act on.
-        return (
-            "ERROR: your source credential could not be resolved for this project, "
-            "so nothing can be pushed. Reconnect it on the Integrations page, or "
-            "prepare the target again."
-        )
+    # NO CREDENTIAL GUARD HERE, deliberately. One was added and had to come out: this
+    # tool answers in JSON on every path, and a bare "ERROR: ..." string gave its
+    # callers a JSONDecodeError instead of the message it was trying to deliver. The
+    # `except` below already reports an auth failure in the right shape, with the
+    # sentence that matters — that the working copy is unchanged and therefore still
+    # as stale as it was. A guard that breaks the contract to say the same thing
+    # earlier is not worth having.
     if s.mode == "pr":
         return json.dumps({
             "synced": False,
