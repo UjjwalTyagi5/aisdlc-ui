@@ -23,9 +23,11 @@ Two sources, in this order:
 
 1. **The run's own Development checkout.** In a conversation where Development has just
    written the code, this is what the user means by "now review it".
-2. **A target prepared on the standalone page**, the same in-memory entry keyed by
+2. **A target prepared on the standalone page**, the same entry keyed by
    (tenant, project) that the wrapper reads — so reviewing an existing branch through
-   the Orchestrator, with no Development turn, still works.
+   the Orchestrator, with no Development turn, still works. It is no longer only in
+   memory: `get_prepared` now falls back to the record written beside the checkout, so
+   a target survives the restart that cloning it used to cause.
 
 Nothing is invented. With no checkout and nothing prepared, this binds nothing and the
 agent goes on saying it has no workspace, which is the truth and is far better than a

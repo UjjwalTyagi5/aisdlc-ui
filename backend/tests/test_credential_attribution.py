@@ -96,9 +96,27 @@ def _call_sites() -> list[tuple[str, int, bool]]:
     # guard with a blind spot is worse than no guard: it says the rule holds.
     # os.walk with dirs[:] prunes .venv before descending into it, which is what
     # made the full scan slow enough to be tempting to narrow.
+    #
+    # CLONED WORKING COPIES ARE NOT OUR SOURCE, and the product puts them inside this
+    # tree: every target dialog clones into DEV_WORKSPACE_ROOT. One of those clones was
+    # a checkout of this very codebase, so every ledger entry below reappeared under a
+    # second path and this guard failed on code it does not own — reporting ten
+    # offenders that were all copies of files it had already accepted. Any user cloning
+    # any repository through the product could break the suite that way.
+    #
+    # Pruned by resolved path, not by directory name, so moving the workspace root
+    # moves this with it and a source directory that happens to be called `files`
+    # is still scanned.
+    from config.env import DEV_WORKSPACE_ROOT  # noqa: PLC0415
+
+    workspace = pathlib.Path(DEV_WORKSPACE_ROOT).resolve()
     skip = {".venv", "__pycache__", ".git", "node_modules", ".pytest_cache",
             ".mypy_cache", "migrations"}
     for dirpath, dirs, files in os.walk(ROOT):
+        here = pathlib.Path(dirpath).resolve()
+        if here == workspace or workspace in here.parents:
+            dirs[:] = []
+            continue
         dirs[:] = [d for d in dirs if d not in skip]
         for fn in files:
             if not fn.endswith(".py"):
@@ -194,3 +212,35 @@ def test_the_scan_reaches_outside_the_obvious_source_directories():
     assert "workers" in scanned, (
         "workers/ is not being scanned — the guard has a blind spot again"
     )
+
+
+def test_a_cloned_repository_is_not_mistaken_for_our_source():
+    """THE FAILURE THIS PREVENTS. The deployment dialog cloned a repository that
+    contained a copy of this codebase into the dev workspace, which lives inside this
+    tree — and the scan above read those copies as new ownerless call sites. Ten of
+    them, every one already on the ledger under its real path.
+
+    A guard that any user can break by cloning a repository is not a guard. This
+    plants one and asserts the scan ignores it.
+    """
+    import shutil
+
+    from config.env import DEV_WORKSPACE_ROOT
+
+    planted = pathlib.Path(DEV_WORKSPACE_ROOT) / "__scan_probe__" / "shared" / "svc"
+    planted.mkdir(parents=True, exist_ok=True)
+    probe = planted / "borrowed.py"
+    probe.write_text(
+        "def f():" + chr(10) + "    return get_connector_for_session(kind='ado')" + chr(10),
+        encoding="utf-8",
+    )
+    try:
+        sites = _call_sites()
+        assert not [rel for rel, _l, _o in sites if "__scan_probe__" in rel], (
+            "a cloned working copy was scanned as if it were our source"
+        )
+        # NON-VACUITY: the probe would be an offender if it were ours, so a scan that
+        # found nothing at all would pass this test for the wrong reason.
+        assert len(sites) >= 10
+    finally:
+        shutil.rmtree(planted.parents[1], ignore_errors=True)

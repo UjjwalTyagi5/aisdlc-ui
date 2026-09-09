@@ -22,12 +22,22 @@ export const listDeployConnectors = (projectId: ProjectId) =>
     schema: z.object({ connectors: z.array(DeployConnector) }),
   });
 
-export const listOpenPrs = (projectId: ProjectId, adoProject: string, repo: string) =>
-  api(`/deployment/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs`, {
-    schema: z.array(AdoPr),
-  });
+export const listOpenPrs = (
+  projectId: ProjectId,
+  adoProject: string,
+  repo: string,
+  provider?: string,
+) =>
+  api(
+    `/deployment/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs${
+      provider ? `?provider=${encodeURIComponent(provider)}` : ""
+    }`,
+    { schema: z.array(AdoPr) },
+  );
 
 export interface PrepareDeployBody {
+  /** Where the code lives — omitted when the project has a single source. */
+  provider?: string;
   mode: "branch" | "pr";
   ado_project: string;
   repo_name: string;

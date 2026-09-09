@@ -92,7 +92,8 @@ async def _get_or_create_chat_run(session, tenant_id: str, project_id: str, stag
 _LAST_UPLOAD_OK: dict[str, bool] = {}
 
 async def register_generated_file(
-    filename: str, file_path: str, url: str, *, stage: str, consented: bool | None = None
+    filename: str, file_path: str, url: str, *, stage: str,
+    consented: bool | None = None, note: str | None = None,
 ) -> None:
     """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
 
@@ -102,12 +103,31 @@ async def register_generated_file(
     consequence, and since migration 0040 that decision belongs to whoever runs the
     project rather than to whoever happened to be chatting.
 
-    So this records the artifact immediately, as PENDING, with its bytes under the
-    tenant's `_pending` prefix. `POST /artifacts/{id}/approve` promotes them to the
-    project's hierarchy path; `/reject` deletes them and keeps the decision.
+    So this records the artifact immediately, as a DRAFT, with its bytes under the
+    tenant's `_pending` prefix. `POST /artifacts/{id}/submit` puts it forward for
+    approval; `POST /artifacts/{id}/approve` then promotes the bytes to the project's
+    hierarchy path, and `/reject` deletes them and keeps the decision.
+
+    WHY DRAFT AND NOT PENDING. It used to be pending, which meant every file an agent
+    produced landed in an approver's queue the moment it was written — including the two
+    discarded attempts before the one the author actually wanted. A queue full of dead
+    drafts is one people stop reading, and that costs more than the missing rows would.
+    Recording is not the same act as asking: this records, and the person who ran the
+    agent decides when to ask. The approval decision itself still belongs to the owner,
+    exactly as migration 0040 established.
+
+    A HAND UPLOAD IS STILL PENDING, deliberately — see `upload_artifact`. Choosing a file
+    and pressing Upload IS the act of putting something forward; there is no draft step
+    to separate out.
 
     `consented` is vestigial — kept in the signature for callers that still pass it,
     and no longer consulted.
+
+    `note` IS THE AGENT'S REASON for putting this forward, and it matters more here than
+    on a hand upload. A person uploading a file was in the conversation that produced it;
+    an approver receiving one an agent generated has no such context, and "why am I being
+    asked to accept this" is the first thing they need. Optional, because an agent with
+    nothing specific to say should say nothing rather than pad.
     """
     try:
         tenant_id = get_tenant_id()
@@ -160,7 +180,7 @@ async def register_generated_file(
                 # rather than handing a dead local path to Azure.
                 session.add(Artifact(
                     run_id=run_id, tenant_id=tenant_id, artifact_type=artifact_type,
-                    blob_url=None, blob_path=None,
+                    blob_url=None, blob_path=None, approval_status="draft",
                     content_type=content_type, size_bytes=None,
                 ))
             else:
@@ -189,12 +209,14 @@ async def register_generated_file(
                 _art = await store_artifact(
                     session,
                     tenant_id=tenant_id,
+                    approval_status="draft",
                     run_id=run_id,
                     artifact_type=artifact_type,
                     filename=filename,
                     data=data,
                     project_id=project_id,
                     agent=stage,
+                    upload_note=(note or "").strip()[:2000] or None,
                     content_type=content_type or "application/octet-stream",
                     blob_client=get_blob_client(),
                 )

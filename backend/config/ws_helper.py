@@ -14,6 +14,13 @@ import uuid
 
 SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar("session_id", default=None)
 USER_ID: contextvars.ContextVar[str] = contextvars.ContextVar("user_id", default=None)
+# WHICH TURN is producing the output in this task. A conversation can have more than one
+# socket open — a second browser tab, or the socket of a turn whose agent has not noticed
+# it ended — and `broadcast` fans a message to every socket registered for the session.
+# Without a turn to scope it to, one turn's answer arrives on another turn's stream and
+# is appended to the wrong bubble. Minted per turn in `ConnectionManager.register_session`,
+# which every agent calls once per message, in the same task its emissions run in.
+TURN_ID: contextvars.ContextVar[str] = contextvars.ContextVar("turn_id", default=None)
 PROVIDER_KIND: contextvars.ContextVar[str] = contextvars.ContextVar("provider_kind", default="azure_devops")
 # Chat scope needed to persist chat-generated files as Artifact rows (so they surface
 # in the project artifacts panel, not just the live WS download). project/run may be
@@ -101,6 +108,17 @@ def get_consequential_approved() -> bool:
         return bool(CONSEQUENTIAL_APPROVED.get())
     except LookupError:
         return False
+
+def set_turn_id(turn_id):
+    return TURN_ID.set(str(turn_id) if turn_id else None)
+
+
+def get_turn_id():
+    try:
+        return TURN_ID.get()
+    except LookupError:
+        return None
+
 
 def set_session_id(session_id: str):
     return SESSION_ID.set(session_id)

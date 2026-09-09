@@ -23,9 +23,9 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     generate_changelog,
     read_upstream_artifacts,
     save_document,
+    save_handover_document,
+    save_kt_document,
     open_docs_pr,
-    publish_to_sharepoint,
-    list_sharepoint_documents,
     ingest_sharepoint_document,
     read_wiki_page,
     list_wiki_pages,
@@ -59,6 +59,20 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 
+try:
+    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+
+    # THE APPROVED-ONLY PUBLISH, replacing this agent's own `publish_to_sharepoint`.
+    # That one filed `session.generated_docs` — whatever had been written during this
+    # conversation, held in memory and reviewed by nobody — straight into the business's
+    # document library, where people who were not in the chat read it and where nothing
+    # in this platform can delete it again. It was the only agent that could do that.
+    # Now `save_document` records every deliverable as a PENDING artifact, so there is
+    # an approval for publishing to wait on, exactly as on every other stage.
+    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="documentation", stage="documentation")
+except Exception:  # noqa: BLE001
+    _SHAREPOINT_TOOLS = []
+
 _tools = [
     inspect_repo,
     read_repo_file,
@@ -66,10 +80,15 @@ _tools = [
     generate_changelog,
     read_upstream_artifacts,
     save_document,
+    # The two onboarding deliverables. Separate tools rather than a doc_type on
+    # save_document because each forces the sections that make it worth reading: a
+    # handover with no "known risks" and a KT document with no setup steps are the
+    # exact failures these replace, and a free-form save cannot refuse them.
+    save_handover_document,
+    save_kt_document,
     open_docs_pr,
     # SharePoint destination — additive to the local-disk save and the git-PR path.
-    publish_to_sharepoint,
-    list_sharepoint_documents,
+    # Publishing is approved-only (see _SHAREPOINT_TOOLS); ingesting is read-only.
     ingest_sharepoint_document,
     read_wiki_page,
     list_wiki_pages,
@@ -81,6 +100,7 @@ _tools = [
     list_confluence_pages,
     ingest_confluence_page,
     *_DOCUMENT_TOOLS,
+    *_SHAREPOINT_TOOLS,
 ]
 
 

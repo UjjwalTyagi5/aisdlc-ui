@@ -147,23 +147,23 @@ export const qk = {
     ) => ["agent-skills", "versions", skillKey, agentId, scope, scopeId ?? ""] as const,
   },
   codeReview: {
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["code-review", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["code-review", "prs", id, p, r, provider ?? ""] as const,
     reviews: (id: ProjectId) => ["code-review", "reviews", id] as const,
     review: (id: ProjectId, runId: string) =>
       ["code-review", "review", id, runId] as const,
   },
   security: {
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["security", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["security", "prs", id, p, r, provider ?? ""] as const,
     scans: (id: ProjectId) => ["security", "scans", id] as const,
     scan: (id: ProjectId, runId: string) =>
       ["security", "scan", id, runId] as const,
   },
   deployment: {
     connectors: (id: ProjectId) => ["deployment", "connectors", id] as const,
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["deployment", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["deployment", "prs", id, p, r, provider ?? ""] as const,
     release: (id: ProjectId, session: string) =>
       ["deployment", "release", id, session] as const,
   },
@@ -173,8 +173,8 @@ export const qk = {
   },
   documentation: {
     connectors: (id: ProjectId) => ["documentation", "connectors", id] as const,
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["documentation", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["documentation", "prs", id, p, r, provider ?? ""] as const,
     docset: (id: ProjectId, session: string) =>
       ["documentation", "docset", id, session] as const,
   },
@@ -222,10 +222,16 @@ export const qk = {
     orgMembers: () => ["access", "org-members"] as const,
   },
   devWorkspace: {
-    adoProjects: (id: ProjectId) => ["dev-workspace", "ado-projects", id] as const,
-    adoRepos: (id: ProjectId, p: string) => ["dev-workspace", "ado-repos", id, p] as const,
-    adoBranches: (id: ProjectId, p: string, r: string) =>
-      ["dev-workspace", "ado-branches", id, p, r] as const,
+    // THE PROVIDER IS PART OF THE KEY. Without it, switching host in a dialog would
+    // show the previous one's cached repositories under the new one's name — the list
+    // would look right and belong to somewhere else.
+    sources: (id: ProjectId) => ["dev-workspace", "sources", id] as const,
+    adoProjects: (id: ProjectId, provider?: string) =>
+      ["dev-workspace", "ado-projects", id, provider ?? ""] as const,
+    adoRepos: (id: ProjectId, p: string, provider?: string) =>
+      ["dev-workspace", "ado-repos", id, p, provider ?? ""] as const,
+    adoBranches: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["dev-workspace", "ado-branches", id, p, r, provider ?? ""] as const,
     workspace: (id: ProjectId) => ["dev-workspace", "workspace", id] as const,
     tree: (id: ProjectId) => ["dev-workspace", "tree", id] as const,
     file: (id: ProjectId, path: string) => ["dev-workspace", "file", id, path] as const,

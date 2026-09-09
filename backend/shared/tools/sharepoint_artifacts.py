@@ -42,7 +42,7 @@ _MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
 async def _resolve(agent_id: str):
     """(connector, target, tenant_id, project_id) for this session, or (None, reason)."""
-    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+    from config.ws_helper import get_project_id, get_tenant_id, get_user_id  # noqa: PLC0415
 
     tenant_id = get_tenant_id() or ""
     project_id = get_project_id() or ""
@@ -59,9 +59,15 @@ async def _resolve(agent_id: str):
                 "ERROR: SharePoint is not connected for this tenant. An admin can "
                 "connect it on the Integrations page (Documents & knowledge)."
             )
+        # NAMED, so SharePoint records WHO filed the document. A resolution with no
+        # owner falls back to a shared credential and the library shows the platform as
+        # the author of everything — which is the opposite of what publishing an
+        # approved document is for. `test_credential_attribution` guards this invariant
+        # across the codebase and caught this file.
         connector = await get_connector_for_session(
             kind="sharepoint", tenant_id=tenant_id,
             project_id=project_id, agent_id=agent_id,
+            owner_id=get_user_id() or "",
         )
         return (connector, target, tenant_id, project_id), ""
     except Exception as exc:  # noqa: BLE001

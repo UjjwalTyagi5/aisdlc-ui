@@ -189,3 +189,68 @@ def test_an_unknown_stage_falls_back_to_a_valid_agent():
     through would fail schema validation and blank the whole panel."""
     steps = derive_steps_from_run(_run(stage="whatever"), [_artifact()])
     assert steps[0].agent == "orchestrator"
+
+
+# -- a document awaiting a decision is not a storage failure ------------------
+#
+# `blob_url` is NULL for every pending and draft artifact by design: the bytes sit under
+# the tenant's `_pending` prefix and the URL is written when approval promotes them.
+# Reading it as "did it reach storage" put "the file did not reach storage" on every
+# document waiting for an approver — a storage alarm on the completely normal path,
+# which is how a real one stops being believed.
+
+
+def _undecided(status="pending", *, path=True):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        artifact_type="document",
+        blob_path=f"{uuid.uuid4()}/document/brd.docx" if path else None,
+        blob_url=None,          # always None before approval
+        approval_status=status,
+        size_bytes=1234,
+        created_at=T0 + timedelta(minutes=1),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["pending", "draft"])
+def test_an_undecided_document_is_not_reported_as_a_failed_upload(status):
+    """THE BUG. Its bytes are in the pending area and its URL is deliberately absent."""
+    steps = derive_steps_from_run(_run(), [_undecided(status)])
+
+    assert "did not reach storage" not in steps[0].summary
+    assert "awaiting approval" in steps[0].summary
+    assert steps[0].status != "failed"
+
+
+@pytest.mark.unit
+def test_an_undecided_document_with_no_file_at_all_still_reports_the_failure():
+    """NON-VACUITY: the fix must not silence the genuine case. No blob path means no
+    bytes were ever written, whatever the approval state."""
+    steps = derive_steps_from_run(_run(), [_undecided("pending", path=False)])
+
+    assert "did not reach storage" in steps[0].summary
+    assert steps[0].status == "failed"
+
+
+@pytest.mark.unit
+def test_a_rejected_document_says_the_file_was_removed_on_purpose():
+    """Rejection deletes the file deliberately. Reporting that as a storage failure
+    blames the platform for doing exactly what the approver asked."""
+    steps = derive_steps_from_run(_run(), [_undecided("rejected")])
+
+    assert "declined" in steps[0].summary
+    assert "did not reach storage" not in steps[0].summary
+    assert steps[0].status != "failed"
+
+
+@pytest.mark.unit
+def test_an_approved_document_without_a_url_is_still_a_real_failure():
+    """The original bug this message was written for survives: once approved, the URL
+    is the honest test, and its absence means the promotion did not happen."""
+    a = _undecided("approved")
+
+    steps = derive_steps_from_run(_run(), [a])
+
+    assert "did not reach storage" in steps[0].summary
+    assert steps[0].status == "failed"

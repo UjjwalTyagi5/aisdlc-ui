@@ -34,6 +34,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -42,7 +43,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useSession } from "@/hooks/use-session";
 import {
-  approveArtifact, listArtifacts, rejectArtifact, uploadArtifact,
+  approveArtifact, listArtifacts, rejectArtifact, submitArtifact, uploadArtifact,
 } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -84,7 +85,33 @@ function waitingOn(a: Artifact): string {
   }
 }
 
+/** The filter's vocabulary, which is the chip's vocabulary: anything not decided and
+ *  not a draft is something somebody is waiting on. */
+function normalisedStatus(a: Artifact): "draft" | "approved" | "rejected" | "pending" {
+  if (a.status === "draft") return "draft";
+  if (a.status === "approved") return "approved";
+  if (a.status === "rejected") return "rejected";
+  return "pending";
+}
+
+const STATUS_FILTER_LABEL: Record<string, string> = {
+  draft: "Draft",
+  approved: "Approved",
+  rejected: "Rejected",
+  pending: "Pending",
+};
+
 function statusChip(a: Artifact) {
+  if (a.status === "draft") {
+    // NEUTRAL, NOT AMBER. Amber says "somebody is waiting"; a draft is waiting on
+    // nobody — its author has not put it forward. Colouring it like pending is what
+    // made every agent iteration look like an outstanding task.
+    return {
+      label: "Draft",
+      cls: "border-border bg-muted text-muted-foreground",
+      Icon: FileText,
+    };
+  }
   if (a.status === "approved") {
     return {
       label: "Approved",
@@ -118,6 +145,34 @@ export interface DocumentListProps {
   /** The stage this screen belongs to — what an upload from here is filed under.
    *  A BACKEND stage name. */
   stage: string;
+  /** Heading, when "Documents" is the wrong word. Design lists diagrams and specs
+   *  alongside the files, so it says "Design artifacts". */
+  title?: string;
+  description?: string;
+  /** Empty-state copy, when the page can say something more useful than the generic
+   *  line — the Project Manager's "No plan yet" explains what the agent would produce,
+   *  which is worth more to somebody staring at an empty screen. */
+  emptyTitle?: string;
+  emptyDescription?: string;
+  /**
+   * SELECTION, when this list is also the page's navigation.
+   *
+   * Design used to stack TWO lists in one sidebar: this one, and an `ArtifactList`
+   * whose types included `document`, `presentation` and `diagram` — exactly what
+   * `_artifact_type_for` produces. Both matched the same rows, so every generated
+   * design document was rendered twice, once with approval controls and once as a
+   * selectable row. Giving this list the selection the other one had is what let the
+   * duplicate go.
+   *
+   * Omitted, rows are not selectable and nothing changes for the pages that only
+   * needed a document list.
+   */
+  selectedId?: string | null;
+  onSelect?: (a: Artifact) => void;
+  /** Called after a delete completes. Design uses it to drop `?artifact=` from the URL
+   *  when the deleted row was the selected one — otherwise a copied link points at an
+   *  artifact that no longer exists. */
+  onDeleted?: (a: Artifact) => void;
   className?: string;
 }
 
@@ -125,6 +180,13 @@ export function DocumentList({
   projectId,
   items,
   stage,
+  title,
+  description,
+  emptyTitle,
+  emptyDescription,
+  selectedId,
+  onSelect,
+  onDeleted,
   className,
 }: DocumentListProps) {
   const session = useSession();
@@ -133,13 +195,13 @@ export function DocumentList({
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [search, setSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<
-    "all" | "approved" | "pending" | "rejected"
+    "all" | "draft" | "approved" | "pending" | "rejected"
   >("all");
   // DELETION IS A REQUEST, NOT AN ACTION, and it comes from the SHARED hook rather
   // than a second copy here. `ArtifactList` on Requirements, Design and StageWorkbench
   // uses the same one, and a delete that asks for approval on one screen and destroys
   // outright on another is the kind of inconsistency you discover by losing a file.
-  const deletion = useDeleteArtifact(projectId);
+  const deletion = useDeleteArtifact(projectId, onDeleted ? { onDeleted } : undefined);
 
   const canUpload = hasPermission(session, "run:create");
   // The stage's own permission, or project administration for the project-wide ones.
@@ -177,24 +239,22 @@ export function DocumentList({
     [source, stage],
   );
 
-  /** The statuses on this screen, normalised the way the chip is: anything that is
-   *  neither approved nor rejected reads as pending. */
+  /** The statuses on this screen, normalised the way the chip is. `draft` is its own
+   *  value: folding it into pending would hide the one distinction this filter is now
+   *  most useful for — "what is actually waiting on somebody". */
   const presentStatuses = React.useMemo(
-    () =>
-      Array.from(
-        new Set(
-          scoped.map((a) =>
-            a.status === "approved" || a.status === "rejected" ? a.status : "pending",
-          ),
-        ),
-      ).sort(),
+    () => Array.from(new Set(scoped.map(normalisedStatus))).sort(),
     [scoped],
   );
 
   const documents = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     return scoped.filter((a) => {
-      if (statusFilter !== "all" && (a.status ?? "pending") !== statusFilter) return false;
+      // THROUGH THE SAME NORMALISER THE OPTIONS ARE BUILT FROM. This compared the raw
+      // `a.status` against the option value, and the option for a waiting document is
+      // "pending" while the status itself is "awaiting_approval" — so choosing Pending
+      // matched nothing and emptied the list. One function now answers both.
+      if (statusFilter !== "all" && normalisedStatus(a) !== statusFilter) return false;
       // Title only. The approver's email is on the row too, but matching it would make
       // typing a colleague's name return documents they merely signed, which is a
       // different question from "find the file I am thinking of".
@@ -202,18 +262,39 @@ export function DocumentList({
     });
   }, [scoped, search, statusFilter]);
 
+  // The file waiting on a note, and the note itself. Null when nothing is staged.
+  const [staged, setStaged] = React.useState<File | null>(null);
+  const [note, setNote] = React.useState("");
+
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
 
   const upload = useMutation({
-    mutationFn: (file: File) => uploadArtifact(projectId, file, { stage }),
+    mutationFn: ({ file, note }: { file: File; note: string }) =>
+      uploadArtifact(projectId, file, { stage, note }),
     onSuccess: (a) => {
+      setStaged(null);
+      setNote("");
       toast.success(`${a.title} uploaded — waiting for approval`);
       void refresh();
     },
     // The backend says WHY: a rejected extension, an oversized file, an unknown stage.
     // Three different things the user has to act on differently.
     onError: (e: Error) => toast.error(e.message || "Upload failed"),
+  });
+
+  const raise_ = useMutation({
+    mutationFn: (a: Artifact) => submitArtifact(a.id),
+    onMutate: (a) => setBusyId(a.id),
+    onSettled: () => setBusyId(null),
+    onSuccess: () => {
+      toast.success("Raised for approval");
+      void refresh();
+      // It has just entered somebody's queue, so the count beside Requests & Approvals
+      // is now wrong until this lands.
+      void queryClient.invalidateQueries({ queryKey: qk.approvals.list({}) });
+    },
+    onError: (e: Error) => toast.error(e.message || "Couldn't raise it for approval"),
   });
 
   const decide = useMutation({
@@ -233,17 +314,20 @@ export function DocumentList({
     // Reset first: picking the SAME file twice fires no change event otherwise, so a
     // retry after a failed upload would appear to do nothing.
     e.target.value = "";
-    if (file) upload.mutate(file);
+    // STAGED, NOT SENT. Uploading on pick left no moment to say why, and the note is
+    // worth most on the documents somebody deliberately puts forward. The upload is
+    // still one more click, not a dialog to dismiss.
+    if (file) setStaged(file);
   };
 
   return (
     <section className={cn("space-y-3", className)}>
       <header className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium">Documents</h3>
+          <h3 className="text-sm font-medium">{title ?? "Documents"}</h3>
           <p className="text-muted-foreground text-xs">
-            Uploaded and generated files. Approved ones are part of the project&apos;s
-            record.
+            {description ??
+              "Uploaded and generated files. Approved ones are part of the project's record."}
           </p>
         </div>
         {canUpload && (
@@ -271,6 +355,54 @@ export function DocumentList({
           </>
         )}
       </header>
+
+      {/* THE NOTE, ASKED FOR ONCE AND NEVER REQUIRED. An approver's first question is
+          "why am I being asked to accept this", and the answer used to live only in
+          whatever conversation happened around the upload. Optional on purpose: a
+          mandatory box gets "." typed into it, and a meaningless note is worse than
+          none because the approver still has to read it. */}
+      {staged && (
+        <div className="border-line-soft bg-surface-2 space-y-2 rounded-lg border p-3">
+          <div className="flex items-center gap-2 text-xs">
+            <FileText className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="truncate font-medium">{staged.name}</span>
+          </div>
+          <Textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={2}
+            maxLength={2000}
+            placeholder="Why are you putting this forward? (optional)"
+            aria-label="Note for the approver"
+            className="text-xs"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={upload.isPending}
+              onClick={() => {
+                setStaged(null);
+                setNote("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={upload.isPending}
+              onClick={() => upload.mutate({ file: staged, note })}
+            >
+              {upload.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" />
+              )}
+              Upload
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* SHOWN ONLY ONCE THERE IS SOMETHING TO SIFT. A search box above two documents is
           furniture; the threshold is where scanning the list stops being faster than
@@ -304,7 +436,7 @@ export function DocumentList({
                 <SelectItem value="all">Any status</SelectItem>
                 {presentStatuses.map((s) => (
                   <SelectItem key={s} value={s}>
-                    {s === "approved" ? "Approved" : s === "rejected" ? "Rejected" : "Pending"}
+                    {STATUS_FILTER_LABEL[s] ?? "Pending"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -315,11 +447,17 @@ export function DocumentList({
 
       {scoped.length === 0 ? (
         <EmptyState
-          title="No documents yet"
+          // FOLLOWS THE HEADING. On Design this list is called "Design artifacts", and
+          // an empty state underneath announcing "No documents yet" reads as a
+          // different, missing section.
+          title={
+            emptyTitle ?? (title ? `No ${title.toLowerCase()} yet` : "No documents yet")
+          }
           description={
-            canUpload
+            emptyDescription ??
+            (canUpload
               ? "Upload one, or run the agent to generate it. Nothing is part of the record until it is approved."
-              : "Nothing has been added to this project's record yet."
+              : "Nothing has been added to this project's record yet.")
           }
         />
       ) : documents.length === 0 ? (
@@ -358,10 +496,48 @@ export function DocumentList({
             const mayDecide = isProjectWide
               ? canApproveProject
               : canApproveStage || canApproveProject;
-            const pending = a.status !== "approved" && a.status !== "rejected";
+            // THREE STATES, NOT TWO. A draft is recorded but nobody has put it
+            // forward, so it is in no approval queue and there is nothing to decide on
+            // it yet — offering Approve here would let an owner accept a document its
+            // author had not finished with. `pending` means somebody asked.
+            // THROUGH THE NORMALISER, not an exact string. The backend spells a waiting
+            // document "awaiting_approval", older rows and fixtures say "pending", and
+            // matching one spelling silently drops the Approve button for the other.
+            const norm = normalisedStatus(a);
+            const isDraft = norm === "draft";
+            const pending = norm === "pending";
             const busy = busyId === a.id;
             return (
-              <li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
+              <li
+                key={a.id}
+                className={cn(
+                  "flex flex-wrap items-center gap-x-3 gap-y-1 p-3",
+                  onSelect && "cursor-pointer",
+                  // The SAME selected treatment `artifact-list` uses, so a row does not
+                  // look different depending on which screen is showing it.
+                  selectedId === a.id &&
+                    "border-l-2 border-[oklch(var(--brand-bright))] bg-surface-2",
+                )}
+                // A CLICKABLE ROW HAS TO BE REACHABLE BY KEYBOARD. Putting onClick on a
+                // bare <li> made the row respond to a mouse and to nothing else — it was
+                // not focusable, not in the accessibility tree as an interactive thing,
+                // and unusable without a pointer. `artifact-list` selects with a real
+                // control for the same reason.
+                {...(onSelect
+                  ? {
+                      role: "button" as const,
+                      tabIndex: 0,
+                      "aria-pressed": selectedId === a.id,
+                      onClick: () => onSelect(a),
+                      onKeyDown: (e: React.KeyboardEvent) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelect(a);
+                        }
+                      },
+                    }
+                  : {})}
+              >
                 <FileText className="text-muted-foreground h-4 w-4 shrink-0" />
                 <span className="truncate text-sm font-medium">{a.title}</span>
 
@@ -393,6 +569,18 @@ export function DocumentList({
                         : ""}
                 </span>
 
+                {/* THE UPLOADER'S REASON, shown to whoever has to decide. It sits on
+                    its own line rather than in the meta run above, because that line is
+                    scanned and this is read. */}
+                {a.uploadNote && (
+                  <span
+                    className="text-muted-foreground w-full basis-full text-xs italic"
+                    title={a.uploadNote}
+                  >
+                    &ldquo;{a.uploadNote}&rdquo;
+                  </span>
+                )}
+
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                   {/* `downloadUrl` IS the decision, not a hint. The backend sets it
                       only when the document is approved AND its bytes actually landed,
@@ -404,6 +592,23 @@ export function DocumentList({
                         <Download className="h-3.5 w-3.5" />
                         <span className="sr-only">Download {a.title}</span>
                       </a>
+                    </Button>
+                  )}
+                  {/* WHOEVER CAN PRODUCE WORK CAN ASK FOR A DECISION ON IT, which is
+                      the same permission as uploading — asking is producing, not
+                      accepting. The owner still decides afterwards. */}
+                  {isDraft && canUpload && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => raise_.mutate(a)}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        "Raise for approval"
+                      )}
                     </Button>
                   )}
                   {pending && mayDecide && (

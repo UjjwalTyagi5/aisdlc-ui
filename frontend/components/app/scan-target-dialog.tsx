@@ -18,7 +18,12 @@ import {
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { LoadingState } from "@/components/ui/loading-state";
-import { listAdoProjects, listAdoRepos, listAdoBranches } from "@/lib/api/dev-workspace";
+import {
+  listAdoProjects,
+  listAdoRepos,
+  listAdoBranches,
+  listSourceProviders,
+} from "@/lib/api/dev-workspace";
 import { listOpenPrs, prepareScan } from "@/lib/api/security";
 import { qk } from "@/lib/api/query-keys";
 import type { PrepareScanResult } from "@/lib/schemas/security";
@@ -53,28 +58,51 @@ export function ScanTargetDialog({
       setRepo(null);
       setBranch(null);
       setPrId(null);
+      setProvider(null);
     }
   }, [open]);
 
-  const projectsQ = useQuery({
-    queryKey: qk.devWorkspace.adoProjects(projectId),
-    queryFn: () => listAdoProjects(projectId),
+
+  // WHICH HOSTS THIS PERSON CAN CLONE FROM, asked rather than assumed. A project with
+  // one source never sees a choice and behaves exactly as it did.
+  const [provider, setProvider] = React.useState<string | null>(null);
+  const sourcesQ = useQuery({
+    queryKey: qk.devWorkspace.sources(projectId),
+    queryFn: () => listSourceProviders(projectId),
     enabled: open,
+    staleTime: 60_000,
+  });
+  const providers = React.useMemo(
+    () => sourcesQ.data?.providers ?? [],
+    [sourcesQ.data],
+  );
+  const sourceLabel =
+    providers.find((sp) => sp.id === provider)?.label ?? "Azure DevOps";
+
+  // Default to the first available so the lists below can load without a click.
+  React.useEffect(() => {
+    if (open && !provider && providers.length > 0) setProvider(providers[0]!.id);
+  }, [open, provider, providers]);
+
+  const projectsQ = useQuery({
+    queryKey: qk.devWorkspace.adoProjects(projectId, provider ?? ""),
+    queryFn: () => listAdoProjects(projectId, provider ?? undefined),
+    enabled: open && !!provider,
     staleTime: 30_000,
   });
   const reposQ = useQuery({
-    queryKey: qk.devWorkspace.adoRepos(projectId, project ?? ""),
-    queryFn: () => listAdoRepos(projectId, project!),
-    enabled: open && !!project,
+    queryKey: qk.devWorkspace.adoRepos(projectId, project ?? "", provider ?? ""),
+    queryFn: () => listAdoRepos(projectId, project!, provider ?? undefined),
+    enabled: open && !!provider && !!project,
   });
   const branchesQ = useQuery({
-    queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? ""),
-    queryFn: () => listAdoBranches(projectId, project!, repo!),
-    enabled: open && mode === "branch" && !!project && !!repo,
+    queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? "", provider ?? ""),
+    queryFn: () => listAdoBranches(projectId, project!, repo!, provider ?? undefined),
+    enabled: open && mode === "branch" && !!provider && !!project && !!repo,
   });
   const prsQ = useQuery({
-    queryKey: qk.security.prs(projectId, project ?? "", repo ?? ""),
-    queryFn: () => listOpenPrs(projectId, project!, repo!),
+    queryKey: qk.security.prs(projectId, project ?? "", repo ?? "", provider ?? ""),
+    queryFn: () => listOpenPrs(projectId, project!, repo!, provider ?? undefined),
     enabled: open && mode === "pr" && !!project && !!repo,
   });
 
@@ -88,6 +116,7 @@ export function ScanTargetDialog({
   const prepare = useMutation({
     mutationFn: () =>
       prepareScan(projectId, {
+        provider: provider ?? undefined,
         mode,
         ado_project: project!,
         repo_name: repo!,
@@ -129,8 +158,31 @@ export function ScanTargetDialog({
         </div>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
-          <Step label="Project">
+          {/* ONLY WHEN THERE IS GENUINELY A CHOICE — a single-option picker is a
+              question that wastes a click and implies other options exist. */}
+          {providers.length > 1 && (
+            <Step label="Source">
+              <div className="grid grid-cols-2 gap-2">
+                {providers.map((sp) => (
+                  <ModeButton
+                    key={sp.id}
+                    active={provider === sp.id}
+                    onClick={() => {
+                      // Everything below names things that exist on one host only.
+                      setProvider(sp.id);
+                      setProject(null); setRepo(null); setBranch(null); setPrId(null);
+                    }}
+                    icon={GitBranch}
+                  >
+                    {sp.label}
+                  </ModeButton>
+                ))}
+              </div>
+            </Step>
+          )}
+          <Step label={provider === "github" ? "Owner" : "Project"}>
             <CascadeList
+              sourceLabel={sourceLabel}
               q={projectsQ}
               value={project}
               onChange={(v) => {
@@ -142,13 +194,14 @@ export function ScanTargetDialog({
               getKey={(p) => p.id}
               getValue={(p) => p.name}
               getLabel={(p) => p.name}
-              emptyText="No Azure DevOps projects found."
+              emptyText={provider === "github" ? "No GitHub owners found." : "No Azure DevOps projects found."}
             />
           </Step>
 
           {project && (
             <Step label="Repository">
               <CascadeList
+              sourceLabel={sourceLabel}
                 q={reposQ}
                 value={repo}
                 onChange={(v) => {
@@ -167,6 +220,7 @@ export function ScanTargetDialog({
           {project && repo && mode === "branch" && (
             <Step label="Branch to scan">
               <CascadeList
+              sourceLabel={sourceLabel}
                 q={branchesQ}
                 value={branch}
                 onChange={setBranch}
@@ -182,6 +236,7 @@ export function ScanTargetDialog({
           {project && repo && mode === "pr" && (
             <Step label="Open pull request">
               <CascadeList
+              sourceLabel={sourceLabel}
                 q={prsQ}
                 value={prId}
                 onChange={setPrId}
@@ -265,6 +320,7 @@ interface CascadeListProps<T> {
   getLabel: (item: T) => string;
   badge?: (item: T) => string | undefined;
   emptyText: string;
+  sourceLabel?: string;
 }
 
 function CascadeList<T>({
@@ -276,12 +332,13 @@ function CascadeList<T>({
   getLabel,
   badge,
   emptyText,
+  sourceLabel = "Azure DevOps",
 }: CascadeListProps<T>) {
   if (q.isLoading) return <LoadingState variant="list" rows={3} />;
   if (q.isError)
     return (
       <p className="text-destructive text-sm">
-        Couldn&apos;t reach Azure DevOps. Connect it on the Integrations page.
+        Couldn&apos;t reach {sourceLabel}. Connect it on the Integrations page.
       </p>
     );
   if (!q.data || q.data.length === 0)

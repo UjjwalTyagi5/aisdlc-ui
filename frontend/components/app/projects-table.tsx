@@ -38,8 +38,6 @@ import {
   ApprovalStatusBadge,
   CreatedByLabel,
   ProjectActions,
-  TEMPLATE_LABEL,
-  TEMPLATE_TONE,
   TrackBadge,
 } from "@/components/app/project-card";
 import type { Project } from "@/lib/schemas";
@@ -126,15 +124,7 @@ export function ProjectsTable({
               <TableCell className="hidden py-2.5 sm:table-cell">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <TrackBadge track={project.track} />
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider uppercase",
-                      TEMPLATE_TONE[project.template],
-                    )}
-                  >
-                    {TEMPLATE_LABEL[project.template]}
-                  </span>
-                </div>
+                  </div>
               </TableCell>
 
               <TableCell className="hidden py-2.5 lg:table-cell">

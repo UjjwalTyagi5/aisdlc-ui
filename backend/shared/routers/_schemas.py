@@ -412,15 +412,41 @@ def derive_steps_from_run(run: Any, artifacts: Optional[List[Any]] = None) -> Li
         atype = getattr(artifact, "artifact_type", "artifact")
         created = getattr(artifact, "created_at", None)
 
-        # SAY WHETHER THE BYTES ARRIVED. "Generated" reads as success, and this is the
-        # one place a reader would otherwise never learn that an upload failed.
-        stored = bool(getattr(artifact, "blob_url", None))
+        # SAY WHETHER THE BYTES ARRIVED — but only where that is knowable.
+        #
+        # `blob_url` IS NOT THAT SIGNAL FOR AN UNDECIDED DOCUMENT. Since the approval
+        # gate it is NULL for every pending and draft artifact by design: the bytes sit
+        # under the tenant's `_pending` prefix and the URL is written when approval
+        # promotes them. Reading it here announced "the file did not reach storage" on
+        # every document awaiting a decision, including ones that uploaded perfectly —
+        # a storage alarm on the normal path, which is how a real one stops being read.
+        # `artifact_store` carries the same warning about `blob_url` for the same reason.
+        #
+        # So each state answers only what it can:
+        #   approved  — blob_url is the honest test; missing means the promotion failed.
+        #   rejected  — the file was deleted on purpose; absence is not a fault.
+        #   otherwise — it is waiting, and this row cannot tell whether the upload
+        #               succeeded, so it does not claim either way.
+        approval = getattr(artifact, "approval_status", None) or "approved"
+        has_path = bool(stored_path)
         size = getattr(artifact, "size_bytes", None)
         detail = f"{size:,} bytes" if size else atype
-        summary = (
-            f"{detail} stored" if stored
-            else f"{detail} — recorded, but the file did not reach storage"
-        )
+
+        if approval == "approved":
+            stored = bool(getattr(artifact, "blob_url", None))
+            summary = (
+                f"{detail} stored" if stored
+                else f"{detail} — recorded, but the file did not reach storage"
+            )
+        elif approval == "rejected":
+            stored = True  # not a failure: the decision removed the file deliberately
+            summary = f"{detail} — declined, so the file was removed"
+        else:
+            stored = has_path
+            summary = (
+                f"{detail} — awaiting approval" if has_path
+                else f"{detail} — recorded, but the file did not reach storage"
+            )
 
         steps.append(
             StepOut(
@@ -574,6 +600,8 @@ class ArtifactOut(BaseModel):
     #: The owning stage, or None for a project-level document. A BACKEND stage name.
     stage: Optional[str] = None
     uploadedBy: Optional[str] = None
+    #: Why it was put forward, in the uploader's or the agent's words.
+    uploadNote: Optional[str] = None
     #: Written on every approval since the gate shipped, and never surfaced until now.
     approvedBy: Optional[str] = None
     approvedAt: Optional[str] = None
@@ -631,6 +659,12 @@ class ArtifactOut(BaseModel):
         # that read like a decision. Migration 0040 gave it one.
         _approval = getattr(artifact, "approval_status", None) or "approved"
         status = {
+            # DRAFT IS NOT PENDING, and the difference is whose turn it is. A draft was
+            # produced by an agent and nobody has put it forward yet, so it sits in no
+            # approval queue; pending means somebody asked for a decision. Mapping draft
+            # to awaiting_approval — which the fallback below would do — is what filled a
+            # BA's queue with every throwaway iteration of a document.
+            "draft": "draft",
             "pending": "awaiting_approval",
             "approved": "approved",
             "rejected": "rejected",
@@ -672,6 +706,7 @@ class ArtifactOut(BaseModel):
             scope="project" if _stage is None else "agent",
             stage=_stage,
             uploadedBy=getattr(artifact, "uploaded_by", None),
+            uploadNote=getattr(artifact, "upload_note", None),
             approvedBy=getattr(artifact, "approved_by", None),
             # NOT `_iso(...)` unguarded: it returns the EPOCH for None, which is
             # right for a required timestamp and absurd for this one — a pending

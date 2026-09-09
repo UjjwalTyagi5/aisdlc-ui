@@ -16,6 +16,7 @@ import pytest
 
 from agents_orchestrator.documentation_agent.config.session_state import get_session, clear_session
 from agents_orchestrator.documentation_agent.tools import doc_tools
+from shared.tools.sharepoint_artifacts import make_sharepoint_tools
 from config.ws_helper import set_session_id
 
 
@@ -190,20 +191,61 @@ async def test_open_docs_pr_refuses_with_no_prepared_target(bound_session):
 
 
 @pytest.mark.asyncio
-async def test_publish_to_sharepoint_reports_not_connected_cleanly(bound_session):
+async def test_publish_reports_not_connected_cleanly(bound_session):
+    """SAME ASSERTION, MOVED TO THE TOOL THAT NOW DOES THE JOB.
+
+    This used to cover `doc_tools.publish_to_sharepoint`, which published whatever the
+    session had generated — reviewed by nobody — and has been deleted. The Documentation
+    agent now binds the shared `publish_approved_to_sharepoint`, so the behaviour worth
+    keeping is the same one: a tenant with no SharePoint connector gets an actionable
+    sentence naming where to connect it, not a stack trace.
+
+    It reads the tenant and project from `ws_helper` rather than the session state,
+    which is the convention every other agent already followed and the reason the
+    handler now sets those contextvars.
+    """
     import sys
-    s, d = bound_session
-    s.tenant_id = "tenant-1"
-    s.generated_docs = [{"filename": "x.md", "contents": "x", "id": "1", "type": "overview", "title": "X", "format": "md", "path": "", "bytes": 1}]
+    from config.ws_helper import set_project_id, set_tenant_id
 
-    mock_notification_targets = MagicMock()
-    mock_notification_targets.sharepoint_target = AsyncMock(return_value=None)
+    set_tenant_id("tenant-1")
+    set_project_id("project-1")
+    try:
+        mock_notification_targets = MagicMock()
+        mock_notification_targets.sharepoint_target = AsyncMock(return_value=None)
 
-    with patch.dict(sys.modules, {"shared.services.notification_targets": mock_notification_targets}):
-        result = await doc_tools.publish_to_sharepoint.ainvoke({})
+        publish = next(
+            t for t in make_sharepoint_tools(agent_id="documentation", stage="documentation")
+            if t.name == "publish_approved_to_sharepoint"
+        )
+        with patch.dict(sys.modules,
+                        {"shared.services.notification_targets": mock_notification_targets}):
+            result = await publish.ainvoke({})
+    finally:
+        set_tenant_id(None)
+        set_project_id(None)
 
     assert result.startswith("ERROR")
     assert "not connected" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_publish_refuses_without_a_project_at_all():
+    """NON-VACUITY for the tenant/project plumbing: with no context the tool refuses
+    outright rather than reaching for a connector it cannot scope. This is the state the
+    agent was permanently in before the handler set the contextvars."""
+    from config.ws_helper import set_project_id, set_tenant_id
+
+    set_tenant_id(None)
+    set_project_id(None)
+    publish = next(
+        t for t in make_sharepoint_tools(agent_id="documentation", stage="documentation")
+        if t.name == "publish_approved_to_sharepoint"
+    )
+
+    result = await publish.ainvoke({})
+
+    assert result.startswith("ERROR")
+    assert "not attached to a project" in result.lower()
 
 
 @pytest.mark.asyncio

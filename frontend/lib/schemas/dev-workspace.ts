@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+/** The hosts this person can clone from on a project — drives the source picker. */
+export const SourceProviders = z.object({
+  providers: z.array(z.object({ id: z.string(), label: z.string() })),
+});
+export type SourceProviders = z.infer<typeof SourceProviders>;
+
 export const AdoProject = z.object({
   id: z.string(),
   name: z.string(),

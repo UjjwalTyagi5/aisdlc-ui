@@ -9,6 +9,7 @@ import {
   Paperclip,
   Plus,
   SendHorizontal,
+  Square,
   Sparkles,
   User,
 } from "lucide-react";
@@ -81,6 +82,15 @@ export interface AgentChatDrawerProps {
   onSend: (text: string) => void | Promise<void>;
   /** Disables input (e.g. while a response streams). */
   busy?: boolean;
+  /**
+   * Stop the turn in flight. Supplied, the Send button becomes Stop while the agent is
+   * working; omitted, the composer behaves exactly as before.
+   *
+   * `use-agent-chat` has exposed a `cancel` since it was written and NOTHING called it,
+   * so a long or wrong answer had to be waited out — the only escape was closing the
+   * drawer, which loses the turn without stopping it.
+   */
+  onStop?: () => void;
   /** Slash-command suggestions shown when input is empty + starts with "/". */
   slashCommands?: Array<{ command: string; description: string }>;
   // ── Session rail (optional; renders a left history rail when onNewChat is set) ──
@@ -129,6 +139,7 @@ export function AgentChatDrawer({
   messages,
   onSend,
   busy,
+  onStop,
   slashCommands = DEFAULT_SLASH_COMMANDS,
   sessions,
   activeSessionId,
@@ -544,10 +555,28 @@ export function AgentChatDrawer({
             >
               <Paperclip className="size-4" aria-hidden />
             </Button>
-            <Button type="submit" size="sm" disabled={!draft.trim() || busy || !!disabledReason} aria-busy={busy}>
-              <SendHorizontal className="size-4" aria-hidden />
-              Send
-            </Button>
+            {/* STOP REPLACES SEND WHILE THE AGENT IS WORKING, rather than sitting
+                beside it. Send is already disabled then, so the one button in the
+                composer is always the one action available — and Stop appears exactly
+                where the hand already is. A second, separate button would be dead for
+                most of the session and easy to miss for the seconds it matters. */}
+            {busy && onStop ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={onStop}
+                aria-label="Stop the agent"
+              >
+                <Square className="size-3.5 fill-current" aria-hidden />
+                Stop
+              </Button>
+            ) : (
+              <Button type="submit" size="sm" disabled={!draft.trim() || busy || !!disabledReason} aria-busy={busy}>
+                <SendHorizontal className="size-4" aria-hidden />
+                Send
+              </Button>
+            )}
           </div>
         </form>
         </div>

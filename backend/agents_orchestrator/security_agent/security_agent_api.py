@@ -41,6 +41,10 @@ from agents_orchestrator.security_agent.config.session_state import (
     get_session,
 )
 from config.agent_context import parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.connection_manager import manager
 from config.env import AGENT_RUNTIME_MODE
@@ -288,6 +292,23 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 for k, v in prepared.items():
                     setattr(s, k, v)
                 s.target_bound = True
+                # A RECORD RESTORED FROM DISK CARRIES NO TOKEN, deliberately — one
+                # credential exists, in the credential store, and a copy beside the
+                # checkout would outlive its revocation. So it is resolved here, as
+                # the person the target was prepared for.
+                #
+                # An empty result is not fatal: reading a checked-out repository needs
+                # no token, and only the push paths do — they say so themselves rather
+                # than failing halfway through a git command.
+                if not getattr(s, "pat", ""):
+                    from shared.services import prepared_targets  # noqa: PLC0415
+
+                    s.pat = await prepared_targets.resolve_secret(
+                        tenant_id=s.tenant_id or tenant_id or "",
+                        project_id=s.project_id or project_id or "",
+                        owner_id=str(getattr(s, "owner_id", "") or ""),
+                        provider=str(getattr(s, "provider", "") or ""),
+                    )
 
         incoming = message_data.get("messages", [])
         if incoming:
@@ -325,6 +346,19 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             s.system_injected = True
         else:
             state = {"messages": [HumanMessage(content=user_text)], **_model_state}
+
+        # THE FILE THE PERSON ATTACHED, read here rather than left as a path. Uploads go
+        # through POST /conversations/{id}/attachments and arrive as refs on
+        # pipeline_context; `attachment_message_contents` extracts the text and names
+        # anything it could not read.
+        #
+        # WITHOUT THIS the chip appears in the transcript and the agent answers "I don't
+        # see any document attached" — the failure that looks like success, and one this
+        # platform has already shipped twice on other agents.
+        for _content in attachment_message_contents(
+            attachment_paths_from_context(message_data.get("pipeline_context"))
+        ):
+            state["messages"].append(HumanMessage(content=_content))
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="security", project_id=_project_id_from_message(message_data))
@@ -421,6 +455,12 @@ async def chat(
         s.system_injected = True
     else:
         state = {"messages": [HumanMessage(content=user_text)], **_model_state}
+
+    # Same as the socket path: refs uploaded to this session, extracted server-side.
+    for _content in attachment_message_contents(
+        attachment_paths_from_context(parse_pipeline_context(pipeline_context or {}))
+    ):
+        state["messages"].append(HumanMessage(content=_content))
 
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140}
     _injected, _skills = await resolve_agent_turn(

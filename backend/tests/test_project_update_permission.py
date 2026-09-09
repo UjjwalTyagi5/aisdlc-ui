@@ -216,3 +216,127 @@ async def test_a_developer_cannot_edit_the_project_they_work_on(two_units):
         json={"monthlyBudgetUsd": 1},
     )
     assert r.status_code == 403, r.text
+
+
+# ---------------------------------------------------------------------------
+# Archive and restore: the same bug, left behind by the same fix.
+#
+# When PATCH moved off `workspace:manage`, archive and restore did not. So the control
+# that turns a project active or inactive stayed gated on a permission no Project Admin
+# holds — and the route's own docstring said "A Project Admin archives their own
+# project", which the dependency in front of it made impossible. The frontend faithfully
+# mirrored the route and hid the button, so the person who runs the project could not
+# find it on the page they run it from.
+#
+# Widening WHO may archive makes WHICH project mandatory, exactly as it did for PATCH:
+# `project:update` is held by every Project Admin in the tenant, so without a scope check
+# one of them could archive a project in another unit.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_project_admin_archives_their_own_project(two_units):
+    """THE HEADLINE. This returned 403 at the dependency before the route was widened."""
+    t = two_units
+    user = f"pa-{_uuid.uuid4()}"
+    await grant_role(user, t["proj_a"], "project_admin",
+                     tenant_id=t["org"], scope_kind="project")
+
+    r = _client().post(
+        f"/projects/{t['proj_a']}/archive",
+        headers=_hdr(user, t["org"], ["artifact:view", "project:update"]),
+    )
+
+    assert r.status_code == 200, r.text
+    # APPLIED, not queued. The request lane is for a BU Admin ending work that is not
+    # theirs; a Project Admin archiving their own project is simply their call.
+    assert r.json()["archived"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_project_admin_restores_their_own_project(two_units):
+    """The other direction, which had the same gate and no request lane at all — so a
+    project archived by anybody could only be brought back by a bu_admin."""
+    t = two_units
+    user = f"pa-{_uuid.uuid4()}"
+    await grant_role(user, t["proj_a"], "project_admin",
+                     tenant_id=t["org"], scope_kind="project")
+    hdr = _hdr(user, t["org"], ["artifact:view", "project:update"])
+    _client().post(f"/projects/{t['proj_a']}/archive", headers=hdr)
+
+    r = _client().post(f"/projects/{t['proj_a']}/restore", headers=hdr)
+
+    assert r.status_code == 200, r.text
+    assert r.json()["archived"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_project_admin_cannot_archive_somebody_elses_project(two_units):
+    """THE SECOND HALF OF THE WIDENING, and the reason the permission alone is not the
+    gate. `project:update` says this person administers A project, never WHICH one.
+
+    404 rather than 403: refusing without confirming to somebody outside the project
+    that it exists."""
+    t = two_units
+    user = f"pa-{_uuid.uuid4()}"
+    await grant_role(user, t["proj_a"], "project_admin",
+                     tenant_id=t["org"], scope_kind="project")
+
+    r = _client().post(
+        f"/projects/{t['proj_b']}/archive",
+        headers=_hdr(user, t["org"], ["artifact:view", "project:update"]),
+    )
+
+    assert r.status_code == 404, r.text
+    # And it really is still active — a 404 that archived it anyway would be worse than
+    # a 200.
+    async with get_db_session_for_tenant(t["org"]) as s:
+        archived = (await s.execute(text(
+            "SELECT archived FROM projects WHERE id = :i"), {"i": t["proj_b"]})).scalar_one()
+    assert archived is False
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_role_still_cannot_archive_anything(two_units):
+    """NON-VACUITY on the floor itself. If the route had simply dropped its permission
+    dependency, every test above would still pass while any member could end the
+    project's life. A developer holds neither `project:update` nor `workspace:manage`."""
+    t = two_units
+    user = f"dev-{_uuid.uuid4()}"
+    await grant_role(user, t["proj_a"], "developer",
+                     tenant_id=t["org"], scope_kind="project")
+
+    r = _client().post(
+        f"/projects/{t['proj_a']}/archive",
+        headers=_hdr(user, t["org"], ["artifact:view", "run:create"]),
+    )
+
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_a_bu_admin_archiving_still_files_a_request(two_units):
+    """THE BEHAVIOUR THAT MUST SURVIVE THE WIDENING. Ending delivery work that is not
+    yours is the case the request lane exists for, and the easy mistake while relaxing
+    this route is to let a BU Admin through directly now that the floor is lower."""
+    t = two_units
+    user = f"bu-{_uuid.uuid4()}"
+    await grant_role(user, t["unit_a"], "bu_admin",
+                     tenant_id=t["org"], scope_kind="business_unit")
+
+    r = _client().post(
+        f"/projects/{t['proj_a']}/archive",
+        headers=_hdr(user, t["org"],
+                     ["artifact:view", "project:update", "workspace:manage"]),
+    )
+
+    assert r.status_code == 200, r.text
+    # Unchanged, and the client reads "sent for approval" from exactly this.
+    assert r.json()["archived"] is False
+    async with get_db_session_for_tenant(t["org"]) as s:
+        row = (await s.execute(text(
+            "SELECT type, status FROM governance_requests "
+            "WHERE project_id = :p AND type = 'project_archive'"
+        ), {"p": t["proj_a"]})).first()
+    assert row is not None, "the archive was neither applied nor filed"
+    assert row.status == "submitted"

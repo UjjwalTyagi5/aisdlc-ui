@@ -40,7 +40,13 @@ export type ApprovalSubmitInput = z.infer<typeof ApprovalSubmitInput>;
  *                    promotion approved or rejected, a request granted or
  *                    denied. Informational, not actionable.
  */
-export const ApprovalGateType = z.enum(["approval", "clarification", "outcome"]);
+/**
+ * `document` joined the three run-gate kinds when uploaded documents started
+ * appearing in the queue. It is decided through `/artifacts/{id}/approve`, not
+ * `/runs/{id}/approvals`, which is why the row has to branch on this rather than
+ * treating every gate as a run decision.
+ */
+export const ApprovalGateType = z.enum(["approval", "clarification", "outcome", "document"]);
 export type ApprovalGateType = z.infer<typeof ApprovalGateType>;
 
 /** The artifact under review (approval gates only). */
@@ -55,11 +61,14 @@ export const ApprovalGate = z.object({
   /** Stable gate id (e.g. `${runId}:${phase}`) — the decision route param. */
   id: z.string().min(1),
   type: ApprovalGateType,
-  runId: RunId,
+  /** Null on a document gate: `artifacts.run_id` is nullable, and an uploaded
+   *  document never had a run. Always present on a run gate. */
+  runId: RunId.nullable(),
   projectId: ProjectId,
   projectName: z.string(),
-  phase: Phase,
-  agentType: AgentType,
+  /** Null on a PROJECT-WIDE document, which belongs to no stage and so to no agent. */
+  phase: Phase.nullable(),
+  agentType: AgentType.nullable(),
   /** Permission required to action this gate — drives role-scoping of the inbox. */
   requiredPermission: z.string(),
   /**
@@ -88,9 +97,15 @@ export const ApprovalGate = z.object({
   summary: z.string(),
   /** "agent" or a person's display name. */
   requestedBy: z.string(),
+  /** The raw actor id behind `requestedBy`. `requestedBy` is a rendered email and
+   *  cannot be compared to an identity id, so "raised by me" needs this. Null on a run
+   *  gate, which an agent raised. */
+  requestedById: z.string().nullish(),
   requestedAt: Timestamp,
   /** ISO SLA deadline when one applies — powers the countdown. */
   deadline: Timestamp.nullish(),
+  /** The uploader's reason, on document gates. */
+  note: z.string().nullish(),
   /** Approval gates only. */
   artifact: GateArtifactRef.nullish(),
   /** Clarification gates only. */
