@@ -127,6 +127,9 @@ export default function TestingPage() {
   const chat = useAgentChat({
     agent: "testing",
     projectId: id,
+    // The picker already reached a RUN (`model: agentModel` below); the chat on the
+    // same page was resolving without it.
+    offeringId: agentModel,
     sessionKey: id,
     onArtifact: () => {
       queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });

@@ -71,12 +71,38 @@ _BY_TYPE_NAME: dict[str, str] = {
 }
 
 
+#: Checked BEFORE the type map, because these arrive under a type whose name is
+#: actively misleading — a spend cap is a `BadRequestError`, indistinguishable by type
+#: from a genuinely malformed request. Matched against the exception text but NEVER
+#: returning it: the provider's message is a signal here, not output, so the module's
+#: rule about never echoing `str(exc)` still holds.
+_BY_MESSAGE_SIGNAL: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("usage limit", "spend limit", "spending limit", "usage limits",
+         "credit balance", "insufficient_quota", "insufficient quota",
+         "exceeded your current quota", "billing hard cap", "quota exceeded"),
+        "The model provider has stopped accepting requests on this credential because "
+        "the account or workspace has reached its usage or spend limit. Nothing is "
+        "wrong with your request, and retrying will not help. An administrator can "
+        "raise the limit with the provider, or pick a model from a different provider "
+        "connection for this project in Model Management.",
+    ),
+)
+
+
 def friendly_model_error(exc: BaseException) -> str:
     """A safe, actionable sentence for a failed model call.
 
     Falls back to the bare type name — the previous behaviour for everything — so an
     unrecognised failure is still reported without ever risking the exception text.
     """
+    # The signal pass first — a spend cap would otherwise be answered as a
+    # configuration problem, which is the wrong action and sends people into the code.
+    haystack = f"{exc}".lower()
+    for needles, sentence in _BY_MESSAGE_SIGNAL:
+        if any(n in haystack for n in needles):
+            return sentence
+
     name = type(exc).__name__
     known = _BY_TYPE_NAME.get(name)
     if known:

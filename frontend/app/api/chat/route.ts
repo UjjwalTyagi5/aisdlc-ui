@@ -38,6 +38,11 @@ interface ChatRequest {
    * selected_test_types / target_url / test_config / clone_target).
    */
   agentParams?: Record<string, unknown>;
+  /**
+   * The offering (provider connection + model) the page's model picker selected.
+   * Sent to the agent as `offering_id`; omitted → the agent resolves the org default.
+   */
+  offeringId?: string;
 }
 
 /** Map an agent id to its FastAPI WS path, or `null` when there is no such agent.
@@ -102,7 +107,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const { message, sessionId, context, agentParams } = body;
+  const { message, sessionId, context, agentParams, offeringId } = body;
   const wsPath = agentWsPath(body.agent);
   if (!wsPath) {
     // Refused rather than routed. See `agentWsPath`'s default branch.
@@ -139,7 +144,9 @@ export async function POST(req: NextRequest) {
     });
   };
 
-  void openChatWsBridge(session, runId, message, context, wsPath, writeSse, closeStream, agentParams);
+  void openChatWsBridge(
+    session, runId, message, context, wsPath, writeSse, closeStream, agentParams, offeringId,
+  );
 
   return new Response(readable, {
     headers: {
@@ -161,6 +168,7 @@ async function openChatWsBridge(
   writeSse: (event: unknown) => void,
   closeStream: () => void,
   agentParams?: Record<string, unknown>,
+  offeringId?: string,
 ): Promise<void> {
   let ws: WebSocket | null = null;
   try {
@@ -221,6 +229,11 @@ async function openChatWsBridge(
       conversation_context: "",
       pipeline_context: context ?? null,
       files: [],
+      // Which key to spend. The agent hands this to resolve_model_for_run as
+      // `offering_id`, which is exact — a bare model id is ambiguous when two
+      // connections expose the same model. Omitted when the page has no pick, so
+      // the agent still falls back to the org default.
+      ...(offeringId ? { offering_id: offeringId } : {}),
       // Structured run params for agents that consume them (Testing). Spread last
       // so they appear as top-level WS fields the agent reads directly.
       ...(agentParams ?? {}),

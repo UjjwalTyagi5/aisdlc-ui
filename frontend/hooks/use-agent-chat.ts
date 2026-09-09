@@ -104,6 +104,18 @@ interface UseAgentChatOptions {
    */
   sessionKey?: string;
   /**
+   * The offering (provider connection + model) the page's model picker selected,
+   * forwarded to the agent as `offering_id`. Undefined → the agent resolves the
+   * org default, which is the old behaviour.
+   *
+   * An OFFERING id rather than a model id, because two provider connections can
+   * expose the same model and only the offering says which key to spend. Before
+   * this existed the picker was decorative — every standalone agent turn resolved
+   * with no model and fell through to whichever connection sorted first by display
+   * name.
+   */
+  offeringId?: string;
+  /**
    * Fired whenever the agent emits an `artifact.updated` event (a document was
    * generated or a board item was written). The page uses it to refresh the
    * main-screen artifact/story lists so chat output appears without a manual
@@ -306,6 +318,7 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
             context: turnContext,
             agent: opts.agent,
             agentParams,
+            offeringId: opts.offeringId,
           }),
         });
 
@@ -390,7 +403,8 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
         }
       }
     },
-    [messages, opts.context, opts.agent, sessionsEnabled, projectId, queryClient, ensureSession, attachments],
+    [messages, opts.context, opts.agent, opts.offeringId, sessionsEnabled, projectId,
+      queryClient, ensureSession, attachments],
   );
 
   const reset = React.useCallback(() => setMessages(opts.initial ?? []), [opts.initial]);

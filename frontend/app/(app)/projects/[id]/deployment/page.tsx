@@ -82,6 +82,9 @@ export default function DeploymentPage() {
   const chat = useAgentChat({
     agent: "deployment",
     projectId: id,
+    // The page's model picker. Without it the chat resolved with no model and ran on
+    // whichever provider connection sorts first by display name.
+    offeringId: agentModel,
     sessionKey: id,
     context: { page: "Deployment", project_id: id },
   });
