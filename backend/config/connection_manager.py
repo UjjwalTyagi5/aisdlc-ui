@@ -15,6 +15,11 @@ class ConnectionManager:
         self._session_connections: Dict[str, List[WebSocket]] = {}
         # id(websocket) → session_id (so disconnect can clean up)
         self._ws_to_session: Dict[int, str] = {}
+        # turn id → the socket that turn's message arrived on. A conversation can have
+        # more than one socket open — a second tab, or the socket of a turn whose agent
+        # has not noticed it ended — and without this, every one of them receives every
+        # message and one turn's answer lands under another turn's question.
+        self._turn_socket: Dict[str, WebSocket] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -35,8 +40,19 @@ class ConnectionManager:
         the chat.
         """
         from config.turn_cancellation import clear as _clear_cancellation  # noqa: PLC0415
+        from config.ws_helper import set_turn_id  # noqa: PLC0415
 
         _clear_cancellation(session_id)
+
+        # A TURN, minted here because this is the one place every agent already calls
+        # once per message — in the same task its emissions run in, so the contextvar
+        # reaches them without eleven agent files learning a new convention.
+        turn_id = uuid4().hex
+        self._turn_socket[turn_id] = websocket
+        # Bounded: a long-lived process would otherwise keep every turn it ever served.
+        while len(self._turn_socket) > 256:
+            self._turn_socket.pop(next(iter(self._turn_socket)), None)
+        set_turn_id(turn_id)
 
         old = self._ws_to_session.get(id(websocket))
         if old and old != session_id:
@@ -112,6 +128,24 @@ class ConnectionManager:
             # membership test, so a session whose sockets have all disconnected is
             # treated the same as one that never registered — both name nobody.
             targets = list(self._session_connections.get(session_id, ()))
+
+            # NARROWED TO THE TURN THAT IS SPEAKING, when this task belongs to one.
+            # Everything above decides which SESSION may hear it; this decides which of
+            # that session's sockets asked the question being answered. A leftover socket
+            # would otherwise receive an answer to a question it never asked and render
+            # it under whatever bubble it had open — reported as "the answer for the
+            # second message showed up on the first".
+            #
+            # Only when the turn's own socket is still among the session's. A turn whose
+            # socket has gone falls back to the session rather than sending nowhere,
+            # because losing output somebody may still be waiting for is the worse
+            # failure.
+            from config.ws_helper import get_turn_id  # noqa: PLC0415
+
+            _turn = get_turn_id()
+            _own = self._turn_socket.get(_turn) if _turn else None
+            if _own is not None and _own in targets:
+                targets = [_own]
         else:
             # Addressed to no session at all. `agents_cleared` and the legacy paths
             # genuinely mean everyone, which is why this branch survives.

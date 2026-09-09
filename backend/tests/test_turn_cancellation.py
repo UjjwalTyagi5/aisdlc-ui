@@ -128,3 +128,80 @@ def test_an_empty_session_id_cancels_nothing():
 
     assert tc.is_cancelled("") is False
     assert tc._CANCELLED == {}
+
+
+# -- one turn's output must not land in another turn's bubble -----------------
+
+
+@pytest.mark.asyncio
+async def test_an_answer_reaches_only_the_turn_that_asked():
+    """THE CROSS-TURN BLEED, reported as "the answer for the second message showed up
+    on the first".
+
+    A conversation can have more than one socket open: the BFF opens one per turn, and a
+    turn whose agent has not yet noticed it ended leaves its socket registered. Every one
+    of them received every message, so an answer arrived on a stream that had asked a
+    different question and was appended to that bubble.
+
+    Sessions still decide who may hear it; the turn decides which of that session's
+    sockets asked.
+    """
+    from config.ws_helper import set_turn_id
+
+    mgr = ConnectionManager()
+    first, second = _Socket(), _Socket()
+    mgr.active_connections.extend([first, second])   # type: ignore[arg-type]
+
+    mgr.register_session(first, "s-1")               # type: ignore[arg-type]
+    # Turn two arrives on its own socket and becomes the turn this task is serving.
+    mgr.register_session(second, "s-1")              # type: ignore[arg-type]
+
+    await mgr.broadcast({"session_id": "s-1", "type": "token", "text": "answer to two"})
+
+    assert len(second.sent) == 1, "the turn that asked must get its answer"
+    assert first.sent == [], "the earlier turn asked a different question"
+
+    set_turn_id(None)
+
+
+@pytest.mark.asyncio
+async def test_a_message_with_no_turn_still_reaches_the_whole_session():
+    """MULTI-SOCKET SESSIONS SURVIVE, and that is deliberate — a second browser tab on
+    the same conversation is a supported thing, and `broadcast_to_session` has a test
+    asserting exactly that. Only output produced INSIDE a turn is narrowed; anything
+    emitted with no turn in context still fans out."""
+    from config.ws_helper import set_turn_id
+
+    mgr = ConnectionManager()
+    a, b = _Socket(), _Socket()
+    mgr.active_connections.extend([a, b])            # type: ignore[arg-type]
+    mgr.register_session(a, "s-1")                   # type: ignore[arg-type]
+    mgr.register_session(b, "s-1")                   # type: ignore[arg-type]
+
+    set_turn_id(None)  # e.g. a background emitter, not serving a turn
+    await mgr.broadcast({"session_id": "s-1", "type": "notice", "text": "for everyone"})
+
+    assert len(a.sent) == 1 and len(b.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_socket_has_gone_falls_back_to_the_session():
+    """Losing output somebody may still be waiting for is worse than showing it on a
+    second tab, so a vanished socket does not mean silence."""
+    from config.ws_helper import set_turn_id
+
+    mgr = ConnectionManager()
+    gone, other = _Socket(), _Socket()
+    mgr.active_connections.extend([gone, other])     # type: ignore[arg-type]
+    mgr.register_session(gone, "s-1")                # type: ignore[arg-type]
+    mgr.register_session(other, "s-1")               # type: ignore[arg-type]
+
+    # The turn being served is the FIRST socket, which has since disconnected.
+    turn = next(t for t, ws in mgr._turn_socket.items() if ws is gone)
+    mgr.disconnect(gone)                             # type: ignore[arg-type]
+    set_turn_id(turn)
+
+    await mgr.broadcast({"session_id": "s-1", "type": "token", "text": "late answer"})
+
+    assert len(other.sent) == 1
+    set_turn_id(None)
