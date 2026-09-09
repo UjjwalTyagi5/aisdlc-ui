@@ -122,6 +122,9 @@ export default function DesignPage() {
   const chat = useAgentChat({
     agent: "design",
     projectId,
+    // The page's model picker. Without it the chat resolved with no model and ran on
+    // whichever provider connection sorts first by display name.
+    offeringId: agentModel,
     sessionKey: projectId,
     onArtifact: () => {
       queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });

@@ -150,7 +150,9 @@ async def pm_chat(
         "messages": messages,
         "tenant_id": real_tenant_id,
         "model_id": model_id,
-        "offering_id": None,
+        # Was hard-coded None, which discarded the page's model picker even after
+        # the socket started carrying it. `schedule.py` reads this.
+        "offering_id": message_data.get("offering_id"),
         "resolved_model": None,
     }
     config = await _run_config(session_id, real_tenant_id, real_user_id, project_id)
@@ -318,7 +320,7 @@ async def _process_turn_ws(
                 "messages": messages,
                 "tenant_id": tenant_id,
                 "model_id": message_data.get("model_id"),
-                "offering_id": None,
+                "offering_id": message_data.get("offering_id"),
                 "resolved_model": None,
             },
             await _run_config(session_id, tenant_id, str(user_id), project_id),

@@ -302,6 +302,9 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         "messages": state_messages,
         "tenant_id": tenant_id,
         "model_id": message_data.get("model_id"),
+        # The page's model picker (an offering id). `architecture.py` already read
+        # `state["offering_id"]`; without this line it only ever saw None.
+        "offering_id": message_data.get("offering_id"),
     }
     # Chat attachments (POST /conversations/{id}/attachments) arrive as paths on
     # pipeline_context.attachments; uploads on this socket are saved above. Both are

@@ -39,6 +39,11 @@ interface ChatRequest {
    * selected_test_types / target_url / test_config / clone_target).
    */
   agentParams?: Record<string, unknown>;
+  /**
+   * The offering (provider connection + model) the page's model picker selected.
+   * Sent to the agent as `offering_id`; omitted → the agent resolves the org default.
+   */
+  offeringId?: string;
 }
 
 /** Map an agent id to its FastAPI WS path, or `null` when there is no such agent.
@@ -103,7 +108,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const { message, sessionId, context, agentParams } = body;
+  const { message, sessionId, context, agentParams, offeringId } = body;
   const wsPath = agentWsPath(body.agent);
   if (!wsPath) {
     // Refused rather than routed. See `agentWsPath`'s default branch.
@@ -147,7 +152,7 @@ export async function POST(req: NextRequest) {
   // "button that does nothing" the Orchestrator cockpit deliberately refuses to ship.
   void openChatWsBridge(
     session, runId, message, context, wsPath, writeSse, closeStream, agentParams,
-    req.signal, sessionId,
+    req.signal, sessionId, offeringId,
   );
 
   return new Response(readable, {
@@ -174,6 +179,16 @@ async function openChatWsBridge(
   signal?: AbortSignal,
   /** The chat session, so the agent can be told to stop the turn it is inside. */
   sessionId?: string,
+  /**
+   * The offering (provider connection + model) the page's model picker selected.
+   *
+   * LAST, and `sessionId` keeps the position main gave it. These two are adjacent and
+   * both `string | undefined`, so transposing them type-checks and then fails silently
+   * in two directions at once: the cancel POST goes to a conversation id that does not
+   * exist (Stop stops nothing) and the turn spends whichever key sorts first. Pinned by
+   * `chat-route-carries-both.test.ts`.
+   */
+  offeringId?: string,
 ): Promise<void> {
   let ws: WebSocket | null = null;
   try {
@@ -276,6 +291,11 @@ async function openChatWsBridge(
       conversation_context: "",
       pipeline_context: context ?? null,
       files: [],
+      // Which key to spend. The agent hands this to resolve_model_for_run as
+      // `offering_id`, which is exact — a bare model id is ambiguous when two
+      // connections expose the same model. Omitted when the page has no pick, so
+      // the agent still falls back to the org default.
+      ...(offeringId ? { offering_id: offeringId } : {}),
       // Structured run params for agents that consume them (Testing). Spread last
       // so they appear as top-level WS fields the agent reads directly.
       ...(agentParams ?? {}),

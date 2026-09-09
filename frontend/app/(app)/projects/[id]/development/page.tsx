@@ -151,6 +151,7 @@ export default function DevelopmentPage() {
   const chat = useAgentChat({
     agent: "development",
     projectId,
+    offeringId: agentModel,
     sessionKey: workspace?.commit_sha ?? projectId,
     onArtifact: refreshWorkspace,
     context: { page: "Development", project_id: projectId },

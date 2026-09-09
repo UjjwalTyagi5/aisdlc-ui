@@ -78,6 +78,12 @@ class DevAgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     tenant_id: str
     model_id: str | None
+    #: The offering (provider connection + model) the page's picker chose. Exact
+    #: where `model_id` is ambiguous — two connections can expose the same model,
+    #: and only the offering says which key gets spent. Every other agent's node
+    #: already read this; this one resolved without it, so the picker could not
+    #: reach the Development agent even once the socket carried the value.
+    offering_id: str | None
 
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
@@ -336,15 +342,21 @@ async def agent_node(state: DevAgentState):
     tenant_id = state.get("tenant_id", "")
     requested = state.get("model_id")
     try:
-        resolved = await resolve_model_for_run(tenant_id, requested)
+        resolved = await resolve_model_for_run(
+            tenant_id, requested, offering_id=state.get("offering_id")
+        )
     except (NoModelConfiguredError, ModelNotEnabledError) as e:
         logger.warning("Dev agent model resolution failed (tenant=%s): %s", tenant_id, type(e).__name__)
         return {"messages": [AIMessage(content=(
             "No usable model is configured for your organization. "
             "An administrator must add and verify a model provider in Org Settings → Model Providers."))]}
     except Exception as e:
-        logger.error("Dev agent model resolution error (tenant=%s): %s", tenant_id, type(e).__name__)
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # .exception, not .error: the class name alone was all that reached either the
+        # log or the user, so the provider's own explanation existed nowhere.
+        logger.exception("Dev agent model resolution error (tenant=%s)", tenant_id)
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
     try:
         from shared.services.model_call_wrapper import guarded_completion
 
@@ -358,9 +370,15 @@ async def agent_node(state: DevAgentState):
         )
         return {"messages": [response]}
     except Exception as e:
-        logger.error("Dev agent error (tenant=%s alias=%s): %s",
-                     tenant_id, resolved.alias, type(e).__name__)
-        return {"messages": [AIMessage(content=f"Agent error: {type(e).__name__}")]}
+        # WHAT THIS USED TO SAY: "Agent error: BadRequestError". True, safe, and
+        # unactionable — the provider had answered "you have reached your specified
+        # workspace API usage limits, you will regain access on <date>", and that
+        # sentence was discarded here and at the log line both. Every other agent
+        # already routed through `friendly_model_error`; this one did not.
+        logger.exception("Dev agent error (tenant=%s alias=%s)", tenant_id, resolved.alias)
+        from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+        return {"messages": [AIMessage(content=friendly_model_error(e))]}
 
 
 def _tool_label(name: str, args: dict) -> str:
