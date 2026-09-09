@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { API_BASE } from "@/lib/api/client";
 import {
@@ -197,9 +198,25 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     async (files: File[]) => {
       if (!files.length) return;
       const sid = await ensureSession(files[0]?.name);
-      if (!sid) return; // attachments require a persisted session
-      const refs = await uploadAttachments(sid, files);
-      setAttachments((cur) => [...cur, ...refs]);
+      if (!sid) {
+        // SAY SO. This returned silently: the file picker closed, no chip appeared,
+        // no error — and the only way to tell an upload from a no-op was that the
+        // agent later said it saw no document. Attachments are stored per session
+        // (files/{user}/attachments/{session}/), so a chat the caller did not give a
+        // projectId has nowhere to put them.
+        toast.error("Couldn't attach: this chat has no saved session.");
+        return;
+      }
+      try {
+        const refs = await uploadAttachments(sid, files);
+        setAttachments((cur) => [...cur, ...refs]);
+      } catch (err) {
+        // A rejected extension or an oversized file comes back as a 400 with a
+        // reason. Swallowing it left the same silence as above.
+        toast.error(
+          err instanceof Error ? err.message : "Couldn't attach that file.",
+        );
+      }
     },
     [ensureSession],
   );

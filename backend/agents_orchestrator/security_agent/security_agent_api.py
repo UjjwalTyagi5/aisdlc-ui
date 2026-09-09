@@ -41,6 +41,10 @@ from agents_orchestrator.security_agent.config.session_state import (
     get_session,
 )
 from config.agent_context import parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.connection_manager import manager
 from config.env import AGENT_RUNTIME_MODE
@@ -326,6 +330,19 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         else:
             state = {"messages": [HumanMessage(content=user_text)], **_model_state}
 
+        # THE FILE THE PERSON ATTACHED, read here rather than left as a path. Uploads go
+        # through POST /conversations/{id}/attachments and arrive as refs on
+        # pipeline_context; `attachment_message_contents` extracts the text and names
+        # anything it could not read.
+        #
+        # WITHOUT THIS the chip appears in the transcript and the agent answers "I don't
+        # see any document attached" — the failure that looks like success, and one this
+        # platform has already shipped twice on other agents.
+        for _content in attachment_message_contents(
+            attachment_paths_from_context(message_data.get("pipeline_context"))
+        ):
+            state["messages"].append(HumanMessage(content=_content))
+
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="security", project_id=_project_id_from_message(message_data))
         config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140, "callbacks": [audit, *_lf_cbs], "metadata": _lf_meta}
@@ -421,6 +438,12 @@ async def chat(
         s.system_injected = True
     else:
         state = {"messages": [HumanMessage(content=user_text)], **_model_state}
+
+    # Same as the socket path: refs uploaded to this session, extracted server-side.
+    for _content in attachment_message_contents(
+        attachment_paths_from_context(parse_pipeline_context(pipeline_context or {}))
+    ):
+        state["messages"].append(HumanMessage(content=_content))
 
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140}
     _injected, _skills = await resolve_agent_turn(

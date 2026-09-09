@@ -112,6 +112,10 @@ export default function SecurityPage() {
 
   const chat = useAgentChat({
     agent: "security",
+    // See the Code Review page: attachments are stored per session, so the durable
+    // session has to exist before a file can be attached at all.
+    projectId: id,
+    sessionKey: id,
     context: { page: "Security", project_id: id },
     onArtifact: () => scansQ.refetch(),
   });
@@ -322,6 +326,9 @@ export default function SecurityPage() {
         onSend={chat.send}
         busy={chat.busy}
         onStop={chat.cancel}
+        attachments={chat.attachments}
+        onAttachFiles={chat.attachFiles}
+        onRemoveAttachment={chat.removeAttachment}
         disabledReason={
           prepared || hasScan ? undefined : "Select a branch or PR to scan first (Select target)."
         }

@@ -29,6 +29,10 @@ from agents_orchestrator.deployment_agent.config.session_state import (
     clear_session, get_prepared, get_session,
 )
 from config.agent_context import parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.connection_manager import manager
 from config.env import AGENT_RUNTIME_MODE
@@ -220,6 +224,17 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         else:
             state = {"messages": [HumanMessage(content=user_text)], "tenant_id": tenant_id, "model_id": message_data.get("model_id")}
 
+        # THE FILE THE PERSON ATTACHED, read here rather than left as a path.
+        #
+        # THIS ROUTE IS THE ONE THE DEPLOYMENT CHAT USES — `/sdlc/agent/deployment/ws`
+        # is mounted on this module, not on deployment_agent_api, which had the block
+        # already. So the page showed an attach button, the file uploaded, the chip
+        # rendered, and the agent never saw a byte of it.
+        for _content in attachment_message_contents(
+            attachment_paths_from_context(message_data.get("pipeline_context"))
+        ):
+            state["messages"].append(HumanMessage(content=_content))
+
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="deployment", project_id=_project_id_from_message(message_data))
         config = {"configurable": {"thread_id": session_id}, "recursion_limit": 140, "callbacks": [audit, *_lf_cbs], "metadata": _lf_meta}
@@ -297,6 +312,12 @@ async def chat(
         s.system_injected = True
     else:
         state = {"messages": [HumanMessage(content=user_text)]}
+
+    # Same as the socket path: refs uploaded to this session, extracted server-side.
+    for _content in attachment_message_contents(
+        attachment_paths_from_context(parse_pipeline_context(pipeline_context or {}))
+    ):
+        state["messages"].append(HumanMessage(content=_content))
     # CALLBACKS ARE NOT OPTIONAL PLUMBING, and this route had none while the WS route
     # above did. `langfuse_langchain_extras` is what threads the run's PROJECT into the
     # async context via set_run_project, and resolve_model_for_run reads it: once a

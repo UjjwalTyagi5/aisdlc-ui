@@ -106,6 +106,12 @@ export default function CodeReviewPage() {
 
   const chat = useAgentChat({
     agent: "code_review",
+    // ATTACHMENTS NEED A PERSISTED SESSION — files are stored under
+    // files/{user}/attachments/{session}/, so a chat with no session id has nowhere
+    // to put them and `attachFiles` returns silently. Passing projectId is what turns
+    // the durable session on.
+    projectId: id,
+    sessionKey: id,
     context: { page: "Code Review", project_id: id },
     onArtifact: () => reviewsQ.refetch(),
   });
@@ -357,6 +363,9 @@ export default function CodeReviewPage() {
         onSend={chat.send}
         busy={chat.busy}
         onStop={chat.cancel}
+        attachments={chat.attachments}
+        onAttachFiles={chat.attachFiles}
+        onRemoveAttachment={chat.removeAttachment}
         disabledReason={
           prepared || hasReview
             ? undefined

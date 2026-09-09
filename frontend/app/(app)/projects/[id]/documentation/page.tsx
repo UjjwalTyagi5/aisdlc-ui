@@ -63,7 +63,14 @@ export default function DocumentationPage() {
   const [chatOpen, setChatOpen] = React.useState(false);
   const [selId, setSelId] = React.useState<string | null>(null);
 
-  const chat = useAgentChat({ agent: "documentation", context: { page: "Documentation", project_id: id } });
+  // projectId turns on the durable session the attachments are stored against —
+  // see the Code Review page for why `attachFiles` needs one.
+  const chat = useAgentChat({
+    agent: "documentation",
+    projectId: id,
+    sessionKey: id,
+    context: { page: "Documentation", project_id: id },
+  });
 
   const docsetQ = useQuery({
     queryKey: qk.documentation.docset(id, chat.sessionId ?? ""),
@@ -269,6 +276,9 @@ export default function DocumentationPage() {
         open={chatOpen} onOpenChange={setChatOpen}
         context={{ page: "Documentation", artifactTitle: targetChip ?? undefined }}
         messages={chat.messages} onSend={chat.send} busy={chat.busy} onStop={chat.cancel}
+        attachments={chat.attachments}
+        onAttachFiles={chat.attachFiles}
+        onRemoveAttachment={chat.removeAttachment}
         disabledReason={prepared ? undefined : "Open a docs workspace first."}
         starterSuggestions={["Generate the full documentation set.", "Write the API reference.", "Generate release notes for this branch."]}
       />

@@ -17,31 +17,39 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-const bffFetch = vi.fn(async () => []);
+import type { NextRequest } from "next/server";
+
+const bffFetch = vi.fn(async (_path: string): Promise<unknown> => []);
 
 vi.mock("@/lib/bff/client", () => ({ bffFetch: (path: string) => bffFetch(path) }));
 vi.mock("@/lib/auth/session", () => ({
   getSession: async () => ({ user: { id: "u1" }, accessToken: "t" }),
 }));
 
-/** Next's handlers only read `nextUrl.searchParams`, which a plain Request supplies. */
-function req(url: string) {
-  return new Request(url) as unknown as import("next/server").NextRequest & {
-    nextUrl: URL;
-  };
-}
-function withUrl(url: string) {
-  const r = req(url) as unknown as { nextUrl: URL };
+/** Next's handlers only read `nextUrl.searchParams`, which a plain URL supplies. */
+function withUrl(url: string): NextRequest {
+  const r = new Request(url) as unknown as { nextUrl: URL };
   r.nextUrl = new URL(url);
-  return r as unknown as import("next/server").NextRequest;
+  return r as unknown as NextRequest;
 }
 
 beforeEach(() => bffFetch.mockClear());
 
 /** Every picker route that a multi-source project can reach, and its parameters. */
+/**
+ * What every Next route handler in this list looks like from the outside. Each one
+ * declares its own params shape (`{ id, project, repo }`), which no single signature
+ * can satisfy, so the handler is narrowed at the call site instead — the params object
+ * passed below carries exactly the keys that route's own type demands.
+ */
+type RouteHandler = (
+  req: NextRequest,
+  ctx: { params: Promise<never> },
+) => Promise<Response>;
+
 const ROUTES: {
   name: string;
-  load: () => Promise<{ GET: (req: unknown, ctx: unknown) => Promise<Response> }>;
+  load: () => Promise<{ GET: RouteHandler }>;
   url: string;
   params: Record<string, string>;
 }[] = [
@@ -82,7 +90,7 @@ describe("the chosen source reaches the backend", () => {
   for (const route of ROUTES) {
     it(`${route.name} forwards ?provider`, async () => {
       const { GET } = await route.load();
-      await GET(withUrl(route.url), { params: Promise.resolve(route.params) });
+      await GET(withUrl(route.url), { params: Promise.resolve(route.params) as Promise<never> });
 
       expect(bffFetch).toHaveBeenCalledTimes(1);
       expect(bffFetch.mock.calls[0]![0]).toContain("provider=github");
@@ -94,7 +102,7 @@ describe("the chosen source reaches the backend", () => {
       // backend would treat it as naming a host it has no credential for.
       const { GET } = await route.load();
       const bare = route.url.split("?")[0]!;
-      await GET(withUrl(bare), { params: Promise.resolve(route.params) });
+      await GET(withUrl(bare), { params: Promise.resolve(route.params) as Promise<never> });
 
       expect(bffFetch.mock.calls[0]![0]).not.toContain("provider");
     });
@@ -105,7 +113,7 @@ describe("the sources route exists in its own right", () => {
   it("asks the backend which hosts this person can clone from", async () => {
     const { GET } = await import("@/app/api/dev/[id]/sources/route");
     await GET(withUrl("http://x/api/dev/p1/sources"), {
-      params: Promise.resolve({ id: "p1" }),
+      params: Promise.resolve({ id: "p1" }) as Promise<never>,
     });
 
     expect(bffFetch.mock.calls[0]![0]).toBe("/dev/p1/sources");

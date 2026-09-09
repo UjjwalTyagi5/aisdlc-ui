@@ -1,4 +1,4 @@
-﻿"""Development Agent API â€” FastAPI router.
+"""Development Agent API â€” FastAPI router.
 
 WebSocket /ws  â€” real-time token streaming
 POST /chat/    â€” REST endpoint (used by orchestrator)
@@ -28,6 +28,7 @@ from sqlalchemy import select
 from uuid import uuid4
 
 from config.agent_context import build_agent_input_text, parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import attachment_message_contents
 from config.connection_manager import manager
 from config.context_broker import build_context
 from config.orchestrator_state_client import set_state as _set_orchestrator_state, fetch_session_artifacts
@@ -564,6 +565,14 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             state["messages"].append(
                 HumanMessage(content=f"Uploaded files available at: {', '.join(_all_files)}")
             )
+        # AND THE CONTENT, not only the path. This agent has file tools, so a path was
+        # not useless — but it is a request the model can skip, and one it can get
+        # wrong on a Windows path mangled through JSON. A .docx read by a code-oriented
+        # file tool comes back as noise. Extracting here means an attachment the person
+        # can SEE in the transcript is text the model actually has; the path stays for
+        # the tools that genuinely operate on files.
+        for _content in attachment_message_contents(_all_files):
+            state["messages"].append(HumanMessage(content=_content))
 
         await manager.broadcast(
             {"type": "message_received", "session_id": session_id, "message": "Processing your request..."}
