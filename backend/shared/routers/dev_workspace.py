@@ -51,32 +51,89 @@ class PullRequest(BaseModel):
     branch: str
 
 
+# THE PATHS STILL SAY `ado` AND THAT IS NOW ONLY A NAME. These three feed every target
+# dialog on the platform, and they serve GitHub as well as Azure DevOps. Renaming them
+# means moving five routers, their BFF proxies and every caller in one go — churn for a
+# cosmetic gain — so the behaviour changed and the name is left as debt, recorded here
+# rather than quietly forgotten.
+#
+# `provider` is a QUERY PARAMETER, absent by default: a project with one source behaves
+# exactly as it did, and only a dialog that has offered somebody a choice sends one.
+
+
 @dev_workspace_router.get("/{project_id}/ado/projects")
-async def get_ado_projects(project_id: str, request: Request) -> list[dict]:
+async def get_ado_projects(
+    project_id: str, request: Request, provider: str | None = None
+) -> list[dict]:
+    """The Azure DevOps projects, or the GitHub owners, this caller can reach."""
+    from shared.services import repo_source  # noqa: PLC0415
+
     owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
-    return await ado_repos.list_projects(
-        tenant_id=request.state.tenant_id, project_id=project_id, owner_id=owner_id
-    )
+    try:
+        _chosen, rows = await repo_source.list_namespaces(
+            request.state.tenant_id, project_id=project_id, owner_id=owner_id,
+            provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return rows
 
 
 @dev_workspace_router.get("/{project_id}/ado/projects/{ado_project}/repos")
-async def get_ado_repos(project_id: str, ado_project: str, request: Request) -> list[dict]:
+async def get_ado_repos(
+    project_id: str, ado_project: str, request: Request, provider: str | None = None
+) -> list[dict]:
+    from shared.services import repo_source  # noqa: PLC0415
+
     owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
-    return await ado_repos.list_repos(
-        ado_project, tenant_id=request.state.tenant_id,
-        project_id=project_id, owner_id=owner_id,
-    )
+    try:
+        _chosen, rows = await repo_source.list_repos(
+            request.state.tenant_id, ado_project, project_id=project_id,
+            owner_id=owner_id, provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return rows
 
 
 @dev_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/branches")
 async def get_ado_branches(
-    project_id: str, ado_project: str, repo: str, request: Request
+    project_id: str, ado_project: str, repo: str, request: Request,
+    provider: str | None = None,
 ) -> list[dict]:
+    from shared.services import repo_source  # noqa: PLC0415
+
     owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
-    return await ado_repos.list_branches(
-        ado_project, repo, tenant_id=request.state.tenant_id,
-        project_id=project_id, owner_id=owner_id,
-    )
+    try:
+        _chosen, rows = await repo_source.list_branches(
+            request.state.tenant_id, ado_project, repo, project_id=project_id,
+            owner_id=owner_id, provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return rows
+
+
+@dev_workspace_router.get("/{project_id}/sources")
+async def get_sources(project_id: str, request: Request) -> dict:
+    """Which source hosts this caller can actually clone from, for the target dialogs.
+
+    Discovery, not configuration: each backend is asked whether a usable credential
+    exists for this tenant, project and person. A dialog offers a choice only when there
+    is genuinely more than one, so a project with only Azure DevOps looks exactly as it
+    always did.
+    """
+    from shared.services import repo_source  # noqa: PLC0415
+
+    owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
+    try:
+        found = await repo_source.available(
+            request.state.tenant_id, project_id=project_id, owner_id=owner_id
+        )
+    except Exception:  # noqa: BLE001
+        found = []
+    labels = {"ado": "Azure DevOps", "github": "GitHub"}
+    return {"providers": [{"id": p, "label": labels.get(p, p)} for p in found]}
 
 
 @dev_workspace_router.post("/{project_id}/workspace/pull")
