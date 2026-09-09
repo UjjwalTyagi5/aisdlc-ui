@@ -22,6 +22,7 @@ from shared.authz.dependency import require_permission
 from shared.authz.project_scope import require_project_access
 from shared.db import get_db_session
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Was bare APIRouter() — the only
 # gate was the artifact:view floor applied at include time (process_api.py), which
@@ -212,14 +213,21 @@ async def prepare_deploy(project_id: str, body: PrepareDeployRequest, request: R
 
     deploy_via = body.deploy_via or await asyncio.to_thread(_detect_deploy_via, work_dir)
 
-    set_prepared(tenant_id, project_id, {
+    _prepared_record = {
         "work_dir": work_dir, "repo_url": remote_url, "pat": secret, "provider": chosen,
         "mode": body.mode, "ado_project": body.ado_project, "repo_name": body.repo_name,
         "source_branch": branch, "pr_id": body.pr_id or "", "head_sha": result.get("commit_sha", ""),
         "environment": body.environment, "deploy_via": deploy_via,
         "image_registry": body.image_registry or "", "image_name": body.image_name or body.repo_name,
         "namespace": body.namespace or "",
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "deployment", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     return {
         "status": "ready", "provider": chosen, "mode": body.mode, "repo_name": body.repo_name,
@@ -246,9 +254,11 @@ async def get_prepared_deploy(project_id: str, request: Request) -> dict:
     Only the descriptive fields are projected here — returning the record as stored
     would hand the browser a token that has no business leaving the server.
 
-    A null `status` is the honest answer after a backend restart: the prepared session
-    lives in memory, so the clone on disk is orphaned and the agent could not use it
-    anyway.
+    A RESTART NO LONGER ORPHANS THE CLONE. It used to: the record lived in memory, so
+    this returned null while a complete checkout sat on disk, and the chat — gated on
+    that status — became unreachable for a target that was already prepared. The record
+    is now written beside the checkout and `get_prepared` falls back to it. Null here
+    means there is genuinely nothing prepared, or the checkout itself is gone.
     """
     from agents_orchestrator.deployment_agent.config.session_state import get_prepared
 

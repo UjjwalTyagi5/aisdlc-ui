@@ -27,6 +27,7 @@ from agents_orchestrator.code_review_agent.config.session_state import set_prepa
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
 # took the project id from the path and filtered on tenant_id alone, so the only gate
@@ -171,7 +172,7 @@ async def prepare_review(
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not prepare diff: {exc}")
 
-    set_prepared(tenant_id, project_id, {
+    _prepared_record = {
         "work_dir": work_dir,
         "repo_url": remote_url,
         "pat": pat,
@@ -186,7 +187,14 @@ async def prepare_review(
         "base_sha": result["base_sha"],
         "diff_text": result["diff"],
         "changed_files": result["files"],
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "code_review", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     unchanged = await _find_unchanged_review(
         db, tenant_id=tenant_id, project_id=project_id, repo_name=body.repo_name,

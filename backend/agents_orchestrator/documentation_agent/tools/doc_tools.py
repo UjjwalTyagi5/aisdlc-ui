@@ -981,6 +981,15 @@ async def open_docs_pr(title: str = "", description: str = "") -> str:
         return "ERROR: no documents generated yet. Generate at least one document first."
     if not (s.work_dir and s.repo_name and s.source_branch):
         return "ERROR: no prepared target. Select a branch/PR first."
+    if not getattr(s, "pat", ""):
+        # THE ONE THING A RESTORED TARGET CANNOT RECOVER BY ITSELF. Reading the
+        # checkout needs no token; pushing does. Saying so beats a git command
+        # that fails halfway with an authentication error nobody can act on.
+        return (
+            "ERROR: your source credential could not be resolved for this project, "
+            "so nothing can be pushed. Reconnect it on the Integrations page, or "
+            "prepare the target again."
+        )
     new_branch = f"docs/auto-{uuid.uuid4().hex[:8]}"
     files = [(f"docs/{d['filename']}", d["contents"]) for d in s.generated_docs]
     pr_title = title or f"Documentation for {s.repo_name} ({s.source_branch})"

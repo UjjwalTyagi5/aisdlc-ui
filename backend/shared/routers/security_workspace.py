@@ -25,6 +25,7 @@ from agents_orchestrator.security_agent.config.session_state import set_prepared
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
 # took the project id from the path and filtered on tenant_id alone, so the only gate
@@ -112,7 +113,7 @@ async def prepare_scan(project_id: str, body: PrepareScanRequest, request: Reque
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not clone the branch: {exc}")
 
-    set_prepared(tenant_id, project_id, {
+    _prepared_record = {
         "work_dir": work_dir,
         "repo_url": remote_url,
         "pat": pat,
@@ -123,7 +124,14 @@ async def prepare_scan(project_id: str, body: PrepareScanRequest, request: Reque
         "pr_id": body.pr_id or "",
         "pr_title": pr_title,
         "head_sha": result.get("commit_sha", ""),
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "security", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     return {
         "status": "ready",

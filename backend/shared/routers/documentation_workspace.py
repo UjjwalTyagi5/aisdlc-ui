@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from agents_orchestrator.documentation_agent.config.session_state import set_prepared
 from shared.authz.project_scope import require_project_access
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Was bare APIRouter() — the only
 # gate was the artifact:view floor applied at include time (process_api.py), which
@@ -214,12 +215,19 @@ async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Reques
     languages = await asyncio.to_thread(_detect_languages, work_dir)
     upstream_summary = await _upstream_summary(tenant_id, project_id)
 
-    set_prepared(tenant_id, project_id, {
+    _prepared_record = {
         "work_dir": work_dir, "repo_url": remote_url, "pat": _secret, "provider": chosen,
         "mode": body.mode, "ado_project": body.ado_project, "repo_name": body.repo_name,
         "source_branch": branch, "pr_id": body.pr_id or "", "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "documentation", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     return {
         "status": "ready", "provider": chosen, "mode": body.mode, "repo_name": body.repo_name,

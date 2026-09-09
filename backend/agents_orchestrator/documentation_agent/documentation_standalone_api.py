@@ -235,6 +235,23 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 for k, v in prepared.items():
                     setattr(s, k, v)
                 s.target_bound = True
+                # A RECORD RESTORED FROM DISK CARRIES NO TOKEN, deliberately — one
+                # credential exists, in the credential store, and a copy beside the
+                # checkout would outlive its revocation. So it is resolved here, as
+                # the person the target was prepared for.
+                #
+                # An empty result is not fatal: reading a checked-out repository needs
+                # no token, and only the push paths do — they say so themselves rather
+                # than failing halfway through a git command.
+                if not getattr(s, "pat", ""):
+                    from shared.services import prepared_targets  # noqa: PLC0415
+
+                    s.pat = await prepared_targets.resolve_secret(
+                        tenant_id=s.tenant_id or tenant_id or "",
+                        project_id=s.project_id or project_id or "",
+                        owner_id=str(getattr(s, "owner_id", "") or ""),
+                        provider=str(getattr(s, "provider", "") or ""),
+                    )
 
         incoming = message_data.get("messages", [])
         if incoming:
