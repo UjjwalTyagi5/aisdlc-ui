@@ -34,6 +34,7 @@ import { CodeViewer } from "@/components/app/code-viewer";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import {
   getWorkspace,
@@ -146,9 +147,13 @@ export default function DevelopmentPage() {
   }, [queryClient, projectId]);
 
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [agentModel, setAgentModel] = React.useState<string>();
   const [repoPickerOpen, setRepoPickerOpen] = React.useState(false);
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "development",
     projectId,
     offeringId: agentModel,

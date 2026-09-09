@@ -64,24 +64,32 @@ async def list_sessions(
     tenant_id: str,
     *,
     created_by: str,
-    agent_id: str,
+    agent_id: Optional[str] = None,
     project_id: Optional[uuid.UUID] = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Creator-scoped agent sessions, newest-first. Empty list on failure (read is best-effort)."""
+    """Creator-scoped agent sessions, newest-first. Empty list on failure (read is best-effort).
+
+    `agent_id` NARROWS, and omitting it means every agent. The chat rail on a stage
+    page wants one agent's sessions; a project overview wants the person's most recent
+    conversations whichever agent they were with, and asking nine times to merge and
+    re-sort the answers client-side would be nine round trips to rebuild an ordering
+    the database already has.
+    """
     try:
         async with _ctx(tenant_id) as session:
             stmt = (
                 select(ConversationSession)
                 .where(
                     ConversationSession.created_by == created_by,
-                    ConversationSession.agent_id == agent_id,
                     ConversationSession.scope_type == "agent",
                     ConversationSession.status == "active",
                 )
                 .order_by(ConversationSession.updated_at.desc())
                 .limit(limit)
             )
+            if agent_id:
+                stmt = stmt.where(ConversationSession.agent_id == agent_id)
             if project_id is not None:
                 stmt = stmt.where(ConversationSession.project_id == project_id)
             rows = (await session.execute(stmt)).scalars().all()

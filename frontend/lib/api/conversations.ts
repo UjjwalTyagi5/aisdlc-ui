@@ -27,9 +27,24 @@ export const ConversationMessage = z.object({
 export type ConversationMessage = z.infer<typeof ConversationMessage>;
 
 /** The caller's sessions for an agent on a project, newest-first. */
-export const listConversations = (projectId: ProjectId, agentId: string) =>
+/**
+ * The caller's chat sessions on a project, newest first.
+ *
+ * `agentId` narrows to one agent's rail. Omitted, the answer spans every agent — the
+ * project overview lists the latest conversations whoever they were with, and merging
+ * nine per-agent calls client-side would rebuild an ordering the database already has.
+ */
+export const listConversations = (
+  projectId: ProjectId,
+  agentId?: string,
+  limit?: number,
+) =>
   api(`/conversations`, {
-    query: { agent_id: agentId, project_id: projectId },
+    query: {
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(limit ? { limit: String(limit) } : {}),
+      project_id: projectId,
+    },
     schema: z.array(ConversationSession),
   });
 

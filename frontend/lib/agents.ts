@@ -212,6 +212,43 @@ export function phaseRoute(phase: Phase): string {
   }
 }
 
+/**
+ * A CHAT SESSION'S agent id is not always a Phase id, and the two must not be
+ * conflated. `ConversationSession.agent_id` is whatever the page passed to
+ * `useAgentChat` — the Requirements page says `requirement` (singular) and the Code
+ * Review page says `code_review`, while the phases are `requirements` and `review`.
+ *
+ * Anything already matching a phase id falls through unchanged, so a new agent page
+ * that names itself after its phase needs no entry here.
+ */
+const CHAT_AGENT_PHASE: Record<string, Phase> = {
+  requirement: "requirements",
+  code_review: "review",
+};
+
+/** The phase a chat session belongs to, or null for the orchestrator / an unknown id. */
+export function chatAgentPhase(agentId: string): Phase | null {
+  const mapped = CHAT_AGENT_PHASE[agentId] ?? (agentId as Phase);
+  return ROUTABLE_PHASES.has(mapped) ? mapped : null;
+}
+
+/**
+ * Where to send someone who clicks a chat session.
+ *
+ * The `session` parameter is what makes it one click rather than two: the page opens
+ * its drawer on that conversation instead of a blank one. A session whose agent has no
+ * page (the orchestrator) goes to the Orchestrator, which owns its own transcript.
+ */
+export function chatSessionHref(
+  projectId: string,
+  agentId: string,
+  sessionId: string,
+): string {
+  const phase = chatAgentPhase(agentId);
+  if (!phase) return `/projects/${projectId}/orchestrator?session=${encodeURIComponent(sessionId)}`;
+  return `${phaseHref(projectId, phase)}?session=${encodeURIComponent(sessionId)}`;
+}
+
 /** Full href for a phase's page within a project. */
 export function phaseHref(projectId: string, phase: Phase): string {
   return `/projects/${projectId}/${phaseRoute(phase)}`;

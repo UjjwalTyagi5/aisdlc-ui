@@ -123,6 +123,14 @@ interface UseAgentChatOptions {
    * "Pull stories".
    */
   onArtifact?: () => void;
+  /**
+   * A session to open instead of a blank chat — the `?session=` a link from the
+   * project overview carries. Applied once, after the rail is enabled: re-applying it
+   * would fight the user the moment they picked a different conversation, and it is
+   * ignored entirely without a `projectId`, since a chat with no persisted sessions
+   * has nothing to restore.
+   */
+  openSessionId?: string;
 }
 
 /** A document the agent generated during the chat (BRD, gap report, risk register…). */
@@ -205,6 +213,17 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     [sessionsEnabled, opts.agent, projectId, queryClient],
   );
 
+  // OPEN THE LINKED CONVERSATION, once. `didOpenLinked` rather than a dependency on
+  // sessionId: selecting the session sets sessionId, which would re-run this effect and
+  // fight any later choice the user makes.
+  const didOpenLinked = React.useRef(false);
+  React.useEffect(() => {
+    if (didOpenLinked.current) return;
+    if (!sessionsEnabled || !opts.openSessionId) return;
+    didOpenLinked.current = true;
+    void selectSessionRef.current?.(opts.openSessionId);
+  }, [sessionsEnabled, opts.openSessionId]);
+
   // Upload files to the current (or a freshly-created) session and stage them.
   const attachFiles = React.useCallback(
     async (files: File[]) => {
@@ -250,6 +269,8 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
   }, [opts.initial]);
 
   // Load a past session's transcript into the drawer and make it active.
+  const selectSessionRef = React.useRef<((id: string) => Promise<void>) | null>(null);
+
   const selectSession = React.useCallback(async (id: string) => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -274,6 +295,10 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
       setMessages([]);
     }
   }, []);
+
+  // The linked-session effect above runs before this callback is declared; the ref
+  // is what lets it call the real one rather than a stale copy.
+  selectSessionRef.current = selectSession;
 
   const send = React.useCallback(
     async (text: string, agentParams?: Record<string, unknown>) => {

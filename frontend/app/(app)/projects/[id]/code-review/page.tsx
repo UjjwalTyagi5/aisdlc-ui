@@ -37,6 +37,7 @@ import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { unchangedReviewNotice } from "@/lib/code-review/prepare-outcome";
 import { getProject } from "@/lib/api/projects";
@@ -87,6 +88,9 @@ export default function CodeReviewPage() {
   const [tab, setTab] = React.useState<Tab>("summary");
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [prepared, setPrepared] = React.useState<PrepareResult | null>(null);
   const [activeReviewId, setActiveReviewId] = React.useState<string | null>(null);
 
@@ -105,6 +109,7 @@ export default function CodeReviewPage() {
   });
 
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "code_review",
     // ATTACHMENTS NEED A PERSISTED SESSION — files are stored under
     // files/{user}/attachments/{session}/, so a chat with no session id has nowhere

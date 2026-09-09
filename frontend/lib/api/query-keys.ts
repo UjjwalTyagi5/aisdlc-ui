@@ -112,8 +112,11 @@ export const qk = {
     detail: (id: string) => ["mcp", "detail", id] as const,
   },
   conversations: {
-    list: (projectId: ProjectId, agentId: string) =>
-      ["conversations", projectId, agentId] as const,
+    // The agent is part of the key, and "" is a real value meaning EVERY agent — the
+    // project overview's list and a stage page's rail are different questions with
+    // different answers, and one cache entry for both would show a page the other's.
+    list: (projectId: ProjectId, agentId?: string) =>
+      ["conversations", projectId, agentId ?? ""] as const,
     messages: (id: string) => ["conversations", "messages", id] as const,
   },
   capabilities: {

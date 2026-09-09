@@ -65,12 +65,23 @@ class MessageOut(BaseModel):
 
 @conversations_router.get("", response_model=list[SessionOut])
 async def list_conversations(
-    request: Request, agent_id: str, project_id: Optional[str] = None
+    request: Request,
+    agent_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    limit: int = 50,
 ) -> list[SessionOut]:
-    """The caller's agent sessions, newest-first (blank when none)."""
+    """The caller's agent sessions, newest-first (blank when none).
+
+    `agent_id` is optional: given, one agent's rail; omitted, every agent's sessions on
+    this project in one ordering — which is what a project overview shows, and what
+    nine separate calls could only approximate.
+    """
     tid, uid = _ctx_ids(request)
     pid = _uuid.UUID(project_id) if project_id else None
-    rows = await cs.list_sessions(tid, created_by=uid, agent_id=agent_id, project_id=pid)
+    rows = await cs.list_sessions(
+        tid, created_by=uid, agent_id=agent_id or None, project_id=pid,
+        limit=max(1, min(limit, 100)),
+    )
     return [SessionOut(**r) for r in rows]
 
 
