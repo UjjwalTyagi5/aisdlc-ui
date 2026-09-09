@@ -183,6 +183,12 @@ export default function RequirementsPage() {
     [stories, scopeIds, storyContent],
   );
 
+  // The model this page's picker selected. Declared HERE, above the chat, so the
+  // chat can send it — it used to sit ~35 lines below, where the only thing in scope
+  // to read it was the JSX. That is a fair part of why it stayed unwired: nothing
+  // that needed it could see it.
+  const [agentModel, setAgentModel] = React.useState<string>();
+
   // Chat drawer — streaming agent chat via /api/chat
   const [chatOpen, setChatOpen] = React.useState(false);
   // A `?session=` link from the project overview opens the drawer on that
@@ -195,6 +201,9 @@ export default function RequirementsPage() {
     // actually reach the agent (the orchestrator rebuilds context and drops them).
     agent: "requirement",
     projectId,
+    // The page's model picker. Without this the chat resolved with no model and ran
+    // on whichever provider connection sorts first by display name.
+    offeringId: agentModel,
     // Switching board projects (re-pull a different one) starts a fresh chat
     // thread scoped to the new project instead of carrying old-project history.
     sessionKey: boardProject,
@@ -221,9 +230,6 @@ export default function RequirementsPage() {
 
   // "Pull stories" → open the board-project picker, then ingest the chosen one.
   const [boardPickerOpen, setBoardPickerOpen] = React.useState(false);
-  // Agent model choice for this page. Local for now. TODO(byok-model): pass to the
-  // requirements run / ingestion dispatch and persist as the project default.
-  const [agentModel, setAgentModel] = React.useState<string>();
   const onIngested = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
     queryClient.invalidateQueries({ queryKey: qk.runs.forProject(projectId) });

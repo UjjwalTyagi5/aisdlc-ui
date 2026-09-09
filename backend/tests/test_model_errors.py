@@ -121,3 +121,84 @@ def test_neither_agent_interpolates_the_raw_model_exception(module):
     src = inspect.getsource(importlib.import_module(module))
     for leak in ('content=f"Agent error: {e}"', 'content=str(e)', 'content=f"{e}"'):
         assert leak not in src
+
+
+# ── A spend cap is not a malformed request ────────────────────────────────────
+#
+# REPORTED: every Development turn came back "Agent error: BadRequestError" while the
+# Orchestrator, on the same tenant, worked. The provider had already given the reason
+# and the date it lifts —
+#
+#   "You have reached your specified workspace API usage limits. You will regain
+#    access on 2026-10-01 at 00:00 UTC."
+#
+# — and both the reply and the log line reduced it to the class name. `BadRequestError`
+# is also the type a genuinely malformed request arrives under, so the type map
+# answered "usually a model configuration problem", which is the wrong action: it sends
+# people into the agent code looking for a bug that is not there. The distinguishing
+# information is only in the message, so the message is READ as a signal — and, per
+# this module's rule, never returned.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Anthropic, verbatim from the incident.
+        "You have reached your specified workspace API usage limits. "
+        "You will regain access on 2026-10-01 at 00:00 UTC.",
+        # OpenAI / Azure.
+        "insufficient_quota: You exceeded your current quota, please check your plan.",
+        # Anthropic, the other half of the same story.
+        "Your credit balance is too low to access the Anthropic API.",
+    ],
+)
+def test_a_spend_cap_is_named_as_one_rather_than_as_a_bad_request(message):
+    from shared.services.model_errors import friendly_model_error
+
+    out = friendly_model_error(_exc("BadRequestError", message))
+
+    assert "usage or spend limit" in out
+    assert "retrying will not help" in out
+    # The action that actually fixes it, and the one place to do it.
+    assert "raise the limit" in out and "Model Management" in out
+    # The old answer, which pointed at the wrong thing entirely.
+    assert "malformed" not in out
+
+
+@pytest.mark.unit
+def test_the_spend_cap_sentence_still_never_echoes_the_exception():
+    """The signal is read, not repeated. A provider message can carry the tenant's key."""
+    from shared.services.model_errors import friendly_model_error
+
+    leaky = "insufficient_quota for key sk-ant-api03-SECRETVALUE on workspace foo"
+    out = friendly_model_error(_exc("BadRequestError", leaky))
+
+    assert "SECRETVALUE" not in out
+    assert "sk-ant" not in out
+    assert "usage or spend limit" in out
+
+
+@pytest.mark.unit
+def test_an_ordinary_bad_request_is_still_answered_as_a_bad_request():
+    """Guards the guard: if the signal matched everything, the case above proves nothing."""
+    from shared.services.model_errors import friendly_model_error
+
+    out = friendly_model_error(_exc("BadRequestError", "tools: Tool names must be unique."))
+    assert "malformed" in out
+    assert "usage or spend limit" not in out
+
+
+@pytest.mark.unit
+def test_the_development_agent_no_longer_replies_with_a_class_name():
+    """It was the last agent still doing it — the one the incident was reported on."""
+    import importlib
+    import inspect
+
+    src = inspect.getsource(
+        importlib.import_module("agents_orchestrator.development_agent.agents.dev_agent")
+    )
+    assert 'content=f"Agent error: {type(e).__name__}"' not in src
+    assert "friendly_model_error" in src
+    for leak in ('content=f"Agent error: {e}"', "content=str(e)", 'content=f"{e}"'):
+        assert leak not in src

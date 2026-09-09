@@ -687,6 +687,9 @@ async def _handle_user_message(
             # P3.6 B6 — BYOK: tenant from the WS JWT claims, optional model from the message.
             "tenant_id": tenant_id,
             "model_id": message.get("model_id"),
+            # The page's model picker (an offering id). `deployer.py` already read
+            # `state["offering_id"]`; without this line it only ever saw None.
+            "offering_id": message.get("offering_id"),
         }
 
         # ── Execute pipeline ──────────────────────────────────────────────────
