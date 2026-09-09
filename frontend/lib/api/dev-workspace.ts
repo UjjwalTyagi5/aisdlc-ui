@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  SourceProviders,
   AdoProject,
   AdoRepo,
   AdoBranch,
@@ -17,26 +18,55 @@ import { api } from "./client";
 
 const enc = encodeURIComponent;
 
-export const listAdoProjects = (projectId: ProjectId) =>
-  api(`/dev/${enc(projectId)}/ado/projects`, { schema: z.array(AdoProject) });
+/** Which hosts this person can clone from on this project. */
+export const listSourceProviders = (projectId: ProjectId) =>
+  api(`/dev/${enc(projectId)}/sources`, { schema: SourceProviders });
 
-export const listAdoRepos = (projectId: ProjectId, adoProject: string) =>
-  api(`/dev/${enc(projectId)}/ado/projects/${enc(adoProject)}/repos`, {
-    schema: z.array(AdoRepo),
+/** `?provider=` only when a choice was offered — omitted, the backend uses the
+ *  project's single configured source and behaves exactly as it did before. */
+const withProvider = (provider?: string) =>
+  provider ? `?provider=${encodeURIComponent(provider)}` : "";
+
+/**
+ * THE NAME SAYS `Ado` AND IT NO LONGER MEANS ONLY AZURE DEVOPS: on GitHub these are
+ * owners, repositories and branches. Renaming reaches five routers, their proxies and
+ * every caller, so the behaviour moved first and the name is debt.
+ */
+export const listAdoProjects = (projectId: ProjectId, provider?: string) =>
+  api(`/dev/${enc(projectId)}/ado/projects${withProvider(provider)}`, {
+    schema: z.array(AdoProject),
   });
+
+export const listAdoRepos = (
+  projectId: ProjectId,
+  adoProject: string,
+  provider?: string,
+) =>
+  api(
+    `/dev/${enc(projectId)}/ado/projects/${enc(adoProject)}/repos${withProvider(provider)}`,
+    { schema: z.array(AdoRepo) },
+  );
 
 export const listAdoBranches = (
   projectId: ProjectId,
   adoProject: string,
   repo: string,
+  provider?: string,
 ) =>
-  api(`/dev/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/branches`, {
-    schema: z.array(AdoBranch),
-  });
+  api(
+    `/dev/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/branches${withProvider(provider)}`,
+    { schema: z.array(AdoBranch) },
+  );
 
 export const pullRepo = (
   projectId: ProjectId,
-  body: { ado_project: string; repo_name: string; branch: string },
+  body: {
+    /** Where the code lives — omitted when the project has a single source. */
+    provider?: string;
+    ado_project: string;
+    repo_name: string;
+    branch: string;
+  },
 ) =>
   api(`/dev/${enc(projectId)}/workspace/pull`, {
     method: "POST",

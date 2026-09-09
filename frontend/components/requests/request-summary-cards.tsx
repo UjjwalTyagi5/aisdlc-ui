@@ -5,7 +5,7 @@ import { CheckCircle2, Clock, Inbox, UserRound, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
-import type { GovernanceApproval } from "@/lib/schemas";
+import type { ApprovalGate, GovernanceApproval } from "@/lib/schemas";
 
 export interface RequestCounts {
   total: number;
@@ -16,16 +16,49 @@ export interface RequestCounts {
 }
 
 /**
- * The five counts, from one pass over the list.
+ * The five counts, from one pass over each list.
  *
  * `pending` counts every OPEN status — submitted, pending review and escalated
  * — not just `pending_review`. A summary that excluded escalated requests would
  * report the queue as shorter than it is, and escalated is precisely the state
  * someone needs to see in a total.
+ *
+ * GATES AND DOCUMENTS COUNT TOO, and leaving them out is what made these tiles read
+ * "Total requests 0 · Pending 0" directly above an Inbox listing a document waiting
+ * for a decision. The tiles summarise the page, and the page shows both lanes:
+ * governance requests raised by a person, and approvals derived from run and artifact
+ * state. A summary that contradicts the list under it teaches people to ignore both.
+ *
+ * THEY CANNOT REACH `approved` OR `rejected`, and that is a property of the source
+ * rather than an omission. `GET /approvals` returns only what is still waiting — a
+ * decided gate stops being derived at all, which is exactly what makes the
+ * first-approver rule work. So a decided document leaves `total` as well as
+ * `pending`; there is no history lane for it to move into. The alternative, keeping a
+ * decided copy around to count, is the stored queue this deliberately is not.
  */
+/**
+ * The items a given person put forward — requests they raised, documents they uploaded.
+ *
+ * EXPORTED SO THERE IS EXACTLY ONE COPY OF THE PREDICATE. The "Raised by me" tile and
+ * the "My requests" tab both answer this question, and answering it twice is how a tile
+ * reading 1 ends up above a tab saying "You haven't raised anything" — which is the bug
+ * this whole area keeps producing in new places.
+ *
+ * A NULL identity matches nothing. Null `requestedById` (a run gate, raised by an agent)
+ * must not become "everyone's" — that is the one answer worse than "nobody's".
+ */
+export function raisedBy<T extends { requestedById?: string | null }>(
+  items: T[],
+  identityId: string | null,
+): T[] {
+  if (!identityId) return [];
+  return items.filter((i) => i.requestedById === identityId);
+}
+
 export function countRequests(
   requests: GovernanceApproval[],
   viewerIdentityId: string | null,
+  awaiting: ApprovalGate[] = [],
 ): RequestCounts {
   let pending = 0;
   let approved = 0;
@@ -35,9 +68,16 @@ export function countRequests(
     if (OPEN_REQUEST_STATUSES.includes(r.status)) pending++;
     else if (r.status === "approved") approved++;
     else if (r.status === "rejected") rejected++;
-    if (viewerIdentityId && r.requestedById === viewerIdentityId) mine++;
   }
-  return { total: requests.length, pending, approved, rejected, mine };
+  pending += awaiting.length;
+  // MATCHED ON THE ID, NOT THE LABEL, and through the SAME helper the "My requests" tab
+  // filters with. `requestedBy` is a rendered email; comparing it to an identity id
+  // would never match and this tile would sit at 0 for the person who uploaded the
+  // document.
+  mine =
+    raisedBy(requests, viewerIdentityId).length +
+    raisedBy(awaiting, viewerIdentityId).length;
+  return { total: requests.length + awaiting.length, pending, approved, rejected, mine };
 }
 
 interface CardSpec {

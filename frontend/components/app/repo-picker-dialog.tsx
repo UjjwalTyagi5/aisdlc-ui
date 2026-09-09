@@ -22,6 +22,7 @@ import {
   listAdoProjects,
   listAdoRepos,
   listAdoBranches,
+  listSourceProviders,
   pullRepo,
 } from "@/lib/api/dev-workspace";
 import { qk } from "@/lib/api/query-keys";
@@ -57,36 +58,59 @@ export function RepoPickerDialog({
   const [newBranch, setNewBranch] = React.useState("main");
 
   // Reset all state when the dialog closes.
+  const [provider, setProvider] = React.useState<string | null>(null);
+
   React.useEffect(() => {
     if (!open) {
       setProject(null);
       setRepo(null);
       setBranch(null);
       setNewBranch("main");
+      setProvider(null);
     }
   }, [open]);
 
+  // WHICH HOSTS THIS PERSON CAN CLONE FROM. The Development workspace assumed Azure
+  // DevOps outright — a project whose code is on GitHub could pick nothing here, on a
+  // page whose whole purpose is to have the code checked out.
+  const sourcesQ = useQuery({
+    queryKey: qk.devWorkspace.sources(projectId),
+    queryFn: () => listSourceProviders(projectId),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const providers = React.useMemo(
+    () => sourcesQ.data?.providers ?? [],
+    [sourcesQ.data],
+  );
+  const sourceLabel =
+    providers.find((sp) => sp.id === provider)?.label ?? "Azure DevOps";
+
+  React.useEffect(() => {
+    if (open && !provider && providers.length > 0) setProvider(providers[0]!.id);
+  }, [open, provider, providers]);
+
   // — Step 1: ADO Projects —
   const projectsQ = useQuery({
-    queryKey: qk.devWorkspace.adoProjects(projectId),
-    queryFn: () => listAdoProjects(projectId),
-    enabled: open,
+    queryKey: qk.devWorkspace.adoProjects(projectId, provider ?? ""),
+    queryFn: () => listAdoProjects(projectId, provider ?? undefined),
+    enabled: open && !!provider,
     staleTime: 30_000,
   });
 
   // — Step 2: Repositories (enabled once a project is chosen) —
   const reposQ = useQuery({
-    queryKey: qk.devWorkspace.adoRepos(projectId, project ?? ""),
-    queryFn: () => listAdoRepos(projectId, project!),
-    enabled: open && !!project,
+    queryKey: qk.devWorkspace.adoRepos(projectId, project ?? "", provider ?? ""),
+    queryFn: () => listAdoRepos(projectId, project!, provider ?? undefined),
+    enabled: open && !!provider && !!project,
     staleTime: 0,
   });
 
   // — Step 3: Branches (enabled once a repo is chosen) —
   const branchesQ = useQuery({
-    queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? ""),
-    queryFn: () => listAdoBranches(projectId, project!, repo!),
-    enabled: open && !!project && !!repo,
+    queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? "", provider ?? ""),
+    queryFn: () => listAdoBranches(projectId, project!, repo!, provider ?? undefined),
+    enabled: open && !!provider && !!project && !!repo,
     staleTime: 0,
   });
 
@@ -109,6 +133,7 @@ export function RepoPickerDialog({
   const pull = useMutation({
     mutationFn: () =>
       pullRepo(projectId, {
+        provider: provider ?? undefined,
         ado_project: project!,
         repo_name: repo!,
         branch: effectiveBranch!,
@@ -182,25 +207,53 @@ export function RepoPickerDialog({
         )}
 
         <div className="min-h-[16rem] space-y-5">
-          {/* ── Step 1: Project ── */}
-          <StepSection label="Project">
+          {/* ── Step 0: Source, and only when there is genuinely a choice ── */}
+          {providers.length > 1 && (
+            <StepSection label="Source">
+              <RadioGroup
+                value={provider ?? ""}
+                onValueChange={(value) => {
+                  // Everything below names things that exist on one host only.
+                  setProvider(value);
+                  setProject(null);
+                  setRepo(null);
+                  setBranch(null);
+                }}
+                className="grid grid-cols-2 gap-2"
+                aria-label="Source control host"
+              >
+                {providers.map((sp) => (
+                  <Label
+                    key={sp.id}
+                    htmlFor={`source-${sp.id}`}
+                    className="border-line-soft bg-surface-1 hover:bg-surface-2 flex cursor-pointer items-center gap-3 rounded-lg border p-3 font-normal transition-colors"
+                  >
+                    <RadioGroupItem value={sp.id} id={`source-${sp.id}`} />
+                    <span className="truncate text-sm font-medium">{sp.label}</span>
+                  </Label>
+                ))}
+              </RadioGroup>
+            </StepSection>
+          )}
+          {/* ── Step 1: Project (an OWNER on GitHub) ── */}
+          <StepSection label={provider === "github" ? "Owner" : "Project"}>
             {projectsQ.isLoading ? (
               <LoadingState variant="list" rows={3} />
             ) : projectsQ.isError ? (
               <p className="text-destructive text-sm">
-                Couldn&apos;t reach Azure DevOps. Connect a provider on the
+                Couldn&apos;t reach {sourceLabel}. Connect a provider on the
                 Integrations page.
               </p>
             ) : !projectsQ.data || projectsQ.data.length === 0 ? (
               <p className="text-muted-foreground text-sm">
-                No projects found on the connected Azure DevOps organisation.
+                Nothing found on the connected {sourceLabel} account.
               </p>
             ) : (
               <RadioGroup
                 value={project ?? ""}
                 onValueChange={handleProjectChange}
                 className="max-h-72 space-y-1.5 overflow-auto"
-                aria-label="Azure DevOps project"
+                aria-label={`${sourceLabel} project`}
               >
                 {projectsQ.data.map((p) => {
                   const rid = `ado-project-${p.id}`;

@@ -33,6 +33,7 @@ AGENTS = [
     ("agents_orchestrator.code_review_agent.agents.reviewer", "_tools", "code_review"),
     ("agents_orchestrator.security_agent.agents.scanner", "_tools", "security"),
     ("agents_orchestrator.deployment_agent.agents.deployer", "_tools", "deployment"),
+    ("agents_orchestrator.documentation_agent.agents.compiler", "_tools", "documentation"),
 ]
 
 
@@ -74,11 +75,27 @@ def test_no_agent_can_delete_from_sharepoint(module_path, attr, stage):
 
 
 def test_the_publish_tool_is_the_approved_only_one():
-    """NON-VACUITY, and a real distinction. The Documentation agent has its OWN
-    `publish_to_sharepoint`, which files whatever it generated this session — in memory,
-    reviewed by nobody. The fanned-out tool is a different one, named differently on
-    purpose, and reads the artifacts table for rows an owner approved. A test asserting
-    only "some publish tool exists" would pass on either and mean nothing."""
+    """NON-VACUITY, and a real distinction. `publish_to_sharepoint` used to exist as a
+    second, weaker publisher: it filed whatever had been generated during the session,
+    from memory, reviewed by nobody. The fanned-out tool is named differently on purpose
+    and reads the artifacts table for rows an owner approved. A test asserting only
+    "some publish tool exists" would pass on either and mean nothing."""
     names = _tool_names("agents_orchestrator.requirements_agent.agents.planning", "tools")
     assert "publish_approved_to_sharepoint" in names
     assert "publish_to_sharepoint" not in names
+
+
+@pytest.mark.parametrize("module_path,attr,stage", AGENTS, ids=[a[2] for a in AGENTS])
+def test_no_agent_keeps_the_unapproved_publisher(module_path, attr, stage):
+    """THE ONE THAT WOULD HAVE CAUGHT THE DOCUMENTATION AGENT.
+
+    It was the last holder of `publish_to_sharepoint`, and the test above only ever
+    looked at Requirements — so the single agent that could file an unreviewed document
+    into the business's library was the single agent nobody asserted on. That agent was
+    also absent from AGENTS entirely, which is exactly the miss this suite exists to
+    catch and did not.
+
+    Asserting the absence per agent, from the same list, is what stops the next one
+    being forgotten the same way."""
+    assert "publish_to_sharepoint" not in _tool_names(module_path, attr), (
+        f"{stage} can publish documents nobody approved")

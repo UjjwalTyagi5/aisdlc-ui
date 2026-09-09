@@ -164,10 +164,16 @@ That applies the same statements but does **not** verify them — prefer the Pyt
 
 ```powershell
 cd backend
-uv run uvicorn process_api:app --reload --port 8004 --ws-max-size 1000000
+uv run uvicorn process_api:app --reload --reload-exclude "files/*" --port 8004 --ws-max-size 1000000
 ```
 
-Two notes on that command:
+Three notes on that command:
+
+- **`--reload-exclude "files/*"` is not optional in practice.** Every target dialog
+  clones the chosen repository into `backend/files/dev-workspace/`, inside the tree the
+  reloader watches. Clone anything containing `.py` files — this codebase, for one — and
+  uvicorn restarts, over and over, killing the very run that did the cloning. On screen
+  that reads as an agent that started and then hung forever.
 
 - **Port 8004, not 8001.** `frontend/.env.local` sets
   `FASTAPI_INTERNAL_URL=http://localhost:8004`, so the BFF calls 8004; a backend on
@@ -508,7 +514,7 @@ docker compose up -d redis
 uv run alembic upgrade head
 uv run alembic current                      # must match `uv run alembic heads`
 uv run python -m scripts.grant_app_role
-uv run uvicorn process_api:app --reload --port 8001   # leave running; creates the org
+uv run uvicorn process_api:app --reload --reload-exclude "files/*" --port 8001   # leave running; creates the org
 
 # in a second terminal:
 cd backend

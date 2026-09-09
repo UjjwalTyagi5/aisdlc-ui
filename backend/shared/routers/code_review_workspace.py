@@ -27,6 +27,7 @@ from agents_orchestrator.code_review_agent.config.session_state import set_prepa
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Until 2026-08-17 these handlers
 # took the project id from the path and filtered on tenant_id alone, so the only gate
@@ -49,19 +50,33 @@ code_review_workspace_router = APIRouter(
 
 @code_review_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")
 async def list_open_prs(
-    project_id: str, ado_project: str, repo: str, request: Request
+    project_id: str, ado_project: str, repo: str, request: Request,
+    provider: str | None = None,
 ) -> list[dict]:
-    # project_id + owner_id, like every dev-workspace picker route: the tenant's
-    # Azure DevOps credential may be a project-scoped personal one, which resolves
-    # to nothing when only tenant_id is passed.
+    """Open pull requests, from whichever host this project's source lives on.
+
+    THE PATH STILL SAYS `ado` and that is now only a name — this serves GitHub too.
+    Before it, a GitHub project's PR picker returned an Azure DevOps error.
+    """
+    from shared.services import repo_source  # noqa: PLC0415
+
+    # project_id + owner_id, like every dev-workspace picker route: the credential may
+    # be a project-scoped personal one, which resolves to nothing on tenant_id alone.
     owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
-    return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id,
-        project_id=project_id, owner_id=owner_id,
-    )
+    try:
+        _chosen, prs = await repo_source.list_pull_requests(
+            request.state.tenant_id, ado_project, repo, status="active",
+            project_id=project_id, owner_id=owner_id, provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return prs
 
 
 class PrepareRequest(BaseModel):
+    # Where the code lives. Absent means "the project's single configured
+    # source", so a one-source project behaves exactly as it always did.
+    provider: str | None = None
     mode: str                       # "branch" | "pr"
     ado_project: str
     repo_name: str
@@ -126,9 +141,21 @@ async def prepare_review(
     # same dialog (repos, branches) pass both and resolved it fine, so the target
     # selected fine and only "Prepare diff" failed, with a bare 500.
     owner_id = str(uid) if (uid := getattr(request.state, "user_id", None)) else ""
-    org_url, pat = await ado_repos.resolve_auth(
-        tenant_id, project_id=project_id, owner_id=owner_id
-    )
+    from shared.services import repo_source  # noqa: PLC0415
+
+    # WHICH HOST, decided once and carried through every call below. Naming a provider
+    # you hold no credential for is an error rather than a quiet fall-through to the
+    # other one — reviewing the wrong repository is worse than reviewing none.
+    #
+    # "Not configured" unhandled reached the browser as a bare 500, which reads as a
+    # broken agent rather than as a connector nobody has set up. 424 with the resolver's
+    # own sentence names the fix and the page that performs it.
+    try:
+        chosen, _base_url, pat = await repo_source.resolve(
+            tenant_id, project_id=project_id, owner_id=owner_id, provider=body.provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
 
     source = (body.source_branch or "").strip()
     base = (body.base_branch or "").strip()
@@ -136,9 +163,13 @@ async def prepare_review(
     if body.mode == "pr":
         if not body.pr_id:
             raise HTTPException(status_code=400, detail="pr_id required for mode=pr")
-        pr = await ado_repos.get_pull_request(
-            body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
-        )
+        try:
+            _p, pr = await repo_source.get_pull_request(
+                tenant_id, body.ado_project, body.repo_name, body.pr_id,
+                project_id=project_id, owner_id=owner_id, provider=chosen,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=424, detail=str(exc)) from exc
         if not pr:
             raise HTTPException(status_code=404, detail="PR not found")
         source, base, pr_title = pr["source_branch"], pr["target_branch"], pr["title"]
@@ -147,33 +178,20 @@ async def prepare_review(
     if source == base:
         raise HTTPException(status_code=400, detail="source and base branch must differ")
 
-    # "Not configured" is a RuntimeError from deep inside _resolve, and unhandled it
-    # reaches the browser as a bare 500 "Internal Server Error" -- which reads as a
-    # broken agent rather than as a connector nobody has set up. 424 with the
-    # resolver's own sentence names the fix and the page that performs it.
-    try:
-        remote_url = await ado_repos.resolve_clone_url(
-            body.ado_project, body.repo_name, pat=pat, org_url=org_url
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=424, detail=str(exc))
-    if remote_url is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Repo '{body.repo_name}' not found in ADO project '{body.ado_project}'",
-        )
-
     work_dir = str(ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "review")
     try:
-        result = await asyncio.to_thread(
-            ado_repos.clone_and_diff, work_dir, remote_url, source, base, pat
+        result = await repo_source.clone_and_diff(
+            tenant_id, body.ado_project, body.repo_name, source, base, work_dir,
+            project_id=project_id, owner_id=owner_id, provider=chosen,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not prepare diff: {exc}")
+    remote_url = result.get("remote_url", "")
 
-    set_prepared(tenant_id, project_id, {
+    _prepared_record = {
         "work_dir": work_dir,
         "repo_url": remote_url,
+        "provider": chosen,
         "pat": pat,
         "mode": body.mode,
         "ado_project": body.ado_project,
@@ -186,7 +204,14 @@ async def prepare_review(
         "base_sha": result["base_sha"],
         "diff_text": result["diff"],
         "changed_files": result["files"],
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "code_review", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     unchanged = await _find_unchanged_review(
         db, tenant_id=tenant_id, project_id=project_id, repo_name=body.repo_name,

@@ -29,6 +29,10 @@ from agents_orchestrator.deployment_agent.config.session_state import (
     clear_session, get_prepared, get_session,
 )
 from config.agent_context import parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import (
+    attachment_message_contents,
+    attachment_paths_from_context,
+)
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.connection_manager import manager
 from config.env import AGENT_RUNTIME_MODE
@@ -203,6 +207,23 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 for k, v in prepared.items():
                     setattr(s, k, v)
                 s.target_bound = True
+                # A RECORD RESTORED FROM DISK CARRIES NO TOKEN, deliberately — one
+                # credential exists, in the credential store, and a copy beside the
+                # checkout would outlive its revocation. So it is resolved here, as
+                # the person the target was prepared for.
+                #
+                # An empty result is not fatal: reading a checked-out repository needs
+                # no token, and only the push paths do — they say so themselves rather
+                # than failing halfway through a git command.
+                if not getattr(s, "pat", ""):
+                    from shared.services import prepared_targets  # noqa: PLC0415
+
+                    s.pat = await prepared_targets.resolve_secret(
+                        tenant_id=s.tenant_id or tenant_id or "",
+                        project_id=s.project_id or project_id or "",
+                        owner_id=str(getattr(s, "owner_id", "") or ""),
+                        provider=str(getattr(s, "provider", "") or ""),
+                    )
 
         incoming = message_data.get("messages", [])
         if incoming:
@@ -219,6 +240,17 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             s.system_injected = True
         else:
             state = {"messages": [HumanMessage(content=user_text)], "tenant_id": tenant_id, "model_id": message_data.get("model_id")}
+
+        # THE FILE THE PERSON ATTACHED, read here rather than left as a path.
+        #
+        # THIS ROUTE IS THE ONE THE DEPLOYMENT CHAT USES — `/sdlc/agent/deployment/ws`
+        # is mounted on this module, not on deployment_agent_api, which had the block
+        # already. So the page showed an attach button, the file uploaded, the chip
+        # rendered, and the agent never saw a byte of it.
+        for _content in attachment_message_contents(
+            attachment_paths_from_context(message_data.get("pipeline_context"))
+        ):
+            state["messages"].append(HumanMessage(content=_content))
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="deployment", project_id=_project_id_from_message(message_data))
@@ -297,6 +329,12 @@ async def chat(
         s.system_injected = True
     else:
         state = {"messages": [HumanMessage(content=user_text)]}
+
+    # Same as the socket path: refs uploaded to this session, extracted server-side.
+    for _content in attachment_message_contents(
+        attachment_paths_from_context(parse_pipeline_context(pipeline_context or {}))
+    ):
+        state["messages"].append(HumanMessage(content=_content))
     # CALLBACKS ARE NOT OPTIONAL PLUMBING, and this route had none while the WS route
     # above did. `langfuse_langchain_extras` is what threads the run's PROJECT into the
     # async context via set_run_project, and resolve_model_for_run reads it: once a

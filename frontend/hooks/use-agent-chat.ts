@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { API_BASE } from "@/lib/api/client";
 import {
@@ -197,9 +198,25 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     async (files: File[]) => {
       if (!files.length) return;
       const sid = await ensureSession(files[0]?.name);
-      if (!sid) return; // attachments require a persisted session
-      const refs = await uploadAttachments(sid, files);
-      setAttachments((cur) => [...cur, ...refs]);
+      if (!sid) {
+        // SAY SO. This returned silently: the file picker closed, no chip appeared,
+        // no error — and the only way to tell an upload from a no-op was that the
+        // agent later said it saw no document. Attachments are stored per session
+        // (files/{user}/attachments/{session}/), so a chat the caller did not give a
+        // projectId has nowhere to put them.
+        toast.error("Couldn't attach: this chat has no saved session.");
+        return;
+      }
+      try {
+        const refs = await uploadAttachments(sid, files);
+        setAttachments((cur) => [...cur, ...refs]);
+      } catch (err) {
+        // A rejected extension or an oversized file comes back as a 400 with a
+        // reason. Swallowing it left the same silence as above.
+        toast.error(
+          err instanceof Error ? err.message : "Couldn't attach that file.",
+        );
+      }
     },
     [ensureSession],
   );
@@ -380,6 +397,19 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
       } finally {
         setBusy(false);
         abortRef.current = null;
+        // NO BUBBLE OUTLIVES ITS STREAM. `streaming` was cleared only by a terminal
+        // `run.completed` event or by one of the catch branches above — so a stream that
+        // simply ENDED without one left the bubble saying "Thinking…" forever while the
+        // composer reopened, which is what a stopped turn looked like: Send enabled,
+        // agent apparently still thinking. Clearing it here makes the end of the stream
+        // the thing that ends the indicator, whatever the reason it ended.
+        setMessages((m) =>
+          m.some((msg) => msg.id === agentMsgId && msg.streaming)
+            ? m.map((msg) =>
+                msg.id === agentMsgId ? { ...msg, streaming: false } : msg,
+              )
+            : m,
+        );
         // (attachments were already cleared at send-time; not here, so a file staged
         //  during streaming for the NEXT turn survives.)
         // Refresh the rail so the new/just-used session surfaces newest-first.

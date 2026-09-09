@@ -22,24 +22,11 @@ import { RequireRole } from "@/components/auth/require-role";
 import type { Project } from "@/lib/schemas";
 import { TRACK_META } from "@/lib/tracks";
 
-// Exported so the table renders the SAME template chip, track badge, approval
-// pill, owner stack and action menu as the card. Two copies of a badge is how one
-// of them quietly stops matching the other.
-export const TEMPLATE_LABEL: Record<Project["template"], string> = {
-  web_app: "Web app",
-  microservice: "Microservice",
-  data_pipeline: "Data pipeline",
-  blank: "Blank",
-};
-
-/** Mono badge tones map to the northstar .tmpl classes */
-export const TEMPLATE_TONE: Record<Project["template"], string> = {
-  web_app: "border-info/30 bg-info/10 text-info",
-  microservice: "border-primary/30 bg-primary/10 text-brand-bright",
-  data_pipeline: "border-success/30 bg-success/10 text-success",
-  blank: "border-border bg-muted text-muted-foreground",
-};
-
+// THE TEMPLATE CHIP IS GONE, from the card and the table together. `projects` has
+// no template column and `ProjectOut` hardcodes "blank", so the badge read BLANK on
+// every project ever created — a label with one possible value, taking up the space
+// beside the ones that actually distinguish a project. The filter that read the same
+// field went earlier; this is the display that outlived it.
 /** Delivery track (PRD §6) — which agent roster this project runs, distinct from `template`. */
 export function TrackBadge({ track, className }: { track: Project["track"]; className?: string }) {
   const meta = TRACK_META[track];
@@ -130,14 +117,6 @@ export function ProjectCard({
                 {project.name}
               </span>
               <TrackBadge track={project.track} />
-              <span
-                className={cn(
-                  "shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider",
-                  TEMPLATE_TONE[project.template],
-                )}
-              >
-                {TEMPLATE_LABEL[project.template]}
-              </span>
               <ApprovalStatusBadge status={project.approvalStatus} />
               <DeliveryStatusBadge status={project.deliveryStatus} />
               {project.archived && (
@@ -200,14 +179,6 @@ export function ProjectCard({
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <TrackBadge track={project.track} />
-            <span
-              className={cn(
-                "shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider",
-                TEMPLATE_TONE[project.template],
-              )}
-            >
-              {TEMPLATE_LABEL[project.template]}
-            </span>
             <ApprovalStatusBadge status={project.approvalStatus} />
             <DeliveryStatusBadge status={project.deliveryStatus} />
           </div>

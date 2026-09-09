@@ -15,6 +15,11 @@ class ConnectionManager:
         self._session_connections: Dict[str, List[WebSocket]] = {}
         # id(websocket) → session_id (so disconnect can clean up)
         self._ws_to_session: Dict[int, str] = {}
+        # turn id → the socket that turn's message arrived on. A conversation can have
+        # more than one socket open — a second tab, or the socket of a turn whose agent
+        # has not noticed it ended — and without this, every one of them receives every
+        # message and one turn's answer lands under another turn's question.
+        self._turn_socket: Dict[str, WebSocket] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -26,13 +31,36 @@ class ConnectionManager:
         Called as soon as session_id is known (first message from client).
         Subsequent broadcast() calls with a matching session_id will only
         reach websockets registered under that session.
+
+        A NEW SOCKET FOR A SESSION MEANS A NEW TURN, which is why any cancellation
+        against it is cleared here. The chat BFF opens one WebSocket per turn, so this
+        runs exactly once per turn — and without it, stopping one turn would cancel every
+        later turn on the same conversation until the TTL expired. That is a far worse
+        bug than the one cancellation exists to fix: a Stop button that silently breaks
+        the chat.
         """
+        from config.turn_cancellation import clear as _clear_cancellation  # noqa: PLC0415
+        from config.ws_helper import set_turn_id  # noqa: PLC0415
+
+        _clear_cancellation(session_id)
+
+        # A TURN, minted here because this is the one place every agent already calls
+        # once per message — in the same task its emissions run in, so the contextvar
+        # reaches them without eleven agent files learning a new convention.
+        turn_id = uuid4().hex
+        self._turn_socket[turn_id] = websocket
+        # Bounded: a long-lived process would otherwise keep every turn it ever served.
+        while len(self._turn_socket) > 256:
+            self._turn_socket.pop(next(iter(self._turn_socket)), None)
+        set_turn_id(turn_id)
+
         old = self._ws_to_session.get(id(websocket))
         if old and old != session_id:
             self._session_connections[old] = [
                 ws for ws in self._session_connections.get(old, [])
                 if ws is not websocket
             ]
+
         self._ws_to_session[id(websocket)] = session_id
         self._session_connections.setdefault(session_id, [])
         if websocket not in self._session_connections[session_id]:
@@ -81,11 +109,43 @@ class ConnectionManager:
         them hands it to someone else.
         """
         session_id = message.get("session_id")
+
+        # STOP LANDS HERE, and this is the only place it could land cheaply. An agent
+        # notices a closed socket at its next `receive_text()`, which does not run until
+        # the turn it is inside has finished — so closing the connection made the chat go
+        # quiet while the agent kept generating and kept running tools. Every agent's
+        # output already funnels through this method (around sixty call sites), so
+        # raising here unwinds whichever loop is producing it without teaching nine
+        # separate stream loops a new convention.
+        if session_id:
+            from config.turn_cancellation import TurnCancelled, is_cancelled  # noqa: PLC0415
+
+            if is_cancelled(session_id):
+                raise TurnCancelled(session_id)
+
         if session_id:
             # Addressed to a session: its own sockets, or none. `.get` rather than a
             # membership test, so a session whose sockets have all disconnected is
             # treated the same as one that never registered — both name nobody.
             targets = list(self._session_connections.get(session_id, ()))
+
+            # NARROWED TO THE TURN THAT IS SPEAKING, when this task belongs to one.
+            # Everything above decides which SESSION may hear it; this decides which of
+            # that session's sockets asked the question being answered. A leftover socket
+            # would otherwise receive an answer to a question it never asked and render
+            # it under whatever bubble it had open — reported as "the answer for the
+            # second message showed up on the first".
+            #
+            # Only when the turn's own socket is still among the session's. A turn whose
+            # socket has gone falls back to the session rather than sending nowhere,
+            # because losing output somebody may still be waiting for is the worse
+            # failure.
+            from config.ws_helper import get_turn_id  # noqa: PLC0415
+
+            _turn = get_turn_id()
+            _own = self._turn_socket.get(_turn) if _turn else None
+            if _own is not None and _own in targets:
+                targets = [_own]
         else:
             # Addressed to no session at all. `agents_cleared` and the legacy paths
             # genuinely mean everyone, which is why this branch survives.

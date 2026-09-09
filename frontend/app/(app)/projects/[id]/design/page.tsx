@@ -4,7 +4,7 @@ import * as React from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileText, MessageSquare } from "lucide-react";
+import { MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -16,9 +16,8 @@ import { DocumentCard } from "@/components/app/document-card";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
-import { ApprovalCard } from "@/components/app/approval-card";
-import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
+import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { MermaidRenderer } from "@/components/app/mermaid-renderer";
@@ -27,7 +26,6 @@ import { OpenApiViewer } from "@/components/app/openapi-viewer";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useSession } from "@/hooks/use-session";
-import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
@@ -38,7 +36,6 @@ import type {
   ArtifactId,
   ArtifactType,
   ProjectId,
-  UserRef,
 } from "@/lib/schemas";
 
 const DESIGN_TYPES: ArtifactType[] = [
@@ -60,15 +57,8 @@ export default function DesignPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, role } = useSession({ required: true });
+  const { role } = useSession({ required: true });
 
-  const me: UserRef = {
-    id: user.id as UserRef["id"],
-    name: user.name,
-    email: user.email,
-    avatarUrl: user.avatarUrl,
-    initials: user.initials,
-  };
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -109,8 +99,8 @@ export default function DesignPage() {
 
   const approval = useArtifactApproval(projectId);
 
-  const deletion = useDeleteArtifact(projectId, {
-    onDeleted: (a) => {
+  const onArtifactDeleted = React.useCallback(
+    (a: { id: string }) => {
       // `selected` resolves through designs.find(), so it goes null on its own once the
       // list refetches — but ?artifact= would linger in the URL, and a copied link would
       // point at an artifact that no longer exists.
@@ -121,7 +111,8 @@ export default function DesignPage() {
         router.replace(`/projects/${projectId}/design${qs ? `?${qs}` : ""}`);
       }
     },
-  });
+    [selectedFromUrl, searchParams, router, projectId],
+  );
 
   // Chat drawer — talk directly to the Design agent. It consumes the imported user
   // stories through `context.requirements` (the backend formats pipeline_context
@@ -185,14 +176,11 @@ export default function DesignPage() {
         e.preventDefault();
         const prev = designs[Math.max(0, idx - 1)];
         if (prev) selectArtifact(prev);
-      } else if (e.key === "a" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        decisionMutation.mutate({ id: selected.id, status: "approved" });
-      } else if (e.key === "r" && selected?.status === "awaiting_approval") {
-        e.preventDefault();
-        document
-          .querySelector<HTMLButtonElement>('[data-testid="approval-reject"]')
-          ?.click();
+      // NO `a`/`r` SHORTCUTS ANY MORE. They drove the approval card that used to be on
+      // this pane: `r` clicked its reject button by test id, which no longer exists, and
+      // `a` would have become an approve with no visible control beside it — a
+      // keystroke that silently accepts a document into the project's record is the
+      // last thing this screen should offer.
       } else if (e.key === "c") {
         e.preventDefault();
         setChatOpen((o) => !o);
@@ -274,25 +262,29 @@ export default function DesignPage() {
             phase="design"
             className="mb-3 shrink-0"
           />
-          {/* Documents and the design artifact list are separate: one is rows with
-              bytes and an approver, the other is what the agent produced. */}
+          {/* ONE LIST, NOT TWO. This sidebar used to stack a DocumentList above an
+              ArtifactList whose DESIGN_TYPES included "document", "presentation" and
+              "diagram" — exactly the types `_artifact_type_for` assigns to a generated
+              file. Both matched the same rows, so every document the Design agent
+              produced appeared twice: once with its approval state and once as a
+              selectable row with a delete button. Two empty states stacked on a new
+              project made the duplication obvious even with nothing in it.
+
+              The merged list does both jobs. It selects (driving the detail pane on the
+              right) and it carries the approval state and actions, which the artifact
+              list never had — so a design artifact can now be raised and approved like
+              anything else in the project's record. */}
           <DocumentList
             projectId={projectId}
             items={artifactsQ.data ?? null}
             stage="design"
-            className="mb-4 shrink-0"
-          />
-          <ArtifactList
-            items={artifactsQ.isLoading ? null : designs}
+            title="Design artifacts"
+            description="Diagrams, specifications and generated files. Approved ones are part of the project's record."
             selectedId={selected?.id}
             onSelect={selectArtifact}
-            onDelete={deletion.onDelete}
-            deletingId={deletion.deletingId}
-            isLoading={artifactsQ.isLoading}
-            emptyTitle="No design artifacts yet"
-            emptyDescription="Trigger the Design agent once Requirements are approved."
+            onDeleted={onArtifactDeleted}
+            className="min-h-0 flex-1"
           />
-          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
@@ -301,26 +293,13 @@ export default function DesignPage() {
                 MAIN screen, per the self-contained agent-page design language. */}
             {chat.documents.length > 0 && (
               <div className="mx-auto max-w-5xl px-4 pt-4 md:px-6">
-                <section className="bg-muted/20 rounded-lg border p-3">
-                  <h3 className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">
-                    Generated documents
-                  </h3>
-                  <ul className="space-y-1">
-                    {chat.documents.map((d) => (
-                      <li key={d.id}>
-                        <a
-                          href={d.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
-                        >
-                          <FileText className="size-3.5" aria-hidden />
-                          {d.name ?? "document"}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <GeneratedDocuments
+                  documents={chat.documents}
+                  projectId={projectId}
+                  stage="design"
+                  artifacts={artifactsQ.data ?? null}
+                  className="bg-muted/20 rounded-lg border p-3"
+                />
               </div>
             )}
             {selected ? (
@@ -338,46 +317,26 @@ export default function DesignPage() {
 
                 <ArtifactViewer artifact={selected} approval={approval} />
 
-                <ApprovalCard
-                  status={selected.status}
-                  title="Gate: Architect review"
-                  description="Approval accepts the design and unlocks Development."
-                  decidedBy={
-                    selected.status === "approved" || selected.status === "rejected"
-                      ? me
-                      : undefined
-                  }
-                  decidedAt={
-                    selected.status === "approved" || selected.status === "rejected"
-                      ? selected.updatedAt
-                      : undefined
-                  }
-                  onApprove={
-                    selected.status === "awaiting_approval"
-                      ? () =>
-                          decisionMutation.mutate({ id: selected.id, status: "approved" })
-                      : undefined
-                  }
-                  onReject={
-                    selected.status === "awaiting_approval"
-                      ? (reason) =>
-                          decisionMutation.mutate({
-                            id: selected.id,
-                            status: "rejected",
-                            reason,
-                          })
-                      : undefined
-                  }
-                  onAskAgent={() => setChatOpen(true)}
-                  pending={decisionMutation.isPending}
-                  pendingDecision={
-                    decisionMutation.isPending && decisionMutation.variables
-                      ? decisionMutation.variables.status === "approved"
-                        ? "approve"
-                        : "reject"
-                      : null
-                  }
-                />
+                {/* THE APPROVAL CARD USED TO SIT HERE, and it was three wrong things
+                    at once.
+
+                    It was a THIRD place to decide the same document — the list row on
+                    the left already offers Approve/Reject, and Requests & Approvals is
+                    the queue built for exactly this.
+
+                    It DESCRIBED THE WRONG CONSEQUENCE: "Approval accepts the design and
+                    unlocks Development" is the STAGE gate's copy (lib/agents.ts). What
+                    the buttons actually did was accept one document into the project's
+                    record, which unlocks nothing. An approval control that misstates
+                    what approving does is worse than no control.
+
+                    And it INVENTED THE DECIDER: `decidedBy={me}` is whoever is looking
+                    at the screen, not whoever decided. It only ever read correctly for
+                    the person who had just clicked it.
+
+                    The status is still visible — `ArtifactViewer` shows it, and the row
+                    on the left carries the chip and the actions. Nothing was lost by
+                    removing this except the ability to be told the wrong thing. */}
               </div>
             ) : (
               <EmptyState
@@ -410,6 +369,7 @@ export default function DesignPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         sessions={chat.sessions}
         activeSessionId={chat.sessionId}
         onSelectSession={chat.selectSession}

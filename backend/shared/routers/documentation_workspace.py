@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from agents_orchestrator.documentation_agent.config.session_state import set_prepared
 from shared.authz.project_scope import require_project_access
 from shared.services import ado_repos
+from shared.services import prepared_targets
 
 # EVERY ROUTE HERE IS SCOPED TO ITS {project_id}. Was bare APIRouter() — the only
 # gate was the artifact:view floor applied at include time (process_api.py), which
@@ -90,12 +91,22 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
     the data exists when a doc-target picker is built.
     """
     tenant_id: str = request.state.tenant_id
-    azure = False
+    # ASKED PER PROVIDER, not hard-coded to one. `repo_source.available` checks each
+    # backend for a usable credential, scoped to this project and caller — the same
+    # project-scoped lookup that is the ONLY place this platform stores a Project
+    # Admin's source credential.
+    from shared.services import repo_source  # noqa: PLC0415
+
     try:
-        org_url, pat = await ado_repos.resolve_auth(tenant_id)
-        azure = bool(org_url and pat)
-    except Exception:
-        azure = False
+        sources = await repo_source.available(
+            tenant_id,
+            project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+        )
+    except Exception:  # noqa: BLE001
+        sources = []
+    azure = "ado" in sources
+    github = "github" in sources
 
     sharepoint = False
     try:
@@ -108,19 +119,43 @@ async def list_doc_connectors(project_id: str, request: Request) -> dict:
     return {
         "connectors": [
             {"kind": "azure_repos", "label": "Azure Repos", "available": azure},
+            {"kind": "github", "label": "GitHub", "available": github},
             {"kind": "sharepoint", "label": "SharePoint", "available": sharepoint},
         ]
     }
 
 
 @documentation_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/prs")
-async def list_open_prs(project_id: str, ado_project: str, repo: str, request: Request) -> list[dict]:
-    return await ado_repos.list_pull_requests(
-        ado_project, repo, status="active", tenant_id=request.state.tenant_id
-    )
+async def list_open_prs(
+    project_id: str, ado_project: str, repo: str, request: Request,
+    provider: str | None = None,
+) -> list[dict]:
+    """Open pull requests, from whichever host this project's source lives on.
+
+    THE PATH STILL SAYS `ado` and that is now only a name — the route serves GitHub
+    too. Renaming it means moving five routers, their BFF proxies and every caller in
+    one go, which is churn for a cosmetic gain; the behaviour is what mattered, and a
+    GitHub project's PR picker returned an Azure DevOps error before this.
+    """
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        _chosen, prs = await repo_source.list_pull_requests(
+            request.state.tenant_id, ado_project, repo,
+            project_id=project_id,
+            owner_id=getattr(request.state, "user_id", "") or "",
+            provider=provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return prs
 
 
 class PrepareDocRequest(BaseModel):
+    #: Which host to clone from. Omitted, the project's only configured source is used;
+    #: with both connected, the picker names one. Never guessed at silently — a clone
+    #: from the wrong host is a confusing failure, not a graceful fallback.
+    provider: str | None = None
     mode: str = "branch"             # "branch" | "pr"
     ado_project: str
     repo_name: str
@@ -132,46 +167,70 @@ class PrepareDocRequest(BaseModel):
 async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Request) -> dict:
     """Clone the branch (or PR source) read-only and detect languages + upstream artifacts."""
     tenant_id: str = request.state.tenant_id
-    org_url, pat = await ado_repos.resolve_auth(tenant_id)
+    owner_id = getattr(request.state, "user_id", "") or ""
+    # `project_id` AND `owner_id`, or the credential is never found. Source credentials
+    # live in `project_integration_credentials`, saved per user per project — that is
+    # the only place this platform keeps them, deliberately, so nobody borrows anybody
+    # else's token. The façade threads both through to whichever backend answers.
+    from shared.services import repo_source  # noqa: PLC0415
+
+    try:
+        chosen, _base, _secret = await repo_source.resolve(
+            tenant_id, project_id=project_id, owner_id=owner_id, provider=body.provider,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     branch = (body.branch or "").strip()
     pr_title = ""
     if body.mode == "pr":
         if not body.pr_id:
             raise HTTPException(status_code=400, detail="pr_id required for mode=pr")
-        pr = await ado_repos.get_pull_request(
-            body.ado_project, body.repo_name, body.pr_id, pat=pat, org_url=org_url
-        )
+        try:
+            _p, pr = await repo_source.get_pull_request(
+                tenant_id, body.ado_project, body.repo_name, body.pr_id,
+                project_id=project_id, owner_id=owner_id, provider=chosen,
+            )
+        except RuntimeError as exc:  # same unconfigured-connector path as below
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not pr:
             raise HTTPException(status_code=404, detail="PR not found")
         branch, pr_title = pr["source_branch"], pr["title"]
     if not branch:
         raise HTTPException(status_code=400, detail="branch is required")
 
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
-    if remote_url is None:
-        raise HTTPException(status_code=404, detail=f"Repo '{body.repo_name}' not found")
-
+    # A MISSING OR UNREACHABLE SOURCE IS NOT A CRASH. These raise RuntimeError carrying
+    # an actionable sentence, and nothing used to catch them, so FastAPI turned it into a
+    # bare 500 and the dialog simply did nothing with the one message that explained why.
     work_dir = str(ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "documentation")
     try:
-        result = await asyncio.to_thread(ado_repos.clone_into, work_dir, remote_url, branch, pat)
+        result = await repo_source.clone(
+            tenant_id, body.ado_project, body.repo_name, branch, work_dir,
+            project_id=project_id, owner_id=owner_id, provider=chosen,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"Could not clone the branch: {exc}")
+    remote_url = result.get("remote_url", "")
 
     languages = await asyncio.to_thread(_detect_languages, work_dir)
     upstream_summary = await _upstream_summary(tenant_id, project_id)
 
-    set_prepared(tenant_id, project_id, {
-        "work_dir": work_dir, "repo_url": remote_url, "pat": pat,
+    _prepared_record = {
+        "work_dir": work_dir, "repo_url": remote_url, "pat": _secret, "provider": chosen,
         "mode": body.mode, "ado_project": body.ado_project, "repo_name": body.repo_name,
         "source_branch": branch, "pr_id": body.pr_id or "", "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,
-    })
+    }
+    set_prepared(tenant_id, project_id, _prepared_record)
+    # AND ON DISK, so the record outlives this process — see prepared_targets
+    # for what a restart used to do to a perfectly good checkout. Never the
+    # credential: that is re-resolved as this person when the agent binds.
+    prepared_targets.save(
+        "documentation", tenant_id, project_id, {**_prepared_record}, owner_id=owner_id,
+    )
 
     return {
-        "status": "ready", "mode": body.mode, "repo_name": body.repo_name,
+        "status": "ready", "provider": chosen, "mode": body.mode, "repo_name": body.repo_name,
         "ado_project": body.ado_project, "branch": branch, "pr_id": body.pr_id,
         "pr_title": pr_title, "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,

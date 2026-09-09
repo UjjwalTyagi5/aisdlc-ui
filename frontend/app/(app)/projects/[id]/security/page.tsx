@@ -112,6 +112,10 @@ export default function SecurityPage() {
 
   const chat = useAgentChat({
     agent: "security",
+    // See the Code Review page: attachments are stored per session, so the durable
+    // session has to exist before a file can be attached at all.
+    projectId: id,
+    sessionKey: id,
     context: { page: "Security", project_id: id },
     onArtifact: () => scansQ.refetch(),
   });
@@ -231,6 +235,11 @@ export default function SecurityPage() {
         </div>
       </div>
 
+      {/* DOCUMENTS DO NOT DEPEND ON A SCAN, so the no-scan state cannot swallow them.
+          The first version of this tab lived inside the branch below and was therefore
+          unreachable on exactly the projects that have no scan yet — which is every new
+          one. A document can be uploaded and approved for this stage before any scan
+          has ever run. */}
       {!prepared && !hasScan && !scansQ.isLoading ? (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
@@ -245,6 +254,11 @@ export default function SecurityPage() {
                 </Button>
               }
             />
+            {/* Shown, not tabbed away behind a bar whose other tabs do not exist here.
+                A lone unselected tab beside an empty state reads as broken. */}
+            <div className="mt-10">
+              <DocumentList projectId={id} stage="security" />
+            </div>
           </div>
         </div>
       ) : (
@@ -311,6 +325,10 @@ export default function SecurityPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
+        attachments={chat.attachments}
+        onAttachFiles={chat.attachFiles}
+        onRemoveAttachment={chat.removeAttachment}
         disabledReason={
           prepared || hasScan ? undefined : "Select a branch or PR to scan first (Select target)."
         }

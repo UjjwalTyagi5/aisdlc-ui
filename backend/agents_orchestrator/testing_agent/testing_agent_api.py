@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from uuid import uuid4
 from config.websocket_utils import set_websocket_context
 from config.agent_context import build_agent_input_text, parse_pipeline_context, set_agent_folder
+from shared.tools.document_tools import attachment_message_contents
 from config import sdlcSettings
 from config.auth.ws_ticket import redeem_ws_ticket as _redeem_ws_ticket
 from config.env import AGENT_RUNTIME_MODE
@@ -700,6 +701,10 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
             state_messages.append(
                 {"role": "user", "content": f"please use the following files {', '.join(_attach_paths)}"}
             )
+        # AND THE CONTENT, not only the path — see the development agent for why a
+        # request to read a file is weaker than the file's text being present.
+        for _content in attachment_message_contents(_attach_paths):
+            state_messages.append({"role": "user", "content": _content})
 
         actual_user_message = state_messages[-1]["content"] if state_messages else user_message
 

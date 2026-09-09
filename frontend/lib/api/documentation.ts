@@ -19,12 +19,22 @@ export const listDocConnectors = (projectId: ProjectId) =>
     schema: z.object({ connectors: z.array(DocConnector) }),
   });
 
-export const listOpenPrs = (projectId: ProjectId, adoProject: string, repo: string) =>
-  api(`/documentation/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs`, {
-    schema: z.array(AdoPr),
-  });
+export const listOpenPrs = (
+  projectId: ProjectId,
+  adoProject: string,
+  repo: string,
+  provider?: string,
+) =>
+  api(
+    `/documentation/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs${
+      provider ? `?provider=${encodeURIComponent(provider)}` : ""
+    }`,
+    { schema: z.array(AdoPr) },
+  );
 
 export interface PrepareDocBody {
+  /** Which host to clone from; omitted when the project has only one. */
+  provider?: string;
   mode: "branch" | "pr";
   ado_project: string;
   repo_name: string;

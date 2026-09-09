@@ -80,10 +80,12 @@ async def _member(t, role: str, perms: list[str]):
 
 
 def _upload(c, t, hdr, *, filename="brd.pdf", data=b"%PDF-1.4 hello", stage=None,
-            artifact_type="document"):
+            artifact_type="document", note=None):
     form = {"artifact_type": artifact_type}
     if stage is not None:
         form["stage"] = stage
+    if note is not None:
+        form["note"] = note
     return c.post(
         f"/projects/{t['project']}/artifacts/upload",
         headers=hdr,
@@ -285,3 +287,55 @@ async def test_holding_the_permission_elsewhere_does_not_reach_this_project(org_
         doc = _upload(c, t, up_hdr, stage="requirements").json()
         r = c.post(f"/artifacts/{doc['id']}/approve", headers=out_hdr)
     assert r.status_code in (403, 404), r.text
+
+
+# -- the note the uploader leaves for the approver ----------------------------
+
+
+async def test_an_uploaders_note_reaches_the_response(org_project):
+    """WHY THIS IS BEING PUT FORWARD. An approver had a filename, a stage and a name,
+    and no answer to "why am I being asked to accept this" — that lived only in
+    whatever conversation happened around the upload."""
+    t = org_project
+    _, hdr = await _member(t, "ba", ["run:create", "artifact:view"])
+    with TestClient(process_api.app) as c:
+        r = _upload(c, t, hdr, stage="requirements",
+                    note="Replaces the draft Ana rejected; only section 3 changed.")
+
+    assert r.json()["uploadNote"] == "Replaces the draft Ana rejected; only section 3 changed."
+
+
+async def test_a_document_without_a_note_has_none(org_project):
+    """NON-VACUITY, and the rule: the note is OPTIONAL. A required box gets '.' typed
+    into it, and a meaningless note is worse than none because the approver still has
+    to read it."""
+    t = org_project
+    _, hdr = await _member(t, "ba", ["run:create", "artifact:view"])
+    with TestClient(process_api.app) as c:
+        r = _upload(c, t, hdr, stage="requirements")
+
+    assert r.json()["uploadNote"] is None
+
+
+async def test_a_blank_note_is_stored_as_no_note(org_project):
+    """One empty case, not two. A whitespace-only note would otherwise render as an
+    empty pair of quotation marks under the document."""
+    t = org_project
+    _, hdr = await _member(t, "ba", ["run:create", "artifact:view"])
+    with TestClient(process_api.app) as c:
+        r = _upload(c, t, hdr, stage="requirements", note="   ")
+
+    assert r.json()["uploadNote"] is None
+
+
+async def test_an_over_long_note_is_truncated_rather_than_refused(org_project):
+    """THE FILE MATTERS MORE THAN THE SENTENCE. Enforcing the length by rejecting the
+    request would lose the upload over a long note, so it is capped and the document
+    still lands."""
+    t = org_project
+    _, hdr = await _member(t, "ba", ["run:create", "artifact:view"])
+    with TestClient(process_api.app) as c:
+        r = _upload(c, t, hdr, stage="requirements", note="x" * 3000)
+
+    assert r.status_code == 200, r.text
+    assert len(r.json()["uploadNote"]) == 2000

@@ -20,8 +20,10 @@ Threat mitigations (T-M4-01, T-M4-02, T-M4-03):
       create           project:create      bu_admin + project_admin
       patch            project:update      bu_admin + project_admin, and additionally
                                            scoped to a project the caller administers
-      archive/restore  workspace:manage    bu_admin only — removing a project from the
-                                           unit is the unit's call, not the project's
+      archive/restore  project:update      bu_admin + project_admin, scoped to a
+                                           project the caller administers. A BU Admin
+                                           gets the request lane instead (see
+                                           archive_project).
 """
 from __future__ import annotations
 
@@ -346,8 +348,10 @@ async def get_project(
     # Pure widening: every holder of `workspace:manage` (bu_admin) also holds
     # `project:create`, so nobody loses the ability to create.
     #
-    # Archive/restore/patch below deliberately KEEP `workspace:manage`. Creating a
-    # project is a delivery act; removing one is unit administration.
+    # Patch, archive and restore below are `project:update` + an administers-this-project
+    # check. Archive/restore used to sit on `workspace:manage`, which no Project Admin
+    # holds, so the route 403'd the very person its own docstring said should be able to
+    # call it.
     dependencies=[Depends(require_permission("project:create"))],
 )
 async def create_project(
@@ -914,7 +918,12 @@ async def ingest_board(
 @projects_router.post(
     "/{project_id}/archive",
     response_model=ProjectOut,
-    dependencies=[Depends(require_permission("workspace:manage"))],
+    # `project:update`, NOT `workspace:manage` — which project_admin does not hold, so
+    # this route rejected at the dependency the one caller its docstring below says may
+    # use it. The real check is `assert_can_administer_project` in the body: the floor
+    # only keeps the boot scan seeing the route as protected, and a permission alone
+    # would let a Project Admin archive somebody else's project.
+    dependencies=[Depends(require_permission("project:update"))],
 )
 async def archive_project(
     project_id: str,
@@ -939,6 +948,10 @@ async def archive_project(
     """
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
+    # WHOSE project, not just what permission. `project:update` is held by every Project
+    # Admin in the tenant; without this one could archive a project in another unit.
+    # 404 rather than 403, so a refusal does not confirm the project exists.
+    await assert_can_administer_project(db, request, project)
 
     role = await effective_platform_role(db, request)
     if role == "bu_admin":
@@ -972,7 +985,7 @@ async def archive_project(
 @projects_router.post(
     "/{project_id}/restore",
     response_model=ProjectOut,
-    dependencies=[Depends(require_permission("workspace:manage"))],
+    dependencies=[Depends(require_permission("project:update"))],
 )
 async def restore_project(
     project_id: str,
@@ -981,10 +994,17 @@ async def restore_project(
 ):
     """Un-archive a project (sets archived=False).
 
-    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03).
+    Scoped by tenant_id to prevent cross-tenant tampering (T-M4-03), and to the projects
+    the caller administers.
+
+    NO REQUEST LANE HERE, unlike archiving. Ending someone's delivery work is the
+    decision that needs a second pair of eyes; giving it back is not, and routing a
+    restore through an approval would leave a project stuck archived while the person
+    who can undo it waits on somebody else.
     """
     tenant_id = request.state.tenant_id
     project = await _get_or_404(db, project_id, tenant_id)
+    await assert_can_administer_project(db, request, project)
     project.archived = False
     await db.flush()
     await db.refresh(project)

@@ -269,6 +269,11 @@ async def store_artifact(
     agent: str | None = None,
     stage: str | None = None,
     uploaded_by: str | None = None,
+    upload_note: str | None = None,
+    #: "draft" for agent output nobody has put forward yet; "pending" for a
+    #: deliberate upload. Both park their bytes under `_pending` — only approval
+    #: moves them — so this changes whose queue it enters, not where it lives.
+    approval_status: str = "pending",
     content_type: str = "application/octet-stream",
     blob_client: Any = None,
 ) -> Artifact:
@@ -353,6 +358,7 @@ async def store_artifact(
         project_id=project_id,
         stage=stage or agent,
         uploaded_by=uploaded_by,
+        upload_note=upload_note,
         tenant_id=tenant_id,
         artifact_type=artifact_type,
         # Set on APPROVAL, when the bytes reach the final path. A pending artifact with
@@ -361,7 +367,7 @@ async def store_artifact(
         blob_path=blob_name,
         content_type=content_type,
         size_bytes=len(data),
-        approval_status="pending",
+        approval_status=approval_status,
     )
     # WHETHER THE BYTES LANDED, for the caller that has to tell the user. It used to be
     # readable from `blob_url`, which is now None for every pending artifact — so an

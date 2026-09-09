@@ -224,6 +224,15 @@ async def open_deploy_pr(title: str = "", description: str = "") -> str:
         return "ERROR: no files staged. Stage deployment files first (stage_deploy_file)."
     if not (s.work_dir and s.repo_name and s.source_branch):
         return "ERROR: no prepared target. Select a branch first."
+    if not getattr(s, "pat", ""):
+        # THE ONE THING A RESTORED TARGET CANNOT RECOVER BY ITSELF. Reading the
+        # checkout needs no token; pushing does. Saying so beats a git command
+        # that fails halfway with an authentication error nobody can act on.
+        return (
+            "ERROR: your source credential could not be resolved for this project, "
+            "so nothing can be pushed. Reconnect it on the Integrations page, or "
+            "prepare the target again."
+        )
     new_branch = f"deploy/{s.environment}-{uuid.uuid4().hex[:8]}"
     files = [(f["path"], f["contents"]) for f in s.staged_files]
     pr_title = title or f"Deployment package for {s.repo_name} ({s.environment})"
@@ -552,6 +561,15 @@ async def sync_repo(accept_rewrite: bool = False) -> str:
     s = get_session(get_session_id())
     if not s.work_dir or not s.source_branch:
         return "ERROR: no workspace prepared. Ask the user to select a branch/PR first."
+    if not getattr(s, "pat", ""):
+        # THE ONE THING A RESTORED TARGET CANNOT RECOVER BY ITSELF. Reading the
+        # checkout needs no token; pushing does. Saying so beats a git command
+        # that fails halfway with an authentication error nobody can act on.
+        return (
+            "ERROR: your source credential could not be resolved for this project, "
+            "so nothing can be pushed. Reconnect it on the Integrations page, or "
+            "prepare the target again."
+        )
     if s.mode == "pr":
         return json.dumps({
             "synced": False,

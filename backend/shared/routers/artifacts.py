@@ -155,11 +155,23 @@ async def list_artifacts_for_project(
                 .order_by(Run.updated_at.desc())
             )
         ).scalars().all()
+        # "HAS A STORY PAYLOAD" IS NOT "HAS STORIES", and conflating them made an empty
+        # pull invisible. This used to skip any run whose synthesis came back empty, so
+        # ingesting a board project with no work items fell through to the PREVIOUS
+        # ingest and re-displayed its stories — the user pulled from an empty project,
+        # was told "no work items", and watched the list keep showing fifteen from
+        # somewhere else. Nothing errored; the page simply refused to change.
+        #
+        # The skip exists for a real case: a chat run never writes `requirements_payload`
+        # at all, and must not shadow the ingest that did. That is a MISSING key, which
+        # is a different thing from a key holding an empty list. An ingest that found
+        # nothing wrote `stories: []` deliberately, and it is the newest answer.
         for r in req_runs:
-            synth = story_artifacts_from_run(r, str(project.id))
-            if synth:
-                result.extend(synth)
-                break
+            payload = getattr(r, "requirements_payload", None) or {}
+            if not isinstance(payload, dict) or "stories" not in payload:
+                continue
+            result.extend(story_artifacts_from_run(r, str(project.id)))
+            break
 
     return await _with_actor_emails(db, tenant_id, result)
 
@@ -358,6 +370,78 @@ async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id
 
     await assert_can_administer_project(db, request, project)
     return artifact, run
+
+
+@artifacts_router.post(
+    "/artifacts/{artifact_id}/submit",
+    response_model=ArtifactOut,
+    dependencies=[Depends(require_permission("run:create"))],
+)
+async def submit_artifact(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Put a draft forward for approval.
+
+    RECORDING AND ASKING ARE TWO ACTS, and separating them is the whole point. An agent
+    writes every file it produces as a `draft` — recorded, listed, downloadable by the
+    people on the project, and in NOBODY's approval queue. Most of those are working
+    iterations: ask for a BRD three times and two of them are dead the moment the third
+    exists. Sending all three to an approver is how a queue stops being read.
+
+    So this is the moment somebody says "this one". It moves `draft` to `pending`, which
+    is what `GET /approvals` derives its rows from.
+
+    `run:create`, NOT `approve` — deliberately the same permission as uploading. Putting
+    work forward is producing, not accepting; the person who ran the agent may raise
+    their own output, and the owner still decides it afterwards. Making this need the
+    approve permission would mean only an approver could ask for an approval.
+
+    IDEMPOTENT, and it never walks a decision backwards. Re-submitting something already
+    pending is a no-op rather than an error — a double click is not a mistake worth a
+    500. An approved or rejected artifact is refused outright: "raise for approval"
+    must never quietly reopen a decision somebody already took.
+    """
+    # SAME SCOPING AS THE DOWNLOAD ROUTE: the id resolves through a join on
+    # `Run.tenant_id`, so another tenant's id is a 404 rather than a submission, and
+    # project visibility is checked separately because being in the tenant is not the
+    # same as being on the project.
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+
+    if artifact.approval_status in ("approved", "rejected"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"That document is already {artifact.approval_status}; it cannot be put "
+                "forward again."
+            ),
+        )
+    if artifact.approval_status == "pending":
+        return (await _with_actor_emails(
+            db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
+
+    artifact.approval_status = "pending"
+    db.add(
+        AuditEvent(
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+            event_type="artifact_submit",
+            resource_type="artifact",
+            resource_id=str(artifact.id),
+            payload={
+                "project_id": str(artifact.project_id),
+                "stage": artifact.stage,
+                "artifact_type": artifact.artifact_type,
+            },
+        )
+    )
+    await db.flush()
+    await db.refresh(artifact)
+    logger.info("Artifact %s submitted for approval", artifact_id)
+    return (await _with_actor_emails(
+        db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
 @artifacts_router.post(
@@ -904,6 +988,7 @@ async def upload_artifact(
     file: UploadFile = File(...),
     stage: Optional[str] = Form(default=None),
     artifact_type: str = Form(default="document"),
+    note: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Add a document to a project by hand.
@@ -924,6 +1009,10 @@ async def upload_artifact(
     demanding project administration for something that looks agent-level on screen.
 
     NO run_id. This is the case migration 0052 made `run_id` nullable for.
+
+    `note` IS THE UPLOADER'S REASON, and it is capped here rather than in the database.
+    A length the schema enforced would reject the whole upload — losing the file over a
+    long sentence — so an over-long note is truncated and the document still lands.
     """
     tenant_id = request.state.tenant_id
     uploader = getattr(request.state, "user_id", None)
@@ -963,6 +1052,9 @@ async def upload_artifact(
         stage=stage,
         agent=stage,
         uploaded_by=uploader,
+        # Truncated, not refused: see the docstring. Blank-only notes become None so
+        # the UI has one empty case to render rather than two.
+        upload_note=(note or "").strip()[:2000] or None,
         artifact_type=artifact_type,
         filename=filename,
         data=data,

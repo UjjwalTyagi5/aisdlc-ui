@@ -92,6 +92,151 @@ async def list_sprints(provider: str = "") -> str:
     return json.dumps(sprints, indent=2, default=str)
 
 
+#: How a board's own state CATEGORY maps to the three buckets a person means by
+#: "done, doing, left". Azure DevOps emits Proposed/InProgress/Resolved/Completed/Removed;
+#: Jira emits To Do/In Progress/Done. Both are read from the board — this is a mapping of
+#: the board's answer, never a guess at what a state name might mean.
+_CATEGORY_BUCKET = {
+    "completed": "done", "resolved": "done", "done": "done", "closed": "done",
+    "inprogress": "in_progress", "in progress": "in_progress", "doing": "in_progress",
+    "proposed": "not_started", "to do": "not_started", "todo": "not_started",
+    "new": "not_started", "open": "not_started",
+    # Removed/cancelled work is not outstanding and is not delivered. Counting it either
+    # way moves the percentage, so it gets its own bucket and leaves the denominator.
+    "removed": "removed", "cancelled": "removed", "canceled": "removed",
+}
+
+
+@tool
+async def report_progress(provider: str = "") -> str:
+    """How much of the work is done, in progress and still to do.
+
+    Answers "how far along are we", "what is left", "how much of development is
+    finished". Reads every work item on the board, buckets it by the board's OWN state
+    category, and reports counts and estimates per bucket.
+
+    THE BUCKETS COME FROM THE BOARD, NOT FROM THE STATE NAME. Azure DevOps and Jira both
+    publish a category for each workflow state, and teams rename states freely — a board
+    with "Ready for UAT" or "Signed off" cannot be read by guessing at the word. Where a
+    state has no category, or the catalogue cannot be read, those items are reported as
+    `unknown` and EXCLUDED from the percentage rather than assumed either way. Say so
+    when you report it: a completion figure that quietly swallowed twelve unknown items
+    is worse than one that admits them.
+
+    TWO MEASURES, BOTH REPORTED, BECAUSE THEY DISAGREE. `by_count` treats every item
+    equally; `by_estimate` weights them, and only covers items that carry an estimate —
+    `estimated` and `unestimated` say how much of the board each figure actually
+    describes. Quoting a points percentage over a half-estimated board is how a plan
+    reports 80% while most of the work is unmeasured.
+
+    Args:
+        provider: which board when the project has more than one ("jira", "ado").
+                  Omit for the stage's default.
+    """
+    from agents_orchestrator.requirements_agent.agents.planning import (  # noqa: PLC0415
+        _board_connector, _board_error,
+    )
+
+    connector, err = await _board_connector(mode="read", provider=provider)
+    if err:
+        return err
+
+    board_project = await _board_project()
+    try:
+        items = await connector.read_adapter("list_all_items", project=board_project)
+    except Exception as exc:  # noqa: BLE001
+        return _board_error(exc)
+    if not items:
+        return (
+            f"There are no work items on {board_project or 'the board'} yet, so there is "
+            "no progress to report. Pull or create the backlog first."
+        )
+
+    # THE STATE CATALOGUE, per work item type, because states are defined per type: a Bug
+    # and a User Story can have different workflows in the same project.
+    categories: dict[str, str] = {}
+    catalogue_errors: list[str] = []
+    for item_type in sorted({(i.get("work_item_type") or "").strip() for i in items} - {""}):
+        try:
+            states = await connector.read_adapter(
+                "list_states", project=board_project, item_type=item_type
+            )
+        except Exception as exc:  # noqa: BLE001
+            catalogue_errors.append(f"{item_type}: {type(exc).__name__}")
+            continue
+        for st in states or []:
+            name = str(st.get("name") or "").strip().lower()
+            cat = str(st.get("category") or "").strip().lower()
+            if name and cat:
+                categories[name] = cat
+
+    buckets: dict[str, dict[str, float]] = {
+        b: {"count": 0, "estimate": 0.0, "estimated": 0, "unestimated": 0}
+        for b in ("done", "in_progress", "not_started", "removed", "unknown")
+    }
+    per_state: dict[str, int] = {}
+    for it in items:
+        state = str(it.get("state") or "").strip()
+        per_state[state or "(none)"] = per_state.get(state or "(none)", 0) + 1
+        bucket = _CATEGORY_BUCKET.get(categories.get(state.lower(), ""), "unknown")
+        b = buckets[bucket]
+        b["count"] += 1
+        est = it.get("estimate")
+        try:
+            value = float(est)
+        except (TypeError, ValueError):
+            value = None
+        if value is None:
+            b["unestimated"] += 1
+        else:
+            b["estimate"] += value
+            b["estimated"] += 1
+
+    # THE DENOMINATOR EXCLUDES `removed` AND `unknown`. Removed work is neither done nor
+    # outstanding; unknown work is work we cannot classify, and folding it in either
+    # direction would state something the board never said.
+    counted = sum(buckets[b]["count"] for b in ("done", "in_progress", "not_started"))
+    points = sum(buckets[b]["estimate"] for b in ("done", "in_progress", "not_started"))
+
+    report: dict[str, object] = {
+        "board_project": board_project or "(the board's default project)",
+        "total_items": len(items),
+        "buckets": {k: v for k, v in buckets.items() if v["count"]},
+        "by_count": (
+            {
+                "done_pct": round(buckets["done"]["count"] * 100 / counted, 1),
+                "counted": counted,
+            }
+            if counted else {"counted": 0, "note": "nothing classifiable to measure"}
+        ),
+        "by_estimate": (
+            {
+                "done_pct": round(buckets["done"]["estimate"] * 100 / points, 1),
+                "points_counted": points,
+                "items_with_an_estimate": sum(
+                    buckets[b]["estimated"] for b in ("done", "in_progress", "not_started")
+                ),
+                "items_without_one": sum(
+                    buckets[b]["unestimated"] for b in ("done", "in_progress", "not_started")
+                ),
+            }
+            if points else {"note": "no item carries an estimate, so there is no points figure"}
+        ),
+        "by_state": dict(sorted(per_state.items(), key=lambda kv: -kv[1])),
+    }
+    if buckets["unknown"]["count"]:
+        report["unknown_note"] = (
+            f"{int(buckets['unknown']['count'])} item(s) are in a state the board gave no "
+            "category for; they are excluded from both percentages. Report that."
+        )
+    if catalogue_errors:
+        report["catalogue_note"] = (
+            "The state catalogue could not be read for: " + "; ".join(catalogue_errors)
+            + ". Items of those types fall into `unknown`."
+        )
+    return json.dumps(report, indent=2, default=str)
+
+
 @tool
 async def read_team_capacity(iteration_id: str, provider: str = "") -> str:
     """Per-person capacity for one sprint: hours a day, net of days off.
@@ -634,8 +779,21 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     _SHAREPOINT_TOOLS = []
     logger.warning("PM agent: project document tools unavailable")
 
+try:
+    from shared.tools.project_team import make_team_tools  # noqa: PLC0415
+
+    # THE PEOPLE, which every other tool here is blind to. Sprints, capacity and work
+    # items all come off the board; the board knows a display name on a ticket and
+    # nothing about roles, agent access, or what somebody did in this platform. Bound to
+    # this stage like the rest — never taken from a tool argument.
+    _TEAM_TOOLS = make_team_tools("plan")
+except Exception:  # noqa: BLE001
+    _TEAM_TOOLS = []
+    logger.warning("PM agent: project team tools unavailable")
+
 tools = [
     read_project_inputs,
+    report_progress,
     list_sprints,
     read_team_capacity,
     build_schedule,
@@ -649,6 +807,7 @@ tools = [
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_TEAM_TOOLS,
 ]
 
 
@@ -675,6 +834,50 @@ requirements exist produces a plan for a system nobody asked for.
 
 Do NOT call it when the user describes the work themselves — their words are the input
 then.
+
+── HOW FAR ALONG THE WORK IS ─────────────────────────────────────────────────
+`report_progress` answers "how much is done", "what is left", "how much of development
+is finished". It buckets every board item by the board's OWN state category, so a team
+that renamed its states to "Ready for UAT" is still read correctly.
+
+Report BOTH figures it returns and say which you are quoting. `by_count` treats every
+item equally; `by_estimate` weights them but only covers items that carry one, and it
+tells you how many do not. A points percentage over a half-estimated board sounds precise
+and is not.
+
+Never quietly absorb the awkward numbers. Items the board gave no category for are
+excluded from both percentages and reported as `unknown` — say how many there are.
+Removed work is excluded too, and is neither done nor outstanding.
+
+DONE ON THE BOARD IS NOT DELIVERED. A closed ticket says the team called it finished; it
+does not mean the stage was signed off here. If asked whether the project can move on,
+that is the gate, not this number.
+
+── THE PEOPLE ON THIS PROJECT ────────────────────────────────────────────────
+`list_project_members` is the roster: who is on the project, the role each holds, and
+which agents they own, may use, or were granted individually. Call it before answering
+anything about the team — who does what, who could pick something up, who a decision
+routes to. The board knows a display name on a ticket; only this knows the roles.
+
+`member_activity` is what they have actually done. It reports TWO sources and you must
+keep them apart in your answer:
+
+  platform — runs, approvals, uploads and other recorded actions here.
+  board    — work items currently assigned to them on Jira or Azure DevOps.
+
+Somebody with no platform activity and four tickets in progress is working on the board.
+Reporting either number alone as "their activity" is a false summary. Name the source.
+
+ON SKILLS AND PERFORMANCE, which you will be asked about. This platform stores no skills
+table and no rating. It stores the ROLE somebody was given and the WORK they have done —
+answer from those two, say that is what you are answering from, and say plainly that
+anything further is not recorded. Do not grade people, do not infer competence from a
+count of events, and do not compare colleagues on a number. A confident-sounding
+judgement about a person, built from an event count, is the worst thing you could
+produce here.
+
+WHEN THE ROSTER IS EMPTY that is a fact about the project, not a tool failure: nobody
+has been assigned yet, and a Project Admin does that on the Members page.
 
 ── WHAT YOU DO ───────────────────────────────────────────────────────────────
 WORK BREAKDOWN, ESTIMATION, SCHEDULING, RESOURCE PLANNING, RISK TRACKING, STATUS
