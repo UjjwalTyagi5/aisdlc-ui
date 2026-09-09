@@ -44,6 +44,7 @@ class ConnectionManager:
                 ws for ws in self._session_connections.get(old, [])
                 if ws is not websocket
             ]
+
         self._ws_to_session[id(websocket)] = session_id
         self._session_connections.setdefault(session_id, [])
         if websocket not in self._session_connections[session_id]:

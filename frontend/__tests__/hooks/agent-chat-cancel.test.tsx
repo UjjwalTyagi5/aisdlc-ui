@@ -118,3 +118,50 @@ describe("stopping a turn", () => {
     );
   });
 });
+
+describe("a stream that ends without a terminal event", () => {
+  /**
+   * THE REPORTED SYMPTOM, and it was not really about Stop. `streaming` was cleared
+   * only by a terminal `run.completed` or by one of the error branches — so a stream
+   * that simply ENDED left the bubble saying "Thinking…" forever while `busy` cleared
+   * and the composer reopened. On screen: Send enabled, agent apparently still
+   * thinking, and no way to tell the turn was over.
+   */
+  function endsImmediately() {
+    return {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () => Promise.resolve({ done: true, value: undefined }),
+          releaseLock: () => {},
+        }),
+      },
+    };
+  }
+
+  it("leaves no bubble thinking", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(endsImmediately() as unknown as Response)));
+
+    const chat = mount();
+    await act(async () => {
+      await chat().send("hi");
+    });
+
+    await waitFor(() => expect(chat().busy).toBe(false));
+    expect(chat().messages.some((m) => m.streaming)).toBe(false);
+  });
+
+  it("still ends the indicator when the request fails outright", async () => {
+    /** NON-VACUITY: the guarantee is "the end of the stream ends the indicator",
+     *  whatever ended it. */
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("network down"))));
+
+    const chat = mount();
+    await act(async () => {
+      await chat().send("hi");
+    });
+
+    await waitFor(() => expect(chat().busy).toBe(false));
+    expect(chat().messages.some((m) => m.streaming)).toBe(false);
+  });
+});

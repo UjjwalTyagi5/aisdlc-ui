@@ -380,6 +380,19 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
       } finally {
         setBusy(false);
         abortRef.current = null;
+        // NO BUBBLE OUTLIVES ITS STREAM. `streaming` was cleared only by a terminal
+        // `run.completed` event or by one of the catch branches above — so a stream that
+        // simply ENDED without one left the bubble saying "Thinking…" forever while the
+        // composer reopened, which is what a stopped turn looked like: Send enabled,
+        // agent apparently still thinking. Clearing it here makes the end of the stream
+        // the thing that ends the indicator, whatever the reason it ended.
+        setMessages((m) =>
+          m.some((msg) => msg.id === agentMsgId && msg.streaming)
+            ? m.map((msg) =>
+                msg.id === agentMsgId ? { ...msg, streaming: false } : msg,
+              )
+            : m,
+        );
         // (attachments were already cleared at send-time; not here, so a file staged
         //  during streaming for the NEXT turn survives.)
         // Refresh the rail so the new/just-used session surfaces newest-first.
