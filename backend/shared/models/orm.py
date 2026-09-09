@@ -798,7 +798,15 @@ class ModelProvider(Base):
     # is_custom â€” onboarding is dynamic, gated only by model:manage RBAC.
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    secret_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    # NULLABLE SINCE 0017, and deliberately: a connection can be registered with no
+    # key at all so its models are granted centrally while a Business Unit or project
+    # supplies one later, and clearing a key (`api_key: ""`) leaves a provider in
+    # exactly that state. Every database has the column nullable; this line said
+    # otherwise, which is a type that promises a string and hands back None. Nothing
+    # reads it through this class today — `model_config` goes via SQL and already
+    # tests `secret_ref is not None` — so the declaration was wrong alone, and
+    # tightening the column instead would have deleted every keyless provider.
+    secret_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Optional custom endpoint (OpenAI-compatible / self-hosted / gateway base URL).
     api_base: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # True when not a curated preset â€” drives the "Custom" UI treatment.
