@@ -7,8 +7,6 @@ the document the user had just given it. Requirements and Design each carried th
 own near-identical copy of the extraction block; Plan was written without one and
 nothing failed loudly.
 """
-import pathlib
-import re
 
 import pytest
 from docx import Document
@@ -86,38 +84,25 @@ def test_extracted_text_is_capped(tmp_path):
 
 
 def test_attachment_paths_are_read_off_the_pipeline_context():
-    ctx = {"attachments": [{"path": "/a/b.docx"}, {"name": "no path"}, "junk"]}
+    # The path must now be inside the attachment store: `pipeline_context` is
+    # client-supplied, and a bare "/a/b.docx" was accepted as readily as a path to
+    # backend/.env would have been. See test_attachment_paths_are_contained.py.
+    from shared.services.attachment_store import _FILES_ROOT
 
-    assert attachment_paths_from_context(ctx) == ["/a/b.docx"]
+    attached = str(_FILES_ROOT / "u1" / "attachments" / "s1" / "b.docx")
+    ctx = {"attachments": [{"path": attached}, {"name": "no path"}, "junk"]}
+
+    assert attachment_paths_from_context(ctx) == [attached]
     assert attachment_paths_from_context(None) == []
     assert attachment_paths_from_context({"attachments": None}) == []
 
 
-# The WEBSOCKET turn handler of each chat agent — the path the chat drawer actually
-# uses. Named individually because "the module mentions attachments somewhere" is not
-# the property that matters, and asserting only that is how this bug survived a fix:
-# the Plan agent got the block in its REST handler while the socket the UI talks to
-# kept dropping every file.
-_WS_TURN_HANDLERS = [
-    ("agents_orchestrator.pm_agent.pm_agent_api", "_process_turn_ws"),
-    ("agents_orchestrator.requirements_agent.requirements_agent_api",
-     "_process_user_message_ws"),
-    ("agents_orchestrator.design_architecture_agent.design_architecture_agent_api",
-     "_process_user_message_ws"),
-]
-
-
-@pytest.mark.parametrize("module_name,handler_name", _WS_TURN_HANDLERS)
-def test_every_websocket_turn_handler_reads_its_attachments(module_name, handler_name):
-    import importlib
-    import inspect
-
-    module = importlib.import_module(module_name)
-    handler = getattr(module, handler_name, None)
-    assert handler is not None, f"{module_name} has no {handler_name}"
-
-    source = inspect.getsource(handler)
-    assert "attachment_message_contents(" in source, (
-        f"{module_name}.{handler_name} does not read attachments — a file attached "
-        f"in the chat drawer will be silently dropped"
-    )
+# THE PER-AGENT CHECK MOVED, and grew. This file named three agents by hand —
+# pm, requirements, design — while nine serve a chat, and four of the six unnamed ones
+# turned out to be dropping attachments silently (code review, security, documentation,
+# and the deployment module that actually answers `/sdlc/agent/deployment/ws`).
+#
+# A hand-maintained list cannot catch the agent nobody thought to add to it, so
+# `test_every_agent_chat_reads_attachments.py` derives the list from the mounts in
+# process_api.py instead, and follows the call graph out of each @websocket handler.
+# One list, kept honest by the code it describes.

@@ -107,9 +107,18 @@ async def test_notification_kinds_the_code_emits_are_all_accepted():
     # regex swept all of them up, reporting 23 false positives. Only the `kind=` of a
     # call named `emit` is a notification kind.
     emitted: set[str] = set()
+    # Cloned working copies live inside this tree (the target dialogs clone into
+    # DEV_WORKSPACE_ROOT) and are not our source: a checkout of this codebase would
+    # otherwise be scanned twice, and somebody else's `emit(kind=...)` would be read
+    # as ours. Pruned by resolved path so moving the workspace root moves this too.
+    from config.env import DEV_WORKSPACE_ROOT  # noqa: PLC0415
+
+    workspace = Path(DEV_WORKSPACE_ROOT).resolve()
     for path in root.rglob("*.py"):
         if any(part in {".venv", "__pycache__", "tests", "migrations"}
                for part in path.parts):
+            continue
+        if workspace in path.resolve().parents:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

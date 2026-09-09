@@ -62,5 +62,29 @@ def set_prepared(tenant_id: str, project_id: str, data: dict) -> None:
 
 
 def get_prepared(tenant_id: str, project_id: str) -> Optional[dict]:
+    """The prepared target, from this process or from the record on disk.
+
+    THE DISK FALLBACK IS THE POINT. This dict is process memory: a restart emptied it
+    while the checkout it described stayed exactly where it was, and both the page and
+    the agent then reported that nothing had been prepared. In development the restart
+    is CAUSED by the prepare — cloning into the watched tree reloads the server — so
+    the target was routinely gone seconds after it was made.
+
+    The restored record carries no credential; the caller re-resolves it as the person
+    who prepared the target. See shared/services/prepared_targets.py.
+    """
+    key = (str(tenant_id), str(project_id))
     with _lock:
-        return _prepared.get((str(tenant_id), str(project_id)))
+        found = _prepared.get(key)
+    if found is not None:
+        return found
+
+    from shared.services import prepared_targets  # noqa: PLC0415
+
+    restored = prepared_targets.load("deployment", str(tenant_id), str(project_id))
+    if restored is None:
+        return None
+    # Cached, so the next turn on this session does not read the file again.
+    with _lock:
+        _prepared.setdefault(key, restored)
+        return _prepared[key]

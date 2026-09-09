@@ -13,7 +13,12 @@ import {
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { LoadingState } from "@/components/ui/loading-state";
-import { listAdoProjects, listAdoRepos, listAdoBranches } from "@/lib/api/dev-workspace";
+import {
+  listAdoProjects,
+  listAdoRepos,
+  listAdoBranches,
+  listSourceProviders,
+} from "@/lib/api/dev-workspace";
 import { listOpenPrs, prepareDocs } from "@/lib/api/documentation";
 import { qk } from "@/lib/api/query-keys";
 import type { PrepareDocResult } from "@/lib/schemas/documentation";
@@ -35,16 +40,43 @@ export function DocTargetDialog({ open, onOpenChange, projectId, onPrepared }: D
   const [branch, setBranch] = React.useState<string | null>(null);
   const [prId, setPrId] = React.useState<string | null>(null);
 
+  const [provider, setProvider] = React.useState<string | null>(null);
+
   React.useEffect(() => {
     if (!open) {
       setMode("branch"); setProject(null); setRepo(null); setBranch(null); setPrId(null);
+      setProvider(null);
     }
   }, [open]);
 
-  const projectsQ = useQuery({ queryKey: qk.devWorkspace.adoProjects(projectId), queryFn: () => listAdoProjects(projectId), enabled: open, staleTime: 30_000 });
-  const reposQ = useQuery({ queryKey: qk.devWorkspace.adoRepos(projectId, project ?? ""), queryFn: () => listAdoRepos(projectId, project!), enabled: open && !!project });
-  const branchesQ = useQuery({ queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? ""), queryFn: () => listAdoBranches(projectId, project!, repo!), enabled: open && mode === "branch" && !!project && !!repo });
-  const prsQ = useQuery({ queryKey: qk.documentation.prs(projectId, project ?? "", repo ?? ""), queryFn: () => listOpenPrs(projectId, project!, repo!), enabled: open && mode === "pr" && !!project && !!repo });
+  // WHICH HOSTS THIS PERSON CAN CLONE FROM, asked rather than assumed. A project with
+  // one source never sees a choice and behaves exactly as it did.
+  const sourcesQ = useQuery({
+    queryKey: qk.devWorkspace.sources(projectId),
+    queryFn: () => listSourceProviders(projectId),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const providers = React.useMemo(
+    () => sourcesQ.data?.providers ?? [],
+    [sourcesQ.data],
+  );
+
+  // Default to the first available so the lists below can load without a click. Only
+  // set once: re-running on every render would fight the user's own selection.
+  React.useEffect(() => {
+    if (open && !provider && providers.length > 0) setProvider(providers[0]!.id);
+  }, [open, provider, providers]);
+
+  // The provider is in the KEY as well as the call: without it, switching host would
+  // show the previous one's cached repositories under the new one's name.
+  const sourceLabel =
+    providers.find((sp) => sp.id === provider)?.label ?? "Azure DevOps";
+
+  const projectsQ = useQuery({ queryKey: qk.devWorkspace.adoProjects(projectId, provider ?? ""), queryFn: () => listAdoProjects(projectId, provider ?? undefined), enabled: open && !!provider, staleTime: 30_000 });
+  const reposQ = useQuery({ queryKey: qk.devWorkspace.adoRepos(projectId, project ?? "", provider ?? ""), queryFn: () => listAdoRepos(projectId, project!, provider ?? undefined), enabled: open && !!provider && !!project });
+  const branchesQ = useQuery({ queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? "", provider ?? ""), queryFn: () => listAdoBranches(projectId, project!, repo!, provider ?? undefined), enabled: open && mode === "branch" && !!provider && !!project && !!repo });
+  const prsQ = useQuery({ queryKey: qk.documentation.prs(projectId, project ?? "", repo ?? "", provider ?? ""), queryFn: () => listOpenPrs(projectId, project!, repo!, provider ?? undefined), enabled: open && mode === "pr" && !!project && !!repo });
 
   React.useEffect(() => {
     if (mode === "branch" && branchesQ.data?.length && !branch) {
@@ -56,6 +88,7 @@ export function DocTargetDialog({ open, onOpenChange, projectId, onPrepared }: D
   const prepare = useMutation({
     mutationFn: () =>
       prepareDocs(projectId, {
+        provider: provider ?? undefined,
         mode, ado_project: project!, repo_name: repo!,
         branch: mode === "branch" ? branch! : undefined,
         pr_id: mode === "pr" ? prId! : undefined,
@@ -83,25 +116,50 @@ export function DocTargetDialog({ open, onOpenChange, projectId, onPrepared }: D
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-          <Step label="Project">
-            <Cascade q={projectsQ} value={project} onChange={(v) => { setProject(v); setRepo(null); setBranch(null); setPrId(null); }}
-              getKey={(p) => p.id} getValue={(p) => p.name} getLabel={(p) => p.name} empty="No Azure DevOps projects found." />
+          {/* ONLY WHEN THERE IS GENUINELY A CHOICE. A project with one source host has
+              nothing to decide, and a picker with a single option is a question that
+              wastes a click and implies the other options exist somewhere. */}
+          {providers.length > 1 && (
+            <Step label="Source">
+              <div className="grid grid-cols-2 gap-2">
+                {providers.map((p) => (
+                  <ModeBtn
+                    key={p.id}
+                    active={provider === p.id}
+                    onClick={() => {
+                      // Everything below names things that only exist on one host, so
+                      // it all resets. Keeping a repo name across a switch would show a
+                      // selection that cannot be cloned.
+                      setProvider(p.id);
+                      setProject(null); setRepo(null); setBranch(null); setPrId(null);
+                    }}
+                    icon={GitBranch}
+                  >
+                    {p.label}
+                  </ModeBtn>
+                ))}
+              </div>
+            </Step>
+          )}
+          <Step label={provider === "github" ? "Owner" : "Project"}>
+            <Cascade sourceLabel={sourceLabel} q={projectsQ} value={project} onChange={(v) => { setProject(v); setRepo(null); setBranch(null); setPrId(null); }}
+              getKey={(p) => p.id} getValue={(p) => p.name} getLabel={(p) => p.name} empty={provider === "github" ? "No GitHub owners found." : "No Azure DevOps projects found."} />
           </Step>
           {project && (
             <Step label="Repository">
-              <Cascade q={reposQ} value={repo} onChange={(v) => { setRepo(v); setBranch(null); setPrId(null); }}
+              <Cascade sourceLabel={sourceLabel} q={reposQ} value={repo} onChange={(v) => { setRepo(v); setBranch(null); setPrId(null); }}
                 getKey={(r) => r.id} getValue={(r) => r.name} getLabel={(r) => r.name} empty={`No repos in ${project}.`} />
             </Step>
           )}
           {project && repo && mode === "branch" && (
             <Step label="Branch">
-              <Cascade q={branchesQ} value={branch} onChange={setBranch} getKey={(b) => b.name} getValue={(b) => b.name}
+              <Cascade sourceLabel={sourceLabel} q={branchesQ} value={branch} onChange={setBranch} getKey={(b) => b.name} getValue={(b) => b.name}
                 getLabel={(b) => b.name} badge={(b) => (b.is_default ? "default" : undefined)} empty={`${repo} has no branches.`} />
             </Step>
           )}
           {project && repo && mode === "pr" && (
             <Step label="Open pull request">
-              <Cascade q={prsQ} value={prId} onChange={setPrId} getKey={(p) => p.id} getValue={(p) => p.id}
+              <Cascade sourceLabel={sourceLabel} q={prsQ} value={prId} onChange={setPrId} getKey={(p) => p.id} getValue={(p) => p.id}
                 getLabel={(p) => `#${p.id} · ${p.title}`} badge={(p) => p.source_branch} empty={`No open PRs in ${repo}.`} />
             </Step>
           )}
@@ -133,12 +191,13 @@ function Step({ label, children }: { label: string; children: React.ReactNode })
   return <div className="space-y-2"><p className="text-muted-foreground text-xs font-medium uppercase tracking-wide">{label}</p>{children}</div>;
 }
 
-function Cascade<T>({ q, value, onChange, getKey, getValue, getLabel, badge, empty }: {
+function Cascade<T>({ q, value, onChange, getKey, getValue, getLabel, badge, empty, sourceLabel = "Azure DevOps" }: {
   q: { isLoading: boolean; isError: boolean; data?: T[] }; value: string | null; onChange: (v: string) => void;
   getKey: (i: T) => string; getValue: (i: T) => string; getLabel: (i: T) => string; badge?: (i: T) => string | undefined; empty: string;
+  sourceLabel?: string;
 }) {
   if (q.isLoading) return <LoadingState variant="list" rows={3} />;
-  if (q.isError) return <p className="text-destructive text-sm">Couldn&apos;t reach Azure DevOps. Connect it on Integrations.</p>;
+  if (q.isError) return <p className="text-destructive text-sm">Couldn&apos;t reach {sourceLabel}. Connect it on Integrations.</p>;
   if (!q.data || q.data.length === 0) return <p className="text-muted-foreground text-sm">{empty}</p>;
   return (
     <RadioGroup value={value ?? ""} onValueChange={onChange} className="max-h-48 space-y-1.5 overflow-auto">

@@ -5,15 +5,17 @@ import { getSession } from "@/lib/auth/session";
 
 /** GET /api/dev/[id]/ado/projects/[project]/repos — list repos in an ADO project. */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string; project: string }> },
 ) {
   const session = await getSession();
   if (!session) return Response.json({ code: "unauthenticated" }, { status: 401 });
 
   const { id, project } = await params;
+  const provider = req.nextUrl.searchParams.get("provider");
+  const qs = provider ? `?provider=${encodeURIComponent(provider)}` : "";
   const data = await bffFetch(
-    `/dev/${encodeURIComponent(id)}/ado/projects/${encodeURIComponent(project)}/repos`,
+    `/dev/${encodeURIComponent(id)}/ado/projects/${encodeURIComponent(project)}/repos${qs}`,
     { session },
   );
   return Response.json(data);

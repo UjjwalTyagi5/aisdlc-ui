@@ -22,13 +22,7 @@ import { Label } from "@/components/ui/label";
  * Everyone else keeps grid and list exactly as before. See `canUseTable`.
  */
 export type ProjectsView = "grid" | "list" | "table";
-export type ProjectsSort = "recent" | "name" | "template";
-export type TemplateFilter =
-  | "all"
-  | "web_app"
-  | "microservice"
-  | "data_pipeline"
-  | "blank";
+export type ProjectsSort = "recent" | "name";
 
 /**
  * The view this viewer should see, from the URL and their standing.
@@ -51,7 +45,6 @@ export function resolveProjectsView(
 
 export interface ProjectsToolbarState {
   search: string;
-  template: TemplateFilter;
   sort: ProjectsSort;
   showArchived: boolean;
   view: ProjectsView;
@@ -101,11 +94,11 @@ export function ProjectsToolbar({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {/* THE TEMPLATE FILTER IS GONE. `projects` has no template column and
-            `ProjectOut` hardcodes "blank", so every project carried the same value —
-            "All templates" returned everything and each of the other four returned
-            nothing at all. A filter whose options can only empty the screen teaches
-            people that filtering does nothing here. */}
+        {/* NOTHING HERE FILTERS OR SORTS BY TEMPLATE. `projects` has no template
+            column and `ProjectOut` hardcodes "blank", so every project carried the
+            same value: the filter's options could only empty the screen, and "Sort by
+            Template" ordered a list by a constant and changed nothing. Both are gone,
+            along with the BLANK chip they matched on the card and the table. */}
 
         <Select
           value={value.sort}
@@ -120,7 +113,6 @@ export function ProjectsToolbar({
           <SelectContent>
             <SelectItem value="recent" className="font-mono text-xs">Most recent</SelectItem>
             <SelectItem value="name" className="font-mono text-xs">Name A→Z</SelectItem>
-            <SelectItem value="template" className="font-mono text-xs">Template</SelectItem>
           </SelectContent>
         </Select>
 

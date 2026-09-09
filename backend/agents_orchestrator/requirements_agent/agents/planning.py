@@ -1859,14 +1859,26 @@ async def create_board_project(
     Requires an admin-scoped connector token. On Jira a project key is auto-derived from
     the name when not given; on ADO the project provisions asynchronously.
 
+    NEVER ASK THE USER FOR A FIELD THE CHOSEN PROVIDER DOES NOT USE. `key` is Jira-only.
+    When the user asks for an Azure DevOps project, omit `key` entirely and do not
+    mention it — a person who said "create it on ADO" and is then asked for a "project
+    key (Jira only)" reasonably concludes the tool has confused the two boards. On Jira,
+    leave `key` empty unless the user volunteered one; it is derived from the name.
+
+    THE NAME IS THE ONLY THING YOU NEED. If the user has given a project name, or has
+    told you to use your judgement, call this — do not stack up a second confirmation
+    round for optional fields.
+
     Args:
         name: The new project's display name.
-        key: Optional Jira project key (uppercase, ≤10 chars); ignored for ADO.
+        key: Jira only, and optional even there. Omit for ADO.
         description: Optional project description.
 
     `provider` optionally names which board to use when this project has more than one
     (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
-    list_board_providers first if you are unsure which are available.
+    list_board_providers first if you are unsure which are available. When the user
+    names a board in words ("create it on ADO"), pass it here rather than relying on
+    the default, which may be the other one.
     """
     connector, err = await _board_connector("write", provider)
     if err:
@@ -1875,9 +1887,21 @@ async def create_board_project(
         res = await connector.write_adapter(
             "create_project", name=name, key=key, description=description
         )
+        # NAMED FROM THE CONNECTOR, not hardcoded. This said "queued on Azure DevOps"
+        # for whichever board queued the create, so a Jira project could be reported as
+        # an ADO one — the same two-boards confusion the docstring above guards against,
+        # in the reply rather than the question.
+        # `display_name` is what ScopedConnector actually exposes ("Azure DevOps",
+        # "Jira"); there is no `kind` on it, and guessing one would have quietly
+        # produced "the board" on every call.
+        label = getattr(connector, "display_name", None) or "the board"
         if res.get("queued"):
-            return f"Project '{name}' creation queued on Azure DevOps (provisions in the background)."
-        return f"Created project '{res.get('name', name)}' (key: {res.get('key', '?')})."
+            return f"Project '{name}' creation queued on {label} (provisions in the background)."
+        # A key is a Jira concept; reporting "key: ?" for an ADO project invents a field
+        # that board does not have.
+        created_key = res.get("key")
+        suffix = f" (key: {created_key})" if created_key else ""
+        return f"Created project '{res.get('name', name)}' on {label}{suffix}."
     except Exception as exc:  # noqa: BLE001
         return f"Error creating project '{name}': {_board_error(exc)}"
 

@@ -24,7 +24,7 @@ export type PrepareDocResult = z.infer<typeof PrepareDocResult>;
 export const DocType = z.enum([
   "doc_set", "overview", "sdd", "api_reference", "code_summary",
   "changelog", "release_notes", "rtm", "run_summary", "compliance",
-  "runbook_update", "knowledge_article", "custom",
+  "runbook_update", "knowledge_article", "handover", "kt", "custom",
 ]);
 export type DocType = z.infer<typeof DocType>;
 

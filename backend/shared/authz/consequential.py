@@ -110,7 +110,7 @@ async def owner_approved(stage: str) -> Tuple[bool, str]:
     Tracked in `help/requirements-design-e2e-plan.md` §5.
     """
     from config.ws_helper import (  # noqa: PLC0415
-        get_orchestrator_run, get_tenant_id, get_user_id,
+        get_orchestrator_run, get_project_id, get_tenant_id, get_user_id,
     )
 
     owner = _owner_label(stage)
@@ -151,12 +151,51 @@ async def owner_approved(stage: str) -> Tuple[bool, str]:
 
     from shared.services.orchestrator.gate_routing import can_user_approve  # noqa: PLC0415
 
-    if not can_user_approve(perms, stage):
-        logger.info(
-            "consequential action refused: %s is not an owner of %s", user_id, stage
-        )
-        return False, _NOT_OWNER.format(owner=owner, stage=stage.replace("_", " ").title())
-    return True, ""
+    if can_user_approve(perms, stage):
+        return True, ""
+
+    # THE PROJECT'S ADMINISTRATOR OWNS EVERY STAGE OF IT, in chat as well as in the
+    # Orchestrator. `_PHASE_PERMISSION` names one permission per stage and
+    # `project_admin` holds only `artifact:approve_plan` and
+    # `artifact:approve_documentation`, so a Project Admin asking the Requirements agent
+    # to do something consequential was told "a Business Analyst has to approve" — on
+    # their own project, where `AGENT_OWNERSHIP` already says they own every agent and
+    # where the artifact and gate routes both accept them as an equal approver.
+    #
+    # The exemption above covers the same person driving the Orchestrator. It stopped at
+    # the socket, so the identical action refused when they asked the agent directly,
+    # which is the route most people actually take.
+    #
+    # SCOPED TO THIS PROJECT, never to the role in the abstract. `project_admin_tier_for`
+    # is the same rule the artifact decision and the archive route use — org-wide
+    # standing, administering the parent unit, or a project_admin binding on this
+    # project itself. A Project Admin of some other project gets nothing here, which is
+    # exactly the hole a bare role check would open.
+    project_id = get_project_id() or ""
+    if project_id:
+        try:
+            from shared.authz.project_scope import project_admin_tier_for  # noqa: PLC0415
+            from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+            from shared.models.orm import Project  # noqa: PLC0415
+
+            async with get_db_session_for_tenant(tenant_id) as db:
+                project = await db.get(Project, project_id)
+                if project is not None and await project_admin_tier_for(
+                    db, user_id=user_id, permissions=perms, project=project
+                ):
+                    return True, ""
+        except Exception as exc:  # noqa: BLE001
+            # FAILS CLOSED, like everything else here: an unresolvable administration
+            # check is not permission. The refusal below still applies.
+            logger.warning(
+                "consequential action: project administration unresolvable "
+                "(stage=%s user=%s): %s", stage, user_id, type(exc).__name__,
+            )
+
+    logger.info(
+        "consequential action refused: %s is not an owner of %s", user_id, stage
+    )
+    return False, _NOT_OWNER.format(owner=owner, stage=stage.replace("_", " ").title())
 
 
 # ── The second half: did the owner actually say yes, on this turn? ────────────

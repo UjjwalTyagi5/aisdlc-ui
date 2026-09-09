@@ -176,6 +176,13 @@ export default function DeploymentPage() {
               <h2 className="mb-3 text-sm font-medium">Deployment requests</h2>
               <DeploymentApprovals projectId={id} />
             </div>
+            {/* And the documents, for the same reason: they exist whether or not this
+                browser has prepared a deployment. The tab bar below lives inside the
+                prepared branch, so a Documents tab there alone would be unreachable on
+                exactly the projects that have never deployed — every new one. */}
+            <div className="mt-10">
+              <DocumentList projectId={id} stage="deployment" />
+            </div>
           </div>
         </div>
       ) : (
@@ -233,6 +240,7 @@ export default function DeploymentPage() {
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         sessions={chat.sessions}
         activeSessionId={chat.sessionId}
         onSelectSession={chat.selectSession}

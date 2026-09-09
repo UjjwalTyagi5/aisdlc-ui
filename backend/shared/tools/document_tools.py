@@ -5,7 +5,15 @@ Import `extract_file_text` here and remove the per-agent copies of
 """
 from __future__ import annotations
 
+import logging
 import os
+import pathlib
+
+logger = logging.getLogger(__name__)
+
+#: Where chat uploads live: `files/{user_id}/attachments/{session_id}/{name}`.
+#: Taken from the same module that WRITES them, so the two cannot drift apart.
+from shared.services.attachment_store import _FILES_ROOT as _ATTACHMENTS_ROOT  # noqa: E402
 
 
 #: What this function returns INSTEAD of text when it could not extract any. These read
@@ -196,16 +204,56 @@ def attachment_message_contents(paths: "list[str] | None") -> "list[str]":
     return contents
 
 
+def _is_an_attachment_path(raw: str) -> bool:
+    """True only for a path inside somebody's chat-attachment directory.
+
+    THE PATH COMES FROM THE BROWSER. `pipeline_context.attachments` is client-supplied
+    JSON: the upload route decides where a file is WRITTEN, and nothing decided what
+    could be named for READING. A crafted turn could send
+    `{"attachments": [{"path": "C:/.../backend/.env"}]}` and have the agent extract it
+    and read it back in chat — every agent that reads attachments, on any project the
+    caller can open a chat on.
+
+    So containment is checked here, in the one place the shape is decoded, rather than
+    trusted at seven call sites. Server-derived paths (an agent's own input directory)
+    do not pass through this function and are unaffected.
+    """
+    root = _ATTACHMENTS_ROOT.resolve()
+    try:
+        candidate = pathlib.Path(raw).resolve()
+    except (OSError, ValueError):
+        return False
+    if root not in candidate.parents:
+        return False
+    # `files/{user}/attachments/{session}/{name}` — the segment after the user must be
+    # `attachments`, so a sibling directory (an agent's workspace, another user's
+    # generated output) cannot be reached by naming it directly.
+    try:
+        parts = candidate.relative_to(root).parts
+    except ValueError:
+        return False
+    return len(parts) >= 4 and parts[1] == "attachments"
+
+
 def attachment_paths_from_context(pipeline_context: object) -> "list[str]":
     """Paths of chat attachments carried on `pipeline_context.attachments`.
 
     Chat uploads go through POST /conversations/{id}/attachments and arrive as
-    `[{"path": ...}, ...]`; this is the one place that shape is decoded.
+    `[{"path": ...}, ...]`; this is the one place that shape is decoded — and the one
+    place that checks the path is actually an attachment. See `_is_an_attachment_path`.
     """
     if not isinstance(pipeline_context, dict):
         return []
     attachments = pipeline_context.get("attachments") or []
-    return [
+    paths = [
         a.get("path") for a in attachments
         if isinstance(a, dict) and a.get("path")
     ]
+    kept = [p for p in paths if _is_an_attachment_path(p)]
+    if len(kept) != len(paths):
+        # Loud, because the only legitimate way to be here is a bug in the client.
+        logger.warning(
+            "attachments: ignored %d path(s) outside the attachment store",
+            len(paths) - len(kept),
+        )
+    return kept

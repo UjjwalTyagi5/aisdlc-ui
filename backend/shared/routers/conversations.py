@@ -11,6 +11,7 @@ import uuid as _uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import Response
 from pydantic import BaseModel
 
 from shared.services import conversation_service as cs
@@ -159,3 +160,35 @@ async def delete_conversation(request: Request, session_id: str) -> dict:
     if not ok:
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
+
+
+@conversations_router.post("/{session_id}/cancel", status_code=204, response_class=Response)
+async def cancel_turn(request: Request, session_id: str) -> Response:
+    """Stop the turn this session is generating right now.
+
+    OUT OF BAND, AND THAT IS THE WHOLE POINT. The chat WebSocket the agent would read a
+    cancel message on is the one it is blocked inside: an agent notices a closed socket
+    at its next `receive_text()`, which does not run until the turn finishes. So the
+    signal has to arrive on a different request, which is this one. The agent discovers
+    it at the next thing it emits, because every agent's output funnels through
+    `ConnectionManager.broadcast`, which raises `TurnCancelled` for a cancelled session.
+
+    OWNERSHIP IS CHECKED LIKE ANY OTHER READ OF THIS SESSION. Stopping somebody else's
+    turn is a denial of service on their work, and an unowned session id must not be a
+    way to interrupt a stranger.
+
+    204 EVEN WHEN NOTHING WAS RUNNING. "Stop" is idempotent by nature — pressing it
+    twice, or after the turn already ended, is not an error worth surfacing in a UI
+    whose whole purpose was to get out of a turn.
+    """
+    tid, uid = _ctx_ids(request)
+    owner = await cs.session_owner(session_id, tenant_id=tid)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if owner != uid:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from config.turn_cancellation import mark_cancelled  # noqa: PLC0415
+
+    mark_cancelled(session_id)
+    return Response(status_code=204)

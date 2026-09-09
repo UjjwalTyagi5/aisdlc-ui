@@ -27,15 +27,12 @@ import { LoadingState } from "@/components/ui/loading-state";
 
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
-import { ApprovalCard } from "@/components/app/approval-card";
-import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
 import { DocumentCard } from "@/components/app/document-card";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
-import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
 import { GATE_POLICY } from "@/lib/agents";
 import { toBackendStage } from "@/lib/api/artifact-versions";
@@ -49,7 +46,6 @@ import type {
   Phase,
   ProjectId,
   Step,
-  UserRef,
 } from "@/lib/schemas";
 
 export interface StageWorkbenchProps {
@@ -84,17 +80,10 @@ export function StageWorkbench({
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, role } = useSession({ required: true });
+  const { role } = useSession({ required: true });
   // Route segment === phase for the stages that use this shell.
   const routeSegment = phase;
 
-  const me: UserRef = {
-    id: user.id as UserRef["id"],
-    name: user.name,
-    email: user.email,
-    avatarUrl: user.avatarUrl,
-    initials: user.initials,
-  };
 
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
@@ -132,8 +121,10 @@ export function StageWorkbench({
 
   const approval = useArtifactApproval(projectId);
 
-  const deletion = useDeleteArtifact(projectId, {
-    onDeleted: (a) => {
+  // The list owns the delete now; this stays because the PAGE owns the URL, and a
+  // deleted artifact must not be left named in ?artifact=.
+  const onArtifactDeleted = React.useCallback(
+    (a: { id: string }) => {
       // Drop ?artifact= when the deleted one was open, so a copied link does not point
       // at an artifact that no longer exists.
       if (searchParams.get("artifact") === a.id) {
@@ -143,7 +134,8 @@ export function StageWorkbench({
         router.replace(`/projects/${projectId}/${routeSegment}${qs ? `?${qs}` : ""}`);
       }
     },
-  });
+    [searchParams, router, projectId, routeSegment],
+  );
 
   const [chatOpen, setChatOpen] = React.useState(false);
   const [agentModel, setAgentModel] = React.useState<string>();
@@ -305,24 +297,26 @@ export function StageWorkbench({
               `items` is this page's PHASE-FILTERED list; `DocumentList` narrows further
               to this stage's documents plus the project-wide ones, so a project policy
               still appears here without another agent's files leaking in. */}
+          {/* ONE LIST. This stacked a DocumentList above an ArtifactList and handed
+              BOTH the same `items`, so every document appeared twice — once with its
+              approval state and once as a selectable row. On a project with nothing in
+              it that showed as two empty states one above the other, which is how it
+              got noticed on the Project Manager page.
+
+              The merged list selects (driving the detail pane) and carries the status
+              chip with Approve/Reject/Raise, which the artifact list never had. */}
           <DocumentList
             projectId={projectId}
             items={artifactsQ.isLoading ? null : items}
             stage={toBackendStage(phase)}
-            className="mb-4 shrink-0"
-          />
-
-          <ArtifactList
-            items={artifactsQ.isLoading ? null : items}
-            selectedId={selected?.id}
-            onSelect={selectArtifact}
-            onDelete={deletion.onDelete}
-            deletingId={deletion.deletingId}
-            isLoading={artifactsQ.isLoading}
+            title={`${title} artifacts`}
             emptyTitle={emptyTitle}
             emptyDescription={emptyDescription}
+            selectedId={selected?.id}
+            onSelect={selectArtifact}
+            onDeleted={onArtifactDeleted}
+            className="min-h-0 flex-1"
           />
-          {deletion.dialog}
         </aside>
 
         <main className="flex min-h-0 flex-col overflow-hidden">
@@ -368,54 +362,32 @@ export function StageWorkbench({
 
                 <ArtifactBody artifact={selected} approval={approval} />
 
-                {gate.type === "auto_approve" ? (
-                  // Documentation et al. auto-approve on completion (§7.1) — no
-                  // human decision; show the policy note instead of approve/reject.
-                  <section className="bg-muted/20 rounded-lg border p-4">
-                    <h3 className="text-sm font-semibold">{gate.title}</h3>
-                    <p className="text-muted-foreground mt-1 text-xs">{gate.description}</p>
-                  </section>
-                ) : (
-                  <ApprovalCard
-                    status={selected.status}
-                    title={gate.title}
-                    description={gate.description}
-                    decidedBy={
-                      selected.status === "approved" || selected.status === "rejected"
-                        ? me
-                        : undefined
-                    }
-                    decidedAt={
-                      selected.status === "approved" || selected.status === "rejected"
-                        ? selected.updatedAt
-                        : undefined
-                    }
-                    onApprove={
-                      selected.status === "awaiting_approval"
-                        ? () => decisionMutation.mutate({ id: selected.id, status: "approved" })
-                        : undefined
-                    }
-                    onReject={
-                      selected.status === "awaiting_approval"
-                        ? (reason) =>
-                            decisionMutation.mutate({
-                              id: selected.id,
-                              status: "rejected",
-                              reason,
-                            })
-                        : undefined
-                    }
-                    onAskAgent={() => setChatOpen(true)}
-                    pending={decisionMutation.isPending}
-                    pendingDecision={
-                      decisionMutation.isPending && decisionMutation.variables
-                        ? decisionMutation.variables.status === "approved"
-                          ? "approve"
-                          : "reject"
-                        : null
-                    }
-                  />
-                )}
+                {/* THE GATE, DESCRIBED — never decided from here.
+                    This branch used to render an ApprovalCard with working-looking
+                    Approve and Reject buttons, and it was wrong four times over.
+
+                    Its buttons called `updateArtifact`, which is
+                    `PATCH /artifacts/{id}` — documented in the router as
+                    "Accepted-but-no-op": it returns 200 with the artifact UNCHANGED and
+                    logs that the status was not persisted. So it toasted "Approved" and
+                    changed nothing, then refetched a list that still said pending.
+
+                    It described the STAGE gate ("accepts the design and unlocks
+                    Development") while acting on ONE artifact, which unlocks nothing.
+
+                    `decidedBy={me}` named whoever was looking at the screen rather than
+                    whoever decided.
+
+                    And it was a third decision surface for a document that already has
+                    two real ones: the row in the list on the left, and Requests &
+                    Approvals — both of which call the endpoints that actually persist.
+
+                    What the gate IS remains worth saying, so the policy note that
+                    auto-approving stages already used now covers every stage. */}
+                <section className="bg-muted/20 rounded-lg border p-4">
+                  <h3 className="text-sm font-semibold">{gate.title}</h3>
+                  <p className="text-muted-foreground mt-1 text-xs">{gate.description}</p>
+                </section>
               </div>
             ) : (
               <EmptyState
@@ -448,6 +420,7 @@ export function StageWorkbench({
         messages={chat.messages}
         onSend={chat.send}
         busy={chat.busy}
+        onStop={chat.cancel}
         sessions={chat.sessions}
         activeSessionId={chat.sessionId}
         onSelectSession={chat.selectSession}

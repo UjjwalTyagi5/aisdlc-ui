@@ -93,6 +93,13 @@ export const approveArtifact = (id: ArtifactId) =>
 
 /** Decline a generated document. Its pending bytes are deleted; the row is kept as
  *  the record that it was produced and refused. */
+/** Move a draft to pending — the moment somebody asks for a decision on it. */
+export const submitArtifact = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}/submit`, {
+    method: "POST",
+    schema: Artifact,
+  });
+
 export const rejectArtifact = (id: ArtifactId, reason?: string) =>
   api(`/artifacts/${encodeURIComponent(id)}/reject`, {
     method: "POST",
@@ -116,12 +123,15 @@ export const rejectArtifact = (id: ArtifactId, reason?: string) =>
 export async function uploadArtifact(
   projectId: ProjectId,
   file: File,
-  opts: { stage?: string | null; artifactType?: string } = {},
+  opts: { stage?: string | null; artifactType?: string; note?: string } = {},
 ): Promise<Artifact> {
   const form = new FormData();
   form.append("file", file);
   if (opts.stage) form.append("stage", opts.stage);
   if (opts.artifactType) form.append("artifact_type", opts.artifactType);
+  // Only when there is something to say — an empty field must not become an empty
+  // note, so the approver's "why" is either present or absent, never blank.
+  if (opts.note?.trim()) form.append("note", opts.note.trim());
 
   const res = await fetch(
     `/api/projects/${encodeURIComponent(projectId)}/artifacts/upload`,

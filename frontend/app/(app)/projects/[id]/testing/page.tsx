@@ -384,6 +384,7 @@ export default function TestingPage() {
           })
         }
         busy={chat.busy}
+        onStop={chat.cancel}
         sessions={chat.sessions}
         activeSessionId={chat.sessionId}
         onSelectSession={chat.selectSession}

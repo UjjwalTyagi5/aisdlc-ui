@@ -155,8 +155,10 @@ export default function ProjectSettingsPage() {
   // `project:update` is now a real permission held by bu_admin and project_admin, and
   // it is what the backend enforces. See docs/rbac-audit-2026-08-17.md.
   //
-  // Archiving stays on `workspace:manage` further down, matching its own route:
-  // removing a project from a unit is the unit's call, not the project's.
+  // Archiving uses this same permission, matching its own route. It used to sit on
+  // `workspace:manage`, which no Project Admin holds — so the one control that turns a
+  // project active or inactive was hidden from the person who runs it, on the page they
+  // run it from. The route agreed, and its docstring did not.
   const canUpdate = hasPermission(session, "project:update");
 
   const projectQ = useQuery({
@@ -561,15 +563,13 @@ export default function ProjectSettingsPage() {
                   </Badge>
                 )}
               </div>
-              <RequirePermission permission="workspace:manage">
-                <Button
-                  variant="outline"
-                  onClick={() => archiveMutation.mutate(!project.archived)}
-                  disabled={archiveMutation.isPending}
-                >
-                  {project.archived ? "Restore project" : "Archive project"}
-                </Button>
-              </RequirePermission>
+              <Button
+                variant="outline"
+                onClick={() => archiveMutation.mutate(!project.archived)}
+                disabled={!canUpdate || archiveMutation.isPending}
+              >
+                {project.archived ? "Restore project" : "Archive project"}
+              </Button>
             </CardContent>
           </Card>
         </TabsContent>

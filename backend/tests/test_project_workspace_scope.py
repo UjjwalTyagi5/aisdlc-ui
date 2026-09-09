@@ -144,14 +144,40 @@ async def test_a_bu_admin_reaches_every_project_in_their_own_unit(two_units):
     hdr = _hdr(user, t["org"], ["artifact:view", "workspace:manage"])
     c = _client()
 
-    assert c.get(f"/dev/{t['proj_a']}/workspace", headers=hdr).status_code == 200
-    # ...and stops at the unit boundary.
+    # 403, NOT 200 — and the difference from 404 is the whole assertion.
+    #
+    # These two tests used to expect 200 and had been failing since 2026-08-31, when
+    # `dev_workspace_router` gained `require_agent_access("development")` on top of
+    # project scope. Governance roles hold `none` on every agent in
+    # `AGENT_DEFAULT_REACH` by design (PRD §14.8: they do not run agents), and the
+    # org_admin-denial case is required coverage in
+    # docs/superpowers/specs/2026-08-31-development-agent-verification-design.md §2.4.
+    # So the behaviour is intended and these expectations were the stale half.
+    #
+    # They are kept rather than deleted because the pair still answers the question
+    # this FILE exists for, just one layer further in: a project inside your unit is
+    # refused for the agent (403 — it is yours, this agent is not), and one outside it
+    # is refused for existing at all (404). Collapsing both to 404 would mean scope had
+    # stopped being enforced separately, and nothing else would notice.
+    assert c.get(f"/dev/{t['proj_a']}/workspace", headers=hdr).status_code == 403
+    # ...and stops at the unit boundary, where the answer changes to "no such project".
     assert c.get(f"/dev/{t['proj_b']}/workspace", headers=hdr).status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_an_org_admin_reaches_everything(two_units):
-    """`admin:*` is org-wide standing, so no per-project binding is expected."""
+async def test_an_org_admin_is_refused_the_agent_but_never_the_project(two_units):
+    """`admin:*` is org-wide standing, so scope never refuses them — every project in
+    the tenant is theirs to address, and BOTH answers below are 403 rather than one of
+    them being 404.
+
+    That is the contrast with the Business Unit Admin above, and it is what makes these
+    two tests worth keeping now that neither returns 200: scope and agent access are
+    still two separate gates, and you can tell which one spoke.
+
+    An Org Admin who genuinely needs the workspace is granted it per project through
+    `agent_access_overrides` (POST /projects/{id}/agent-access-overrides), so this is a
+    default, not a wall.
+    """
     t = two_units
     user = f"oa-{_uuid.uuid4()}"
     await grant_role(user, t["org"], "org_admin",
@@ -159,8 +185,8 @@ async def test_an_org_admin_reaches_everything(two_units):
     hdr = _hdr(user, t["org"], ["admin:*"])
     c = _client()
 
-    assert c.get(f"/dev/{t['proj_a']}/workspace", headers=hdr).status_code == 200
-    assert c.get(f"/dev/{t['proj_b']}/workspace", headers=hdr).status_code == 200
+    assert c.get(f"/dev/{t['proj_a']}/workspace", headers=hdr).status_code == 403
+    assert c.get(f"/dev/{t['proj_b']}/workspace", headers=hdr).status_code == 403
 
 
 @pytest.mark.asyncio
