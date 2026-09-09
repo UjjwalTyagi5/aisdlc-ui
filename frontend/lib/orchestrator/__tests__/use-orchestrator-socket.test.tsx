@@ -763,3 +763,75 @@ describe("useOrchestratorSocket — deliverables", () => {
     expect(result.current.deliverables).toHaveLength(0);
   });
 });
+
+/**
+ * A turn's own files, on the echoed bubble.
+ *
+ * Two things are pinned. The first is that they reach the message at all — the cockpit
+ * mocks this hook, so nothing on that side would notice the stamp being dropped.
+ *
+ * The second is that they DO NOT reach the wire. The backend reads the run's attachment
+ * store to build the agent's context; a list on the frame would be a second source for
+ * the same thing, and the two would diverge the moment an upload landed between the
+ * cockpit's last refetch and the send. This field is display only.
+ */
+describe("useOrchestratorSocket — attachments on the echoed turn", () => {
+  const runId = "3f6b0b7e-1a8a-4b3d-8a2c-0f1e2d3c4b5a";
+  const prd = { name: "QuickLink_PRD.docx", url: "/generated/u1/attachments/r1/p.docx" };
+
+  it("stamps the files on the user's own bubble", async () => {
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({
+        text: "turn this into stories",
+        resolveRunId: async () => runId,
+        attachments: [prd],
+      });
+    });
+
+    const mine = result.current.messages.find((m) => m.role === "user");
+    expect(mine!.attachments).toEqual([prd]);
+  });
+
+  it("leaves the field off a turn that carried nothing", async () => {
+    // Absent, not an empty array: the thread draws a separating rule above the chips,
+    // and an empty list would draw the rule under every message in the conversation.
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({ text: "what do you make of it?", resolveRunId: async () => runId });
+    });
+
+    const mine = result.current.messages.find((m) => m.role === "user");
+    expect(mine!.attachments).toBeUndefined();
+  });
+
+  it("leaves the field off when the caller passes an empty list", async () => {
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({
+        text: "and the criteria?",
+        resolveRunId: async () => runId,
+        attachments: [],
+      });
+    });
+
+    const mine = result.current.messages.find((m) => m.role === "user");
+    expect(mine!.attachments).toBeUndefined();
+  });
+
+  it("never puts them on the frame — the server reads its own store", async () => {
+    const { result } = await mount();
+    await act(async () => {
+      result.current.send({
+        text: "turn this into stories",
+        resolveRunId: async () => runId,
+        attachments: [prd],
+      });
+    });
+
+    await waitFor(() => expect(socket().sent.length).toBeGreaterThan(0));
+    for (const raw of socket().sent) {
+      expect(JSON.parse(raw)).not.toHaveProperty("attachments");
+    }
+  });
+});

@@ -43,6 +43,15 @@ export interface OrchestratorMessage {
   createdAt: number;
   /** `provider::model_id` of the model that answered — agent turns only. */
   modelKey?: string | null;
+  /**
+   * Files that went out WITH this turn — user turns only.
+   *
+   * Not the run's attachment list, which is everything ever attached and is already
+   * shown under the composer. This is the narrower claim the user needs once a turn
+   * has gone: that these files were carried by THIS message. Stamped at send time, so
+   * a file attached afterwards does not retroactively appear on an earlier turn.
+   */
+  attachments?: ReadonlyArray<{ name: string; url: string }>;
 }
 
 export type SessionStatus = "idle" | "running" | "paused" | "complete" | "failed";
