@@ -84,6 +84,18 @@ const ROUTES: {
     url: "http://x/api/deployment/p1/ado/repos/acme/web/prs?provider=github",
     params: { id: "p1", project: "acme", repo: "web" },
   },
+  {
+    name: "code review · open PRs",
+    load: () => import("@/app/api/code-review/[id]/ado/repos/[project]/[repo]/prs/route"),
+    url: "http://x/api/code-review/p1/ado/repos/acme/web/prs?provider=github",
+    params: { id: "p1", project: "acme", repo: "web" },
+  },
+  {
+    name: "security · open PRs",
+    load: () => import("@/app/api/security/[id]/ado/repos/[project]/[repo]/prs/route"),
+    url: "http://x/api/security/p1/ado/repos/acme/web/prs?provider=github",
+    params: { id: "p1", project: "acme", repo: "web" },
+  },
 ];
 
 describe("the chosen source reaches the backend", () => {

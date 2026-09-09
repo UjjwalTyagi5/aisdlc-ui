@@ -60,7 +60,13 @@ export const listAdoBranches = (
 
 export const pullRepo = (
   projectId: ProjectId,
-  body: { ado_project: string; repo_name: string; branch: string },
+  body: {
+    /** Where the code lives — omitted when the project has a single source. */
+    provider?: string;
+    ado_project: string;
+    repo_name: string;
+    branch: string;
+  },
 ) =>
   api(`/dev/${enc(projectId)}/workspace/pull`, {
     method: "POST",

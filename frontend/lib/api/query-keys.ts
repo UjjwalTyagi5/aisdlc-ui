@@ -147,15 +147,15 @@ export const qk = {
     ) => ["agent-skills", "versions", skillKey, agentId, scope, scopeId ?? ""] as const,
   },
   codeReview: {
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["code-review", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["code-review", "prs", id, p, r, provider ?? ""] as const,
     reviews: (id: ProjectId) => ["code-review", "reviews", id] as const,
     review: (id: ProjectId, runId: string) =>
       ["code-review", "review", id, runId] as const,
   },
   security: {
-    prs: (id: ProjectId, p: string, r: string) =>
-      ["security", "prs", id, p, r] as const,
+    prs: (id: ProjectId, p: string, r: string, provider?: string) =>
+      ["security", "prs", id, p, r, provider ?? ""] as const,
     scans: (id: ProjectId) => ["security", "scans", id] as const,
     scan: (id: ProjectId, runId: string) =>
       ["security", "scan", id, runId] as const,

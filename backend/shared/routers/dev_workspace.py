@@ -1,4 +1,4 @@
-﻿"""Dev-workspace cascade endpoints — ADO project / repo / branch picker,
+"""Dev-workspace cascade endpoints — ADO project / repo / branch picker,
 persistent workspace management, and PR listing for the Development agent page.
 
 Routes (mounted under the '/dev' prefix in process_api):
@@ -46,6 +46,9 @@ dev_workspace_router = APIRouter(
 
 
 class PullRequest(BaseModel):
+    # Where the code lives. Absent means "the project's single configured source", so a
+    # one-source project behaves exactly as it did before the picker existed.
+    provider: str | None = None
     ado_project: str
     repo_name: str
     branch: str
@@ -140,19 +143,12 @@ async def get_sources(project_id: str, request: Request) -> dict:
 async def pull_workspace(project_id: str, body: PullRequest, request: Request) -> dict:
     tenant_id: str = request.state.tenant_id
     pulled_by = str(uid) if (uid := getattr(request.state, "user_id", None)) else None
+    from shared.services import repo_source  # noqa: PLC0415
 
-    org_url, pat = await ado_repos.resolve_auth(
-        tenant_id, project_id=project_id, owner_id=pulled_by or ""
-    )
-    remote_url = await ado_repos.resolve_clone_url(
-        body.ado_project, body.repo_name, pat=pat, org_url=org_url
-    )
-    if remote_url is None:
-        return {
-            "status": "error",
-            "error": f"Repo '{body.repo_name}' not found in ADO project '{body.ado_project}'",
-        }
-
+    # THE DEVELOPMENT WORKSPACE WAS AZURE DEVOPS ONLY, on the page whose entire purpose
+    # is to have the code checked out — a project whose repository lives on GitHub could
+    # pick nothing here. The clone below is the same git either way; only resolving the
+    # remote differs, and that difference lives in the facade.
     work_dir = str(
         ado_repos.WORKSPACE_ROOT / tenant_id / project_id / "repo"
     )
@@ -164,7 +160,10 @@ async def pull_workspace(project_id: str, body: PullRequest, request: Request) -
         "ado_project": body.ado_project,
         "repo_name": body.repo_name,
         "branch": body.branch,
-        "remote_url": remote_url,
+        # Filled in once the clone reports where it actually pulled from. `remote_url`
+        # is NOT NULL, and the row has to exist before the clone starts so a pull that
+        # dies leaves "pulling" behind rather than nothing at all.
+        "remote_url": "",
         "work_dir": work_dir,
         "pulled_by": pulled_by,
     }
@@ -174,15 +173,25 @@ async def pull_workspace(project_id: str, body: PullRequest, request: Request) -
     )
 
     try:
-        result = await asyncio.to_thread(
-            ado_repos.clone_into, work_dir, remote_url, body.branch, pat
+        result = await repo_source.clone(
+            tenant_id, body.ado_project, body.repo_name, body.branch, work_dir,
+            project_id=project_id, owner_id=pulled_by or "", provider=body.provider,
         )
         workspace = await dev_workspace_store.upsert(
             tenant_id,
             project_id,
-            {**base_fields, "status": "ready", "commit_sha": result["commit_sha"]},
+            {
+                **base_fields,
+                "remote_url": result.get("remote_url", ""),
+                "status": "ready",
+                "commit_sha": result["commit_sha"],
+            },
         )
     except RuntimeError as exc:
+        # A repository that is not there, a provider with no credential, a clone that
+        # failed: all three arrive here carrying a sentence worth showing, and all three
+        # used to be a bare 500 or a silent "not found in ADO project" that named the
+        # wrong host entirely.
         workspace = await dev_workspace_store.upsert(
             tenant_id, project_id, {**base_fields, "status": "error"}
         )

@@ -177,6 +177,46 @@ async def get_pull_request(
         namespace, repo, number, pat=secret, org_url=base)
 
 
+async def clone_and_diff(
+    tenant_id: str, namespace: str, repo: str, source: str, base: str, work_dir: str,
+    *, project_id: str = "", owner_id: str = "",
+    provider: Provider | str | None = None,
+) -> dict[str, Any]:
+    """Clone a branch and diff it against a base, whichever host it lives on.
+
+    THE SAME SHAPE AS `clone`, and for the same reason: `ado_repos.clone_and_diff` is
+    plain git once it has a remote and a secret, so both providers share it rather than
+    growing a second copy that would drift. Only resolving the remote differs, and that
+    difference already lives in each backend's `resolve_clone_url`.
+
+    Code Review is the only caller — it needs the diff, not just the checkout.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from shared.services import ado_repos  # noqa: PLC0415
+
+    chosen, base_url, secret = await resolve(
+        tenant_id, project_id=project_id, owner_id=owner_id, provider=provider)
+    backend = _backend(chosen)
+
+    if chosen == "github":
+        remote = await backend.resolve_clone_url(namespace, repo, token=secret)
+    else:
+        remote = await backend.resolve_clone_url(
+            namespace, repo, pat=secret, org_url=base_url)
+    if not remote:
+        raise RuntimeError(
+            f"Repository {repo!r} was not found under {namespace!r} on "
+            f"{'GitHub' if chosen == 'github' else 'Azure DevOps'}."
+        )
+
+    result = await asyncio.to_thread(
+        ado_repos.clone_and_diff, work_dir, remote, source, base, secret)
+    result["provider"] = chosen
+    result["remote_url"] = remote
+    return result
+
+
 async def clone(
     tenant_id: str, namespace: str, repo: str, branch: str, work_dir: str,
     *, project_id: str = "", owner_id: str = "",

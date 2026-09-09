@@ -15,12 +15,22 @@ const enc = encodeURIComponent;
 // ADO project/repo/branch cascade is reused from the dev-workspace client
 // (listAdoProjects / listAdoRepos / listAdoBranches) — same generic picker.
 
-export const listOpenPrs = (projectId: ProjectId, adoProject: string, repo: string) =>
-  api(`/code-review/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs`, {
-    schema: z.array(AdoPr),
-  });
+export const listOpenPrs = (
+  projectId: ProjectId,
+  adoProject: string,
+  repo: string,
+  provider?: string,
+) =>
+  api(
+    `/code-review/${enc(projectId)}/ado/repos/${enc(adoProject)}/${enc(repo)}/prs${
+      provider ? `?provider=${encodeURIComponent(provider)}` : ""
+    }`,
+    { schema: z.array(AdoPr) },
+  );
 
 export interface PrepareBody {
+  /** Where the code lives — omitted when the project has a single source. */
+  provider?: string;
   mode: "branch" | "pr";
   ado_project: string;
   repo_name: string;
