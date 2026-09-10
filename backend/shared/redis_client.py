@@ -26,6 +26,9 @@ connection detail is carried in the URL:
                                                     TLS + password, single node
     rediss://:<access-key>@host.redis.azure.net:10000/0?cluster=true
                                                     TLS + password, OSS cluster mode
+    rediss://<object-id>:<entra-token>@host…:10000/0?cluster=true&tls_skip_hostname_check=true
+                                                    Azure Managed Redis, Entra auth —
+                                                    see the note on the hostname check
 
 `rediss://` selects TLS, `:<password>@` supplies the access key, the port is the port —
 redis-py derives all of that from the URL already. The only thing it cannot infer is
@@ -68,26 +71,68 @@ from config.env import REDIS_URL
 CONNECT_TIMEOUT_S = 2.0
 OPERATION_TIMEOUT_S = 2.0
 
-# Query parameter that selects the cluster client. Consumed here and stripped before the
-# URL reaches redis-py, which would reject it as an unknown connection argument.
+# Query parameters consumed HERE and stripped before the URL reaches redis-py, which
+# would reject them as unknown connection arguments.
 _CLUSTER_PARAM = "cluster"
+_SKIP_TLS_HOSTNAME_PARAM = "tls_skip_hostname_check"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
-def _split_cluster_flag(url: str) -> tuple[str, bool]:
-    """Return the URL with `cluster=` removed, and whether it asked for cluster mode."""
+def _split_flags(url: str) -> tuple[str, bool, bool]:
+    """Return (url_without_our_params, cluster_mode, skip_tls_hostname_check)."""
     if not url:
-        return url, False
+        return url, False, False
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
-    cluster = any(k.lower() == _CLUSTER_PARAM and v.lower() in _TRUTHY for k, v in query)
-    remaining = [(k, v) for k, v in query if k.lower() != _CLUSTER_PARAM]
-    return urlunsplit(parts._replace(query=urlencode(remaining))), cluster
+    ours = {_CLUSTER_PARAM, _SKIP_TLS_HOSTNAME_PARAM}
+
+    def _flag(name: str) -> bool:
+        return any(k.lower() == name and v.lower() in _TRUTHY for k, v in query)
+
+    remaining = [(k, v) for k, v in query if k.lower() not in ours]
+    return (
+        urlunsplit(parts._replace(query=urlencode(remaining))),
+        _flag(_CLUSTER_PARAM),
+        _flag(_SKIP_TLS_HOSTNAME_PARAM),
+    )
+
+
+def _split_cluster_flag(url: str) -> tuple[str, bool]:
+    """Back-compat shim: URL minus our params, plus the cluster flag."""
+    target, cluster, _ = _split_flags(url)
+    return target, cluster
 
 
 def is_cluster_url(url: str | None = None) -> bool:
     """Whether this URL asks for cluster mode. Exposed for diagnostics and tests."""
     return _split_cluster_flag(url if url is not None else REDIS_URL)[1]
+
+
+def redis_pubsub_from_url(url: str | None = None, **overrides: Any):
+    """A client that can PUBLISH and SUBSCRIBE, even when the URL asks for cluster mode.
+
+    THE CLUSTER CLIENT CANNOT DO PUB/SUB AT ALL. `RedisCluster` in redis-py exposes
+    neither `publish` nor `pubsub` — calling either is an AttributeError, not a
+    degraded result — while three call sites here need them: the artifact-event
+    listener in process_api, artifact_service, and the pipeline consumer.
+
+    A plain client is the right tool anyway. Redis Cluster propagates ordinary PUBLISH
+    across every node, so a subscriber on any single node sees the message; there is no
+    sharding decision to make and therefore no need for a cluster-aware client. It also
+    dials the endpoint HOSTNAME rather than the node IPs the cluster would hand back,
+    so it keeps full TLS certificate verification — the hostname check that cluster mode
+    has to give up (see redis_from_url) stays on for this path.
+
+    Verified against Azure Managed Redis (OSSCluster policy): subscribe, publish and
+    delivery all work on this client while the cluster client cannot even offer them.
+    """
+    target, _cluster, _skip = _split_flags(url if url is not None else REDIS_URL)
+    settings: dict[str, Any] = {
+        "socket_connect_timeout": CONNECT_TIMEOUT_S,
+        "socket_timeout": OPERATION_TIMEOUT_S,
+    }
+    settings.update(overrides)
+    return aioredis.from_url(target, **settings)
 
 
 def redis_from_url(url: str | None = None, **overrides: Any):
@@ -97,12 +142,33 @@ def redis_from_url(url: str | None = None, **overrides: Any):
     the operating system will, which is the hang described above, and it cannot reach the
     cluster client at all.
     """
-    target, cluster = _split_cluster_flag(url if url is not None else REDIS_URL)
+    target, cluster, skip_tls_hostname = _split_flags(
+        url if url is not None else REDIS_URL
+    )
 
     settings: dict[str, Any] = {
         "socket_connect_timeout": CONNECT_TIMEOUT_S,
         "socket_timeout": OPERATION_TIMEOUT_S,
     }
+    if skip_tls_hostname:
+        # WHY THIS EXISTS, AND WHAT IT DOES NOT DO. Azure Managed Redis with the
+        # OSSCluster policy answers CLUSTER SHARDS with raw node IPs (…:8502), so the
+        # cluster client then dials an IP while the certificate is issued for
+        # *.redis.azure.net — TLS fails with "IP address mismatch" before any command
+        # runs. There is no client-side way to make redis-py dial the hostname it was
+        # given once the cluster has told it otherwise.
+        #
+        # This disables the HOSTNAME match only. The certificate chain is still
+        # verified against the trust store, so an attacker still needs a certificate a
+        # trusted CA issued; what is lost is the binding of that certificate to this
+        # particular host. On a private Azure endpoint that is a small risk, but it is
+        # not zero, which is why it is an explicit opt-in in the URL rather than
+        # something cluster mode turns on silently.
+        #
+        # The clean fix is server-side: switch the cluster's policy from OSSCluster to
+        # Enterprise, which presents one endpoint and needs no redirects. That changes
+        # a shared resource, so it is a conversation, not a default.
+        settings["ssl_check_hostname"] = False
     settings.update(overrides)
 
     if cluster:

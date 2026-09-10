@@ -112,7 +112,19 @@ class PipelineRunConsumer(AbstractWorker):
             logger.debug("pipeline run publish skipped: %s", type(exc).__name__)
 
     async def _get_redis_client(self):
-        """Return the injected client, or the base worker's own connection."""
+        """Return a client that can PUBLISH — injected, or one built for the purpose.
+
+        The base worker's own client is a RedisCluster when REDIS_URL asks for cluster
+        mode, and RedisCluster has no `publish` at all. The caller wraps this in a
+        broad `except` that logs at DEBUG, so the AttributeError would not surface as
+        an error — pipeline-run events would simply stop reaching the artifact channel
+        with nothing above debug to say so. Hand back a pub/sub-capable client instead.
+        """
         if self._injected_redis is not None:
             return self._injected_redis
-        return getattr(self, "_redis", None)
+        client = getattr(self, "_redis", None)
+        if client is not None and hasattr(client, "publish"):
+            return client
+        from shared.redis_client import redis_pubsub_from_url  # noqa: PLC0415
+
+        return redis_pubsub_from_url()

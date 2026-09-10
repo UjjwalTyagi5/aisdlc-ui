@@ -12,6 +12,8 @@ import time
 from abc import ABC, abstractmethod
 
 import redis.asyncio as aioredis
+
+from shared.redis_client import redis_from_url
 from redis.exceptions import ResponseError
 
 from config.env import REDIS_URL, WORKER_RECLAIM_TIMEOUT_MS
@@ -34,8 +36,20 @@ class AbstractWorker(ABC):
         self._reclaim_counts: dict[bytes, int] = {}
 
     async def run(self) -> None:
-        client = aioredis.from_url(REDIS_URL)
-        await self._ensure_group(client)
+        client = redis_from_url()
+        try:
+            await self._ensure_group(client)
+        except Exception as exc:
+            # Redis unreachable at startup. Every other Redis path on this platform
+            # degrades rather than failing, and a worker that cannot reach its stream
+            # has nothing to do — but raising here killed the task with "Task exception
+            # was never retrieved", which is noise that hides real failures.
+            logger.warning(
+                "%s worker: Redis unavailable (%s) — not consuming %s",
+                self.agent_type, type(exc).__name__, self.stream_key,
+            )
+            await client.aclose()
+            return
         try:
             while True:
                 # Crash recovery first: reclaim messages idle longer than the

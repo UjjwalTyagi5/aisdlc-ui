@@ -28,6 +28,8 @@ from typing import Any, Optional
 
 import redis.asyncio as aioredis
 
+from shared.redis_client import redis_from_url
+
 from config.env import REDIS_URL
 from shared.audit.models import AuditEventPayload
 from shared.audit.service import audit_service as _default_audit_service
@@ -119,7 +121,7 @@ class AuditRetryWorker:
         client = self._redis_client
         own_client = False
         if client is None:
-            client = aioredis.from_url(REDIS_URL)
+            client = redis_from_url()
             own_client = True
         try:
             results = await client.xread(
@@ -152,7 +154,7 @@ class AuditRetryWorker:
         client = self._redis_client
         own_client = False
         if client is None:
-            client = aioredis.from_url(REDIS_URL)
+            client = redis_from_url()
             own_client = True
         last_id: Any = "0-0"
         logger.info("AuditRetryWorker started — draining %s", _DEAD_LETTER_STREAM)

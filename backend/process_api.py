@@ -267,12 +267,28 @@ async def _handle_artifact_ready(payload: dict) -> None:
 
 
 async def _artifact_event_listener() -> None:
-    """Subscribe to Redis artifact_events channel and route pipeline stage transitions."""
-    from shared.redis_client import redis_from_url
+    """Subscribe to Redis artifact_events channel and route pipeline stage transitions.
 
-    client = redis_from_url()
+    Returns quietly when Redis is unreachable. `subscribe` used to sit outside the try,
+    so an unavailable Redis killed this task with the exception still pending — and the
+    lifespan's `await artifact_listener_task` only catches CancelledError, so it surfaced
+    at SHUTDOWN as "Application shutdown failed. Exiting." rather than at startup as the
+    degraded feature it actually is. Pipeline stage transitions stop; the API does not.
+    """
+    from shared.redis_client import redis_pubsub_from_url
+
+    # Pub/sub needs the non-cluster client: RedisCluster has no .pubsub() at all.
+    client = redis_pubsub_from_url()
     pubsub = client.pubsub()
-    await pubsub.subscribe(_ARTIFACT_CHANNEL)
+    try:
+        await pubsub.subscribe(_ARTIFACT_CHANNEL)
+    except Exception as exc:
+        logger.warning(
+            "artifact_event_listener: Redis unavailable (%s) — stage transitions "
+            "will not be routed", type(exc).__name__,
+        )
+        await client.aclose()
+        return
     try:
         async for message in pubsub.listen():
             if message.get("type") == "message":
@@ -287,8 +303,14 @@ async def _artifact_event_listener() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await pubsub.unsubscribe(_ARTIFACT_CHANNEL)
-        await client.aclose()
+        try:
+            await pubsub.unsubscribe(_ARTIFACT_CHANNEL)
+        except Exception:  # Redis may have gone away; shutdown must still complete.
+            pass
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 async def _refresh_health(app: FastAPI) -> None:
