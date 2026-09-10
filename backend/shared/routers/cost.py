@@ -176,43 +176,73 @@ async def get_cost_breakdown(
     if ENABLE_LANGFUSE:
         from shared.routers.traces import _lf_get  # noqa: PLC0415
         _cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+        _to = datetime.now(timezone.utc).isoformat()
 
-        # ONE QUERY PER UNIT THE CALLER MAY SEE, summed — rather than one tenant-wide
-        # query. Langfuse ANDs its tag filter, so there is no single tag set meaning
-        # "these three workspaces"; and post-filtering is not available either, because
-        # the daily-metrics endpoint returns figures already aggregated across whatever
-        # it matched. Totalling per unit is the only shape that computes the answer FROM
-        # the allowed set rather than trimming it afterwards.
+        # PER-PROJECT, because that is where the traces now live. Each project has its
+        # own Langfuse project and key pair, so the old shape — one tenant/workspace
+        # tagged query against a shared project — reads a project that holds nothing and
+        # reports zero spend. That is worse than an error: "no spend" is a plausible
+        # answer, so nobody investigates.
         #
-        # An org-wide caller keeps the single untagged query — one call, as before.
-        if workspace:
-            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{workspace}"]]
-        elif allowed_ws is None:
-            _tag_sets = [[f"tenant:{tenant_id}"]]
-        else:
-            # Empty allowed set → no queries at all → zeroes, which is the honest
-            # answer for someone with no units rather than the organisation's total.
-            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{w}"] for w in allowed_ws]
+        # AND grouped by agent, which the model-only daily-metrics endpoint could not
+        # do. /api/public/metrics takes dimensions, and our trace name is
+        # `sdlc:{agent_type}`, so one query per project yields (agent, model, cost,
+        # tokens) together — the split the Cost page has always described and never had.
+        import json as _json  # noqa: PLC0415
 
-        per_model: dict[str, list] = {}  # model -> [in_tok, out_tok, cost, observations]
-        for _tags in _tag_sets:
+        from shared.observability.bindings import load_bindings  # noqa: PLC0415
+
+        _bound = (await db.execute(
+            text(
+                "select project_id, workspace_id from langfuse_bindings "
+                "where tenant_id = cast(:t as uuid) and is_active = true"
+            ),
+            {"t": str(tenant_id)},
+        )).all()
+        # Respect the same unit scoping the tag query used: a caller only ever
+        # aggregates over units they may read.
+        _pids = [
+            str(r[0]) for r in _bound
+            if (workspace is None or str(r[1]) == str(workspace))
+            and (allowed_ws is None or str(r[1]) in allowed_ws)
+        ]
+        _bindings = await load_bindings(db, str(tenant_id), _pids) if _pids else []
+
+        # key: (agent_type, model) -> [in, out, cost, calls]
+        _per: dict[tuple[str, str], list] = {}
+        for _b in _bindings:
+            _q = {
+                "view": "observations",
+                "metrics": [
+                    {"measure": "totalCost", "aggregation": "sum"},
+                    {"measure": "totalTokens", "aggregation": "sum"},
+                    {"measure": "count", "aggregation": "count"},
+                ],
+                "dimensions": [{"field": "traceName"}, {"field": "providedModelName"}],
+                "fromTimestamp": _cutoff,
+                "toTimestamp": _to,
+            }
             _data = await _lf_get(
-                "/api/public/metrics/daily",
-                {"tags": _tags, "fromTimestamp": _cutoff},
+                "/api/public/metrics", {"query": _json.dumps(_q)},
+                host=_b.langfuse_host, public_key=_b.public_key, secret_key=_b.secret_key,
             )
-            for _day in (_data or {}).get("data") or []:
-                for _u in _day.get("usage") or []:
-                    _m = _u.get("model")
-                    if not _m:  # skip the null-model bucket (non-LLM spans)
-                        continue
-                    _agg = per_model.setdefault(_m, [0, 0, 0.0, 0])
-                    _agg[0] += int(_u.get("inputUsage") or 0)
-                    _agg[1] += int(_u.get("outputUsage") or 0)
-                    _agg[2] += float(_u.get("totalCost") or 0.0)
-                    _agg[3] += int(_u.get("countObservations") or 0)
-        for _m, (_i, _o, _c, _n) in per_model.items():
+            for _row in (_data or {}).get("data") or []:
+                _model = _row.get("providedModelName")
+                if not _model:  # non-LLM spans carry no model and no cost
+                    continue
+                _name = str(_row.get("traceName") or "")
+                _agent = _name.split("sdlc:", 1)[1] if _name.startswith("sdlc:") else ""
+                _agg = _per.setdefault((_agent, _model), [0, 0, 0.0, 0])
+                # The API reports total tokens, not the input/output split; attribute
+                # them to input rather than invent a division that was never measured.
+                _agg[0] += int(_row.get("sum_totalTokens") or 0)
+                _agg[2] += float(_row.get("sum_totalCost") or 0.0)
+                _agg[3] += int(_row.get("count_count") or 0)
+
+        for (_agent, _model), (_i, _o, _c, _n) in sorted(_per.items()):
             rows.append(CostBreakdownRow(
-                model=_m, inputTokens=_i, outputTokens=_o,
+                agentType=_agent or None,
+                model=_model, inputTokens=_i, outputTokens=_o,
                 costUsd=round(_c, 6), callCount=_n,
             ))
             total_input += _i

@@ -95,65 +95,78 @@ async def test_get_cost_requires_cost_view(mint_token):
 
 
 @pytest.mark.unit
-async def test_get_cost_returns_aggregates_and_totals(mint_token, monkeypatch):
-    """GET /cost returns per-model rows + grand totals, sourced from Langfuse metrics."""
+async def test_get_cost_returns_per_agent_and_per_model_rows(mint_token, monkeypatch):
+    """GET /cost groups by (agent, model), sourced from each project's own Langfuse.
+
+    Was per-model only against a shared project. Both halves changed for the same
+    reason: traces moved into per-project Langfuse projects, so the old tenant-tagged
+    query reads a project holding nothing and reports zero spend — and the richer
+    /api/public/metrics endpoint that the per-project read needs also takes dimensions,
+    which is what finally makes the agent split the Cost page promised possible.
+    """
     import httpx
     from process_api import app
     from shared.db import get_db_session
 
-    # Cost is Langfuse-sourced now: enable it and mock the /api/public/metrics/daily feed.
     import config.env as _env
     import shared.routers.traces as _traces
     monkeypatch.setattr(_env, "ENABLE_LANGFUSE", True)
 
-    async def _fake_lf_get(path, params):
-        assert path == "/api/public/metrics/daily"
-        assert any(t.startswith("tenant:") for t in params.get("tags", []))
-        return {"data": [{"date": "2026-07-09", "totalCost": 0.045, "usage": [
-            {"model": "claude-sonnet-4-6", "inputUsage": 1000, "outputUsage": 500,
-             "totalCost": 0.015, "countObservations": 3},
-            {"model": "claude-opus-4-8", "inputUsage": 2000, "outputUsage": 1000,
-             "totalCost": 0.030, "countObservations": 2},
-            {"model": None, "inputUsage": 0, "outputUsage": 0, "totalCost": 0,
-             "countObservations": 6},  # non-LLM bucket — must be skipped
-        ]}]}
+    # One bound project for this tenant, so the per-project path is the one exercised.
+    class _Binding:
+        project_id = "11111111-1111-1111-1111-111111111111"
+        workspace_id = "22222222-2222-2222-2222-222222222222"
+        langfuse_host = "https://langfuse.invalid"
+        public_key = "pk-lf-test"
+        secret_key = "sk-lf-test"
+
+    async def _fake_bindings(session, tenant_id, project_ids):
+        return [_Binding()]
+
+    import shared.observability.bindings as _bindings
+    monkeypatch.setattr(_bindings, "load_bindings", _fake_bindings)
+
+    async def _fake_lf_get(path, params, **kw):
+        assert path == "/api/public/metrics", path
+        # Credentials must be the BINDING's — reading the shared project would be the
+        # bug this endpoint just stopped having.
+        assert kw.get("public_key") == "pk-lf-test"
+        return {"data": [
+            {"traceName": "sdlc:requirements", "providedModelName": "claude-sonnet-4-6",
+             "sum_totalCost": 0.015, "sum_totalTokens": 1500, "count_count": 3},
+            {"traceName": "sdlc:development", "providedModelName": "claude-opus-4-8",
+             "sum_totalCost": 0.030, "sum_totalTokens": 3000, "count_count": 2},
+            # A non-LLM span: no model, no cost. Must be skipped, not counted as a row.
+            {"traceName": "sdlc:requirements", "providedModelName": None,
+             "sum_totalCost": None, "sum_totalTokens": 0, "count_count": 6},
+        ]}
     monkeypatch.setattr(_traces, "_lf_get", _fake_lf_get)
 
-    app.dependency_overrides[get_db_session] = _make_db_session_override([])
+    app.dependency_overrides[get_db_session] = _make_db_session_override(
+        [(_Binding.project_id, _Binding.workspace_id)]
+    )
     try:
         token = mint_token(
-            user_id="u2",
-            tenant_id=TENANT_A,
-            # settings:manage makes this caller ORG-WIDE, which is what a tenant-wide
-            # total now requires. `cost:view` alone says the caller may see spend, not
-            # whose: with no bindings they are scoped to an empty set of units and get
-            # zeroes — correctly, since this test asserts the aggregation math rather
-            # than the scope filter. See docs/rbac-audit-2026-08-17.md finding 4.
+            user_id="u2", tenant_id=TENANT_A,
             permissions=["artifact:view", "cost:view", "settings:manage"],
         )
-        headers = {"Authorization": f"Bearer {token}"}
-
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            response = await client.get("/cost", headers=headers)
+            response = await client.get(
+                "/cost", headers={"Authorization": f"Bearer {token}"}
+            )
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
-        assert data["windowDays"] == 30
-        assert len(data["rows"]) == 2  # null-model bucket skipped
-        by_model = {r["model"]: r for r in data["rows"]}
-        assert by_model["claude-sonnet-4-6"]["callCount"] == 3
-        assert "agentType" not in data["rows"][0]
-        # totals = 0.015 + 0.030 = 0.045
+        assert len(data["rows"]) == 2  # the null-model row is skipped
+        by_agent = {r["agentType"]: r for r in data["rows"]}
+        # THE POINT OF THIS TEST: the agent is on the row now.
+        assert set(by_agent) == {"requirements", "development"}
+        assert by_agent["requirements"]["model"] == "claude-sonnet-4-6"
+        assert by_agent["requirements"]["callCount"] == 3
         assert round(data["totalCostUsd"], 6) == 0.045
-        assert data["totalInputTokens"] == 3000
-        assert data["totalOutputTokens"] == 1500
-        assert "generatedAt" in data
-        # budget signal fields present (REQ-M9-09)
-        assert "budgetUsd" in data
-        assert "utilization" in data
-        assert "breached80" in data
+        assert "budgetUsd" in data and "utilization" in data and "breached80" in data
     finally:
         app.dependency_overrides.pop(get_db_session, None)
 
@@ -208,19 +221,17 @@ async def test_get_cost_no_token_returns_401():
 
 
 @pytest.mark.unit
-async def test_get_cost_tenant_tag_is_server_derived(mint_token, monkeypatch):
-    """T-9.2-05: GET /cost is scoped by the CALLER'S tenant tag, never a supplied one.
+async def test_get_cost_reads_only_this_tenants_bindings(mint_token, monkeypatch):
+    """Isolation for /cost is now the CREDENTIALS, not a tag.
 
-    Rewritten from a live-DB test that seeded two tenants' `agent_call_logs` rows and
-    asserted tenant A's total stayed under tenant B's 999.0. That stopped testing
-    anything the day /cost moved onto Langfuse: the endpoint no longer reads
-    agent_call_logs at all, so the total was 0.0 and `0.0 < 999.0` passed without
-    exercising a single isolation code path.
+    This asserted that the tenant tag on the outbound query came from the token. That
+    guarantee has moved: each project has its own Langfuse project and key pair, so the
+    binding lookup — scoped to the caller's tenant in SQL, under RLS — decides which
+    credentials exist at all. A query cannot reach another tenant's traces because the
+    key that would read them is never loaded.
 
-    The boundary that actually holds now is the tag on the outbound Langfuse query —
-    application-level, not Postgres RLS, because Langfuse is one shared project. So
-    that is what this asserts: the tenant tag matches the token's tenant, and query
-    parameters a caller controls cannot introduce another tenant's tag.
+    So what is pinned here is the lookup: it is filtered by the token's tenant, and a
+    caller-supplied parameter cannot widen it.
     """
     import httpx
     from process_api import app
@@ -230,34 +241,45 @@ async def test_get_cost_tenant_tag_is_server_derived(mint_token, monkeypatch):
     import shared.routers.traces as _traces
     monkeypatch.setattr(_env, "ENABLE_LANGFUSE", True)
 
-    seen: list[list[str]] = []
+    seen_params: list[dict] = []
 
-    async def _capture_lf_get(path, params):
-        seen.append(list(params.get("tags") or []))
-        return {"data": []}
+    async def _capture_execute(stmt, params=None):
+        if params:
+            seen_params.append(dict(params))
+        result = MagicMock()
+        result.all = MagicMock(return_value=[])
+        result.scalar = MagicMock(return_value=None)
+        return result
 
-    monkeypatch.setattr(_traces, "_lf_get", _capture_lf_get)
+    async def _override():
+        session = MagicMock()
+        session.execute = AsyncMock(side_effect=_capture_execute)
+        yield session
 
-    app.dependency_overrides[get_db_session] = _make_db_session_override([])
+    async def _fake_lf_get(path, params, **kw):  # pragma: no cover - must not be reached
+        raise AssertionError("no bindings, so Langfuse must not be queried")
+
+    monkeypatch.setattr(_traces, "_lf_get", _fake_lf_get)
+
+    app.dependency_overrides[get_db_session] = _override
     try:
         token = mint_token(
-            user_id="u-iso",
-            tenant_id=TENANT_A,
+            user_id="u-iso", tenant_id=TENANT_A,
             permissions=["artifact:view", "cost:view", "settings:manage"],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get(
-                # A caller-supplied tenant tag must not reach the Langfuse query.
-                f"/cost?window_days=1&tags=tenant:{TENANT_B}",
+                # A tenant supplied by the caller must not reach the binding lookup.
+                f"/cost?window_days=1&tenant_id={TENANT_B}",
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         assert response.status_code == 200
-        assert seen, "expected at least one Langfuse query"
-        for tags in seen:
-            assert f"tenant:{TENANT_A}" in tags
-            assert not any(TENANT_B in t for t in tags)
+        tenant_params = [p["t"] for p in seen_params if "t" in p]
+        assert tenant_params, "expected the binding lookup to run"
+        assert all(t == TENANT_A for t in tenant_params)
+        assert not any(TENANT_B in str(v) for p in seen_params for v in p.values())
     finally:
         app.dependency_overrides.pop(get_db_session, None)

@@ -1010,11 +1010,21 @@ class EvalRecordOut(BaseModel):
 # ── CostBreakdownOut (REQ-M9-07, REQ-M9-09) ──────────────────────────────────
 
 class CostBreakdownRow(BaseModel):
-    """One per-model aggregate row in the GET /cost response.
+    """One aggregate row in the GET /cost response, per (agent, model).
 
-    Grouped by model only — the agent that made the call is not a meaningful cost
-    dimension (the same agent runs across projects and can use different models)."""
+    The agent WAS omitted here, on the argument that it is not a meaningful cost
+    dimension. The real reason was that it could not be produced: Langfuse's
+    daily-metrics endpoint groups by model alone. Meanwhile the Cost page's own copy
+    promised the split, because "which agent is expensive" is the question that decides
+    where to tune a prompt or downgrade a model — a per-model total cannot answer it.
 
+    /api/public/metrics takes dimensions, and our trace name is `sdlc:{agent_type}`, so
+    grouping by traceName and providedModelName produces both in one query.
+
+    OPTIONAL, because a trace not written by this platform's agents has no agent to
+    attribute — the row is honest about that rather than inventing a bucket."""
+
+    agentType: Optional[str] = None
     model: str
     inputTokens: int
     outputTokens: int
