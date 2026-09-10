@@ -43,41 +43,101 @@ usual caveat.
   and it's the one part of Track 1 that transfers with the least rework — it just needs
   to operate against *two* repo references instead of one (see §4).
 
-## 2. Phase 0 — make the orchestration engine track-aware (prerequisite)
+## 2. Phase 0 — make the orchestration engine track-aware (DONE, `track-3` branch)
 
-Nothing agent-specific yet. This phase makes it *safe* to add Track 3 agents at all.
+Built and merged into the `track-3` branch, additive-only, zero behavior change for
+Track 1/2. Scoped narrower than the original sketch below (kept here struck through
+for the record) once the real blast radius became clear: `AGENT_IDS`/`REGISTRY` are
+depended on by ~30 files — the deliverables DB CHECK constraint, the frontend
+`ORCHESTRATOR_AGENT_IDS` enum, transcript budgeting, context rendering — none of
+which need to change until a Track 3 agent actually exists to render or budget for.
+Rewriting those globally to be "per-track" would have been a large, high-risk change
+for zero behavior payoff this session. What actually had to change is narrower and
+was verified against the real risk: **what the router OFFERS, and what dispatch will
+RUN, for a given project's track.**
 
-1. **`AGENT_REGISTRY` gets a `track: str` field** on `AgentDefinition` (or, cleaner:
-   split into `AGENT_REGISTRY` (all agents, any track) filtered by a new
-   `agents_for_track(track: str) -> dict[str, AgentDefinition]` that reads
-   `TRACK_PORTFOLIOS[track]`). `STAGE_ORDER` becomes `stage_order_for_track(track)`
-   instead of a module-level constant — every caller of the bare `STAGE_ORDER` (found
-   via `grep -rn STAGE_ORDER backend/`) needs to pass a track through.
-2. **`orchestrator2/registry.py`'s `REGISTRY`/`AGENT_IDS`** become per-track too:
-   `registry_for_track(track)` returning the filtered `AgentCapability` map, with the
-   same import-time coverage assertion but scoped to that track's portfolio.
-3. **`orchestrator2/router.py`'s `DISPLAY_NAMES`, `_CAPABILITIES`, and
-   `_PROMPT_TEMPLATE`** need a Track 3 variant. This is where "the orchestrator talks
-   like code modernization" actually lives — the prompt template's bullet list ("THE
-   AGENTS REACH THE PROJECT'S CONNECTED TOOLS... Development clones the repository,
-   branches, commits, pushes and opens pull requests") is Track-1-flavored prose. A
-   Track 3 prompt needs its own version: two repos not one, equivalence and cutover
-   vocabulary, no "first-release requirements" framing. Concretely: `_system_prompt()`
-   takes a `track` argument and selects between `_PROMPT_TEMPLATE_GREENFIELD` and a new
-   `_PROMPT_TEMPLATE_MODERNIZATION`, with per-track `_CAPABILITIES`/`DISPLAY_NAMES`
-   dicts, each still asserted at import to cover exactly that track's `AGENT_IDS`.
-4. **`dispatch.run_agent`** already takes `project_id`; add a `track` lookup at the top
-   (read `projects.track`, default `"greenfield"` for existing rows since the column is
-   nullable) and pass it through to `registry_for_track`/`router.route`. One extra read,
-   no signature change to callers beyond that.
-5. **Test to write first, before any Track 3 agent exists**: a Greenfield project's
-   Orchestrator turn must never offer or route to a Track-3-only agent id, and
-   vice versa. This is the regression Phase 0 exists to prevent — write it red against
-   the current flat registry, then make it pass by doing the split above.
+What shipped:
 
-This phase touches no agent logic and ships no new capability. It's pure plumbing, and
-skipping it means Track 3 agents get bolted onto Track 1's roster instead of getting
-their own — exactly the "same name, different track" confusion the user is flagging.
+1. **`config/agent_registry.py`**: `agents_for_track(track)` and
+   `stage_order_for_track(track)`, filtering `AGENT_REGISTRY`/pipeline order down to
+   `TRACK_PORTFOLIOS[track]`. Raises `UnknownTrackError` for a bad track string
+   (never silently returns an empty portfolio for a typo) and raises `KeyError` if a
+   portfolio ever names an id `AGENT_REGISTRY` doesn't have (a build-order bug,
+   surfaced immediately rather than silently dropping the agent).
+2. **`orchestrator2/registry.py`**: `agent_ids_for_track(track)` and
+   `registry_for_track(track)`, the same filtering one layer up, against `REGISTRY`.
+   `registry_for_track` raises `UnknownAgentError` if a track's portfolio names an id
+   with no `AgentCapability` registered yet — the other half of the build-order
+   guard (agent added to the portfolio before its graph/prompt is wired here).
+   **`AGENT_IDS`/`REGISTRY` themselves are UNCHANGED** — every one of the ~30 files
+   depending on the full nine-agent set keeps reading it, untouched.
+3. **`orchestrator2/router.py`**: `route()` gains `track: str = "greenfield"`.
+   `_tool_specs`, `_system_prompt`, `_system_prompt_with_continuity`, `_ask_model` and
+   `_validated` all take an optional `capabilities`/`valid_ids` override
+   (`None`/default → today's exact global behavior, proven byte-identical by
+   `test_system_prompt_none_default_matches_full_registry`). `prefilter` itself
+   stays track-agnostic on purpose (it's pure, and rebuilding its regex per track on
+   every call would be needless cost) — instead `route()` discards a `prefilter`
+   match that falls outside the scoped track's portfolio, falling through to the
+   model instead of trusting it. A track with an empty portfolio (today:
+   `modernization`, `rpa_infra`, `data_engineering`) short-circuits to a direct reply
+   before any model call — no `bind_tools([])`.
+   **The Track 3-flavored prompt text itself (two-repo framing, equivalence/cutover
+   vocabulary) is deliberately NOT written yet** — there is nothing to describe until
+   Discovery & Assessment exists. `_system_prompt_with_continuity`'s signature is
+   ready for it (it renders whatever `_CAPABILITIES`/`DISPLAY_NAMES` subset it's
+   given); the content is Phase 1+'s job, alongside the agent it describes.
+4. **`orchestrator2/dispatch.py`**: `run_agent()` gains `track: str = "greenfield"`
+   and resolves its capability via a new `_capability_for_track(agent_id, track)`
+   instead of the unscoped `get_capability`. **This is the enforcement layer, not a
+   restatement of the router's offer** — `ws.py`'s `override_agent` path lets a
+   client name `agent_id` directly on the wire, bypassing `router.route` entirely, so
+   the router being scoped correctly is not sufficient on its own. `dispatch` is
+   where both paths (routed and user-forced) converge, so it's the one place this
+   closes for both.
+5. **`orchestrator2/ws.py`**: `RunSelection` gained a `track: Optional[str] = None`
+   field (defaulted, so every pre-existing construction site — tests included — keeps
+   compiling). `_resolve_run` now also reads `Project.track` via a second, tenant-
+   already-verified query (kept as a *second* query rather than folding it into the
+   existing `Run` lookup specifically so the original query's shape didn't change —
+   several tests build a fake DB session mocking only `.scalar_one_or_none()` on that
+   one query, and preserving it kept them passing unmodified rather than forcing a
+   test-fixture rewrite for a plumbing change). The socket resolves
+   `track = project_track or "greenfield"` once per turn and threads the SAME value
+   into both `route(..., track=track)` and `run_agent(..., track=track)` — so the
+   agent the router offered is provably the same track dispatch then enforces
+   against, for that turn.
+6. **Regression tests**: `tests/orchestrator2/test_track_scoping.py` (new, 19 tests) —
+   proves the boundary holds using a monkeypatched `AGENT_REGISTRY`/`TRACK_PORTFOLIOS`
+   entry standing in for a Track 3 agent that doesn't exist yet, since a real one
+   can't be built before this phase lands. Covers: portfolio filtering, both
+   build-order guards (agent-before-portfolio, portfolio-before-agent), the
+   empty-portfolio direct-reply short-circuit, prefilter-match-outside-track being
+   discarded, `_validated` rejecting an out-of-portfolio id, and — the actual
+   enforcement proof — `run_agent` refusing an out-of-track id via the
+   `override_agent`-shaped path with no router involved at all.
+
+**Verified against the existing suite, not just the new one.** Ran the full
+`tests/orchestrator2/` + agent-registry suite (690 passed) before and after: the
+`_resolve_run` query-shape change initially broke 51 tests (two fixture-based DB
+mocks expecting the old single-`Run` query, and one source-scan test pinning a
+literal call-site string that a line-wrap had broken); all 51 were fixed by keeping
+the original `Run` query byte-identical and adding the `track` read as a genuinely
+separate second query, and by keeping the `_resolve_run(run_id, tenant_id)` call
+on one line. The 3 that remain failing are confirmed pre-existing on the
+pre-Phase-0 baseline too (a local DB grant gap on `conversation_messages` for the
+`sdlc_app` role, and a stray `agents_orchestrator/orchestrator/__pycache__`
+directory) — neither caused by, nor fixed by, this phase.
+
+~~Original sketch (superseded by the narrower design above; kept for context)~~:
+~~`AGENT_REGISTRY` gets a `track` field; `STAGE_ORDER` becomes
+`stage_order_for_track(track)` and every one of its ~30 callers gets touched;
+`DISPLAY_NAMES`/`_CAPABILITIES`/`_PROMPT_TEMPLATE` get full Track 3 variants
+immediately.~~ Rejected: the global tables' ~30 dependents (deliverables schema,
+frontend enum, context rendering) don't need per-track awareness until a Track 3
+agent exists to need it, and touching them all for zero behavior change was the
+wrong trade. Revisit when Phase 1 (Discovery & Assessment) actually lands and needs
+`discovery_artifacts` to render somewhere.
 
 ## 3. Data model additions
 

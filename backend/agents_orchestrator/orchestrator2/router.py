@@ -1,18 +1,27 @@
 """The Orchestrator's agent router: a deterministic pre-filter, then a model.
 
-`route(text, ...)` decides which one of the nine delivery agents handles a turn, or
-that none should and the user gets a direct answer. It is two stages:
+`route(text, ...)` decides which one of `track`'s delivery agents handles a turn, or
+that none should and the user gets a direct answer. `track` defaults to
+`"greenfield"` — the nine-agent portfolio Greenfield and Enhancement share (see
+`config.agent_registry.TRACK_PORTFOLIOS`) — so everything in this module describing
+"the nine agents" is describing that default, not a platform-wide constant: a
+track-scoped caller passes `registry_for_track(track)`/`agent_ids_for_track(track)`
+in and sees only that track's roster. It is two stages:
 
   1. `prefilter(text)` — a pure function answering one narrow question: *is this
      message an explicit imperative naming one of the nine agents?* If yes the turn
-     costs no model call. If there is any doubt at all it returns `None`.
+     costs no model call. If there is any doubt at all it returns `None`. It is
+     track-agnostic BY DESIGN (see `route`'s docstring for why) — `route` is what
+     discards a match outside the scoped track.
   2. `_ask_model(...)` — the Context Agent. It reads the message for MEANING, with
-     one tool per agent generated from `REGISTRY`, and either calls exactly one or
-     answers in plain text.
+     one tool per agent generated from `REGISTRY` (or a track-scoped subset of it),
+     and either calls exactly one or answers in plain text.
 
-ALL NINE AGENTS ARE CANDIDATES ON EVERY TURN. There is no ordering in this engine:
-no `STAGE_ORDER.index(active) + 1`, no "next agent", no notion of what ran before.
-`stage_switch.py` (retired in Phase 5) advanced positionally, which made "the next
+ALL NINE AGENTS ARE CANDIDATES ON EVERY TURN — on the default, `"greenfield"`,
+track; a track-scoped caller sees only its own portfolio as candidates. There is no
+ORDERING within a portfolio in this engine: no `STAGE_ORDER.index(active) + 1`, no
+"next agent", no notion of what ran before. `stage_switch.py` (retired in Phase 5)
+advanced positionally, which made "the next
  agent" mean "the next
 item in a list" rather than "what the conversation needs".
 
@@ -78,7 +87,12 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from agents_orchestrator.orchestrator2.registry import AGENT_IDS, REGISTRY
+from agents_orchestrator.orchestrator2.registry import (
+    AGENT_IDS,
+    REGISTRY,
+    agent_ids_for_track,
+    registry_for_track,
+)
 from shared.services.model_call_wrapper import guarded_completion
 from shared.services.model_resolver import (
     litellm_key_kwargs,
@@ -360,8 +374,9 @@ _COULD_NOT_CHOOSE_REPLY = (
 )
 
 
-def _tool_specs() -> list[dict]:
-    """One tool per agent, GENERATED FROM `REGISTRY`.
+def _tool_specs(capabilities: Mapping[str, Any] | None = None) -> list[dict]:
+    """One tool per agent, GENERATED FROM `REGISTRY` — or from a track-scoped
+    subset of it, when `capabilities` is given.
 
     Derived, never hand-typed, because the two lists drifting apart is precisely the
     failure `registry.py` exists to prevent: the old engine's dispatch table silently
@@ -369,10 +384,16 @@ def _tool_specs() -> list[dict]:
     built from `REGISTRY` cannot offer an agent this engine cannot dispatch — remove
     an entry from `REGISTRY` and the model stops being offered it in the same breath.
 
+    `capabilities=None` reproduces today's behaviour EXACTLY — every agent in
+    `REGISTRY`, unscoped — which is what every call site not yet naming a track
+    still gets. A track-scoped caller passes `registry_for_track(track)`, so the
+    model is never even offered a tool for an agent outside this run's track.
+
     `REGISTRY` rather than `AGENT_IDS` on purpose. They are the same set (asserted at
     import in `registry.py`), but `REGISTRY` is the one that says the agent can
     actually be RUN, and that is the property this list has to have.
     """
+    source = REGISTRY if capabilities is None else capabilities
     return [
         {
             "type": "function",
@@ -398,7 +419,7 @@ def _tool_specs() -> list[dict]:
                 },
             },
         }
-        for agent_id in REGISTRY
+        for agent_id in source
     ]
 
 
@@ -493,13 +514,21 @@ Requirements." When you answer directly, just answer: your reply is what they se
 """
 
 
-def _system_prompt() -> str:
-    """The routing prompt with the agent roster generated from `REGISTRY`.
+def _system_prompt(capabilities: Mapping[str, Any] | None = None) -> str:
+    """The routing prompt with the agent roster generated from `REGISTRY` — or from
+    a track-scoped subset of it, when `capabilities` is given.
 
     Each line carries the agent's display name, its tool id and its `_CAPABILITIES`
     text, because the roster is where the model reads what an agent is FOR. A roster of
     bare names is the failure `_CAPABILITIES` exists to prevent, reached by the other
     door.
+
+    `capabilities=None` reproduces today's behaviour EXACTLY — the full nine-agent
+    roster — so every existing caller (and the tests pinning this exact string) is
+    unaffected. A track-scoped caller passes `registry_for_track(track)`, and the
+    rendered roster then names only that track's agents — a project on a track with
+    an empty portfolio gets a roster of nothing, which `route` handles before this
+    is ever called (see `route`'s early return).
 
     Generation is what stops the roster naming an agent `REGISTRY` lacks — but only for
     the roster. The prompt is a template a person will edit, and a `route_to_*` written
@@ -509,10 +538,11 @@ def _system_prompt() -> str:
     `route_to_*` occurrence in the WHOLE rendered prompt against `REGISTRY`, and does
     not care what line it sits on.
     """
+    source = REGISTRY if capabilities is None else capabilities
     roster = "\n".join(
         f"- The {DISPLAY_NAMES[agent_id]} agent ({_TOOL_PREFIX}{agent_id}): "
         f"{_CAPABILITIES[agent_id]}."
-        for agent_id in REGISTRY
+        for agent_id in source
     )
     return _PROMPT_TEMPLATE.format(roster=roster)
 
@@ -548,15 +578,22 @@ whichever agent does that work, exactly as it would have on any other turn.
 """
 
 
-def _system_prompt_with_continuity(last_agent: str | None) -> str:
+def _system_prompt_with_continuity(
+    last_agent: str | None, capabilities: Mapping[str, Any] | None = None
+) -> str:
     """`_system_prompt`, plus who is mid-conversation when anyone is.
 
     An unknown agent id is treated as no agent rather than raising: this is a hint,
-    and a routing turn is the wrong place to fail over one.
+    and a routing turn is the wrong place to fail over one. `last_agent` outside
+    `capabilities` (the run's OWN prior agent, on a project whose track no longer —
+    or never did — offer it) is treated the same way: naming it in the continuity
+    note would tell the model to route back to an agent the tool list does not
+    include, which `_validated` would then have to refuse anyway.
     """
-    if not last_agent or last_agent not in REGISTRY:
-        return _system_prompt()
-    return _system_prompt() + _CONTINUITY_TEMPLATE.format(
+    source = REGISTRY if capabilities is None else capabilities
+    if not last_agent or last_agent not in source:
+        return _system_prompt(capabilities)
+    return _system_prompt(capabilities) + _CONTINUITY_TEMPLATE.format(
         name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
     )
 
@@ -844,21 +881,27 @@ def _decision_from_response(response: Any) -> RoutingDecision:
     return RoutingDecision(agent_id=agent_id, reason=reason, direct_reply=None)
 
 
-def _validated(decision: RoutingDecision) -> RoutingDecision:
+def _validated(
+    decision: RoutingDecision, valid_ids: Any = None
+) -> RoutingDecision:
     """Enforce the two things a caller may rely on, whatever the model said.
 
-      1. `agent_id` is `None` or one of `AGENT_IDS`. The tools are generated from
-         `REGISTRY` so an invented id should be impossible — but models hallucinate,
-         and an id that is not one of the nine reaches `dispatch.run_agent` as an
-         `error` event for an agent the ROUTER chose, which reads as the platform
-         being broken rather than as a bad pick. `AGENT_IDS` and `REGISTRY` are
-         asserted to be the same set at import in `registry.py`, so checking either
-         one checks both: this cannot pass an id dispatch would reject.
+      1. `agent_id` is `None` or one of `valid_ids` (default `AGENT_IDS`, today's
+         exact behaviour). The tools are generated from the same set, so an
+         invented id should be impossible — but models hallucinate, and an id
+         outside it reaches `dispatch.run_agent` as an `error` event for an agent
+         the ROUTER chose, which reads as the platform being broken rather than as
+         a bad pick. A track-scoped caller passes `agent_ids_for_track(track)`
+         here, so this ALSO catches the case where the model picked a real agent
+         id that simply is not in this run's track's portfolio — the same refusal
+         as a hallucinated one, because from a caller's side they are the same
+         failure: an id `dispatch.run_agent` (also track-scoped) will not run.
       2. `agent_id is None` implies a non-empty `direct_reply`. Otherwise the turn
          ends with nothing shown and nothing run — a silent no-op, which is the
          failure this engine exists to remove.
     """
-    if decision.agent_id is not None and decision.agent_id not in AGENT_IDS:
+    ids = AGENT_IDS if valid_ids is None else valid_ids
+    if decision.agent_id is not None and decision.agent_id not in ids:
         return RoutingDecision(
             agent_id=None,
             reason=_COULD_NOT_CHOOSE_REASON,
@@ -883,8 +926,14 @@ async def _ask_model(
     model_id: str | None,
     offering_id: str | None,
     system_prompt: str,
+    capabilities: Mapping[str, Any] | None = None,
 ) -> RoutingDecision:
     """Ask the Context Agent which agent should handle `text`.
+
+    `capabilities=None` offers every tool in `REGISTRY` — today's exact behaviour.
+    A track-scoped caller passes `registry_for_track(track)`, and the model is then
+    bound only the tools for that track's portfolio, matching the roster
+    `system_prompt` (built by the caller, from the same map) already describes.
 
     `system_prompt` is PASSED, not built here. `route` is the only thing that knows
     which agent answered last, and a default of `_system_prompt()` would let a call
@@ -930,7 +979,7 @@ async def _ask_model(
         offering_id=offering_id,
         project_id=project_id,
     )
-    bound = _build_llm(resolved).bind_tools(_tool_specs())
+    bound = _build_llm(resolved).bind_tools(_tool_specs(capabilities))
     response = await guarded_completion(
         resolved,
         bound,
@@ -945,6 +994,18 @@ async def _ask_model(
     return _decision_from_response(response)
 
 
+#: Shown when a project's track has no delivery agents built yet — `track_id` in
+#: `{"modernization", "rpa_infra", "data_engineering"}` today, per
+#: `config.agent_registry.TRACK_PORTFOLIOS`. Not a `route` failure: the track is a
+#: real, deliberate choice (§Portfolio 2-4, "target design, not yet built" in
+#: `help/multi-track-agent-access-design.md`), so this is an honest status, not an
+#: apology for a bug.
+_NO_AGENTS_FOR_TRACK_REPLY = (
+    "This project's track has no delivery agents built yet, so there is nothing "
+    "for me to run. Come back once they ship."
+)
+
+
 async def route(
     text: str,
     *,
@@ -955,8 +1016,9 @@ async def route(
     model_id: str | None,
     offering_id: str | None,
     last_agent: str | None = None,
+    track: str = "greenfield",
 ) -> RoutingDecision:
-    """Decide which of the nine agents handles `text`, or answer directly.
+    """Decide which agent in `track`'s portfolio handles `text`, or answer directly.
 
     `prefilter` first: an explicit imperative naming an agent is answered without
     spending a model call, and the reason says so — "because you named it" is the only
@@ -967,16 +1029,34 @@ async def route(
     agent alias anywhere in the text, so "I need a PRD" routed nowhere and the user had
     to name the agent by hand.
 
-    ALL NINE AGENTS ARE CANDIDATES ON EVERY TURN. There is no ordering in this engine
-    — no `STAGE_ORDER.index(active) + 1`, no notion of a next agent, nothing about
-    what ran before.
+    EVERY AGENT IN `track`'S PORTFOLIO IS A CANDIDATE ON EVERY TURN. There is no
+    ordering in this engine — no `STAGE_ORDER.index(active) + 1`, no notion of a next
+    agent, nothing about what ran before.
 
-    `last_agent` does not weaken that. It names the agent that answered the PREVIOUS
-    turn, and it exists because an agent that asked the user a question owns the
-    answer to it: "2" and "main" are not routable messages, they are replies. It
-    changes what the model is TOLD, never what it is allowed to choose — every agent
-    remains a candidate, and `prefilter` still wins outright. `None` is the ordinary
-    first-message case, not an error.
+    `track` SCOPES BOTH HALVES. `prefilter` itself stays track-agnostic (it is pure,
+    and pinning its regex to one track's names would mean rebuilding it per track on
+    every call) — instead, a `prefilter` match outside `track`'s portfolio is treated
+    as NO match here, falling through to the model rather than being trusted. The
+    model half is scoped directly: its tools and roster come from
+    `registry_for_track(track)`, so an agent outside the portfolio is never even
+    offered, and `_validated` checks the model's pick against
+    `agent_ids_for_track(track)` rather than the full `AGENT_IDS`. Defaults to
+    `"greenfield"` — the portfolio Greenfield and Enhancement share — which
+    reproduces every existing call site's behaviour exactly: nothing that calls
+    `route()` without naming a track sees any change.
+
+    A track whose portfolio is empty (today: `modernization`, `rpa_infra`,
+    `data_engineering` — see `TRACK_PORTFOLIOS`) short-circuits before the model is
+    ever called: there is nothing to offer it, and a `bind_tools([])` call would be a
+    confusing way to say so. `direct_reply` explains why instead.
+
+    `last_agent` does not weaken "every agent in the portfolio is a candidate". It
+    names the agent that answered the PREVIOUS turn, and it exists because an agent
+    that asked the user a question owns the answer to it: "2" and "main" are not
+    routable messages, they are replies. It changes what the model is TOLD, never
+    what it is allowed to choose — every agent in the portfolio remains a candidate,
+    and `prefilter` still wins outright. `None` is the ordinary first-message case,
+    not an error.
 
     `project_id` is KEYWORD-REQUIRED WITH NO DEFAULT, like `dispatch.run_agent`'s: it
     decides which models this run may use and whose budget it spends, and a default of
@@ -984,19 +1064,29 @@ async def route(
     comes from the `runs` row, never from the client (see `ws._resolve_run`).
 
     Guarantees, both enforced in `_validated` regardless of what the model returned:
-    `agent_id` is `None` or one of `AGENT_IDS`, and when it is `None` `direct_reply` is
-    non-empty. Not guaranteed: that the agent chosen is the RIGHT one — that is a
-    model's judgement, which is why `reason` is shown to the user and why
-    `agent.selected` is emitted before any of the agent's text.
+    `agent_id` is `None` or one of `agent_ids_for_track(track)`, and when it is `None`
+    `direct_reply` is non-empty. Not guaranteed: that the agent chosen is the RIGHT
+    one — that is a model's judgement, which is why `reason` is shown to the user and
+    why `agent.selected` is emitted before any of the agent's text.
     """
+    valid_ids = agent_ids_for_track(track)
+
     named = prefilter(text)
-    if named is not None:
+    if named is not None and named in valid_ids:
         return RoutingDecision(
             agent_id=named,
             reason=f"You asked for the {DISPLAY_NAMES[named]} agent by name.",
             direct_reply=None,
         )
 
+    if not valid_ids:
+        return RoutingDecision(
+            agent_id=None,
+            reason=f"No delivery agents are registered for track {track!r} yet.",
+            direct_reply=_NO_AGENTS_FOR_TRACK_REPLY,
+        )
+
+    capabilities = registry_for_track(track)
     decision = await _ask_model(
         text,
         history=history,
@@ -1008,6 +1098,7 @@ async def route(
         # The one piece of turn-to-turn state this router has. It does not order the
         # agents and does not decide anything; it tells the model that a question is
         # outstanding, which a bare "2" does not carry on its own.
-        system_prompt=_system_prompt_with_continuity(last_agent),
+        system_prompt=_system_prompt_with_continuity(last_agent, capabilities),
+        capabilities=capabilities,
     )
-    return _validated(decision)
+    return _validated(decision, valid_ids)

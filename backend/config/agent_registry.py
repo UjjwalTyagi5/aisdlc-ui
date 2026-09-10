@@ -256,6 +256,56 @@ TRACK_PORTFOLIOS: dict[str, list[str]] = {
     "data_engineering": [],
 }
 
+
+class UnknownTrackError(Exception):
+    """Raised for a track string that is not one of `TRACK_PORTFOLIOS`'s five keys.
+
+    A typo here must fail loudly rather than be treated as an empty portfolio —
+    an empty portfolio is a real, meaningful state (a track with nothing built
+    yet), and silently returning one for a MISSPELLED track name would look
+    identical to that instead of surfacing the typo.
+    """
+
+
+def agents_for_track(track: str) -> dict[str, AgentDefinition]:
+    """`AGENT_REGISTRY` filtered to the ids in `TRACK_PORTFOLIOS[track]`.
+
+    THE ROUTING BOUNDARY THIS FUNCTION EXISTS TO DRAW: every agent Greenfield and
+    Enhancement projects may ever be offered or run comes from here, not from
+    `AGENT_REGISTRY` directly. Once Track 3/4/5 agents start landing in
+    `AGENT_REGISTRY`, a caller that read the whole dict instead of going through
+    this function would offer a Code Modernization agent to a Greenfield project's
+    Orchestrator — this function is what a track-scoped caller (the orchestrator2
+    router and dispatch) must call instead.
+
+    Indexes `AGENT_REGISTRY` directly rather than `.get`-with-a-skip: an id present
+    in `TRACK_PORTFOLIOS[track]` but absent from `AGENT_REGISTRY` is exactly the
+    inconsistency the module docstring on `TRACK_PORTFOLIOS` promises never
+    happens ("an agent id is added here only once it's actually built and
+    mounted") — if it ever did, this must raise `KeyError` immediately, not
+    silently drop the agent from the portfolio.
+    """
+    try:
+        ids = TRACK_PORTFOLIOS[track]
+    except KeyError:
+        raise UnknownTrackError(
+            f"unknown track {track!r}; known tracks: {sorted(TRACK_PORTFOLIOS)}"
+        ) from None
+    return {aid: AGENT_REGISTRY[aid] for aid in ids}
+
+
+def stage_order_for_track(track: str) -> list[str]:
+    """`get_pipeline_order`'s ordering, flattened and filtered to one track's
+    portfolio — the same `(pipeline_position, agent_id)` tie-break `STAGE_ORDER`
+    uses, applied to `agents_for_track(track)` instead of the whole registry."""
+    agents = agents_for_track(track)
+    return [
+        aid
+        for aid, _ in sorted(
+            agents.items(), key=lambda kv: (kv[1].pipeline_position, kv[0])
+        )
+    ]
+
 # ── Default role -> agent reach ───────────────────────────────────────────────
 #
 # ONE AGENT, ONE ROLE. A delivery role reaches exactly the agents it OWNS. There is

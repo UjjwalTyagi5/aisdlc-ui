@@ -134,7 +134,10 @@ from config.ws_helper import (
     set_tenant_id,
     set_user_id,
 )
-from agents_orchestrator.orchestrator2.registry import get_capability, UnknownAgentError
+from agents_orchestrator.orchestrator2.registry import (
+    UnknownAgentError,
+    registry_for_track,
+)
 from shared.authz.consequential import is_approval_message
 from shared.services.model_resolver import (
     ModelNotEnabledError,
@@ -282,6 +285,34 @@ def _tool_name(value: Any) -> str:
     return name.strip() if name and name.strip() else _UNNAMED_TOOL
 
 
+def _capability_for_track(agent_id: str, track: str):
+    """`get_capability(agent_id)`, scoped to `track`'s portfolio.
+
+    ENFORCEMENT, NOT A SUGGESTION. `router.route` already only ever OFFERS an
+    agent inside the caller's track — but `agent_id` here may also come from
+    `ws.py`'s `override_agent` (a user naming an agent directly, bypassing the
+    router entirely), which the router never sees at all. Without this check,
+    once a Track 3 agent exists in `REGISTRY`, a client on a Greenfield project
+    could set `{"agent": "discovery_assessment"}` on the wire and this function
+    would run it — dispatch is the one place both paths (routed and
+    user-forced) converge, so it is the one place this can be closed for both at
+    once.
+
+    Raises the SAME `UnknownAgentError` `get_capability` raises for a
+    genuinely-nonexistent id, and for the same reason: from `run_agent`'s
+    caller's side, "this id does not exist" and "this id exists but is not in
+    this run's track" are the same failure — neither can be dispatched here.
+    """
+    portfolio = registry_for_track(track)
+    try:
+        return portfolio[agent_id]
+    except KeyError:
+        raise UnknownAgentError(
+            f"'{agent_id}' is not a known agent id for track {track!r}. Known "
+            f"ids: {sorted(portfolio)}"
+        ) from None
+
+
 async def run_agent(
     agent_id: str,
     *,
@@ -293,6 +324,7 @@ async def run_agent(
     project_id: str | None,
     user_id: str,
     context: str,
+    track: str = "greenfield",
     reason: str,
 ) -> AsyncIterator[dict]:
     """Run `agent_id` on `text` and yield protocol events.
@@ -344,6 +376,16 @@ async def run_agent(
     by passing `None` explicitly, and will then fail closed on any tenant that
     has grants configured. It comes from the `runs` row — never from the client
     (see `ws._resolve_run`).
+
+    `track` DEFAULTS TO `"greenfield"`, unlike `project_id` — every existing call
+    site is on a project whose track is that one (or the nullable-column,
+    pre-migration-0024 equivalent of it), so this default reproduces today's
+    exact dispatch behaviour rather than requiring every caller to be touched to
+    keep working. A caller that knows the run's actual track (`ws.py`, once it
+    reads `Project.track`) should still pass it explicitly: `agent_id` is
+    resolved against `registry_for_track(track)`, NOT the unscoped `REGISTRY` —
+    the enforcement half of the track boundary `router.route` draws on the
+    offering side (see `_capability_for_track`).
     """
     # THIS IS THE LOAD-BEARING CLEAR. A socket serves many turns in one async
     # context and both contextvars are set per turn, so a turn that ends before
@@ -361,7 +403,7 @@ async def run_agent(
     _clear_run_model_context()
 
     try:
-        capability = get_capability(agent_id)
+        capability = _capability_for_track(agent_id, track)
     except UnknownAgentError as exc:
         # `agent` is deliberately OMITTED here: the frontend contract
         # (frontend/lib/orchestrator/protocol.ts) types ErrorEvent.agent as
