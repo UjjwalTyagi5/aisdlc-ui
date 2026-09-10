@@ -272,9 +272,11 @@ LANGFUSE_SECRET_KEY: str = os.environ.get("LANGFUSE_SECRET_KEY", "")
 # sha256(secret_key + sha256_hex(salt)) and compares against it.
 LANGFUSE_DB_URL: str = os.environ.get("LANGFUSE_DB_URL", "")
 LANGFUSE_SALT: str = os.environ.get("LANGFUSE_SALT", "")
-# The Langfuse user made owner of each provisioned organization. Without a membership
-# row nobody can open the project in the Langfuse UI — the traces arrive and are
-# invisible to a human trying to look at them.
+# Langfuse users made owners of each provisioned organization. COMMA-SEPARATED, because
+# one address is not enough: Langfuse lists only the organizations you belong to, so a
+# project provisioned under a service account is invisible to the engineers who need to
+# open it — the traces arrive and nobody can look at them, which reads as "provisioning
+# failed" rather than "you were not added".
 LANGFUSE_BOOTSTRAP_USER_EMAIL: str = os.environ.get("LANGFUSE_BOOTSTRAP_USER_EMAIL", "")
 # Trace retention in days, applied to each project as it is created (PRD §34.8: traces
 # "expire on a policy far shorter than audit"). Empty leaves the instance default.

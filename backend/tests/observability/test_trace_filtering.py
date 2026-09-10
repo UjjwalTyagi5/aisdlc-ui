@@ -39,7 +39,15 @@ def _trace(tid, project=None, ts="2026-09-01T00:00:00Z"):
 
 
 def _capture(monkeypatch, tr, payloads=None):
-    """Record every Langfuse call; answer from `payloads` keyed by the project tag."""
+    """Record every Langfuse call; answer from `payloads` keyed by the project tag.
+
+    These tests cover the PRE-BINDING fallback — one shared Langfuse project with tag
+    filtering — which is still the path for a tenant that has no bindings yet. They pass
+    `db=None`, so `_readable_bindings` fails its lookup and returns None, selecting that
+    fallback. It also needs the shared key pair to be configured, which the test
+    environment does not set, so that is declared here rather than left to `.env.test`.
+    """
+    monkeypatch.setattr(tr, "_shared_project_configured", lambda: True)
     calls: list[dict] = []
 
     async def _fake_get(path, params):

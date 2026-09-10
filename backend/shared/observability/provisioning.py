@@ -239,19 +239,27 @@ class LangfuseProvisioner:
         )
         return project_id, True
 
-    async def _bootstrap_user_id(self, conn) -> Optional[str]:
-        """The Langfuse user to own provisioned orgs, or None if not configured/found."""
-        if not self.bootstrap_email:
-            return None
-        uid = await conn.fetchval("select id from users where email=$1", self.bootstrap_email)
-        if not uid:
+    async def _bootstrap_user_ids(self, conn) -> list[str]:
+        """Langfuse user ids to make owners. Comma-separated in config; may be empty.
+
+        MORE THAN ONE, DELIBERATELY. Langfuse lists only the organizations a user
+        belongs to, so provisioning under a single service account produces projects
+        that collect traces nobody can open — indistinguishable, from the UI, from
+        provisioning having failed. Every address that should be able to look belongs
+        here.
+        """
+        emails = [e.strip() for e in (self.bootstrap_email or "").split(",") if e.strip()]
+        if not emails:
+            return []
+        rows = await conn.fetch("select id, email from users where email = any($1::text[])", emails)
+        found = {r["email"]: str(r["id"]) for r in rows}
+        for missing in [e for e in emails if e not in found]:
             logger.warning(
-                "LANGFUSE_BOOTSTRAP_USER_EMAIL=%s is not a Langfuse user — the project "
-                "will receive traces but nobody will see it in the Langfuse UI",
-                self.bootstrap_email,
+                "LANGFUSE_BOOTSTRAP_USER_EMAIL lists %s, which is not a Langfuse user — "
+                "they must sign in once before they can be granted access",
+                missing,
             )
-            return None
-        return str(uid)
+        return list(found.values())
 
     async def _ensure_memberships(self, conn, org_id: str, project_id: str, user_id: str) -> None:
         """Make the bootstrap user an owner, so the project is visible in the UI.
@@ -323,8 +331,7 @@ class LangfuseProvisioner:
                 project_id, created_project = await self._ensure_project(
                     conn, org_id, project_name
                 )
-                user_id = await self._bootstrap_user_id(conn)
-                if user_id:
+                for user_id in await self._bootstrap_user_ids(conn):
                     await self._ensure_memberships(conn, org_id, project_id, user_id)
                 public_key, secret_key = await self._insert_api_key(
                     conn, project_id, note=f"provisioned-for-{project_name}"

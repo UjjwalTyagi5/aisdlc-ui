@@ -81,11 +81,26 @@ _AGENT_TYPES = {
 
 
 def _enabled() -> bool:
-    # Host included deliberately: every read here builds a URL from it, and an empty
-    # host would produce a relative request rather than an honest "tracing is off".
-    return bool(
-        ENABLE_LANGFUSE and LANGFUSE_HOST and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY
-    )
+    """Whether the trace API can serve anything at all.
+
+    HOST BUT NOT KEYS. Every read builds a URL from the host, so an empty one would
+    produce a relative request rather than an honest "tracing is off". The global key
+    pair is deliberately NOT required: each project now reads through its own binding's
+    credentials, and requiring a process-wide pair would make the whole surface go dark
+    whenever it is absent — which is the normal state once every project is bound.
+    """
+    return bool(ENABLE_LANGFUSE and LANGFUSE_HOST)
+
+
+def _shared_project_configured() -> bool:
+    """Whether the pre-binding single-project fallback can run.
+
+    Only the fallback needs the global key pair. An unbound project with no shared pair
+    configured is simply not traced — which is the right outcome once per-project
+    isolation is the model: dumping its traces into a shared bucket would recreate the
+    mixing this design exists to prevent.
+    """
+    return bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 
 
 def _auth_header(public_key: str | None = None, secret_key: str | None = None) -> dict[str, str]:
@@ -161,7 +176,12 @@ async def _lf_get(
         return _hit[1]
     url = f"{(host or LANGFUSE_HOST).rstrip('/')}{path}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # 30s, not 15. A cold self-hosted Langfuse was observed taking longer than
+        # 15s on the first request of a session, and because a timeout degrades to an
+        # empty result the whole Traces page then renders as "no traces" — indisting-
+        # uishable from there being none. Per-project fan-out multiplies the exposure:
+        # any one slow project would blank the aggregate.
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 url, params=params, headers=_auth_header(public_key, secret_key)
             )
@@ -550,6 +570,8 @@ async def list_traces(
 
     # FALLBACK: this tenant has no bindings yet — the original single-project mode,
     # where every trace shares one Langfuse project and tags do the separating.
+    if not _shared_project_configured():
+        return []
     visible = await _visible_projects(db, request)
 
     if project:
@@ -610,13 +632,29 @@ async def project_summary(
     if not _enabled():
         return empty
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
-    data = await _lf_get(
-        "/api/public/metrics/daily",
-        {
-            "tags": [_tenant_tag(request), f"project:{project_id}"],
-            "fromTimestamp": cutoff,
-        },
-    )
+    # Read this project's own Langfuse, when it has one. Without this the summary
+    # queries the shared project — which, now that traces live in per-project projects,
+    # answers zero for every project and reads as "no spend" rather than "wrong place".
+    _bindings = await _readable_bindings(db, request, only_project=project_id)
+    if _bindings is not None:
+        if not _bindings:
+            return empty
+        _b = _bindings[0]
+        data = await _lf_get(
+            "/api/public/metrics/daily",
+            {"fromTimestamp": cutoff},
+            host=_b.langfuse_host, public_key=_b.public_key, secret_key=_b.secret_key,
+        )
+    else:
+        if not _shared_project_configured():
+            return empty
+        data = await _lf_get(
+            "/api/public/metrics/daily",
+            {
+                "tags": [_tenant_tag(request), f"project:{project_id}"],
+                "fromTimestamp": cutoff,
+            },
+        )
     days = (data or {}).get("data") or []
     total_cost = 0.0
     in_tok = out_tok = 0
@@ -671,6 +709,41 @@ async def trace_metrics(
         return empty
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     items: list[TraceListItemOut] = []
+
+    # PREFERRED: aggregate across the projects this caller may read, each from its own
+    # Langfuse. This has to match what GET /traces shows — a strip reporting zero above
+    # a table full of rows is worse than no strip, and that is exactly what happens if
+    # the aggregate keeps querying a shared project the traces no longer live in.
+    _bindings = await _readable_bindings(db, request, only_project=project)
+    if _bindings is not None:
+        if not _bindings:
+            return empty
+        for b in _bindings[:_MAX_PROJECT_FANOUT]:
+            for page in range(1, 11):  # ≤1000 traces per project for the aggregate
+                _p: dict[str, Any] = {"limit": 100, "page": page, "fromTimestamp": cutoff}
+                if user:
+                    _p["userId"] = user
+                data = await _lf_get(
+                    "/api/public/traces", _p,
+                    host=b.langfuse_host, public_key=b.public_key, secret_key=b.secret_key,
+                )
+                batch = (data or {}).get("data") or []
+                if not batch:
+                    break
+                for t in batch:
+                    meta_t = dict(t.get("metadata") or {})
+                    meta_t.setdefault("project_id", b.project_id)
+                    items.append(_map_list_item({**t, "metadata": meta_t}))
+                _meta = (data or {}).get("meta") or {}
+                if page >= int(_meta.get("totalPages") or page):
+                    break
+        # Already restricted to readable projects by the credentials themselves, so the
+        # only filter left is the caller's own agent choice.
+        items = _apply_trace_filters(items, agent, None)
+        return _aggregate_metrics(items, window_days, empty)
+
+    if not _shared_project_configured():
+        return empty
     for page in range(1, 11):  # cap at 10 pages (≤1000 traces) for the aggregate
         _params: dict[str, Any] = {
             "tags": [_tenant_tag(request)] + ([f"project:{project}"] if project else []),
@@ -697,34 +770,7 @@ async def trace_metrics(
     if not items:
         return empty
 
-    latencies = sorted(r.latencyMs for r in items)
-    total_cost = round(sum(r.cost.usd for r in items), 6)
-    by_agent: dict[str, list[TraceListItemOut]] = {}
-    for r in items:
-        by_agent.setdefault(r.agentType, []).append(r)
-
-    return TraceMetricsOut(
-        windowDays=window_days,
-        totalTraces=len(items),
-        # None, not 0.0: span levels are not on the list path, so "no errors" is
-        # not something this aggregate is in a position to claim.
-        errorRate=None,
-        latencyP50Ms=_percentile(latencies, 0.50),
-        latencyP95Ms=_percentile(latencies, 0.95),
-        totalCostUsd=total_cost,
-        byAgent=[
-            TraceMetricsByAgentOut(
-                agentType=a,
-                traceCount=len(rs),
-                errorRate=None,
-                latencyP50Ms=_percentile(sorted(x.latencyMs for x in rs), 0.50),
-                latencyP95Ms=_percentile(sorted(x.latencyMs for x in rs), 0.95),
-                costUsd=round(sum(x.cost.usd for x in rs), 6),
-            )
-            for a, rs in sorted(by_agent.items())
-        ],
-        generatedAt=_now_iso(),
-    )
+    return _aggregate_metrics(items, window_days, empty)
 
 
 @traces_router.get(
@@ -767,6 +813,8 @@ async def get_trace(
 
     # FALLBACK: no bindings for this tenant, so one shared Langfuse project and the
     # tag/scope guards that go with it.
+    if not _shared_project_configured():
+        raise HTTPException(status_code=404, detail="Trace not found")
     t = await _lf_get(f"/api/public/traces/{trace_id}", {})
     if t is None:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -838,6 +886,46 @@ async def _build_trace_detail(
             if isinstance(s, dict) and isinstance(s.get("value"), (int, float))
         ],
     })
+
+
+def _aggregate_metrics(
+    items: list[TraceListItemOut], window_days: int, empty: TraceMetricsOut
+) -> TraceMetricsOut:
+    """Fold mapped rows into the metrics envelope.
+
+    Shared by the per-project path and the pre-binding fallback so the strip cannot
+    disagree with itself depending on which one ran.
+    """
+    if not items:
+        return empty
+
+    latencies = sorted(r.latencyMs for r in items)
+    by_agent: dict[str, list[TraceListItemOut]] = {}
+    for r in items:
+        by_agent.setdefault(r.agentType, []).append(r)
+
+    return TraceMetricsOut(
+        windowDays=window_days,
+        totalTraces=len(items),
+        # None, not 0.0: span levels are not on the list path, so "no errors" is not
+        # something this aggregate is in a position to claim.
+        errorRate=None,
+        latencyP50Ms=_percentile(latencies, 0.50),
+        latencyP95Ms=_percentile(latencies, 0.95),
+        totalCostUsd=round(sum(r.cost.usd for r in items), 6),
+        byAgent=[
+            TraceMetricsByAgentOut(
+                agentType=a,
+                traceCount=len(rs),
+                errorRate=None,
+                latencyP50Ms=_percentile(sorted(x.latencyMs for x in rs), 0.50),
+                latencyP95Ms=_percentile(sorted(x.latencyMs for x in rs), 0.95),
+                costUsd=round(sum(x.cost.usd for x in rs), 6),
+            )
+            for a, rs in sorted(by_agent.items())
+        ],
+        generatedAt=_now_iso(),
+    )
 
 
 def _percentile(sorted_vals: list[int], q: float) -> int:

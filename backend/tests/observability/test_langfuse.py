@@ -143,6 +143,10 @@ def test_get_trace_maps_detail_and_worst_level(monkeypatch):
     import shared.routers.traces as tr
 
     monkeypatch.setattr(tr, "_enabled", lambda: True)
+    # These exercise the PRE-BINDING fallback (one shared Langfuse project, tag
+    # filtering): they pass db=None, so the binding lookup returns None and selects it.
+    # That path also needs the shared key pair declared.
+    monkeypatch.setattr(tr, "_shared_project_configured", lambda: True)
 
     async def _fake_get(path, params):
         return _sample_trace(tenant="t1")
@@ -172,6 +176,10 @@ def test_metrics_aggregate(monkeypatch):
     import shared.routers.traces as tr
 
     monkeypatch.setattr(tr, "_enabled", lambda: True)
+    # These exercise the PRE-BINDING fallback (one shared Langfuse project, tag
+    # filtering): they pass db=None, so the binding lookup returns None and selects it.
+    # That path also needs the shared key pair declared.
+    monkeypatch.setattr(tr, "_shared_project_configured", lambda: True)
     page = {
         "data": [_sample_trace(trace_id="a"), _sample_trace(trace_id="b")],
         "meta": {"page": 1, "totalPages": 1},
