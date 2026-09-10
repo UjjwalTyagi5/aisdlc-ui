@@ -5,7 +5,28 @@ from the backend side only. This one is the frontend research it was missing, an
 it **corrects a real naming mistake** in that doc's §1 — read §1 below before
 building anything.
 
-## 1. The frontend is already far ahead of the backend for Track 3
+## 0. Direct answer: does a capability-based standalone page exist for either agent?
+
+**No, for both — stated plainly so §1 below isn't misread as "the frontend is
+done."** What §1 documents is *metadata and routing* (enums, per-track rosters,
+gate copy, a stub route) — not a UI built around either agent's actual work
+product. Concretely, as the code stands today:
+
+| | Discovery & Assessment | Requirements (migration-intent) |
+|---|---|---|
+| **Page exists?** | Yes — `app/(app)/projects/[id]/discovery/page.tsx` | Yes — `app/(app)/projects/[id]/requirements/page.tsx` |
+| **What it's built on** | The **generic** `StageWorkbench` shell — the same list/detail/approve/chat shell used for Code Review, Security, Documentation. 21 lines: a title, a description string, nothing else. Zero knowledge of dependency graphs, risk tiers, or EOL/CVE flags — those don't exist as concepts anywhere in this page. | **Track 1's Requirements capabilities only** — `BoardProjectDialog` (push stories to Jira/ADO), `TraceabilityPanel`, an artifact list built for INVEST stories/BRD/risk register. Checked directly: **zero references to `project.track` or `DeliveryTrack` anywhere in the file.** It has no idea a project can be on Track 3. |
+| **What a Track 3 project would see today** | The generic shell, with its chat broken (next row) — no assessment-specific rendering at all. | The exact same story-pulling UI a Track 1 project gets — wrong for migration-intent output, which isn't stories. |
+| **Chat works?** | **No.** `agentWsPath("discovery")` in `app/api/chat/route.ts` has no case for it — the `default` branch returns `null`, and the BFF refuses with `400 {code:"unknown_agent", detail:"no agent named discovery"}` the moment "Run Discovery & Assessment agent" is clicked. | Yes, but talks to Track 1's `requirement` WS endpoint (`agentWsPath` maps `"requirements"` → `/sdlc/agent/requirement/ws`) regardless of the project's actual track. |
+
+So: **both need real frontend work.** Discovery needs a page built from nothing
+(§4 below sketches what its secondary panel should show, once the backend agent's
+output schema exists). Requirements needs, at minimum, a track-conditional
+rendering path added to the existing page — not a rebuild, since the chat
+plumbing and artifact-list mechanics already work, just not for migration-intent's
+different output shape.
+
+## 1. The frontend is already far ahead of the backend for Track 3 — on metadata and routing, not on either agent's actual UI
 
 Before writing any backend code, a look at `frontend/lib/` shows the frontend side
 of this platform was already built out for all five tracks, not just Track 1 —
