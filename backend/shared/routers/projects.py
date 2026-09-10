@@ -979,6 +979,14 @@ async def archive_project(
     project.archived = True
     await db.flush()
     await db.refresh(project)
+    # Stop tracing an archived project, WITHOUT deleting its Langfuse project. Archive
+    # here is a soft delete with a /restore counterpart, so destroying the traces would
+    # be a harder action than the one taken — and PRD §34.10 makes retention expiry the
+    # only way an audit record ever leaves. Deactivating the binding stops new traces
+    # and keeps the history readable if the project comes back.
+    from shared.observability.bindings import deactivate_binding  # noqa: PLC0415
+
+    await deactivate_binding(db, tenant_id=str(tenant_id), project_id=str(project.id))
     return ProjectOut.from_orm_project(project)
 
 
@@ -1008,6 +1016,12 @@ async def restore_project(
     project.archived = False
     await db.flush()
     await db.refresh(project)
+    # Resume tracing. ensure_binding finds the existing Langfuse project by name and
+    # adopts it, so a restored project returns to the same project its history is in
+    # rather than starting a second one beside it.
+    from shared.observability.bindings import ensure_binding  # noqa: PLC0415
+
+    await ensure_binding(db, tenant_id=str(tenant_id), project_id=str(project.id))
     return ProjectOut.from_orm_project(project)
 
 
@@ -1153,7 +1167,11 @@ async def patch_project(
     if tier == "project":
         return await _queue_settings_change(db, request, project, changes)
 
+    _renamed_to = None
     if body.name is not None:
+        # Captured before the flush so the Langfuse sync below runs on a committed
+        # value; syncing first would rename Langfuse for an edit that then failed.
+        _renamed_to = body.name if body.name != project.display_name else None
         project.display_name = body.name
     if body.description is not None:
         project.description = body.description
@@ -1169,6 +1187,15 @@ async def patch_project(
         project.enforce_artifact_publication = body.enforceArtifactPublication
     await db.flush()
     await db.refresh(project)
+    if _renamed_to:
+        # Langfuse lists projects by name, so a rename that stops here leaves anyone
+        # opening Langfuse hunting for a name this platform no longer uses. Best-effort:
+        # an unreachable Langfuse must not fail the edit.
+        from shared.observability.bindings import sync_project_rename  # noqa: PLC0415
+
+        await sync_project_rename(
+            db, tenant_id=str(tenant_id), project_id=str(project.id), new_name=_renamed_to
+        )
     from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415
     clear_budget_cache()
     from shared.services.budget_store import read_scope_spend  # noqa: PLC0415

@@ -131,6 +131,40 @@ async def ensure_binding(
     if existing is not None:
         return existing
 
+    # REACTIVATE BEFORE PROVISIONING. A project that was bound and then archived still
+    # has its row, just inactive, and its traces are still in that Langfuse project.
+    # Provisioning a fresh one would strand the history and leave two projects for one.
+    #
+    # This must not be a name lookup. Provisioning matches an existing Langfuse project
+    # by name, so a project renamed while archived would not be found and a DUPLICATE
+    # would be created — observed exactly that before this existed. The binding row is
+    # the durable identity; the name is not.
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(str(tenant_id)) as revive:
+            revived = (
+                await revive.execute(
+                    text(
+                        "update langfuse_bindings set is_active = true, updated_at = now() "
+                        "where id = (select id from langfuse_bindings "
+                        "            where tenant_id = cast(:t as uuid) "
+                        "              and project_id = cast(:p as uuid) "
+                        "              and is_active = false "
+                        "            order by updated_at desc limit 1) "
+                        "returning id"
+                    ),
+                    {"t": str(tenant_id), "p": str(project_id)},
+                )
+            ).first()
+        if revived is not None:
+            logger.info("langfuse binding reactivated for project=%s", project_id)
+            return await load_binding(session, tenant_id, project_id)
+    except Exception:
+        logger.warning(
+            "langfuse binding reactivation failed for project=%s", project_id, exc_info=True
+        )
+
     # Names come from OUR records, so the Langfuse organization and project are
     # recognisable to a human opening the UI rather than a pair of uuids.
     try:
@@ -262,3 +296,74 @@ def client_for_binding(binding: Binding):
 def clear_client_cache() -> None:
     """Drop memoised clients. For tests, and after a credential rotation."""
     _client_cache.clear()
+
+
+async def sync_project_rename(session, *, tenant_id: str, project_id: str, new_name: str) -> None:
+    """Carry an SDLC project rename through to its Langfuse project.
+
+    Best-effort and deliberately silent on failure: a rename must not fail because an
+    observability system is unreachable. The consequence of skipping it is cosmetic —
+    Langfuse keeps the old name — and the next successful rename corrects it.
+    """
+    binding = await load_binding(session, tenant_id, project_id)
+    if binding is None:
+        return
+    try:
+        from shared.observability.provisioning import LangfuseProvisioner  # noqa: PLC0415
+
+        ok = await LangfuseProvisioner().rename_project(
+            binding.langfuse_project_id, new_name
+        )
+    except Exception:
+        logger.warning("langfuse rename failed for project=%s", project_id, exc_info=True)
+        return
+    if not ok:
+        return
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(str(tenant_id)) as s:
+            await s.execute(
+                text(
+                    "update langfuse_bindings set langfuse_project_name = :n, "
+                    "updated_at = now() where tenant_id = cast(:t as uuid) "
+                    "and project_id = cast(:p as uuid) and is_active = true"
+                ),
+                {"n": new_name, "t": str(tenant_id), "p": str(project_id)},
+            )
+    except Exception:
+        logger.warning(
+            "langfuse binding name not updated for project=%s", project_id, exc_info=True
+        )
+
+
+async def deactivate_binding(session, *, tenant_id: str, project_id: str) -> None:
+    """Mark a project's binding inactive when the project is archived.
+
+    THE LANGFUSE PROJECT IS NOT DELETED, and that is the point. Archiving here is a soft
+    delete with a `/restore` counterpart, so destroying the traces would be a harder
+    action than the one the user took — and it would break PRD §17's auditability and
+    §34.10's "retention expiry is the only way an audit record ever leaves". Only the
+    retention policy set at provisioning time ever removes a trace.
+
+    Deactivating stops new traces (agent_trace finds no binding, so the project is not
+    traced) while leaving the history readable if the project is restored: `restore`
+    calls ensure_binding, which finds the existing Langfuse project by name and adopts
+    it rather than creating a second one.
+    """
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(str(tenant_id)) as s:
+            await s.execute(
+                text(
+                    "update langfuse_bindings set is_active = false, updated_at = now() "
+                    "where tenant_id = cast(:t as uuid) and project_id = cast(:p as uuid) "
+                    "and is_active = true"
+                ),
+                {"t": str(tenant_id), "p": str(project_id)},
+            )
+    except Exception:
+        logger.warning(
+            "langfuse binding not deactivated for project=%s", project_id, exc_info=True
+        )

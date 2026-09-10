@@ -355,6 +355,34 @@ class LangfuseProvisioner:
             await conn.close()
 
 
+    async def rename_project(self, langfuse_project_id: str, new_name: str) -> bool:
+        """Rename the Langfuse project behind a binding. Best-effort; never raises.
+
+        Cosmetic but not pointless: the Langfuse UI lists projects by name, so a project
+        renamed here and not there leaves whoever opens Langfuse looking for a name that
+        no longer exists in this platform.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse rename skipped (%s)", exc)
+            return False
+        try:
+            await conn.execute(
+                "update projects set name=$1, updated_at=$2 where id=$3",
+                new_name, _now(), langfuse_project_id,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "langfuse rename failed for project=%s", langfuse_project_id, exc_info=True
+            )
+            return False
+        finally:
+            await conn.close()
+
+
 async def verify_key_pair(public_key: str, secret_key: str, host: str) -> bool:
     """Prove a minted pair actually authenticates before anything relies on it.
 
