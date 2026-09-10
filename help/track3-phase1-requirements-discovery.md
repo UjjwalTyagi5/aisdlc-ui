@@ -1,5 +1,15 @@
 # Track 3 Phase 1 — Requirements (migration-intent) + Discovery & Assessment
 
+> **§1 below is corrected by `help/track3-frontend-plan.md` §2 — read that first.**
+> This doc was written from the backend alone, before anyone had checked what the
+> frontend already has. The frontend ships a full 13-agent `AgentType`/`Phase`
+> enum, a per-track roster (`lib/tracks.ts`), and even stub pages for `discovery`
+> and `strategy` already — all written against the id `discovery`, not
+> `discovery_assessment` as proposed below, and against `requirements` (the SAME
+> id as Track 1, not a new one) for Track 3's Requirements agent. §1's naming
+> proposal is superseded; everything else in this doc (the file-level build plan,
+> the standalone track-enforcement gap, the build order) still holds.
+
 **Scope note (supersedes the "build all 10 agents" framing in the earlier docs):**
 the near-term goal has narrowed. We are building exactly **two** agents first —
 Requirements in its migration-intent mode, and Discovery & Assessment — and each
