@@ -575,6 +575,60 @@ class UsageMonthly(Base):
 # role-assignment table — with no isolation at all. Keep it in step with the
 # tables that actually carry a tenant_id column; test_rls_coverage guards it.
 # ---------------------------------------------------------------------------
+
+class LangfuseBinding(Base):
+    """Which Langfuse project one SDLC project's traces go to, and the key that reaches it.
+
+    THE ROW THAT MAKES ISOLATION REAL. Traces used to land in one shared Langfuse project
+    and be told apart by a `project:` tag — an application-level promise, where PRD §45
+    asks for project-level isolation as a release gate. Each SDLC project now owns a
+    Langfuse project, under a Langfuse organization per business unit, and this table is
+    the map. A key pair only reaches its own project, so a wrong filter returns nothing
+    instead of another unit's prompts.
+
+    ONE ACTIVE BINDING PER PROJECT, enforced by a partial unique index rather than a
+    plain constraint: re-provisioning after a Langfuse rebuild must be able to leave the
+    old row behind for forensics while only one binding is live.
+
+    KEYS ARE STORED ENCRYPTED with the platform's existing secret-store key, not in
+    plaintext. They are credentials to a system holding every prompt and completion this
+    platform produces; a database dump should not be enough to read them.
+    """
+
+    __tablename__ = "langfuse_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # RLS anchor, same convention as every other tenant-scoped table.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # The business unit -> becomes the Langfuse ORGANIZATION.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    # The SDLC project -> becomes the Langfuse PROJECT.
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+
+    langfuse_org_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    langfuse_project_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    langfuse_project_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Stored per row, not read from config: a binding must keep working after the
+    # platform is pointed at a different Langfuse, or it silently reads the wrong host.
+    langfuse_host: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    public_key_encrypted: Mapped[str] = mapped_column(Text(), nullable=False)
+    secret_key_encrypted: Mapped[str] = mapped_column(Text(), nullable=False)
+
+    is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_langfuse_binding_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+
 _RLS_TABLES: tuple[str, ...] = (
     "agent_call_logs",
     "agent_profiles",
@@ -589,6 +643,7 @@ _RLS_TABLES: tuple[str, ...] = (
     "custom_roles",
     "dev_workspaces",
     "eval_records",
+    "langfuse_bindings",
     "mcp_servers",
     "model_offerings",
     "model_providers",

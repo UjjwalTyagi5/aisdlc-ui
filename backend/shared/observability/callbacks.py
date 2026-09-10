@@ -57,6 +57,7 @@ def langfuse_langchain_extras(
     offering_id: Optional[str] = None,
     project_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    public_key: Optional[str] = None,
 ) -> tuple[list, dict]:
     """Return (extra_callbacks, config_metadata) for a standalone (session) call.
 
@@ -78,8 +79,11 @@ def langfuse_langchain_extras(
     extra_cbs: list = [UsageMeterCallbackHandler(tenant_id or "", offering_id, project_id)]
     _set_run_project(project_id)
 
-    client = get_langfuse_client()
-    if client is None:
+    # `public_key` selects WHICH Langfuse project this turn writes to. Each SDLC project
+    # has its own, so the handler must be bound to that project's client rather than the
+    # process-wide default — otherwise every project's traces land in one bucket again
+    # and the isolation the binding table exists to provide is lost at the last step.
+    if public_key is None and get_langfuse_client() is None:
         return extra_cbs, {}
     try:
         from langfuse.langchain import CallbackHandler  # noqa: PLC0415
@@ -115,7 +119,8 @@ def langfuse_langchain_extras(
         # run that produced it. FR-08 asks for traces "correlated to ... workstream";
         # this is the correlation.
         meta["run_id"] = str(run_id)
-    return [*extra_cbs, CallbackHandler()], meta
+    handler = CallbackHandler(public_key=public_key) if public_key else CallbackHandler()
+    return [*extra_cbs, handler], meta
 
 
 async def agent_trace(
@@ -179,6 +184,33 @@ async def agent_trace(
         except Exception:  # pragma: no cover - tags are best-effort, never fatal
             logger.debug("workspace resolution failed (swallowed)", exc_info=True)
 
+    # WHICH LANGFUSE PROJECT THIS TURN WRITES TO. Each SDLC project owns one, so the
+    # binding decides the destination; without it every project would fall back to the
+    # single shared client and the isolation would exist in the database and nowhere
+    # else. Best-effort by design: an unreachable Langfuse leaves `public_key` None, the
+    # handler falls back to the default client if one is configured, and if neither
+    # exists the turn simply runs untraced rather than failing.
+    public_key = None
+    if project_id and _tenant:
+        try:
+            from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+            from shared.observability.bindings import (  # noqa: PLC0415
+                client_for_binding,
+                ensure_binding,
+            )
+
+            async with get_db_session_for_tenant(str(_tenant)) as _s:
+                binding = await ensure_binding(
+                    _s, tenant_id=str(_tenant), project_id=str(project_id)
+                )
+            if binding is not None:
+                # Constructing the client REGISTERS it with the SDK under its public
+                # key, which is how CallbackHandler(public_key=…) finds it below.
+                if client_for_binding(binding) is not None:
+                    public_key = binding.public_key
+        except Exception:  # pragma: no cover - never fail a run over observability
+            logger.debug("langfuse binding resolution failed (swallowed)", exc_info=True)
+
     return langfuse_langchain_extras(
         session_id=session_id,
         run_id=run_id,
@@ -189,4 +221,5 @@ async def agent_trace(
         offering_id=offering_id,
         project_id=project_id,
         workspace_id=workspace_id,
+        public_key=public_key,
     )

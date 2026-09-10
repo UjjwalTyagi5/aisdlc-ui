@@ -88,10 +88,17 @@ def _enabled() -> bool:
     )
 
 
-def _auth_header() -> dict[str, str]:
-    token = base64.b64encode(
-        f"{LANGFUSE_PUBLIC_KEY}:{LANGFUSE_SECRET_KEY}".encode()
-    ).decode()
+def _auth_header(public_key: str | None = None, secret_key: str | None = None) -> dict[str, str]:
+    """Basic auth for one Langfuse project.
+
+    Defaults to the process-wide key pair. A caller that passes a binding's keys reads
+    THAT project and only that project — which is the whole isolation story: a key pair
+    cannot reach a project it was not issued for, so a wrong filter returns nothing
+    rather than another unit's traces.
+    """
+    pk = public_key if public_key is not None else LANGFUSE_PUBLIC_KEY
+    sk = secret_key if secret_key is not None else LANGFUSE_SECRET_KEY
+    token = base64.b64encode(f"{pk}:{sk}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
 
@@ -130,17 +137,34 @@ def _lf_cache_key(path: str, params: dict[str, Any]):
     )))
 
 
-async def _lf_get(path: str, params: dict[str, Any]) -> Optional[dict]:
-    """GET the Langfuse Public API; return parsed JSON or None on any failure (cached)."""
+async def _lf_get(
+    path: str,
+    params: dict[str, Any],
+    *,
+    host: str | None = None,
+    public_key: str | None = None,
+    secret_key: str | None = None,
+) -> Optional[dict]:
+    """GET the Langfuse Public API; return parsed JSON or None on any failure (cached).
+
+    `host`/`public_key`/`secret_key` select which Langfuse PROJECT to read. Omitted,
+    they fall back to the process-wide configuration, which is the single-project mode
+    used when a project has no binding yet.
+    """
     import time  # noqa: PLC0415
-    _key = _lf_cache_key(path, params)
+    # The public key is part of the cache key: two projects asking the same question
+    # must not share an answer. Without this, one project's page could be served from
+    # another's cached response — the isolation undone by a cache hit.
+    _key = _lf_cache_key(path, {**params, "__pk": public_key or LANGFUSE_PUBLIC_KEY})
     _hit = _LF_CACHE.get(_key)
     if _hit and (time.monotonic() - _hit[0]) < _LF_CACHE_TTL_S:
         return _hit[1]
-    url = f"{LANGFUSE_HOST.rstrip('/')}{path}"
+    url = f"{(host or LANGFUSE_HOST).rstrip('/')}{path}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params, headers=_auth_header())
+            resp = await client.get(
+                url, params=params, headers=_auth_header(public_key, secret_key)
+            )
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -406,6 +430,53 @@ async def _resolve_project_names(project_ids: set[str], tenant_id: str) -> dict[
         return {}
 
 
+
+async def _readable_bindings(db, request, only_project: str | None = None):
+    """The Langfuse projects this caller may read, as bindings with live credentials.
+
+    THE ISOLATION BOUNDARY. Every project owns a Langfuse project and a key pair; this
+    returns only the pairs for projects `visible_project_ids` already allows. A caller
+    therefore cannot reach another unit's traces even if a filter below is wrong,
+    because the credential that would read them was never handed out.
+
+    Returns [] when nothing is readable, and None when this tenant has no bindings at
+    all — the pre-binding single-project mode, where the caller falls back to the shared
+    key pair and tag filtering.
+    """
+    tenant_id = str(request.state.tenant_id)
+    try:
+        from sqlalchemy import text as _text  # noqa: PLC0415
+
+        rows = (
+            await db.execute(
+                _text(
+                    "select project_id from langfuse_bindings "
+                    "where tenant_id = cast(:t as uuid) and is_active = true"
+                ),
+                {"t": tenant_id},
+            )
+        ).all()
+    except Exception:
+        logger.warning("langfuse binding lookup failed on read path", exc_info=True)
+        return None
+    if not rows:
+        return None
+
+    bound = {str(r[0]) for r in rows}
+    visible = await _visible_projects(db, request)
+    allowed = bound if visible is None else (bound & visible)
+    if only_project is not None:
+        # Naming a project narrows; it never widens. An id outside `allowed` yields an
+        # empty set, so the answer is "nothing" rather than someone else's traces.
+        allowed = allowed & {only_project}
+    if not allowed:
+        return []
+
+    from shared.observability.bindings import load_bindings  # noqa: PLC0415
+
+    return await load_bindings(db, tenant_id, sorted(allowed))
+
+
 @traces_router.get(
     "",
     response_model=list[TraceListItemOut],
@@ -439,11 +510,47 @@ async def list_traces(
     """
     if not _enabled():
         return []
-    visible = await _visible_projects(db, request)
 
     base: dict[str, Any] = {"limit": limit, "page": 1}
     if user:
         base["userId"] = user
+
+    # PREFERRED PATH: one query per Langfuse project the caller may read, using that
+    # project's own key pair. No tag filter is needed for isolation here — the
+    # credential cannot reach anything else — so a mistake below returns nothing rather
+    # than another unit's traces.
+    bindings = await _readable_bindings(db, request, only_project=project)
+    if bindings is not None:
+        if not bindings:
+            return []
+        import asyncio  # noqa: PLC0415
+
+        results = await asyncio.gather(*[
+            _lf_get(
+                "/api/public/traces", dict(base),
+                host=b.langfuse_host, public_key=b.public_key, secret_key=b.secret_key,
+            )
+            for b in bindings[:_MAX_PROJECT_FANOUT]
+        ])
+        merged: list[dict] = []
+        for b, raw in zip(bindings[:_MAX_PROJECT_FANOUT], results):
+            for t in ((raw or {}).get("data") or []):
+                # Langfuse does not know our project id — it only knows its own project.
+                # Stamp ours on so the row maps to the right name and the frontend
+                # filter keeps working.
+                meta = dict(t.get("metadata") or {})
+                meta.setdefault("project_id", b.project_id)
+                merged.append({**t, "metadata": meta})
+        merged.sort(key=lambda t: str(t.get("timestamp") or ""), reverse=True)
+        rows = [_map_list_item(t) for t in merged[:limit]]
+        names = await _resolve_project_names({r.projectId for r in rows}, request.state.tenant_id)
+        for r in rows:
+            r.projectName = names.get(r.projectId, r.projectName)
+        return _apply_trace_filters(rows, agent, None)
+
+    # FALLBACK: this tenant has no bindings yet — the original single-project mode,
+    # where every trace shares one Langfuse project and tags do the separating.
+    visible = await _visible_projects(db, request)
 
     if project:
         # One project asked for: push it down. Scoping still runs afterwards — an
@@ -631,19 +738,60 @@ async def get_trace(
     """Full trace detail with spans + a deep-link into the Langfuse UI."""
     if not _enabled():
         raise HTTPException(status_code=404, detail="Tracing disabled")
+
+    # ASK ONLY THE PROJECTS THIS CALLER MAY READ. A trace id is opaque and carries no
+    # project, so the search is over the caller's own bindings — which means a trace in
+    # a project they cannot see is simply not found, without a separate access check to
+    # forget. The 404 is the same one an unknown id gets, so it does not confirm the
+    # trace exists elsewhere.
+    bindings = await _readable_bindings(db, request)
+    if bindings is not None:
+        t = None
+        binding = None
+        for b in bindings[:_MAX_PROJECT_FANOUT]:
+            found = await _lf_get(
+                f"/api/public/traces/{trace_id}", {},
+                host=b.langfuse_host, public_key=b.public_key, secret_key=b.secret_key,
+            )
+            if found:
+                t, binding = found, b
+                break
+        if not t:
+            raise HTTPException(status_code=404, detail="Trace not found")
+        # Langfuse knows only its own project id; stamp ours so the detail page shows
+        # the right project name and deep-links correctly.
+        meta = dict(t.get("metadata") or {})
+        meta.setdefault("project_id", binding.project_id)
+        t = {**t, "metadata": meta}
+        return await _build_trace_detail(t, trace_id, request, host=binding.langfuse_host)
+
+    # FALLBACK: no bindings for this tenant, so one shared Langfuse project and the
+    # tag/scope guards that go with it.
     t = await _lf_get(f"/api/public/traces/{trace_id}", {})
     if t is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     # Tenant guard: refuse a trace that is not tagged for the caller's tenant.
     if _tenant_tag(request) not in (t.get("tags") or []):
         raise HTTPException(status_code=404, detail="Trace not found")
-
-    base = _map_list_item(t)
-    # Project guard, on top of the tenant guard above: the tenant tag stops a
-    # cross-tenant read, not a cross-PROJECT one inside the same organisation.
+    # Project guard on top: the tenant tag stops a cross-tenant read, not a
+    # cross-PROJECT one inside the same organisation.
     _visible = await _visible_projects(db, request)
-    if _visible is not None and base.projectId not in _visible:
+    if _visible is not None and _map_list_item(t).projectId not in _visible:
         raise HTTPException(status_code=404, detail="Trace not found")
+    return await _build_trace_detail(t, trace_id, request)
+
+
+async def _build_trace_detail(
+    t: dict, trace_id: str, request: Request, *, host: str | None = None
+) -> TraceOut:
+    """Map one Langfuse trace payload onto the frontend Trace contract.
+
+    Shared by both read paths — the per-project one and the pre-binding fallback — so
+    the detail page cannot drift between them. `host` is the Langfuse the trace was
+    actually read from, which is what the deep-link must point at: a binding may name a
+    different instance from the process-wide default.
+    """
+    base = _map_list_item(t)
     # Resolve the real project display name for the detail header.
     if base.projectId == "standalone":
         project_name = "Standalone"
@@ -666,9 +814,10 @@ async def get_trace(
             worst = lvl
             break
     html_path = t.get("htmlPath")
+    _host = (host or LANGFUSE_HOST).rstrip("/")
     langfuse_url = (
-        f"{LANGFUSE_HOST.rstrip('/')}{html_path}" if html_path
-        else f"{LANGFUSE_HOST.rstrip('/')}/project/{t.get('projectId', '')}/traces/{trace_id}"
+        f"{_host}{html_path}" if html_path
+        else f"{_host}/project/{t.get('projectId', '')}/traces/{trace_id}"
     )
     return TraceOut(
         # userId arrives via base.model_dump() — it is on the list projection now, so
@@ -696,3 +845,6 @@ def _percentile(sorted_vals: list[int], q: float) -> int:
         return 0
     idx = min(len(sorted_vals) - 1, int(round(q * (len(sorted_vals) - 1))))
     return int(sorted_vals[idx])
+
+
+
