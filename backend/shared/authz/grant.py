@@ -309,7 +309,8 @@ async def _sync_langfuse_org(scope_kind: str, scope_id, role_name: str, tenant_i
     """Carry a role change through to the unit's Langfuse organization. Never raises.
 
     WHY HERE AND NOT IN THE ROUTES. Appointing a business unit admin grants that person
-    ADMIN on their unit's Langfuse organization, and there are six ways to appoint one —
+    ADMIN on their unit's Langfuse organization, and appointing a project admin grants
+    MEMBER on that one project — and there are six ways to appoint one —
     the workspaces routes, onboarding, the admin router, governance effects and the CLI.
     A hook per route would be six implementations of one rule, and the seventh route would
     silently not have it. `grant_role` and `revoke_role` are the only things all of them
@@ -322,7 +323,9 @@ async def _sync_langfuse_org(scope_kind: str, scope_id, role_name: str, tenant_i
     The sync itself is idempotent and derives the whole desired state, so calling it on a
     role change that turns out to be irrelevant costs a lookup and changes nothing.
     """
-    if role_name not in ("bu_admin", "org_admin"):
+    from shared.observability.org_sync import _PROJECT_ROLE_MAP  # noqa: PLC0415
+
+    if role_name not in ("bu_admin", "org_admin") and role_name not in _PROJECT_ROLE_MAP:
         return
     try:
         from shared.db import get_db_session_for_tenant  # noqa: PLC0415
@@ -331,6 +334,14 @@ async def _sync_langfuse_org(scope_kind: str, scope_id, role_name: str, tenant_i
         if not org_sync._enabled():
             return
         async with get_db_session_for_tenant(str(tenant_id)) as session:
+            # A project-scoped role reaches exactly one Langfuse project. `sync_project`
+            # runs the unit sync first, because a project membership has to hang off an
+            # organization membership that may not exist yet.
+            if scope_kind == "project" and role_name in _PROJECT_ROLE_MAP:
+                await org_sync.sync_project(
+                    session, tenant_id=str(tenant_id), project_id=str(scope_id)
+                )
+                return
             if role_name == "bu_admin" and scope_kind == "business_unit":
                 await org_sync.sync_unit(
                     session, tenant_id=str(tenant_id), workspace_id=str(scope_id)

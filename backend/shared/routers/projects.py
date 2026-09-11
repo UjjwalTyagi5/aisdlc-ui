@@ -593,6 +593,24 @@ async def create_project(
     except Exception:  # noqa: BLE001 — reporting must never break project creation
         pass
 
+    # ITS LANGFUSE PROJECT, NOW RATHER THAN ON THE FIRST TRACED RUN.
+    #
+    # Provisioning used to be lazy: the Langfuse project and its key pair appeared the
+    # first time somebody ran an agent here. That is too late to grant anybody a role on
+    # it — `project_memberships` references a project that does not exist yet — so the
+    # project admin appointed above would hold nothing until an unrelated event happened.
+    # Creating it here is also what makes a new project visible in Langfuse immediately
+    # rather than looking like the integration failed.
+    #
+    # Backgrounded and fail-soft, like the business-unit hooks: an unreachable Langfuse
+    # must never be the reason a project cannot be created. `scripts/sync_langfuse_orgs.py`
+    # converges anything lost that way.
+    from shared.observability import org_sync  # noqa: PLC0415
+
+    org_sync.schedule(
+        "sync_project", tenant_id=str(tenant_id), project_id=str(project.id)
+    )
+
     return ProjectOut.from_orm_project(project)
 
 

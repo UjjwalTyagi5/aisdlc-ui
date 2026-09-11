@@ -74,6 +74,18 @@ _WRITABLE_TABLES = frozenset(
 # bu_admin administers theirs. MEMBER/VIEWER/NONE exist in Langfuse and are unused here.
 ORG_ROLE_OWNER = "OWNER"
 ORG_ROLE_ADMIN = "ADMIN"
+# Project-level roles. A project membership OVERRIDES the organization role for that one
+# project (Langfuse's `resolveProjectRole`), which is what lets somebody reach exactly one
+# project and nothing else — and also why granting one carelessly can REDUCE access. See
+# `_grant_project_role`.
+PROJECT_ROLE_MEMBER = "MEMBER"
+PROJECT_ROLE_VIEWER = "VIEWER"
+# The organization-level floor for somebody who should only reach individual projects.
+# `project_memberships.org_membership_id` is NOT NULL, so a project role is impossible
+# without an organization membership; NONE grants nothing on its own
+# (`projectAccessRights.NONE` is the empty list), so it is the only value that does not
+# leak the rest of the unit's projects to them.
+ORG_ROLE_NONE = "NONE"
 
 # Strongest-wins ordering, used when two rules name the same address. Observed in
 # testing: the bootstrap address is an OWNER, and appointing that same person admin of one
@@ -95,7 +107,8 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
     # How a person who has never signed in to Langfuse is granted access. Langfuse
     # creates the membership from this row when they first authenticate, which is the
     # only supported way to grant somebody who has no `users` row yet.
-    "membership_invitations": {"id", "email", "org_id", "org_role"},
+    "membership_invitations": {"id", "email", "org_id", "org_role", "project_id", "project_role"},
+    "project_memberships": {"project_id", "user_id", "role", "org_membership_id"},
     "api_keys": {
         "id",
         "public_key",
@@ -574,6 +587,308 @@ class LangfuseProvisioner:
         finally:
             await conn.close()
 
+
+    # ── project-level roles ───────────────────────────────────────────────────
+    #
+    # WHY THIS WORKS ON OSS, WHICH IS NOT OBVIOUS. Langfuse documents project-level RBAC as
+    # an Enterprise feature, and it is — but the licence gate is on the API that ASSIGNS a
+    # project role (`hasEntitlement("rbac-project-roles")` in its membersRouter), not on the
+    # code that ENFORCES one. `resolveProjectRole` in `packages/shared` is MIT-licensed and
+    # has no entitlement check at all:
+    #
+    #     projectMemberships.find(m => m.projectId === projectId)?.role ?? orgMembershipRole
+    #
+    # So a row we write ourselves is honoured. The same is true of the invitation path:
+    # `createProjectMembershipsOnSignup` builds ProjectMemberships from an invitation's
+    # project_id/project_role unconditionally, while the LANGFUSE_DEFAULT_PROJECT_ID path a
+    # few lines above it DOES check the entitlement — the difference is visible in one file,
+    # so this is their design rather than an oversight we are exploiting. A Langfuse
+    # maintainer has confirmed self-implementing this is welcome and not a licence breach
+    # (github.com/orgs/langfuse/discussions/10745).
+
+    async def _grant_project_role(
+        self,
+        conn,
+        org_id: str,
+        project_id: str,
+        email: str,
+        role: str,
+        invited_by: Optional[str] = None,
+    ) -> str:
+        """Give `email` `role` on ONE project, and nothing else in the organization.
+
+        THE DOWNGRADE GUARD IS THE SUBTLE PART. A project membership does not add to the
+        organization role, it REPLACES it for that project. So writing MEMBER for somebody
+        who is already an organization ADMIN (a business unit admin) would quietly REDUCE
+        what they can do on that one project — a grant that takes access away. Nothing
+        errors; they simply lose buttons on one project and not the others.
+
+        A project row is therefore written only when it is STRONGER than the organization
+        role, and removed when it is not, so the stronger organization role applies.
+        """
+        email = (email or "").strip()
+        if not email:
+            return "skipped"
+        now = _now()
+
+        user_id = await conn.fetchval(
+            "select id from users where lower(email) = lower($1)", email
+        )
+
+        if user_id:
+            # A project role needs an organization membership to hang off (the FK is NOT
+            # NULL). Created at NONE when absent — never lowering an existing one, which
+            # would strip a unit admin of their unit.
+            om = await conn.fetchrow(
+                "select id, role from organization_memberships where org_id=$1 and user_id=$2",
+                org_id, str(user_id),
+            )
+            if om is None:
+                om_id = str(uuid.uuid4())
+                await conn.execute(
+                    "insert into organization_memberships "
+                    '(id,org_id,user_id,role,created_at,updated_at) '
+                    'values ($1,$2,$3,$4::text::"Role",$5,$6)',
+                    om_id, org_id, str(user_id), ORG_ROLE_NONE, now, now,
+                )
+                org_role = ORG_ROLE_NONE
+            else:
+                om_id, org_role = str(om["id"]), str(om["role"])
+
+            # They have an account, so any invitation is stale — and left in place it is a
+            # second grant Langfuse would apply at their next sign-in, including after a
+            # revoke.
+            await conn.execute(
+                "delete from membership_invitations "
+                "where org_id=$1 and lower(email)=lower($2)",
+                org_id, email,
+            )
+
+            if _ROLE_RANK.get(role, 0) <= _ROLE_RANK.get(org_role, 0):
+                # The organization role already reaches at least this far. Any project row
+                # here would override it downwards, so make sure none exists.
+                await conn.execute(
+                    "delete from project_memberships where project_id=$1 and user_id=$2",
+                    project_id, str(user_id),
+                )
+                return f"covered-by-org-{org_role.lower()}"
+
+            existing = await conn.fetchval(
+                "select role from project_memberships where project_id=$1 and user_id=$2",
+                project_id, str(user_id),
+            )
+            if existing is None:
+                await conn.execute(
+                    "insert into project_memberships "
+                    "(project_id,user_id,role,created_at,updated_at,org_membership_id) "
+                    'values ($1,$2,$3::text::"Role",$4,$5,$6)',
+                    project_id, str(user_id), role, now, now, om_id,
+                )
+                return "granted"
+            if str(existing) != role:
+                await conn.execute(
+                    'update project_memberships set role=$1::text::"Role", updated_at=$2 '
+                    "where project_id=$3 and user_id=$4",
+                    role, now, project_id, str(user_id),
+                )
+                return "updated"
+            return "unchanged"
+
+        # No Langfuse account yet — invite them to the organization AND the project in one
+        # row. Langfuse turns both into memberships at their first sign-in.
+        #
+        # ONE INVITATION PER PERSON PER ORGANIZATION, enforced by a UNIQUE (email, org_id)
+        # index in Langfuse's own schema. So somebody who has never signed in can be
+        # invited to exactly ONE project in a unit: a second project's grant cannot be
+        # expressed until they have an account. That is reported rather than hidden —
+        # `scripts/sync_langfuse_orgs.py` applies the rest once they appear, and the
+        # alternative (a second row) would fail the unique index and lose the first grant
+        # too.
+        existing = await conn.fetchrow(
+            "select id, project_id, org_role, project_role from membership_invitations "
+            "where org_id=$1 and lower(email)=lower($2)",
+            org_id, email,
+        )
+        if existing is None:
+            await conn.execute(
+                "insert into membership_invitations "
+                "(id,email,org_id,org_role,project_id,project_role,invited_by_user_id,"
+                " created_at,updated_at) "
+                'values ($1,$2,$3,$4::text::"Role",$5,$6::text::"Role",$7,$8,$9)',
+                str(uuid.uuid4()), email.lower(), org_id, ORG_ROLE_NONE,
+                project_id, role, invited_by, now, now,
+            )
+            return "invited"
+
+        if existing["project_id"] and str(existing["project_id"]) != project_id:
+            logger.info(
+                "langfuse: %s already has a pending invitation to another project in this "
+                "organization; %s applies once they sign in", email, project_id,
+            )
+            return "invite-slot-taken"
+
+        if str(existing["project_role"] or "") != role or not existing["project_id"]:
+            await conn.execute(
+                "update membership_invitations set project_id=$1, "
+                'project_role=$2::text::"Role", updated_at=$3 where id=$4',
+                project_id, role, now, str(existing["id"]),
+            )
+            return "invite-updated"
+        return "unchanged"
+
+    async def _revoke_project_role(
+        self, conn, org_id: str, project_id: str, email: str
+    ) -> str:
+        """Remove `email`'s access to ONE project, membership and pending invitation alike.
+
+        Leaves the organization membership alone unless it is a bare NONE floor that now
+        holds nothing up — a NONE member with no project rows grants nothing but does show
+        up as a member of the unit, which reads as access they do not have.
+        """
+        email = (email or "").strip()
+        if not email:
+            return "skipped"
+        removed: list[str] = []
+
+        user_id = await conn.fetchval(
+            "select id from users where lower(email) = lower($1)", email
+        )
+        if user_id:
+            result = await conn.execute(
+                "delete from project_memberships where project_id=$1 and user_id=$2",
+                project_id, str(user_id),
+            )
+            if not result.endswith(" 0"):
+                removed.append("membership")
+
+            om = await conn.fetchrow(
+                "select id, role from organization_memberships where org_id=$1 and user_id=$2",
+                org_id, str(user_id),
+            )
+            if om is not None and str(om["role"]) == ORG_ROLE_NONE:
+                still = await conn.fetchval(
+                    "select count(*) from project_memberships where org_membership_id=$1",
+                    str(om["id"]),
+                )
+                if not still:
+                    await conn.execute(
+                        "delete from organization_memberships where id=$1", str(om["id"])
+                    )
+                    removed.append("org-floor")
+
+        result = await conn.execute(
+            "delete from membership_invitations "
+            "where org_id=$1 and lower(email)=lower($2) and project_id=$3",
+            org_id, email, project_id,
+        )
+        if not result.endswith(" 0"):
+            removed.append("invitation")
+        return "+".join(removed) if removed else "nothing-to-revoke"
+
+    async def sync_project_access(
+        self,
+        *,
+        org_id: str,
+        project_id: str,
+        grants: Optional[dict] = None,
+        revoke: Optional[list] = None,
+        invited_by_email: Optional[str] = None,
+    ) -> dict:
+        """Apply per-project grants and revocations. Never raises.
+
+        Revocations first, for the same reason as `sync_org_access`: moving a role between
+        two people in one call must not have the outgoing revoke undo the incoming grant.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning(
+                "langfuse project access sync skipped for project=%s (%s)", project_id, exc
+            )
+            return {}
+        applied: dict = {}
+        try:
+            invited_by = (
+                await conn.fetchval(
+                    "select id from users where lower(email) = lower($1)", invited_by_email
+                )
+                if invited_by_email
+                else None
+            )
+            async with conn.transaction():
+                for email in revoke or []:
+                    applied[email.strip().lower()] = await self._revoke_project_role(
+                        conn, org_id, project_id, email
+                    )
+                for email, role in (grants or {}).items():
+                    applied[email.strip().lower()] = await self._grant_project_role(
+                        conn, org_id, project_id, email, role,
+                        invited_by=str(invited_by) if invited_by else None,
+                    )
+        except Exception:
+            logger.warning(
+                "langfuse project access sync failed for project=%s", project_id, exc_info=True
+            )
+        finally:
+            await conn.close()
+        return applied
+
+    async def project_access(self, *, org_id: str, project_id: str) -> dict:
+        """Who reaches this project, and how. For the reconciler and for tests.
+
+        Returns {"members": {email: role}, "invitations": {email: role},
+                 "via_org": {email: org_role}}.
+
+        `via_org` is the third answer the other two cannot give: somebody with no project
+        row still reaches the project through their organization role, and reporting only
+        explicit project rows would show a project as having no readers when a unit admin
+        reads it every day.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse project access read skipped (%s)", exc)
+            return {"members": {}, "invitations": {}, "via_org": {}}
+        try:
+            members = {
+                str(r["email"]).lower(): str(r["role"])
+                for r in await conn.fetch(
+                    "select u.email, pm.role from project_memberships pm "
+                    "join users u on u.id = pm.user_id where pm.project_id=$1",
+                    project_id,
+                )
+                if r["email"]
+            }
+            invitations = {
+                str(r["email"]).lower(): str(r["project_role"])
+                for r in await conn.fetch(
+                    "select email, project_role from membership_invitations "
+                    "where org_id=$1 and project_id=$2 and project_role is not null",
+                    org_id, project_id,
+                )
+            }
+            via_org = {
+                str(r["email"]).lower(): str(r["role"])
+                for r in await conn.fetch(
+                    "select u.email, m.role from organization_memberships m "
+                    "join users u on u.id = m.user_id "
+                    "where m.org_id=$1 and m.role <> 'NONE' "
+                    "  and not exists (select 1 from project_memberships pm "
+                    "                  where pm.project_id=$2 and pm.user_id=m.user_id)",
+                    org_id, project_id,
+                )
+                if r["email"]
+            }
+            return {"members": members, "invitations": invitations, "via_org": via_org}
+        except Exception:
+            logger.warning(
+                "langfuse project access read failed for project=%s", project_id, exc_info=True
+            )
+            return {"members": {}, "invitations": {}, "via_org": {}}
+        finally:
+            await conn.close()
 
     # -- the business-unit lifecycle -------------------------------------------
     #

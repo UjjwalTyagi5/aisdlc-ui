@@ -60,6 +60,99 @@ async def _tenants(session) -> list[str]:
     return [str(r[0]) for r in rows.all()]
 
 
+async def _reconcile_projects(
+    session, provisioner, org_sync, tenant_id: str, workspace_id: str, org_id: str,
+    *, dry_run: bool,
+) -> tuple[int, int]:
+    """Check every live project in one unit. Returns (drifted, checked).
+
+    A project is drifted when somebody who should hold a role does not, or somebody holds
+    one nothing entitles them to. Two states are reported but NOT counted, because both
+    are correct and re-running changes nothing:
+
+      * `via org` — a unit admin reaches the project through their organization role and
+        holds no project row. That is the design: a project row would REPLACE their
+        organization role and cap them below what they have.
+      * `invited` — a grant awaiting that person's first Langfuse sign-in.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "select p.id, p.display_name, b.langfuse_project_id "
+                "from projects p "
+                "left join langfuse_bindings b "
+                "  on b.project_id = p.id and b.is_active = true "
+                "where p.workspace_id = cast(:w as uuid) "
+                "  and p.tenant_id = cast(:t as uuid) "
+                "  and p.archived = false "
+                "order by p.display_name"
+            ),
+            {"w": workspace_id, "t": tenant_id},
+        )
+    ).all()
+    if not rows:
+        return 0, 0
+
+    drifted = 0
+    for pid, pname, lf_project in rows:
+        wanted = await org_sync.desired_project_access(
+            session, tenant_id=tenant_id, project_id=str(pid)
+        )
+        label = f"project {pname!r}"
+
+        if not lf_project:
+            if wanted:
+                drifted += 1
+                print(f"    DRIFT {label}: no Langfuse project, {len(wanted)} grant(s) pending")
+                if not dry_run:
+                    await org_sync.sync_project(
+                        session, tenant_id=tenant_id, project_id=str(pid)
+                    )
+            continue
+
+        current = await provisioner.project_access(
+            org_id=org_id, project_id=str(lf_project)
+        )
+        held, pending, via_org = current["members"], current["invitations"], current["via_org"]
+
+        issues: list[str] = []
+        notes: list[str] = []
+        for email, role in wanted.items():
+            if held.get(email) == role:
+                continue
+            if pending.get(email) == role:
+                notes.append(f"{email} -> {role} invited, awaiting first sign-in")
+                continue
+            if email in via_org:
+                notes.append(f"{email} reaches it via org {via_org[email]} (stronger)")
+                continue
+            issues.append(f"{email} should be {role}, is {held.get(email) or 'nothing'}")
+
+        for email in set(held) | set(pending):
+            if email not in wanted:
+                issues.append(f"{email} holds a project role nothing entitles them to")
+
+        if issues:
+            drifted += 1
+            print(f"    DRIFT {label}")
+            for i in issues:
+                print(f"          - {i}")
+        elif notes:
+            print(f"    ok {label}")
+        for n in notes:
+            print(f"          . {n}")
+
+        if issues and not dry_run:
+            rep = await org_sync.sync_project(
+                session, tenant_id=tenant_id, project_id=str(pid)
+            )
+            if rep:
+                print(f"          -> access={rep['access']}")
+                if rep["revoked"]:
+                    print(f"             revoked={rep['revoked']}")
+    return drifted, len(rows)
+
+
 async def run(*, dry_run: bool, only_unit: str | None) -> int:
     from config.env import ENABLE_LANGFUSE, LANGFUSE_MANAGE_MEMBERSHIPS
     from shared.db import get_db_session_for_tenant, get_db_session_superuser
@@ -85,6 +178,7 @@ async def run(*, dry_run: bool, only_unit: str | None) -> int:
     provisioner = LangfuseProvisioner()
     drift = 0
     total = 0
+    projects_checked = 0
 
     for tenant_id in tenant_ids:
         # Tenant-scoped: `workspaces` is under FORCE RLS, so without the GUC this reads
@@ -171,19 +265,31 @@ async def run(*, dry_run: bool, only_unit: str | None) -> int:
                 for note in pending_notes:
                     print(f"        . {note}")
 
-                if dry_run:
-                    continue
-                report = await org_sync.sync_unit(
-                    session, tenant_id=tenant_id, workspace_id=str(uid)
-                )
-                if report is None:
-                    print("        -> sync did not run (disabled or Langfuse unreachable)")
-                else:
-                    print(f"        -> org {report['org_id']} access={report['access']}")
-                    if report["revoked"]:
-                        print(f"           revoked={report['revoked']}")
+                if not dry_run:
+                    report = await org_sync.sync_unit(
+                        session, tenant_id=tenant_id, workspace_id=str(uid)
+                    )
+                    if report is None:
+                        print("        -> sync did not run (disabled or Langfuse unreachable)")
+                    else:
+                        print(f"        -> org {report['org_id']} access={report['access']}")
+                        if report["revoked"]:
+                            print(f"           revoked={report['revoked']}")
 
-    print(f"\n{total} unit(s) checked, {drift} with drift.")
+            # ── per-project grants ────────────────────────────────────────────
+            # Checked for every unit, drifted or not: a unit can be perfectly converged at
+            # the organization level while a project admin inside it holds nothing.
+            for uid, name, status, org_id, _org_name in units:
+                if status == "archived" or not org_id:
+                    continue
+                project_drift, project_total = await _reconcile_projects(
+                    session, provisioner, org_sync, tenant_id, str(uid), str(org_id),
+                    dry_run=dry_run,
+                )
+                projects_checked += project_total
+                drift += project_drift
+
+    print(f"\n{total} unit(s) and {projects_checked} project(s) checked, {drift} with drift.")
     if dry_run and drift:
         print("Dry run — nothing changed. Re-run without --dry-run to converge.")
     return 1 if (dry_run and drift) else 0

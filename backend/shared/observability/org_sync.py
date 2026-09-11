@@ -48,9 +48,40 @@ _ROLE_MAP = {
     "bu_admin": "ADMIN",
 }
 
+# Which PROJECT-scoped platform role earns which Langfuse project role.
+#
+# DELIBERATELY ONLY THE ROLES THAT ALREADY HOLD `trace:view`. Nine roles bind at project
+# scope; only `project_admin` and `security_engineer` may read traces in this product. If
+# a `developer` were given a Langfuse VIEWER login they could open every prompt and
+# completion for their project by going to Langfuse directly — data this platform
+# deliberately refuses them — and the two systems would then disagree about who may read
+# what. Widening this map is a permissions decision, not a configuration one: grant
+# `trace:view` in shared/authz/permissions.py first, and the two stay honest.
+_PROJECT_ROLE_MAP = {
+    "project_admin": "MEMBER",
+    "security_engineer": "VIEWER",
+}
+
 
 def _enabled() -> bool:
     return bool(ENABLE_LANGFUSE and LANGFUSE_MANAGE_MEMBERSHIPS)
+
+
+# One in-flight sync per business unit. The re-read above makes a concurrent sync
+# CORRECT; this keeps it from being wasteful — creating a unit and appointing its admin
+# fire two syncs seconds apart, and without serialising they both make the same round
+# trips to Langfuse and log contradictory-looking grant/revoke pairs. Per process only:
+# several workers can still interleave, which is why correctness does not depend on it.
+_UNIT_LOCKS: dict = {}
+
+
+def _unit_lock(workspace_id: str):
+    import asyncio  # noqa: PLC0415
+
+    lock = _UNIT_LOCKS.get(workspace_id)
+    if lock is None:
+        lock = _UNIT_LOCKS[workspace_id] = asyncio.Lock()
+    return lock
 
 
 async def owned_org_ids(session) -> frozenset:
@@ -106,7 +137,201 @@ async def desired_access(session, *, tenant_id: str, workspace_id: str) -> dict:
         # Somebody who is both an organization admin and this unit's admin keeps the
         # stronger role, rather than whichever binding row happened to come back last.
         access[key] = strongest_role(access.get(key, ""), langfuse_role)
+
+    # ANYBODY WITH A PROJECT-LEVEL GRANT INSIDE THIS UNIT BELONGS HERE TOO, at the NONE
+    # floor. Two reasons, and the second is a bug that would otherwise be very hard to see:
+    #
+    #   1. `project_memberships.org_membership_id` is NOT NULL, so a project role is
+    #      impossible without an organization membership. NONE is the value that creates
+    #      one without granting anything — `projectAccessRights.NONE` is empty.
+    #   2. `sync_unit` revokes every grant it did not just make. Without this, the unit
+    #      sync would delete the organization membership the project sync depends on, the
+    #      project sync would recreate it, and the two would undo each other on every
+    #      role change — each looking correct in isolation.
+    #
+    # `strongest_role` keeps a unit admin who also runs a project at ADMIN rather than
+    # lowering them to the floor.
+    try:
+        project_rows = await session.execute(
+            text(
+                "select rb.role_name, u.email "
+                "from role_bindings rb "
+                "join users u on u.id = rb.user_id "
+                "join projects p on p.id = rb.scope_id "
+                "where rb.tenant_id = cast(:t as uuid) "
+                "  and rb.scope_kind = 'project' "
+                "  and p.workspace_id = cast(:w as uuid) "
+                "  and u.email is not null"
+            ),
+            {"t": str(tenant_id), "w": str(workspace_id)},
+        )
+        for role_name, email in project_rows.all():
+            if str(role_name) not in _PROJECT_ROLE_MAP or not email:
+                continue
+            key = str(email).strip().lower()
+            access[key] = strongest_role(access.get(key, ""), "NONE")
+    except Exception:
+        logger.warning(
+            "langfuse: project-grantee lookup failed for unit=%s", workspace_id, exc_info=True
+        )
     return access
+
+
+async def desired_project_access(session, *, tenant_id: str, project_id: str) -> dict:
+    """{email: langfuse_project_role} for one project, from its project-scoped bindings.
+
+    Only the roles in `_PROJECT_ROLE_MAP` — see the note there on why that is two roles
+    and not nine.
+    """
+    access: dict = {}
+    try:
+        rows = await session.execute(
+            text(
+                "select rb.role_name, u.email "
+                "from role_bindings rb join users u on u.id = rb.user_id "
+                "where rb.tenant_id = cast(:t as uuid) "
+                "  and rb.scope_kind = 'project' and rb.scope_id = cast(:p as uuid) "
+                "  and u.email is not null"
+            ),
+            {"t": str(tenant_id), "p": str(project_id)},
+        )
+    except Exception:
+        logger.warning(
+            "langfuse: project role lookup failed for project=%s", project_id, exc_info=True
+        )
+        return {}
+
+    for role_name, email in rows.all():
+        langfuse_role = _PROJECT_ROLE_MAP.get(str(role_name))
+        if not langfuse_role or not email:
+            continue
+        key = str(email).strip().lower()
+        access[key] = strongest_role(access.get(key, ""), langfuse_role)
+    return access
+
+
+async def sync_project(
+    session,
+    *,
+    tenant_id: str,
+    project_id: str,
+    actor_email: Optional[str] = None,
+) -> Optional[dict]:
+    """Converge one project's Langfuse access. Never raises.
+
+    Runs `sync_unit` FIRST, deliberately. The unit sync is what creates the organization
+    membership a project role has to hang off (see `desired_access`), and it is also what
+    creates the organization itself on a unit that predates this. Doing it the other way
+    round leaves the project grant with nothing to attach to on a cold start.
+    """
+    if not _enabled():
+        return None
+    try:
+        row = (
+            await session.execute(
+                text(
+                    "select p.workspace_id, p.display_name, p.archived, "
+                    "       w.langfuse_org_id, b.langfuse_project_id "
+                    "from projects p "
+                    "join workspaces w on w.id = p.workspace_id "
+                    "left join langfuse_bindings b "
+                    "  on b.project_id = p.id and b.is_active = true "
+                    "where p.id = cast(:p as uuid) and p.tenant_id = cast(:t as uuid)"
+                ),
+                {"p": str(project_id), "t": str(tenant_id)},
+            )
+        ).first()
+    except Exception:
+        logger.warning("langfuse: project lookup failed for %s", project_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+
+    workspace_id, project_name, archived = str(row[0]), str(row[1]), bool(row[2])
+    org_id, langfuse_project_id = row[3], row[4]
+    if archived:
+        # An archived project keeps its traces but takes no new grants; `deactivate_binding`
+        # already stopped ingestion.
+        return None
+
+    # The organization and its memberships first — a project role needs both.
+    await sync_unit(
+        session, tenant_id=tenant_id, workspace_id=workspace_id, actor_email=actor_email
+    )
+
+    if not org_id:
+        org_id = (
+            await session.execute(
+                text("select langfuse_org_id from workspaces where id = cast(:w as uuid)"),
+                {"w": workspace_id},
+            )
+        ).scalar()
+    if not langfuse_project_id:
+        # NO LANGFUSE PROJECT YET, SO MAKE ONE. `project_memberships` references a project
+        # row, so there is nothing to grant a role ON until this runs — which is why
+        # provisioning moved off "first traced agent run" and onto project creation.
+        # `ensure_binding` is the existing, idempotent path: it provisions the project
+        # inside the unit's organization, mints its key pair and records the binding.
+        from shared.observability.bindings import ensure_binding  # noqa: PLC0415
+
+        binding = await ensure_binding(
+            session, tenant_id=str(tenant_id), project_id=str(project_id)
+        )
+        if binding is not None:
+            langfuse_project_id = binding.langfuse_project_id
+            org_id = org_id or getattr(binding, "langfuse_org_id", None)
+
+    if not org_id or not langfuse_project_id:
+        # Langfuse was unreachable. Fail soft — the project exists here regardless, and
+        # `scripts/sync_langfuse_orgs.py` converges the grant later.
+        logger.info(
+            "langfuse: project %s has no Langfuse project yet — grants deferred", project_id
+        )
+        return None
+
+    from shared.observability.provisioning import LangfuseProvisioner  # noqa: PLC0415
+
+    provisioner = LangfuseProvisioner()
+    wanted = await desired_project_access(
+        session, tenant_id=tenant_id, project_id=project_id
+    )
+
+    revoked: dict = {}
+    try:
+        current = await provisioner.project_access(
+            org_id=str(org_id), project_id=str(langfuse_project_id)
+        )
+        stale = [
+            email
+            for email in set(current["members"]) | set(current["invitations"])
+            if email not in wanted
+        ]
+        if stale:
+            logger.info(
+                "langfuse: removing %d stale project grant(s) from %r: %s",
+                len(stale), project_name, ", ".join(sorted(stale)),
+            )
+            revoked = await provisioner.sync_project_access(
+                org_id=str(org_id), project_id=str(langfuse_project_id), revoke=stale
+            )
+    except Exception:
+        logger.warning(
+            "langfuse stale project-grant cleanup failed for %s", project_id, exc_info=True
+        )
+
+    applied = await provisioner.sync_project_access(
+        org_id=str(org_id),
+        project_id=str(langfuse_project_id),
+        grants=wanted,
+        invited_by_email=actor_email,
+    )
+    return {
+        "org_id": str(org_id),
+        "langfuse_project_id": str(langfuse_project_id),
+        "project_name": project_name,
+        "access": applied,
+        "revoked": revoked,
+    }
 
 
 async def _persist_org(tenant_id: str, workspace_id: str, org_id: str, org_name: str) -> None:
@@ -147,6 +372,19 @@ async def sync_unit(
     """
     if not _enabled():
         return None
+    async with _unit_lock(str(workspace_id)):
+        return await _sync_unit_locked(
+            session, tenant_id=tenant_id, workspace_id=workspace_id, actor_email=actor_email
+        )
+
+
+async def _sync_unit_locked(
+    session,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    actor_email: Optional[str] = None,
+) -> Optional[dict]:
     try:
         row = (
             await session.execute(
@@ -213,7 +451,16 @@ async def sync_unit(
     revoked: dict = {}
     try:
         current = await provisioner.org_access(org_id=resolved_id)
-        entitled = set(result.access) | {
+        # RE-READ, DO NOT REUSE `result.access`. That set was computed before
+        # `provision_org` made its round trips to Langfuse, and `current` is read now — so
+        # comparing them treats anything granted by a CONCURRENT sync in between as stale
+        # and revokes it. Observed live: creating a unit and appointing its admin schedule
+        # two syncs, the slower one revoked the admin the faster one had just granted, and
+        # only a third sync put it back. Both reads have to describe the same moment.
+        fresh = await desired_access(
+            session, tenant_id=tenant_id, workspace_id=workspace_id
+        )
+        entitled = set(fresh) | set(result.access) | {
             e.strip().lower() for e in provisioner._bootstrap_emails()
         }
         stale = [
@@ -362,10 +609,18 @@ _ACTIONS = {
     "sync": sync_unit,
     "teardown": teardown_unit,
     "restore": restore_unit,
+    "sync_project": sync_project,
 }
 
 
-def schedule(action: str, *, tenant_id: str, workspace_id: str, actor_email=None) -> bool:
+def schedule(
+    action: str,
+    *,
+    tenant_id: str,
+    workspace_id: str = "",
+    project_id: str = "",
+    actor_email=None,
+) -> bool:
     """Run a unit sync in the BACKGROUND, on its own session. Returns whether it started.
 
     WHY NOT INLINE. Provisioning opens a connection to a Langfuse database in another
@@ -394,14 +649,18 @@ def schedule(action: str, *, tenant_id: str, workspace_id: str, actor_email=None
             from shared.db import get_db_session_for_tenant  # noqa: PLC0415
 
             async with get_db_session_for_tenant(str(tenant_id)) as own:
-                kwargs = {"tenant_id": tenant_id, "workspace_id": workspace_id}
+                kwargs: dict = {"tenant_id": tenant_id}
+                if action == "sync_project":
+                    kwargs["project_id"] = project_id
+                else:
+                    kwargs["workspace_id"] = workspace_id
                 if action != "teardown":
                     kwargs["actor_email"] = actor_email
                 await fn(own, **kwargs)
         except Exception:
             logger.warning(
-                "langfuse %s failed in background for unit=%s", action, workspace_id,
-                exc_info=True,
+                "langfuse %s failed in background for unit=%s project=%s", action,
+                workspace_id or "-", project_id or "-", exc_info=True,
             )
 
     try:
@@ -411,6 +670,6 @@ def schedule(action: str, *, tenant_id: str, workspace_id: str, actor_email=None
         return True
     except RuntimeError:
         # No running loop — a sync context or a script. The reconciler covers it.
-        logger.debug("langfuse %s not scheduled for unit=%s — no running event loop",
-                     action, workspace_id)
+        logger.debug("langfuse %s not scheduled (unit=%s project=%s) — no running event loop",
+                     action, workspace_id or "-", project_id or "-")
         return False
