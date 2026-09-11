@@ -310,7 +310,7 @@ async def _board(mode: str):
         conn = get_connector()
     except Exception:  # noqa: BLE001
         return None, ("No board is connected to this stage. A Project Admin can wire Azure "
-                      "DevOps or Jira to the Requirements (migration intent) stage in project settings.")
+                      "DevOps or Jira to the Migration Intent stage in project settings.")
     level = getattr(conn, "access_level", "__unscoped__")
     if level != "__unscoped__":
         from shared.authz.connector_access import label, permits  # noqa: PLC0415

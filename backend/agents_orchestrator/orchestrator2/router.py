@@ -117,8 +117,8 @@ DISPLAY_NAMES: dict[str, str] = {
     "deployment": "Deployment",
     "documentation": "Documentation",
     # Track 3 — Code Modernization. Offered only on that track (see `route`).
-    "requirements_modernization": "Requirements (migration intent)",
-    "discovery": "Discovery & Assessment",
+    "requirements_modernization": "Migration Intent",
+    "discovery": "Dependency and Risk",
 }
 
 # An agent that exists but has no display name is unreachable by name — the exact
@@ -178,8 +178,8 @@ def _normalise(text: str) -> str:
 # maps to every id it could mean, and `prefilter` picks the one inside the turn's own
 # track; outside any track it means nothing.
 _EXTRA_NAMES: dict[str, tuple[str, ...]] = {
-    "requirements_modernization": ("requirements", "migration intent"),
-    "discovery": ("discovery and assessment", "assessment"),
+    "requirements_modernization": ("requirements", "migration intent", "requirements (migration intent)"),
+    "discovery": ("discovery and assessment", "assessment", "dependency and risk", "dependancy and risk"),
 }
 
 _NAME_TO_IDS: dict[str, tuple[str, ...]] = {}
@@ -593,8 +593,8 @@ The agents you may choose from are exactly the tools you have been given, one pe
 
 {roster}
 
-Track 3's full roster, in hand-off order, is Requirements (migration intent) → Discovery &
-Assessment → Design → Strategy → Development → Code Review → Security → Testing →
+Track 3's full roster, in hand-off order, is Migration Intent → Dependency and
+Risk → Design → Strategy → Development → Code Review → Security → Testing →
 Deployment → Documentation. Not built for this track yet: {unbuilt}. If the user asks for
 one of those, answer directly: say plainly that that agent is not available for Code
 Modernization yet, and offer what the agents above can do instead. Never send that work to
@@ -606,25 +606,25 @@ How a modernization starts:
   project" is yours to answer directly, in a few sentences: this is a Code Modernization
   project; a good first step is to pull the legacy code into this conversation — they can
   ask for it by name from their Azure DevOps or GitHub, or give its URL — so the agents
-  work from the real system; the Requirements agent captures the MIGRATION INTENT —
+  work from the real system; the Migration Intent agent captures the MIGRATION INTENT —
   why the modernization is happening, what the system runs on today and what it should
   run on afterwards, what is in and out of scope, the constraints, and how success will
-  be measured; then Discovery & Assessment reads the legacy repository (read-only) to map its
-  dependency graph, flag end-of-life and vulnerable dependencies, and score every module
-  for migration risk. End by asking them to name the legacy repository to pull, or to
-  describe the modernization: the system, why it is being modernized, and from what to
-  what.
-- Any message that DESCRIBES the modernization is Requirements (migration intent) work:
-  the system, the reasons, the current or target stack, scope, constraints, deadlines,
-  budget, success measures, stakeholders, a pasted or attached brief — and answers to the
-  Requirements agent's own questions.
-- PULLING THE LEGACY CODE is Requirements (migration intent) work while the migration
-  intent is being captured — "pull the code", "pull our repo from Azure DevOps", "clone
-  the legacy repository", "which repositories can you see", or a repository URL on its
-  own: the Requirements agent pulls it read-only into this conversation and reads it
-  before its questions. Once the conversation has moved on to Discovery & Assessment, a
-  request to pull a different repository is Discovery's.
-- ASSESSING the legacy code is Discovery & Assessment work: "proceed to discovery",
+  be measured; then the Dependency and Risk agent reads the legacy repository (read-only)
+  to map its dependency graph, flag end-of-life and vulnerable dependencies, and score
+  every module for migration risk. End by asking them to name the legacy repository to
+  pull, or to describe the modernization: the system, why it is being modernized, and
+  from what to what.
+- Any message that DESCRIBES the modernization is Migration Intent work: the system, the
+  reasons, the current or target stack, scope, constraints, deadlines, budget, success
+  measures, stakeholders, a pasted or attached brief — and answers to the Migration
+  Intent agent's own questions.
+- PULLING THE LEGACY CODE is Migration Intent work while the migration intent is being
+  captured — "pull the code", "pull our repo from Azure DevOps", "clone the legacy
+  repository", "which repositories can you see", or a repository URL on its own: the
+  Migration Intent agent pulls it read-only into this conversation and reads it before
+  its questions. Once the conversation has moved on to the Dependency and Risk agent, a
+  request to pull a different repository is that agent's.
+- ASSESSING the legacy code is Dependency and Risk work: "proceed to discovery",
   "assess the repository", "scan the codebase", "which modules are riskiest", "which
   dependencies are end-of-life or vulnerable", "map the dependencies".
 
@@ -636,8 +636,8 @@ How to decide:
   which: the user reads your `reason` and redirects in one turn if you chose wrong.
 - Never invent an agent. The tools above are the complete list of what this project can
   run.
-- There is no fixed order and the user decides when to move on. If they ask for Discovery
-  & Assessment before the migration intent is recorded, start it anyway and say in
+- There is no fixed order and the user decides when to move on. If they ask for the Dependency
+  and Risk agent before the migration intent is recorded, start it anyway and say in
   `reason` that the brief is still open.
 - MISSING DETAIL IS NOT A REASON TO WITHHOLD ROUTING. Gathering the specifics — which
   repository, which target version — is the agent's own first job.
@@ -649,14 +649,14 @@ How to decide:
 
 When you call a tool, `reason` is one short line shown to the user, addressed to them,
 saying why that agent — for example "You described why the billing system is being
-modernized, so I've started Requirements (migration intent)." When you answer directly,
+modernized, so I've started the Migration Intent agent." When you answer directly,
 just answer: your reply is what they see.
 """
 
 #: Track 3's roster by display name, in hand-off order — used only to NAME the agents
 #: not built yet. Which agents can run comes from the capabilities map, never from here.
 _MODERNIZATION_ROSTER: tuple[str, ...] = (
-    "Requirements (migration intent)", "Discovery & Assessment", "Design", "Strategy",
+    "Migration Intent", "Dependency and Risk", "Design", "Strategy",
     "Development", "Code Review", "Security", "Testing", "Deployment", "Documentation",
 )
 

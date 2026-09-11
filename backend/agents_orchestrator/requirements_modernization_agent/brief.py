@@ -296,11 +296,11 @@ def brief_markdown(brief: MigrationIntentArtifact) -> str:
         where = " / ".join(p for p in (repo.provider, repo.project, repo.name) if p)
         lines.append(f"- {where or repo.url}" + (f" — `{repo.url}`" if repo.url else ""))
     else:
-        lines.append("- Not named yet — Discovery & Assessment will ask which repository to read.")
+        lines.append("- Not named yet — the Dependency and Risk agent will ask which repository to read.")
     lines.append("")
 
     lines += ["## Next step", "",
-              "- Discovery & Assessment reads the legacy repository read-only, maps its "
+              "- The Dependency and Risk agent reads the legacy repository read-only, maps its "
               "dependency graph, flags end-of-life and vulnerable dependencies, and scores "
               "every module for migration risk against this target.", ""]
     return "\n".join(lines)

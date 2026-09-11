@@ -266,8 +266,8 @@ def profile_markdown(pull: dict) -> str:
 # ── pulling ──────────────────────────────────────────────────────────────────
 
 
-_STAGE_LABELS = {"requirements_modernization": "Requirements (migration intent)",
-                 "discovery": "Discovery & Assessment"}
+_STAGE_LABELS = {"requirements_modernization": "Migration Intent",
+                 "discovery": "Dependency and Risk"}
 
 
 def stage_may_read() -> bool:
