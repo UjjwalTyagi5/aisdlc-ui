@@ -14,21 +14,22 @@ from __future__ import annotations
 
 import re
 import uuid as _uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import false as False_
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
 from shared.authz.grant import UnitAlreadyAdministeredError, grant_role, revoke_role
 from shared.authz.grant_guard import assert_can_grant_role
-from shared.authz.permissions import ROLE_TIER
-from shared.authz.read_scope import allowed_workspace_ids, is_org_wide
+from shared.authz.read_scope import active_binding, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
 from shared.models.orm import Project, Role, RoleBinding, UsageMonthly, User, Workspace
+from shared.observability import org_sync
 from shared.routers._schemas import BudgetIncreaseIn
 from shared.services.governance_requests import complete_role_assignment
 
@@ -95,6 +96,16 @@ class WorkspaceOut(BaseModel):
     projectCount: int
     monthlySpendUsd: float
     monthlyBudgetUsd: float | None
+    # WHO ADMINISTERS THIS UNIT. The card renders `buAdminName ?? "No admin appointed"`
+    # (workspaces/page.tsx:325) and the field was only ever populated by the mock
+    # fixtures — so against the real backend every unit read "No admin appointed",
+    # including units that plainly had one. A frontend-only field that silently reports
+    # the negative case is worse than an absent one: it looks like an answer.
+    #
+    # `buAdminName` is the admin's email. `users` carries no display name, and email is
+    # what `add_workspace_member` already returns for the same person.
+    buAdminId: str | None = None
+    buAdminName: str | None = None
     createdAt: str
 
 
@@ -144,7 +155,11 @@ class UpdateMemberRoleIn(BaseModel):
 # ─── serialisers ─────────────────────────────────────────────────────────────
 
 def _to_out(
-    w: Workspace, member_count: int, project_count: int, spend_usd: float = 0.0
+    w: Workspace,
+    member_count: int,
+    project_count: int,
+    spend_usd: float = 0.0,
+    admin: tuple[str, str | None] | None = None,
 ) -> WorkspaceOut:
     return WorkspaceOut(
         id=str(w.id),
@@ -159,6 +174,8 @@ def _to_out(
         projectCount=project_count,
         monthlySpendUsd=round(float(spend_usd or 0.0), 4),
         monthlyBudgetUsd=float(w.monthly_budget_usd) if w.monthly_budget_usd is not None else None,
+        buAdminId=admin[0] if admin else None,
+        buAdminName=admin[1] if admin else None,
         createdAt=w.created_at.isoformat() if w.created_at else "",
     )
 
@@ -200,6 +217,40 @@ async def _counts(db: AsyncSession, tenant_uuid: _uuid.UUID) -> tuple[dict, dict
     projects = {str(r[0]): r[1] for r in proj_rows}
     members = {str(r[0]): r[1] for r in mem_rows}
     return projects, members
+
+
+async def _admin_map(
+    db: AsyncSession, tenant_uuid: _uuid.UUID
+) -> dict[str, tuple[str, str | None]]:
+    """workspace_id -> (user_id, email) for the unit's appointed `bu_admin`.
+
+    USES `active_binding`, NOT A HAND-WRITTEN PREDICATE. That helper exists precisely for
+    this query — its docstring names "who administers this unit" as the case it was split
+    out for — and it was never called. Writing the rule again here is how the four
+    disagreeing versions it replaced came about: a revoked or expired binding would keep
+    naming somebody who no longer administers anything.
+
+    `u.active` matters for the same reason: a deactivated account is not an administrator,
+    and showing their name suggests the unit is covered when nobody is minding it.
+
+    A unit has at most one `bu_admin` — `_assert_single_bu_admin` in shared/authz/grant.py
+    enforces it — so collapsing to one row per workspace loses nothing.
+    """
+    rows = (
+        await db.execute(
+            text(
+                "select rb.scope_id, rb.user_id, u.email "
+                "from role_bindings rb join users u on u.id = rb.user_id "
+                "where rb.tenant_id = :t "
+                "  and rb.scope_kind = 'business_unit' "
+                "  and rb.role_name = 'bu_admin' "
+                "  and u.active "
+                f"  and {active_binding('rb')}"
+            ),
+            {"t": str(tenant_uuid), "now": datetime.now(timezone.utc)},
+        )
+    ).all()
+    return {str(r[0]): (str(r[1]), r[2]) for r in rows}
 
 
 # ─── workspace lookup helper ─────────────────────────────────────────────────
@@ -276,9 +327,16 @@ async def list_workspaces(request: Request, db: AsyncSession = Depends(get_db_se
     rows = (await db.execute(query.order_by(Workspace.display_name))).scalars().all()
 
     projects, members = await _counts(db, tenant_uuid)
+    admins = await _admin_map(db, tenant_uuid)
     spend = await _workspace_spend_map(db, tenant_uuid) if _can_view_cost(request) else {}
     return [
-        _to_out(w, members.get(str(w.id), 0), projects.get(str(w.id), 0), spend.get(str(w.id), 0.0))
+        _to_out(
+            w,
+            members.get(str(w.id), 0),
+            projects.get(str(w.id), 0),
+            spend.get(str(w.id), 0.0),
+            admins.get(str(w.id)),
+        )
         for w in rows
     ]
 
@@ -363,6 +421,15 @@ async def create_workspace(
     # the single-admin check and the audit row that `shared/authz/grant.py` exists to
     # apply. That is the same class of bug as finding 7 in docs/rbac-audit-2026-08-17.md.
     await db.commit()
+
+    # The unit's Langfuse organization, created NOW rather than whenever somebody first
+    # runs an agent in one of its projects (0058). Lazy provisioning meant a freshly
+    # created business unit was simply absent from Langfuse, which is indistinguishable
+    # from the integration being broken. Backgrounded and fail-soft: an unreachable
+    # Langfuse must never be the reason a business unit cannot be created.
+    org_sync.schedule("sync", tenant_id=tenant_id, workspace_id=str(ws.id))
+    # A unit is created with NO admin, deliberately — see the block above. Passing None
+    # is therefore the true answer here, not a gap.
     return _to_out(ws, 0, 0)
 
 
@@ -373,7 +440,11 @@ async def get_workspace(workspace_id: str, request: Request, db: AsyncSession = 
     projects, members = await _counts(db, tenant_uuid)
     from shared.services.budget_store import read_scope_spend  # noqa: PLC0415
     spend = await read_scope_spend(str(tenant_uuid), "workspace", str(ws.id)) if _can_view_cost(request) else 0.0
-    return _to_out(ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0), spend)
+    admins = await _admin_map(db, tenant_uuid)
+    return _to_out(
+        ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0), spend,
+        admins.get(str(ws.id)),
+    )
 
 
 @workspaces_router.patch(
@@ -386,6 +457,9 @@ async def update_workspace(
 ):
     tenant_uuid = _uuid.UUID(_tenant_id(request))
     ws = await _get_owned(db, tenant_uuid, workspace_id)
+    # Captured BEFORE the assignments below: this route is also how a unit is un-archived,
+    # and telling that apart from an ordinary edit needs the value it had on arrival.
+    was_archived = ws.status == "archived"
     if body.displayName is not None:
         ws.display_name = body.displayName.strip()
     if body.businessUnit is not None:
@@ -400,13 +474,30 @@ async def update_workspace(
         # 0 clears the cap (inherit org / unlimited); any positive value sets it.
         ws.monthly_budget_usd = body.monthlyBudgetUsd or None
     await db.commit()
+
+    # Carry the change through to Langfuse. `sync_unit` is idempotent and derives the whole
+    # desired state, so a rename, a budget edit and a re-appointment all go through the
+    # same call rather than needing a hook each.
+    if was_archived and ws.status != "archived":
+        # Un-archiving: undo the soft-delete first, or the sync would re-grant access to
+        # projects that are still hidden in Langfuse.
+        org_sync.schedule("restore", tenant_id=str(tenant_uuid), workspace_id=str(ws.id))
+    elif not was_archived and ws.status == "archived":
+        org_sync.schedule("teardown", tenant_id=str(tenant_uuid), workspace_id=str(ws.id))
+    else:
+        org_sync.schedule("sync", tenant_id=str(tenant_uuid), workspace_id=str(ws.id))
+
     # Budgets are cached briefly for enforcement — invalidate so the edit applies now.
     from shared.services.budget_guard import clear_budget_cache  # noqa: PLC0415
     clear_budget_cache()
     from shared.services.budget_store import read_scope_spend  # noqa: PLC0415
     spend = await read_scope_spend(str(tenant_uuid), "workspace", str(ws.id)) if _can_view_cost(request) else 0.0
     projects, members = await _counts(db, tenant_uuid)
-    return _to_out(ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0), spend)
+    admins = await _admin_map(db, tenant_uuid)
+    return _to_out(
+        ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0), spend,
+        admins.get(str(ws.id)),
+    )
 
 
 @workspaces_router.post(
@@ -421,8 +512,19 @@ async def archive_workspace(
     ws = await _get_owned(db, tenant_uuid, workspace_id)
     ws.status = "archived"
     await db.commit()
+
+    # Revoke every Langfuse grant, stop ingestion and hide the unit's projects. NOT a
+    # delete — see `provisioning.teardown_org`: traces live in ClickHouse, so dropping the
+    # Postgres rows would orphan them rather than remove them, and archiving is reversible
+    # here while that would not be.
+    org_sync.schedule("teardown", tenant_id=str(tenant_uuid), workspace_id=str(ws.id))
+
     projects, members = await _counts(db, tenant_uuid)
-    return _to_out(ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0))
+    admins = await _admin_map(db, tenant_uuid)
+    return _to_out(
+        ws, members.get(str(ws.id), 0), projects.get(str(ws.id), 0), 0.0,
+        admins.get(str(ws.id)),
+    )
 
 
 @workspaces_router.post("/{workspace_id}/budget-increase-request", status_code=201)
@@ -567,16 +669,39 @@ async def add_workspace_member(
             detail=f"User is already a member of this workspace with role '{body.roleName}'.",
         )
 
-    member = RoleBinding(
-        user_id=user.id,
-        scope_kind="business_unit",
-        scope_id=wid,
-        role_name=body.roleName,
-        tier=ROLE_TIER.get(body.roleName),
-        tenant_id=tenant_uuid,
-    )
-    db.add(member)
-    await db.commit()
+    # THROUGH `grant_role`, NOT A DIRECT `RoleBinding` WRITE.
+    #
+    # This used to `db.add(RoleBinding(...))` and commit, which is the same bypass
+    # `update_workspace_member_role` documents at length below and which finding 7 of
+    # docs/rbac-audit-2026-08-17.md describes: no rank check (so `workspace:manage` was one
+    # POST away from installing an org_admin), no tier-conflict check, no one-admin-per-unit
+    # check, and no `record_rbac_change` audit row — on the screen where members are
+    # actually added. `create_workspace` above already removed one instance of this pattern.
+    #
+    # It also matters for Langfuse: appointing a `bu_admin` is what grants that person
+    # ADMIN on the unit's Langfuse organization, and that hook lives in `grant_role`. A
+    # choke point the main "add a member" route walks around is not a choke point.
+    await assert_can_grant_role(db, request, body.roleName)
+    actor = getattr(request.state, "user_id", None)
+    try:
+        await grant_role(
+            user.id, wid, body.roleName,
+            tenant_id=str(tenant_uuid), scope_kind="business_unit",
+            granted_by=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    member = (
+        await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.scope_kind == "business_unit",
+                RoleBinding.scope_id == wid,
+                RoleBinding.role_name == body.roleName,
+            )
+        )
+    ).scalar_one_or_none()
 
     initials = _initials(None, user.email, user.id)
     return WorkspaceMemberOut(
@@ -585,7 +710,7 @@ async def add_workspace_member(
         displayName=None,
         initials=initials,
         roleName=body.roleName,
-        joinedAt=member.created_at.isoformat() if member.created_at else "",
+        joinedAt=member.created_at.isoformat() if member is not None and member.created_at else "",
     )
 
 

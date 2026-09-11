@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from config.env import (
+    DEFAULT_ORG_NAME,
     LANGFUSE_BOOTSTRAP_USER_EMAIL,
     LANGFUSE_DB_URL,
     LANGFUSE_HOST,
@@ -58,14 +59,43 @@ logger = logging.getLogger(__name__)
 # Only these tables are ever written. Not a security boundary — the DSN already grants
 # everything — but it keeps a typo or a future edit from reaching Langfuse's trace data.
 _WRITABLE_TABLES = frozenset(
-    {"organizations", "organization_memberships", "projects", "project_memberships", "api_keys"}
+    {
+        "organizations",
+        "organization_memberships",
+        "membership_invitations",
+        "projects",
+        "project_memberships",
+        "api_keys",
+    }
 )
+
+# Langfuse's organization-role enum. OWNER and ADMIN are the only two this module grants:
+# the platform's organization admins own every unit's organization, and the unit's own
+# bu_admin administers theirs. MEMBER/VIEWER/NONE exist in Langfuse and are unused here.
+ORG_ROLE_OWNER = "OWNER"
+ORG_ROLE_ADMIN = "ADMIN"
+
+# Strongest-wins ordering, used when two rules name the same address. Observed in
+# testing: the bootstrap address is an OWNER, and appointing that same person admin of one
+# business unit DEMOTED them to ADMIN of it — the safety floor that keeps a provisioned
+# organization openable was being removed by an ordinary appointment.
+_ROLE_RANK = {"NONE": 0, "VIEWER": 1, "MEMBER": 2, ORG_ROLE_ADMIN: 3, ORG_ROLE_OWNER: 4}
+
+
+def strongest_role(*roles: str) -> str:
+    """The most privileged of the given Langfuse roles."""
+    return max((r for r in roles if r), key=lambda r: _ROLE_RANK.get(r, 0))
 
 # Columns this module depends on. Checked before the first write so a Langfuse upgrade
 # that renames one fails with a readable message instead of a half-created project.
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
     "organizations": {"id", "name"},
-    "projects": {"id", "name", "org_id"},
+    "projects": {"id", "name", "org_id", "deleted_at"},
+    "organization_memberships": {"id", "org_id", "user_id", "role"},
+    # How a person who has never signed in to Langfuse is granted access. Langfuse
+    # creates the membership from this row when they first authenticate, which is the
+    # only supported way to grant somebody who has no `users` row yet.
+    "membership_invitations": {"id", "email", "org_id", "org_role"},
     "api_keys": {
         "id",
         "public_key",
@@ -93,6 +123,28 @@ class ProvisionedProject:
     host: str
     created_org: bool
     created_project: bool
+
+
+@dataclass(frozen=True)
+class ProvisionedOrg:
+    """A business unit's Langfuse organization, and what access was applied to it."""
+
+    langfuse_org_id: str
+    langfuse_org_name: str
+    host: str
+    created: bool
+    # email -> what happened ("granted" / "updated" / "invited" / "unchanged" / ...).
+    # `invited` is the interesting one: that person has no Langfuse account yet, so the
+    # grant is pending their first sign-in and is not access they hold right now.
+    access: dict[str, str]
+
+
+def _affected(command_tag) -> int:
+    """Row count out of an asyncpg command tag ("DELETE 3" -> 3)."""
+    try:
+        return int(str(command_tag).rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 def _now() -> datetime:
@@ -203,17 +255,80 @@ class LangfuseProvisioner:
 
     # ── steps, each idempotent ────────────────────────────────────────────────
 
-    async def _ensure_org(self, conn, name: str) -> tuple[str, bool]:
-        existing = await conn.fetchval("select id from organizations where name=$1", name)
-        if existing:
-            return str(existing), False
-        org_id = str(uuid.uuid4())
+    async def _available_org_name(
+        self, conn, name: str, owned_org_ids: frozenset[str]
+    ) -> tuple[str, Optional[str]]:
+        """Resolve `name` to a name we may safely use, plus the org already holding it.
+
+        WHY THIS IS NOT JUST A LOOKUP. Langfuse does not make organization names unique,
+        and this instance is shared: it already holds organizations called `Payments` and
+        `Lending` that belong to the sibling product. Returning the existing row for a
+        matching name — which is what this used to do — means a business unit called
+        `Payments` adopts theirs, and from then on this platform writes its prompts and
+        completions into an organization their users can open. That is the exact
+        cross-unit mixing the per-unit organization exists to prevent, and it fails
+        silently: provisioning succeeds, traces arrive, nothing looks wrong.
+
+        So an existing organization is reused ONLY if we created it — that is,
+        `owned_org_ids` (the ids recorded on this platform's workspaces) contains it.
+        Otherwise the name is disambiguated and the caller gets a fresh organization.
+        Isolation wins over an exact name match; the unit's real name is in this product's
+        own UI either way.
+        """
+        candidate = name
+        attempt = 1
+        while True:
+            existing = await conn.fetchval(
+                "select id from organizations where name=$1", candidate
+            )
+            if existing is None:
+                return candidate, None
+            if str(existing) in owned_org_ids:
+                return candidate, str(existing)
+            attempt += 1
+            suffix = DEFAULT_ORG_NAME if attempt == 2 else f"{DEFAULT_ORG_NAME} {attempt - 1}"
+            candidate = f"{name} ({suffix})"
+            logger.warning(
+                "Langfuse already has an organization named %r that this platform did not "
+                "create — not adopting it, using %r instead so traces cannot mix",
+                name, candidate,
+            )
+
+    async def _ensure_org(
+        self,
+        conn,
+        name: str,
+        *,
+        org_id: Optional[str] = None,
+        owned_org_ids: frozenset[str] = frozenset(),
+    ) -> tuple[str, str, bool]:
+        """(org_id, org_name, created). Addresses a known organization by id, never name."""
+        if org_id:
+            row = await conn.fetchrow(
+                "select id, name from organizations where id=$1", org_id
+            )
+            if row is not None:
+                return str(row["id"]), str(row["name"]), False
+            # The recorded organization is gone — a Langfuse rebuild, or somebody deleting
+            # it in the UI. Fall through and make a new one rather than failing: the unit
+            # needs somewhere to send traces more than it needs the old id. The caller
+            # records the new id, and the old traces stay unreachable, which is the honest
+            # outcome of having deleted the organization holding them.
+            logger.warning(
+                "Langfuse organization %s is recorded against a business unit but no "
+                "longer exists — provisioning a replacement", org_id,
+            )
+
+        resolved, existing = await self._available_org_name(conn, name, owned_org_ids)
+        if existing is not None:
+            return existing, resolved, False
+        new_id = str(uuid.uuid4())
         now = _now()
         await conn.execute(
             "insert into organizations (id,name,created_at,updated_at) values ($1,$2,$3,$4)",
-            org_id, name, now, now,
+            new_id, resolved, now, now,
         )
-        return org_id, True
+        return new_id, resolved, True
 
     async def _ensure_project(self, conn, org_id: str, name: str) -> tuple[str, bool]:
         existing = await conn.fetchval(
@@ -239,65 +354,155 @@ class LangfuseProvisioner:
         )
         return project_id, True
 
-    async def _bootstrap_user_ids(self, conn) -> list[str]:
-        """Langfuse user ids to make owners. Comma-separated in config; may be empty.
+    def _bootstrap_emails(self) -> list[str]:
+        """Addresses always made OWNER of any organization this module provisions.
 
-        MORE THAN ONE, DELIBERATELY. Langfuse lists only the organizations a user
-        belongs to, so provisioning under a single service account produces projects
-        that collect traces nobody can open — indistinguishable, from the UI, from
-        provisioning having failed. Every address that should be able to look belongs
-        here.
+        MORE THAN ONE, DELIBERATELY. Langfuse lists only the organizations you belong to,
+        so provisioning under a single service account produces projects that collect
+        traces nobody can open — indistinguishable, from the UI, from provisioning having
+        failed. Every address that should be able to look belongs here.
+
+        STILL NEEDED NOW THAT REAL PEOPLE ARE GRANTED. The platform's own organization
+        admins are made OWNER as well (see `sync_org_access`), derived from role bindings
+        — but on a fresh deployment none of them may have a Langfuse identity yet, and an
+        organization whose every grant is a pending invitation is one nobody can open. This
+        list is the floor that keeps it reachable.
+
+        No database lookup: unlike the old version this returns ADDRESSES, because
+        `_grant_org_role` no longer requires the person to already exist.
         """
-        emails = [e.strip() for e in (self.bootstrap_email or "").split(",") if e.strip()]
-        if not emails:
-            return []
-        rows = await conn.fetch("select id, email from users where email = any($1::text[])", emails)
-        found = {r["email"]: str(r["id"]) for r in rows}
-        for missing in [e for e in emails if e not in found]:
-            logger.warning(
-                "LANGFUSE_BOOTSTRAP_USER_EMAIL lists %s, which is not a Langfuse user — "
-                "they must sign in once before they can be granted access",
-                missing,
+        return [e.strip() for e in (self.bootstrap_email or "").split(",") if e.strip()]
+
+    async def _grant_org_role(
+        self, conn, org_id: str, email: str, role: str, invited_by: Optional[str] = None
+    ) -> str:
+        """Give `email` `role` on `org_id`, whether or not they have a Langfuse account.
+
+        THE TWO PATHS, AND WHY BOTH ARE NEEDED. `organization_memberships.user_id`
+        references a `users` row, and Langfuse only creates one when that person first
+        signs in. A business unit admin appointed five minutes ago has never signed in, so
+        the membership cannot be written — which is why granting used to be limited to a
+        fixed list of bootstrap addresses that happened to already exist.
+
+        `membership_invitations` is Langfuse's own answer: a pending grant keyed by email,
+        which Langfuse converts into a membership when that address authenticates. So:
+
+            user row exists -> organization_memberships
+            it does not     -> membership_invitations, consumed at first sign-in
+
+        WHY NOT JUST CREATE THE USER ROW. We have write access and could. But this
+        instance authenticates through `azure-ad`, and a `users` row with no matching
+        `Account` row is what makes NextAuth raise `OAuthAccountNotLinked` — we would be
+        locking the person out of Langfuse in the act of granting them access. The
+        invitation path is supported and has no such failure mode.
+
+        Idempotent: re-granting the same role is a no-op, a different role is an update.
+        """
+        email = (email or "").strip()
+        if not email:
+            return "skipped"
+        now = _now()
+
+        user_id = await conn.fetchval(
+            "select id from users where lower(email) = lower($1)", email
+        )
+        if user_id:
+            # They have an account now, so any invitation is stale. Left in place it
+            # would be a second, independent grant that Langfuse could apply later —
+            # including after a revoke.
+            await conn.execute(
+                "delete from membership_invitations "
+                "where org_id=$1 and lower(email)=lower($2)",
+                org_id, email,
             )
-        return list(found.values())
+            current = await conn.fetchrow(
+                "select id, role from organization_memberships where org_id=$1 and user_id=$2",
+                org_id, str(user_id),
+            )
+            if current is None:
+                await conn.execute(
+                    "insert into organization_memberships "
+                    '(id,org_id,user_id,role,created_at,updated_at) '
+                    'values ($1,$2,$3,$4::text::"Role",$5,$6)',
+                    str(uuid.uuid4()), org_id, str(user_id), role, now, now,
+                )
+                return "granted"
+            if str(current["role"]) != role:
+                await conn.execute(
+                    'update organization_memberships set role=$1::text::"Role", '
+                    "updated_at=$2 where id=$3",
+                    role, now, str(current["id"]),
+                )
+                return "updated"
+            return "unchanged"
 
-    async def _ensure_memberships(self, conn, org_id: str, project_id: str, user_id: str) -> None:
-        """Make the bootstrap user an owner, so the project is visible in the UI.
+        existing = await conn.fetchrow(
+            "select id, org_role from membership_invitations "
+            "where org_id=$1 and lower(email)=lower($2)",
+            org_id, email,
+        )
+        if existing is None:
+            await conn.execute(
+                "insert into membership_invitations "
+                "(id,email,org_id,org_role,invited_by_user_id,created_at,updated_at) "
+                'values ($1,$2,$3,$4::text::"Role",$5,$6,$7)',
+                str(uuid.uuid4()), email.lower(), org_id, role, invited_by, now, now,
+            )
+            return "invited"
+        if str(existing["org_role"]) != role:
+            await conn.execute(
+                'update membership_invitations set org_role=$1::text::"Role", '
+                "updated_at=$2 where id=$3",
+                role, now, str(existing["id"]),
+            )
+            return "invite-updated"
+        return "unchanged"
 
-        Best-effort: traces do not depend on it, and the membership tables carry enum
-        columns whose values differ across Langfuse versions. A failure here must not
-        cost us a working key pair.
+    async def _revoke_org_role(self, conn, org_id: str, email: str) -> str:
+        """Remove `email`'s access to `org_id` — membership AND any pending invitation.
+
+        BOTH, ALWAYS. Deleting only the membership leaves an invitation that Langfuse
+        will happily convert into a fresh membership the next time that address signs in.
+        Somebody removed as a unit admin would silently regain access by logging in.
+        """
+        email = (email or "").strip()
+        if not email:
+            return "skipped"
+        removed: list[str] = []
+
+        user_id = await conn.fetchval(
+            "select id from users where lower(email) = lower($1)", email
+        )
+        if user_id:
+            result = await conn.execute(
+                "delete from organization_memberships where org_id=$1 and user_id=$2",
+                org_id, str(user_id),
+            )
+            if not result.endswith(" 0"):
+                removed.append("membership")
+        result = await conn.execute(
+            "delete from membership_invitations where org_id=$1 and lower(email)=lower($2)",
+            org_id, email,
+        )
+        if not result.endswith(" 0"):
+            removed.append("invitation")
+        return "+".join(removed) if removed else "nothing-to-revoke"
+
+    async def _ensure_memberships(self, conn, org_id: str, email: str) -> str:
+        """Make a bootstrap address an OWNER. Best-effort — a key pair matters more.
+
+        Traces do not depend on membership; visibility does. A failure here must not cost
+        us a working key pair, so it is swallowed rather than raised.
         """
         try:
-            om_id = await conn.fetchval(
-                "select id from organization_memberships where org_id=$1 and user_id=$2",
-                org_id, user_id,
-            )
-            now = _now()
-            if not om_id:
-                om_id = str(uuid.uuid4())
-                await conn.execute(
-                    "insert into organization_memberships (id,org_id,user_id,role,created_at,updated_at) "
-                    "values ($1,$2,$3,'OWNER',$4,$5)",
-                    om_id, org_id, user_id, now, now,
-                )
-            exists = await conn.fetchval(
-                "select 1 from project_memberships where project_id=$1 and user_id=$2",
-                project_id, user_id,
-            )
-            if not exists:
-                await conn.execute(
-                    "insert into project_memberships "
-                    "(project_id,user_id,role,created_at,updated_at,org_membership_id) "
-                    "values ($1,$2,'OWNER',$3,$4,$5)",
-                    project_id, user_id, now, now, str(om_id),
-                )
+            return await self._grant_org_role(conn, org_id, email, ORG_ROLE_OWNER)
         except Exception as exc:
             logger.warning(
-                "Langfuse membership not created for project=%s (%s) — traces will still "
-                "arrive, but the project will not be visible in the Langfuse UI",
-                project_id, type(exc).__name__,
+                "Langfuse membership not created for org=%s (%s) — traces will still "
+                "arrive, but the organization may not be visible in the Langfuse UI",
+                org_id, type(exc).__name__,
             )
+            return "failed"
 
     async def _insert_api_key(self, conn, project_id: str, note: str) -> tuple[str, str]:
         public_key, secret_key = generate_key_pair()
@@ -313,11 +518,24 @@ class LangfuseProvisioner:
 
     # ── the one public entry point ────────────────────────────────────────────
 
-    async def provision(self, *, unit_name: str, project_name: str) -> ProvisionedProject:
+    async def provision(
+        self,
+        *,
+        unit_name: str,
+        project_name: str,
+        org_id: Optional[str] = None,
+        owned_org_ids: frozenset[str] = frozenset(),
+    ) -> ProvisionedProject:
         """Ensure a Langfuse org for the unit and a project inside it, and mint a key.
 
         `unit_name` is the business unit — it becomes the Langfuse organization.
         `project_name` is the SDLC project — it becomes the Langfuse project.
+
+        `org_id` is the organization already recorded against that business unit
+        (`workspaces.langfuse_org_id`). Pass it whenever it is known: it is what makes
+        this reuse the organization created when the unit was created, instead of
+        searching by name. `owned_org_ids` is every such id across the platform, used to
+        tell our organizations apart from the sibling product's — see `_available_org_name`.
 
         Runs in one transaction: a failure part-way leaves no organization without its
         project, and no project without its key.
@@ -327,12 +545,14 @@ class LangfuseProvisioner:
         try:
             await self._assert_schema(conn)
             async with conn.transaction():
-                org_id, created_org = await self._ensure_org(conn, unit_name)
+                org_id, _org_name, created_org = await self._ensure_org(
+                    conn, unit_name, org_id=org_id, owned_org_ids=owned_org_ids
+                )
                 project_id, created_project = await self._ensure_project(
                     conn, org_id, project_name
                 )
-                for user_id in await self._bootstrap_user_ids(conn):
-                    await self._ensure_memberships(conn, org_id, project_id, user_id)
+                for email in self._bootstrap_emails():
+                    await self._ensure_memberships(conn, org_id, email)
                 public_key, secret_key = await self._insert_api_key(
                     conn, project_id, note=f"provisioned-for-{project_name}"
                 )
@@ -354,6 +574,299 @@ class LangfuseProvisioner:
         finally:
             await conn.close()
 
+
+    # -- the business-unit lifecycle -------------------------------------------
+    #
+    # These exist because a business unit's Langfuse organization used to appear only when
+    # somebody ran an agent inside one of its projects -- creating the unit did nothing, and
+    # the only people ever granted access were a fixed list of addresses in an env var.
+    # Each one is called from a fail-soft hook in the BU routes, so none of them may raise:
+    # Langfuse being unreachable must never stop somebody creating a business unit.
+    # `scripts/sync_langfuse_orgs.py` converges whatever a failure left behind.
+
+    async def provision_org(
+        self,
+        *,
+        unit_name: str,
+        org_id: Optional[str] = None,
+        owned_org_ids: frozenset = frozenset(),
+        access: Optional[dict] = None,
+        invited_by_email: Optional[str] = None,
+    ) -> ProvisionedOrg:
+        """Ensure the Langfuse organization for a business unit, and apply access to it.
+
+        Organization-only, unlike `provision()`, which always wants a project too. A unit
+        is created before any of its projects exist, and its organization should appear in
+        Langfuse at that moment rather than whenever somebody first runs an agent.
+
+        `access` maps email -> Langfuse role. Bootstrap addresses are always added as
+        OWNER on top, so an organization is never provisioned with nobody able to open it.
+        """
+        self._require_config()
+        conn = await self._connect()
+        try:
+            await self._assert_schema(conn)
+            invited_by = (
+                await conn.fetchval(
+                    "select id from users where lower(email) = lower($1)", invited_by_email
+                )
+                if invited_by_email
+                else None
+            )
+            applied: dict = {}
+            async with conn.transaction():
+                resolved_id, resolved_name, created = await self._ensure_org(
+                    conn, unit_name, org_id=org_id, owned_org_ids=owned_org_ids
+                )
+                wanted = {e.strip().lower(): ORG_ROLE_OWNER for e in self._bootstrap_emails()}
+                # STRONGEST WINS, not last-write. A bootstrap address that is also this
+                # unit's admin must stay OWNER: letting the ADMIN grant overwrite it would
+                # quietly remove the floor that guarantees somebody can open the
+                # organization at all.
+                for email, role in (access or {}).items():
+                    if not email or not email.strip():
+                        continue
+                    key = email.strip().lower()
+                    wanted[key] = strongest_role(wanted.get(key, ""), role)
+                for email, role in wanted.items():
+                    applied[email] = await self._grant_org_role(
+                        conn, resolved_id, email, role,
+                        invited_by=str(invited_by) if invited_by else None,
+                    )
+            logger.info(
+                "Langfuse organization for unit %r: %s (%s), access=%s",
+                unit_name, resolved_id, "created" if created else "existing", applied,
+            )
+            return ProvisionedOrg(
+                langfuse_org_id=resolved_id,
+                langfuse_org_name=resolved_name,
+                host=self.host,
+                created=created,
+                access=applied,
+            )
+        finally:
+            await conn.close()
+
+    async def sync_org_access(
+        self,
+        *,
+        org_id: str,
+        grants: Optional[dict] = None,
+        revoke: Optional[list] = None,
+        invited_by_email: Optional[str] = None,
+    ) -> dict:
+        """Apply grants and revocations to an existing organization. Never raises.
+
+        Revocations are applied BEFORE grants, so moving a role between two people in one
+        call cannot leave the incoming grant undone by the outgoing revoke when both name
+        the same address.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse access sync skipped for org=%s (%s)", org_id, exc)
+            return {}
+        applied: dict = {}
+        try:
+            invited_by = (
+                await conn.fetchval(
+                    "select id from users where lower(email) = lower($1)", invited_by_email
+                )
+                if invited_by_email
+                else None
+            )
+            async with conn.transaction():
+                for email in revoke or []:
+                    applied[email.strip().lower()] = await self._revoke_org_role(
+                        conn, org_id, email
+                    )
+                for email, role in (grants or {}).items():
+                    applied[email.strip().lower()] = await self._grant_org_role(
+                        conn, org_id, email, role,
+                        invited_by=str(invited_by) if invited_by else None,
+                    )
+        except Exception:
+            logger.warning("langfuse access sync failed for org=%s", org_id, exc_info=True)
+        finally:
+            await conn.close()
+        return applied
+
+    async def rename_org(
+        self, *, org_id: str, new_name: str, owned_org_ids: frozenset = frozenset()
+    ) -> Optional[str]:
+        """Rename a business unit's organization. Returns the name actually used.
+
+        May differ from `new_name`: renaming INTO a name the sibling product already uses
+        would leave two organizations indistinguishable in the Langfuse UI, so the same
+        disambiguation as creation applies.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse org rename skipped (%s)", exc)
+            return None
+        try:
+            # Our own row holds the old name; exclude it so a rename is never treated as a
+            # collision with itself.
+            resolved, existing = await self._available_org_name(
+                conn, new_name, owned_org_ids | {org_id}
+            )
+            if existing is not None and existing != org_id:
+                logger.warning(
+                    "not renaming Langfuse org %s to %r -- another organization of ours "
+                    "already has that name", org_id, new_name,
+                )
+                return None
+            await conn.execute(
+                "update organizations set name=$1, updated_at=$2 where id=$3",
+                resolved, _now(), org_id,
+            )
+            return resolved
+        except Exception:
+            logger.warning("langfuse org rename failed for org=%s", org_id, exc_info=True)
+            return None
+        finally:
+            await conn.close()
+
+    async def teardown_org(self, *, org_id: str) -> dict:
+        """Make an archived unit's organization inert: no access, no ingestion, hidden.
+
+        WHY NOT `DELETE FROM organizations`. Postgres would cascade cleanly -- projects,
+        memberships, invitations and api_keys all have ON DELETE CASCADE -- and it would
+        still be the wrong operation, because TRACES DO NOT LIVE IN POSTGRES. They are in
+        ClickHouse, and Langfuse removes them through an async cleanup job that its own
+        delete endpoint schedules. Dropping the Postgres rows behind its back leaves trace
+        data that is neither reachable nor deleted: worse than either outcome, and
+        indefensible if somebody later has to demonstrate that a deletion happened.
+
+        What this does instead reaches the same end state by Langfuse's own mechanisms:
+
+          1. soft-delete every project (`deleted_at`) -- they vanish from the Langfuse UI
+          2. delete their API keys -- ingestion stops immediately
+          3. delete every membership and pending invitation -- nobody retains access, and
+             no invitation can quietly restore it at next sign-in
+
+        It is also REVERSIBLE, which matters: archiving a business unit is reversible in
+        this product, so a hard delete would make a routine undoable action permanently
+        destructive. `restore_org` brings it back -- minus the API keys, which are gone for
+        good and get re-minted by the normal provisioning path.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse org teardown skipped for org=%s (%s)", org_id, exc)
+            return {}
+        counts = {"projects": 0, "api_keys": 0, "memberships": 0, "invitations": 0}
+        try:
+            now = _now()
+            async with conn.transaction():
+                project_ids = [
+                    str(r["id"])
+                    for r in await conn.fetch(
+                        "select id from projects where org_id=$1 and deleted_at is null",
+                        org_id,
+                    )
+                ]
+                if project_ids:
+                    await conn.execute(
+                        "update projects set deleted_at=$1, updated_at=$1 "
+                        "where id = any($2::text[])",
+                        now, project_ids,
+                    )
+                    counts["projects"] = len(project_ids)
+                    counts["api_keys"] = _affected(
+                        await conn.execute(
+                            "delete from api_keys where project_id = any($1::text[])",
+                            project_ids,
+                        )
+                    )
+                counts["memberships"] = _affected(
+                    await conn.execute(
+                        "delete from organization_memberships where org_id=$1", org_id
+                    )
+                )
+                counts["invitations"] = _affected(
+                    await conn.execute(
+                        "delete from membership_invitations where org_id=$1", org_id
+                    )
+                )
+            logger.info("Langfuse org %s torn down: %s", org_id, counts)
+        except Exception:
+            logger.warning("langfuse org teardown failed for org=%s", org_id, exc_info=True)
+        finally:
+            await conn.close()
+        return counts
+
+    async def restore_org(self, *, org_id: str) -> int:
+        """Undo `teardown_org`'s soft-delete. Keys are NOT restored -- they were deleted.
+
+        The caller re-mints them through the normal binding path, which is why
+        `deactivate_binding` is the right partner to `teardown_org`: a deactivated binding
+        makes the next traced run provision a fresh key pair instead of reusing a deleted one.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse org restore skipped for org=%s (%s)", org_id, exc)
+            return 0
+        try:
+            restored = _affected(
+                await conn.execute(
+                    "update projects set deleted_at=null, updated_at=$1 "
+                    "where org_id=$2 and deleted_at is not null",
+                    _now(), org_id,
+                )
+            )
+            logger.info("Langfuse org %s restored: %d project(s)", org_id, restored)
+            return restored
+        except Exception:
+            logger.warning("langfuse org restore failed for org=%s", org_id, exc_info=True)
+            return 0
+        finally:
+            await conn.close()
+
+    async def org_access(self, *, org_id: str) -> dict:
+        """Who can reach this organization today. For the reconciler and for tests.
+
+        Returns {"members": {email: role}, "invitations": {email: role}}. The split
+        matters: an invitation is a grant that has NOT taken effect -- that person cannot
+        open Langfuse until they sign in, and if they cannot authenticate against the
+        instance's Entra tenant at all, they never will. Reporting them as members would
+        hide exactly that failure.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError as exc:
+            logger.warning("langfuse org access read skipped for org=%s (%s)", org_id, exc)
+            return {"members": {}, "invitations": {}}
+        try:
+            members = {
+                str(r["email"]).lower(): str(r["role"])
+                for r in await conn.fetch(
+                    "select u.email, m.role from organization_memberships m "
+                    "join users u on u.id = m.user_id where m.org_id=$1",
+                    org_id,
+                )
+                if r["email"]
+            }
+            invitations = {
+                str(r["email"]).lower(): str(r["org_role"])
+                for r in await conn.fetch(
+                    "select email, org_role from membership_invitations where org_id=$1",
+                    org_id,
+                )
+            }
+            return {"members": members, "invitations": invitations}
+        except Exception:
+            logger.warning("langfuse org access read failed for org=%s", org_id, exc_info=True)
+            return {"members": {}, "invitations": {}}
+        finally:
+            await conn.close()
 
     async def rename_project(self, langfuse_project_id: str, new_name: str) -> bool:
         """Rename the Langfuse project behind a binding. Best-effort; never raises.

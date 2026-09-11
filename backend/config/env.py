@@ -281,6 +281,17 @@ LANGFUSE_BOOTSTRAP_USER_EMAIL: str = os.environ.get("LANGFUSE_BOOTSTRAP_USER_EMA
 # Trace retention in days, applied to each project as it is created (PRD §34.8: traces
 # "expire on a policy far shorter than audit"). Empty leaves the instance default.
 LANGFUSE_RETENTION_DAYS: str = os.environ.get("LANGFUSE_RETENTION_DAYS", "")
+# Master switch for the BU->Langfuse-organization lifecycle (0058): creating a business
+# unit creates its Langfuse organization, the platform's org admins are made OWNER, and
+# its appointed bu_admin is made ADMIN so they can sign in to Langfuse directly.
+#
+# Set false to keep provisioning (projects and keys still get created on demand) while
+# granting no human any Langfuse access — the posture before 0058, and the right one if
+# Langfuse sign-in is not wanted for this deployment. Every grant is best-effort either
+# way; this only decides whether it is attempted.
+LANGFUSE_MANAGE_MEMBERSHIPS: bool = (
+    os.environ.get("LANGFUSE_MANAGE_MEMBERSHIPS", "true").strip().lower() == "true"
+)
 
 # ── M7.3: OIDC SSO master flag (REQ-M7-15) — gates decode_token dispatch + frontend login in lockstep ──
 ENABLE_OIDC: bool = os.environ.get("ENABLE_OIDC", "false").lower() == "true"

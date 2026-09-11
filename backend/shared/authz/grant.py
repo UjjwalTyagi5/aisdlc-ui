@@ -302,6 +302,61 @@ async def grant_role(
         tenant_uuid,
     )
 
+    await _sync_langfuse_org(scope_kind, scope_uuid, role_name, str(tenant_uuid))
+
+
+async def _sync_langfuse_org(scope_kind: str, scope_id, role_name: str, tenant_id: str) -> None:
+    """Carry a role change through to the unit's Langfuse organization. Never raises.
+
+    WHY HERE AND NOT IN THE ROUTES. Appointing a business unit admin grants that person
+    ADMIN on their unit's Langfuse organization, and there are six ways to appoint one —
+    the workspaces routes, onboarding, the admin router, governance effects and the CLI.
+    A hook per route would be six implementations of one rule, and the seventh route would
+    silently not have it. `grant_role` and `revoke_role` are the only things all of them
+    share.
+
+    ORG ADMINS TOO, NOT JUST UNIT ADMINS. An organization admin owns EVERY unit's
+    organization, so granting or revoking that role has to converge all of them rather
+    than one.
+
+    The sync itself is idempotent and derives the whole desired state, so calling it on a
+    role change that turns out to be irrelevant costs a lookup and changes nothing.
+    """
+    if role_name not in ("bu_admin", "org_admin"):
+        return
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.observability import org_sync  # noqa: PLC0415
+
+        if not org_sync._enabled():
+            return
+        async with get_db_session_for_tenant(str(tenant_id)) as session:
+            if role_name == "bu_admin" and scope_kind == "business_unit":
+                await org_sync.sync_unit(
+                    session, tenant_id=str(tenant_id), workspace_id=str(scope_id)
+                )
+                return
+            if role_name == "org_admin":
+                rows = await session.execute(
+                    text(
+                        "select id from workspaces where organization_id = cast(:t as uuid) "
+                        "and status <> 'archived'"
+                    ),
+                    {"t": str(tenant_id)},
+                )
+                for (wid,) in rows.all():
+                    await org_sync.sync_unit(
+                        session, tenant_id=str(tenant_id), workspace_id=str(wid)
+                    )
+    except Exception:
+        # Observability access is never allowed to fail an RBAC write. The role change is
+        # already committed and correct in this product; only Langfuse may be behind, and
+        # `scripts/sync_langfuse_orgs.py` converges it.
+        logger.warning(
+            "langfuse org sync failed after role change (role=%s scope=%s:%s)",
+            role_name, scope_kind, scope_id, exc_info=True,
+        )
+
 
 async def revoke_role(
     user_id: str,
@@ -385,6 +440,8 @@ async def revoke_role(
         role_name,
         tenant_id,
     )
+
+    await _sync_langfuse_org(scope_kind, scope_uuid, role_name, str(tenant_id))
 
 
 async def _belongs_to_unit(

@@ -53,6 +53,23 @@ class Workspace(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
+    # The Langfuse organization this business unit owns (0058). BU = Langfuse org, so
+    # every unit gets its own and traces cannot mix across units.
+    #
+    # THE ID IS THE BINDING, NOT THE NAME. Langfuse organization names are not unique and
+    # the instance is shared with a sibling product — it already holds orgs called
+    # `Payments` and `Lending` that are not ours. Matching by name would let a unit named
+    # `Payments` silently adopt theirs and write this platform's traces into it. Recording
+    # the id we created ourselves is what makes rename, grant and teardown unambiguous,
+    # and what lets provisioning refuse to adopt an org it did not create.
+    #
+    # NULL means not provisioned yet: Langfuse was unreachable when the unit was created
+    # (every hook is fail-soft) or the unit predates 0058. `scripts/sync_langfuse_orgs.py`
+    # converges those.
+    langfuse_org_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Kept only to detect drift — somebody renaming the org in the Langfuse UI. The id
+    # above is what every operation actually addresses.
+    langfuse_org_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

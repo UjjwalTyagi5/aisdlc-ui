@@ -172,7 +172,8 @@ async def ensure_binding(
         row = (
             await session.execute(
                 text(
-                    "select p.display_name, p.workspace_id, w.display_name "
+                    "select p.display_name, p.workspace_id, w.display_name, "
+                    "       w.langfuse_org_id "
                     "from projects p join workspaces w on w.id = p.workspace_id "
                     "where p.id = :p and p.tenant_id = :t"
                 ),
@@ -189,15 +190,26 @@ async def ensure_binding(
         return None
 
     project_name, workspace_id, unit_name = str(row[0]), str(row[1]), str(row[2])
+    # The organization the unit already owns (0058), created when the unit was created.
+    # Passing it is what makes this reuse that organization instead of searching by name —
+    # and searching by name on a shared instance is how a unit ends up adopting the
+    # sibling product's organization. None means the unit predates 0058 or its eager
+    # provisioning failed; `_ensure_org` then creates one, collision-safely.
+    unit_org_id = str(row[3]) if row[3] else None
 
+    from shared.observability.org_sync import owned_org_ids  # noqa: PLC0415
     from shared.observability.provisioning import (  # noqa: PLC0415
         LangfuseProvisioner,
         LangfuseProvisioningError,
     )
 
     try:
+        owned = await owned_org_ids(session)
         result = await LangfuseProvisioner().provision(
-            unit_name=unit_name, project_name=project_name
+            unit_name=unit_name,
+            project_name=project_name,
+            org_id=unit_org_id,
+            owned_org_ids=owned,
         )
     except LangfuseProvisioningError as exc:
         logger.warning(
