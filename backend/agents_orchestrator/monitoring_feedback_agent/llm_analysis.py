@@ -16,7 +16,7 @@ from langgraph.graph import StateGraph, END
 from typing import Dict, TypedDict, List, Optional, Any
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_fixed
-from ._byok import resolved_litellm_kwargs
+from ._byok import resolved_litellm_kwargs, traced_completion
 
 # Configure basic logging to see outputs and errors
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -194,9 +194,8 @@ def rca_agent(state: AgentState) -> AgentState:
       "confidence": <float between 0.0 and 1.0>
     }}
     """
-    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    import litellm
-    response = litellm.completion(
+    response = traced_completion(
+        name="rca_agent",
         messages=[{"role": "user", "content": prompt}],
         **resolved_litellm_kwargs(),
     )
@@ -230,9 +229,8 @@ def summary_agent(state: AgentState) -> AgentState:
       "exception_type": "<The primary exception type, e.g., NullPointerException, or null if none is found.>"
     }}
     """
-    # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    import litellm
-    response = litellm.completion(
+    response = traced_completion(
+        name="summary_agent",
         messages=[{"role": "user", "content": prompt}],
         **resolved_litellm_kwargs(),
     )

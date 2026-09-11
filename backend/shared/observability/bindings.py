@@ -26,6 +26,7 @@ process holding many projects does not grow without limit.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -367,3 +368,26 @@ async def deactivate_binding(session, *, tenant_id: str, project_id: str) -> Non
         logger.warning(
             "langfuse binding not deactivated for project=%s", project_id, exc_info=True
         )
+
+
+# The Langfuse client for the run currently executing, so code that is NOT LangChain can
+# still trace to the right project. The LangChain handler carries this implicitly; agents
+# calling a provider SDK directly (the monitoring agent uses litellm) have nothing to
+# carry it, and a module-level client would send every project's traces to whichever one
+# happened to be configured first.
+_CURRENT_CLIENT: contextvars.ContextVar = contextvars.ContextVar(
+    "langfuse_current_client", default=None
+)
+
+
+def set_current_client(client: Any | None) -> None:
+    """Bind a Langfuse client to this run's context. Called by agent_trace."""
+    _CURRENT_CLIENT.set(client)
+
+
+def get_current_client():
+    """The Langfuse client for this run, or None when untraced."""
+    try:
+        return _CURRENT_CLIENT.get()
+    except Exception:
+        return None

@@ -206,8 +206,18 @@ async def agent_trace(
             if binding is not None:
                 # Constructing the client REGISTERS it with the SDK under its public
                 # key, which is how CallbackHandler(public_key=…) finds it below.
-                if client_for_binding(binding) is not None:
+                _client = client_for_binding(binding)
+                if _client is not None:
                     public_key = binding.public_key
+                    # Also bind it to this run's context, for agents that do NOT go
+                    # through LangChain — the monitoring agent calls litellm directly,
+                    # so it has no handler to carry the destination and would otherwise
+                    # be untraceable without a global client.
+                    from shared.observability.bindings import (  # noqa: PLC0415
+                        set_current_client,
+                    )
+
+                    set_current_client(_client)
         except Exception:  # pragma: no cover - never fail a run over observability
             logger.debug("langfuse binding resolution failed (swallowed)", exc_info=True)
 
