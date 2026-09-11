@@ -34,6 +34,7 @@ import { getProject, listProjects } from "@/lib/api/projects";
 import { createRun, listRunAttachments, uploadRunAttachments } from "@/lib/api/runs";
 import { qk } from "@/lib/api/query-keys";
 import { TRACK_META } from "@/lib/tracks";
+import { PHASE_LABEL, builtAgentsForTrack } from "@/lib/agents";
 import { freshStages, useOrchestratorStore } from "@/stores/orchestrator-store";
 import type { ProjectId } from "@/lib/schemas";
 
@@ -762,6 +763,11 @@ export function OrchestratorCockpit({
                 projectName={project?.name ?? null}
                 trackLabel={trackMeta ? `Track ${trackMeta.number} · ${trackMeta.label}` : null}
                 agentCount={stages.length}
+                available={
+                  project && project.track === "modernization"
+                    ? builtAgentsForTrack(project.track).map((p) => PHASE_LABEL[p])
+                    : null
+                }
               />
             }
           />
@@ -843,9 +849,13 @@ function EmptyThread({
   projectName,
   trackLabel,
   agentCount,
+  available,
 }: {
   projectName: string | null;
   trackLabel: string | null;
+  /** Agents the track can run TODAY, when fewer than its roster — Track 3 has its
+   *  first two of ten. Null when the whole roster is available. */
+  available?: string[] | null;
   agentCount: number;
 }) {
   return (
@@ -860,7 +870,15 @@ function EmptyThread({
         {projectName && trackLabel ? (
           <>
             <span className="text-foreground">{trackLabel}</span> — {agentCount} agents on the
-            roster.{" "}
+            roster
+            {available && available.length < agentCount ? (
+              <>
+                , {available.length} available now:{" "}
+                <span className="text-foreground">{available.join(" and ")}</span>.{" "}
+              </>
+            ) : (
+              ". "
+            )}
             {/* No "pick one yourself above" any more — the picker is gone and the
                 Orchestrator always chooses. Naming an agent in the message still
                 works, which is what this now points at. */}

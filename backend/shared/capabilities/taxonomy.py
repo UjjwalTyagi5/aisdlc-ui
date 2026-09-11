@@ -60,6 +60,14 @@ CAPABILITIES: frozenset[str] = frozenset({
     # docs.*
     "docs.aggregate", "docs.compile", "docs.api.reference.generate", "docs.changelog.generate",
     "docs.release.notes.generate", "docs.run.summary", "docs.publish",
+    # Track 3 — Code Modernization: Requirements in migration-intent mode, and
+    # Discovery & Assessment (help/track3-agent-build-plan.md, "New capability tokens").
+    "req.migration_intent.capture", "req.migration_intent.brief",
+    "discovery.repo.clone", "discovery.dependency.graph.build",
+    "discovery.dependency.eol.scan", "discovery.dependency.cve.scan",
+    "discovery.module.risk.score", "discovery.module.tier.classify",
+    # Both Track 3 agents read the project's pulled legacy code (profile, files, search).
+    "legacy.code.read",
     # cross-cutting
     "traceability.map",
     "artifact.read", "artifact.write",
@@ -68,6 +76,11 @@ CAPABILITIES: frozenset[str] = frozenset({
 # BYO servers can NEVER provide these (D9). Code/repo mutation + platform-internal writes.
 NATIVE_ONLY: frozenset[str] = frozenset({
     "repo.write", "repo.clone",
+    # Discovery's clone is read-only, but it is still the platform fetching a repository
+    # with the project's credential — the same reason `repo.clone` is native-only.
+    "discovery.repo.clone",
+    # The checkout is the platform's, on the platform's disk — nothing external can read it.
+    "legacy.code.read",
     "vcs.branch.create", "vcs.commit", "vcs.pr.create", "vcs.pr.ready",
     "code.edit", "code.execute",
     "board.write",

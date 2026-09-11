@@ -575,6 +575,13 @@ def _dedupe_by_directory(
 # Fail-soft: None until then.
 _GENERATED_STAGE_DIRS = {"security", "code_review", "deployment"}
 
+#: Track 3's agents write under their own segment, the way Requirements does under
+#: `requirements_agent` — see agents_orchestrator/modernization_common/files.py.
+_SEGMENT_OUTPUT_STAGES = {
+    "requirements_modernization": "requirements_modernization_agent",
+    "discovery": "discovery_agent",
+}
+
 
 async def _run_stage_output_dir(
     run_id: str,
@@ -614,6 +621,9 @@ async def _run_stage_output_dir(
 
     if stage == "requirements":
         return _glob_user_scoped_dir(run_id, "output", segment="requirements_agent")
+
+    if stage in _SEGMENT_OUTPUT_STAGES:
+        return _glob_user_scoped_dir(run_id, "output", segment=_SEGMENT_OUTPUT_STAGES[stage])
 
     if stage in _ORCHESTRATOR_OUTPUT_STAGES:
         return _glob_user_scoped_dir(run_id, "output")

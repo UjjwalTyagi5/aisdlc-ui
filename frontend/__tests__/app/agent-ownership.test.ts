@@ -73,7 +73,10 @@ describe("AGENT_OWNERSHIP invariants", () => {
     // Development; QA Testing; Security Engineer Security; DevOps Deployment.
     const reach = (role: PlatformRole) => roleAgentSplit(role).reachable.sort();
 
-    expect(reach("ba")).toEqual(["documentation", "requirements"]);
+    // + Track 3's first two agents, both the BA's (a product decision for Track 3).
+    expect(reach("ba")).toEqual(
+      ["discovery", "documentation", "requirements", "requirements_modernization"],
+    );
     expect(reach("developer")).toEqual(["development"]);
     expect(reach("qa")).toEqual(["testing", "validation"].sort());
     expect(reach("security_engineer")).toEqual(["security"]);
@@ -83,7 +86,7 @@ describe("AGENT_OWNERSHIP invariants", () => {
     // Architect holds the two greenfield agents plus the three modernization-track
     // ones it owns; those never appear on a Track 1 project.
     expect(reach("architect")).toEqual(
-      ["design", "review", "discovery", "strategy", "migration_mapping"].sort(),
+      ["design", "review", "strategy", "migration_mapping"].sort(),
     );
   });
 
