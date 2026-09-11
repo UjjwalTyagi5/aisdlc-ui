@@ -1,5 +1,84 @@
 # Track 3 Phase 1 — Requirements (migration-intent) + Discovery & Assessment
 
+> **STATUS (2026-09-10): BUILT, on branch `track-3-phase1-agents`** (uncommitted when
+> written). Plan and task list: `docs/superpowers/plans/2026-09-10-track3-phase1-agents.md`.
+> Decisions taken while building — each supersedes what this doc proposed below:
+>
+> - **Ids:** `requirements_modernization` (Track 3's own Requirements agent — the user's
+>   call: its work differs from Track 1's, so it is a separate agent, not a mode flag) and
+>   `discovery` (matching the frontend, per `track3-frontend-plan.md` §2).
+> - **Owners:** the BA owns BOTH agents (user decision; the design doc named the Architect
+>   for Discovery). Project Admin is the fallback owner of both. The Orchestrator stays
+>   Project-Admin-only, as in Track 1.
+> - **Standalone track check (§2):** built as `assert_agent_access_for_chat_on_track` in
+>   `shared/authz/agent_access.py`; Track 1's nine handlers are untouched.
+> - **Data:** migration 0057 adds `runs.migration_intent_payload` and
+>   `runs.discovery_artifacts` (Track 3 does not reuse `requirements_payload` — a brief is
+>   not a story backlog), widens the deliverables CHECK, and adds the two approve
+>   permissions.
+> - **Orchestrator voice:** Track 3 has its own router prompt template (introduces Code
+>   Modernization, starts with the migration intent, hands to Discovery on request) —
+>   answering `track3-implementation-plan.md` §7's "separate vs shared template".
+> - **Discovery's analysis is deterministic** (no model): inventory, manifests
+>   (.NET/Java/Node/Python), dependency graph, a dated EOL table, Trivy for CVEs, and an
+>   attributed 0-100 risk score with a mechanical / LLM-assisted / manual-only tier. The
+>   golden-master field is reserved (`not_captured`) — capture belongs to Testing's phase.
+> - **Clone is read-only by construction:** shallow, push URL disabled, no write tools;
+>   credentials only from the connector wired to the Discovery stage; bare https URLs only
+>   for GitHub / Azure DevOps / GitLab / Bitbucket.
+> - **Dual-repo config (§6):** still undecided; only the legacy side exists (the Discovery
+>   stage's connector).
+>
+> **Pages rebuilt around history and the legacy code (2026-09-10, after the live check;
+> not yet live-tested):**
+>
+> - *Pull legacy code* on either page clones the repository read-only into ONE checkout
+>   per project (`files/legacy-code/<project>/checkout`, record in `pull.json` beside it —
+>   on disk, no migration). Both agents read it through `modernization_common/legacy_code.py`:
+>   a deterministic profile (`get_legacy_code_profile`) plus `list_legacy_files`,
+>   `read_legacy_file`, `search_legacy_code`. Requirements states the current stack from
+>   the code and asks the user to confirm it; Discovery assesses the pulled checkout
+>   instead of cloning again, and its own clone becomes the project's checkout.
+> - Every recorded brief / assessment is frozen as a stage version (`artifact_versions`,
+>   `modernization_common/versions.py`) — standalone and Orchestrator alike. The left rail
+>   lists them; the page opens on a how-it-works guide; a version recorded while the page is
+>   open opens by itself. Each version downloads as .docx / .pdf
+>   (`GET /projects/{id}/modernization/{kind}/versions/{v}/export`) and is approved or
+>   rejected through the existing version gate (no self-approval).
+> - The Requirements agent records only what the user said or confirmed — its own
+>   examples never land in the brief.
+> - *Connector RBAC for pulls (2026-09-11):* a pull's credential comes only from the
+>   connection wired to the stage whose page (or agent) asked, via
+>   `get_connector_for_session` — Business Unit grant (Integrations page) → stage wiring
+>   → a level that admits `read`. No fallback to the other Track 3 stage's connection
+>   (an early version had one; removed). No permitted connection = no credential, so only
+>   a public repository can be pulled. Pinned end-to-end against real grant rows in
+>   `tests/test_legacy_code_connector_access.py`.
+
+> **Live verification (2026-09-10, dev stack on :8004, Azure gpt-5-mini, persona
+> `sarthakk2004` as Project Admin, Track 3 project `10cb0723-…`):**
+>
+> - *Requirements, standalone:* a thin description gets focused follow-up questions (it
+>   does not invent scope, constraints or success criteria); a complete one records the
+>   brief (`runs.migration_intent_payload`), read back by
+>   `GET /projects/{id}/modernization/migration-intent`.
+> - *Discovery, standalone:* public clone of `dotnet-architecture/eShopModernizing`
+>   (read-only, shallow), Trivy ran (11 findings); 10 modules, 16,388 LOC, 228 vendored
+>   front-end files excluded from LOC, tiers 2 mechanical / 3 LLM-assisted / 5 manual,
+>   5 EOL runtimes (.NET Framework 4.6.1 ×4, .NET 6.0), 30 deprecated packages. Stored in
+>   `runs.discovery_artifacts`, read back by `GET /projects/{id}/modernization/discovery`.
+>   The chat summary names each flag exactly as the report does.
+> - *Orchestrator* (run `669f4f1b-…`): "hi" gets the Code Modernization introduction and
+>   the migration-intent questions (direct reply, no agent); a migration description
+>   routes to Requirements (migration intent), which asks for the missing parts; the
+>   answers record the brief; "proceed to discovery and assessment" routes to Discovery
+>   (clone → assess). `GET /runs/{id}/deliverables` lists both documents — "Migration
+>   Intent Brief — eShop catalog" and "Discovery & Assessment — eShopModernizing".
+> - *Not checked here:* the pages in a browser (Chrome MCP cannot reach this dev server —
+>   the user checks them), and cloning a private repo through a wired Azure DevOps /
+>   GitHub connector (only the public path was exercised live; the credential path is
+>   unit-tested).
+
 > **§1 below is corrected by `help/track3-frontend-plan.md` §2 — read that first.**
 > This doc was written from the backend alone, before anyone had checked what the
 > frontend already has. The frontend ships a full 13-agent `AgentType`/`Phase`
