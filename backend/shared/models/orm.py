@@ -629,6 +629,15 @@ class LangfuseBinding(Base):
     )
 
 
+# BASELINE-ERA TABLES ONLY. Migration 0001 imports this list and applies RLS to every
+# entry, so a name here that 0001 does not also CREATE breaks every FRESH database —
+# `relation "x" does not exist` — while an already-migrated one carries on fine, because
+# 0001 ran long ago. That is exactly how `langfuse_bindings` slipped in and passed
+# locally: it is created in 0057, and the local database was already past 0001.
+#
+# A table added after the baseline applies its own RLS in its own migration, which is
+# what `workstreams`, `org_model_grants`, `approval_requests`, `org_settings` and the
+# rest already do. Do not add to this tuple.
 _RLS_TABLES: tuple[str, ...] = (
     "agent_call_logs",
     "agent_profiles",
@@ -643,7 +652,6 @@ _RLS_TABLES: tuple[str, ...] = (
     "custom_roles",
     "dev_workspaces",
     "eval_records",
-    "langfuse_bindings",
     "mcp_servers",
     "model_offerings",
     "model_providers",

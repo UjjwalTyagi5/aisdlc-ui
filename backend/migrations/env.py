@@ -54,7 +54,13 @@ if not _migrations_url:
         "It must be a superuser/BYPASSRLS DSN; POSTGRES_CONN_STRING is the app-role DSN and "
         "must NOT be used for migrations."
     )
-config.set_main_option("sqlalchemy.url", _migrations_url)
+# ESCAPE THE PERCENT SIGNS. alembic.ini is read by configparser, whose set() applies
+# interpolation — so a literal `%` in the value is parsed as `%(name)s` syntax and raises
+# "invalid interpolation syntax". A URL-encoded password is full of them: `$` becomes
+# %24, `{` becomes %7B, `#` becomes %23. Doubling them is the documented Alembic escape
+# and is inert for any password without one, which is why this went unnoticed while the
+# local password was `1234`.
+config.set_main_option("sqlalchemy.url", _migrations_url.replace("%", "%%"))
 
 from shared.models.orm import Base  # noqa: E402 — must come after sys.path is established
 
