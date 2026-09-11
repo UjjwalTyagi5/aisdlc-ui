@@ -15,10 +15,29 @@ MIGRATION = (
 )
 
 
+def _newest_agent_id_check() -> str:
+    """The source of the NEWEST migration that (re)defines the agent_id CHECK.
+
+    0044 created it for Portfolio 1's nine; 0057 widened it for Track 3's first two
+    agents. The database holds whichever ran last, so that is the one the registry has
+    to match — reading 0044 forever would pin the constraint to nine agents.
+    """
+    versions = sorted(MIGRATION.parent.glob("*.py"))
+    defining = [
+        p for p in versions
+        if "ck_orchestrator_deliverables_agent_id" in p.read_text(encoding="utf-8")
+        and "agent_id IN (" in p.read_text(encoding="utf-8")
+    ]
+    assert defining, "no migration defines the agent_id CHECK constraint"
+    source = defining[-1].read_text(encoding="utf-8")
+    # The UPGRADE's definition — a downgrade restoring the older list comes after it.
+    return source.split("def downgrade", 1)[0]
+
+
 def test_agent_id_check_constraint_matches_the_registry():
     from agents_orchestrator.orchestrator2.registry import AGENT_IDS
 
-    source = MIGRATION.read_text(encoding="utf-8")
+    source = _newest_agent_id_check()
     match = re.search(r"agent_id IN \(([^)]*)\)", source, re.S)
     assert match, "the agent_id CHECK constraint is missing from the migration"
     in_constraint = set(re.findall(r"'([a-z_]+)'", match.group(1)))

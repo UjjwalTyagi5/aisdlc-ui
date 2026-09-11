@@ -173,11 +173,18 @@ def test_turns_are_rendered_oldest_first():
 
 
 def test_the_budget_is_generous_enough_for_one_turn_from_each_of_the_nine():
-    """Pins the constants against the requirement that set them: nine agents, at least
-    one turn each, without relying on any of them being terse."""
-    from agents_orchestrator.orchestrator2.registry import AGENT_IDS
+    """Pins the constants against the requirement that set them: every agent a run can
+    reach, at least one turn each, without relying on any of them being terse.
 
-    assert tr.MAX_TRANSCRIPT_CHARS >= tr.PER_AGENT_TRANSCRIPT_CHARS * len(AGENT_IDS), (
+    A run belongs to one project and so to ONE track — its conversation can only ever
+    involve that track's portfolio. The largest portfolio (Greenfield's nine) is the
+    bound, not every agent registered across all tracks."""
+    from agents_orchestrator.orchestrator2.registry import agent_ids_for_track
+    from config.agent_registry import TRACK_PORTFOLIOS
+
+    largest = max(len(agent_ids_for_track(t)) for t in TRACK_PORTFOLIOS)
+    assert largest == 9
+    assert tr.MAX_TRANSCRIPT_CHARS >= tr.PER_AGENT_TRANSCRIPT_CHARS * largest, (
         "the total budget cannot fit one guaranteed turn from every agent, so the "
         "guarantee the user asked for is not one"
     )

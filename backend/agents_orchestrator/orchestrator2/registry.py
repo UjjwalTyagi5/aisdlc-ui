@@ -279,6 +279,36 @@ def _load_prompt_documentation() -> str:
     return DOC_SYSTEM_PROMPT
 
 
+# ── Track 3 — Code Modernization ────────────────────────────────────────────
+# Portfolio 2's own agents (multi-track-agent-access-design.md §1.4). Only a project
+# on the modernization track is ever offered or dispatched them — `registry_for_track`
+# is what every track-scoped caller reads, never this table directly.
+def _load_graph_requirements_modernization() -> Any:
+    from agents_orchestrator.requirements_modernization_agent.agents.intake import app
+
+    return app
+
+
+def _load_prompt_requirements_modernization() -> str:
+    from agents_orchestrator.requirements_modernization_agent.agents.intake import (
+        MIGRATION_INTENT_SYS_MESSAGE,
+    )
+
+    return MIGRATION_INTENT_SYS_MESSAGE
+
+
+def _load_graph_discovery() -> Any:
+    from agents_orchestrator.discovery_agent.agents.assessor import app
+
+    return app
+
+
+def _load_prompt_discovery() -> str:
+    from agents_orchestrator.discovery_agent.agents.assessor import DISCOVERY_SYS_MESSAGE
+
+    return DISCOVERY_SYS_MESSAGE
+
+
 REGISTRY: dict[str, AgentCapability] = {
     "requirements": AgentCapability(
         agent_id="requirements",
@@ -334,6 +364,18 @@ REGISTRY: dict[str, AgentCapability] = {
         agent_id="documentation",
         load_graph=_load_graph_documentation,
         load_prompt=_load_prompt_documentation,
+        mode="stream",
+    ),
+    "requirements_modernization": AgentCapability(
+        agent_id="requirements_modernization",
+        load_graph=_load_graph_requirements_modernization,
+        load_prompt=_load_prompt_requirements_modernization,
+        mode="stream",
+    ),
+    "discovery": AgentCapability(
+        agent_id="discovery",
+        load_graph=_load_graph_discovery,
+        load_prompt=_load_prompt_discovery,
         mode="stream",
     ),
 }

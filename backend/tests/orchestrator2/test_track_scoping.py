@@ -35,13 +35,16 @@ from config.agent_registry import (
 def test_greenfield_and_enhancement_portfolios_are_the_full_registry_today():
     """Nothing changes for the two tracks that share Portfolio 1 — this is the
     regression the whole phase must not break."""
-    from config.agent_registry import AGENT_REGISTRY
+    from config.agent_registry import _PORTFOLIO_1, AGENT_REGISTRY
 
-    assert agents_for_track("greenfield") == AGENT_REGISTRY
-    assert agents_for_track("enhancement") == AGENT_REGISTRY
+    portfolio_1 = {aid: AGENT_REGISTRY[aid] for aid in _PORTFOLIO_1}
+    assert agents_for_track("greenfield") == portfolio_1
+    assert agents_for_track("enhancement") == portfolio_1
+    # Track 3's agents are registered, and still never in Portfolio 1.
+    assert "discovery" in AGENT_REGISTRY and "discovery" not in portfolio_1
 
 
-@pytest.mark.parametrize("track", ["modernization", "rpa_infra", "data_engineering"])
+@pytest.mark.parametrize("track", ["rpa_infra", "data_engineering"])
 def test_unbuilt_tracks_have_empty_portfolios(track):
     """Matches `TRACK_PORTFOLIOS[track] == []` — "target design, not yet built"
     (multi-track-agent-access-design.md §Portfolio 2-4) is a real, empty state,
@@ -60,9 +63,10 @@ def test_unknown_track_raises_rather_than_returning_empty():
 
 
 def test_stage_order_for_track_matches_the_global_stage_order_for_portfolio_1():
+    from config.agent_registry import _PORTFOLIO_1
     from shared.services.orchestrator.progression import STAGE_ORDER
 
-    assert stage_order_for_track("greenfield") == list(STAGE_ORDER)
+    assert stage_order_for_track("greenfield") == [s for s in STAGE_ORDER if s in _PORTFOLIO_1]
 
 
 def test_a_track3_agent_added_to_agent_registry_does_not_leak_into_other_tracks(
@@ -111,16 +115,22 @@ def test_agent_ids_for_track_matches_config_agent_registry():
         agent_ids_for_track,
     )
 
-    assert agent_ids_for_track("greenfield") == AGENT_IDS
-    assert agent_ids_for_track("enhancement") == AGENT_IDS
-    assert agent_ids_for_track("modernization") == ()
+    from config.agent_registry import _PORTFOLIO_1
+
+    portfolio_1 = tuple(a for a in AGENT_IDS if a in _PORTFOLIO_1)
+    assert agent_ids_for_track("greenfield") == portfolio_1
+    assert agent_ids_for_track("enhancement") == portfolio_1
+    assert agent_ids_for_track("modernization") == ("requirements_modernization", "discovery")
 
 
 def test_registry_for_track_matches_the_global_registry_for_portfolio_1():
     from agents_orchestrator.orchestrator2.registry import REGISTRY, registry_for_track
 
-    assert registry_for_track("greenfield") == REGISTRY
-    assert registry_for_track("modernization") == {}
+    from config.agent_registry import _PORTFOLIO_1
+
+    assert registry_for_track("greenfield") == {a: REGISTRY[a] for a in REGISTRY if a in _PORTFOLIO_1}
+    assert set(registry_for_track("modernization")) == {"requirements_modernization", "discovery"}
+    assert registry_for_track("rpa_infra") == {}
 
 
 def test_registry_for_track_raises_for_a_portfolio_naming_an_unmounted_capability(
@@ -175,7 +185,7 @@ async def test_route_defaults_to_greenfield_and_is_unchanged(monkeypatch):
 async def test_a_track_with_no_agents_answers_directly_without_a_model_call(
     monkeypatch,
 ):
-    """`modernization` has an empty portfolio today. Routing on it must not attempt
+    """`rpa_infra` has an empty portfolio today. Routing on it must not attempt
     a `bind_tools([])` model call — it must short-circuit to a direct reply saying
     so, and must not call the model at all (proven by never installing a fake
     resolver: if this reached `_ask_model`, resolution would raise `ImportError`
@@ -183,14 +193,14 @@ async def test_a_track_with_no_agents_answers_directly_without_a_model_call(
     from agents_orchestrator.orchestrator2 import router
 
     decision = await router.route(
-        "migrate this legacy service",
+        "migrate this bot to UiPath",
         history=[],
         run_id="run-1",
         tenant_id="t1",
         project_id="proj-1",
         model_id=None,
         offering_id=None,
-        track="modernization",
+        track="rpa_infra",
     )
     assert decision.agent_id is None
     assert decision.direct_reply
@@ -205,9 +215,8 @@ async def test_prefilter_naming_an_agent_outside_the_track_falls_through(monkeyp
     no-agents-yet direct reply, never to the named (but out-of-track) agent."""
     from agents_orchestrator.orchestrator2 import router
 
-    # "run the testing agent" matches `prefilter` unconditionally — "testing" is
-    # not in modernization's (currently empty) portfolio, so it must not be
-    # trusted here.
+    # "run the testing agent" names a real agent — Portfolio 1's — which is not in
+    # rpa_infra's (currently empty) portfolio, so it must not be trusted here.
     decision = await router.route(
         "run the testing agent",
         history=[],
@@ -216,7 +225,7 @@ async def test_prefilter_naming_an_agent_outside_the_track_falls_through(monkeyp
         project_id="proj-1",
         model_id=None,
         offering_id=None,
-        track="modernization",
+        track="rpa_infra",
     )
     assert decision.agent_id is None
 
@@ -232,14 +241,16 @@ def test_validated_rejects_an_id_outside_the_given_track(monkeypatch):
     assert result.direct_reply
 
 
-def test_system_prompt_none_default_matches_full_registry():
-    """`_system_prompt(None)` (every existing call site) must render byte-identical
-    to explicitly passing the full `REGISTRY` — this is what makes the change
-    invisible to `test_router.py`'s pinned prompt-string assertions."""
-    from agents_orchestrator.orchestrator2.registry import REGISTRY
+def test_system_prompt_none_default_matches_the_greenfield_portfolio():
+    """`_system_prompt(None)` (every existing call site) renders byte-identical to
+    passing the Greenfield portfolio explicitly — the nine, as before Track 3's agents
+    were registered. Defaulting to the whole `REGISTRY` would now advertise Discovery &
+    Assessment to every untracked caller."""
+    from agents_orchestrator.orchestrator2.registry import registry_for_track
     from agents_orchestrator.orchestrator2 import router
 
-    assert router._system_prompt() == router._system_prompt(REGISTRY)
+    assert router._system_prompt() == router._system_prompt(registry_for_track("greenfield"))
+    assert "route_to_discovery" not in router._system_prompt()
 
 
 def test_system_prompt_scoped_to_a_track_names_only_that_tracks_agents():

@@ -100,6 +100,10 @@ from shared.services.model_resolver import (
     temperature_kwargs,
 )
 
+#: The track a caller that names none gets — the portfolio Greenfield and Enhancement
+#: share, which is what every call site meant before tracks existed.
+DEFAULT_TRACK = "greenfield"
+
 # The user-facing name of each agent, keyed by id. `plan` is the Project Manager
 # agent — never "Plan agent", never "PM agent" — and that is the name users type.
 DISPLAY_NAMES: dict[str, str] = {
@@ -112,6 +116,9 @@ DISPLAY_NAMES: dict[str, str] = {
     "testing": "Testing",
     "deployment": "Deployment",
     "documentation": "Documentation",
+    # Track 3 — Code Modernization. Offered only on that track (see `route`).
+    "requirements_modernization": "Requirements (migration intent)",
+    "discovery": "Discovery & Assessment",
 }
 
 # An agent that exists but has no display name is unreachable by name — the exact
@@ -159,13 +166,28 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", lowered).strip().rstrip(".!").strip()
 
 
-# Every spelling that names an agent: its display name and its raw id. Nothing
-# else. The old router's alias lists ("docs", "qa", "ship it", "backlog") are the
-# soup that made "document this function" route, and are not reproduced here.
-_NAME_TO_ID: dict[str, str] = {}
+# Every spelling that names an agent: its display name and its raw id — plus, for an
+# agent whose display name is not what people call it, the few names they do use.
+# The old router's alias lists ("docs", "qa", "ship it", "backlog") are the soup that
+# made "document this function" route, and are not reproduced here: an extra name is
+# only ever a NAME for the agent, never a word describing its work.
+#
+# ONE NAME CAN MEAN TWO AGENTS. "Requirements" is Portfolio 1's Requirements agent on a
+# Greenfield project and Track 3's migration-intent Requirements agent on a Code
+# Modernization project — each track owns its own agent (design doc §1.4). So a name
+# maps to every id it could mean, and `prefilter` picks the one inside the turn's own
+# track; outside any track it means nothing.
+_EXTRA_NAMES: dict[str, tuple[str, ...]] = {
+    "requirements_modernization": ("requirements", "migration intent"),
+    "discovery": ("discovery and assessment", "assessment"),
+}
+
+_NAME_TO_IDS: dict[str, tuple[str, ...]] = {}
 for _agent_id in AGENT_IDS:
-    _NAME_TO_ID[_normalise(DISPLAY_NAMES[_agent_id])] = _agent_id
-    _NAME_TO_ID[_normalise(_agent_id)] = _agent_id
+    for _spelling in (DISPLAY_NAMES[_agent_id], _agent_id, *_EXTRA_NAMES.get(_agent_id, ())):
+        _key = _normalise(_spelling)
+        if _agent_id not in _NAME_TO_IDS.get(_key, ()):
+            _NAME_TO_IDS[_key] = (*_NAME_TO_IDS.get(_key, ()), _agent_id)
 
 
 def _alternation(phrases: object) -> str:
@@ -182,13 +204,19 @@ _COMMAND = re.compile(
     rf"^{_LEADING_FILLER}"
     rf"(?:{_alternation(_VERBS)})\s+"
     rf"(?:the\s+|a\s+|an\s+)?"
-    rf"({_alternation(_NAME_TO_ID)})\s+"
+    rf"({_alternation(_NAME_TO_IDS)})\s+"
     rf"agent{_TRAILING_FILLER}$"
 )
 
 
-def prefilter(text: str) -> str | None:
+def prefilter(text: str, valid_ids: Any = None) -> str | None:
     """Return the agent id for an unambiguous imperative naming an agent, else `None`.
+
+    `valid_ids` is the turn's own track portfolio (default: DEFAULT_TRACK's). A name
+    resolves only to an agent inside it — "run the requirements agent" is the
+    migration-intent Requirements agent on a Code Modernization project and Portfolio
+    1's on a Greenfield one — and a name that means no agent inside it, or more than
+    one, is not a command this function can answer.
 
     Matches only a whole message of the shape *verb + agent name + "agent"*, e.g.
     "run the testing agent", "switch to the security agent", "use the project
@@ -202,7 +230,7 @@ def prefilter(text: str) -> str | None:
     already handled by the guard, so the catch caught nothing real, while making
     `test_odd_input_returns_none_and_never_raises` unfalsifiable — delete the guard
     and the test still passed, because the catch covered for it. It would equally
-    have laundered a genuine regex or `_NAME_TO_ID` bug into "not a command", which
+    have laundered a genuine regex or `_NAME_TO_IDS` bug into "not a command", which
     routes the turn to the model and looks exactly like the intended behaviour. A
     pre-filter that silently mis-routes is the failure this module was written to
     end, so the fault surfaces instead. `ws.py`'s turn loop already renders an
@@ -214,12 +242,16 @@ def prefilter(text: str) -> str | None:
     Everything below is total for a `str`: `_normalise` calls only `str` methods and
     two anchored `re.sub`s, `_COMMAND` is compiled at import over escaped literals
     with no nested quantifier to backtrack on, and `group(1)` can only ever be one of
-    the `_NAME_TO_ID` keys the alternation was built from.
+    the `_NAME_TO_IDS` keys the alternation was built from.
     """
     if not isinstance(text, str) or not text:
         return None
     match = _COMMAND.match(_normalise(text))
-    return _NAME_TO_ID[match.group(1)] if match else None
+    if not match:
+        return None
+    pool = agent_ids_for_track(DEFAULT_TRACK) if valid_ids is None else tuple(valid_ids)
+    hits = [aid for aid in _NAME_TO_IDS[match.group(1)] if aid in pool]
+    return hits[0] if len(hits) == 1 else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -313,6 +345,18 @@ _CAPABILITIES: dict[str, str] = {
         "writes documentation from the repository and the project's artifacts — "
         "overviews and READMEs, API docs, runbook updates, knowledge articles"
     ),
+    "requirements_modernization": (
+        "captures the MIGRATION INTENT for modernizing an existing system — why it is "
+        "happening, the current and the target stack, what is in and out of scope, the "
+        "constraints and measurable success criteria — records the migration-intent "
+        "brief, and can write the migration Epic and items to the connected board"
+    ),
+    "discovery": (
+        "clones and reads the LEGACY repository read-only, maps its modules and "
+        "dependency graph, flags end-of-life, deprecated and vulnerable dependencies, "
+        "and scores every module for migration risk (mechanical, LLM-assisted or "
+        "manual-only) — the assessment later planning works from"
+    ),
 }
 
 assert set(_CAPABILITIES) == set(AGENT_IDS), (
@@ -348,6 +392,20 @@ assert not _UNDESCRIBED, (
     f"{_MIN_CAPABILITY_CHARS} characters): {_UNDESCRIBED}. The model routes on this "
     f"text; an agent described by nothing is an agent that is never chosen."
 )
+
+def _default_capabilities() -> Mapping[str, Any]:
+    """What an untracked caller is offered: the DEFAULT_TRACK portfolio.
+
+    NOT the whole `REGISTRY`. `REGISTRY` now also holds Track 3's agents, and a caller
+    that names no track has always meant the nine; defaulting to the whole table would
+    quietly start offering Discovery & Assessment to a Greenfield conversation.
+
+    Read off this module's `REGISTRY` (filtered to the portfolio's ids) rather than
+    through `registry_for_track`, so the list stays DERIVED from the one table that
+    says an agent can run — remove an entry there and it disappears here too.
+    """
+    return {aid: REGISTRY[aid] for aid in agent_ids_for_track(DEFAULT_TRACK) if aid in REGISTRY}
+
 
 # One tool per agent, named `route_to_<agent id>`. The prefix is what makes the id
 # recoverable exactly: `code_review` contains an underscore, so a name is un-prefixed,
@@ -393,7 +451,7 @@ def _tool_specs(capabilities: Mapping[str, Any] | None = None) -> list[dict]:
     import in `registry.py`), but `REGISTRY` is the one that says the agent can
     actually be RUN, and that is the property this list has to have.
     """
-    source = REGISTRY if capabilities is None else capabilities
+    source = _default_capabilities() if capabilities is None else capabilities
     return [
         {
             "type": "function",
@@ -514,7 +572,90 @@ Requirements." When you answer directly, just answer: your reply is what they se
 """
 
 
-def _system_prompt(capabilities: Mapping[str, Any] | None = None) -> str:
+#: Track 3 — Code Modernization. ITS OWN TEMPLATE rather than a conditional section in
+#: the Greenfield one (help/track3-implementation-plan.md §7's open question): a
+#: modernization is a different conversation — a legacy system, a target stack, a
+#: migration — and Greenfield's examples ("I need a PRD", "Development clones the
+#: repository") would tell the model about agents this track does not have. The
+#: routing RULES are the same ones, restated in this track's vocabulary.
+#:
+#: Like the Greenfield template, it names no `route_to_*` tool in its prose — the
+#: roster is generated from the same map as the tools, and
+#: `test_the_prompt_names_no_routing_tool_outside_the_registry` checks the whole text.
+_MODERNIZATION_PROMPT_TEMPLATE = """\
+You are the Context Agent for a software delivery platform. This project is on TRACK 3 —
+CODE MODERNIZATION: it migrates an existing, legacy codebase to a new language, framework
+or version. It does not build something new from a blank slate. You read the conversation
+and decide one thing: which of this project's agents should handle the user's latest
+message — or that none should, and you answer it yourself.
+
+The agents you may choose from are exactly the tools you have been given, one per agent:
+
+{roster}
+
+Track 3's full roster, in hand-off order, is Requirements (migration intent) → Discovery &
+Assessment → Design → Strategy → Development → Code Review → Security → Testing →
+Deployment → Documentation. Not built for this track yet: {unbuilt}. If the user asks for
+one of those, answer directly: say plainly that that agent is not available for Code
+Modernization yet, and offer what the agents above can do instead. Never send that work to
+an agent above that does not do it.
+
+How a modernization starts:
+
+- A greeting ("hi", "hello"), "where do I start", "what can you do" or "what is this
+  project" is yours to answer directly, in a few sentences: this is a Code Modernization
+  project; the work starts with the Requirements agent capturing the MIGRATION INTENT —
+  why the modernization is happening, what the system runs on today and what it should
+  run on afterwards, what is in and out of scope, the constraints, and how success will
+  be measured; then Discovery & Assessment clones and reads the legacy repository
+  (read-only) to map its dependency graph, flag end-of-life and vulnerable dependencies,
+  and score every module for migration risk. End by asking them to describe the
+  modernization: the system, why it is being modernized, and from what to what.
+- Any message that DESCRIBES the modernization is Requirements (migration intent) work:
+  the system, the reasons, the current or target stack, scope, constraints, deadlines,
+  budget, success measures, stakeholders, a pasted or attached brief — and answers to the
+  Requirements agent's own questions.
+- Messages about the LEGACY CODE ITSELF are Discovery & Assessment work: "proceed to
+  discovery", "assess the repository", "scan the codebase", "clone the legacy repo",
+  "which modules are riskiest", "which dependencies are end-of-life or vulnerable",
+  "map the dependencies".
+
+How to decide:
+
+- Route on what the message ASKS FOR, not on words it happens to contain.
+- Call exactly one tool, or call none. Never call two: one agent runs per turn.
+- WHEN BOTH AGENTS COULD FIT, PICK THE LIKELIER ONE AND SAY WHY. Do not stall to ask
+  which: the user reads your `reason` and redirects in one turn if you chose wrong.
+- Never invent an agent. The tools above are the complete list of what this project can
+  run.
+- There is no fixed order and the user decides when to move on. If they ask for Discovery
+  & Assessment before the migration intent is recorded, start it anyway and say in
+  `reason` that the brief is still open.
+- MISSING DETAIL IS NOT A REASON TO WITHHOLD ROUTING. Gathering the specifics — which
+  repository, which target version — is the agent's own first job.
+- NEVER DECLINE ON AN AGENT'S BEHALF, and never ask permission to route. "Can you assess
+  the repo" is a request for the work; route it.
+- Answer directly, with no tool call, only for a greeting, small talk, a question about
+  this platform or this track, a request for an agent not built for this track yet, or a
+  follow-up about something already produced in this conversation.
+
+When you call a tool, `reason` is one short line shown to the user, addressed to them,
+saying why that agent — for example "You described why the billing system is being
+modernized, so I've started Requirements (migration intent)." When you answer directly,
+just answer: your reply is what they see.
+"""
+
+#: Track 3's roster by display name, in hand-off order — used only to NAME the agents
+#: not built yet. Which agents can run comes from the capabilities map, never from here.
+_MODERNIZATION_ROSTER: tuple[str, ...] = (
+    "Requirements (migration intent)", "Discovery & Assessment", "Design", "Strategy",
+    "Development", "Code Review", "Security", "Testing", "Deployment", "Documentation",
+)
+
+
+def _system_prompt(
+    capabilities: Mapping[str, Any] | None = None, track: str = DEFAULT_TRACK
+) -> str:
     """The routing prompt with the agent roster generated from `REGISTRY` — or from
     a track-scoped subset of it, when `capabilities` is given.
 
@@ -538,12 +679,16 @@ def _system_prompt(capabilities: Mapping[str, Any] | None = None) -> str:
     `route_to_*` occurrence in the WHOLE rendered prompt against `REGISTRY`, and does
     not care what line it sits on.
     """
-    source = REGISTRY if capabilities is None else capabilities
+    source = _default_capabilities() if capabilities is None else capabilities
     roster = "\n".join(
         f"- The {DISPLAY_NAMES[agent_id]} agent ({_TOOL_PREFIX}{agent_id}): "
         f"{_CAPABILITIES[agent_id]}."
         for agent_id in source
     )
+    if track == "modernization":
+        built = {DISPLAY_NAMES[agent_id] for agent_id in source}
+        unbuilt = ", ".join(n for n in _MODERNIZATION_ROSTER if n not in built) or "none"
+        return _MODERNIZATION_PROMPT_TEMPLATE.format(roster=roster, unbuilt=unbuilt)
     return _PROMPT_TEMPLATE.format(roster=roster)
 
 
@@ -579,7 +724,9 @@ whichever agent does that work, exactly as it would have on any other turn.
 
 
 def _system_prompt_with_continuity(
-    last_agent: str | None, capabilities: Mapping[str, Any] | None = None
+    last_agent: str | None,
+    capabilities: Mapping[str, Any] | None = None,
+    track: str = DEFAULT_TRACK,
 ) -> str:
     """`_system_prompt`, plus who is mid-conversation when anyone is.
 
@@ -590,10 +737,10 @@ def _system_prompt_with_continuity(
     note would tell the model to route back to an agent the tool list does not
     include, which `_validated` would then have to refuse anyway.
     """
-    source = REGISTRY if capabilities is None else capabilities
+    source = _default_capabilities() if capabilities is None else capabilities
     if not last_agent or last_agent not in source:
-        return _system_prompt(capabilities)
-    return _system_prompt(capabilities) + _CONTINUITY_TEMPLATE.format(
+        return _system_prompt(capabilities, track)
+    return _system_prompt(capabilities, track) + _CONTINUITY_TEMPLATE.format(
         name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
     )
 
@@ -900,7 +1047,7 @@ def _validated(
          ends with nothing shown and nothing run — a silent no-op, which is the
          failure this engine exists to remove.
     """
-    ids = AGENT_IDS if valid_ids is None else valid_ids
+    ids = agent_ids_for_track(DEFAULT_TRACK) if valid_ids is None else valid_ids
     if decision.agent_id is not None and decision.agent_id not in ids:
         return RoutingDecision(
             agent_id=None,
@@ -1071,7 +1218,7 @@ async def route(
     """
     valid_ids = agent_ids_for_track(track)
 
-    named = prefilter(text)
+    named = prefilter(text, valid_ids)
     if named is not None and named in valid_ids:
         return RoutingDecision(
             agent_id=named,
@@ -1098,7 +1245,7 @@ async def route(
         # The one piece of turn-to-turn state this router has. It does not order the
         # agents and does not decide anything; it tells the model that a question is
         # outstanding, which a bare "2" does not carry on its own.
-        system_prompt=_system_prompt_with_continuity(last_agent, capabilities),
+        system_prompt=_system_prompt_with_continuity(last_agent, capabilities, track),
         capabilities=capabilities,
     )
     return _validated(decision, valid_ids)

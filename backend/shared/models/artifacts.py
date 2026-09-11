@@ -117,6 +117,72 @@ class SecurityArtifact(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Track 3 (Code Modernization) — its own portfolio, its own columns
+# ---------------------------------------------------------------------------
+
+
+class StackState(BaseModel):
+    """One end of a migration: what the system runs on."""
+
+    stack: str = ""
+    description: str = ""
+
+
+class Stakeholder(BaseModel):
+    name: str
+    role: str = ""
+
+
+class LegacyRepository(BaseModel):
+    """Where the legacy code lives — what Discovery & Assessment will clone."""
+
+    provider: str = ""
+    project: str = ""
+    name: str = ""
+    url: str = ""
+
+
+class MigrationIntentArtifact(BaseModel):
+    """-> runs.migration_intent_payload. The Track 3 Requirements agent's brief:
+    why the modernization is happening, from what to what, scope, constraints and
+    how success is measured. Not a story backlog — Track 3 has no INVEST stories."""
+
+    system_name: str = ""
+    business_drivers: List[str] = []
+    current_state: StackState = StackState()
+    target_state: StackState = StackState()
+    in_scope: List[str] = []
+    out_of_scope: List[str] = []
+    constraints: List[str] = []
+    success_criteria: List[str] = []
+    stakeholders: List[Stakeholder] = []
+    assumptions: List[str] = []
+    risks: List[str] = []
+    open_questions: List[str] = []
+    legacy_repository: Optional[LegacyRepository] = None
+    recorded_at: Optional[str] = None
+    agent_session_id: Optional[str] = None
+    version: int = 1
+
+
+class DiscoveryArtifact(BaseModel):
+    """-> runs.discovery_artifacts. Shape documented in
+    agents_orchestrator/discovery_agent/analysis/assessment.py."""
+
+    schema_version: int
+    generated_at: str
+    as_of: str
+    target_stack: str = ""
+    repository: Dict[str, Any]
+    summary: Dict[str, Any]
+    modules: List[Dict[str, Any]]
+    dependency_graph: Dict[str, Any]
+    flags: Dict[str, Any]
+    scanners: Dict[str, Any]
+    golden_master: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Traceability and handoff helpers
 # ---------------------------------------------------------------------------
 

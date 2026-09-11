@@ -224,6 +224,50 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
         # save locally and still ship through a git PR.
         optional_capabilities=["docs.publish", "doc.ingest"],
     ),
+
+    # ── Track 3 — Code Modernization (Portfolio 2) ─────────────────────────────
+    #
+    # Independent agents, NOT Portfolio 1's with a flag (multi-track-agent-access-
+    # design.md §1.4). `pipeline_position` orders them within their own portfolio;
+    # `stage_order_for_track("modernization")` never mixes them with Portfolio 1.
+    "requirements_modernization": AgentDefinition(
+        id="requirements_modernization",
+        name="Requirements Agent (Migration Intent)",
+        pipeline_position=1,
+        input_artifacts=[],
+        output_artifact="migration_intent_payload",
+        route_path="/requirements-modernization",
+        # Board writes are Consequential; baselining the brief is the Sign-off.
+        gate_type="approval_required",
+        sla_hours=24,
+        can_parallel_with=[],
+        max_rejections=1,
+        required_capabilities=[
+            "req.migration_intent.capture", "req.migration_intent.brief",
+            "board.read", "artifact.write",
+        ],
+        optional_capabilities=["board.write", "doc.export.docx", "doc.export.pdf", "legacy.code.read"],
+    ),
+    "discovery": AgentDefinition(
+        id="discovery",
+        name="Discovery & Assessment Agent",
+        pipeline_position=2,
+        input_artifacts=["migration_intent_payload"],
+        output_artifact="discovery_artifacts",
+        route_path="/discovery",
+        # "Accept the assessment as planning baseline" is a Sign-off.
+        gate_type="approval_required",
+        sla_hours=48,
+        can_parallel_with=[],
+        max_rejections=1,
+        required_capabilities=[
+            "discovery.repo.clone", "discovery.dependency.graph.build",
+            "discovery.dependency.eol.scan", "discovery.dependency.cve.scan",
+            "discovery.module.risk.score", "discovery.module.tier.classify",
+            "artifact.write",
+        ],
+        optional_capabilities=["doc.export.docx", "doc.export.pdf", "legacy.code.read"],
+    ),
 }
 
 
@@ -241,8 +285,8 @@ def get_pipeline_order() -> List[List[str]]:
 # share one — both point at the same literal list below, not by convention but by
 # construction, so they can never silently drift apart. Modernization, RPA/Infra
 # Migration, and Data Engineering are independent portfolios; each starts empty
-# because none of their agents exist as AGENT_REGISTRY entries yet (spec Part 5 —
-# an agent id is added here only once it's actually built and mounted).
+# until its agents exist as AGENT_REGISTRY entries (spec Part 5 — an agent id is added
+# here only once it's actually built and mounted). Modernization has its first two.
 _PORTFOLIO_1: list[str] = [
     "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
@@ -251,7 +295,9 @@ _PORTFOLIO_1: list[str] = [
 TRACK_PORTFOLIOS: dict[str, list[str]] = {
     "greenfield": _PORTFOLIO_1,
     "enhancement": _PORTFOLIO_1,
-    "modernization": [],
+    # Built so far: the first two of Portfolio 2's ten (Phase 1). Design, Strategy and
+    # the rest are added one at a time as each is built and mounted.
+    "modernization": ["requirements_modernization", "discovery"],
     "rpa_infra": [],
     "data_engineering": [],
 }
@@ -337,6 +383,11 @@ _OWNER_OF: dict[str, str] = {
     "security": "security_engineer",
     "deployment": "devops_engineer",
     "plan": "scrum_master",
+    # Track 3 — Code Modernization. BOTH owned by the BA — a product decision for this
+    # track (2026-09-10) that departs from the design doc's "Discovery: Architect".
+    # One agent, one role still holds: the Architect does not reach Discovery.
+    "requirements_modernization": "ba",
+    "discovery": "ba",
 }
 
 _DELIVERY_ROLES = (
