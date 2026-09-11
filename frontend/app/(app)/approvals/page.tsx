@@ -32,6 +32,7 @@ import { qk } from "@/lib/api/query-keys";
 import { canRaiseRequest } from "@/lib/requests/routing";
 import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
 import type { ApprovalGate, GovernanceApproval } from "@/lib/schemas";
+import { scopeChipName } from "@/lib/scope";
 
 /**
  * Requests & Approvals — the personal queue, and the place you raise things.
@@ -187,26 +188,13 @@ export default function RequestsAndApprovalsPage() {
     );
   }
 
-  const unitBindings = bindings.filter((b) => b.kind === "business_unit");
-  const projectBindings = bindings.filter((b) => b.kind === "project");
   // NAMED FROM WHERE YOU ARE BOUND, not from what you administer — those are two
   // different questions and this chip asks the first. A Project Admin bound at
   // business-unit scope administers no unit by design (that split is what keeps Users
   // and Roles & Access out of their nav), so `managedBusinessUnitIds` is empty for them
   // and the chip read "BUSINESS UNIT / 0 business units" — a scope indicator reporting
   // that the viewer is nowhere. They are in Lending; they simply do not run it.
-  const scopeName = isOrgWide
-    ? null
-    : level === "business_unit"
-      ? ((managedBusinessUnitIds.length === 1
-          ? unitBindings.find((b) => b.scopeId === managedBusinessUnitIds[0])?.scopeName
-          : undefined) ??
-        (unitBindings.length === 1
-          ? unitBindings[0]!.scopeName
-          : `${unitBindings.length} business units`))
-      : projectBindings.length === 1
-        ? projectBindings[0]!.scopeName
-        : `${projectBindings.length} projects`;
+  const scopeName = scopeChipName(level, { isOrgWide, bindings, managedBusinessUnitIds });
 
   const mayRaise = canRaiseRequest(role);
 

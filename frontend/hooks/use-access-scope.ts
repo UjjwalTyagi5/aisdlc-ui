@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getAccessScope } from "@/lib/api/access-scope";
 import { qk } from "@/lib/api/query-keys";
+import { isUnboundScope } from "@/lib/schemas/access-scope";
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import type { AccessScopeOut, ScopeBinding } from "@/lib/schemas/access-scope";
@@ -35,6 +36,10 @@ export interface AccessScopeState {
 
   // ── Derived predicates — all fail CLOSED while pending or on error ─────────
   isOrgWide: boolean;
+  /** Bound to NOTHING — no unit and no project. False while unresolved, so a
+   *  request in flight never renders as a false access-denied. See
+   *  `isUnboundScope`: it exists because three pages had three definitions. */
+  isUnbound: boolean;
   /** Widest scope held: drives dashboard shape and the scope indicator. */
   level: "organization" | "business_unit" | "project";
   businessUnitIds: string[];
@@ -89,6 +94,10 @@ export function useAccessScope(): AccessScopeState {
     refetch: () => void q.refetch(),
 
     isOrgWide,
+    // Bound to nothing at all — see `isUnboundScope`. Exposed here rather than
+    // recomputed per page, because three pages recomputing it is how they came to
+    // disagree about what it means.
+    isUnbound: isUnboundScope(scope),
     level: scope?.level ?? (orgByRole ? "organization" : "project"),
     businessUnitIds: scope?.businessUnitIds ?? [],
     managedBusinessUnitIds: scope?.managedBusinessUnitIds ?? [],

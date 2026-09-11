@@ -183,15 +183,13 @@ export function ScopedListBoundary({
   emptyAction?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const { scope, isOrgWide, businessUnitIds, projectIds } = useAccessScope();
+  const { isUnbound } = useAccessScope();
 
   if (!isEmpty) return <>{children}</>;
 
   // Resolved, not org-wide, and bound to nothing at all → the person has no
   // assignment yet, which is a different problem from an empty scope.
-  const unbound =
-    scope !== null && !isOrgWide && businessUnitIds.length === 0 && projectIds.length === 0;
-  if (unbound) return <NoScopeAccess resource={resource} />;
+  if (isUnbound) return <NoScopeAccess resource={resource} />;
 
   return (
     <EmptyInScope

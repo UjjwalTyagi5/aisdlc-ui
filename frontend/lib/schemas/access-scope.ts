@@ -36,3 +36,28 @@ export const AccessScopeOut = z.object({
   identityId: z.string().nullable(),
 });
 export type AccessScopeOut = z.infer<typeof AccessScopeOut>;
+
+/**
+ * Is this viewer bound to NOTHING — no business unit and no project?
+ *
+ * ONE DEFINITION, BECAUSE THERE WERE THREE AND THEY DISAGREED. This decides whether a
+ * page shows "you have no access yet, ask an admin" or "your scope is empty, create
+ * something", and the two need opposite next steps. The projects page had it as
+ * `projectIds.length === 0` alone, so a Business Unit Admin whose unit held no projects
+ * was told they were assigned to nothing and should "ask your Business Unit Admin to add
+ * you to a project" — advice addressed to themselves, about access they already held.
+ *
+ * Having an empty scope is not the same as having no scope.
+ *
+ * `scope === null` means unresolved, not unbound: a request in flight or failed must
+ * never render as "you have no access", which is the one wrong answer that looks
+ * authoritative.
+ */
+export function isUnboundScope(scope: {
+  isOrgWide: boolean;
+  businessUnitIds: string[];
+  projectIds: string[];
+} | null): boolean {
+  if (scope === null) return false;
+  return !scope.isOrgWide && scope.businessUnitIds.length === 0 && scope.projectIds.length === 0;
+}
