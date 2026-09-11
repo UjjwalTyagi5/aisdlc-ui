@@ -1,0 +1,703 @@
+{
+  "assessment": {
+    "schema_version": 1,
+    "generated_at": "2026-09-10T09:00:00+00:00",
+    "as_of": "2026-09-10",
+    "target_stack": ".NET 8",
+    "repository": {
+      "url": "https://dev.azure.com/acme/billing/_git/billing",
+      "branch": "main",
+      "commit": "a1b2c3d4e5f6a7b8c9d0",
+      "provider": "ado",
+      "name": "billing"
+    },
+    "summary": {
+      "module_count": 5,
+      "file_count": 15,
+      "loc": 413,
+      "vendored_files": 0,
+      "languages": {
+        "C#": 407,
+        "JavaScript": 3,
+        "ASP.NET WebForms": 2,
+        "Java": 1
+      },
+      "ecosystems": [
+        ".NET",
+        "Java",
+        "Node.js"
+      ],
+      "tier_counts": {
+        "mechanical": 2,
+        "llm_assisted": 2,
+        "manual": 1
+      },
+      "risk": {
+        "average": 27.2,
+        "max": 63
+      },
+      "flag_counts": {
+        "eol": 4,
+        "deprecated": 3,
+        "vulnerable": 1
+      }
+    },
+    "modules": [
+      {
+        "name": "Billing.Web",
+        "path": "src/Billing.Web",
+        "ecosystem": ".NET",
+        "manifest": "src/Billing.Web/Billing.Web.csproj",
+        "loc": 405,
+        "files": 5,
+        "languages": {
+          "ASP.NET WebForms": 2,
+          "C#": 403
+        },
+        "vendored_files": 0,
+        "has_tests": false,
+        "runtime": {
+          "name": ".NET Framework",
+          "version": "4.5.2",
+          "status": "eol",
+          "eol_date": "2022-04-26",
+          "note": "Windows-only; 4.7-4.8.x are patched as a Windows component but frozen — every new .NET feature and most new libraries target .NET 8+."
+        },
+        "dependencies": [
+          {
+            "name": "System.Web",
+            "version": "",
+            "kind": "framework-assembly",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          },
+          {
+            "name": "System.ServiceModel",
+            "version": "",
+            "kind": "framework-assembly",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          },
+          {
+            "name": "Newtonsoft.Json",
+            "version": "9.0.1",
+            "kind": "package",
+            "status": "vulnerable",
+            "note": "",
+            "vulnerabilities": [
+              {
+                "package": "Newtonsoft.Json",
+                "installed_version": "9.0.1",
+                "cve": "CVE-2024-21907",
+                "severity": "high",
+                "fixed_version": "13.0.1",
+                "target": "src/Billing.Web/packages.config",
+                "title": "Improper handling of exceptional conditions"
+              }
+            ]
+          },
+          {
+            "name": "WindowsAzure.Storage",
+            "version": "8.1.4",
+            "kind": "package",
+            "status": "deprecated",
+            "note": "Deprecated by Microsoft; replaced by Azure.Storage.Blobs / Queues and Azure.Data.Tables.",
+            "vulnerabilities": []
+          },
+          {
+            "name": "Microsoft.AspNet.WebApi.Core",
+            "version": "5.2.3",
+            "kind": "package",
+            "status": "deprecated",
+            "note": "ASP.NET Web API 2 runs only on .NET Framework; ASP.NET Core replaces it.",
+            "vulnerabilities": []
+          }
+        ],
+        "depends_on": [
+          "Billing.Core"
+        ],
+        "dependents": [],
+        "blockers": [
+          "webforms",
+          "wcf_server"
+        ],
+        "parse_error": "",
+        "risk": {
+          "score": 63,
+          "tier": "manual",
+          "factors": [
+            {
+              "factor": "size",
+              "points": 2,
+              "detail": "405 lines of code across 5 files."
+            },
+            {
+              "factor": "runtime",
+              "points": 15,
+              "detail": "Windows-only; 4.7-4.8.x are patched as a Windows component but frozen — every new .NET feature and most new libraries target .NET 8+."
+            },
+            {
+              "factor": "platform",
+              "points": 20,
+              "detail": "ASP.NET WebForms pages (no equivalent on .NET 5+ — the UI must be rewritten); WCF service endpoints (.svc) — .NET 5+ has no WCF server; CoreWCF or gRPC/REST"
+            },
+            {
+              "factor": "dependencies",
+              "points": 1,
+              "detail": "3 external packages, each needing a target-stack equivalent."
+            },
+            {
+              "factor": "deprecated_dependencies",
+              "points": 10,
+              "detail": "2 deprecated package(s) must be replaced, not upgraded."
+            },
+            {
+              "factor": "vulnerable_dependencies",
+              "points": 10,
+              "detail": "1 high/critical and 0 other known vulnerabilities."
+            },
+            {
+              "factor": "tests",
+              "points": 5,
+              "detail": "No tests exercise this module, so preserved behaviour is harder to prove."
+            }
+          ]
+        }
+      },
+      {
+        "name": "billing-notifier",
+        "path": "services/notifier",
+        "ecosystem": "Node.js",
+        "manifest": "services/notifier/package.json",
+        "loc": 3,
+        "files": 3,
+        "languages": {
+          "JavaScript": 3
+        },
+        "vendored_files": 0,
+        "has_tests": true,
+        "runtime": {
+          "name": "Node.js",
+          "version": "14",
+          "status": "eol",
+          "eol_date": "2023-04-30",
+          "note": "Past the vendor's end of support."
+        },
+        "dependencies": [
+          {
+            "name": "express",
+            "version": "^4.17.1",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          },
+          {
+            "name": "request",
+            "version": "^2.88.0",
+            "kind": "package",
+            "status": "deprecated",
+            "note": "Deprecated by its maintainers (2020); use fetch, undici or axios.",
+            "vulnerabilities": []
+          },
+          {
+            "name": "jest",
+            "version": "^26.0.0",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          }
+        ],
+        "depends_on": [],
+        "dependents": [],
+        "blockers": [],
+        "parse_error": "",
+        "risk": {
+          "score": 23,
+          "tier": "llm_assisted",
+          "factors": [
+            {
+              "factor": "size",
+              "points": 2,
+              "detail": "3 lines of code across 3 files."
+            },
+            {
+              "factor": "runtime",
+              "points": 15,
+              "detail": "Past the vendor's end of support."
+            },
+            {
+              "factor": "dependencies",
+              "points": 1,
+              "detail": "3 external packages, each needing a target-stack equivalent."
+            },
+            {
+              "factor": "deprecated_dependencies",
+              "points": 5,
+              "detail": "1 deprecated package(s) must be replaced, not upgraded."
+            }
+          ]
+        }
+      },
+      {
+        "name": "Billing.Core",
+        "path": "src/Billing.Core",
+        "ecosystem": ".NET",
+        "manifest": "src/Billing.Core/Billing.Core.csproj",
+        "loc": 3,
+        "files": 2,
+        "languages": {
+          "C#": 3
+        },
+        "vendored_files": 0,
+        "has_tests": true,
+        "runtime": {
+          "name": ".NET",
+          "version": "6.0",
+          "status": "eol",
+          "eol_date": "2024-11-12",
+          "note": "Past the vendor's end of support."
+        },
+        "dependencies": [
+          {
+            "name": "Dapper",
+            "version": "2.0.123",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          },
+          {
+            "name": "Serilog",
+            "version": "2.12.0",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          }
+        ],
+        "depends_on": [],
+        "dependents": [
+          "Billing.Web",
+          "Billing.Core.Tests"
+        ],
+        "blockers": [],
+        "parse_error": "",
+        "risk": {
+          "score": 21,
+          "tier": "mechanical",
+          "factors": [
+            {
+              "factor": "size",
+              "points": 2,
+              "detail": "3 lines of code across 2 files."
+            },
+            {
+              "factor": "runtime",
+              "points": 15,
+              "detail": "Past the vendor's end of support."
+            },
+            {
+              "factor": "coupling",
+              "points": 4,
+              "detail": "2 other module(s) depend on this one — a change here ripples."
+            }
+          ]
+        }
+      },
+      {
+        "name": "Billing.Core.Tests",
+        "path": "tests/Billing.Core.Tests",
+        "ecosystem": ".NET",
+        "manifest": "tests/Billing.Core.Tests/Billing.Core.Tests.csproj",
+        "loc": 1,
+        "files": 2,
+        "languages": {
+          "C#": 1
+        },
+        "vendored_files": 0,
+        "has_tests": true,
+        "runtime": {
+          "name": ".NET",
+          "version": "6.0",
+          "status": "eol",
+          "eol_date": "2024-11-12",
+          "note": "Past the vendor's end of support."
+        },
+        "dependencies": [
+          {
+            "name": "xunit",
+            "version": "2.4.2",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          }
+        ],
+        "depends_on": [
+          "Billing.Core"
+        ],
+        "dependents": [],
+        "blockers": [],
+        "parse_error": "",
+        "risk": {
+          "score": 17,
+          "tier": "mechanical",
+          "factors": [
+            {
+              "factor": "size",
+              "points": 2,
+              "detail": "1 lines of code across 2 files."
+            },
+            {
+              "factor": "runtime",
+              "points": 15,
+              "detail": "Past the vendor's end of support."
+            }
+          ]
+        }
+      },
+      {
+        "name": "billing-batch",
+        "path": "batch",
+        "ecosystem": "Java",
+        "manifest": "batch/pom.xml",
+        "loc": 1,
+        "files": 2,
+        "languages": {
+          "Java": 1
+        },
+        "vendored_files": 0,
+        "has_tests": false,
+        "runtime": {
+          "name": "Java",
+          "version": "8",
+          "status": "legacy",
+          "eol_date": "2030-12-31",
+          "note": "Dates are Oracle's; premier support ending moves a version to legacy."
+        },
+        "dependencies": [
+          {
+            "name": "org.springframework:spring-core",
+            "version": "4.3.9.RELEASE",
+            "kind": "package",
+            "status": "ok",
+            "note": "",
+            "vulnerabilities": []
+          }
+        ],
+        "depends_on": [],
+        "dependents": [],
+        "blockers": [],
+        "parse_error": "",
+        "risk": {
+          "score": 12,
+          "tier": "llm_assisted",
+          "factors": [
+            {
+              "factor": "size",
+              "points": 2,
+              "detail": "1 lines of code across 2 files."
+            },
+            {
+              "factor": "runtime",
+              "points": 5,
+              "detail": "Dates are Oracle's; premier support ending moves a version to legacy."
+            },
+            {
+              "factor": "tests",
+              "points": 5,
+              "detail": "No tests exercise this module, so preserved behaviour is harder to prove."
+            }
+          ]
+        }
+      }
+    ],
+    "dependency_graph": {
+      "nodes": [
+        {
+          "id": "module:billing-batch",
+          "type": "module",
+          "label": "billing-batch",
+          "ecosystem": "Java"
+        },
+        {
+          "id": "module:billing-notifier",
+          "type": "module",
+          "label": "billing-notifier",
+          "ecosystem": "Node.js"
+        },
+        {
+          "id": "module:Billing.Core",
+          "type": "module",
+          "label": "Billing.Core",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "module:Billing.Web",
+          "type": "module",
+          "label": "Billing.Web",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "module:Billing.Core.Tests",
+          "type": "module",
+          "label": "Billing.Core.Tests",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:Java:org.springframework:spring-core",
+          "type": "package",
+          "label": "org.springframework:spring-core",
+          "ecosystem": "Java"
+        },
+        {
+          "id": "package:Node.js:express",
+          "type": "package",
+          "label": "express",
+          "ecosystem": "Node.js"
+        },
+        {
+          "id": "package:Node.js:request",
+          "type": "package",
+          "label": "request",
+          "ecosystem": "Node.js"
+        },
+        {
+          "id": "package:Node.js:jest",
+          "type": "package",
+          "label": "jest",
+          "ecosystem": "Node.js"
+        },
+        {
+          "id": "package:.NET:Dapper",
+          "type": "package",
+          "label": "Dapper",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:.NET:Serilog",
+          "type": "package",
+          "label": "Serilog",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:.NET:Newtonsoft.Json",
+          "type": "package",
+          "label": "Newtonsoft.Json",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:.NET:WindowsAzure.Storage",
+          "type": "package",
+          "label": "WindowsAzure.Storage",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:.NET:Microsoft.AspNet.WebApi.Core",
+          "type": "package",
+          "label": "Microsoft.AspNet.WebApi.Core",
+          "ecosystem": ".NET"
+        },
+        {
+          "id": "package:.NET:xunit",
+          "type": "package",
+          "label": "xunit",
+          "ecosystem": ".NET"
+        }
+      ],
+      "edges": [
+        {
+          "from": "module:billing-batch",
+          "to": "package:Java:org.springframework:spring-core",
+          "type": "package",
+          "version": "4.3.9.RELEASE"
+        },
+        {
+          "from": "module:billing-notifier",
+          "to": "package:Node.js:express",
+          "type": "package",
+          "version": "^4.17.1"
+        },
+        {
+          "from": "module:billing-notifier",
+          "to": "package:Node.js:request",
+          "type": "package",
+          "version": "^2.88.0"
+        },
+        {
+          "from": "module:billing-notifier",
+          "to": "package:Node.js:jest",
+          "type": "package",
+          "version": "^26.0.0"
+        },
+        {
+          "from": "module:Billing.Core",
+          "to": "package:.NET:Dapper",
+          "type": "package",
+          "version": "2.0.123"
+        },
+        {
+          "from": "module:Billing.Core",
+          "to": "package:.NET:Serilog",
+          "type": "package",
+          "version": "2.12.0"
+        },
+        {
+          "from": "module:Billing.Web",
+          "to": "module:Billing.Core",
+          "type": "project"
+        },
+        {
+          "from": "module:Billing.Web",
+          "to": "package:.NET:Newtonsoft.Json",
+          "type": "package",
+          "version": "9.0.1"
+        },
+        {
+          "from": "module:Billing.Web",
+          "to": "package:.NET:WindowsAzure.Storage",
+          "type": "package",
+          "version": "8.1.4"
+        },
+        {
+          "from": "module:Billing.Web",
+          "to": "package:.NET:Microsoft.AspNet.WebApi.Core",
+          "type": "package",
+          "version": "5.2.3"
+        },
+        {
+          "from": "module:Billing.Core.Tests",
+          "to": "module:Billing.Core",
+          "type": "project"
+        },
+        {
+          "from": "module:Billing.Core.Tests",
+          "to": "package:.NET:xunit",
+          "type": "package",
+          "version": "2.4.2"
+        }
+      ]
+    },
+    "flags": {
+      "eol": [
+        {
+          "module": "billing-notifier",
+          "runtime": "Node.js 14",
+          "status": "eol",
+          "eol_date": "2023-04-30",
+          "note": "Past the vendor's end of support."
+        },
+        {
+          "module": "Billing.Core",
+          "runtime": ".NET 6.0",
+          "status": "eol",
+          "eol_date": "2024-11-12",
+          "note": "Past the vendor's end of support."
+        },
+        {
+          "module": "Billing.Web",
+          "runtime": ".NET Framework 4.5.2",
+          "status": "eol",
+          "eol_date": "2022-04-26",
+          "note": "Windows-only; 4.7-4.8.x are patched as a Windows component but frozen — every new .NET feature and most new libraries target .NET 8+."
+        },
+        {
+          "module": "Billing.Core.Tests",
+          "runtime": ".NET 6.0",
+          "status": "eol",
+          "eol_date": "2024-11-12",
+          "note": "Past the vendor's end of support."
+        }
+      ],
+      "deprecated": [
+        {
+          "module": "billing-notifier",
+          "package": "request",
+          "version": "^2.88.0",
+          "reason": "Deprecated by its maintainers (2020); use fetch, undici or axios."
+        },
+        {
+          "module": "Billing.Web",
+          "package": "WindowsAzure.Storage",
+          "version": "8.1.4",
+          "reason": "Deprecated by Microsoft; replaced by Azure.Storage.Blobs / Queues and Azure.Data.Tables."
+        },
+        {
+          "module": "Billing.Web",
+          "package": "Microsoft.AspNet.WebApi.Core",
+          "version": "5.2.3",
+          "reason": "ASP.NET Web API 2 runs only on .NET Framework; ASP.NET Core replaces it."
+        }
+      ],
+      "vulnerable": [
+        {
+          "module": "Billing.Web",
+          "package": "Newtonsoft.Json",
+          "version": "9.0.1",
+          "cve": "CVE-2024-21907",
+          "severity": "high",
+          "fixed_version": "13.0.1",
+          "title": "Improper handling of exceptional conditions"
+        }
+      ]
+    },
+    "scanners": {
+      "trivy": "ok",
+      "note": "1 finding(s)."
+    },
+    "golden_master": {
+      "status": "not_captured",
+      "ref": null,
+      "note": "No behaviour baseline has been captured yet. Recording real inputs and outputs of the legacy system is what the Testing agent will diff the migrated code against; it is planned for that phase and this field is reserved for it."
+    }
+  },
+  "brief": {
+    "system_name": "Billing",
+    "business_drivers": [
+      ".NET Framework 4.5.2 is out of support"
+    ],
+    "current_state": {
+      "stack": ".NET Framework 4.5.2 WebForms on IIS",
+      "description": ""
+    },
+    "target_state": {
+      "stack": ".NET 8 on Azure App Service",
+      "description": ""
+    },
+    "in_scope": [
+      "Billing.Web",
+      "Billing.Core"
+    ],
+    "out_of_scope": [
+      "Reporting database"
+    ],
+    "constraints": [
+      "Live before 31 March"
+    ],
+    "success_criteria": [
+      "Identical invoices for recorded Q1 inputs"
+    ],
+    "stakeholders": [
+      {
+        "name": "Priya",
+        "role": "Sponsor"
+      }
+    ],
+    "assumptions": [],
+    "risks": [],
+    "open_questions": [],
+    "legacy_repository": {
+      "provider": "ado",
+      "project": "billing",
+      "name": "billing",
+      "url": "https://dev.azure.com/acme/billing/_git/billing"
+    },
+    "recorded_at": "2026-09-10T08:00:00+00:00",
+    "agent_session_id": "s1",
+    "version": 1
+  }
+}

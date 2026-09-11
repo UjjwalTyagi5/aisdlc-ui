@@ -1082,6 +1082,7 @@ export function CreateProjectDialog({
                     onAccessModeChange={setAccessModeSel}
                     enabled={open}
                     workspaceId={selectedWorkspaceId}
+                    track={selectedTrack}
                   />
                 </div>
               )}

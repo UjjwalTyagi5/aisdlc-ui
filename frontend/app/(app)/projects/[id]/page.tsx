@@ -43,7 +43,7 @@ import {
 import { listRuns } from "@/lib/api/runs";
 import { listConversations } from "@/lib/api/conversations";
 import { qk } from "@/lib/api/query-keys";
-import { BUILT_AGENTS, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { builtAgentsForTrack, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -106,7 +106,9 @@ export default function ProjectOverviewPage() {
     // for which agents are on it and what "verified" meant for each. Agents not on
     // it keep their old, unverified code per the design doc's "assume broken until
     // properly rebuilt" framing (multi-track-agent-access-design.md).
-    const builtAgents: readonly Phase[] = BUILT_AGENTS;
+    // Per TRACK: a Code Modernization project's Design, Development and the rest are
+    // Track 3's own agents, not yet built, even though Portfolio 1's are.
+    const builtAgents: readonly Phase[] = builtAgentsForTrack(track);
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 

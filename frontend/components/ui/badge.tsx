@@ -19,6 +19,8 @@ const badgeVariants = cva(
         warning:
           "border-transparent bg-warning/15 text-foreground",
         info: "border-transparent bg-info/15 text-info",
+        /** Soft red — same weight as success/warning/info, for a status rather than an alarm. */
+        danger: "border-transparent bg-destructive/15 text-destructive",
       },
     },
     defaultVariants: { variant: "default" },

@@ -1,4 +1,4 @@
-import type { AgentType, CapabilityClass, Phase } from "@/lib/schemas";
+import type { AgentType, CapabilityClass, DeliveryTrack, Phase } from "@/lib/schemas";
 import { AGENT_OWNER_ROLE, ROLE_META } from "@/lib/roles";
 
 /**
@@ -40,6 +40,7 @@ export const PHASE_ORDER: readonly Phase[] = [
  */
 export const PHASE_ALL: readonly Phase[] = [
   ...PHASE_ORDER,
+  "requirements_modernization",
   "discovery",
   "strategy",
   "migration_mapping",
@@ -62,6 +63,7 @@ export const PHASE_LABEL: Record<Phase, string> = {
   testing: "Testing",
   deployment: "Deployment",
   documentation: "Documentation",
+  requirements_modernization: "Requirements (migration intent)",
   discovery: "Discovery & Assessment",
   strategy: "Strategy",
   migration_mapping: "Migration Mapping",
@@ -82,7 +84,9 @@ export const PHASE_DESCRIPTION: Record<Phase, string> = {
   testing: "Generates test plans and edge cases mapped to requirements and code.",
   deployment: "Builds release-readiness reports and risk-gate validations.",
   documentation: "Compiles every upstream artifact into consistent docs.",
-  discovery: "Builds the as-is inventory and assessment later agents plan against (Tracks 3–4).",
+  requirements_modernization:
+    "Captures why the modernization is happening, from what to what, scope, constraints and success criteria (Track 3).",
+  discovery: "Clones the legacy repo read-only; maps dependencies, flags EOL/vulnerable ones, scores module risk (Tracks 3–4).",
   strategy: "Turns the assessment into a risk-sequenced execution plan (Track 3).",
   migration_mapping: "Maps each legacy item to its target platform, item by item (Track 4).",
   validation: "Runs parallel-parity validation and accepts cutover-readiness (Track 4).",
@@ -160,6 +164,30 @@ export const BUILT_AGENTS: readonly Phase[] = [
   "testing",
 ];
 
+/**
+ * What is built FOR A TRACK — the list a project's tiles are gated on.
+ *
+ * `BUILT_AGENTS` is Portfolio 1's list, and Track 3 must not inherit it: a Code
+ * Modernization project's Design, Development and the rest are Track 3's OWN agents
+ * (multi-track design §1.4), none of them built yet, so they stay "Coming soon" even
+ * though Portfolio 1 agents with the same names are built. Track 3's first two are its
+ * migration-intent Requirements agent and Discovery & Assessment.
+ *
+ * Tracks 4 and 5 keep today's behaviour (`BUILT_AGENTS`) — changing what their tiles
+ * show is a separate decision, not part of Track 3's work.
+ */
+export const BUILT_AGENTS_BY_TRACK: Record<DeliveryTrack, readonly Phase[]> = {
+  greenfield: BUILT_AGENTS,
+  enhancement: BUILT_AGENTS,
+  modernization: ["requirements_modernization", "discovery"],
+  rpa_infra: BUILT_AGENTS,
+  data_engineering: BUILT_AGENTS,
+};
+
+export function builtAgentsForTrack(track: DeliveryTrack): readonly Phase[] {
+  return BUILT_AGENTS_BY_TRACK[track];
+}
+
 /** Label per agent (phases + the orchestrator meta-agent). */
 export const AGENT_LABEL: Record<AgentType, string> = {
   orchestrator: "Orchestrator",
@@ -184,6 +212,7 @@ export const ROUTABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>([
   "testing",
   "deployment",
   "documentation",
+  "requirements_modernization",
   "discovery",
   "strategy",
   "migration_mapping",
@@ -194,8 +223,9 @@ export const ROUTABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>([
 /**
  * Route segment for a phase's project sub-page.
  *
- * Three phases don't map 1:1 onto their id:
+ * Four phases don't map 1:1 onto their id:
  *  - `review` → `code-review`  (the real screen; `/review` redirects here)
+ *  - `requirements_modernization` → `requirements-modernization`
  *  - `migration_mapping` → `migration-mapping`
  *  - `data_engineering` → `data-engineering`
  */
@@ -203,6 +233,8 @@ export function phaseRoute(phase: Phase): string {
   switch (phase) {
     case "review":
       return "code-review";
+    case "requirements_modernization":
+      return "requirements-modernization";
     case "migration_mapping":
       return "migration-mapping";
     case "data_engineering":
@@ -392,13 +424,22 @@ export const GATE_POLICY: Record<Phase, GatePolicy> = {
   },
 
   // ── Track-specific agents ──────────────────────────────────────────────────
+  requirements_modernization: {
+    type: "approval_required",
+    capabilityClass: "signoff",
+    ownerLabel: owner("requirements_modernization"),
+    title: "Gate: baseline the migration-intent brief",
+    description:
+      "Sign-off baselines why the modernization is happening, from what to what, its scope, constraints and success criteria. Writing the migration Epic and items to Jira/ADO is a separate Consequential approval.",
+    mandatory: false,
+  },
   discovery: {
     type: "approval_required",
     capabilityClass: "signoff",
     ownerLabel: owner("discovery"),
     title: "Gate: accept the assessment",
     description:
-      "The Architect accepts the as-is assessment as the planning baseline for every later agent (PRD §23.2, §24.2).",
+      "The BA accepts the as-is assessment — dependency graph, end-of-life and vulnerable dependencies, per-module migration risk — as the planning baseline for every later agent (PRD §23.2).",
     mandatory: false,
   },
   strategy: {

@@ -119,8 +119,10 @@ const TRACK_AGENTS: Record<DeliveryTrack, readonly Phase[]> = {
     "documentation",
   ],
   // PRD §9 — 10 agents: Track 1's eight plus Discovery & Assessment and Strategy.
+  // Its Requirements agent is its OWN (migration-intent mode), not Portfolio 1's —
+  // each track owns its agents (multi-track design §1.4).
   modernization: [
-    "requirements",
+    "requirements_modernization",
     "discovery",
     "design",
     "strategy",

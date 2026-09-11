@@ -25,6 +25,7 @@ export type Status = z.infer<typeof Status>;
  * per PRD Part V §20.1. The first eight are the shared Track 1 roster; the
  * remaining five are the track-specific additions:
  *
+ *  - `requirements_modernization`  Requirements, migration-intent mode — Track 3 (PRD §23.1)
  *  - `discovery`         Discovery & Assessment — Tracks 3 & 4 (PRD §23.2, §24.2)
  *  - `strategy`          Strategy               — Track 3    (PRD §23.4)
  *  - `migration_mapping` Migration Mapping      — Track 4    (PRD §24.3)
@@ -45,6 +46,7 @@ export const AgentType = z.enum([
   "testing",
   "deployment",
   "documentation",
+  "requirements_modernization",
   "discovery",
   "strategy",
   "migration_mapping",
@@ -64,6 +66,9 @@ export const Phase = z.enum([
   "testing",
   "deployment",
   "documentation",
+  // Track 3's own Requirements agent (migration-intent mode) — a separate agent from
+  // Portfolio 1's `requirements`, not a mode flag on it (multi-track design §1.4).
+  "requirements_modernization",
   "discovery",
   "strategy",
   "migration_mapping",

@@ -48,6 +48,8 @@ describe("every surface with a model picker sends what it picked", () => {
     "app/(app)/projects/[id]/requirements/page.tsx",
     "app/(app)/projects/[id]/testing/page.tsx",
     "components/app/stage-workbench.tsx",
+    // Track 3's shared agent shell — both of its first two agents' pages.
+    "components/modernization/track3-agent-page.tsx",
   ];
 
   it.each(SURFACES)("%s hands its picker value to useAgentChat", (path) => {

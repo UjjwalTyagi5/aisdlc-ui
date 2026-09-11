@@ -23,6 +23,8 @@ import { connectorKindLabel } from "@/lib/connectors";
 import { listMcpServers } from "@/lib/api/mcp";
 import { qk } from "@/lib/api/query-keys";
 import { PHASE_ORDER, PHASE_LABEL } from "@/lib/agents";
+import { agentsForTrack } from "@/lib/tracks";
+import type { DeliveryTrack, Phase } from "@/lib/schemas/enums";
 import type { ToolAccessMode } from "@/lib/schemas/project";
 
 /** stage -> selected ids (MCP server ids, or connector kinds) */
@@ -51,12 +53,24 @@ const ACCESS_MODE_META: Record<ToolAccessMode, { label: string; short: string; i
 // `review` phase, whose agent id is `code_review` (see backend AGENT_REGISTRY).
 const PHASE_TO_AGENT_ID: Record<string, string> = { review: "code_review" };
 
+function stagesFor(roster: readonly Phase[]): { id: string; label: string }[] {
+  return roster.map((p) => ({ id: PHASE_TO_AGENT_ID[p] ?? p, label: PHASE_LABEL[p] }));
+}
+
 // Derived from the canonical pipeline so this list always matches the stages shown
 // everywhere else (all 8, in order) instead of drifting when new stages are added.
-export const TOOL_STAGES: { id: string; label: string }[] = PHASE_ORDER.map((p) => ({
-  id: PHASE_TO_AGENT_ID[p] ?? p,
-  label: PHASE_LABEL[p],
-}));
+export const TOOL_STAGES: { id: string; label: string }[] = stagesFor(PHASE_ORDER);
+
+/**
+ * The stages a project on `track` can wire tools to — its OWN roster. A Code
+ * Modernization project wires its repository connector to Discovery & Assessment,
+ * which the Greenfield list does not have; without its own stages that project could
+ * not give Discovery a repository to clone at all (the stage IS the access decision:
+ * `connector_grants.effective_access` refuses a tool not wired to the stage).
+ */
+export function toolStagesForTrack(track?: DeliveryTrack): { id: string; label: string }[] {
+  return track ? stagesFor(agentsForTrack(track)) : TOOL_STAGES;
+}
 
 type Opt = { id: string; label: string; hint?: string };
 
@@ -269,6 +283,7 @@ export function ToolsStagePicker({
   disabled,
   enabled = true,
   workspaceId,
+  track,
 }: {
   mcpValue: StageMap;
   onMcpChange: (next: StageMap) => void;
@@ -287,7 +302,10 @@ export function ToolsStagePicker({
    * create-project dialog before a unit is chosen.
    */
   workspaceId?: string | null;
+  /** The project's delivery track — its roster decides which stages are listed. */
+  track?: DeliveryTrack;
 }) {
+  const stages = toolStagesForTrack(track);
   const servers = useQuery({
     queryKey: qk.mcp.list(true, workspaceId),
     queryFn: () => listMcpServers(true, workspaceId),
@@ -352,7 +370,7 @@ export function ToolsStagePicker({
 
   return (
     <div className="space-y-3">
-      {TOOL_STAGES.map((st) => {
+      {stages.map((st) => {
         const selectedConnectors = connectorValue[st.id] ?? [];
         const selectedMcp = mcpValue[st.id] ?? [];
         const chosenConn = connectorOptions.filter((o) => selectedConnectors.includes(o.id));

@@ -302,6 +302,7 @@ const AGENT_MODEL_MIX: Record<Phase, Partial<Record<string, number>>> = {
   documentation: { "claude-haiku-4-5": 0.7, "claude-sonnet-4-6": 0.3 },
   // Track-specific agents draw no spend in these fixtures; listed so the record
   // stays exhaustive over Phase and a new phase cannot be forgotten here.
+  requirements_modernization: {},
   discovery: {},
   strategy: {},
   migration_mapping: {},
