@@ -308,8 +308,44 @@ def _fmt_security(sec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_migration_intent(brief: Dict[str, Any]) -> str:
+    """Track 3's migration-intent brief, as Discovery & Assessment reads it.
+
+    Discovery needs two things from it above all: the TARGET stack (it decides whether
+    a module can be upgraded by codemod tooling or must be rewritten) and WHERE THE
+    LEGACY CODE LIVES. Both are rendered first, and nothing in the brief is dropped.
+    """
+    def items(key: str) -> list[str]:
+        return [str(v) for v in (brief.get(key) or []) if str(v).strip()]
+
+    current = brief.get("current_state") or {}
+    target = brief.get("target_state") or {}
+    repo = brief.get("legacy_repository") or {}
+    lines = [
+        "MIGRATION INTENT BRIEF (Requirements, migration-intent mode):",
+        f"  SYSTEM: {brief.get('system_name') or 'not named'}",
+        f"  FROM: {current.get('stack') or 'not stated'}"
+        + (f" — {current['description']}" if current.get("description") else ""),
+        f"  TO (target stack): {target.get('stack') or 'not stated'}"
+        + (f" — {target['description']}" if target.get("description") else ""),
+    ]
+    if repo.get("url") or repo.get("name"):
+        where = " / ".join(p for p in (repo.get("provider"), repo.get("project"), repo.get("name")) if p)
+        lines.append(f"  LEGACY REPOSITORY: {where}" + (f" ({repo['url']})" if repo.get("url") else ""))
+    for label, key in (
+        ("WHY", "business_drivers"), ("IN SCOPE", "in_scope"), ("OUT OF SCOPE", "out_of_scope"),
+        ("CONSTRAINTS", "constraints"), ("SUCCESS CRITERIA", "success_criteria"),
+        ("ASSUMPTIONS", "assumptions"), ("RISKS", "risks"), ("OPEN QUESTIONS", "open_questions"),
+    ):
+        values = items(key)
+        if values:
+            lines.append(f"  {label}: " + "; ".join(values))
+    return "\n".join(lines)
+
+
 _ARTIFACT_FORMATTERS = {
     "requirements_payload": _fmt_requirements,
+    "migration_intent_payload": _fmt_migration_intent,
     "design_artifacts": _fmt_design,
     "development_artifacts": _fmt_development,
     "testing_artifacts": _fmt_testing,
@@ -353,6 +389,8 @@ _PROJECT_RUN_LOOKBACK = 100
 
 _ARTIFACT_FIELDS = (
     "requirements_payload",
+    # Track 3 — Discovery & Assessment reads the migration-intent brief.
+    "migration_intent_payload",
     "design_artifacts",
     "development_artifacts",
     "testing_artifacts",

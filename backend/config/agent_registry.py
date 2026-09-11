@@ -224,6 +224,50 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
         # save locally and still ship through a git PR.
         optional_capabilities=["docs.publish", "doc.ingest"],
     ),
+
+    # ── Track 3 — Code Modernization (Portfolio 2) ─────────────────────────────
+    #
+    # Independent agents, NOT Portfolio 1's with a flag (multi-track-agent-access-
+    # design.md §1.4). `pipeline_position` orders them within their own portfolio;
+    # `stage_order_for_track("modernization")` never mixes them with Portfolio 1.
+    "requirements_modernization": AgentDefinition(
+        id="requirements_modernization",
+        name="Requirements Agent (Migration Intent)",
+        pipeline_position=1,
+        input_artifacts=[],
+        output_artifact="migration_intent_payload",
+        route_path="/requirements-modernization",
+        # Board writes are Consequential; baselining the brief is the Sign-off.
+        gate_type="approval_required",
+        sla_hours=24,
+        can_parallel_with=[],
+        max_rejections=1,
+        required_capabilities=[
+            "req.migration_intent.capture", "req.migration_intent.brief",
+            "board.read", "artifact.write",
+        ],
+        optional_capabilities=["board.write", "doc.export.docx", "doc.export.pdf", "legacy.code.read"],
+    ),
+    "discovery": AgentDefinition(
+        id="discovery",
+        name="Discovery & Assessment Agent",
+        pipeline_position=2,
+        input_artifacts=["migration_intent_payload"],
+        output_artifact="discovery_artifacts",
+        route_path="/discovery",
+        # "Accept the assessment as planning baseline" is a Sign-off.
+        gate_type="approval_required",
+        sla_hours=48,
+        can_parallel_with=[],
+        max_rejections=1,
+        required_capabilities=[
+            "discovery.repo.clone", "discovery.dependency.graph.build",
+            "discovery.dependency.eol.scan", "discovery.dependency.cve.scan",
+            "discovery.module.risk.score", "discovery.module.tier.classify",
+            "artifact.write",
+        ],
+        optional_capabilities=["doc.export.docx", "doc.export.pdf", "legacy.code.read"],
+    ),
 }
 
 
@@ -241,8 +285,8 @@ def get_pipeline_order() -> List[List[str]]:
 # share one — both point at the same literal list below, not by convention but by
 # construction, so they can never silently drift apart. Modernization, RPA/Infra
 # Migration, and Data Engineering are independent portfolios; each starts empty
-# because none of their agents exist as AGENT_REGISTRY entries yet (spec Part 5 —
-# an agent id is added here only once it's actually built and mounted).
+# until its agents exist as AGENT_REGISTRY entries (spec Part 5 — an agent id is added
+# here only once it's actually built and mounted). Modernization has its first two.
 _PORTFOLIO_1: list[str] = [
     "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
@@ -251,10 +295,62 @@ _PORTFOLIO_1: list[str] = [
 TRACK_PORTFOLIOS: dict[str, list[str]] = {
     "greenfield": _PORTFOLIO_1,
     "enhancement": _PORTFOLIO_1,
-    "modernization": [],
+    # Built so far: the first two of Portfolio 2's ten (Phase 1). Design, Strategy and
+    # the rest are added one at a time as each is built and mounted.
+    "modernization": ["requirements_modernization", "discovery"],
     "rpa_infra": [],
     "data_engineering": [],
 }
+
+
+class UnknownTrackError(Exception):
+    """Raised for a track string that is not one of `TRACK_PORTFOLIOS`'s five keys.
+
+    A typo here must fail loudly rather than be treated as an empty portfolio —
+    an empty portfolio is a real, meaningful state (a track with nothing built
+    yet), and silently returning one for a MISSPELLED track name would look
+    identical to that instead of surfacing the typo.
+    """
+
+
+def agents_for_track(track: str) -> dict[str, AgentDefinition]:
+    """`AGENT_REGISTRY` filtered to the ids in `TRACK_PORTFOLIOS[track]`.
+
+    THE ROUTING BOUNDARY THIS FUNCTION EXISTS TO DRAW: every agent Greenfield and
+    Enhancement projects may ever be offered or run comes from here, not from
+    `AGENT_REGISTRY` directly. Once Track 3/4/5 agents start landing in
+    `AGENT_REGISTRY`, a caller that read the whole dict instead of going through
+    this function would offer a Code Modernization agent to a Greenfield project's
+    Orchestrator — this function is what a track-scoped caller (the orchestrator2
+    router and dispatch) must call instead.
+
+    Indexes `AGENT_REGISTRY` directly rather than `.get`-with-a-skip: an id present
+    in `TRACK_PORTFOLIOS[track]` but absent from `AGENT_REGISTRY` is exactly the
+    inconsistency the module docstring on `TRACK_PORTFOLIOS` promises never
+    happens ("an agent id is added here only once it's actually built and
+    mounted") — if it ever did, this must raise `KeyError` immediately, not
+    silently drop the agent from the portfolio.
+    """
+    try:
+        ids = TRACK_PORTFOLIOS[track]
+    except KeyError:
+        raise UnknownTrackError(
+            f"unknown track {track!r}; known tracks: {sorted(TRACK_PORTFOLIOS)}"
+        ) from None
+    return {aid: AGENT_REGISTRY[aid] for aid in ids}
+
+
+def stage_order_for_track(track: str) -> list[str]:
+    """`get_pipeline_order`'s ordering, flattened and filtered to one track's
+    portfolio — the same `(pipeline_position, agent_id)` tie-break `STAGE_ORDER`
+    uses, applied to `agents_for_track(track)` instead of the whole registry."""
+    agents = agents_for_track(track)
+    return [
+        aid
+        for aid, _ in sorted(
+            agents.items(), key=lambda kv: (kv[1].pipeline_position, kv[0])
+        )
+    ]
 
 # ── Default role -> agent reach ───────────────────────────────────────────────
 #
@@ -287,6 +383,11 @@ _OWNER_OF: dict[str, str] = {
     "security": "security_engineer",
     "deployment": "devops_engineer",
     "plan": "scrum_master",
+    # Track 3 — Code Modernization. BOTH owned by the BA — a product decision for this
+    # track (2026-09-10) that departs from the design doc's "Discovery: Architect".
+    # One agent, one role still holds: the Architect does not reach Discovery.
+    "requirements_modernization": "ba",
+    "discovery": "ba",
 }
 
 _DELIVERY_ROLES = (

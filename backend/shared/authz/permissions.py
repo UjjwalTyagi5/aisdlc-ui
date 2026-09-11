@@ -108,6 +108,9 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # project_admin is "owner" on every agent (AGENT_DEFAULT_REACH) and the fallback
         # approver, so it holds the plan gate alongside scrum_master.
         "artifact:approve_plan",
+        # Track 3's first two agents (migration 0057) — fallback approver, as above.
+        "artifact:approve_requirements_modernization",
+        "artifact:approve_discovery",
         "connector:view", "connector:manage",
         "cost:view", "trace:view",
         # Tier 1 of routing.REQUEST_ESCALATION_CHAIN — the first approver a request
@@ -122,6 +125,11 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "artifact:view", "artifact:export", "artifact:delete",
         "agent:invoke", "approve",
         "artifact:approve_requirements",
+        # OWNS Track 3's first two agents (migration 0057): baselining the
+        # migration-intent brief, and accepting the Discovery & Assessment as the
+        # planning baseline, are both this role's Sign-offs.
+        "artifact:approve_requirements_modernization",
+        "artifact:approve_discovery",
         "connector:view",
         # AGENT_OWNER_ROLE.requirements is ba, so this is stage two's approver for
         # an agent_access request on that phase. Scoped by decide()'s own
@@ -259,6 +267,9 @@ _PHASE_PERMISSION: dict[str, str] = {
     "testing": "artifact:approve_testing",
     "deployment": "artifact:approve_deployment",
     "documentation": "artifact:approve_documentation",
+    # Track 3 — Code Modernization.
+    "requirements_modernization": "artifact:approve_requirements_modernization",
+    "discovery": "artifact:approve_discovery",
 }
 
 # The permission catalog is the universe of valid leaf permission strings.
@@ -294,6 +305,8 @@ _PERMISSION_CATALOG: list[str] = [
     "artifact:approve_testing",
     "artifact:approve_deployment",
     "artifact:approve_documentation",
+    "artifact:approve_requirements_modernization",
+    "artifact:approve_discovery",
     # Agents
     "agent:invoke",
     # Connectors

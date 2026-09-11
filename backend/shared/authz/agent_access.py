@@ -148,15 +148,83 @@ async def assert_agent_access_for_chat(
     Returns the resolved project's UUID string, so callers don't need a second
     `resolve_project` round trip.
     """
+    project = await _resolve_member_project(
+        db, tenant_id=tenant_id, project_id=project_id, user_id=user_id,
+    )
+    resolved_project_id = str(project.id)
+
+    role = await platform_role_for(db, user_id=user_id, permissions=[])
+    await assert_agent_access(
+        db, tenant_id=tenant_id, project_id=resolved_project_id,
+        role=role, user_id=user_id, agent_id=agent_id,
+    )
+    return resolved_project_id
+
+
+async def _resolve_member_project(
+    db: AsyncSession, *, tenant_id: str, project_id: str, user_id: str
+):
+    """The project (UUID or slug, tenant-scoped) the caller is a member of, or 404.
+
+    "Not found" and "not yours" are the same answer, as everywhere else — see
+    `assert_agent_access_for_chat`'s docstring for why membership is checked here
+    rather than trusted from a role held somewhere else in the tenant.
+    """
     project = await resolve_project(db, tenant_id, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="not found")
-    resolved_project_id = str(project.id)
-
     visible = await visible_project_ids(db, user_id=user_id, tenant_id=tenant_id)
-    if visible is not None and resolved_project_id not in visible:
+    if visible is not None and str(project.id) not in visible:
         raise HTTPException(status_code=404, detail="not found")
+    return project
 
+
+async def assert_agent_access_for_chat_on_track(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    agent_id: str,
+) -> str:
+    """`assert_agent_access_for_chat`, plus: the agent belongs to THIS project's track.
+
+    WHY TRACK 3's AGENTS NEED THIS AND PORTFOLIO 1's DID NOT. Until Track 3, every
+    standalone agent belonged to the one portfolio every project could reach, so
+    "may this role use this agent" was the whole question. Track 3's agents belong to
+    Code Modernization projects only (design doc §1.4): a Greenfield project's BA
+    reaching the migration-intent Requirements agent would get an agent that expects
+    a legacy system the project does not have. The Orchestrator already refuses this
+    (`orchestrator2/dispatch.py::_capability_for_track`); this is the same boundary on
+    the standalone path, which never goes through the Orchestrator.
+
+    A SEPARATE FUNCTION rather than a flag on the existing one, so the nine Portfolio 1
+    handlers are untouched by construction. Membership is resolved first (404 for a
+    project that is not yours, as before), then track (403, naming the reason), then
+    the role's reach (403) — the most specific true answer the caller may be told.
+    """
+    from config.agent_registry import AGENT_REGISTRY, TRACK_PORTFOLIOS  # noqa: PLC0415
+
+    project = await _resolve_member_project(
+        db, tenant_id=tenant_id, project_id=project_id, user_id=user_id,
+    )
+    # Its own read: `resolve_project` returns (id, workspace_id, display_name) and is
+    # shared by many callers, so its shape stays as it is. A project with no track
+    # recorded (created before migration 0024) is Greenfield, as everywhere else.
+    track = (
+        await db.execute(
+            text("SELECT track FROM projects WHERE id = CAST(:p AS uuid)"),
+            {"p": str(project.id)},
+        )
+    ).scalar_one_or_none() or "greenfield"
+    if agent_id not in TRACK_PORTFOLIOS.get(track, ()):
+        definition = AGENT_REGISTRY.get(agent_id)
+        label = getattr(definition, "name", None) or agent_id
+        raise HTTPException(
+            status_code=403,
+            detail=f"The {label} is not part of this project's delivery track.",
+        )
+    resolved_project_id = str(project.id)
     role = await platform_role_for(db, user_id=user_id, permissions=[])
     await assert_agent_access(
         db, tenant_id=tenant_id, project_id=resolved_project_id,

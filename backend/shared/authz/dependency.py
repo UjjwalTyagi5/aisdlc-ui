@@ -316,6 +316,11 @@ _WS_IN_HANDLER_AUTH_PATHS: set[str] = {
     "/sdlc/agent/security/ws",
     "/sdlc/agent/testing/ws",
     "/sdlc/agent/testing_orchestrator/ws",
+    # Track 3 — Code Modernization (2026-09-10). Each redeems its single-use ticket in
+    # the endpoint before accepting, then checks membership, the project's TRACK and
+    # the caller's reach on every turn (assert_agent_access_for_chat_on_track).
+    "/sdlc/agent/discovery/ws",
+    "/sdlc/agent/requirements-modernization/ws",
 }
 
 

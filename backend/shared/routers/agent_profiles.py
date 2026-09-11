@@ -115,6 +115,8 @@ from shared.services.prompt_runtime import invalidate_profile_cache
 PIPELINE_ORDER: tuple[str, ...] = (
     "requirements", "design", "plan", "development", "code_review",
     "security", "testing", "deployment", "documentation",
+    # Track 3 — Code Modernization.
+    "requirements_modernization", "discovery",
 )
 
 SCOPE_VALUES: tuple[str, ...] = ("org", "workspace", "project", "user")

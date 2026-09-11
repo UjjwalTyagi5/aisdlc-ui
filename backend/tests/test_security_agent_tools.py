@@ -275,3 +275,46 @@ async def test_scan_dependencies_caches_findings_only_on_a_successful_scan(
     assert get_session(session_id).last_trivy_findings == expected_cache
 
     clear_session(session_id)
+
+
+# ── run_trivy_scan: a crash is not a clean scan ──────────────────────────────
+
+
+def _fake_run(returncode, stdout="", stderr="", seen=None):
+    class _Result:
+        pass
+
+    def run(args, **kwargs):
+        if seen is not None:
+            seen.append(args)
+        r = _Result()
+        r.returncode, r.stdout, r.stderr = returncode, stdout, stderr
+        return r
+    return run
+
+
+def test_trivy_fatal_with_no_report_is_an_error_not_zero_findings(monkeypatch, tmp_path):
+    """Found on a real legacy repository: Maven Central answered 429 while Trivy resolved a
+    pom.xml, Trivy exited 1 with no report, and the tool said "ok, 0 findings"."""
+    import json as _json
+
+    import agents_orchestrator.security_agent.tools.trivy_tool as trivy_tool
+
+    monkeypatch.setattr(trivy_tool, "_TRIVY_BIN", "trivy")
+    monkeypatch.setattr(trivy_tool.subprocess, "run", _fake_run(
+        1, stdout="", stderr="INFO scanning\nFATAL Error remote Maven repository returned 429 Too Many Requests"))
+    out = _json.loads(trivy_tool.run_trivy_scan.invoke({"target_path": str(tmp_path)}))
+    assert out["status"] == "error" and "429" in out["message"] and out["findings"] == []
+
+
+def test_trivy_offline_adds_offline_scan_and_default_does_not(monkeypatch, tmp_path):
+    import json as _json
+
+    import agents_orchestrator.security_agent.tools.trivy_tool as trivy_tool
+
+    seen: list = []
+    monkeypatch.setattr(trivy_tool, "_TRIVY_BIN", "trivy")
+    monkeypatch.setattr(trivy_tool.subprocess, "run", _fake_run(0, stdout='{"Results": []}', seen=seen))
+    assert _json.loads(trivy_tool.run_trivy_scan.invoke({"target_path": str(tmp_path), "offline": True}))["status"] == "ok"
+    assert _json.loads(trivy_tool.run_trivy_scan.invoke({"target_path": str(tmp_path)}))["status"] == "ok"
+    assert "--offline-scan" in seen[0] and "--offline-scan" not in seen[1]

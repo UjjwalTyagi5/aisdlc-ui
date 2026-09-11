@@ -30,6 +30,14 @@ export const qk = {
   projectMembers: {
     list: (id: ProjectId) => ["project-members", "list", id] as const,
   },
+  /** Track 3 (Code Modernization): what its first two agents recorded for a project. */
+  modernization: {
+    migrationIntent: (id: ProjectId) => ["modernization", id, "migration-intent"] as const,
+    discovery: (id: ProjectId) => ["modernization", id, "discovery"] as const,
+    legacyCode: (id: ProjectId) => ["modernization", id, "legacy-code"] as const,
+    legacyRepositories: (id: ProjectId, stage: string, adoProject: string) =>
+      ["modernization", id, "legacy-code", "repositories", stage, adoProject] as const,
+  },
   users: {
     /** The org-wide people directory (Users & Roles). */
     directory: () => ["users", "directory"] as const,

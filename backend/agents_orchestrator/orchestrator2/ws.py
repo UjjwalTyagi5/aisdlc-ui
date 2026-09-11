@@ -289,14 +289,27 @@ async def _project_admin_tier_for_run(
 
 
 class RunSelection(NamedTuple):
-    """What a verified run tells the socket: which model it selected, and which
-    project it belongs to. A NamedTuple rather than a bare tuple so the third
-    field cannot be read positionally by accident at a call site that predates it.
+    """What a verified run tells the socket: which model it selected, which
+    project it belongs to, and that project's delivery track. A NamedTuple rather
+    than a bare tuple so a new field cannot be read positionally by accident at a
+    call site that predates it.
     """
 
     model_id: Optional[str]
     offering_id: Optional[str]
     project_id: Optional[str]
+    # `Project.track` — the value `router.route` and `dispatch.run_agent` scope
+    # this turn's agent roster to. `None` for a project with no track recorded
+    # (the column is nullable — every project created before migration 0024) and
+    # for a run with no project at all; both callers default an unscoped `None`
+    # to `"greenfield"`, which is exactly today's behaviour for both cases.
+    #
+    # DEFAULTED, unlike the other three fields, so every existing test (and any
+    # other construction site) that built a `RunSelection` before this field
+    # existed keeps compiling and keeps meaning exactly what it meant before —
+    # "no track", which resolves to `"greenfield"` at the one call site that
+    # reads it (`orchestrator2_ws`, below).
+    track: Optional[str] = None
 
 
 async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
@@ -343,9 +356,10 @@ async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
     REFUSAL, not a fall-through to the organization default. A turn that cannot prove
     which run it belongs to must not run.
 
-    Returns the run's `(model_id, offering_id, project_id)` — all three are properties
-    of the run, never something the client names on the wire. `(None, None, None)` is a
-    legitimate value; it is no longer overloaded to also mean "could not check".
+    Returns the run's `(model_id, offering_id, project_id, track)` — all four are
+    properties of the run (`track` via its project), never something the client
+    names on the wire. `(None, None, None, None)` is a legitimate value; it is no
+    longer overloaded to also mean "could not check".
 
     WHY `project_id` IS READ HERE AND NOT TAKEN FROM THE MESSAGE. It is the scope that
     `resolve_model_for_run` uses to decide WHICH models this turn may use
@@ -377,7 +391,7 @@ async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
         from sqlalchemy import select
 
         from shared.db import get_db_session_for_tenant
-        from shared.models.orm import Run
+        from shared.models.orm import Project, Run
 
         async with get_db_session_for_tenant(tenant_id) as session:
             run = (
@@ -388,6 +402,23 @@ async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
                     )
                 )
             ).scalar_one_or_none()
+
+            # A SECOND query, not a join into the one above: keeping the Run
+            # lookup exactly as it was (a single-column `select(Run)`) is what
+            # every test built against `_resolve_run` before `track` existed
+            # keeps working against unchanged — this project id is read from
+            # the ALREADY-VERIFIED run, tenant-scoped by construction (it can
+            # only be a project on a run this session already proved belongs to
+            # the caller's tenant), so a second read costs one more round trip
+            # and no new authorization surface.
+            track: str | None = None
+            project_id_for_track = getattr(run, "project_id", None) if run else None
+            if project_id_for_track is not None:
+                track = (
+                    await session.execute(
+                        select(Project.track).where(Project.id == project_id_for_track)
+                    )
+                ).scalar_one_or_none()
     except Exception as exc:  # noqa: BLE001 — cannot prove ownership ⇒ refuse
         logger.warning(
             "orchestrator2 could not verify run=%s for tenant=%s: %s — refusing "
@@ -409,6 +440,7 @@ async def _resolve_run(run_id: str, tenant_id: str) -> RunSelection:
         # `Run.project_id` is a UUID column; every consumer downstream compares it as
         # text (offering-grant sets, budget scope keys), so normalise once here.
         project_id=str(project_id) if project_id else None,
+        track=track,
     )
 
 
@@ -615,7 +647,17 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
             # PROJECT comes from — the run's, not the frame's, because the project
             # decides which models may be used and whose budget pays for them.
             try:
-                model_id, offering_id, project_id = await _resolve_run(run_id, tenant_id)
+                model_id, offering_id, project_id, project_track = await _resolve_run(run_id, tenant_id)
+                # `Project.track` is nullable (every project predating migration
+                # 0024, and a webhook run with no project at all) — default to
+                # the portfolio Greenfield and Enhancement share, matching what
+                # an unset track has always behaved as. `router.route` and
+                # `dispatch.run_agent` both default the same way on their own,
+                # but resolving it ONCE here — rather than passing `None` through
+                # and letting each default independently — is what guarantees
+                # the agent the router offered is the exact same track dispatch
+                # then enforces against, for this turn.
+                track = project_track or "greenfield"
             except RunNotAvailableError as exc:
                 # NO `detail`. `RunNotAvailableError` carries one of four strings —
                 # "no run identified", "'…' is not a run id", "no such run", "the run
@@ -739,6 +781,11 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # answered it itself, and re-asked what the agent had just
                         # asked — the ping-pong reported from a live session.
                         last_agent=last_agent,
+                        # From the verified `runs` row's project, resolved once
+                        # above. Scopes both the tools offered to the router's
+                        # model AND the roster it is told about to this project's
+                        # track's portfolio.
+                        track=track,
                     )
                     if decision.agent_id is None:
                         # Answered without a delivery agent. NO `agent.selected`:
@@ -843,6 +890,13 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         user_id=user_id,
                         context=context,
                         reason=reason,
+                        # ENFORCEMENT, not a repeat of the router's offer:
+                        # `agent_id` above may have come from `override_agent`,
+                        # which never went through `route` at all. Passing the
+                        # same resolved `track` here is what makes dispatch
+                        # refuse an id outside this project's portfolio even
+                        # when the router was bypassed entirely.
+                        track=track,
                     )
                 ) as events:
                     async for event in events:

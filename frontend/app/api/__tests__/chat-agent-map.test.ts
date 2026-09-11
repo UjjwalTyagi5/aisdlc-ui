@@ -27,6 +27,9 @@ describe("agentWsPath", () => {
     ["testing", "/sdlc/agent/testing/ws"],
     ["deployment", "/sdlc/agent/deployment/ws"],
     ["documentation", "/sdlc/agent/documentation/ws"],
+    // Track 3 — Code Modernization.
+    ["requirements_modernization", "/sdlc/agent/requirements-modernization/ws"],
+    ["discovery", "/sdlc/agent/discovery/ws"],
   ])("maps %s to its own agent socket", (agent, path) => {
     expect(agentWsPath(agent)).toBe(path);
   });

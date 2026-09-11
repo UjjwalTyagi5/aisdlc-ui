@@ -77,6 +77,9 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // stage no delivery role owns.
     "artifact:approve_documentation",
     "artifact:approve_plan",
+    // Track 3's first two agents — fallback approver, as above (migration 0057).
+    "artifact:approve_requirements_modernization",
+    "artifact:approve_discovery",
     "connector:view",
     "connector:manage",
     "cost:view",
@@ -93,6 +96,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "agent:invoke",
     "approve",
     "artifact:approve_requirements",
+    // Track 3's first two agents are both the BA's (migration 0057): baselining the
+    // migration-intent brief and accepting the Discovery & Assessment.
+    "artifact:approve_requirements_modernization",
+    "artifact:approve_discovery",
     // AGENT_OWNER_ROLE.documentation moved to `ba` when the ownership table became
     // one-agent-one-role. Without the matching permission the gate would route to a
     // role that cannot pass it — a sign-off addressed to someone who can only look

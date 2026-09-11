@@ -321,6 +321,7 @@ const ALL_NONE: Record<Phase, Involvement> = {
   testing: "none",
   deployment: "none",
   documentation: "none",
+  requirements_modernization: "none",
   discovery: "none",
   strategy: "none",
   migration_mapping: "none",
@@ -338,6 +339,7 @@ const ALL_OWNER: Record<Phase, Involvement> = {
   testing: "owner",
   deployment: "owner",
   documentation: "owner",
+  requirements_modernization: "owner",
   discovery: "owner",
   strategy: "owner",
   migration_mapping: "owner",
@@ -349,7 +351,8 @@ const ALL_OWNER: Record<Phase, Involvement> = {
  * Role × agent involvement, per PRD §14.7 plus the track-specific agents from
  * §23 (Modernization), §24 (RPA/Infra) and §25 (Data engineering), whose
  * owners the track stage tables name explicitly:
- *   Discovery & Assessment → Architect · Strategy → Architect
+ *   Requirements (migration intent) → BA · Discovery & Assessment → BA (Track 3's
+ *   product decision) · Strategy → Architect
  *   Migration Mapping → Architect · Validation → QA/Tester
  *   Data Engineering → Data Engineer
  *
@@ -395,11 +398,16 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // reasoning that acceptance is automatic and everyone writes into it; it now
   // belongs to the BA like any other owned agent.
 
-  // Owns Requirements and Documentation.
+  // Owns Requirements and Documentation — and, on Code Modernization projects, both
+  // of Track 3's first agents: its migration-intent Requirements agent and Discovery &
+  // Assessment (a product decision for Track 3; the design doc named the Architect for
+  // Discovery).
   ba: {
     ...ALL_NONE,
     requirements: "owner",
     documentation: "owner",
+    requirements_modernization: "owner",
+    discovery: "owner",
   },
 
   // Owns Design and Code Review.
@@ -409,7 +417,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
     review: "owner",
     // Modernization-track agents this role owns on their own tracks; they are not
     // in the greenfield pipeline, so they never appear on a Track 1 project.
-    discovery: "owner",
+    // (Discovery moved to the BA with Track 3's Phase 1 — see `ba` above.)
     strategy: "owner",
     migration_mapping: "owner",
   },
@@ -485,7 +493,8 @@ export const AGENT_OWNER_ROLE: Record<Phase, PlatformRole> = {
   // The BA owns Documentation in the new matrix, so the gate follows the access.
   // Project Admin remains the fallback approver on every agent regardless.
   documentation: "ba",
-  discovery: "architect",
+  requirements_modernization: "ba",
+  discovery: "ba",
   strategy: "architect",
   migration_mapping: "architect",
   validation: "qa",

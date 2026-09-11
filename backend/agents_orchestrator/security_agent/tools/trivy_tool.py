@@ -2,6 +2,17 @@
 
 Runs `trivy fs --format json --scanners vuln` on a target directory.
 Degrades gracefully if trivy CLI is not installed.
+
+EXIT CODE 1 IS NOT ENOUGH TO CALL IT A SCAN. Trivy exits 1 both when it finds
+vulnerabilities (with --exit-code) and on a FATAL error — for example Maven Central
+answering 429 while Trivy resolves a pom.xml. The FATAL case prints no report, and
+reading that as "ok, 0 findings" told a user their code was clean when it had not been
+scanned at all. A run with no JSON report is an error, with Trivy's own message.
+
+`offline` adds `--offline-scan`: no remote lookups while scanning (Maven Central for
+POM resolution). Discovery uses it — a planning baseline must not depend on a public
+repository's rate limit, and resolving a legacy pom remotely sends the organisation's
+internal artifact names to that repository.
 """
 from __future__ import annotations
 
@@ -19,11 +30,12 @@ _TRIVY_BIN = shutil.which("trivy")
 
 
 @tool
-def run_trivy_scan(target_path: str) -> str:
+def run_trivy_scan(target_path: str, offline: bool = False) -> str:
     """Run Trivy vulnerability scan on the given directory.
 
     Args:
         target_path: Absolute path to the directory to scan.
+        offline: Scan without remote lookups (declared dependencies only).
 
     Returns:
         JSON string of Trivy findings, or an error/unavailable message.
@@ -44,21 +56,26 @@ def run_trivy_scan(target_path: str) -> str:
         })
 
     try:
+        args = [_TRIVY_BIN, "fs", "--format", "json", "--scanners", "vuln", "--quiet"]
+        if offline:
+            args.append("--offline-scan")
         result = subprocess.run(
-            [_TRIVY_BIN, "fs", "--format", "json", "--scanners", "vuln", "--quiet", str(target)],
+            [*args, str(target)],
             capture_output=True,
             text=True,
             timeout=180,
         )
 
-        if result.returncode not in (0, 1):
+        if result.returncode not in (0, 1) or not (result.stdout or "").strip():
+            detail = (result.stderr or "").strip().splitlines()
+            fatal = next((line for line in detail if "FATAL" in line), detail[-1] if detail else "")
             return json.dumps({
                 "status": "error",
-                "message": f"Trivy exited with code {result.returncode}: {result.stderr[:500]}",
+                "message": f"Trivy produced no report (exit code {result.returncode}): {fatal[:500]}",
                 "findings": [],
             })
 
-        raw = json.loads(result.stdout) if result.stdout else {}
+        raw = json.loads(result.stdout)
         results = raw.get("Results") or []
 
         findings = []

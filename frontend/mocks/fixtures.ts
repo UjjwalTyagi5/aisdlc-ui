@@ -298,6 +298,7 @@ const PHASE_BY_AGENT: Record<Run["agent"], Run["phase"]> = {
   testing: "testing",
   deployment: "deployment",
   documentation: "documentation",
+  requirements_modernization: "requirements_modernization",
   discovery: "discovery",
   strategy: "strategy",
   migration_mapping: "migration_mapping",

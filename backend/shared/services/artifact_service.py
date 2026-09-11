@@ -39,6 +39,9 @@ _COLUMN_MAP = {
     "security": "security_artifacts",
     "deployment": "deployment_artifacts",
     "documentation": "documentation_artifacts",
+    # Track 3 (Code Modernization) — migration 0057.
+    "requirements_modernization": "migration_intent_payload",
+    "discovery": "discovery_artifacts",
 }
 
 

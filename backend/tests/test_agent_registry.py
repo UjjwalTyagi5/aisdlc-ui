@@ -16,14 +16,18 @@ def test_all_agents_present():
         "requirements",
         "plan", "design", "development", "testing", "deployment",
         "code_review", "security", "documentation",
+        # Track 3 (Code Modernization) — its own portfolio, scoped by TRACK_PORTFOLIOS.
+        "requirements_modernization", "discovery",
     }
 
 
 def test_pipeline_order_returns_phases():
     phases = get_pipeline_order()
     assert len(phases) >= 5
-    assert phases[0] == ["requirements"]
-    assert phases[1] == ["design"]
+    # Positions are per portfolio, so Track 3's first two share positions 1 and 2 with
+    # Portfolio 1's. `stage_order_for_track` is what orders a single track.
+    assert "requirements" in phases[0]
+    assert "design" in phases[1]
     for phase in phases:
         for agent_id in phase:
             assert agent_id in AGENT_REGISTRY

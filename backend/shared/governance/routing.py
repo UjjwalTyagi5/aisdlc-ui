@@ -140,10 +140,14 @@ AGENT_OWNER_ROLE: dict[str, str] = {
     # The BA owns Documentation in the one-agent-one-role matrix, so the gate
     # follows the access. project_admin remains the fallback approver.
     "documentation": "ba",
-    # Track-specific agents. Not in AGENT_REGISTRY, so no run ever sits at one and
-    # they have no artifact:approve_* permission — but agent-access requests are
-    # routed for them from the catalogue, so they need an owner.
-    "discovery": "architect",
+    # Track 3's built agents (migration 0057) — in AGENT_REGISTRY, each with its own
+    # artifact:approve_* permission held by the owner named here.
+    "requirements_modernization": "ba",
+    # BA, not Architect, for Track 3 (2026-09-10) — see config/agent_registry._OWNER_OF.
+    "discovery": "ba",
+    # Track-specific agents not built yet. Not in AGENT_REGISTRY, so no run ever sits
+    # at one and they have no artifact:approve_* permission — but agent-access requests
+    # are routed for them from the catalogue, so they need an owner.
     "strategy": "architect",
     "migration_mapping": "architect",
     "validation": "qa",
