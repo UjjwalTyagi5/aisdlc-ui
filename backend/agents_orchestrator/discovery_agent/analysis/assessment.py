@@ -319,7 +319,7 @@ def assessment_markdown(artifacts: dict, *, max_modules: int | None = None) -> s
     tiers = summary.get("tier_counts") or {}
     name = repo.get("name") or repo.get("url") or "legacy repository"
 
-    lines: list[str] = [f"# Discovery & Assessment — {name}", ""]
+    lines: list[str] = [f"# Dependency and Risk — {name}", ""]
     meta = [f"Assessed {str(artifacts.get('as_of') or '')}".strip()]
     if repo.get("url"):
         meta.append(f"source `{repo['url']}`" + (f" @ `{repo['branch']}`" if repo.get("branch") else ""))

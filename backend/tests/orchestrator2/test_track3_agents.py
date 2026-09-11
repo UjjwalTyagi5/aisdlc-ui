@@ -160,7 +160,7 @@ def test_the_track3_prompt_starts_with_migration_intent_and_names_the_unbuilt_ag
     prompt = router._system_prompt(registry_for_track("modernization"), "modernization")
     assert "MIGRATION INTENT" in prompt
     assert "why the modernization is happening" in prompt
-    assert "Discovery & Assessment clones and reads the legacy repository" in prompt
+    assert "Dependency and Risk agent clones and reads the legacy repository" in prompt
     assert "proceed to" in prompt
     unbuilt = prompt.split("Not built for this track yet:", 1)[1].split(".", 1)[0]
     for name in ("Design", "Strategy", "Development", "Documentation"):
@@ -172,7 +172,7 @@ def test_continuity_on_a_modernization_turn_keeps_the_track3_voice():
     prompt = router._system_prompt_with_continuity(
         "discovery", registry_for_track("modernization"), "modernization")
     assert "CODE MODERNIZATION" in prompt
-    assert "THE Discovery & Assessment AGENT IS MID-CONVERSATION" in prompt
+    assert "THE Dependency and Risk AGENT IS MID-CONVERSATION" in prompt
 
 
 # ── deliverables: what the two agents file ───────────────────────────────────
@@ -189,7 +189,7 @@ def test_the_assessment_report_is_filed_as_a_deliverable(tmp_path):
     report = assessment_markdown(assess_repository(build_legacy_repo(tmp_path / "r")), max_modules=25)
     rows = render("discovery", report)
     assert len(rows) == 1
-    assert rows[0]["title"].startswith("Discovery & Assessment")
+    assert rows[0]["title"].startswith("Dependency and Risk")
 
 
 def test_the_migration_brief_is_filed_as_a_deliverable():

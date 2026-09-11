@@ -67,7 +67,7 @@ export function MigrationBriefCard({
           </p>
         ) : (
           <p className="text-muted-foreground text-sm italic">
-            Not named yet — Discovery & Assessment will ask which repository to clone.
+            Not named yet — the Dependency and Risk agent will ask which repository to clone.
           </p>
         )}
       </section>

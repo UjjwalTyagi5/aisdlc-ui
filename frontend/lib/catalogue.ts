@@ -289,14 +289,14 @@ export const CATALOGUE_AGENTS: CatalogueAgent[] = [
         track: "modernization",
         mode: "Migration-intent",
         inputs: ["Application inventory and business goal", "Scope boundary and constraints"],
-        outputs: ["Migration-intent brief (goal, scope boundary, constraints, success criteria)", "Persisted requirements artifact consumed by Discovery & Assessment and Strategy"],
+        outputs: ["Migration-intent brief (goal, scope boundary, constraints, success criteria)", "Persisted requirements artifact consumed by the Dependency and Risk agent and Strategy"],
         approvalFlow: "Draft & analyse (Safe) → approve board writes (Consequential) → baseline the migration-intent brief (Sign-off).",
       },
       {
         track: "rpa_infra",
         mode: "Migration-intent by flavour",
         inputs: ["Bot inventory, process maps", "Infrastructure inventory and target systems"],
-        outputs: ["Migration-intent brief (flavour per item, in-scope list, wave plan, constraints)", "Persisted requirements artifact consumed by Discovery & Assessment"],
+        outputs: ["Migration-intent brief (flavour per item, in-scope list, wave plan, constraints)", "Persisted requirements artifact consumed by the Dependency and Risk agent"],
         approvalFlow: "Draft & analyse (Safe) → approve board writes (Consequential) → baseline the migration-intent brief (Sign-off).",
       },
       {
@@ -353,7 +353,7 @@ export const CATALOGUE_AGENTS: CatalogueAgent[] = [
       {
         track: "modernization",
         mode: "Target architecture",
-        inputs: ["As-is assessment from Discovery & Assessment"],
+        inputs: ["As-is assessment from the Dependency and Risk agent"],
         outputs: ["Target architecture package — HLD, LLD, C4, API contracts, DB schema", "ADRs covering rewrite-vs-strangler-fig and target-stack decisions", "Persisted design artifact that Strategy sequences against"],
         approvalFlow: "Generate & validate (Safe) → accept the target design (Sign-off, Architect).",
       },
@@ -384,7 +384,7 @@ export const CATALOGUE_AGENTS: CatalogueAgent[] = [
       {
         track: "rpa_infra",
         mode: "Three mapping strategies, by flavour",
-        inputs: ["Per-item assessment from Discovery & Assessment"],
+        inputs: ["Per-item assessment from the Dependency and Risk agent"],
         outputs: ["Versioned per-item migration plan — IR/design, resolved mapping table or function design, open decisions"],
         approvalFlow: "Build the IR/design and resolve mappings (Safe) → resolve an escalated ambiguous mapping (Consequential, Architect) → accept the migration plan (Sign-off, Architect).",
       },

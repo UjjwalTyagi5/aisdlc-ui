@@ -130,7 +130,7 @@ async def test_no_business_unit_grant_means_no_credential(tree, fake_client):
     await _wire(tree["org"], tree["project"], {REQ: ["azure_devops"]})
     secret, problem = await _secret_for(tree, REQ)
     assert secret == ""
-    assert "Integrations page" in problem and "Requirements (migration intent)" in problem
+    assert "Integrations page" in problem and "Migration Intent" in problem
 
 
 async def test_granted_and_wired_to_the_stage_gets_the_credential(tree, fake_client):
@@ -143,7 +143,7 @@ async def test_a_connection_wired_only_to_discovery_is_not_lent_to_requirements(
     await _grant(tree["org"], tree["unit"])
     await _wire(tree["org"], tree["project"], {DISC: ["azure_devops"]})
     secret, problem = await _secret_for(tree, REQ)
-    assert secret == "" and "Requirements (migration intent)" in problem
+    assert secret == "" and "Migration Intent" in problem
     # ...while Discovery, which it IS wired to, gets it.
     assert await _secret_for(tree, DISC) == (SECRET, "")
 
@@ -206,7 +206,7 @@ async def test_the_picker_lists_nothing_without_access_and_never_asks_the_connec
     await _wire(tree["org"], tree["project"], {DISC: ["azure_devops"]})
     await _grant(tree["org"], tree["unit"])
     out = await router.list_legacy_code_repositories(tree["project"], None, stage=REQ, ado_project="", db=None)
-    assert calls == [] and "Requirements (migration intent)" in out["problem"]
+    assert calls == [] and "Migration Intent" in out["problem"]
 
     out = await router.list_legacy_code_repositories(tree["project"], None, stage=DISC, ado_project="", db=None)
     assert out == {"provider": "ado", "projects": ["Billing"]} and calls == [""]

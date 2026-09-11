@@ -8,7 +8,7 @@ the legacy remote. The Development agent's `clone_repo` is deliberately NOT reus
 it seeds and pushes a `main` branch into an empty repository, which is a write.
 
 CREDENTIALS COME FROM THE STAGE'S CONNECTOR ONLY. The project wires a connector to
-the Discovery & Assessment stage (project settings → tools); the Orchestrator's
+the Dependency and Risk stage (project settings → tools); the Orchestrator's
 dispatch and the standalone socket both bind it for the turn, and this module reads
 it back. A connector the stage may not READ is refused here — `auth_adapter` itself
 does not check the level, so this is where that check lives for a git clone.
@@ -96,7 +96,7 @@ def validate_clone_url(url: str) -> str | None:
     return (
         f"'{host or url}' is not a repository host Discovery may clone from. Supported: "
         "Azure DevOps, GitHub, GitLab and Bitbucket — or wire the project's repository "
-        "connector to the Discovery & Assessment stage."
+        "connector to the Dependency and Risk stage."
     )
 
 
@@ -137,7 +137,7 @@ async def _stage_credentials() -> tuple[str, str, str, str]:
         if not permits(level, "read"):
             return "", "", "", (
                 f"The {getattr(conn, 'display_name', 'repository')} connection is not readable "
-                "by the Discovery & Assessment stage on this project. A Project Admin can wire "
+                "by the Dependency and Risk stage on this project. A Project Admin can wire "
                 "it to this stage with read access in project settings."
             )
     try:
@@ -163,7 +163,7 @@ async def list_legacy_repositories(project: str = "") -> str:
         return refusal
     if not secret:
         return (
-            "No repository connection is available to the Discovery & Assessment stage on this "
+            "No repository connection is available to the Dependency and Risk stage on this "
             "project. A Project Admin can wire Azure DevOps or GitHub to this stage in project "
             "settings. Alternatively, give me a public https clone URL (Azure DevOps, GitHub, "
             "GitLab or Bitbucket)."
@@ -283,7 +283,7 @@ async def clone_legacy_repository(repository: str, branch: str = "") -> str:
     except Exception as exc:  # noqa: BLE001
         hint = f" Note: {problem}" if problem else (
             "" if use_secret else " No credential was used — if the repository is private, "
-            "wire its connection to the Discovery & Assessment stage in project settings.")
+            "wire its connection to the Dependency and Risk stage in project settings.")
         return f"Clone failed: {exc}.{hint}"
 
     clean_url = urllib.parse.urlunparse(urllib.parse.urlparse(url)._replace(

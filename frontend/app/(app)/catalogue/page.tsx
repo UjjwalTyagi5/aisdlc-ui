@@ -287,7 +287,7 @@ export default function AgentCataloguePage() {
         id="agents"
         eyebrow="Agent catalogue"
         title={`${CATALOGUE_AGENTS.length} agents, one control plane`}
-        lead="Eight run the forward pipeline. Tracks 3–5 add Discovery & Assessment, Strategy, Migration Mapping, Validation and Data Engineering. An agent appearing in several tracks is one agent with several modes."
+        lead="Eight run the forward pipeline. Tracks 3–5 add Dependency and Risk, Strategy, Migration Mapping, Validation and Data Engineering. An agent appearing in several tracks is one agent with several modes."
         actions={
           <Button
             variant="outline"

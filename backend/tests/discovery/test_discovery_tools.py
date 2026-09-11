@@ -93,7 +93,7 @@ async def test_assess_after_clone_returns_the_report_and_keeps_the_assessment(cl
     assert out["read_only"] is True and out["branch"] == "main"
 
     report = await assessment_tools.assess_legacy_repository.ainvoke({"target_stack": ".NET 8"})
-    assert report.startswith("# Discovery & Assessment — billing")
+    assert report.startswith("# Dependency and Risk — billing")
     assert "## Module risk and migration tier" in report
     assert "Billing.Web" in report
     assert persisted and persisted[0]["target_stack"] == ".NET 8"
@@ -158,7 +158,7 @@ async def test_a_connector_the_stage_cannot_read_is_refused(monkeypatch):
 
     monkeypatch.setattr("config.connectors.context.get_connector", lambda: _Unreadable())
     out = await repo_tools.list_legacy_repositories.ainvoke({})
-    assert "not readable by the Discovery & Assessment stage" in out
+    assert "not readable by the Dependency and Risk stage" in out
 
 
 async def test_no_connector_explains_how_to_wire_one(monkeypatch):

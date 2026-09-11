@@ -46,7 +46,7 @@ describe("Track 3 roster", () => {
   it("routes to its own pages", () => {
     expect(phaseRoute("requirements_modernization")).toBe("requirements-modernization");
     expect(phaseHref("p1", "discovery")).toBe("/projects/p1/discovery");
-    expect(PHASE_LABEL.requirements_modernization).toBe("Requirements (migration intent)");
+    expect(PHASE_LABEL.requirements_modernization).toBe("Migration Intent");
   });
 });
 
@@ -92,8 +92,8 @@ describe("Track 3 in the Orchestrator", () => {
 
   it("labels them the way the rest of the app does", () => {
     expect(PHASE_FOR_AGENT.discovery).toBe("discovery");
-    expect(agentLabel("discovery")).toBe("Discovery & Assessment");
-    expect(agentLabel("requirements_modernization")).toBe("Requirements (migration intent)");
+    expect(agentLabel("discovery")).toBe("Dependency and Risk");
+    expect(agentLabel("requirements_modernization")).toBe("Migration Intent");
   });
 });
 

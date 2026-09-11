@@ -27,7 +27,7 @@ export default function RequirementsModernizationPage() {
       guide={({ pull, run, legacy, legacyStatus }) => [
         {
           title: "Pull the legacy code",
-          body: "Choose the legacy repository. It is cloned read-only for this project, so the agent reads today's system before it asks you anything — and Discovery & Assessment assesses the same code.",
+          body: "Choose the legacy repository. It is cloned read-only for this project, so the agent reads today's system before it asks you anything — and the Dependency and Risk agent assesses the same code.",
           status: legacyStatus,
           action: {
             label: legacy?.pull ? "Pull again" : "Pull legacy code",
