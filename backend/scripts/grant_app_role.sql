@@ -16,9 +16,16 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sdlc_app;
 
 -- Without these two, the NEXT migration creates tables the app role has no rights on
 -- and the "permission denied for table …" failure comes back looking brand new.
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+--
+-- CURRENT_USER, NOT A HARDCODED `postgres`. Default privileges attach to the role that
+-- CREATES the object, so this only works when it names whoever alembic connects as. That
+-- is `postgres` locally but `pgadmin` on Azure Postgres Flexible Server, where the admin
+-- role is chosen at server creation — and naming the wrong one does not fail loudly: the
+-- statement succeeds against a role that never creates anything, and the next migration
+-- produces tables the app cannot read.
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sdlc_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO sdlc_app;
 
 -- ── APPEND-ONLY TABLES ──────────────────────────────────────────────────────────
