@@ -542,6 +542,10 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 "messages": [SystemMessage(content=sys_content)] + state_messages,
                 "tenant_id": tenant_id,
                 "model_id": message_data.get("model_id"),
+                # The page's model picker. Exact where `model_id` is ambiguous:
+                # two connections can expose the same model and only the offering
+                # says which key. Absent → the agent resolves the org default.
+                "offering_id": message_data.get("offering_id"),
             }
             # NOTE: s.system_injected is deliberately NOT set here. It is set only
             # after _stream_agent_response returns successfully below — setting it
@@ -554,6 +558,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 "messages": state_messages,
                 "tenant_id": tenant_id,
                 "model_id": message_data.get("model_id"),
+                "offering_id": message_data.get("offering_id"),
             }
 
         # Chat attachments (uploaded via POST /conversations/{id}/attachments) arrive as

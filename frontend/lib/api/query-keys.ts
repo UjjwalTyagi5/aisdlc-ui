@@ -30,6 +30,14 @@ export const qk = {
   projectMembers: {
     list: (id: ProjectId) => ["project-members", "list", id] as const,
   },
+  /** Track 3 (Code Modernization): what its first two agents recorded for a project. */
+  modernization: {
+    migrationIntent: (id: ProjectId) => ["modernization", id, "migration-intent"] as const,
+    discovery: (id: ProjectId) => ["modernization", id, "discovery"] as const,
+    legacyCode: (id: ProjectId) => ["modernization", id, "legacy-code"] as const,
+    legacyRepositories: (id: ProjectId, stage: string, adoProject: string) =>
+      ["modernization", id, "legacy-code", "repositories", stage, adoProject] as const,
+  },
   users: {
     /** The org-wide people directory (Users & Roles). */
     directory: () => ["users", "directory"] as const,
@@ -112,8 +120,11 @@ export const qk = {
     detail: (id: string) => ["mcp", "detail", id] as const,
   },
   conversations: {
-    list: (projectId: ProjectId, agentId: string) =>
-      ["conversations", projectId, agentId] as const,
+    // The agent is part of the key, and "" is a real value meaning EVERY agent — the
+    // project overview's list and a stage page's rail are different questions with
+    // different answers, and one cache entry for both would show a page the other's.
+    list: (projectId: ProjectId, agentId?: string) =>
+      ["conversations", projectId, agentId ?? ""] as const,
     messages: (id: string) => ["conversations", "messages", id] as const,
   },
   capabilities: {

@@ -92,11 +92,12 @@ describe("approvePermissionForPhase", () => {
   });
 
   it("still returns a never-granted sentinel for phases with no backend gate", () => {
-    // `discovery`, `strategy`, `migration_mapping`, `validation` and `data_engineering`
-    // genuinely have no entry in `_PHASE_PERMISSION`. Fail-closed is the right answer
-    // for them, and pinning it here stops a future edit to the `default` case from
-    // silently granting something.
-    for (const phase of ["discovery", "strategy", "migration_mapping"]) {
+    // `strategy`, `migration_mapping`, `validation` and `data_engineering` genuinely
+    // have no entry in `_PHASE_PERMISSION`. Fail-closed is the right answer for them,
+    // and pinning it here stops a future edit to the `default` case from silently
+    // granting something. (`discovery` left this list when Track 3 built it: it has
+    // `artifact:approve_discovery` now.)
+    for (const phase of ["strategy", "migration_mapping", "validation"]) {
       const sentinel = approvePermissionForPhase(phase);
       expect(sentinel).toBe("artifact:approve_review");
       const memberSession = buildSession([

@@ -14,10 +14,18 @@ def test_greenfield_and_enhancement_share_the_same_nine_agent_portfolio():
     assert TRACK_PORTFOLIOS["enhancement"] == _PORTFOLIO_1
 
 
-def test_portfolios_2_through_4_are_empty_until_their_agents_are_built():
-    assert TRACK_PORTFOLIOS["modernization"] == []
+def test_portfolios_hold_only_agents_that_are_built():
+    """Track 3 has its first two agents (Phase 1); Tracks 4 and 5 have none yet."""
+    assert TRACK_PORTFOLIOS["modernization"] == ["requirements_modernization", "discovery"]
     assert TRACK_PORTFOLIOS["rpa_infra"] == []
     assert TRACK_PORTFOLIOS["data_engineering"] == []
+
+
+def test_track3_agents_are_not_in_portfolio_1():
+    """Independent portfolios (design doc §1.4): nothing of Track 3's leaks into the
+    list Greenfield and Enhancement share."""
+    assert "requirements_modernization" not in _PORTFOLIO_1
+    assert "discovery" not in _PORTFOLIO_1
 
 
 def test_every_portfolio_1_agent_has_a_default_reach_row():
@@ -57,6 +65,7 @@ def test_every_delivery_role_reaches_only_what_it_owns():
         "development": "developer", "testing": "qa",
         "security": "security_engineer", "deployment": "devops_engineer",
         "plan": "scrum_master",
+        "requirements_modernization": "ba", "discovery": "ba",
     }
     for agent_id, reach in AGENT_DEFAULT_REACH.items():
         for role, involvement in reach.items():

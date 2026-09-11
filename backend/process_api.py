@@ -1014,6 +1014,18 @@ app.include_router(security_router, prefix="/sdlc/agent/security", tags=["securi
 # Documentation: standalone interactive doc-generation chat (read-only on the repo; optional gated docs PR)
 from agents_orchestrator.documentation_agent.documentation_standalone_api import documentation_standalone_router
 app.include_router(documentation_standalone_router, prefix="/sdlc/agent/documentation", tags=["documentation"], dependencies=[_VIEW_DEP])
+
+# Track 3 — Code Modernization (Portfolio 2). Their standalone sockets check the
+# PROJECT'S TRACK as well as the caller's reach (shared/authz/agent_access.py::
+# assert_agent_access_for_chat_on_track), so a Greenfield project cannot reach them.
+from agents_orchestrator.requirements_modernization_agent.requirements_modernization_agent_api import (
+    requirements_modernization_router,
+)
+from agents_orchestrator.discovery_agent.discovery_agent_api import discovery_router
+from shared.routers.modernization import modernization_router
+app.include_router(requirements_modernization_router, prefix="/sdlc/agent/requirements-modernization", tags=["requirements-modernization"], dependencies=[_VIEW_DEP])
+app.include_router(discovery_router, prefix="/sdlc/agent/discovery", tags=["discovery"], dependencies=[_VIEW_DEP])
+app.include_router(modernization_router, tags=["modernization"], dependencies=[_VIEW_DEP])
 app.include_router(deployment_router_orchestrator, prefix="/sdlc/agent/deployment_orchestrator", tags=["deployment-orchestrator"], dependencies=[_VIEW_DEP])
 # Testing: active orchestrated router serves both the primary and legacy prefixes (mirrors dev agent pattern)
 app.include_router(testing_router_orchestrator, prefix="/sdlc/agent/testing", tags=["testing"], dependencies=[_VIEW_DEP])

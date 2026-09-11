@@ -32,6 +32,9 @@ from agents_orchestrator.orchestrator2.registry import AGENT_IDS
 #: are resolved by different branches and are not in this table.
 _WRITES_UNDER = {
     "requirements": ("requirements_agent", "output"),
+    # Track 3 — agents_orchestrator/modernization_common/files.py::output_dir.
+    "requirements_modernization": ("requirements_modernization_agent", "output"),
+    "discovery": ("discovery_agent", "output"),
     "plan": ("orchestrator", "output"),
     "design": ("orchestrator", "output"),
     "testing": ("orchestrator", "output"),

@@ -40,6 +40,31 @@ pytestmark = pytest.mark.usefixtures("purge_created_orgs")
 
 
 @pytest.fixture(autouse=True)
+def _storage_is_not_what_this_file_is_about():
+    """Approval promotes a document out of the `_pending` prefix, and these rows are
+    inserted straight into the table with a blob_path and no bytes behind it.
+
+    WHY THE FIXTURE EXISTS. Whether that promote runs at all depended on ambient state:
+    `app.state.blob_client` is None until something starts the app's lifespan, so these
+    tests passed alone and failed inside the full suite, where an earlier test had
+    initialised it — and then the promote reached the real storage account looking for
+    bytes nobody uploaded. Three tests about a QUEUE, failing on storage, in one order
+    and not the other.
+
+    A double that succeeds says what the file means: the document is approved, and what
+    happens to its bytes is `test_artifact_approval`'s subject, not this one's.
+    """
+    class _Storage:
+        async def move_blob(self, src, dst, content_type=None):
+            return f"https://example.invalid/{dst}"
+
+    previous = getattr(process_api.app.state, "blob_client", None)
+    process_api.app.state.blob_client = _Storage()
+    yield
+    process_api.app.state.blob_client = previous
+
+
+@pytest.fixture(autouse=True)
 async def _dispose_shared_engine():
     yield
     from shared.db import engine

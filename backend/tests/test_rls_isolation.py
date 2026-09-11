@@ -164,16 +164,24 @@ async def test_cross_tenant_isolation():
                     "tid": str(_TENANT_A),
                 },
             )
-            # Insert the Artifact for tenant-A
+            # Insert the Artifact for tenant-A.
+            #
+            # `project_id` IS NOT NULL SINCE 0052. This insert predates that migration
+            # and named only the run, which is how an artifact used to find its project
+            # — the column was added precisely because a document can outlive its run,
+            # or never have had one. Without it the insert fails on the constraint, and
+            # a tenant-isolation test that cannot create its fixture proves nothing
+            # about isolation.
             await su_session.execute(
                 text("""
-                    INSERT INTO artifacts (id, run_id, tenant_id, artifact_type, created_at)
-                    VALUES (:id, :run_id, :tid, 'requirements', now())
+                    INSERT INTO artifacts (id, run_id, project_id, tenant_id, artifact_type, created_at)
+                    VALUES (:id, :run_id, :proj_id, :tid, 'requirements', now())
                     ON CONFLICT (id) DO NOTHING
                 """),
                 {
                     "id": str(artifact_id_a),
                     "run_id": str(run_id_a),
+                    "proj_id": str(proj_a_id),
                     "tid": str(_TENANT_A),
                 },
             )

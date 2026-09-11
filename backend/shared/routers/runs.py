@@ -575,6 +575,13 @@ def _dedupe_by_directory(
 # Fail-soft: None until then.
 _GENERATED_STAGE_DIRS = {"security", "code_review", "deployment"}
 
+#: Track 3's agents write under their own segment, the way Requirements does under
+#: `requirements_agent` — see agents_orchestrator/modernization_common/files.py.
+_SEGMENT_OUTPUT_STAGES = {
+    "requirements_modernization": "requirements_modernization_agent",
+    "discovery": "discovery_agent",
+}
+
 
 async def _run_stage_output_dir(
     run_id: str,
@@ -614,6 +621,9 @@ async def _run_stage_output_dir(
 
     if stage == "requirements":
         return _glob_user_scoped_dir(run_id, "output", segment="requirements_agent")
+
+    if stage in _SEGMENT_OUTPUT_STAGES:
+        return _glob_user_scoped_dir(run_id, "output", segment=_SEGMENT_OUTPUT_STAGES[stage])
 
     if stage in _ORCHESTRATOR_OUTPUT_STAGES:
         return _glob_user_scoped_dir(run_id, "output")
@@ -947,7 +957,11 @@ async def record_approval(
             assert_can_administer_project,
         )
 
-        project = await db.get(Project, run.project_id)
+        # A RUN WITH NO PROJECT HAS NO ADMINISTRATOR, so there is nothing to ask. This
+        # used to call `db.get(Project, None)` regardless: a pointless round trip on
+        # every refusal, and the reason this route's own test could not reach the
+        # branch at all.
+        project = await db.get(Project, run.project_id) if run.project_id else None
         if project is not None:
             try:
                 await assert_can_administer_project(db, request, project)

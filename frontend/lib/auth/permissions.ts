@@ -72,6 +72,10 @@ export function approvePermissionForPhase(phase: Phase | string): string {
       return "artifact:approve_deployment" satisfies Permission;
     case "documentation":
       return "artifact:approve_documentation";
+    case "requirements_modernization":
+      return "artifact:approve_requirements_modernization";
+    case "discovery":
+      return "artifact:approve_discovery";
     default:
       // SAFE-DENY sentinel: not in backend ALL_PERMISSIONS / _PHASE_PERMISSION,
       // so no non-admin role can ever hold it — hasPermission stays fail-closed.

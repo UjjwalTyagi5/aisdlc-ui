@@ -5,9 +5,18 @@ import re
 import pytest
 
 from agents_orchestrator.orchestrator2 import registry as reg, router
-from agents_orchestrator.orchestrator2.registry import AGENT_IDS
+from agents_orchestrator.orchestrator2.registry import AGENT_IDS, agent_ids_for_track
 from agents_orchestrator.orchestrator2.router import DISPLAY_NAMES, prefilter
 from shared.services import model_resolver as mr
+
+#: The tracks with built agents. Every registered agent is offered on exactly one of
+#: them, and each track's tool list and roster are checked against its own portfolio.
+_TRACKS = ("greenfield", "modernization")
+_GREENFIELD = set(agent_ids_for_track("greenfield"))
+
+
+def _track_of(agent_id):
+    return next(t for t in _TRACKS if agent_id in agent_ids_for_track(t))
 
 
 @pytest.mark.parametrize(
@@ -64,14 +73,17 @@ def test_the_project_manager_agent_is_not_named_plan_or_pm_in_display_names():
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
 def test_every_agent_routes_by_its_display_name(agent_id):
-    """Derived from AGENT_IDS, so a new agent cannot silently miss coverage."""
-    assert prefilter(f"run the {DISPLAY_NAMES[agent_id]} agent") == agent_id
+    """Derived from AGENT_IDS, so a new agent cannot silently miss coverage. Each is
+    named inside its OWN track — a name resolves only within the turn's portfolio."""
+    pool = agent_ids_for_track(_track_of(agent_id))
+    assert prefilter(f"run the {DISPLAY_NAMES[agent_id]} agent", pool) == agent_id
 
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
 def test_every_agent_routes_by_its_raw_id(agent_id):
     """`code_review` / `code-review` normalise to the same words as the display name."""
-    assert prefilter(f"switch to the {agent_id} agent") == agent_id
+    pool = agent_ids_for_track(_track_of(agent_id))
+    assert prefilter(f"switch to the {agent_id} agent", pool) == agent_id
 
 
 # ── adversarial: the cases that must NOT route ────────────────────────────────
@@ -384,9 +396,20 @@ def _tool_names(specs):
 def test_the_tool_list_covers_exactly_the_registry():
     """One tool per agent the engine can actually run — not a hand-typed list that
     can drift from it."""
+    # Untracked callers get the default (Greenfield) portfolio — the nine, as always.
     assert _tool_names(router._tool_specs()) == {
-        f"{router._TOOL_PREFIX}{agent_id}" for agent_id in reg.REGISTRY
+        f"{router._TOOL_PREFIX}{agent_id}" for agent_id in _GREENFIELD
     }
+    # Each track's list is exactly its own portfolio, and between them they cover every
+    # agent the engine can run — no registered agent is unreachable from every track.
+    covered = set()
+    for track in _TRACKS:
+        scoped = reg.registry_for_track(track)
+        assert _tool_names(router._tool_specs(scoped)) == {
+            f"{router._TOOL_PREFIX}{agent_id}" for agent_id in scoped
+        }
+        covered |= set(scoped)
+    assert covered == set(reg.REGISTRY)
 
 
 def test_the_tool_list_cannot_offer_an_agent_the_engine_cannot_run(monkeypatch):
@@ -400,7 +423,7 @@ def test_the_tool_list_cannot_offer_an_agent_the_engine_cannot_run(monkeypatch):
 
     names = _tool_names(router._tool_specs())
     assert f"{router._TOOL_PREFIX}security" not in names
-    assert len(names) == len(AGENT_IDS) - 1
+    assert len(names) == len(_GREENFIELD) - 1
 
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
@@ -414,7 +437,7 @@ def test_every_tool_carries_its_display_name_and_a_description(agent_id):
 
     The boilerplate's length is measured below rather than quoted, because the last
     quoted figure (62) was wrong by five characters and nothing noticed."""
-    spec = next(s["function"] for s in router._tool_specs()
+    spec = next(s["function"] for s in router._tool_specs(reg.REGISTRY)
                 if s["function"]["name"] == f"{router._TOOL_PREFIX}{agent_id}")
     capability = router._CAPABILITIES[agent_id]
     display_name = DISPLAY_NAMES[agent_id]
@@ -560,11 +583,14 @@ def test_the_prompt_names_no_routing_tool_outside_the_registry():
     `- Marketing agent (route_to_marketing): ...`, and a phantom in the prompt's prose
     body, both passed the whole suite. This compares the tool ids the prompt names
     ANYWHERE against `REGISTRY`, so neither can."""
-    advertised = _advertised_agent_ids(router._system_prompt())
-    assert advertised == set(reg.REGISTRY), (
-        f"the prompt advertises {sorted(advertised)}, the registry holds "
-        f"{sorted(reg.REGISTRY)}"
-    )
+    for track in _TRACKS:
+        scoped = reg.registry_for_track(track)
+        advertised = _advertised_agent_ids(router._system_prompt(scoped, track))
+        assert advertised == set(scoped), (
+            f"the {track} prompt advertises {sorted(advertised)}, its portfolio holds "
+            f"{sorted(scoped)}"
+        )
+    assert _advertised_agent_ids(router._system_prompt()) == _GREENFIELD
 
 
 def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
@@ -574,22 +600,26 @@ def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
     is `test_the_prompt_names_no_routing_tool_outside_the_registry`'s job. What this
     still buys is the COUNT: a roster line carrying no `(route_to_x)` at all is
     invisible to a set comparison over tool ids and perfectly visible to the model."""
-    prompt = router._system_prompt()
-    lines = _roster_lines(prompt)
+    for track in _TRACKS:
+        scoped = reg.registry_for_track(track)
+        prompt = router._system_prompt(scoped, track)
+        lines = _roster_lines(prompt)
 
-    listed = {
-        line.split("(", 1)[1].split(")", 1)[0].removeprefix(router._TOOL_PREFIX)
-        for line in lines
-        if "(" in line and ")" in line
-    }
-    assert listed == set(reg.REGISTRY), (
-        f"the roster advertises {sorted(listed)}, the registry holds "
-        f"{sorted(reg.REGISTRY)}"
-    )
-    assert len(lines) == len(reg.REGISTRY), (
-        f"{len(lines)} roster lines for {len(reg.REGISTRY)} agents: {lines}"
-    )
-    assert "Plan agent" not in prompt
+        # By the TOOL NAME in parentheses, not the first "(" — a display name may
+        # carry one of its own ("Requirements (migration intent)").
+        listed = {
+            m.group(1)
+            for line in lines
+            if (m := re.search(rf"\({re.escape(router._TOOL_PREFIX)}(\w+)\)", line))
+        }
+        assert listed == set(scoped), (
+            f"the {track} roster advertises {sorted(listed)}, its portfolio holds "
+            f"{sorted(scoped)}"
+        )
+        assert len(lines) == len(scoped), (
+            f"{len(lines)} roster lines for {len(scoped)} agents: {lines}"
+        )
+        assert "Plan agent" not in prompt
 
 
 @pytest.mark.parametrize("agent_id", AGENT_IDS)
@@ -601,7 +631,8 @@ def test_the_roster_offers_no_agent_as_a_bare_name(agent_id):
     Measured: reducing the roster to `- The X agent (route_to_x).` left the suite fully
     green while advertising all nine agents to the model as bare names — verbatim the
     failure `_CAPABILITIES`' header comment claims is prevented."""
-    prompt = router._system_prompt()
+    track = _track_of(agent_id)
+    prompt = router._system_prompt(reg.registry_for_track(track), track)
     capability = router._CAPABILITIES[agent_id]
     line = _roster_line_for(prompt, agent_id)
 
@@ -622,8 +653,8 @@ def test_the_routing_prompt_cannot_describe_an_agent_the_registry_lacks(monkeypa
     prompt = router._system_prompt()
     assert f"{router._TOOL_PREFIX}security" not in prompt
     assert "Security agent" not in prompt
-    assert _advertised_agent_ids(prompt) == set(registry_without_security)
-    assert len(_roster_lines(prompt)) == len(AGENT_IDS) - 1
+    assert _advertised_agent_ids(prompt) == _GREENFIELD - {"security"}
+    assert len(_roster_lines(prompt)) == len(_GREENFIELD) - 1
 
 
 def test_the_roster_and_the_tool_list_name_the_same_agents():
@@ -1108,5 +1139,5 @@ async def test_every_agent_is_reachable_by_meaning(monkeypatch):
     for agent_id in AGENT_IDS:
         _install(monkeypatch, response=_FakeAIMessage(
             tool_calls=[_tool_call(f"{router._TOOL_PREFIX}{agent_id}")]))
-        d = await _route()
+        d = await _route(track=_track_of(agent_id))
         assert d.agent_id == agent_id

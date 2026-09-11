@@ -16,6 +16,7 @@ import { DocumentCard } from "@/components/app/document-card";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { DocumentList } from "@/components/app/document-list";
 import { GeneratedDocuments } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
@@ -118,10 +119,17 @@ export default function DesignPage() {
   // stories through `context.requirements` (the backend formats pipeline_context
   // .requirements into the agent input).
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [agentModel, setAgentModel] = React.useState<string>();
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "design",
     projectId,
+    // The page's model picker. Without it the chat resolved with no model and ran on
+    // whichever provider connection sorts first by display name.
+    offeringId: agentModel,
     sessionKey: projectId,
     onArtifact: () => {
       queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });

@@ -158,6 +158,9 @@ class Run(Base):
     security_artifacts: Mapped[dict | None] = mapped_column(JSONB)
     deployment_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     documentation_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Track 3 (Code Modernization) — its own portfolio, its own columns (migration 0057).
+    migration_intent_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    discovery_artifacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Orchestrator state â€” tracks which SDLC stage is active and whether a human gate is pending
     current_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gate_pending: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")

@@ -595,6 +595,7 @@ export const segmentLabels: Record<string, string> = {
   onboarding: "Onboarding",
   deployment: "Deployment",
   documentation: "Documentation",
+  "requirements-modernization": "Requirements (migration intent)",
   discovery: "Discovery & Assessment",
   strategy: "Strategy",
   "migration-mapping": "Migration Mapping",

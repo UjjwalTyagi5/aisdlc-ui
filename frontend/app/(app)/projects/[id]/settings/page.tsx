@@ -437,6 +437,7 @@ export default function ProjectSettingsPage() {
                 onAccessModeChange={setAccessModeSel}
                 disabled={!canUpdate}
                 workspaceId={projectWorkspaceId}
+                track={project.track}
               />
               <div className="flex justify-end gap-2">
                 <Button

@@ -32,11 +32,60 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
+from config.agent_registry import UnknownTrackError, stage_order_for_track
 from shared.services.orchestrator.progression import STAGE_ORDER
 
 # The canonical nine, in the canonical order. Never hand-typed elsewhere in this
 # package — everything else is keyed off this tuple or off STAGE_ORDER directly.
+#
+# THIS IS THE GREENFIELD/ENHANCEMENT PORTFOLIO, not "every agent that exists".
+# `STAGE_ORDER` is `AGENT_REGISTRY` sorted whole, with no notion of track — it
+# happens to equal that portfolio today only because `AGENT_REGISTRY` currently
+# holds nothing else. The moment a Track 3/4/5 agent is added to
+# `AGENT_REGISTRY`, `AGENT_IDS` (and everything module-level below keyed off it —
+# `REGISTRY`, `DISPLAY_NAMES`, `_CAPABILITIES` in router.py) would silently grow
+# to include it, offering it to every project regardless of track. Every caller
+# that must not do that — `orchestrator2.router.route` and
+# `orchestrator2.dispatch.run_agent` — goes through `agent_ids_for_track` /
+# `registry_for_track` below instead of this tuple. `AGENT_IDS` stays exactly as
+# it is for the many callers that are legitimately track-agnostic today
+# (deliverables rendering, transcript budgeting, the DB CHECK constraint, the
+# frontend enum) — none of those need to change until a Track 3 agent actually
+# exists to render or budget for.
 AGENT_IDS: tuple[str, ...] = tuple(STAGE_ORDER)
+
+
+def agent_ids_for_track(track: str) -> tuple[str, ...]:
+    """The agent ids one track's Orchestrator may offer or run, in pipeline order.
+
+    `stage_order_for_track` already raises `UnknownTrackError` for a track string
+    outside `TRACK_PORTFOLIOS`'s five keys — not re-caught here, so a typo in a
+    call site surfaces as itself rather than as an empty, misleadingly "nothing
+    built yet"-shaped portfolio.
+    """
+    return tuple(stage_order_for_track(track))
+
+
+def registry_for_track(track: str) -> dict[str, "AgentCapability"]:
+    """The `AgentCapability` map for one track — the ids `agent_ids_for_track`
+    names, each resolved against `REGISTRY` below.
+
+    RAISES, rather than skipping, an id the track's portfolio names but `REGISTRY`
+    does not carry a capability for. That combination means an agent was added to
+    `TRACK_PORTFOLIOS` in `config/agent_registry.py` before its `AgentCapability`
+    was registered here — build order matters, and this is where that mistake
+    would otherwise go quiet: routing would simply not offer the agent, which
+    looks identical to the track legitimately having fewer agents.
+    """
+    ids = agent_ids_for_track(track)
+    missing = [aid for aid in ids if aid not in REGISTRY]
+    if missing:
+        raise UnknownAgentError(
+            f"track {track!r} names agent id(s) {missing} with no AgentCapability "
+            f"registered in REGISTRY yet — register them here before adding them "
+            f"to TRACK_PORTFOLIOS in config/agent_registry.py"
+        )
+    return {aid: REGISTRY[aid] for aid in ids}
 
 
 class UnknownAgentError(Exception):
@@ -230,6 +279,36 @@ def _load_prompt_documentation() -> str:
     return DOC_SYSTEM_PROMPT
 
 
+# ── Track 3 — Code Modernization ────────────────────────────────────────────
+# Portfolio 2's own agents (multi-track-agent-access-design.md §1.4). Only a project
+# on the modernization track is ever offered or dispatched them — `registry_for_track`
+# is what every track-scoped caller reads, never this table directly.
+def _load_graph_requirements_modernization() -> Any:
+    from agents_orchestrator.requirements_modernization_agent.agents.intake import app
+
+    return app
+
+
+def _load_prompt_requirements_modernization() -> str:
+    from agents_orchestrator.requirements_modernization_agent.agents.intake import (
+        MIGRATION_INTENT_SYS_MESSAGE,
+    )
+
+    return MIGRATION_INTENT_SYS_MESSAGE
+
+
+def _load_graph_discovery() -> Any:
+    from agents_orchestrator.discovery_agent.agents.assessor import app
+
+    return app
+
+
+def _load_prompt_discovery() -> str:
+    from agents_orchestrator.discovery_agent.agents.assessor import DISCOVERY_SYS_MESSAGE
+
+    return DISCOVERY_SYS_MESSAGE
+
+
 REGISTRY: dict[str, AgentCapability] = {
     "requirements": AgentCapability(
         agent_id="requirements",
@@ -285,6 +364,18 @@ REGISTRY: dict[str, AgentCapability] = {
         agent_id="documentation",
         load_graph=_load_graph_documentation,
         load_prompt=_load_prompt_documentation,
+        mode="stream",
+    ),
+    "requirements_modernization": AgentCapability(
+        agent_id="requirements_modernization",
+        load_graph=_load_graph_requirements_modernization,
+        load_prompt=_load_prompt_requirements_modernization,
+        mode="stream",
+    ),
+    "discovery": AgentCapability(
+        agent_id="discovery",
+        load_graph=_load_graph_discovery,
+        load_prompt=_load_prompt_discovery,
         mode="stream",
     ),
 }

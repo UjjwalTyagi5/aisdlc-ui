@@ -22,6 +22,7 @@ import { MarkdownMessage } from "@/components/app/markdown-message";
 import { DocTargetDialog } from "@/components/app/doc-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
 import { getDocSet } from "@/lib/api/documentation";
@@ -61,11 +62,15 @@ export default function DocumentationPage() {
   const [prepared, setPrepared] = React.useState<PrepareDocResult | null>(null);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // A `?session=` link from the project overview opens the drawer on that
+  // conversation rather than a blank one.
+  const linkedSession = useChatDeepLink(setChatOpen);
   const [selId, setSelId] = React.useState<string | null>(null);
 
   // projectId turns on the durable session the attachments are stored against —
   // see the Code Review page for why `attachFiles` needs one.
   const chat = useAgentChat({
+    openSessionId: linkedSession,
     agent: "documentation",
     projectId: id,
     sessionKey: id,

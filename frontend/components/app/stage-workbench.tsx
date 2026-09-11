@@ -143,6 +143,7 @@ export function StageWorkbench({
   const chat = useAgentChat({
     agent,
     projectId,
+    offeringId: agentModel,
     sessionKey: projectId,
     onArtifact: () => {
       queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });

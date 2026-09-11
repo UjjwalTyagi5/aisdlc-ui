@@ -25,7 +25,7 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { PhasePipeline } from "@/components/app/phase-pipeline";
 import { DeliveryStatusPicker } from "@/components/app/delivery-status-badge";
 import { ProjectCostPanel } from "@/components/app/project-cost-panel";
-import { ProjectRunsTable } from "@/components/app/project-runs-table";
+import { RecentChatsList } from "@/components/app/recent-chats-list";
 import { RunAgentButton } from "@/components/app/run-agent-button";
 import { isStoredArtifact } from "@/components/app/artifact-list";
 import { RequireRole } from "@/components/auth/require-role";
@@ -41,8 +41,9 @@ import {
   type ProjectDeliveryStatus,
 } from "@/lib/schemas/project";
 import { listRuns } from "@/lib/api/runs";
+import { listConversations } from "@/lib/api/conversations";
 import { qk } from "@/lib/api/query-keys";
-import { BUILT_AGENTS, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
+import { builtAgentsForTrack, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
 import { ROLE_META } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
@@ -105,7 +106,9 @@ export default function ProjectOverviewPage() {
     // for which agents are on it and what "verified" meant for each. Agents not on
     // it keep their old, unverified code per the design doc's "assume broken until
     // properly rebuilt" framing (multi-track-agent-access-design.md).
-    const builtAgents: readonly Phase[] = BUILT_AGENTS;
+    // Per TRACK: a Code Modernization project's Design, Development and the rest are
+    // Track 3's own agents, not yet built, even though Portfolio 1's are.
+    const builtAgents: readonly Phase[] = builtAgentsForTrack(track);
     return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
   }, [viewerRole, projectQ.data?.track]);
 
@@ -131,6 +134,16 @@ export default function ProjectOverviewPage() {
   const artifactsQ = useQuery({
     queryKey: qk.artifacts.forProject(id),
     queryFn: () => listArtifacts(id),
+  });
+
+  // THE LATEST CONVERSATIONS, whichever agent they were with. Runs used to lead this
+  // page and could not say much: two of their three columns are unbound (duration is
+  // always "—", cost always $0.0000), and a run is a thing the platform did, not a
+  // thing the person was doing. A chat is where the work actually happened, and it can
+  // be resumed — which is why every row here is a link back into it.
+  const chatsQ = useQuery({
+    queryKey: qk.conversations.list(id),
+    queryFn: () => listConversations(id, undefined, 10),
   });
 
   if (projectQ.isLoading) {
@@ -187,7 +200,7 @@ export default function ProjectOverviewPage() {
   const runs = runsQ.data?.items ?? [];
   const artifacts = artifactsQ.data ?? [];
 
-  const recentRuns = runs.slice(0, 10);
+  const recentChats = chatsQ.data ?? [];
 
   // FILES THE PROJECT PRODUCED, not board rows. `listArtifacts` with no phase filter
   // also returns the SYNTHESISED story artifacts materialised from a run's
@@ -201,7 +214,8 @@ export default function ProjectOverviewPage() {
   const recentArtifacts = artifacts
     .filter((a) => isStoredArtifact(a.id))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, 8);
+    // Ten, matching the chat list beside it, and the panel scrolls rather than growing.
+    .slice(0, 10);
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -334,28 +348,31 @@ export default function ProjectOverviewPage() {
             />
           )}
 
-          {/* Recent runs */}
-          <section aria-labelledby="runs-heading" className="space-y-3">
+          {/* Recent chats */}
+          <section aria-labelledby="chats-heading" className="space-y-3">
             <div className="flex items-baseline justify-between">
-              <h2 id="runs-heading" className="text-lg font-semibold tracking-tight">
-                Recent runs
+              <h2 id="chats-heading" className="text-lg font-semibold tracking-tight">
+                Recent chats
               </h2>
-              {runs.length > recentRuns.length && (
+              {runs.length > 0 && (
                 <Button variant="link" size="sm" asChild className="h-auto p-0">
-                  <Link href={`/runs?projectId=${project.id}`}>View all {runs.length}</Link>
+                  <Link href={`/runs?projectId=${project.id}`}>All runs ({runs.length})</Link>
                 </Button>
               )}
             </div>
-            {runsQ.isError ? (
+            {chatsQ.isError ? (
               <ErrorState
-                title="Couldn't load runs"
+                title="Couldn't load chats"
                 description={
-                  runsQ.error instanceof Error ? runsQ.error.message : "Unknown error."
+                  chatsQ.error instanceof Error ? chatsQ.error.message : "Unknown error."
                 }
-                onRetry={() => runsQ.refetch()}
+                onRetry={() => chatsQ.refetch()}
               />
             ) : (
-              <ProjectRunsTable runs={runsQ.isLoading ? null : recentRuns} />
+              <RecentChatsList
+                projectId={project.id}
+                sessions={chatsQ.isLoading ? null : recentChats}
+              />
             )}
           </section>
 
@@ -449,7 +466,10 @@ function RecentArtifactsList({
   return (
     <Card>
       <CardContent className="p-2">
-        <ul className="divide-y">
+        {/* Its own scrollbar, for the same reason the chat list has one: this panel
+            sits at the bottom of a long page, and a project with thirty documents
+            turned the overview into a scroll to nowhere. */}
+        <ul className="max-h-[22rem] divide-y overflow-y-auto">
           {artifacts.map((a) => (
             <li key={a.id}>
               <Link
