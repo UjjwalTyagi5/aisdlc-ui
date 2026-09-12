@@ -36,7 +36,7 @@ const OWNERS = [
  *
  * Each project's `pipeline` uses only the stages its track actually runs, per
  * `lib/tracks.ts::agentsForTrack()` — a Track 4 project has no Design or Code
- * Review stage, and a Track 3 project has Discovery & Assessment and Strategy.
+ * Review stage, and a Track 3 project has Dependency and Risk and Strategy.
  */
 export const PROJECTS: Project[] = [
   {
@@ -284,7 +284,7 @@ export const PROJECTS: Project[] = [
 /**
  * Runs are generated from each project's own track roster (PRD §6), so a
  * Track 4 project never shows a Design run it cannot have, and a Track 3
- * project shows real Discovery & Assessment and Strategy runs.
+ * project shows real Dependency and Risk and Strategy runs.
  */
 
 const PHASE_BY_AGENT: Record<Run["agent"], Run["phase"]> = {

@@ -1,4 +1,10 @@
-# Track 3 Phase 1 — Requirements (migration-intent) + Discovery & Assessment
+# Track 3 Phase 1 — Migration Intent + Dependency and Risk
+
+> **RENAMED (2026-09-12).** Requirements (migration intent) is now **Migration Intent**,
+> and Discovery & Assessment is now **Dependency and Risk**. Display names only: the ids
+> `requirements_modernization` and `discovery`, the routes and the artifact keys are
+> unchanged, and the Orchestrator still understands the old names. The text below keeps
+> the names it was written with.
 
 > **STATUS (2026-09-10): BUILT, on branch `track-3-phase1-agents`** (uncommitted when
 > written). Plan and task list: `docs/superpowers/plans/2026-09-10-track3-phase1-agents.md`.
@@ -47,6 +53,14 @@
 >   rejected through the existing version gate (no self-approval).
 > - The Requirements agent records only what the user said or confirmed — its own
 >   examples never land in the brief.
+> - *The Orchestrator is self-contained (2026-09-11):* the chat can pull the code — the
+>   Requirements agent got `find_legacy_repositories` / `pull_legacy_code` (the stage's own
+>   connection), and the router sends "pull the code" to it while the intent is being
+>   captured. Code pulled in an Orchestrator conversation lives in its own copy
+>   (`legacy-code/<project>/runs/<run>/`, chosen by `current_scope()`), and what its agents
+>   record stays in its Deliverables — no page versions. A page's Discovery chat reads the
+>   brief from the Requirements page's versions (approved first, else the newest draft
+>   unless publication is enforced), never from an Orchestrator run.
 > - *Connector RBAC for pulls (2026-09-11):* a pull's credential comes only from the
 >   connection wired to the stage whose page (or agent) asked, via
 >   `get_connector_for_session` — Business Unit grant (Integrations page) → stage wiring

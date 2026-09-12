@@ -1,4 +1,4 @@
-"""The Discovery & Assessment agent's graph (Track 3 — Code Modernization).
+"""The Dependency and Risk agent's graph (Track 3 — Code Modernization).
 
 `app` is what both entry points run: the Orchestrator's dispatch (through
 `orchestrator2/registry.py`) and the standalone socket (`discovery_agent_api.py`).

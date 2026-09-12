@@ -39,7 +39,7 @@ const usd = (n: number) =>
  * FORM. Both are magnitude comparisons, so both are bars. Time runs left to
  * right along the bottom, which is the only orientation a month axis reads in;
  * agents are ranked by spend and run horizontally, because "Documentation" and
- * "Discovery & Assessment" are labels that do not fit under a vertical bar and
+ * "Dependency and Risk" are labels that do not fit under a vertical bar and
  * a ranked list is read top-down anyway.
  *
  * COLOUR. One hue throughout, `--series-1`, the same token the dashboard's

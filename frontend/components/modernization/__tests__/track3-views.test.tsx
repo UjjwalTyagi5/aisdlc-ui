@@ -126,3 +126,64 @@ describe("the assessment", () => {
     expect(screen.getByText(/CVE-2024-21907/)).toBeTruthy();
   });
 });
+
+describe("the version-2 brief (the agent's recommendation, structured)", () => {
+  // `brief_v2` is a MigrationIntentArtifact the backend produced (v2 fields, statuses
+  // filled in from the pulled code) — so a drift between the stored shape and the view
+  // fails here.
+  const v2 = MigrationIntentResponse.parse({
+    projectId: "p1", runId: "r1", updatedAt: null, payload: fixtures.brief_v2,
+  }).payload!;
+
+  it("opens with the goal and the key facts", () => {
+    render(<MigrationBriefCard brief={v2} />);
+    expect(screen.getByRole("heading", { name: "ClaimTrack" })).toBeTruthy();
+    expect(screen.getByText(/without changing anything brokers, the bank or the regulator see/)).toBeTruthy();
+    const fact = (label: string) => screen.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
+    expect(fact("Deadline")).toBe("30 Jun 2027");
+    expect(fact("Budget")).toBe("$450,000");
+    expect(fact("End of life today")).toBe("3 parts"); // from the code, not the model
+    expect(fact("Target stack")).toBe("Recommended");
+  });
+
+  it("shows the change at a glance: today (by support status) → target, and the kind of change", () => {
+    render(<MigrationBriefCard brief={v2} />);
+    const glance = screen.getByRole("region", { name: "The change at a glance" });
+    const row = within(glance).getByText("Broker portal").closest("tr")!;
+    expect(within(row).getByText("AngularJS 1.5 · Gulp 3 on Node 8")).toBeTruthy();
+    expect(within(row).getByText("End of life")).toBeTruthy();
+    expect(within(row).getByText("React 18 · TypeScript · Vite on Node 22 LTS")).toBeTruthy();
+    expect(within(row).getByText("Rewrite")).toBeTruthy();
+  });
+
+  it("labels the target as the agent's recommendation, with its reasons and alternatives", () => {
+    render(<MigrationBriefCard brief={v2} />);
+    const rec = screen.getByRole("region", { name: "Recommended target stack" });
+    expect(within(rec).getByText("Recommended by the Migration Intent agent")).toBeTruthy();
+    expect(within(rec).getByText("Accepted when this brief is signed off.")).toBeTruthy();
+    expect(within(rec).getByText("Azure Kubernetes Service")).toBeTruthy();
+  });
+
+  it("shows each module's change, with the change mix and effort", () => {
+    render(<MigrationBriefCard brief={v2} />);
+    const modules = screen.getByRole("region", { name: "What changes in each module" });
+    expect(within(modules).getByLabelText("Change mix")).toBeTruthy();
+    expect(within(modules).getByText("4 upgrade")).toBeTruthy();
+    expect(within(modules).getByText("1 rewrite")).toBeTruthy();
+    expect(within(modules).getByText("High effort")).toBeTruthy();
+    expect(within(modules).getByText("javax.* → jakarta.* namespace")).toBeTruthy();
+  });
+
+  it("shows the trade-offs, the timeline in date order, and the measures", () => {
+    render(<MigrationBriefCard brief={v2} />);
+    const trade = screen.getByRole("region", { name: "Trade-offs" });
+    expect(within(trade).getAllByText("What we gain")).toHaveLength(4);
+    const timeline = screen.getByRole("region", { name: "Timeline" });
+    const items = within(timeline).getAllByRole("listitem").map((li) => li.textContent);
+    expect(items[0]).toContain("Legacy change freeze");
+    expect(items[items.length - 1]).toContain("Legacy servers decommissioned");
+    const success = screen.getByRole("region", { name: "How we will measure success" });
+    expect(within(success).getByText("≤ 300 ms")).toBeTruthy();
+    expect(screen.getByText("Azure DevOps / Project 2")).toBeTruthy();
+  });
+});

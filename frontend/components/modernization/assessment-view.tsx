@@ -14,7 +14,7 @@ import type {
 } from "@/lib/schemas/modernization";
 
 /**
- * Discovery & Assessment, rendered for the person who has to accept it as the
+ * The Dependency and Risk assessment, rendered for the person who has to accept it as the
  * planning baseline (Track 3).
  *
  * NOT a document viewer. The assessment is data — modules with scores and tiers, a

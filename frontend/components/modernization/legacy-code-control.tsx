@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
  * The project's legacy code, as both Track 3 pages show it: what is pulled (repository,
  * commit, when), whether a pull is running, and the Pull dialog.
  *
- * ONE CHECKOUT PER PROJECT. Pulling from the Requirements page or the Discovery page
+ * ONE CHECKOUT PER PROJECT. Pulling from the Migration Intent page or the Dependency and Risk page
  * fills the same checkout — both agents read it — so the status is keyed by project,
  * not by page. While a pull runs the status is polled; the page learns it finished
  * without anyone refreshing.
@@ -157,7 +157,7 @@ export function PullLegacyCodeDialog({
           <DialogTitle>Pull legacy code</DialogTitle>
           <DialogDescription>
             The repository is cloned read-only for this project. Both Code Modernization agents read it:
-            Requirements before it asks you about today&apos;s system, Discovery when it assesses.
+            Migration Intent before it asks you about today&apos;s system, Dependency and Risk when it assesses.
           </DialogDescription>
         </DialogHeader>
 

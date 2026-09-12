@@ -1,5 +1,5 @@
 """Read Track 3's recorded work for a project: the migration-intent brief and the
-Discovery & Assessment.
+Dependency and Risk.
 
 What the two agents record lands on a run's own column (`migration_intent_payload`,
 `discovery_artifacts` — migration 0057), on whichever run the conversation belonged
@@ -90,7 +90,7 @@ async def latest_migration_intent(
 async def latest_discovery_assessment(
     project_id: str, request: Request, db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """The project's current Discovery & Assessment, or `payload: null`."""
+    """The project's current Dependency and Risk assessment, or `payload: null`."""
     return await _latest(db, request, project_id, "discovery", "discovery_artifacts")
 
 
@@ -223,7 +223,19 @@ async def export_version(
     filename = f"{stem}-v{version}.{fmt}"
     path = os.path.join(workdir, filename)
     try:
-        await render_document(markdown, path, title=f"{stem.replace('-', ' ').title()} v{version}")
+        if stage == "requirements_modernization":
+            # The designed brief — title band, change table, timeline — not generic Markdown.
+            import asyncio  # noqa: PLC0415
+
+            from agents_orchestrator.requirements_modernization_agent.brief_document import (  # noqa: PLC0415
+                render_brief,
+            )
+            from shared.models.artifacts import MigrationIntentArtifact  # noqa: PLC0415
+
+            await asyncio.to_thread(render_brief, MigrationIntentArtifact(**row.payload), path,
+                                    {"version": version, "status": {"published": "approved"}.get(row.status, row.status)})
+        else:
+            await render_document(markdown, path, title=f"{stem.replace('-', ' ').title()} v{version}")
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(workdir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Rendering the {fmt} failed ({type(exc).__name__}).") from exc

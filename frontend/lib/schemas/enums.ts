@@ -26,7 +26,7 @@ export type Status = z.infer<typeof Status>;
  * remaining five are the track-specific additions:
  *
  *  - `requirements_modernization`  Requirements, migration-intent mode — Track 3 (PRD §23.1)
- *  - `discovery`         Discovery & Assessment — Tracks 3 & 4 (PRD §23.2, §24.2)
+ *  - `discovery`         Dependency and Risk — Tracks 3 & 4 (PRD §23.2, §24.2)
  *  - `strategy`          Strategy               — Track 3    (PRD §23.4)
  *  - `migration_mapping` Migration Mapping      — Track 4    (PRD §24.3)
  *  - `validation`        Validation             — Track 4    (PRD §24.6)

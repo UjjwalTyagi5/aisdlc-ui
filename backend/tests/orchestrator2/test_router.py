@@ -606,7 +606,7 @@ def test_the_routing_prompt_roster_is_exactly_the_registry_no_more():
         lines = _roster_lines(prompt)
 
         # By the TOOL NAME in parentheses, not the first "(" — a display name may
-        # carry one of its own ("Requirements (migration intent)").
+        # carry one of its own (Track 3's once did).
         listed = {
             m.group(1)
             for line in lines

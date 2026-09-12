@@ -8,7 +8,7 @@ the legacy remote. The Development agent's `clone_repo` is deliberately NOT reus
 it seeds and pushes a `main` branch into an empty repository, which is a write.
 
 CREDENTIALS COME FROM THE STAGE'S CONNECTOR ONLY. The project wires a connector to
-the Discovery & Assessment stage (project settings → tools); the Orchestrator's
+the Dependency and Risk stage (project settings → tools); the Orchestrator's
 dispatch and the standalone socket both bind it for the turn, and this module reads
 it back. A connector the stage may not READ is refused here — `auth_adapter` itself
 does not check the level, so this is where that check lives for a git clone.
@@ -17,12 +17,13 @@ A public repository needs no credential, but only hosts on `_ALLOWED_HOSTS` are
 accepted over plain https: an agent that would clone any URL a message contained is a
 way to make the platform fetch from inside its own network.
 
-ONE CHECKOUT PER PROJECT. On a project, the clone IS the project's legacy code
-(`modernization_common.legacy_code`): the same checkout the Requirements agent reads
-and the pages' "Pull legacy code" fills. Asked for the repository that is already
-pulled, this tool adopts it instead of cloning again; asked for another one, its clone
-replaces the project's. Only with no project bound (tests, scripts) does it clone into
-a conversation-private folder.
+ONE CHECKOUT PER SCOPE. On a project, the clone IS the legacy code of the turn's
+scope (`modernization_common.legacy_code.current_scope`): the project's checkout on a
+page's chat — the one "Pull legacy code" fills and Requirements reads — or, on an
+Orchestrator turn, that conversation's own copy. Asked for the repository already pulled
+in that scope, this tool adopts it instead of cloning again; asked for another one, its
+clone replaces it. Only with no project bound (tests, scripts) does it clone into a
+conversation-private folder.
 """
 from __future__ import annotations
 
@@ -96,7 +97,7 @@ def validate_clone_url(url: str) -> str | None:
     return (
         f"'{host or url}' is not a repository host Discovery may clone from. Supported: "
         "Azure DevOps, GitHub, GitLab and Bitbucket — or wire the project's repository "
-        "connector to the Discovery & Assessment stage."
+        "connector to the Dependency and Risk stage."
     )
 
 
@@ -137,7 +138,7 @@ async def _stage_credentials() -> tuple[str, str, str, str]:
         if not permits(level, "read"):
             return "", "", "", (
                 f"The {getattr(conn, 'display_name', 'repository')} connection is not readable "
-                "by the Discovery & Assessment stage on this project. A Project Admin can wire "
+                "by the Dependency and Risk stage on this project. A Project Admin can wire "
                 "it to this stage with read access in project settings."
             )
     try:
@@ -163,7 +164,7 @@ async def list_legacy_repositories(project: str = "") -> str:
         return refusal
     if not secret:
         return (
-            "No repository connection is available to the Discovery & Assessment stage on this "
+            "No repository connection is available to the Dependency and Risk stage on this "
             "project. A Project Admin can wire Azure DevOps or GitHub to this stage in project "
             "settings. Alternatively, give me a public https clone URL (Azure DevOps, GitHub, "
             "GitLab or Bitbucket)."
@@ -269,11 +270,11 @@ async def clone_legacy_repository(repository: str, branch: str = "") -> str:
         "ado" if host == "dev.azure.com" or host.endswith(".visualstudio.com") else "public")
     use_secret = secret if provider and provider == host_provider else ""
 
-    from config.ws_helper import get_project_id  # noqa: PLC0415
+    from agents_orchestrator.modernization_common.legacy_code import current_scope  # noqa: PLC0415
 
-    project_id = str(get_project_id() or "")
+    project_id, run_id = current_scope()
     if project_id:
-        return await _clone_for_project(s, project_id, url, branch.strip(), use_secret, problem)
+        return await _clone_for_project(s, project_id, url, branch.strip(), use_secret, problem, run_id)
 
     dest = legacy_checkout_dir()
     try:
@@ -283,7 +284,7 @@ async def clone_legacy_repository(repository: str, branch: str = "") -> str:
     except Exception as exc:  # noqa: BLE001
         hint = f" Note: {problem}" if problem else (
             "" if use_secret else " No credential was used — if the repository is private, "
-            "wire its connection to the Discovery & Assessment stage in project settings.")
+            "wire its connection to the Dependency and Risk stage in project settings.")
         return f"Clone failed: {exc}.{hint}"
 
     clean_url = urllib.parse.urlunparse(urllib.parse.urlparse(url)._replace(
@@ -309,39 +310,42 @@ def _same_repo(a: str, b: str) -> bool:
     return norm(a) == norm(b)
 
 
-def adopt_project_checkout(s: DiscoverySession, project_id: str, pull: dict) -> None:
-    """Point this conversation at the project's pulled legacy code."""
+def adopt_project_checkout(s: DiscoverySession, project_id: str, pull: dict,
+                           run_id: str | None = None) -> None:
+    """Point this conversation at the pulled legacy code of its scope."""
     from agents_orchestrator.modernization_common.legacy_code import checkout_dir  # noqa: PLC0415
 
-    s.work_dir = str(checkout_dir(project_id))
+    s.work_dir = str(checkout_dir(project_id, run_id))
     s.repo_url, s.provider = pull.get("url", ""), pull.get("provider", "")
     s.repo_name, s.branch, s.commit = pull.get("name", ""), pull.get("branch", ""), pull.get("commit", "")
     s.assessment = None
 
 
 async def _clone_for_project(s: DiscoverySession, project_id: str, url: str, branch: str,
-                             secret: str, problem: str) -> str:
+                             secret: str, problem: str, run_id: str | None = None) -> str:
     from agents_orchestrator.modernization_common import legacy_code  # noqa: PLC0415
 
-    pull = legacy_code.current_pull(project_id)
+    where = "in this conversation" if run_id else "for the project"
+    pull = legacy_code.current_pull(project_id, run_id)
     if pull and _same_repo(pull.get("url", ""), url) and (not branch or branch == pull.get("branch")):
-        adopt_project_checkout(s, project_id, pull)
+        adopt_project_checkout(s, project_id, pull, run_id)
         return json.dumps({
             "cloned": False, "reused": True, "read_only": True, "repository": pull.get("url"),
             "branch": s.branch, "commit": s.commit[:12],
-            "note": "This repository is already pulled for the project — using that checkout.",
+            "note": f"This repository is already pulled {where} — using that checkout.",
             "next": "Call assess_legacy_repository to build the assessment.",
         })
     record = await legacy_code.pull_now(
-        project_id, url, branch, user_id=str(get_user_id() or ""), secret=secret, problem=problem)
+        project_id, url, branch, user_id=str(get_user_id() or ""), secret=secret, problem=problem,
+        run_id=run_id)
     if record.get("status") != "ready":
         return f"Clone failed: {record.get('error') or 'unknown error'}"
-    adopt_project_checkout(s, project_id, record["pull"])
+    adopt_project_checkout(s, project_id, record["pull"], run_id)
     summary = (record["pull"].get("profile") or {}).get("summary") or {}
     return json.dumps({
         "cloned": True, "read_only": True, "repository": s.repo_url, "branch": s.branch,
         "commit": s.commit[:12], "files": summary.get("files"),
-        "note": "This is now the project's legacy code — the Requirements agent reads the same checkout.",
+        "note": f"This is now the legacy code {where} — the Migration Intent agent reads the same checkout.",
         "next": "Call assess_legacy_repository to build the assessment.",
     })
 

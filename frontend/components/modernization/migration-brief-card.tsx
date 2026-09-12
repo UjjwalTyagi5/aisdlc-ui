@@ -1,18 +1,68 @@
-"use client";
+import * as React from "react";
 
-import { ArrowRight, FolderGit2 } from "lucide-react";
-
-import { Badge } from "@/components/ui/badge";
 import type { MigrationIntentBrief } from "@/lib/schemas/modernization";
 
+import { sectionPlan, type BriefSection } from "./brief-display";
+import {
+  BriefHero,
+  ChangeAtAGlance,
+  Constraints,
+  ModuleChanges,
+  People,
+  RecommendedStack,
+  RepositoryLine,
+  RisksAndQuestions,
+  ScopeView,
+  Section,
+  Success,
+  Timeline,
+  TradeOffs,
+  WhyNow,
+} from "./brief-sections";
+
 /**
- * The migration-intent brief, as the Requirements agent recorded it (Track 3).
+ * The migration-intent brief, laid out to be read at a glance: a title band with the
+ * goal and key facts, then numbered sections — what changes in each part of the
+ * system (coloured by support status), why, the recommended target and its trade-offs,
+ * scope, the change per module, the timeline, constraints and how success is measured.
  *
- * Laid out in the order the brief is taken — why, from → to, scope, constraints,
- * success — because that is the order a reviewer baselines it in, and every later
- * agent reads a part of it: Discovery the target stack and the repository, Strategy
- * the constraints, Testing the success criteria.
+ * The same sections, in the same order, as the Word and PDF downloads
+ * (`requirements_modernization_agent/brief_document.py`). A version-1 brief renders
+ * through the same view: its plain drivers are tagged by their words, and today →
+ * target becomes one row.
  */
+const TITLES: Record<BriefSection, string> = {
+  glance: "The change at a glance",
+  why: "Why we are modernizing",
+  recommendation: "Recommended target stack",
+  target_state: "Target state",
+  scope: "Scope",
+  modules: "What changes in each module",
+  tradeoffs: "Trade-offs",
+  timeline: "Timeline",
+  constraints: "Constraints",
+  success: "How we will measure success",
+  people: "Stakeholders",
+  risks: "Assumptions, risks and open questions",
+};
+
+function body(key: BriefSection, brief: MigrationIntentBrief): React.ReactNode {
+  switch (key) {
+    case "glance": return <ChangeAtAGlance brief={brief} />;
+    case "why": return <WhyNow brief={brief} />;
+    case "recommendation": return <RecommendedStack brief={brief} />;
+    case "target_state": return <p className="text-[14px] leading-relaxed">{brief.target_state.description}</p>;
+    case "scope": return <ScopeView brief={brief} />;
+    case "modules": return <ModuleChanges brief={brief} />;
+    case "tradeoffs": return <TradeOffs brief={brief} />;
+    case "timeline": return <Timeline brief={brief} />;
+    case "constraints": return <Constraints brief={brief} />;
+    case "success": return <Success brief={brief} />;
+    case "people": return <People brief={brief} />;
+    case "risks": return <RisksAndQuestions brief={brief} />;
+  }
+}
+
 export function MigrationBriefCard({
   brief,
   updatedAt,
@@ -20,117 +70,19 @@ export function MigrationBriefCard({
   brief: MigrationIntentBrief;
   updatedAt?: string | null;
 }) {
-  const repo = brief.legacy_repository;
   // The brief's own time. `updatedAt` is its RUN's last change, which moves whenever
   // anything else writes to that run (Discovery, in the same Orchestrator chat).
   const recordedAt = brief.recorded_at ?? updatedAt;
+  const plan = sectionPlan(brief);
   return (
-    <article className="space-y-6" aria-label="Migration-intent brief">
-      <header className="space-y-1">
-        <p className="text-muted-foreground font-mono text-[10.5px] tracking-[0.14em] uppercase">
-          Migration-intent brief
-        </p>
-        <h2 className="font-display text-xl font-semibold tracking-tight">
-          {brief.system_name || "Unnamed system"}
-        </h2>
-        {recordedAt && (
-          <p className="text-muted-foreground font-mono text-[11px]">
-            Recorded {new Date(recordedAt).toLocaleString()}
-          </p>
-        )}
-      </header>
-
-      <section aria-labelledby="brief-from-to" className="rounded-lg border p-4">
-        <h3 id="brief-from-to" className="sr-only">From and to</h3>
-        <div className="grid items-start gap-3 sm:grid-cols-[1fr_auto_1fr]">
-          <StackSide label="Today" stack={brief.current_state.stack} note={brief.current_state.description} />
-          <ArrowRight className="text-muted-foreground mt-6 hidden size-5 sm:block" aria-hidden />
-          <StackSide label="Target" stack={brief.target_state.stack} note={brief.target_state.description} />
-        </div>
-      </section>
-
-      <BriefList title="Why this modernization is happening" items={brief.business_drivers} />
-      <div className="grid gap-6 md:grid-cols-2">
-        <BriefList title="In scope" items={brief.in_scope} />
-        <BriefList title="Out of scope" items={brief.out_of_scope} empty="Nothing excluded yet." />
-      </div>
-      <BriefList title="Constraints" items={brief.constraints} />
-      <BriefList title="Success criteria" items={brief.success_criteria} />
-
-      <section className="space-y-2">
-        <SectionTitle>Legacy repository</SectionTitle>
-        {repo && (repo.url || repo.name) ? (
-          <p className="flex items-center gap-2 text-sm">
-            <FolderGit2 className="text-muted-foreground size-4" aria-hidden />
-            <span>{[repo.provider, repo.project, repo.name].filter(Boolean).join(" / ") || repo.url}</span>
-            {repo.url && <code className="text-muted-foreground truncate text-xs">{repo.url}</code>}
-          </p>
-        ) : (
-          <p className="text-muted-foreground text-sm italic">
-            Not named yet — Discovery & Assessment will ask which repository to clone.
-          </p>
-        )}
-      </section>
-
-      {brief.stakeholders.length > 0 && (
-        <section className="space-y-2">
-          <SectionTitle>Stakeholders</SectionTitle>
-          <ul className="flex flex-wrap gap-2">
-            {brief.stakeholders.map((s) => (
-              <li key={`${s.name}-${s.role}`}>
-                <Badge variant="outline" className="font-normal">
-                  {s.name}
-                  {s.role && <span className="text-muted-foreground ml-1">· {s.role}</span>}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <div className="grid gap-6 md:grid-cols-3">
-        <BriefList title="Assumptions" items={brief.assumptions} empty="None recorded." />
-        <BriefList title="Risks" items={brief.risks} empty="None recorded." />
-        <BriefList title="Open questions" items={brief.open_questions} empty="None." />
-      </div>
+    <article className="space-y-9" aria-label="Migration-intent brief">
+      <BriefHero brief={brief} recordedAt={recordedAt} />
+      {plan.map((key, i) => (
+        <Section key={key} n={i + 1} title={TITLES[key]} id={`brief-${key}`}>
+          {body(key, brief)}
+        </Section>
+      ))}
+      <RepositoryLine brief={brief} />
     </article>
-  );
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <h3 className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">{children}</h3>
-  );
-}
-
-function StackSide({ label, stack, note }: { label: string; stack: string; note: string }) {
-  return (
-    <div className="space-y-1">
-      <p className="text-muted-foreground font-mono text-[10.5px] tracking-[0.12em] uppercase">{label}</p>
-      <p className="text-sm font-medium">{stack || "Not stated"}</p>
-      {note && <p className="text-muted-foreground text-xs">{note}</p>}
-    </div>
-  );
-}
-
-function BriefList({ title, items, empty = "Not answered yet." }: {
-  title: string;
-  items: readonly string[];
-  empty?: string;
-}) {
-  const clean = items.filter((i) => i.trim());
-  return (
-    <section className="space-y-2">
-      <SectionTitle>{title}</SectionTitle>
-      {clean.length ? (
-        <ul className="list-disc space-y-1 pl-5 text-sm">
-          {clean.map((item, i) => (
-            <li key={i}>{item}</li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-muted-foreground text-sm italic">{empty}</p>
-      )}
-    </section>
   );
 }
