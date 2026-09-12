@@ -54,52 +54,39 @@ project wired it to the Requirements stage.
 
 ### 1. Requirements (migration intent)
 
-1. **Pull legacy code** → *Project 2* → repository *Project 2*, branch `main` → Pull. The
-   header shows the repository and commit when it is done (under a minute).
-2. **Run Requirements agent**, then send the prompts below in order. The agent asks at most
-   three questions a turn; these answers cover everything it requires, so it records the
-   brief after the third message. If it asks for something not covered, use the fallback
-   answers at the end.
+The agent does NOT get told the target stack — it recommends one from the code and the
+reasons you give, you confirm, and it records a designed brief.
 
-**Prompt 1**
+1. **Pull legacy code** → *Project 2* → repository *Project 2*, branch `main` → Pull (or,
+   in the chat: "Pull our legacy code — it's the Project 2 repository in Azure DevOps").
+2. **Run Requirements agent** → **New chat**, and paste:
+
+**Prompt 1 — the situation, in your own words (no target stack)**
 ```
-Let's capture the migration intent for ClaimTrack, Contoso Insurance's claims management system. The legacy code has been pulled for this project — start from what it shows.
+Hi! I'm the business analyst on Contoso Insurance's claims modernization programme. The code you can see is ClaimTrack, our claims management system: the claim rules library, the web app our adjusters use along with the REST API our brokers call, the nightly batch that settles approved claims with the bank, the broker portal, and the monthly and regulator reports. It was built around 2015 and has barely been touched since, and it all runs on our own servers in the Dallas data centre with a MySQL 5.6 database. We need to modernize it for a few reasons. Much of the stack is out of support. Our last internal audit and SOC 2 review flagged Log4j 1.x and several libraries with critical vulnerabilities, which we have to fix before our next SOC 2 audit in March 2027. The Dallas data centre lease ends on 30 June 2027 and we're not renewing it; those servers cost us around $310,000 a year. And honestly, we can't find AngularJS or Java 7 developers any more, and two of the three people who understand the batch retire next year. We're an Azure shop and we already use Azure DevOps for our pipelines, but we'd like your recommendation on what the target stack should be. All five components and the database move are in scope. PolicyHub (we just consume its nightly extract), the external RiskLens fraud service, the bank's payment gateway, the data warehouse and any new features are not. We have to be off the old servers by the end of June 2027, ideally moving one component at a time with no more than two hours of downtime per cutover on a Sunday night, the budget is $450,000, and the legacy system is frozen from 1 February 2027 except for P1 fixes. A few things can't change at all: the /api/v1 claims API our broker partners call, the bank payment file format, and the regulator's CR-4 quarterly return. Policyholder data also has to stay in US Azure regions. We'll call it a success if payouts come out identical on a recorded set of 10,000 past claims, the bank files and the Q4 2026 regulator return match the old system exactly, the API responds within 300 ms at p95 (it's about 800 ms today), there are no critical or high vulnerabilities at go-live, and the old servers are switched off by the end of September 2027. Priya Raman, our Head of Claims Operations, is the business owner. What would you recommend?
 ```
-*Expect:* it states what the code shows (5 components, Java 8/7, Node 8, Python 2.7, what
-is end-of-life) and asks you to confirm, then asks why and what the target is.
+*Expect (about a minute):* it confirms what the code shows (five modules; Java 7, Node 8
+and Python 2.7 past end of support; Log4j 1.x), then recommends a target per part of the
+system with the reason, the concrete change per module, the trade-offs and the alternatives
+it rejected — and asks whether it looks right. It may ask two or three short questions.
 
-**Prompt 2 — confirm, why, from → to**
+**Prompt 2 — agree (answer its questions in the same message if it asked any)**
 ```
-Yes, that's correct — those five components are all of ClaimTrack. Today it runs on four on-premises VMs in our Dallas data centre (two Tomcat 8.5 app servers, one batch VM, one reporting VM) against a MySQL 5.6 database.
-
-Why we're modernizing:
-1. End of support — the settlement batch runs on Java 7 (unsupported since July 2022), the reports on Python 2.7 (unsupported since January 2020), and the agent portal on AngularJS 1.5 and Node 8, both end-of-life. Java 8 is out of premier support and MySQL 5.6 is end-of-life as well.
-2. Security and audit — our 2026 internal audit and the last SOC 2 review flagged Log4j 1.x and libraries with known critical vulnerabilities. The audit committee wants them remediated before the next SOC 2 Type II window in March 2027.
-3. Cost — the Dallas data-centre lease ends on 30 June 2027 and will not be renewed. Hosting these VMs costs about $310,000 a year.
-4. Skills — we can no longer hire AngularJS or Java 7 developers, and two of the three engineers who know the settlement batch retire next year.
-
-Target: Java 21 with Spring Boot 3.3 for the web API and the settlement batch (Spring Batch), React 18 with TypeScript for the agent portal, and Python 3.12 for the reporting — all on Azure Container Apps, with Azure Database for MySQL Flexible Server 8.0, deployed from Azure DevOps pipelines.
+Yes, that's the whole system and those four are out of scope. Go PaaS-first, React with TypeScript for the portal, and Azure Database for MySQL Flexible Server in US regions is fine. Looks good, please record the brief.
 ```
+*Expect:* a short "recorded" reply, and **Brief vN** opens on the left as a designed
+document in the PwC palette: a title band running white into orange with the goal and key
+facts (deadline, budget, scope, end-of-life count, "Recommended"), then numbered sections —
+the change at a glance (today in grey, end of life marked red → the target in orange, and
+the kind of change, whose orange deepens from Upgrade to Rewrite), why, the recommended
+stack with its reasons and rejected alternatives, scope, what changes in each module (with
+the change mix and effort), trade-offs, a timeline, constraints and the success measures.
 
-**Prompt 3 — scope, constraints, success criteria, stakeholders**
-```
-Scope — in: all five components (claimtrack-core, claimtrack-web including the adjuster screens and the /api/v1 claims REST API, claimtrack-batch, the agent portal and the reports), plus moving the MySQL database to Azure. Out: the PolicyHub policy administration system (we only consume its nightly extract), the external RiskLens fraud-scoring service, the bank's payment gateway, the data warehouse, and any new product features.
-
-Constraints: cut over by 30 June 2027, one component at a time, with at most 2 hours of downtime per cutover in a Sunday 00:00–04:00 window. The /api/v1 claims API must not change — broker partners call it directly. The bank payment file (94-character fixed-width format) and the regulator's CR-4 quarterly return must stay byte-for-byte identical. Policyholder personal data must stay in US Azure regions. Budget cap: $450,000. From 1 February 2027 the legacy system is frozen except for P1 fixes.
-
-Success criteria: identical payouts on a recorded set of 10,000 historical claims; identical bank payment files for three months of recorded nightly batch inputs; the Q4 2026 regulator return reproduced byte-for-byte; API p95 latency at or below 300 ms (about 800 ms today); zero critical or high vulnerabilities at go-live; at least 80% unit-test coverage on the claim rules; legacy VMs decommissioned by 30 September 2027.
-
-Stakeholders: Priya Raman, Head of Claims Operations (business owner); Daniel Okafor, Enterprise Architect; Mei Chen, Security & Compliance lead; Tom Becker, IT Operations manager.
-
-Please record the brief.
-```
-*Expect:* the brief is recorded, appears on the left as **Brief v1** and opens by itself.
-Show: the from → to card, the scope and constraints as given (nothing added), **Word /
-PDF** download, and the sign-off.
+Show: **Word (.docx)** and **PDF** — the same design, ready to send — and the sign-off.
 
 Optional follow-ups:
 ```
-Which parts of the current system did you read from the code, and which came from me?
+Why did you recommend Java 21 rather than rewriting in .NET?
 ```
 ```
 Where does the web app call the external fraud service? Show me the code.
@@ -135,15 +122,18 @@ Export the full assessment as a Word document.
 
 ## Flow B — the Orchestrator (Project Admin)
 
-On the same project, after the code is pulled:
+The Orchestrator is self-contained: everything happens in its chat, including pulling the
+code, and what it produces stays in that conversation's **Deliverables** (it is not added to
+the agent pages' history, and code pulled here is this conversation's own copy).
 
-1. `hi` — it introduces Code Modernization and asks why and from what to what.
-2. `We're modernizing ClaimTrack, Contoso Insurance's claims management system — the legacy code is already pulled for this project. Help me capture the migration intent.`
-3. Prompt 2 above.
-4. Prompt 3 above.
-5. `Proceed to discovery and assessment. The target is Java 21 with Spring Boot 3, React 18 with TypeScript, and Python 3.12 on Azure.`
-6. Open **Deliverables**: the Migration Intent Brief and the Discovery & Assessment report.
-   Both also appear as versions on the two agent pages.
+1. `hi` — it introduces Code Modernization and suggests pulling the legacy code first.
+2. `Can you pull our legacy code? It's the Project 2 repository in our Azure DevOps.` — the
+   Requirements agent lists what the connection wired to its stage can see (pick *Project 2*
+   if it asks), pulls it read-only and summarises what the code shows.
+3. Prompt 1 above — it recommends the target; then Prompt 2 — it records the brief.
+4. `Proceed to discovery and assessment. The target is Java 21 with Spring Boot 3, React 18 with TypeScript, and Python 3.12 on Azure.`
+   — Discovery assesses the code already pulled in this conversation; no second pull.
+5. Open **Deliverables**: the Migration Intent Brief and the Discovery & Assessment report.
 
 ## Fallback answers (if the agent asks for more)
 

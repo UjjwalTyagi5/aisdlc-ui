@@ -52,10 +52,11 @@ def test_markdown_is_a_document_with_the_intake_sections():
     )
     md = brief_markdown(brief)
     assert md.startswith("# Migration Intent Brief — Billing")
-    for heading in ("## Why this modernization is happening", "## From → to", "## Scope",
-                    "## Constraints", "## Success criteria", "## Legacy repository"):
+    for heading in ("The change at a glance", "Why we are modernizing", "Scope", "Constraints",
+                    "How we will measure success", "## Legacy repository"):
         assert heading in md
-    assert "| Target | .NET 8 |" in md
+    # A version-1 brief (no per-layer change) shows today -> target as one row.
+    assert "| **Whole system** | .NET Framework 4.5.2 | .NET 8 | — |" in md
 
 
 async def test_an_incomplete_brief_is_not_persisted(monkeypatch):
@@ -156,4 +157,195 @@ def test_graph_compiles():
         "record_migration_intent", "export_migration_brief", "list_board_projects",
         "create_migration_work_items",
         "get_legacy_code_profile", "list_legacy_files", "read_legacy_file", "search_legacy_code",
+        "find_legacy_repositories", "pull_legacy_code",
     }
+
+
+# ── version 2: the structured brief ─────────────────────────────────────────
+
+V2 = {
+    "system_name": "ClaimTrack",
+    "goal": "Move ClaimTrack onto supported runtimes by June 2027.",
+    "drivers": [{"category": "End of life", "title": "Java 7 is unsupported", "detail": "Since 2022."},
+                {"category": "cost", "title": "Lease ends", "detail": "30 June 2027."}],
+    "layers": [
+        {"layer": "Settlement batch", "current": "Java 7", "target": "Java 21 + Spring Batch",
+         "change_type": "Upgrade", "modules": ["claimtrack-batch"]},
+        {"layer": "Broker portal", "current": "AngularJS 1.5", "target": "React 18 + TypeScript",
+         "change_type": "rewrite", "modules": ["agent-portal"]},
+    ],
+    "recommendation_summary": "Upgrade Java in place; rebuild only the portal.",
+    "recommendation_rationale": ["AngularJS has no upgrade path."],
+    "alternatives": [{"option": "Lift and shift", "why_not": "Keeps Java 7."}],
+    "module_changes": [
+        {"module": "claimtrack-batch", "target": "Java 21", "change_type": "upgrade", "effort": "Medium",
+         "changes": ["Quartz -> Spring Batch"]},
+        {"module": "agent-portal", "target": "React 18", "change_type": "rewrite", "effort": "high",
+         "changes": ["Rebuild the four screens"]},
+    ],
+    "trade_offs": [{"decision": "Rebuild the portal", "gain": "Hireable", "cost": "Largest piece of work"}],
+    "in_scope": ["claimtrack-batch", "agent-portal"],
+    "constraints": ["Off the old servers by 30 June 2027"],
+    "deadline": "2027-06-30", "budget": "$450,000",
+    "milestones": [{"date": "2027-06-30", "label": "Data-centre exit", "kind": "Data-centre exit"},
+                   {"date": "2027-02-01", "label": "Legacy freeze", "kind": "freeze"}],
+    "success_measures": [{"metric": "API p95", "current": "~800 ms", "target": "<= 300 ms"}],
+    "success_criteria": ["Identical payouts on 10,000 recorded claims"],
+}
+
+
+def test_labels_are_normalised_so_the_views_can_colour_them():
+    brief = MigrationIntentArtifact(
+        drivers=[{"category": "SOC 2 compliance deadline", "title": "t"}],
+        layers=[{"layer": "x", "current_status": "End of life", "change_type": "Re-platform"}],
+        module_changes=[{"module": "m", "effort": "Large", "change_type": "Lift and shift"}],
+        milestones=[{"date": "2027-06-30", "label": "exit", "kind": "Data-centre exit"}],
+        recommendation={"recommended_by": "BA"},
+    )
+    assert brief.drivers[0].category == "compliance"
+    assert (brief.layers[0].current_status, brief.layers[0].change_type) == ("eol", "replatform")
+    assert (brief.module_changes[0].effort, brief.module_changes[0].change_type) == ("high", "replatform")
+    assert brief.milestones[0].kind == "deadline"
+    assert brief.recommendation.recommended_by == "user"
+
+
+def test_a_version_1_brief_still_loads():
+    old = MigrationIntentArtifact(**{"system_name": "Billing", "business_drivers": ["EOL"], "version": 1})
+    assert old.version == 1 and old.layers == [] and old.recommendation is None
+
+
+async def test_a_structured_brief_is_recorded_with_the_plain_fields_derived(monkeypatch):
+    stored: list = []
+
+    async def fake_persist(brief):
+        stored.append(brief)
+        return "Saved to the project as the current migration-intent brief."
+
+    monkeypatch.setattr(brief_tools, "_persist", fake_persist)
+    out = await brief_tools.record_migration_intent.ainvoke(V2)
+    assert not out.startswith("NOT RECORDED"), out
+    brief = stored[0]
+    # The required plain fields come from the structured ones.
+    assert brief.business_drivers == ["Java 7 is unsupported: Since 2022.", "Lease ends: 30 June 2027."]
+    assert brief.current_state.stack == "Settlement batch: Java 7; Broker portal: AngularJS 1.5"
+    assert brief.target_state.stack.startswith("Settlement batch: Java 21")
+    assert brief.recommendation.recommended_by == "agent"
+    assert brief.drivers[0].category == "end_of_support"
+    assert brief.module_changes[0].effort == "medium"
+    # The document the tool returns is the numbered brief.
+    for heading in ("## 1. The change at a glance", "Recommended target stack", "What changes in each module",
+                    "Trade-offs", "Timeline", "How we will measure success"):
+        assert heading in out
+    assert "| **Settlement batch** | Java 7 | Java 21 + Spring Batch | Upgrade |" in out
+    timeline = out[out.index("Timeline"):]
+    assert timeline.index("1 Feb 2027") < timeline.index("30 Jun 2027")  # milestones in date order
+
+
+async def test_todays_facts_come_from_the_pulled_code(monkeypatch):
+    """The model says which modules change; the pulled code says what they run on today
+    and whether it is still supported — the model cannot get that wrong."""
+    from agents_orchestrator.modernization_common import legacy_code
+
+    profile = {"modules": [
+        {"name": "claimtrack-batch", "path": "claimtrack-batch", "runtime": "Java 7", "runtimeStatus": "eol"},
+        {"name": "claimtrack-agent-portal", "path": "agent-portal", "runtime": "Node.js 8", "runtimeStatus": "eol"},
+    ]}
+    monkeypatch.setattr(legacy_code, "current_scope", lambda: ("proj", None))
+    monkeypatch.setattr(legacy_code, "current_pull",
+                        lambda project_id, run_id=None: {"profile": profile, "url": "https://x/y", "name": "y"})
+    stored: list = []
+
+    async def fake_persist(brief):
+        stored.append(brief)
+        return "saved"
+
+    monkeypatch.setattr(brief_tools, "_persist", fake_persist)
+    await brief_tools.record_migration_intent.ainvoke({
+        **V2, "module_changes": V2["module_changes"] + [
+            {"module": "database", "target": "MySQL 8.0", "change_type": "replatform", "changes": ["x"]}],
+    })
+    brief = stored[0]
+    # Only the code's modules are "modules"; the database change lives in the change table.
+    assert [m.module for m in brief.module_changes] == ["claimtrack-batch", "agent-portal"]
+    portal = next(m for m in brief.module_changes if m.module == "agent-portal")
+    assert (portal.current, portal.current_status, portal.path) == ("Node.js 8", "eol", "agent-portal")
+    assert [layer.current_status for layer in brief.layers] == ["eol", "eol"]
+
+
+def _v2_brief():
+    from agents_orchestrator.requirements_modernization_agent.tools.brief_tools import MigrationIntentArtifact as M
+
+    return M(system_name="ClaimTrack", goal=V2["goal"], drivers=V2["drivers"], business_drivers=["x"],
+             current_state={"stack": "Java 7"}, target_state={"stack": "Java 21"}, layers=V2["layers"],
+             recommendation={"summary": V2["recommendation_summary"], "rationale": V2["recommendation_rationale"],
+                             "alternatives": V2["alternatives"]},
+             module_changes=V2["module_changes"], trade_offs=V2["trade_offs"], in_scope=V2["in_scope"],
+             constraints=V2["constraints"], deadline=V2["deadline"], budget=V2["budget"],
+             milestones=V2["milestones"], success_measures=V2["success_measures"],
+             success_criteria=V2["success_criteria"], stakeholders=[{"name": "Priya Raman", "role": "Owner"}])
+
+
+def test_the_word_document_is_the_designed_brief(tmp_path):
+    from docx import Document
+
+    from agents_orchestrator.requirements_modernization_agent.brief_document import render_brief
+
+    path = render_brief(_v2_brief(), str(tmp_path / "brief.docx"), meta={"version": 3, "status": "draft"})
+    doc = Document(path)
+    text = "\n".join(p.text for p in doc.paragraphs)
+    cells = "\n".join(c.text for t in doc.tables for row in t.rows for c in row.cells)
+    assert "ClaimTrack" in cells and "Version 3" in cells  # the title band is a table cell
+    for title in ("The change at a glance", "Why we are modernizing", "Recommended target stack",
+                  "What changes in each module", "Trade-offs", "Timeline", "How we will measure success"):
+        assert title in text
+    assert "Java 21 + Spring Batch" in cells and "End of life" not in cells  # no status: none given
+    assert "RECOMMENDED BY THE REQUIREMENTS AGENT" in cells
+    assert len(doc.inline_shapes) == 1  # the timeline chart
+
+
+def test_the_pdf_is_the_designed_brief(tmp_path):
+    from pypdf import PdfReader
+
+    from agents_orchestrator.requirements_modernization_agent.brief_document import render_brief
+
+    path = render_brief(_v2_brief(), str(tmp_path / "brief.pdf"))
+    text = "\n".join(page.extract_text() for page in PdfReader(path).pages)
+    for needle in ("ClaimTrack", "The change at a glance", "Recommended target stack", "Trade-offs",
+                   "Data-centre exit", "How we will measure success"):
+        assert needle in text, needle
+
+
+def test_a_version_1_brief_renders_in_both_formats(tmp_path):
+    from agents_orchestrator.requirements_modernization_agent.brief_document import render_brief
+
+    old = MigrationIntentArtifact(system_name="Billing", business_drivers=["EOL"],
+                                  current_state={"stack": ".NET 4.5"}, target_state={"stack": ".NET 8"},
+                                  in_scope=["web"], constraints=["March"], success_criteria=["same"])
+    for ext in ("docx", "pdf"):
+        assert (tmp_path / f"b.{ext}").exists() is False
+        render_brief(old, str(tmp_path / f"b.{ext}"))
+        assert (tmp_path / f"b.{ext}").stat().st_size > 5_000
+
+
+async def test_the_page_download_uses_the_designed_brief(monkeypatch, tmp_path):
+    """`GET .../migration-intent/versions/{v}/export` renders THAT version with the brief
+    renderer (title band, change table) — not the generic Markdown one."""
+    from types import SimpleNamespace
+
+    from docx import Document
+
+    import shared.routers.modernization as router
+    from shared.services import artifact_versions as svc
+
+    async def guard(db, request, project_id, stage):
+        return "proj", "tenant", "user"
+
+    async def get_version(db, project_id, stage, version):
+        return SimpleNamespace(payload=_v2_brief().model_dump(), status="published")
+
+    monkeypatch.setattr(router, "_guard", guard)
+    monkeypatch.setattr(svc, "get_version", get_version)
+    resp = await router.export_version("proj", "migration-intent", 4, None, format="docx", db=None)
+    assert resp.filename == "migration-intent-brief-v4.docx"
+    cells = "\n".join(c.text for t in Document(resp.path).tables for r in t.rows for c in r.cells)
+    assert "Version 4" in cells and "Approved" in cells

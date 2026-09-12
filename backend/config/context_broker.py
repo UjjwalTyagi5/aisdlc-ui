@@ -329,6 +329,25 @@ def _fmt_migration_intent(brief: Dict[str, Any]) -> str:
         f"  TO (target stack): {target.get('stack') or 'not stated'}"
         + (f" — {target['description']}" if target.get("description") else ""),
     ]
+    if brief.get("goal"):
+        lines.append(f"  GOAL: {brief['goal']}")
+    rec = brief.get("recommendation") or {}
+    if rec.get("summary"):
+        by = "recommended by the Requirements agent" if rec.get("recommended_by") != "user" else "set by the business"
+        lines.append(f"  TARGET ({by}): {rec['summary']}")
+    layer_rows = [layer for layer in (brief.get("layers") or []) if isinstance(layer, dict)]
+    if layer_rows:
+        lines.append("  CHANGE BY PART OF THE SYSTEM (today -> target, change):")
+        lines += [f"    - {layer.get('layer')}: {layer.get('current') or '?'} -> {layer.get('target') or '?'}"
+                  + (f" ({layer['change_type']})" if layer.get("change_type") else "")
+                  + (f" [modules: {', '.join(layer['modules'])}]" if layer.get("modules") else "")
+                  for layer in layer_rows]
+    module_rows = [m for m in (brief.get("module_changes") or []) if isinstance(m, dict)]
+    if module_rows:
+        lines.append("  TARGET PER MODULE (use it when you assess each module):")
+        lines += [f"    - {m.get('module')}: -> {m.get('target') or '?'}"
+                  + (f" ({m['change_type']}, {m.get('effort') or '?'} effort)" if m.get("change_type") else "")
+                  for m in module_rows]
     if repo.get("url") or repo.get("name"):
         where = " / ".join(p for p in (repo.get("provider"), repo.get("project"), repo.get("name")) if p)
         lines.append(f"  LEGACY REPOSITORY: {where}" + (f" ({repo['url']})" if repo.get("url") else ""))

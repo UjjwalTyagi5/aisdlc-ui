@@ -699,5 +699,354 @@
     "recorded_at": "2026-09-10T08:00:00+00:00",
     "agent_session_id": "s1",
     "version": 1
+  },
+  "brief_v2": {
+    "system_name": "ClaimTrack",
+    "goal": "Move every part of ClaimTrack off end-of-life runtimes onto a supported, Azure-hosted stack by 30 June 2027 — without changing anything brokers, the bank or the regulator see.",
+    "business_drivers": [
+      "Three runtimes past end of support",
+      "Critical vulnerabilities flagged by audit",
+      "SOC 2 Type II window in March 2027",
+      "Data-centre lease ends 30 June 2027",
+      "Skills we can no longer hire"
+    ],
+    "drivers": [
+      {
+        "category": "end_of_support",
+        "title": "Three runtimes past end of support",
+        "detail": "The batch runs on Java 7, the reports on Python 2.7 and the portal on AngularJS 1.5 and Node 8; MySQL 5.6 is unsupported too."
+      },
+      {
+        "category": "security",
+        "title": "Critical vulnerabilities flagged by audit",
+        "detail": "The 2026 internal audit and SOC 2 review flagged Log4j 1.x and libraries with critical CVEs."
+      },
+      {
+        "category": "compliance",
+        "title": "SOC 2 Type II window in March 2027",
+        "detail": "The findings must be remediated before the next audit window."
+      },
+      {
+        "category": "cost",
+        "title": "Data-centre lease ends 30 June 2027",
+        "detail": "The Dallas lease is not being renewed; the servers cost about $310,000 a year."
+      },
+      {
+        "category": "skills",
+        "title": "Skills we can no longer hire",
+        "detail": "No AngularJS or Java 7 developers in the market; two of three batch experts retire next year."
+      }
+    ],
+    "current_state": {
+      "stack": "see layers",
+      "description": ""
+    },
+    "target_state": {
+      "stack": "see layers",
+      "description": ""
+    },
+    "layers": [
+      {
+        "layer": "Claim rules library",
+        "current": "Java 8 · Joda-Time",
+        "current_status": "legacy",
+        "target": "Java 21 LTS · java.time",
+        "change_type": "upgrade",
+        "modules": [
+          "claimtrack-core"
+        ]
+      },
+      {
+        "layer": "Adjuster web app & REST API",
+        "current": "Java 8 · Spring MVC 4.3 · JSP on Tomcat 8.5",
+        "current_status": "legacy",
+        "target": "Java 21 · Spring Boot 3.3 · REST (same /api/v1 contract)",
+        "change_type": "upgrade",
+        "modules": [
+          "claimtrack-web"
+        ]
+      },
+      {
+        "layer": "Settlement batch",
+        "current": "Java 7 · Quartz 2.2 · plain JDBC",
+        "current_status": "eol",
+        "target": "Java 21 · Spring Batch 5",
+        "change_type": "upgrade",
+        "modules": [
+          "claimtrack-batch"
+        ]
+      },
+      {
+        "layer": "Broker portal",
+        "current": "AngularJS 1.5 · Gulp 3 on Node 8",
+        "current_status": "eol",
+        "target": "React 18 · TypeScript · Vite on Node 22 LTS",
+        "change_type": "rewrite",
+        "modules": [
+          "claimtrack-agent-portal"
+        ]
+      },
+      {
+        "layer": "Reports",
+        "current": "Python 2.7 scripts on cron",
+        "current_status": "eol",
+        "target": "Python 3.12 · Azure Container Apps jobs",
+        "change_type": "upgrade",
+        "modules": [
+          "claimtrack-reports"
+        ]
+      },
+      {
+        "layer": "Database",
+        "current": "MySQL 5.6 on-prem",
+        "current_status": "eol",
+        "target": "Azure Database for MySQL Flexible Server 8.0",
+        "change_type": "replatform",
+        "modules": []
+      },
+      {
+        "layer": "Hosting & delivery",
+        "current": "4 on-prem VMs · Jenkins",
+        "current_status": "",
+        "target": "Azure Container Apps · Azure DevOps Pipelines",
+        "change_type": "replatform",
+        "modules": []
+      }
+    ],
+    "recommendation": {
+      "summary": "Stay on the languages the team already knows and move each one to its current long-term-support release: Java 21 with Spring Boot 3 for the rules, web API and batch; rebuild only the portal, in React and TypeScript, because AngularJS has no upgrade path; Python 3.12 for the reports. Run it all as containers on Azure Container Apps with managed MySQL 8.0, delivered from the Azure DevOps pipelines already in use.",
+      "recommended_by": "agent",
+      "rationale": [
+        "Same-language upgrades for four of five components keep risk and cost down — upgrade tooling (OpenRewrite) covers most of the Java 7/8 → 21 move.",
+        "Java 21 and Spring Boot 3.3 are long-term-support releases, supported well past the 2027 deadline.",
+        "AngularJS reached end of life in 2021 with no upgrade path; React with TypeScript is the most hireable replacement.",
+        "Azure Container Apps fits the stateless web API and scheduled jobs without running Kubernetes, and keeps data in US Azure regions.",
+        "Managed MySQL 8.0 removes the unsupported MySQL 5.6 with the fewest application changes."
+      ],
+      "alternatives": [
+        {
+          "option": "Rewrite everything in .NET 8",
+          "why_not": "Discards working, tested Java rules and the team's Java skills; far above the $450k budget."
+        },
+        {
+          "option": "Lift and shift the VMs to Azure as they are",
+          "why_not": "Keeps Java 7, Python 2.7 and AngularJS — fixes the lease but none of the audit findings."
+        },
+        {
+          "option": "Azure Kubernetes Service",
+          "why_not": "More to operate than a five-component system needs; Container Apps covers it."
+        }
+      ]
+    },
+    "module_changes": [
+      {
+        "module": "claimtrack-core",
+        "path": "",
+        "current": "Java 8",
+        "current_status": "legacy",
+        "target": "Java 21 LTS",
+        "change_type": "upgrade",
+        "changes": [
+          "Raise the build to Java 21 with OpenRewrite recipes",
+          "Replace Joda-Time with java.time",
+          "Replace commons-lang 2 with commons-lang3",
+          "Keep the payout and fraud rules byte-for-byte — they have tests"
+        ],
+        "effort": "low"
+      },
+      {
+        "module": "claimtrack-web",
+        "path": "",
+        "current": "Java 8",
+        "current_status": "legacy",
+        "target": "Java 21 · Spring Boot 3.3",
+        "change_type": "upgrade",
+        "changes": [
+          "Spring MVC 4 XML config → Spring Boot 3 auto-configuration",
+          "javax.* → jakarta.* namespace",
+          "Log4j 1.x → SLF4J with Logback",
+          "commons-httpclient 3 → Spring RestClient for the fraud service",
+          "Keep /api/v1 URLs and JSON field names unchanged",
+          "Move the adjuster JSP screens into the React portal (decided in Design)"
+        ],
+        "effort": "medium"
+      },
+      {
+        "module": "claimtrack-batch",
+        "path": "",
+        "current": "Java 7",
+        "current_status": "eol",
+        "target": "Java 21 · Spring Batch 5",
+        "change_type": "upgrade",
+        "changes": [
+          "Quartz + plain JDBC → a Spring Batch job on a schedule",
+          "Keep the 94-character bank payment file layout exactly",
+          "Add tests around the settlement transaction and file writer"
+        ],
+        "effort": "medium"
+      },
+      {
+        "module": "claimtrack-agent-portal",
+        "path": "",
+        "current": "Node.js 8",
+        "current_status": "eol",
+        "target": "React 18 · TypeScript",
+        "change_type": "rewrite",
+        "changes": [
+          "Rebuild the four screens (dashboard, claims, file a claim, claim detail) in React",
+          "Gulp 3 on Node 8 → Vite on Node 22 LTS",
+          "Remove moment, request and node-sass",
+          "Keep calling the same /api/v1 endpoints"
+        ],
+        "effort": "high"
+      },
+      {
+        "module": "claimtrack-reports",
+        "path": "",
+        "current": "Python 2.7",
+        "current_status": "eol",
+        "target": "Python 3.12",
+        "change_type": "upgrade",
+        "changes": [
+          "Port Python 2 syntax (print, iteritems, xrange, except ... ,e)",
+          "pycrypto → cryptography; MySQL-python → PyMySQL",
+          "Keep the CR-4 regulator file byte-for-byte",
+          "Run on a schedule as Container Apps jobs instead of cron"
+        ],
+        "effort": "low"
+      }
+    ],
+    "trade_offs": [
+      {
+        "decision": "Upgrade Java in place instead of rewriting",
+        "gain": "Keeps tested rules and team knowledge; lowest risk to payouts.",
+        "cost": "Carries some 2015-era design forward; refactoring comes later."
+      },
+      {
+        "decision": "Rebuild the broker portal in React",
+        "gain": "Supported, hireable front end; modern UX for brokers.",
+        "cost": "The largest single piece of work; brokers need a short heads-up."
+      },
+      {
+        "decision": "Azure Container Apps over AKS",
+        "gain": "Far less to operate; pay per use.",
+        "cost": "Fewer knobs than Kubernetes if the system grows a lot."
+      },
+      {
+        "decision": "One component at a time",
+        "gain": "Each cutover fits the 2-hour Sunday window; easy rollback.",
+        "cost": "Old and new run side by side for a few months."
+      }
+    ],
+    "in_scope": [
+      "Claim rules library (claimtrack-core)",
+      "Adjuster web app and /api/v1 REST API (claimtrack-web)",
+      "Nightly settlement batch (claimtrack-batch)",
+      "Broker portal (claimtrack-agent-portal)",
+      "Monthly and regulator reports (claimtrack-reports)",
+      "Moving the MySQL database to Azure"
+    ],
+    "out_of_scope": [
+      "PolicyHub policy administration (we consume its nightly extract)",
+      "RiskLens fraud-scoring service",
+      "The bank's payment gateway",
+      "The data warehouse",
+      "New features"
+    ],
+    "constraints": [
+      "Off the Dallas servers by 30 June 2027",
+      "One component at a time; at most 2 hours of downtime per cutover, Sunday 00:00–04:00",
+      "/api/v1 claims API unchanged — broker partners call it directly",
+      "Bank payment file and regulator CR-4 return byte-for-byte identical",
+      "Policyholder data stays in US Azure regions",
+      "Budget capped at $450,000",
+      "Legacy system frozen from 1 February 2027 except P1 fixes"
+    ],
+    "deadline": "2027-06-30",
+    "budget": "$450,000",
+    "milestones": [
+      {
+        "date": "2027-02-01",
+        "label": "Legacy change freeze (P1 fixes only)",
+        "kind": "freeze"
+      },
+      {
+        "date": "2027-03-15",
+        "label": "SOC 2 Type II audit window",
+        "kind": "compliance"
+      },
+      {
+        "date": "2027-06-30",
+        "label": "Dallas data-centre exit",
+        "kind": "deadline"
+      },
+      {
+        "date": "2027-09-30",
+        "label": "Legacy servers decommissioned",
+        "kind": "decommission"
+      }
+    ],
+    "success_criteria": [
+      "Payouts identical on a recorded set of 10,000 historical claims",
+      "Bank payment files identical for three months of recorded nightly runs",
+      "Q4 2026 regulator return reproduced byte for byte",
+      "No critical or high vulnerabilities at go-live",
+      "Old servers switched off by 30 September 2027"
+    ],
+    "success_measures": [
+      {
+        "metric": "API response time (p95)",
+        "current": "~800 ms",
+        "target": "≤ 300 ms"
+      },
+      {
+        "metric": "Critical / high vulnerabilities",
+        "current": "12 critical",
+        "target": "0"
+      },
+      {
+        "metric": "Payout parity on 10,000 recorded claims",
+        "current": "—",
+        "target": "100%"
+      }
+    ],
+    "stakeholders": [
+      {
+        "name": "Priya Raman",
+        "role": "Head of Claims Operations — business owner"
+      },
+      {
+        "name": "Daniel Okafor",
+        "role": "Enterprise Architect"
+      },
+      {
+        "name": "Mei Chen",
+        "role": "Security & Compliance lead"
+      },
+      {
+        "name": "Tom Becker",
+        "role": "IT Operations manager"
+      }
+    ],
+    "assumptions": [
+      "The Cloud Platform team provides the Azure landing zone",
+      "The PolicyHub nightly extract continues unchanged"
+    ],
+    "risks": [
+      "The batch and web app have no automated tests today",
+      "The regulator validates the CR-4 file strictly"
+    ],
+    "open_questions": [
+      "Do the adjuster screens move into the React portal or stay separate?"
+    ],
+    "legacy_repository": {
+      "provider": "ado",
+      "project": "",
+      "name": "Project 2",
+      "url": "https://dev.azure.com/srk02804/Project%202/_git/Project%202"
+    },
+    "recorded_at": "2026-09-11T10:00:00+00:00",
+    "agent_session_id": null,
+    "version": 2
   }
 }
