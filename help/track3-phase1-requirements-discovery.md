@@ -47,6 +47,14 @@
 >   rejected through the existing version gate (no self-approval).
 > - The Requirements agent records only what the user said or confirmed — its own
 >   examples never land in the brief.
+> - *The Orchestrator is self-contained (2026-09-11):* the chat can pull the code — the
+>   Requirements agent got `find_legacy_repositories` / `pull_legacy_code` (the stage's own
+>   connection), and the router sends "pull the code" to it while the intent is being
+>   captured. Code pulled in an Orchestrator conversation lives in its own copy
+>   (`legacy-code/<project>/runs/<run>/`, chosen by `current_scope()`), and what its agents
+>   record stays in its Deliverables — no page versions. A page's Discovery chat reads the
+>   brief from the Requirements page's versions (approved first, else the newest draft
+>   unless publication is enforced), never from an Orchestrator run.
 > - *Connector RBAC for pulls (2026-09-11):* a pull's credential comes only from the
 >   connection wired to the stage whose page (or agent) asked, via
 >   `get_connector_for_session` — Business Unit grant (Integrations page) → stage wiring

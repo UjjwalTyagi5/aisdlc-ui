@@ -160,7 +160,12 @@ def test_the_track3_prompt_starts_with_migration_intent_and_names_the_unbuilt_ag
     prompt = router._system_prompt(registry_for_track("modernization"), "modernization")
     assert "MIGRATION INTENT" in prompt
     assert "why the modernization is happening" in prompt
-    assert "Discovery & Assessment clones and reads the legacy repository" in prompt
+    assert "Discovery & Assessment reads the legacy repository" in prompt
+    # Pulling the code is asked for in the chat, and belongs to Requirements while the
+    # intent is being captured; assessing it is Discovery's.
+    assert "a good first step is to pull the legacy code" in prompt
+    assert "PULLING THE LEGACY CODE is Requirements (migration intent) work" in prompt
+    assert "ASSESSING the legacy code is Discovery & Assessment work" in prompt
     assert "proceed to" in prompt
     unbuilt = prompt.split("Not built for this track yet:", 1)[1].split(".", 1)[0]
     for name in ("Design", "Strategy", "Development", "Documentation"):

@@ -117,7 +117,6 @@ async def run_turn(
     """One chat turn. Never raises into the socket loop; always ends the turn."""
     from agents_orchestrator.orchestrator2 import connectors, mcp  # noqa: PLC0415
     from config.agent_context import build_agent_input_text  # noqa: PLC0415
-    from config.context_broker import build_context_for_project  # noqa: PLC0415
     from config.ws_helper import (  # noqa: PLC0415
         reset_session_id, set_consequential_approved, set_orchestrator_run,
         set_project_id, set_provider_kind, set_run_id, set_session_id, set_tenant_id,
@@ -184,7 +183,7 @@ async def run_turn(
             prompt, _skills = await resolve_agent_turn(agent_id, system_prompt, tenant_id or None, project_id)
             messages.append(SystemMessage(content=prompt or system_prompt))
             initialized.add(session_id)
-        upstream = await build_context_for_project(project_id, tenant_id, agent_id)
+        upstream = await upstream_from_pages(project_id, tenant_id, agent_id)
         if upstream:
             messages.append(HumanMessage(content=(
                 "--- WORK ALREADY ON THIS PROJECT ---\n" + upstream + "\n--- END ---")))
@@ -314,3 +313,51 @@ async def serve_agent_socket(
     except Exception:  # noqa: BLE001
         logger.exception("%s socket closed on an unexpected error", agent_id)
         manager.disconnect(websocket)
+
+
+#: The page whose versions feed each Track 3 input artifact: (producing stage, noun).
+_UPSTREAM_STAGE = {"migration_intent_payload": ("requirements_modernization", "Migration-intent brief")}
+
+
+async def upstream_from_pages(project_id: str, tenant_id: str, agent_id: str) -> str:
+    """The work already on the AGENT PAGES that this agent builds on — for Discovery, the
+    brief on the Requirements page.
+
+    FROM THE PAGES' VERSIONS, NOT FROM RUNS. The run columns are written by Orchestrator
+    conversations too, and an Orchestrator conversation is self-contained: a brief
+    captured there must not turn up as the context of a page's chat. Versions are only
+    frozen by the pages, so reading them keeps the two apart.
+
+    Which version: the approved one when there is one; otherwise the newest draft,
+    labelled as a draft — unless the project enforces publication, in which case an
+    unapproved brief is not context at all (`artifact_versions.enforcement_enabled`).
+    """
+    from config.agent_registry import AGENT_REGISTRY  # noqa: PLC0415
+    from config.context_broker import _ARTIFACT_FORMATTERS  # noqa: PLC0415
+
+    definition = AGENT_REGISTRY.get(agent_id)
+    wanted = [a for a in (definition.input_artifacts if definition else []) if a in _UPSTREAM_STAGE]
+    if not (wanted and project_id and tenant_id):
+        return ""
+    parts: list[str] = []
+    try:
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.services import artifact_versions as svc  # noqa: PLC0415
+
+        async with get_db_session_for_tenant(tenant_id) as db:
+            enforced = await svc.enforcement_enabled(db, project_id)
+            for artifact in wanted:
+                stage, noun = _UPSTREAM_STAGE[artifact]
+                row = await svc.latest_published(db, project_id, stage)
+                if row is None and not enforced:
+                    row = await svc.latest_version(db, project_id, stage)
+                if row is None or not row.payload:
+                    continue
+                state = "approved" if row.status == "published" else f"{row.status}, not yet approved"
+                formatter = _ARTIFACT_FORMATTERS.get(artifact)
+                body = formatter(row.payload) if formatter else str(row.payload)
+                parts.append(f"{noun} v{row.version} ({state}):\n{body}")
+    except Exception:  # noqa: BLE001 — context is a help, never a reason to fail the turn
+        logger.exception("modernization: reading upstream versions failed (project %s)", project_id)
+        return ""
+    return "\n\n".join(parts)
