@@ -1,4 +1,10 @@
-# Track 3 Phase 1 — Requirements (migration-intent) + Discovery & Assessment
+# Track 3 Phase 1 — Migration Intent + Dependency and Risk
+
+> **RENAMED (2026-09-12).** Requirements (migration intent) is now **Migration Intent**,
+> and Discovery & Assessment is now **Dependency and Risk**. Display names only: the ids
+> `requirements_modernization` and `discovery`, the routes and the artifact keys are
+> unchanged, and the Orchestrator still understands the old names. The text below keeps
+> the names it was written with.
 
 > **STATUS (2026-09-10): BUILT, on branch `track-3-phase1-agents`** (uncommitted when
 > written). Plan and task list: `docs/superpowers/plans/2026-09-10-track3-phase1-agents.md`.

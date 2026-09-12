@@ -1,5 +1,5 @@
 """Read Track 3's recorded work for a project: the migration-intent brief and the
-Discovery & Assessment.
+Dependency and Risk.
 
 What the two agents record lands on a run's own column (`migration_intent_payload`,
 `discovery_artifacts` — migration 0057), on whichever run the conversation belonged
@@ -90,7 +90,7 @@ async def latest_migration_intent(
 async def latest_discovery_assessment(
     project_id: str, request: Request, db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """The project's current Discovery & Assessment, or `payload: null`."""
+    """The project's current Dependency and Risk assessment, or `payload: null`."""
     return await _latest(db, request, project_id, "discovery", "discovery_artifacts")
 
 

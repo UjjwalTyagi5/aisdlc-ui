@@ -18,7 +18,7 @@ export default function DiscoveryPage() {
   return (
     <Track3AgentPage
       phase="discovery"
-      runLabel="Run Dependency and Risk"
+      runLabel="Run Dependency and Risk agent"
       intro="Reads the legacy repository read-only, maps its dependency graph, flags end-of-life and vulnerable dependencies, and scores every module for migration risk."
       noun="assessment"
       historyTitle="Assessments"
@@ -35,9 +35,9 @@ export default function DiscoveryPage() {
           },
         },
         {
-          title: "Run Dependency and Risk",
+          title: "Run the Dependency and Risk agent",
           body: "It maps the modules and their dependencies, flags end-of-life, deprecated and vulnerable dependencies, and scores every module for migration risk — mechanical, LLM-assisted or manual-only. It uses the target stack from the migration-intent brief.",
-          action: { label: "Run Dependency and Risk", onClick: run },
+          action: { label: "Run Dependency and Risk agent", onClick: run },
         },
         {
           title: "Open the assessment",

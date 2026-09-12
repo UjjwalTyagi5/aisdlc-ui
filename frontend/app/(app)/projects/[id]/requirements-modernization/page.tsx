@@ -19,7 +19,7 @@ export default function RequirementsModernizationPage() {
   return (
     <Track3AgentPage
       phase="requirements_modernization"
-      runLabel="Run Requirements agent"
+      runLabel="Run Migration Intent agent"
       intro="Captures the migration intent: why the modernization is happening, what the system runs on today and what it should run on, scope, constraints and success criteria."
       noun="brief"
       historyTitle="Briefs"
@@ -36,13 +36,13 @@ export default function RequirementsModernizationPage() {
           },
         },
         {
-          title: "Run the Requirements agent",
-          body: "It tells you what the code shows about today's system — modules, runtimes, versions — and asks you to confirm it. Then it asks what code cannot tell it: why the modernization is happening, the target, scope, constraints and success criteria.",
-          action: { label: "Run Requirements agent", onClick: run },
+          title: "Run the Migration Intent agent",
+          body: "It tells you what the code shows about today's system — modules, runtimes, versions — and asks you to confirm it. Then it asks what code cannot tell it — why the modernization is happening, scope, constraints and success criteria — and recommends the target stack.",
+          action: { label: "Run Migration Intent agent", onClick: run },
         },
         {
           title: "Answer its questions",
-          body: "It asks at most three at a time and records only what you tell it. When every required part is answered, it records the brief.",
+          body: "It asks at most three at a time and records only what you tell it. When you agree with its recommendation, it records the brief.",
         },
         {
           title: "Open the brief",

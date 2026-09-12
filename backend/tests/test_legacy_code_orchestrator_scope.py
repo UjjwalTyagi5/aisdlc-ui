@@ -5,7 +5,7 @@
   * the chat can pull the code (Requirements' `pull_legacy_code`), with the connection
     wired to the agent's stage and only when that stage may read;
   * what an Orchestrator turn records is its Deliverables, not a version on the pages;
-  * a page's Discovery chat takes its brief from the Requirements page's versions, never
+  * a page's Discovery chat takes its brief from the Migration Intent page's versions, never
     from a run an Orchestrator conversation wrote.
 
 The clone is faked (the fixture repository is copied into place) so nothing touches the
@@ -139,7 +139,7 @@ async def test_a_chat_pull_uses_the_stages_connection_when_it_may_read(legacy, b
     bound("read")
     out = await _tool("pull_legacy_code").ainvoke(
         {"repository": "https://dev.azure.com/acme/Billing/_git/legacy-billing"})
-    assert "Requirements (migration intent) stage's connection" in out
+    assert "Migration Intent stage's connection" in out
     assert legacy.clones[-1]["secret"] == SECRET
 
 
@@ -150,7 +150,7 @@ async def test_a_chat_pull_gets_no_credential_when_the_stage_cannot_read(legacy,
     assert legacy.clones[-1]["secret"] == ""
 
     listing = await _tool("find_legacy_repositories").ainvoke({})
-    assert "Requirements (migration intent)" in listing and "Integrations page" in listing
+    assert "Migration Intent" in listing and "Integrations page" in listing
 
 
 async def test_a_github_token_is_not_sent_to_azure_from_the_chat(legacy, bound, monkeypatch):

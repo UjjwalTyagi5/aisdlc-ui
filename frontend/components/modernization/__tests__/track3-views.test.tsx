@@ -159,7 +159,7 @@ describe("the version-2 brief (the agent's recommendation, structured)", () => {
   it("labels the target as the agent's recommendation, with its reasons and alternatives", () => {
     render(<MigrationBriefCard brief={v2} />);
     const rec = screen.getByRole("region", { name: "Recommended target stack" });
-    expect(within(rec).getByText("Recommended by the Requirements agent")).toBeTruthy();
+    expect(within(rec).getByText("Recommended by the Migration Intent agent")).toBeTruthy();
     expect(within(rec).getByText("Accepted when this brief is signed off.")).toBeTruthy();
     expect(within(rec).getByText("Azure Kubernetes Service")).toBeTruthy();
   });

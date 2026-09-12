@@ -173,13 +173,13 @@ def _normalise(text: str) -> str:
 # only ever a NAME for the agent, never a word describing its work.
 #
 # ONE NAME CAN MEAN TWO AGENTS. "Requirements" is Portfolio 1's Requirements agent on a
-# Greenfield project and Track 3's migration-intent Requirements agent on a Code
+# Greenfield project and Track 3's Migration Intent agent (people still call it Requirements) on a Code
 # Modernization project — each track owns its own agent (design doc §1.4). So a name
 # maps to every id it could mean, and `prefilter` picks the one inside the turn's own
 # track; outside any track it means nothing.
 _EXTRA_NAMES: dict[str, tuple[str, ...]] = {
     "requirements_modernization": ("requirements", "migration intent", "requirements (migration intent)"),
-    "discovery": ("discovery and assessment", "assessment", "dependency and risk", "dependancy and risk"),
+    "discovery": ("discovery and assessment", "assessment", "dependency and risk", "dependency & risk", "dependancy and risk"),
 }
 
 _NAME_TO_IDS: dict[str, tuple[str, ...]] = {}
@@ -214,7 +214,7 @@ def prefilter(text: str, valid_ids: Any = None) -> str | None:
 
     `valid_ids` is the turn's own track portfolio (default: DEFAULT_TRACK's). A name
     resolves only to an agent inside it — "run the requirements agent" is the
-    migration-intent Requirements agent on a Code Modernization project and Portfolio
+    Migration Intent agent on a Code Modernization project and Portfolio
     1's on a Greenfield one — and a name that means no agent inside it, or more than
     one, is not a command this function can answer.
 
@@ -398,7 +398,7 @@ def _default_capabilities() -> Mapping[str, Any]:
 
     NOT the whole `REGISTRY`. `REGISTRY` now also holds Track 3's agents, and a caller
     that names no track has always meant the nine; defaulting to the whole table would
-    quietly start offering Discovery & Assessment to a Greenfield conversation.
+    quietly start offering Dependency and Risk to a Greenfield conversation.
 
     Read off this module's `REGISTRY` (filtered to the portfolio's ids) rather than
     through `registry_for_track`, so the list stays DERIVED from the one table that

@@ -309,7 +309,7 @@ def _fmt_security(sec: Dict[str, Any]) -> str:
 
 
 def _fmt_migration_intent(brief: Dict[str, Any]) -> str:
-    """Track 3's migration-intent brief, as Discovery & Assessment reads it.
+    """Track 3's migration-intent brief, as the Dependency and Risk agent reads it.
 
     Discovery needs two things from it above all: the TARGET stack (it decides whether
     a module can be upgraded by codemod tooling or must be rewritten) and WHERE THE
@@ -408,7 +408,7 @@ _PROJECT_RUN_LOOKBACK = 100
 
 _ARTIFACT_FIELDS = (
     "requirements_payload",
-    # Track 3 — Discovery & Assessment reads the migration-intent brief.
+    # Track 3 — the Dependency and Risk agent reads the migration-intent brief.
     "migration_intent_payload",
     "design_artifacts",
     "development_artifacts",

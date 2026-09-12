@@ -1,4 +1,4 @@
-"""Discovery & Assessment's deterministic analysis: inventory, manifests, EOL, graph, risk.
+"""Dependency and Risk's deterministic analysis: inventory, manifests, EOL, graph, risk.
 
 No model is involved anywhere in these functions — a migration-risk number has to be
 reproducible and explainable, so it is computed, and the agent only narrates it.

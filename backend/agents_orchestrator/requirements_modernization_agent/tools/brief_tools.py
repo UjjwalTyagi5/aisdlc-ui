@@ -1,4 +1,4 @@
-"""Tools of the Requirements agent in migration-intent mode (Track 3).
+"""Tools of the Migration Intent agent (Track 3).
 
 Three things this agent does beyond talking (help/multi-track-agent-access-design.md,
 Portfolio 2 row 1):

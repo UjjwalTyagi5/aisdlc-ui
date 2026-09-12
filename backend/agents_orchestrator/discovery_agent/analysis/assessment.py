@@ -357,7 +357,7 @@ def assessment_markdown(artifacts: dict, *, max_modules: int | None = None) -> s
 
     if omitted:
         lines += [f"_The tables below show the {len(modules)} riskiest modules; {omitted} more are "
-                  "on the Discovery page and in the exported report._", ""]
+                  "on the Dependency and Risk page and in the exported report._", ""]
 
     lines += ["## Inventory", "", "| Module | Path | Ecosystem | Runtime | LOC | Tests |",
               "|---|---|---|---|---:|---|"]

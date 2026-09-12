@@ -134,7 +134,7 @@ class Stakeholder(BaseModel):
 
 
 class LegacyRepository(BaseModel):
-    """Where the legacy code lives — what Discovery & Assessment will clone."""
+    """Where the legacy code lives — what the Dependency and Risk agent will clone."""
 
     provider: str = ""
     project: str = ""

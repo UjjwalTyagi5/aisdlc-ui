@@ -345,7 +345,7 @@ async def _clone_for_project(s: DiscoverySession, project_id: str, url: str, bra
     return json.dumps({
         "cloned": True, "read_only": True, "repository": s.repo_url, "branch": s.branch,
         "commit": s.commit[:12], "files": summary.get("files"),
-        "note": f"This is now the legacy code {where} — the Requirements agent reads the same checkout.",
+        "note": f"This is now the legacy code {where} — the Migration Intent agent reads the same checkout.",
         "next": "Call assess_legacy_repository to build the assessment.",
     })
 

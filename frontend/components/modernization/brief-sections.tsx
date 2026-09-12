@@ -287,7 +287,7 @@ export function RecommendedStack({ brief }: { brief: MigrationIntentBrief }) {
         <span aria-hidden className="bg-primary absolute inset-y-0 left-0 w-1" />
         <p className="text-primary flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase">
           <Sparkles className="size-3.5" aria-hidden />
-          {byAgent ? "Recommended by the Requirements agent" : "Set by the business"}
+          {byAgent ? "Recommended by the Migration Intent agent" : "Set by the business"}
         </p>
         {rec.summary && <p className="mt-2 text-[15px] leading-relaxed">{rec.summary}</p>}
         {byAgent && <p className="text-muted-foreground mt-2 text-xs italic">Accepted when this brief is signed off.</p>}

@@ -185,7 +185,7 @@ async def export_assessment_report(filename: str = "discovery_assessment.docx") 
     url = await announce_generated_file(FILE_SEGMENT, name, path, stage=STAGE)
     return export_result_message(
         name, url,
-        ["It is saved as a draft of the Discovery & Assessment stage — submitting it for "
+        ["It is saved as a draft of the Dependency and Risk stage — submitting it for "
          "approval is how the BA accepts the assessment as the planning baseline."],
     )
 

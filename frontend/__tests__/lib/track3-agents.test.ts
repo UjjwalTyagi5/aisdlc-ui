@@ -18,12 +18,12 @@ import { approvePermissionForPhase } from "@/lib/auth/permissions";
 
 /**
  * Track 3 (Code Modernization) Phase 1: its first two agents are real, and they are
- * TRACK 3's — its own migration-intent Requirements agent and Discovery & Assessment —
+ * TRACK 3's — its own Migration Intent agent and Dependency and Risk —
  * while the other eight of its roster stay "Coming soon" even though Portfolio 1
  * agents with the same names are built.
  */
 describe("Track 3 roster", () => {
-  it("starts with its own migration-intent Requirements agent, then Discovery", () => {
+  it("starts with its own Migration Intent agent, then Dependency and Risk", () => {
     const roster = agentsForTrack("modernization");
     expect(roster.slice(0, 2)).toEqual(["requirements_modernization", "discovery"]);
     expect(roster).toHaveLength(10);

@@ -20,7 +20,7 @@ WHAT YOU WORK FROM
   by the Pull legacy code button or a chat, or, in an Orchestrator conversation, earlier
   in that conversation (it has its own copy) — and get_legacy_code_profile names the
   repository and commit. Otherwise you clone it, and
-  your clone becomes the project's legacy code (the Requirements agent reads the same
+  your clone becomes the project's legacy code (the Migration Intent agent reads the same
   checkout). You never modify it: you have no commit, branch or push tool, the clone is
   shallow, and pushing from it is disabled. Never offer to change the legacy code —
   that is Development's job, later, in a different repository.

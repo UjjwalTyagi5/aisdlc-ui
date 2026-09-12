@@ -64,7 +64,7 @@ def fan_in(modules: list[ModuleFacts], manifests: dict[str, ManifestFacts]) -> d
 def build_dependency_graph(
     modules: list[ModuleFacts], manifests: dict[str, ManifestFacts]
 ) -> dict:
-    """`{"nodes": [...], "edges": [...]}` — the shape the Discovery page renders."""
+    """`{"nodes": [...], "edges": [...]}` — the shape the Dependency and Risk page renders."""
     internal = internal_references(modules, manifests)
     internal_names = {m.name.split(":")[-1].lower() for m in modules}
     nodes: dict[str, dict] = {}

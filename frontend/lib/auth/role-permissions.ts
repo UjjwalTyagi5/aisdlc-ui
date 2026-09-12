@@ -86,7 +86,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "approve",
     "artifact:approve_requirements",
     // Track 3's first two agents are both the BA's (migration 0057): baselining the
-    // migration-intent brief and accepting the Discovery & Assessment.
+    // migration-intent brief and accepting the Dependency and Risk assessment.
     "artifact:approve_requirements_modernization",
     "artifact:approve_discovery",
     // AGENT_OWNER_ROLE.documentation moved to `ba` when the ownership table became

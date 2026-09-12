@@ -1,6 +1,6 @@
 """The migration-intent brief: what is required, and how it reads as a document.
 
-Track 3's Requirements agent does not write user stories. A modernization starts from
+Track 3's Migration Intent agent does not write user stories. A modernization starts from
 a system that already exists, so what has to be pinned down before anyone plans is
 different: WHY it is being modernized, what the system is TODAY, the TARGET — which the
 agent recommends from the code and the user's reasons, and the user confirms — what
@@ -226,7 +226,7 @@ def brief_markdown(brief: MigrationIntentArtifact) -> str:
     rec = brief.recommendation
     if rec and (rec.summary or rec.rationale):
         lines += section("Recommended target stack")
-        by = ("Recommended by the Requirements agent from the legacy code and the reasons above — "
+        by = ("Recommended by the Migration Intent agent from the legacy code and the reasons above — "
               "accepted when this brief is signed off." if rec.recommended_by == "agent"
               else "Set by the business.")
         lines += [f"_{by}_", ""]

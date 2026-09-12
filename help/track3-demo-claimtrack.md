@@ -1,7 +1,7 @@
 # Track 3 demo — modernizing ClaimTrack (Contoso Insurance)
 
 A realistic Code Modernization scenario for showing Track 3's first two agents —
-Requirements (migration intent) and Discovery & Assessment — end to end.
+Migration Intent and Dependency and Risk — end to end.
 
 **The legacy system** is in Azure DevOps: `srk02804 / Project 2 / Project 2` (branch
 `main`), local copy at `C:\Users\srk02\Downloads\Frontend\claimtrack-legacy`. Keep this
@@ -17,7 +17,7 @@ nightly settlement batch still on **Java 7**, an **AngularJS 1.5** broker portal
 Log4j 1.x in production, and a data-centre lease that ends in June 2027. The target is
 **Java 21 + Spring Boot 3, React 18 + TypeScript, Python 3.12 on Azure**.
 
-Why this scenario and not, say, COBOL → Python: Discovery reads Maven/Gradle, npm, pip and
+Why this scenario and not, say, COBOL → Python: Dependency and Risk reads Maven/Gradle, npm, pip and
 .NET projects and has a dated end-of-life table for Java, Node, Python and .NET, so every
 part of this system is inventoried, flagged and scored. A COBOL estate has no manifests or
 runtime versions for it to read, and its report would be thin.
@@ -37,29 +37,29 @@ Talking points: the platform read the real code, not a questionnaire; every risk
 attributed; no module needs a manual redesign; the brief and the assessment are frozen
 versions that download as Word/PDF and are signed off by the BA; the code was pulled with
 the project's Azure DevOps connection only because the Business Unit holds the grant and the
-project wired it to the Requirements stage.
+project wired it to the Migration Intent stage.
 
 ## Before the demo
 
 1. Docker Desktop (Redis), backend on :8004, frontend on :3000.
 2. A Track 3 (Code Modernization) project — e.g. **ClaimTrack Modernization** in the
    PAYMENTS Business Unit — approved by the Business Unit admin. In its settings, wire
-   **Azure DevOps** to the **Requirements (migration intent)** stage (read access is
-   enough). Wire it to **Discovery & Assessment** too if you want to pull from that page.
+   **Azure DevOps** to the **Migration Intent** stage (read access is
+   enough). Wire it to **Dependency and Risk** too if you want to pull from that page.
 3. Model picker: **Azure gpt-5-mini** (the Anthropic key is at its spend limit).
 4. Sign-off: nobody can approve a version they produced — have a second person (BA or
    Project Admin) ready to click Approve, or show the button and explain the rule.
 
 ## Flow A — the two agent pages
 
-### 1. Requirements (migration intent)
+### 1. Migration Intent
 
 The agent does NOT get told the target stack — it recommends one from the code and the
 reasons you give, you confirm, and it records a designed brief.
 
 1. **Pull legacy code** → *Project 2* → repository *Project 2*, branch `main` → Pull (or,
    in the chat: "Pull our legacy code — it's the Project 2 repository in Azure DevOps").
-2. **Run Requirements agent** → **New chat**, and paste:
+2. **Run Migration Intent agent** → **New chat**, and paste:
 
 **Prompt 1 — the situation, in your own words (no target stack)**
 ```
@@ -92,10 +92,10 @@ Why did you recommend Java 21 rather than rewriting in .NET?
 Where does the web app call the external fraud service? Show me the code.
 ```
 
-### 2. Discovery & Assessment
+### 2. Dependency and Risk
 
-The page shows the same pulled code in its header — no second pull. **Run Discovery &
-Assessment**:
+The page shows the same pulled code in its header — no second pull. **Run Dependency and Risk
+agent**:
 
 **Prompt 1**
 ```
@@ -128,12 +128,12 @@ the agent pages' history, and code pulled here is this conversation's own copy).
 
 1. `hi` — it introduces Code Modernization and suggests pulling the legacy code first.
 2. `Can you pull our legacy code? It's the Project 2 repository in our Azure DevOps.` — the
-   Requirements agent lists what the connection wired to its stage can see (pick *Project 2*
+   Migration Intent agent lists what the connection wired to its stage can see (pick *Project 2*
    if it asks), pulls it read-only and summarises what the code shows.
 3. Prompt 1 above — it recommends the target; then Prompt 2 — it records the brief.
-4. `Proceed to discovery and assessment. The target is Java 21 with Spring Boot 3, React 18 with TypeScript, and Python 3.12 on Azure.`
-   — Discovery assesses the code already pulled in this conversation; no second pull.
-5. Open **Deliverables**: the Migration Intent Brief and the Discovery & Assessment report.
+4. `Run the dependency and risk agent.` — it assesses the code already pulled in this
+   conversation against the recorded brief's target; no second pull.
+5. Open **Deliverables**: the Migration Intent Brief and the Dependency and Risk report.
 
 ## Fallback answers (if the agent asks for more)
 

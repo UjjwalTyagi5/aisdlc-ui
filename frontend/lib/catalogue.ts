@@ -259,7 +259,7 @@ const A = (
  *
  * Thirteen is not a chosen number — it is every distinct agent named across
  * PRD §21–§25. Eight run the forward pipeline in Tracks 1 and 2; Tracks 3–5
- * add Discovery & Assessment, Strategy, Migration Mapping, Validation and Data
+ * add Dependency and Risk, Strategy, Migration Mapping, Validation and Data
  * Engineering. An agent appearing in several tracks is one agent with several
  * profiles, exactly as the PRD frames it ("the same eight-agent portfolio…
  * entered at whichever stage the change actually requires").

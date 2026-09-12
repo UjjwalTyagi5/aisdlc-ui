@@ -620,7 +620,7 @@ class _Word:
         self.cell_border(cell, left=(BRAND, 36))
         self.pad(cell, top=140, bottom=140, left=220, right=180)
         p = self.para(cell, first=True, after=3)
-        by = ("RECOMMENDED BY THE REQUIREMENTS AGENT" if rec.recommended_by == "agent"
+        by = ("RECOMMENDED BY THE MIGRATION INTENT AGENT" if rec.recommended_by == "agent"
               else "SET BY THE BUSINESS")
         self.run(p, by, size=7.5, bold=True, colour=ACCENT, spacing=20)
         if rec.summary:
@@ -1122,7 +1122,7 @@ class _Pdf:
         from reportlab.platypus import Spacer  # noqa: PLC0415
 
         rec = self.b.recommendation
-        by = "RECOMMENDED BY THE REQUIREMENTS AGENT" if rec.recommended_by == "agent" else "SET BY THE BUSINESS"
+        by = "RECOMMENDED BY THE MIGRATION INTENT AGENT" if rec.recommended_by == "agent" else "SET BY THE BUSINESS"
         inner = [self.P(by, size=6.8, colour=ACCENT, bold=True)]
         if rec.summary:
             inner.append(self.P(rec.summary.strip(), size=10, colour=INK, leading=14))

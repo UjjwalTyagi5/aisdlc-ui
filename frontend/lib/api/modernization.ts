@@ -14,7 +14,7 @@ export const getMigrationIntent = (id: ProjectId) =>
     schema: MigrationIntentResponse,
   });
 
-/** The project's current Discovery & Assessment. */
+/** The project's current Dependency and Risk assessment. */
 export const getDiscoveryAssessment = (id: ProjectId) =>
   api(`/projects/${encodeURIComponent(id)}/modernization/discovery`, {
     schema: DiscoveryResponse,

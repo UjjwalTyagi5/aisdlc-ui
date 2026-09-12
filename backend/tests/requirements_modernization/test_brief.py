@@ -299,7 +299,7 @@ def test_the_word_document_is_the_designed_brief(tmp_path):
                   "What changes in each module", "Trade-offs", "Timeline", "How we will measure success"):
         assert title in text
     assert "Java 21 + Spring Batch" in cells and "End of life" not in cells  # no status: none given
-    assert "RECOMMENDED BY THE REQUIREMENTS AGENT" in cells
+    assert "RECOMMENDED BY THE MIGRATION INTENT AGENT" in cells
     assert len(doc.inline_shapes) == 1  # the timeline chart
 
 

@@ -321,7 +321,7 @@ _UPSTREAM_STAGE = {"migration_intent_payload": ("requirements_modernization", "M
 
 async def upstream_from_pages(project_id: str, tenant_id: str, agent_id: str) -> str:
     """The work already on the AGENT PAGES that this agent builds on — for Discovery, the
-    brief on the Requirements page.
+    brief on the Migration Intent page.
 
     FROM THE PAGES' VERSIONS, NOT FROM RUNS. The run columns are written by Orchestrator
     conversations too, and an Orchestrator conversation is self-contained: a brief

@@ -120,7 +120,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:invoke", "approve",
         "artifact:approve_requirements",
         # OWNS Track 3's first two agents (migration 0057): baselining the
-        # migration-intent brief, and accepting the Discovery & Assessment as the
+        # migration-intent brief, and accepting the Dependency and Risk assessment as the
         # planning baseline, are both this role's Sign-offs.
         "artifact:approve_requirements_modernization",
         "artifact:approve_discovery",

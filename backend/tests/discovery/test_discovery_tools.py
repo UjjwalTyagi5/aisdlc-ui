@@ -1,4 +1,4 @@
-"""Discovery & Assessment's tools: where it may clone from, that the clone cannot push,
+"""Dependency and Risk's tools: where it may clone from, that the clone cannot push,
 and that an assessment becomes a report and an artifact."""
 from __future__ import annotations
 

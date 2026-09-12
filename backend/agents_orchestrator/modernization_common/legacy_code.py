@@ -1,8 +1,8 @@
 """The project's legacy code: pulled once, read by both Track 3 agents.
 
-WHY ONE PULL PER PROJECT. The Requirements agent (migration intent) asks better
+WHY ONE PULL PER PROJECT. The Migration Intent agent asks better
 questions once it has seen the code — it can state the current stack instead of asking
-for it — and Discovery & Assessment assesses that same code. One read-only checkout per
+for it — and the Dependency and Risk agent assesses that same code. One read-only checkout per
 project serves both, at one commit, so the brief and the assessment describe the same
 code. It is pulled from either agent's page (`POST /projects/{id}/modernization/
 legacy-code`) or by Discovery's own clone tool, and whichever pulled last wins.
@@ -635,7 +635,7 @@ def pull_tools(stage: str) -> list:
 
     @tool
     async def pull_legacy_code(repository: str, branch: str = "") -> str:
-        """Pull the legacy repository READ-ONLY so you (and, later, Discovery & Assessment)
+        """Pull the legacy repository READ-ONLY so you (and, later, the Dependency and Risk agent)
         can read it. Returns what the code contains.
 
         Args:
