@@ -122,13 +122,17 @@ async def test_postgres_connection(db_session):
 
 
 @pytest.mark.integration
-async def test_alembic_migration_cycle():
-    """TM1-005: full Alembic upgrade → downgrade → upgrade cycle returns exit 0 each time."""
-    if not POSTGRES_MIGRATIONS_CONN_STRING:
-        pytest.skip("POSTGRES_MIGRATIONS_CONN_STRING not set")
+@pytest.mark.destructive
+async def test_alembic_migration_cycle(disposable_migrations_dsn):
+    """TM1-005: full Alembic upgrade → downgrade → upgrade cycle returns exit 0 each time.
 
+    THIS TEST DROPS EVERY TABLE (`downgrade base`). It takes its DSN from the
+    `disposable_migrations_dsn` fixture rather than the environment, because the
+    environment normally points at a development database and this used to empty it
+    without so much as a prompt -- see the fixture for what that cost on 2026-09-13.
+    """
     agentic_app_dir = pathlib.Path(__file__).parents[2]
-    env = {**os.environ, "POSTGRES_MIGRATIONS_CONN_STRING": POSTGRES_MIGRATIONS_CONN_STRING}
+    env = {**os.environ, "POSTGRES_MIGRATIONS_CONN_STRING": disposable_migrations_dsn}
 
     def run(cmd):
         # sys.executable -m alembic, not a bare "alembic" — a bare executable name
