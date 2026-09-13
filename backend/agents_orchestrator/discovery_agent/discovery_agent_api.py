@@ -1,4 +1,4 @@
-"""Discovery & Assessment — standalone chat socket (Track 3 — Code Modernization).
+"""Dependency and Risk — standalone chat socket (Track 3 — Code Modernization).
 
 Mounted at `/sdlc/agent/discovery`. The ticket is redeemed HERE, before the handshake is accepted;
 the turn contract, access (member, track, reach), run and connector handling after
@@ -39,6 +39,6 @@ async def discovery_ws(websocket: WebSocket) -> None:
         return
 
     await serve_agent_socket(
-        websocket, claims, agent_id=AGENT_ID, label="Discovery & Assessment agent", graph=app,
+        websocket, claims, agent_id=AGENT_ID, label="Dependency and Risk agent", graph=app,
         system_prompt=DISCOVERY_SYS_MESSAGE, initialized=_initialized_sessions,
     )

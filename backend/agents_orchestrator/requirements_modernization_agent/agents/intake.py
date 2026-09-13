@@ -1,4 +1,4 @@
-"""The Requirements agent's graph in migration-intent mode (Track 3 — Code Modernization).
+"""The Migration Intent agent's graph (Track 3 — Code Modernization).
 
 A separate agent from Portfolio 1's `requirements` — its own id, prompt, tools and output
 column — because Track 3 is its own portfolio (help/multi-track-agent-access-design.md

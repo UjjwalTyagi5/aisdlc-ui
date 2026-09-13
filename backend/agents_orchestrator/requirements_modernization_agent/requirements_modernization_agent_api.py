@@ -1,4 +1,4 @@
-"""Requirements (migration intent) — standalone chat socket (Track 3 — Code Modernization).
+"""Migration Intent — standalone chat socket (Track 3 — Code Modernization).
 
 Mounted at `/sdlc/agent/requirements-modernization`. The ticket is redeemed HERE, before the handshake is accepted;
 the turn contract, access (member, track, reach), run and connector handling after
@@ -39,6 +39,6 @@ async def requirements_modernization_ws(websocket: WebSocket) -> None:
         return
 
     await serve_agent_socket(
-        websocket, claims, agent_id=AGENT_ID, label="Requirements agent (migration intent)", graph=app,
+        websocket, claims, agent_id=AGENT_ID, label="Migration Intent agent", graph=app,
         system_prompt=MIGRATION_INTENT_SYS_MESSAGE, initialized=_initialized_sessions,
     )

@@ -351,7 +351,7 @@ const ALL_OWNER: Record<Phase, Involvement> = {
  * Role × agent involvement, per PRD §14.7 plus the track-specific agents from
  * §23 (Modernization), §24 (RPA/Infra) and §25 (Data engineering), whose
  * owners the track stage tables name explicitly:
- *   Requirements (migration intent) → BA · Discovery & Assessment → BA (Track 3's
+ *   Migration Intent → BA · Dependency and Risk → BA (Track 3's
  *   product decision) · Strategy → Architect
  *   Migration Mapping → Architect · Validation → QA/Tester
  *   Data Engineering → Data Engineer
@@ -399,7 +399,7 @@ export const AGENT_OWNERSHIP: Record<PlatformRole, Record<Phase, Involvement>> =
   // belongs to the BA like any other owned agent.
 
   // Owns Requirements and Documentation — and, on Code Modernization projects, both
-  // of Track 3's first agents: its migration-intent Requirements agent and Discovery &
+  // of Track 3's first agents: its Migration Intent agent and Dependency and
   // Assessment (a product decision for Track 3; the design doc named the Architect for
   // Discovery).
   ba: {

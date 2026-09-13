@@ -193,7 +193,7 @@ async def assert_agent_access_for_chat_on_track(
     standalone agent belonged to the one portfolio every project could reach, so
     "may this role use this agent" was the whole question. Track 3's agents belong to
     Code Modernization projects only (design doc §1.4): a Greenfield project's BA
-    reaching the migration-intent Requirements agent would get an agent that expects
+    reaching the Migration Intent agent would get an agent that expects
     a legacy system the project does not have. The Orchestrator already refuses this
     (`orchestrator2/dispatch.py::_capability_for_track`); this is the same boundary on
     the standalone path, which never goes through the Orchestrator.
