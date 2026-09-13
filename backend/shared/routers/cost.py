@@ -215,7 +215,16 @@ async def get_cost_breakdown(
                 "view": "observations",
                 "metrics": [
                     {"measure": "totalCost", "aggregation": "sum"},
-                    {"measure": "totalTokens", "aggregation": "sum"},
+                    # THE SPLIT, NOT THE TOTAL. This asked for `totalTokens` and filed
+                    # every token under input, on the belief that Langfuse only reports a
+                    # total. It reports both: `inputTokens` and `outputTokens` are listed
+                    # measures, and asking for them returns the real division. The Cost
+                    # page therefore showed an output-token count of ZERO for every
+                    # project since the per-project move, with the output tokens silently
+                    # added to input — a number that looked plausible and was wrong in
+                    # both columns.
+                    {"measure": "inputTokens", "aggregation": "sum"},
+                    {"measure": "outputTokens", "aggregation": "sum"},
                     {"measure": "count", "aggregation": "count"},
                 ],
                 "dimensions": [{"field": "traceName"}, {"field": "providedModelName"}],
@@ -233,9 +242,8 @@ async def get_cost_breakdown(
                 _name = str(_row.get("traceName") or "")
                 _agent = _name.split("sdlc:", 1)[1] if _name.startswith("sdlc:") else ""
                 _agg = _per.setdefault((_agent, _model), [0, 0, 0.0, 0])
-                # The API reports total tokens, not the input/output split; attribute
-                # them to input rather than invent a division that was never measured.
-                _agg[0] += int(_row.get("sum_totalTokens") or 0)
+                _agg[0] += int(_row.get("sum_inputTokens") or 0)
+                _agg[1] += int(_row.get("sum_outputTokens") or 0)
                 _agg[2] += float(_row.get("sum_totalCost") or 0.0)
                 _agg[3] += int(_row.get("count_count") or 0)
 

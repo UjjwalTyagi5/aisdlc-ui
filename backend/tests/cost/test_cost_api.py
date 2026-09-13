@@ -14,6 +14,7 @@ tests/audit/test_audit_api.py.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -131,14 +132,24 @@ async def test_get_cost_returns_per_agent_and_per_model_rows(mint_token, monkeyp
         # Credentials must be the BINDING's — reading the shared project would be the
         # bug this endpoint just stopped having.
         assert kw.get("public_key") == "pk-lf-test"
+        # ASK FOR THE SPLIT. This used to request `totalTokens` and file all of it as
+        # input, on the stated belief that Langfuse reports no split; it reports both.
+        # Asserting the measures keeps the request honest — returning split data below
+        # while the endpoint asked for a total would otherwise read as a clean pass
+        # with every output count silently zero.
+        _measures = {m["measure"] for m in json.loads(params["query"])["metrics"]}
+        assert {"inputTokens", "outputTokens"} <= _measures, _measures
         return {"data": [
             {"traceName": "sdlc:requirements", "providedModelName": "claude-sonnet-4-6",
-             "sum_totalCost": 0.015, "sum_totalTokens": 1500, "count_count": 3},
+             "sum_totalCost": 0.015, "sum_inputTokens": 1100, "sum_outputTokens": 400,
+             "count_count": 3},
             {"traceName": "sdlc:development", "providedModelName": "claude-opus-4-8",
-             "sum_totalCost": 0.030, "sum_totalTokens": 3000, "count_count": 2},
+             "sum_totalCost": 0.030, "sum_inputTokens": 2200, "sum_outputTokens": 800,
+             "count_count": 2},
             # A non-LLM span: no model, no cost. Must be skipped, not counted as a row.
             {"traceName": "sdlc:requirements", "providedModelName": None,
-             "sum_totalCost": None, "sum_totalTokens": 0, "count_count": 6},
+             "sum_totalCost": None, "sum_inputTokens": 0, "sum_outputTokens": 0,
+             "count_count": 6},
         ]}
     monkeypatch.setattr(_traces, "_lf_get", _fake_lf_get)
 
@@ -165,6 +176,13 @@ async def test_get_cost_returns_per_agent_and_per_model_rows(mint_token, monkeyp
         assert set(by_agent) == {"requirements", "development"}
         assert by_agent["requirements"]["model"] == "claude-sonnet-4-6"
         assert by_agent["requirements"]["callCount"] == 3
+        # Output tokens must survive to the response. The regression this guards was a
+        # total filed entirely as input, which showed every project as generating zero
+        # output tokens for as long as the Cost page has been per-project.
+        assert by_agent["requirements"]["inputTokens"] == 1100
+        assert by_agent["requirements"]["outputTokens"] == 400
+        assert data["totalInputTokens"] == 3300
+        assert data["totalOutputTokens"] == 1200
         assert round(data["totalCostUsd"], 6) == 0.045
         assert "budgetUsd" in data and "utilization" in data and "breached80" in data
     finally:
