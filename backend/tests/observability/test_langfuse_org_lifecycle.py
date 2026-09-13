@@ -54,6 +54,11 @@ class FakeLangfuseDB:
             return None
         if "from users where lower(email)" in s:
             return self.users.get(str(args[0]).lower())
+        if "from projects where org_id=" in s and "name=" in s:
+            for pid, p in self.projects.items():
+                if p["org_id"] == args[0] and p.get("name") == args[1]:
+                    return pid
+            return None
         return None
 
     async def fetchrow(self, sql, *args):
@@ -103,6 +108,12 @@ class FakeLangfuseDB:
 
     async def execute(self, sql, *args):
         s = " ".join(sql.lower().split())
+        if s.startswith("insert into projects"):
+            # (id, name, org_id, created_at, updated_at, retention_days)
+            self.projects[args[0]] = {
+                "org_id": args[2], "name": args[1], "deleted_at": None,
+            }
+            return "INSERT 1"
         if s.startswith("insert into organizations"):
             self.orgs[args[0]] = args[1]
             return "INSERT 1"
@@ -395,3 +406,52 @@ async def test_the_connection_is_always_closed():
     db = FakeLangfuseDB(users=["boot@example.com"])
     await _provisioner(db).provision_org(unit_name="Lending Ops")
     assert db.closed
+
+
+# ── two SDLC projects, one name ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_two_projects_with_the_same_name_do_not_share_a_langfuse_project():
+    """This product does not require project names to be unique inside a unit.
+
+    Two projects called "Checkout Revamp" in one business unit both resolved to the same
+    Langfuse project, so their traces mixed and either project's API key could read the
+    other's prompts. Nothing errored and both looked healthy — found only by creating the
+    second one and noticing the bindings pointed at the same id.
+    """
+    db = FakeLangfuseDB(users=["boot@example.com"])
+    p = _provisioner(db)
+
+    first = await p.provision(unit_name="Lending Ops", project_name="Checkout Revamp")
+    second = await p.provision(
+        unit_name="Lending Ops",
+        project_name="Checkout Revamp",
+        org_id=first.langfuse_org_id,
+        owned_org_ids=frozenset({first.langfuse_org_id}),
+        bound_project_ids=frozenset({first.langfuse_project_id}),
+    )
+
+    assert second.langfuse_project_id != first.langfuse_project_id
+    assert second.created_project
+    # Distinct key pairs too, or the isolation would only be nominal.
+    assert second.public_key != first.public_key
+
+
+@pytest.mark.asyncio
+async def test_restore_still_re_adopts_its_own_langfuse_project():
+    """The other half of the rule. Archiving deactivates a binding and restoring must
+    return to the SAME Langfuse project, or the project's history becomes unreachable.
+    Its own id is therefore never in `bound_project_ids`."""
+    db = FakeLangfuseDB(users=["boot@example.com"])
+    p = _provisioner(db)
+
+    first = await p.provision(unit_name="Lending Ops", project_name="Checkout Revamp")
+    again = await p.provision(
+        unit_name="Lending Ops",
+        project_name="Checkout Revamp",
+        org_id=first.langfuse_org_id,
+        owned_org_ids=frozenset({first.langfuse_org_id}),
+        bound_project_ids=frozenset(),  # its own binding is excluded by ensure_binding
+    )
+    assert again.langfuse_project_id == first.langfuse_project_id
+    assert not again.created_project

@@ -205,11 +205,31 @@ async def ensure_binding(
 
     try:
         owned = await owned_org_ids(session)
+        # Every Langfuse project another live binding already claims, EXCLUDING this
+        # project's own. Excluding it is what keeps restore-after-archive working: that
+        # path must re-adopt the Langfuse project it used to write to, or its history
+        # becomes unreachable. Including everyone else's is what stops two SDLC projects
+        # that happen to share a display name from sharing one Langfuse project — and
+        # therefore each other's prompts and completions.
+        bound = frozenset(
+            str(r[0])
+            for r in (
+                await session.execute(
+                    text(
+                        "select langfuse_project_id from langfuse_bindings "
+                        "where tenant_id = cast(:t as uuid) and is_active = true "
+                        "  and project_id <> cast(:p as uuid)"
+                    ),
+                    {"t": str(tenant_id), "p": str(project_id)},
+                )
+            ).all()
+        )
         result = await LangfuseProvisioner().provision(
             unit_name=unit_name,
             project_name=project_name,
             org_id=unit_org_id,
             owned_org_ids=owned,
+            bound_project_ids=bound,
         )
     except LangfuseProvisioningError as exc:
         logger.warning(

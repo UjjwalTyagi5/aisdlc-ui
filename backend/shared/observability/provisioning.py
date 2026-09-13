@@ -343,12 +343,55 @@ class LangfuseProvisioner:
         )
         return new_id, resolved, True
 
-    async def _ensure_project(self, conn, org_id: str, name: str) -> tuple[str, bool]:
+    async def _ensure_project(
+        self,
+        conn,
+        org_id: str,
+        name: str,
+        *,
+        bound_project_ids: frozenset = frozenset(),
+    ) -> tuple[str, bool]:
+        """Find or create the Langfuse project for one SDLC project.
+
+        ADOPTING BY NAME IS DELIBERATE, BUT ONLY WHEN NOBODY ELSE HOLDS IT. Restoring an
+        archived project has to re-adopt the Langfuse project it used to write to —
+        otherwise its history becomes unreachable and a second project accumulates
+        alongside it. That is why this matches on name at all.
+
+        The danger is that this product does NOT require project names to be unique inside
+        a business unit. Two projects called "Checkout Revamp" in the same unit both
+        resolved to the same Langfuse project, so their traces mixed and either project's
+        API key could read the other's prompts and completions — the exact isolation this
+        module exists to provide, lost silently, with both projects looking healthy.
+
+        `bound_project_ids` is every Langfuse project already claimed by a DIFFERENT live
+        binding. One of those is never adopted; the name is disambiguated instead, the same
+        way `_available_org_name` handles a foreign organization.
+        """
         existing = await conn.fetchval(
             "select id from projects where org_id=$1 and name=$2", org_id, name
         )
-        if existing:
+        if existing and str(existing) not in bound_project_ids:
             return str(existing), False
+
+        if existing:
+            # Somebody else's. Walk until a free name is found.
+            attempt = 1
+            candidate = name
+            while existing and str(existing) in bound_project_ids:
+                attempt += 1
+                candidate = f"{name} ({attempt})"
+                existing = await conn.fetchval(
+                    "select id from projects where org_id=$1 and name=$2", org_id, candidate
+                )
+            logger.warning(
+                "Langfuse project %r in this organization is already bound to another SDLC "
+                "project - using %r so their traces cannot mix", name, candidate,
+            )
+            if existing:
+                return str(existing), False
+            name = candidate
+
         project_id = str(uuid.uuid4())
         now = _now()
         retention = None
@@ -538,11 +581,16 @@ class LangfuseProvisioner:
         project_name: str,
         org_id: Optional[str] = None,
         owned_org_ids: frozenset[str] = frozenset(),
+        bound_project_ids: frozenset = frozenset(),
     ) -> ProvisionedProject:
         """Ensure a Langfuse org for the unit and a project inside it, and mint a key.
 
         `unit_name` is the business unit — it becomes the Langfuse organization.
         `project_name` is the SDLC project — it becomes the Langfuse project.
+
+        `bound_project_ids` is every Langfuse project already claimed by another live
+        binding, so a name clash cannot make two SDLC projects share one — see
+        `_ensure_project`.
 
         `org_id` is the organization already recorded against that business unit
         (`workspaces.langfuse_org_id`). Pass it whenever it is known: it is what makes
@@ -562,7 +610,7 @@ class LangfuseProvisioner:
                     conn, unit_name, org_id=org_id, owned_org_ids=owned_org_ids
                 )
                 project_id, created_project = await self._ensure_project(
-                    conn, org_id, project_name
+                    conn, org_id, project_name, bound_project_ids=bound_project_ids
                 )
                 for email in self._bootstrap_emails():
                     await self._ensure_memberships(conn, org_id, email)

@@ -310,6 +310,41 @@ async def run(*, dry_run: bool, only_unit: str | None) -> int:
                     projects_checked += project_total
                     drift += project_drift
 
+    # -- two SDLC projects pointing at one Langfuse project --------------------
+    #
+    # Project names are not unique inside a business unit, and provisioning used to adopt
+    # a Langfuse project by NAME -- so two projects sharing a name shared a Langfuse
+    # project, and with it each other's prompts and completions. New collisions are
+    # prevented now (see `_ensure_project`), but bindings written before that still exist
+    # and cannot be split automatically: the traces are already interleaved in one
+    # project, and only a human can decide what to do with them. So it is reported.
+    # TENANT-SCOPED, NOT `get_db_session_superuser`. `langfuse_bindings` is under FORCE
+    # RLS and that helper does not bypass it, so the same query through it returns zero
+    # rows and reports a clean bill of health -- the failure mode being checked for here.
+    _shared = []
+    for _tid in tenant_ids:
+        async with get_db_session_for_tenant(_tid) as _s:
+            _shared.extend(
+                (
+                    await _s.execute(
+                        text(
+                            "select langfuse_project_id, count(*) n, "
+                            "       string_agg(project_id::text, ', ') ids "
+                            "from langfuse_bindings where is_active = true "
+                            "group by langfuse_project_id having count(*) > 1"
+                        )
+                    )
+                ).all()
+            )
+    for _lf, _n, _ids in _shared:
+        drift += 1
+        print(f"\n  SHARED LANGFUSE PROJECT {_lf}")
+        print(f"    {_n} SDLC projects write to it, so each can read the others' traces:")
+        for _pid in str(_ids).split(", "):
+            print(f"      - {_pid}")
+        print("    Not auto-fixable: their traces are already interleaved. Rename one and")
+        print("    re-provision it, or accept the mixing deliberately.")
+
     print(f"\n{total} unit(s) and {projects_checked} project(s) checked, {drift} with drift.")
     if dry_run and drift:
         print("Dry run — nothing changed. Re-run without --dry-run to converge.")
