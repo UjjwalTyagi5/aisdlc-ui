@@ -785,6 +785,36 @@ class LangfuseProvisioner:
             removed.append("invitation")
         return "+".join(removed) if removed else "nothing-to-revoke"
 
+    async def pending_invitation_projects(self, *, org_id: str) -> dict:
+        """{email: project_id} for invitations that name a project. For the reconciler.
+
+        Exists to explain an otherwise baffling report. Langfuse allows ONE invitation per
+        person per organization (UNIQUE (email, org_id)), so somebody granted on a second
+        project before they have ever signed in cannot be invited to it. The reconciler
+        would say "should be MEMBER, is nothing" and an operator would re-run it forever;
+        knowing which project holds their one invitation turns that into "waiting on their
+        first sign-in", which is actionable.
+        """
+        self._require_config()
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError:
+            return {}
+        try:
+            return {
+                str(r["email"]).lower(): str(r["project_id"])
+                for r in await conn.fetch(
+                    "select email, project_id from membership_invitations "
+                    "where org_id=$1 and project_id is not null",
+                    org_id,
+                )
+            }
+        except Exception:
+            logger.warning("langfuse invitation scan failed for org=%s", org_id, exc_info=True)
+            return {}
+        finally:
+            await conn.close()
+
     async def sync_project_access(
         self,
         *,

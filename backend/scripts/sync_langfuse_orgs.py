@@ -93,6 +93,10 @@ async def _reconcile_projects(
     if not rows:
         return 0, 0
 
+    # Which project each pending invitation actually names — see
+    # `pending_invitation_projects`. One lookup per unit, not per project.
+    invited_elsewhere = await provisioner.pending_invitation_projects(org_id=org_id)
+
     drifted = 0
     for pid, pname, lf_project in rows:
         wanted = await org_sync.desired_project_access(
@@ -126,7 +130,23 @@ async def _reconcile_projects(
             if email in via_org:
                 notes.append(f"{email} reaches it via org {via_org[email]} (stronger)")
                 continue
-            issues.append(f"{email} should be {role}, is {held.get(email) or 'nothing'}")
+            other = invited_elsewhere.get(email)
+            if other and other != str(lf_project):
+                # Their single invitation slot is spent on another project. Re-running will
+                # not fix it: Langfuse allows one invitation per person per organization,
+                # so this grant applies once they first sign in and that invitation becomes
+                # a real membership. Saying only "is nothing" sends an operator looking for
+                # a fault that is not there.
+                # ASCII only. This is console output on a Windows-first team, where a
+                # non-ASCII character renders as a replacement glyph and makes the line
+                # look corrupted — and worse, turns the stream binary for anything
+                # grepping the report.
+                issues.append(
+                    f"{email} should be {role} -- BLOCKED: their one pending invitation "
+                    f"names another project, so this applies after their first sign-in"
+                )
+            else:
+                issues.append(f"{email} should be {role}, is {held.get(email) or 'nothing'}")
 
         for email in set(held) | set(pending):
             if email not in wanted:
@@ -252,20 +272,17 @@ async def run(*, dry_run: bool, only_unit: str | None) -> int:
                     if org_name and str(org_name) != str(name):
                         issues.append(f"name drift: Langfuse has {org_name!r}")
 
-                if not issues:
+                if issues:
+                    drift += 1
+                    print(f"  DRIFT {label}")
+                    for issue in issues:
+                        print(f"        - {issue}")
+                else:
                     print(f"  ok {label}")
-                    for note in pending_notes:
-                        print(f"        . {note}")
-                    continue
-
-                drift += 1
-                print(f"  DRIFT {label}")
-                for issue in issues:
-                    print(f"        - {issue}")
                 for note in pending_notes:
                     print(f"        . {note}")
 
-                if not dry_run:
+                if issues and not dry_run:
                     report = await org_sync.sync_unit(
                         session, tenant_id=tenant_id, workspace_id=str(uid)
                     )
@@ -276,18 +293,22 @@ async def run(*, dry_run: bool, only_unit: str | None) -> int:
                         if report["revoked"]:
                             print(f"           revoked={report['revoked']}")
 
-            # ── per-project grants ────────────────────────────────────────────
-            # Checked for every unit, drifted or not: a unit can be perfectly converged at
-            # the organization level while a project admin inside it holds nothing.
-            for uid, name, status, org_id, _org_name in units:
-                if status == "archived" or not org_id:
-                    continue
-                project_drift, project_total = await _reconcile_projects(
-                    session, provisioner, org_sync, tenant_id, str(uid), str(org_id),
-                    dry_run=dry_run,
-                )
-                projects_checked += project_total
-                drift += project_drift
+                # THIS UNIT'S PROJECTS, PRINTED INSIDE THIS UNIT'S SECTION.
+                #
+                # These used to run in a second pass after every unit had been printed, so
+                # every project appeared under the LAST unit's heading — a drifted project
+                # attributed to a business unit it does not belong to, which sends whoever
+                # reads the report to the wrong place. The unit loop cannot `continue`
+                # early for that reason: a converged unit still has projects to check, and
+                # a unit can be perfectly right at the organization level while a project
+                # admin inside it holds nothing.
+                if org_id:
+                    project_drift, project_total = await _reconcile_projects(
+                        session, provisioner, org_sync, tenant_id, str(uid), str(org_id),
+                        dry_run=dry_run,
+                    )
+                    projects_checked += project_total
+                    drift += project_drift
 
     print(f"\n{total} unit(s) and {projects_checked} project(s) checked, {drift} with drift.")
     if dry_run and drift:
