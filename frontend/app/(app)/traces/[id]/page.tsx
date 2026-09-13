@@ -12,6 +12,7 @@ import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { TraceDetail } from "@/components/app/trace-detail";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
+import { ApiRequestError } from "@/lib/api/client";
 import { getTrace } from "@/lib/api/traces";
 import { qk } from "@/lib/api/query-keys";
 
@@ -25,6 +26,14 @@ export default function TraceDetailPage() {
     queryFn: () => getTrace(id),
     enabled: !!id,
   });
+
+  // A trace that was listed a moment ago and will not open is the ordinary
+  // result of the Langfuse retention window passing, or of the project's binding
+  // being removed -- not a fault the reader can retry their way out of. It used
+  // to render as "Trace not found" beneath a red UNKNOWN_ERROR chip, which named
+  // no cause and invited an endless Try again.
+  const missing =
+    traceQ.error instanceof ApiRequestError && traceQ.error.status === 404;
 
   if (!hasPermission(session, "trace:view")) {
     return (
@@ -43,6 +52,11 @@ export default function TraceDetailPage() {
 
       {traceQ.isLoading ? (
         <LoadingState variant="list" rows={5} />
+      ) : missing ? (
+        <ApiErrorState
+          title="This trace is no longer available"
+          description="It may have passed out of the trace retention window, or its project's Langfuse connection may have been removed. Traces can leave the list this way after you have opened it."
+        />
       ) : traceQ.isError ? (
         <ApiErrorState
           title="Couldn't load trace"

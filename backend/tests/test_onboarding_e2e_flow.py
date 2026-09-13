@@ -140,9 +140,16 @@ async def test_a_bu_admin_is_onboarded_signs_in_and_sees_their_access(org, _capt
     # What a BU Admin is FOR: run the unit, its people, its money, its connections.
     assert {"member:manage", "role:manage", "workspace:manage",
             "project:create", "cost:view", "audit:view"} <= perms
-    # And what they are deliberately not for — governance does not run agents.
-    assert "agent:invoke" not in perms
-    assert "run:create" not in perms
+    # They can also run and approve inside their unit. This asserted the opposite
+    # ("governance does not run agents", PRD §14.8) until 2026-09-13: bu_admin holds
+    # role:manage, and the custom-role composer refuses to package a permission its
+    # creator lacks, so without the delivery set a unit admin could not author any
+    # role their unit actually needed. Granted deliberately, with the separation-of-
+    # duties cost noted in shared/authz/permissions.py.
+    assert {"agent:invoke", "approve", "run:create"} <= perms
+    # Still not an organization admin: org-wide policy stays out of reach.
+    assert "admin:*" not in perms
+    assert "settings:manage" not in perms
 
     # "View all the access granted to them": the unit they administer is the one they
     # see, and the endpoint the My Access page reads returns exactly it.

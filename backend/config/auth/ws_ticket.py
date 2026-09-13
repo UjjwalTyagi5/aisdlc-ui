@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 
-import redis.asyncio as aioredis
+from shared.redis_client import redis_from_url
 
 from config.env import REDIS_URL
 
@@ -22,7 +22,7 @@ _WS_TICKET_TTL_SECONDS = 20
 async def mint_ws_ticket(user_id: str, tenant_id: str) -> str:
     """Store a single-use ticket in Redis and return the UUID."""
     ticket = str(uuid.uuid4())
-    client = aioredis.from_url(REDIS_URL)
+    client = redis_from_url()
     try:
         await client.setex(
             f"ws_ticket:{ticket}",
@@ -36,7 +36,7 @@ async def mint_ws_ticket(user_id: str, tenant_id: str) -> str:
 
 async def redeem_ws_ticket(ticket: str) -> dict | None:
     """Atomically consume a ticket and return its claims, or None if absent/expired."""
-    client = aioredis.from_url(REDIS_URL)
+    client = redis_from_url()
     try:
         raw = await client.getdel(f"ws_ticket:{ticket}")
     finally:

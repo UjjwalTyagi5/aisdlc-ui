@@ -59,11 +59,15 @@ def _hdr(user_id: str, org: str, perms: list[str]) -> dict:
 async def test_creator_cannot_grant_a_permission_they_lack(org_tree):
     """The escalation.
 
-    bu_admin is a GOVERNANCE role: it holds cost:view and audit:view but no delivery
-    permissions at all, so run:create is something it can never hand out. That the
-    tier split makes this case real rather than contrived is the point — a unit admin
-    packaging delivery access into a role would be manufacturing authority they were
-    deliberately not given.
+    `settings:manage` is organization-wide policy and compliance configuration. It is
+    deliberately withheld from bu_admin — a unit does not set org policy — so packaging
+    it into a role would be manufacturing authority the tier split withheld.
+
+    THIS USED TO USE `run:create`, on the reasoning that bu_admin was a governance role
+    holding no delivery permissions at all. That stopped being true on 2026-09-13 when
+    bu_admin was granted the delivery set so it could compose its unit's roles, which
+    turned this test green for the wrong reason: the creation succeeded. The guard needs
+    a permission the creator genuinely still lacks, or it tests nothing.
     """
     t = org_tree
     user = f"bu-{_uuid.uuid4()}"
@@ -72,11 +76,11 @@ async def test_creator_cannot_grant_a_permission_they_lack(org_tree):
     r = _client().post(
         f"/admin/custom-roles/business-unit/{t['bu_a']}",
         headers=_hdr(user, t["org"], ["role:manage", "cost:view"]),
-        json={"name": "Sneaky", "permissions": ["cost:view", "run:create"]},
+        json={"name": "Sneaky", "permissions": ["cost:view", "settings:manage"]},
     )
     assert r.status_code == 403, r.text
     detail = r.json()["detail"]
-    assert "run:create" in detail, detail
+    assert "settings:manage" in detail, detail
     # Only the excess is named — the permission they DO hold is not.
     assert "cost:view" not in detail, detail
 
@@ -111,14 +115,15 @@ async def test_the_check_reads_the_database_not_the_token(org_tree):
     user = f"bu-{_uuid.uuid4()}"
     await grant_role(user, t["bu_a"], "bu_admin", tenant_id=t["org"], scope_kind="business_unit")
 
-    # The JWT asserts run:create; the binding does not grant it.
+    # The JWT asserts settings:manage; the binding does not grant it. (Was run:create,
+    # which bu_admin now legitimately holds — see the note in the test above.)
     r = _client().post(
         f"/admin/custom-roles/business-unit/{t['bu_a']}",
-        headers=_hdr(user, t["org"], ["role:manage", "run:create"]),
-        json={"name": "StaleClaim", "permissions": ["run:create"]},
+        headers=_hdr(user, t["org"], ["role:manage", "settings:manage"]),
+        json={"name": "StaleClaim", "permissions": ["settings:manage"]},
     )
     assert r.status_code == 403, r.text
-    assert "run:create" in r.json()["detail"]
+    assert "settings:manage" in r.json()["detail"]
 
 
 @pytest.mark.asyncio

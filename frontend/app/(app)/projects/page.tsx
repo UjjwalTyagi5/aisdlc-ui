@@ -31,7 +31,7 @@ import { NoScopeAccess } from "@/components/auth/scope-empty-state";
 import { archiveProject, listProjects, restoreProject } from "@/lib/api/projects";
 import { qk } from "@/lib/api/query-keys";
 import type { Project } from "@/lib/schemas";
-import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL, scopeChipName } from "@/lib/scope";
 
 const PAGE_SIZE = 12;
 
@@ -125,7 +125,8 @@ export default function ProjectsPage() {
     placeholderData: (prev) => prev,
   });
   const { data: workspaces = [] } = useWorkspaces();
-  const { scope, level, isOrgWide, managedProjectIds, projectIds } = useAccessScope();
+  const { scope, level, isOrgWide, isUnbound, managedProjectIds, managedBusinessUnitIds, bindings } =
+    useAccessScope();
 
   // Client-side finishing move: sort (the server handles search/archive/page).
   const items = React.useMemo(() => {
@@ -167,15 +168,38 @@ export default function ProjectsPage() {
   // The scope these projects were drawn from, named for the chip. A grouped list
   // already shows each Business Unit heading, so the chip carries the tier and
   // the count rather than repeating one unit's name.
-  const scopeName = isOrgWide
-    ? null
-    : groups.length === 1
-      ? groups[0]!.label
-      : `${groups.length} ${groups.length === 1 ? BUSINESS_UNIT_LABEL.toLowerCase() : BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`;
+  //
+  // FALLS BACK TO THE ACCESS SCOPE WHEN THERE ARE NO PROJECTS. `groups` is derived
+  // from the projects on screen, so a Business Unit Admin whose unit has no projects
+  // yet produced `groups.length === 0` and a chip reading "0 business units" — while
+  // they plainly administer one. The number of units a person is in does not depend
+  // on whether anything has been created in them.
+  // A single group already names the unit this list came from, so it is the better
+  // label; otherwise fall back to the viewer's actual scope. Counting `groups` alone —
+  // which is derived from the PROJECTS on screen — is what produced "0 business units"
+  // for a Business Unit Admin whose unit had no projects yet.
+  const scopeName = scopeChipName(level, {
+    isOrgWide,
+    bindings,
+    managedBusinessUnitIds,
+    preferredName: groups.length === 1 ? groups[0]!.label : null,
+  });
 
   // Resolved and bound to nothing: a person with no assignment yet needs a
   // different message from "no projects match your filter".
-  const unbound = scope !== null && !isOrgWide && projectIds.length === 0;
+  //
+  // BOTH SETS MUST BE EMPTY. This checked `projectIds` alone, so a Business Unit
+  // Admin whose unit holds no projects yet was shown `NoScopeAccess` — "You aren't
+  // assigned to any business units or projects ... Ask your Business Unit Admin to
+  // add you to a project" — telling the unit's own admin to ask themselves for access
+  // they already hold. Having no projects is not the same as having no scope, and the
+  // two need opposite next steps: one is "create the first project", the other is
+  // "ask someone to add you".
+  //
+  // This is the same predicate as `ScopedListBoundary` in
+  // components/auth/scope-empty-state.tsx, which had it right; this page reimplemented
+  // it and dropped half the condition.
+  const unbound = isUnbound;
 
   // Metric strip counts — derived from real listProjects data
   const activeCount = items.filter((p) => !p.archived).length;

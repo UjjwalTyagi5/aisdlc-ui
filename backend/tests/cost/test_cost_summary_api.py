@@ -55,7 +55,17 @@ async def test_cost_summary_returns_project_spend_and_budget(mint_token):
     except Exception as exc:
         pytest.skip(f"DB not reachable or setup incomplete: {exc}")
 
-    token = mint_token(tenant_id=tenant, permissions=["artifact:view", "cost:view"])
+    # settings:manage makes this caller ORG-WIDE, which is what reading an arbitrary
+    # project's spend now requires. `cost:view` alone says the caller may see spend, not
+    # WHOSE: with no bindings they are scoped to an empty set and get a 404, correctly —
+    # this test asserts the spend/budget math rather than the scope filter. Same
+    # adjustment the other aggregate tests took in docs/rbac-audit-2026-08-17.md
+    # finding 4, where "cost:view with no bindings" had been indistinguishable from
+    # org-wide.
+    token = mint_token(
+        tenant_id=tenant,
+        permissions=["artifact:view", "cost:view", "settings:manage"],
+    )
     headers = {"Authorization": f"Bearer {token}"}
 
     async with httpx.AsyncClient(

@@ -52,7 +52,7 @@ from shared.tools.document_tools import (
 )
 from shared.audit import AuditCallbackHandler
 from shared.audit.service import audit_service
-from shared.observability import langfuse_langchain_extras
+from shared.observability import agent_trace
 from shared.services.standalone_prompt import resolve_agent_turn, resolve_agent_skills
 from shared.services.skill_runtime import skill_context_scope
 
@@ -441,10 +441,8 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     )
 
     _lf_project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
-    from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
-    _lf_ws = await workspace_id_for_project(tenant_id or "", _lf_project_id)
     _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="requirements", project_id=_lf_project_id, workspace_id=_lf_ws)
+    _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="requirements", project_id=_lf_project_id)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler, *_lf_cbs], "metadata": _lf_meta}
     os.makedirs(input_directory, exist_ok=True)
 
@@ -676,9 +674,7 @@ async def chat(
     file_names: List[str] = []
 
     _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
-    from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
-    _lf_ws_rest = await workspace_id_for_project(real_tenant_id or "", _lf_pid)
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=real_tenant_id or "", user_id=real_user_id, model=model_id, agent_type="requirements", project_id=_lf_pid, workspace_id=_lf_ws_rest)
+    _lf_cbs, _lf_meta = await agent_trace(request=request, session_id=session_id, model=model_id, agent_type="requirements", project_id=_lf_pid)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}
     os.makedirs(input_directory, exist_ok=True)
 

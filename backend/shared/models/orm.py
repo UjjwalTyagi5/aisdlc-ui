@@ -53,6 +53,23 @@ class Workspace(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
+    # The Langfuse organization this business unit owns (0058). BU = Langfuse org, so
+    # every unit gets its own and traces cannot mix across units.
+    #
+    # THE ID IS THE BINDING, NOT THE NAME. Langfuse organization names are not unique and
+    # the instance is shared with a sibling product — it already holds orgs called
+    # `Payments` and `Lending` that are not ours. Matching by name would let a unit named
+    # `Payments` silently adopt theirs and write this platform's traces into it. Recording
+    # the id we created ourselves is what makes rename, grant and teardown unambiguous,
+    # and what lets provisioning refuse to adopt an org it did not create.
+    #
+    # NULL means not provisioned yet: Langfuse was unreachable when the unit was created
+    # (every hook is fail-soft) or the unit predates 0058. `scripts/sync_langfuse_orgs.py`
+    # converges those.
+    langfuse_org_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Kept only to detect drift — somebody renaming the org in the Langfuse UI. The id
+    # above is what every operation actually addresses.
+    langfuse_org_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -578,6 +595,69 @@ class UsageMonthly(Base):
 # role-assignment table — with no isolation at all. Keep it in step with the
 # tables that actually carry a tenant_id column; test_rls_coverage guards it.
 # ---------------------------------------------------------------------------
+
+class LangfuseBinding(Base):
+    """Which Langfuse project one SDLC project's traces go to, and the key that reaches it.
+
+    THE ROW THAT MAKES ISOLATION REAL. Traces used to land in one shared Langfuse project
+    and be told apart by a `project:` tag — an application-level promise, where PRD §45
+    asks for project-level isolation as a release gate. Each SDLC project now owns a
+    Langfuse project, under a Langfuse organization per business unit, and this table is
+    the map. A key pair only reaches its own project, so a wrong filter returns nothing
+    instead of another unit's prompts.
+
+    ONE ACTIVE BINDING PER PROJECT, enforced by a partial unique index rather than a
+    plain constraint: re-provisioning after a Langfuse rebuild must be able to leave the
+    old row behind for forensics while only one binding is live.
+
+    KEYS ARE STORED ENCRYPTED with the platform's existing secret-store key, not in
+    plaintext. They are credentials to a system holding every prompt and completion this
+    platform produces; a database dump should not be enough to read them.
+    """
+
+    __tablename__ = "langfuse_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # RLS anchor, same convention as every other tenant-scoped table.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # The business unit -> becomes the Langfuse ORGANIZATION.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    # The SDLC project -> becomes the Langfuse PROJECT.
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+
+    langfuse_org_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    langfuse_project_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    langfuse_project_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Stored per row, not read from config: a binding must keep working after the
+    # platform is pointed at a different Langfuse, or it silently reads the wrong host.
+    langfuse_host: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    public_key_encrypted: Mapped[str] = mapped_column(Text(), nullable=False)
+    secret_key_encrypted: Mapped[str] = mapped_column(Text(), nullable=False)
+
+    is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_langfuse_binding_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+
+# BASELINE-ERA TABLES ONLY. Migration 0001 imports this list and applies RLS to every
+# entry, so a name here that 0001 does not also CREATE breaks every FRESH database —
+# `relation "x" does not exist` — while an already-migrated one carries on fine, because
+# 0001 ran long ago. That is exactly how `langfuse_bindings` slipped in and passed
+# locally: it is created in 0057, and the local database was already past 0001.
+#
+# A table added after the baseline applies its own RLS in its own migration, which is
+# what `workstreams`, `org_model_grants`, `approval_requests`, `org_settings` and the
+# rest already do. Do not add to this tuple.
 _RLS_TABLES: tuple[str, ...] = (
     "agent_call_logs",
     "agent_profiles",
@@ -759,6 +839,10 @@ class CustomRole(Base):
     scope_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Per-phase agent access: {"strategy": "primary", "development": "build", ...}.
+    # NULL means never set, which is not the same as {} ("set, granting nothing").
+    # Written and read whole; see migration 0060.
+    agent_access: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Uniqueness is per OWNER scope, not per tenant: two business units may each define
     # a role called "Reviewer" without colliding.

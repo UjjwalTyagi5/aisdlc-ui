@@ -1,9 +1,63 @@
+import os
+import re
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import NullPool
 
-from config.env import POSTGRES_CONN_STRING, REDIS_URL, AZURE_BLOB_ACCOUNT_URL
+from config.env import (
+    AZURE_BLOB_ACCOUNT_URL,
+    POSTGRES_CONN_STRING,
+    POSTGRES_MIGRATIONS_CONN_STRING,
+    REDIS_URL,
+)
+
+# Names that mark a database as safe to DESTROY. Anything else is presumed to be
+# somebody's real data.
+_DISPOSABLE_HINTS = ("test", "tmp", "temp", "scratch", "ci", "throwaway")
+_OPT_IN = "ALLOW_DESTRUCTIVE_DB_TESTS"
+
+
+def _database_name(dsn: str) -> str:
+    """The database name out of a SQLAlchemy/libpq URL, minus any query string."""
+    m = re.search(r"/([^/?]+)(?:\?|$)", dsn or "")
+    return m.group(1) if m else ""
+
+
+@pytest.fixture
+def disposable_migrations_dsn():
+    """A migrations DSN this test is allowed to DROP EVERY TABLE in.
+
+    WHY THIS EXISTS. `test_alembic_migration_cycle` runs `alembic downgrade base`,
+    which drops the entire schema. It took the DSN straight from the environment and
+    the only guard was "is it set", so pointing it at a development database -- which
+    is the normal thing for POSTGRES_MIGRATIONS_CONN_STRING to hold -- silently
+    destroyed it. That happened on 2026-09-13: one organization, one business unit,
+    one project, the Langfuse bindings and 125 audit events, gone in a run that
+    reported itself as a single ordinary test failure.
+
+    A test that can do that must name the database it is willing to ruin. The DSN is
+    accepted only when the database name looks disposable, or when the caller opts in
+    explicitly with ALLOW_DESTRUCTIVE_DB_TESTS=1 -- which is deliberately awkward to
+    type by accident and greppable when someone wonders how it got set.
+    """
+    dsn = POSTGRES_MIGRATIONS_CONN_STRING
+    if not dsn:
+        pytest.skip("POSTGRES_MIGRATIONS_CONN_STRING not set")
+
+    name = _database_name(dsn)
+    if os.environ.get(_OPT_IN) == "1":
+        return dsn
+    if not any(hint in name.lower() for hint in _DISPOSABLE_HINTS):
+        pytest.skip(
+            f"refusing to run a schema-destroying test against database {name!r}: "
+            f"the name does not look disposable. This test runs `alembic downgrade "
+            f"base`, which DROPS EVERY TABLE. Point "
+            f"POSTGRES_MIGRATIONS_CONN_STRING at a throwaway database, or set "
+            f"{_OPT_IN}=1 if you genuinely mean to destroy {name!r}."
+        )
+    return dsn
 
 
 @pytest.fixture

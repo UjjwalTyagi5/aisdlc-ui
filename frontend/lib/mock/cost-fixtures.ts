@@ -392,6 +392,10 @@ export function buildCostBreakdown(
     totalInputTokens: rows.reduce((a, r) => a + r.inputTokens, 0),
     totalOutputTokens: rows.reduce((a, r) => a + r.outputTokens, 0),
     rows,
+    // The mock always has a complete answer: it never asks Langfuse, so there is
+    // nothing that could have failed to load.
+    degraded: false,
+    degradedProjects: 0,
     generatedAt: GENERATED_AT,
     budgetUsd,
     utilization: budgetUsd > 0 ? Number((totalCostUsd / budgetUsd).toFixed(3)) : 0,

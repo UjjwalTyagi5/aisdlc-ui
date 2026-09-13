@@ -48,7 +48,11 @@ describe("cost breakdown reconciliation", () => {
   it("reconciles when rolled up by agent", () => {
     const byAgent = new Map<string, number>();
     for (const r of data.rows) {
-      byAgent.set(r.agentType, (byAgent.get(r.agentType) ?? 0) + r.costUsd);
+      // agentType is optional on the wire (the live /cost feed aggregates by model
+      // and omits it). Bucketing the absent case rather than skipping it keeps this
+      // a reconciliation test: every row's spend must still land somewhere.
+      const key = r.agentType ?? "(unattributed)";
+      byAgent.set(key, (byAgent.get(key) ?? 0) + r.costUsd);
     }
     const summed = [...byAgent.values()].reduce((a, b) => a + b, 0);
     expect(Math.abs(summed - data.totalCostUsd)).toBeLessThan(CENT * data.rows.length);

@@ -15,11 +15,9 @@ import type { Phase } from "@/lib/schemas/enums";
  * `scope` + `businessUnitId`. Renaming a field is not adapting a shape — every
  * value below comes from the row as stored.
  *
- * `agentAccess` IS NOT PERSISTED. `custom_roles` stores a name, a description and
- * a permission list; there is no per-phase agent-access column. It is accepted
- * and dropped rather than rejected, so composing a role still works — and the
- * next read simply won't carry it back, which is the truth becoming visible
- * rather than a stored value quietly diverging from what was sent.
+ * `agentAccess` IS PERSISTED (migration 0060). It used to be accepted here and
+ * dropped on the floor, so a role composed with Strategy=Primary came back reading
+ * "No access" on every phase — the form reported success and the answer was gone.
  *
  * Ownership is resolved by the backend from the caller, exactly as the fixture
  * version resolved it from the session and for the same reason: an org-wide role
@@ -27,11 +25,10 @@ import type { Phase } from "@/lib/schemas/enums";
  * do. The two creation endpoints are how FastAPI expresses that — the org one
  * checks `is_org_wide`, the unit one checks `assert_can_write_workspace`.
  *
- * BACKLOG: `agentAccess` on `custom_roles`, and a PATCH (see the [id] route).
  */
 export const dynamic = "force-dynamic";
 
-interface BackendCustomRole {
+export interface BackendCustomRole {
   id: string;
   name: string;
   description: string | null;
@@ -39,9 +36,16 @@ interface BackendCustomRole {
   scopeKind: string;
   scopeId: string | null;
   createdBy: string | null;
+  agentAccess: Partial<Record<Phase, InvolvementLevel>> | null;
 }
 
-function toCustomRole(row: BackendCustomRole) {
+/**
+ * Exported because the [id] route needs the IDENTICAL translation. It used to
+ * proxy PATCH straight through, so an edit answered with FastAPI's `scopeKind` /
+ * `scopeId` while the client validates `scope` / `businessUnitId` — every save
+ * failed on "response did not match schema" after the write had already landed.
+ */
+export function toCustomRole(row: BackendCustomRole) {
   return {
     id: row.id,
     name: row.name,
@@ -49,6 +53,7 @@ function toCustomRole(row: BackendCustomRole) {
     permissions: row.permissions,
     scope: (row.scopeKind === "business_unit" ? "business_unit" : "organization") as CustomRoleScope,
     businessUnitId: row.scopeKind === "business_unit" ? row.scopeId : null,
+    agentAccess: row.agentAccess ?? undefined,
   };
 }
 
@@ -104,6 +109,7 @@ export async function POST(req: NextRequest) {
         name: body.name,
         description: body.description ?? null,
         permissions: body.permissions ?? [],
+        agentAccess: body.agentAccess ?? null,
       },
     })) as BackendCustomRole;
     return Response.json(toCustomRole(created), { status: 201 });

@@ -234,15 +234,64 @@ ENABLE_LITELLM: bool = os.environ.get("ENABLE_LITELLM", "false").lower() == "tru
 ENABLE_WORKER_POOL: bool = os.environ.get("ENABLE_WORKER_POOL", "false").lower() == "true"
 WORKER_RECLAIM_TIMEOUT_MS: int = int(os.environ.get("WORKER_RECLAIM_TIMEOUT_MS", "60000"))
 
-# ── Langfuse LLM Observability (self-hosted OSS) ──
-# ENABLE_LANGFUSE gates all tracing: when false, build_agent_callbacks returns only
-# the AuditCallbackHandler and get_langfuse_client() returns None (zero behavior change).
+# ── Langfuse LLM Observability (shared self-hosted instance) ──
+# ENABLE_LANGFUSE gates all tracing: when false, langfuse_langchain_extras returns only
+# the Redis usage meter and get_langfuse_client() returns None (zero behavior change).
 # Keys + host are read by the langfuse SDK singleton (shared/observability) AND by the
 # read-only traces_router (shared/routers/traces.py) which proxies the Langfuse Public API.
+#
+# NO LOCALHOST DEFAULT. A default pointing at a container nobody runs turns a missing
+# setting into connection errors on every trace read; empty keys already disable tracing
+# cleanly, so an unset host should reach the same "off" state rather than a broken "on".
 ENABLE_LANGFUSE: bool = os.environ.get("ENABLE_LANGFUSE", "false").lower() == "true"
-LANGFUSE_HOST: str = os.environ.get("LANGFUSE_HOST", "http://localhost:3100")
+LANGFUSE_HOST: str = os.environ.get("LANGFUSE_HOST", "")
 LANGFUSE_PUBLIC_KEY: str = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.environ.get("LANGFUSE_SECRET_KEY", "")
+
+# ── Per-project Langfuse provisioning ──
+# The keys above are ONE key pair for ONE Langfuse project — fine while every trace
+# shares a project and isolation rides on tags. It is not fine once the requirement is
+# that a business unit's and a project's logs cannot mix: PRD §45 makes "project-level
+# trace isolation" an R1 release gate, and a tag is an application-level promise, not a
+# boundary. So each SDLC project gets its OWN Langfuse project, under a Langfuse
+# organization per business unit:
+#
+#     SDLC organization (tenant)  ->  (no Langfuse equivalent; single-tenant by default)
+#     SDLC business unit          ->  Langfuse ORGANIZATION
+#     SDLC project                ->  Langfuse PROJECT, with its own key pair
+#     member                      ->  Langfuse userId, within that project
+#
+# Langfuse only offers organization -> project, so the tenant tier has no level left to
+# occupy; it stays a tag. That is the right tier to give up, because PRD §3 makes this a
+# single-tenant-default platform while §45 is explicit about projects.
+#
+# Provisioning writes DIRECTLY TO THE LANGFUSE DATABASE. Creating organizations,
+# projects and API keys through the API is a Langfuse Enterprise feature and this
+# deployment is OSS, so the supported path does not exist. LANGFUSE_SALT must match the
+# instance's own SALT or every key minted here fails authentication: Langfuse stores
+# sha256(secret_key + sha256_hex(salt)) and compares against it.
+LANGFUSE_DB_URL: str = os.environ.get("LANGFUSE_DB_URL", "")
+LANGFUSE_SALT: str = os.environ.get("LANGFUSE_SALT", "")
+# Langfuse users made owners of each provisioned organization. COMMA-SEPARATED, because
+# one address is not enough: Langfuse lists only the organizations you belong to, so a
+# project provisioned under a service account is invisible to the engineers who need to
+# open it — the traces arrive and nobody can look at them, which reads as "provisioning
+# failed" rather than "you were not added".
+LANGFUSE_BOOTSTRAP_USER_EMAIL: str = os.environ.get("LANGFUSE_BOOTSTRAP_USER_EMAIL", "")
+# Trace retention in days, applied to each project as it is created (PRD §34.8: traces
+# "expire on a policy far shorter than audit"). Empty leaves the instance default.
+LANGFUSE_RETENTION_DAYS: str = os.environ.get("LANGFUSE_RETENTION_DAYS", "")
+# Master switch for the BU->Langfuse-organization lifecycle (0058): creating a business
+# unit creates its Langfuse organization, the platform's org admins are made OWNER, and
+# its appointed bu_admin is made ADMIN so they can sign in to Langfuse directly.
+#
+# Set false to keep provisioning (projects and keys still get created on demand) while
+# granting no human any Langfuse access — the posture before 0058, and the right one if
+# Langfuse sign-in is not wanted for this deployment. Every grant is best-effort either
+# way; this only decides whether it is attempted.
+LANGFUSE_MANAGE_MEMBERSHIPS: bool = (
+    os.environ.get("LANGFUSE_MANAGE_MEMBERSHIPS", "true").strip().lower() == "true"
+)
 
 # ── M7.3: OIDC SSO master flag (REQ-M7-15) — gates decode_token dispatch + frontend login in lockstep ──
 ENABLE_OIDC: bool = os.environ.get("ENABLE_OIDC", "false").lower() == "true"

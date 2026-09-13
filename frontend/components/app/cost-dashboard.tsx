@@ -65,15 +65,28 @@ export function formatTokens(n: number): string {
  * The model alone stopped being unique once rows carry an agent: Development
  * and Testing both run on Sonnet, and two rows sharing a key make React reuse
  * one row's DOM for the other's data.
+ *
+ * When the row has no agent — the shape the live /cost endpoint returns, which
+ * aggregates by model — the model IS unique again, so it is the whole key.
+ * Falling back to a literal "undefined::" prefix would collide every row.
  */
 export function rowKey(row: CostBreakdownRow): string {
-  return `${row.agentType}::${row.model}`;
+  return row.agentType ? `${row.agentType}::${row.model}` : row.model;
 }
 
-/** Pure helper: the agents present in a breakdown, in spend order. */
+/**
+ * Pure helper: the agents present in a breakdown, in spend order.
+ *
+ * Rows without an agent contribute nothing: an empty result is what tells the
+ * table there is no agent dimension to show, so it hides the column and the
+ * filter rather than rendering a column of blanks.
+ */
 export function agentsInBreakdown(rows: CostBreakdownRow[]): string[] {
   const spend = new Map<string, number>();
-  for (const r of rows) spend.set(r.agentType, (spend.get(r.agentType) ?? 0) + r.costUsd);
+  for (const r of rows) {
+    if (!r.agentType) continue;
+    spend.set(r.agentType, (spend.get(r.agentType) ?? 0) + r.costUsd);
+  }
   return [...spend.entries()].sort((a, b) => b[1] - a[1]).map(([agent]) => agent);
 }
 
@@ -192,6 +205,27 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
 
   return (
     <div className="space-y-6">
+      {/* INCOMPLETE FIGURES SAY SO. A Langfuse read that fails degrades to an empty
+          result, so the spend below arrives as a confident $0 -- identical to a quiet
+          month, and nobody investigates a quiet month. This is the difference between
+          "nothing was spent" and "we could not find out". */}
+      {data.degraded && (
+        <div
+          role="status"
+          className="border-amber-500/30 bg-amber-500/8 flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+        >
+          <span className="font-mono text-[11px] tracking-widest text-amber-600 uppercase dark:text-amber-400">
+            Incomplete
+          </span>
+          <span className="text-muted-foreground">
+            Spend for {data.degradedProjects}{" "}
+            {data.degradedProjects === 1 ? "project" : "projects"} could not be read
+            from Langfuse, so the totals below are a floor, not the full figure. Budget
+            use is unaffected — it is measured separately.
+          </span>
+        </div>
+      )}
+
       {/* Total spend tile — reuses CostMeter for the headline + budget bar */}
       <CostMeter
         cost={{
@@ -239,24 +273,29 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
                 · {formatUsd(filteredUsd)} of {formatUsd(data.totalCostUsd)}
               </span>
             )}
-            <Select value={agent} onValueChange={setAgent}>
-              <SelectTrigger className="ml-auto h-8 w-48 border-line-soft" aria-label="Filter by agent">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All agents</SelectItem>
-                {agents.map((a) => (
-                  <SelectItem key={a} value={a}>
-                    {PHASE_LABEL[a as keyof typeof PHASE_LABEL] ?? a}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* No agent dimension in the data (the live /cost feed aggregates by
+                model), so there is nothing to filter by — an "All agents" select
+                whose only option is "all" is a control that cannot do anything. */}
+            {agents.length > 0 && (
+              <Select value={agent} onValueChange={setAgent}>
+                <SelectTrigger className="ml-auto h-8 w-48 border-line-soft" aria-label="Filter by agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All agents</SelectItem>
+                  {agents.map((a) => (
+                    <SelectItem key={a} value={a}>
+                      {PHASE_LABEL[a as keyof typeof PHASE_LABEL] ?? a}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Agent</TableHead>
+                {agents.length > 0 && <TableHead>Agent</TableHead>}
                 <TableHead>Model</TableHead>
                 <TableHead className="text-right">In</TableHead>
                 <TableHead className="text-right">Out</TableHead>
@@ -267,9 +306,11 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
             <TableBody>
               {rows.map((row) => (
                 <TableRow key={rowKey(row)}>
-                  <TableCell className="text-[12px] font-medium">
-                    {PHASE_LABEL[row.agentType] ?? row.agentType}
-                  </TableCell>
+                  {agents.length > 0 && (
+                    <TableCell className="text-[12px] font-medium">
+                      {row.agentType ? PHASE_LABEL[row.agentType] ?? row.agentType : "—"}
+                    </TableCell>
+                  )}
                   <TableCell className="font-mono text-[12px]">
                     {row.model}
                   </TableCell>
