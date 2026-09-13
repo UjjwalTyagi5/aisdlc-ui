@@ -24,6 +24,7 @@ Admin define a role for their own unit without defining it for every unit.
 from __future__ import annotations
 
 import logging
+import json as _json
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -112,10 +113,38 @@ async def _assert_creator_holds(request: Request, requested: list[str]) -> None:
         )
 
 
+# The contract is frontend/lib/schemas/enums.ts::Phase and
+# frontend/lib/schemas/agent-access.ts::InvolvementLevel. Kept as an explicit list
+# rather than reusing governance.routing.PHASES, which is a different set (it has no
+# `plan` or `requirements_modernization`) -- silently accepting only part of what the
+# composer offers is how this field came to be dropped in the first place.
+_PHASES: frozenset[str] = frozenset({
+    "requirements", "design", "plan", "development", "review", "security",
+    "testing", "deployment", "documentation", "requirements_modernization",
+    "discovery", "strategy", "migration_mapping", "validation", "data_engineering",
+})
+_LEVELS: frozenset[str] = frozenset({"owner", "primary", "build", "requests", "use", "none"})
+
+
+def _validate_agent_access(access: dict[str, str] | None) -> dict[str, str] | None:
+    """Reject unknown phases and levels. Returns the map unchanged, or None."""
+    if access is None:
+        return None
+    for phase, level in access.items():
+        if phase not in _PHASES:
+            raise ValueError(f"unknown agent phase: {phase!r}")
+        if level not in _LEVELS:
+            raise ValueError(f"unknown involvement level for {phase!r}: {level!r}")
+    return dict(access)
+
+
 class CustomRoleIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=255)
     permissions: list[str] = Field(default_factory=list)
+    # Per-phase agent access. Optional so an older client still creates a role;
+    # None means "not stated", which leaves an existing value alone on PATCH.
+    agentAccess: dict[str, str] | None = None
 
 
 class CustomRoleOut(BaseModel):
@@ -126,6 +155,7 @@ class CustomRoleOut(BaseModel):
     scopeKind: str = "organization"
     scopeId: str | None = None
     createdBy: str | None = None
+    agentAccess: dict[str, str] | None = None
 
 
 class OkOut(BaseModel):
@@ -155,6 +185,7 @@ async def _create(
     tenant_id = _tenant_id(request)
     try:
         _validate_permissions(body.permissions)
+        agent_access = _validate_agent_access(body.agentAccess)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -166,13 +197,16 @@ async def _create(
         await db.execute(
             text(
                 "INSERT INTO custom_roles "
-                "  (id, tenant_id, name, description, scope_kind, scope_id, created_by) "
-                "VALUES (:id, :t, :name, :descr, :sk, :sid, :by)"
+                "  (id, tenant_id, name, description, scope_kind, scope_id, created_by, "
+                "   agent_access) "
+                "VALUES (:id, :t, :name, :descr, :sk, :sid, :by, "
+                "        CAST(:aa AS jsonb))"
             ),
             {
                 "id": str(role_id), "t": tenant_id, "name": body.name,
                 "descr": body.description, "sk": scope_kind, "sid": scope_id,
                 "by": created_by,
+                "aa": _json.dumps(agent_access) if agent_access is not None else None,
             },
         )
     except IntegrityError:
@@ -192,7 +226,7 @@ async def _create(
     return CustomRoleOut(
         id=str(role_id), name=body.name, description=body.description,
         permissions=body.permissions, scopeKind=scope_kind, scopeId=scope_id,
-        createdBy=created_by,
+        createdBy=created_by, agentAccess=agent_access,
     )
 
 
@@ -265,6 +299,7 @@ async def list_custom_roles(
                 scopeKind=getattr(r, "scope_kind", "organization") or "organization",
                 scopeId=str(r.scope_id) if getattr(r, "scope_id", None) else None,
                 createdBy=getattr(r, "created_by", None),
+                agentAccess=getattr(r, "agent_access", None),
             )
         )
     return out
@@ -308,8 +343,22 @@ async def update_custom_role(
             ),
         )
 
+    try:
+        _validate_permissions(body.permissions)
+        agent_access = _validate_agent_access(body.agentAccess)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # THE SAME NO-ESCALATION RULE AS CREATE. This path did not check it at all, so a
+    # permission an admin could not package into a new role could be added to an
+    # existing one by editing it -- the guard was one HTTP verb wide.
+    await _assert_creator_holds(request, body.permissions)
+
     row.name = body.name
     row.description = body.description
+    # None means "not stated" and leaves the stored value alone; {} clears it.
+    if agent_access is not None:
+        row.agent_access = agent_access
     await db.execute(
         text("DELETE FROM custom_role_permissions WHERE custom_role_id = :rid"),
         {"rid": str(rid)},
@@ -335,6 +384,7 @@ async def update_custom_role(
         permissions=list(body.permissions), scopeKind=scope_kind,
         scopeId=str(row.scope_id) if row.scope_id else None,
         createdBy=getattr(row, "created_by", None),
+        agentAccess=getattr(row, "agent_access", None),
     )
 
 

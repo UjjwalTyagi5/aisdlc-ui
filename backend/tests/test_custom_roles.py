@@ -309,3 +309,100 @@ async def test_custom_roles_are_tenant_isolated():
             {"id": role_id},
         )
         await eng.dispose()
+
+
+# ── Agent access on a custom role (migration 0060) ───────────────────────────
+#
+# The composer has always had an AGENT ACCESS section and there was nowhere to put
+# the answer: the BFF accepted the field and dropped it, so a role created with
+# Strategy=Primary came back reading "No access" on every phase. The form reported
+# success and the choice was gone.
+
+def test_custom_role_has_somewhere_to_store_agent_access():
+    cols = {c.name for c in CustomRole.__table__.columns}
+    assert "agent_access" in cols, (
+        "the composer collects per-phase agent access; without this column it is "
+        "accepted and silently discarded"
+    )
+
+
+def test_agent_access_validation_rejects_unknown_phase_and_level():
+    import pytest as _pytest
+    from shared.routers.custom_roles import _validate_agent_access
+
+    # Not stated at all is legitimate, and distinct from "stated as empty".
+    assert _validate_agent_access(None) is None
+    assert _validate_agent_access({}) == {}
+
+    ok = {"strategy": "primary", "migration_mapping": "build", "requirements": "none"}
+    assert _validate_agent_access(ok) == ok
+
+    with _pytest.raises(ValueError):
+        _validate_agent_access({"not_a_phase": "primary"})
+    with _pytest.raises(ValueError):
+        _validate_agent_access({"strategy": "supreme_overlord"})
+
+
+def test_every_phase_the_ui_offers_is_accepted():
+    """The backend's phase set must cover the composer's, or a legitimate choice 422s.
+
+    Mirrors frontend/lib/schemas/enums.ts::Phase. Reusing governance.routing.PHASES
+    here would have been wrong -- it has no `plan` and no
+    `requirements_modernization`, so those two dropdowns would have been rejected.
+    """
+    from shared.routers.custom_roles import _validate_agent_access
+
+    ui_phases = [
+        "requirements", "design", "plan", "development", "review", "security",
+        "testing", "deployment", "documentation", "requirements_modernization",
+        "discovery", "strategy", "migration_mapping", "validation",
+        "data_engineering",
+    ]
+    _validate_agent_access({p: "primary" for p in ui_phases})
+
+
+def test_every_involvement_level_the_ui_offers_is_accepted():
+    """Mirrors frontend/lib/schemas/agent-access.ts::InvolvementLevel."""
+    from shared.routers.custom_roles import _validate_agent_access
+    for level in ("owner", "primary", "build", "requests", "use", "none"):
+        _validate_agent_access({"development": level})
+
+
+def test_bu_admin_can_grant_the_delivery_permissions_it_now_holds():
+    """The composer refuses permissions its creator lacks, so `role:manage` without
+    the delivery set left a Business Unit Admin unable to author any role that does
+    real work -- "You cannot grant permissions you do not hold: agent:invoke, ...".
+    Granted 2026-09-13 by product decision; see the note in permissions.py.
+    """
+    from shared.authz.permissions import _ROLE_PERMISSIONS
+
+    held = set(_ROLE_PERMISSIONS["bu_admin"])
+    for p in ("agent:invoke", "approve", "run:create", "run:view", "run:cancel",
+              "artifact:approve_requirements", "artifact:approve_design",
+              "artifact:approve_development", "artifact:delete", "artifact:export",
+              "skill:edit", "skill:import", "connector:request"):
+        assert p in held, f"bu_admin cannot compose a role granting {p}"
+
+    # Organization-wide policy is not a unit's to change, and no route requires it.
+    assert "settings:manage" not in held
+    # Still not an org admin.
+    assert "admin:*" not in held
+
+
+def test_bu_admin_mirrors_the_frontend_exactly():
+    """permissions.py says it mirrors the frontend; drift means the UI shows a
+    permission set the API will not honour (or hides one it would)."""
+    import pathlib
+    import re
+
+    from shared.authz.permissions import _ROLE_PERMISSIONS
+
+    src = (pathlib.Path(__file__).parents[2] / "frontend" / "lib" / "auth"
+           / "role-permissions.ts").read_text(encoding="utf-8")
+    block = re.search(r"\n  bu_admin: \[(.*?)\n  \],", src, re.S)
+    assert block, "could not find bu_admin in role-permissions.ts"
+    body = "\n".join(
+        line for line in block.group(1).split("\n")
+        if not line.strip().startswith("//")
+    )
+    assert set(re.findall(r'"([^"]+)"', body)) == set(_ROLE_PERMISSIONS["bu_admin"])
