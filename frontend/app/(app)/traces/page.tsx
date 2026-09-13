@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ActivityTabs } from "@/components/app/activity-tabs";
+import { OpenInLangfuse } from "@/components/app/open-in-langfuse";
 import { TraceMetricsStrip } from "@/components/app/trace-metrics-strip";
 import { TracesExplorer } from "@/components/app/traces-explorer";
 import { getTraceMetrics, type TraceFilters } from "@/lib/api/traces";
@@ -63,6 +64,12 @@ export default function TracesPage() {
       >
         <div>
           <PageTitle>Traces</PageTitle>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          {/* Renders nothing unless this viewer genuinely has a Langfuse grant — see
+              OpenInLangfuse on why that is a server decision, not a permission check. */}
+          <OpenInLangfuse className="border-line-soft" />
         </div>
 
         <Select value={String(windowDays)} onValueChange={(v) => setWindowDays(Number(v))}>

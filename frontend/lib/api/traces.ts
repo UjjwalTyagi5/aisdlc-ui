@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ProjectCostSummary, Trace, TraceListItem, TraceMetrics } from "@/lib/schemas";
 
 import { api } from "./client";
+import { LangfuseLinkList } from "@/lib/schemas/trace";
 
 /**
  * Filters the backend actually applies.
@@ -24,6 +25,16 @@ export interface TraceFilters {
    */
   user?: string;
 }
+
+/**
+ * Where this viewer may go in Langfuse.
+ *
+ * Returns [] for anybody the backend finds no Langfuse grant for, which is what the
+ * "Open in Langfuse" control keys off — it is the presence of real access, not the
+ * `trace:view` permission, that decides whether a link is offered.
+ */
+export const listLangfuseLinks = () =>
+  api("/traces/langfuse", { schema: LangfuseLinkList });
 
 export const listTraces = (filters: TraceFilters = {}) =>
   api("/traces", {

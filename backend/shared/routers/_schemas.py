@@ -1116,6 +1116,22 @@ class TraceListItemOut(BaseModel):
     scores: List[TraceScoreOut] = []
 
 
+class LangfuseLinkOut(BaseModel):
+    """One project this caller may open in the Langfuse UI.
+
+    `access` is the honest part: "member" means they can open it now, "invited" means
+    Langfuse will let them in once they sign in for the first time, and anything else is
+    filtered out before it reaches the client. Without it the product would offer a link
+    to somebody who lands on an access-denied page — a worse answer than no link.
+    """
+
+    projectId: str
+    projectName: str
+    url: str
+    access: str
+    role: str
+
+
 class TraceOut(TraceListItemOut):
     """Full trace detail — list item + spans + a deep-link to the Langfuse trace."""
 

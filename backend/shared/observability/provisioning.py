@@ -785,6 +785,70 @@ class LangfuseProvisioner:
             removed.append("invitation")
         return "+".join(removed) if removed else "nothing-to-revoke"
 
+    async def user_project_access(
+        self, *, org_id: str, project_id: str, email: str
+    ) -> tuple[str, str]:
+        """(state, role) for one person on one project: what Langfuse would actually do.
+
+        state is "member" (they can open it now), "invited" (they will once they sign in
+        for the first time) or "none".
+
+        WHY THE UI NEEDS THIS AND NOT JUST A ROLE LOOKUP. A link to Langfuse shown to
+        somebody who cannot open it is worse than no link: they follow it and land on an
+        access-denied page with no explanation, and the product looks broken rather than
+        correctly restrictive. Today everybody holding `trace:view` also holds a Langfuse
+        grant, so a link gated on the permission happens to be right — but that is a
+        coincidence of two lists matching, not a guarantee, and it stops being true the
+        moment either one changes.
+
+        Resolution mirrors Langfuse's own: a project membership overrides the organization
+        role, and NONE grants nothing.
+        """
+        self._require_config()
+        email = (email or "").strip()
+        if not email:
+            return "none", ORG_ROLE_NONE
+        try:
+            conn = await self._connect()
+        except LangfuseProvisioningError:
+            return "none", ORG_ROLE_NONE
+        try:
+            user_id = await conn.fetchval(
+                "select id from users where lower(email) = lower($1)", email
+            )
+            if user_id:
+                role = await conn.fetchval(
+                    "select role from project_memberships where project_id=$1 and user_id=$2",
+                    project_id, str(user_id),
+                )
+                if role is None:
+                    role = await conn.fetchval(
+                        "select role from organization_memberships "
+                        "where org_id=$1 and user_id=$2",
+                        org_id, str(user_id),
+                    )
+                role = str(role) if role else ORG_ROLE_NONE
+                return ("member" if role != ORG_ROLE_NONE else "none"), role
+
+            inv = await conn.fetchrow(
+                "select org_role, project_id, project_role from membership_invitations "
+                "where org_id=$1 and lower(email)=lower($2)",
+                org_id, email,
+            )
+            if inv is None:
+                return "none", ORG_ROLE_NONE
+            if inv["project_id"] == project_id and inv["project_role"]:
+                return "invited", str(inv["project_role"])
+            role = str(inv["org_role"])
+            return ("invited" if role != ORG_ROLE_NONE else "none"), role
+        except Exception:
+            logger.warning(
+                "langfuse access lookup failed for project=%s", project_id, exc_info=True
+            )
+            return "none", ORG_ROLE_NONE
+        finally:
+            await conn.close()
+
     async def pending_invitation_projects(self, *, org_id: str) -> dict:
         """{email: project_id} for invitations that name a project. For the reconciler.
 

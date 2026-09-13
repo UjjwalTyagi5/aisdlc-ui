@@ -51,6 +51,7 @@ from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
 from shared.routers._schemas import (
     CostOut,
+    LangfuseLinkOut,
     ProjectCostSummaryOut,
     SpanOut,
     TraceListItemOut,
@@ -771,6 +772,94 @@ async def trace_metrics(
         return empty
 
     return _aggregate_metrics(items, window_days, empty)
+
+
+@traces_router.get(
+    "/langfuse",
+    response_model=list[LangfuseLinkOut],
+    dependencies=[Depends(require_permission("trace:view"))],
+)
+async def langfuse_links(
+    request: Request,
+    project: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> list[LangfuseLinkOut]:
+    """Where this caller can go in Langfuse for deeper debugging, and nowhere else.
+
+    REGISTERED BEFORE `/{trace_id}`, DELIBERATELY. FastAPI matches routes in declaration
+    order, so a literal path added after the parameterised one is never reached — the
+    request arrives as `get_trace(trace_id="langfuse")` and 404s, which looks like the
+    feature is broken rather than mis-ordered.
+
+    SCOPED THE SAME WAY THE TRACES THEMSELVES ARE. `_readable_bindings` already answers
+    "which Langfuse projects may this caller read", so the link list cannot name a project
+    their trace list would not show.
+
+    FILTERED BY REAL LANGFUSE ACCESS, not by the `trace:view` permission that gates this
+    route. The two agree today — every role holding `trace:view` also gets a Langfuse
+    grant — but they are separate systems, and offering a link that lands on an
+    access-denied page makes the product look broken rather than correctly restrictive.
+    Somebody with a pending invitation IS included, because following the link is exactly
+    what turns that invitation into access.
+    """
+    if not _enabled():
+        return []
+
+    bindings = await _readable_bindings(db, request, only_project=project)
+    if not bindings:
+        return []
+
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    email = None
+    try:
+        email = (
+            await db.execute(
+                _text("select email from users where id = :u"),
+                {"u": getattr(request.state, "user_id", "")},
+            )
+        ).scalar()
+    except Exception:
+        logger.warning("langfuse link: caller email lookup failed", exc_info=True)
+    if not email:
+        # No address means Langfuse cannot identify them at all, so there is nothing
+        # honest to offer.
+        return []
+
+    names = await _resolve_project_names(
+        {str(b.project_id) for b in bindings}, str(request.state.tenant_id)
+    )
+
+    from shared.observability.provisioning import LangfuseProvisioner  # noqa: PLC0415
+
+    provisioner = LangfuseProvisioner()
+    out: list[LangfuseLinkOut] = []
+    for b in bindings[:_MAX_PROJECT_FANOUT]:
+        try:
+            state, role = await provisioner.user_project_access(
+                org_id=b.langfuse_org_id,
+                project_id=b.langfuse_project_id,
+                email=str(email),
+            )
+        except Exception:
+            logger.warning(
+                "langfuse link: access lookup failed for project=%s", b.project_id,
+                exc_info=True,
+            )
+            continue
+        if state == "none":
+            continue
+        host = (b.langfuse_host or LANGFUSE_HOST).rstrip("/")
+        out.append(
+            LangfuseLinkOut(
+                projectId=str(b.project_id),
+                projectName=names.get(str(b.project_id), "Project"),
+                url=f"{host}/project/{b.langfuse_project_id}/traces",
+                access=state,
+                role=role,
+            )
+        )
+    return sorted(out, key=lambda x: x.projectName.lower())
 
 
 @traces_router.get(

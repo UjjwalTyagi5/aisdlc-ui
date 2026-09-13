@@ -118,3 +118,22 @@ export const ProjectCostSummary = z.object({
   generatedAt: Timestamp,
 });
 export type ProjectCostSummary = z.infer<typeof ProjectCostSummary>;
+
+/**
+ * One project this viewer may open in the Langfuse UI.
+ *
+ * `access` is why this comes from the server rather than being derived from the
+ * viewer's role: "member" can open it now, "invited" gets in on first sign-in, and the
+ * backend drops anyone with neither. Deriving it here from `trace:view` would be right
+ * only for as long as the two systems' role lists happen to match.
+ */
+export const LangfuseLink = z.object({
+  projectId: z.string(),
+  projectName: z.string(),
+  url: z.string(),
+  access: z.enum(["member", "invited"]),
+  role: z.string(),
+});
+export type LangfuseLink = z.infer<typeof LangfuseLink>;
+
+export const LangfuseLinkList = z.array(LangfuseLink);
