@@ -37,6 +37,8 @@ function buildBreakdown(overrides: Partial<CostBreakdown> = {}): CostBreakdown {
     budgetUsd: 100,
     utilization: 0.125,
     breached80: false,
+    degraded: false,
+    degradedProjects: 0,
     ...overrides,
   };
 }

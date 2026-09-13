@@ -205,6 +205,27 @@ function CostDashboardBody({ data }: { data: CostBreakdown }) {
 
   return (
     <div className="space-y-6">
+      {/* INCOMPLETE FIGURES SAY SO. A Langfuse read that fails degrades to an empty
+          result, so the spend below arrives as a confident $0 -- identical to a quiet
+          month, and nobody investigates a quiet month. This is the difference between
+          "nothing was spent" and "we could not find out". */}
+      {data.degraded && (
+        <div
+          role="status"
+          className="border-amber-500/30 bg-amber-500/8 flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+        >
+          <span className="font-mono text-[11px] tracking-widest text-amber-600 uppercase dark:text-amber-400">
+            Incomplete
+          </span>
+          <span className="text-muted-foreground">
+            Spend for {data.degradedProjects}{" "}
+            {data.degradedProjects === 1 ? "project" : "projects"} could not be read
+            from Langfuse, so the totals below are a floor, not the full figure. Budget
+            use is unaffected — it is measured separately.
+          </span>
+        </div>
+      )}
+
       {/* Total spend tile — reuses CostMeter for the headline + budget bar */}
       <CostMeter
         cost={{

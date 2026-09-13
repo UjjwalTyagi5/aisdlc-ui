@@ -26,19 +26,34 @@ TENANT_A = "00000000-0000-0000-0000-000000000001"
 TENANT_B = "00000000-0000-0000-0000-000000000002"
 
 
-def _make_db_session_override(rows: list[tuple]):
+def _make_db_session_override(rows: list[tuple], spend: list[tuple] | None = None):
     """Return an async-generator dependency override yielding a mock AsyncSession.
 
     `rows` is the list of tuples the mocked execute().all() returns — one
     per (model, input_tokens, output_tokens, cost_usd, call_count).
+
+    `spend` is what the `usage_monthly` rollup returns — [(scope_id, cost_usd)].
+    ROUTED BY SQL, because the endpoint now issues two different .all() queries:
+    the binding lookup and the rollup that drives the budget signal. A fake that
+    answers both with the same tuples fed binding rows to the spend reader, which
+    is not a scenario the real database can produce — it would let a test pass on
+    a shape the endpoint never sees.
     """
 
     async def _override():
         session = MagicMock()
-        result = MagicMock()
-        result.all = MagicMock(return_value=rows)
-        result.scalar = MagicMock(return_value=None)  # org-budget query → env fallback
-        session.execute = AsyncMock(return_value=result)
+
+        async def _execute(stmt, params=None, *a, **kw):
+            sql = str(getattr(stmt, "text", stmt))
+            result = MagicMock()
+            result.scalar = MagicMock(return_value=None)  # org-budget → env fallback
+            result.first = MagicMock(return_value=None)
+            result.all = MagicMock(
+                return_value=(spend or []) if "usage_monthly" in sql else rows
+            )
+            return result
+
+        session.execute = AsyncMock(side_effect=_execute)
         yield session
 
     return _override
@@ -299,5 +314,126 @@ async def test_get_cost_reads_only_this_tenants_bindings(mint_token, monkeypatch
         assert tenant_params, "expected the binding lookup to run"
         assert all(t == TENANT_A for t in tenant_params)
         assert not any(TENANT_B in str(v) for p in seen_params for v in p.values())
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest.mark.unit
+async def test_unreachable_langfuse_is_reported_not_reported_as_zero(
+    mint_token, monkeypatch
+):
+    """A Langfuse read that fails must not come back as a confident $0.
+
+    `_lf_get` returns None for every failure -- unreachable host, bad keys, timeout --
+    and this endpoint turned that into zero spend and no rows behind HTTP 200. "No
+    spend" is a plausible answer, so nobody investigates it; that is precisely how the
+    2026-09 ingestion outage ran for five days unnoticed.
+    """
+    import httpx
+    from process_api import app
+    from shared.db import get_db_session
+    import shared.routers.traces as _traces
+
+    # Langfuse ENABLED but unreachable. Disabled is a different state and correctly
+    # not degraded -- nothing was promised, so nothing is missing.
+    import config.env as _env
+    monkeypatch.setattr(_env, "ENABLE_LANGFUSE", True)
+
+    class _Binding:
+        project_id = "22222222-2222-2222-2222-222222222222"
+        workspace_id = "33333333-3333-3333-3333-333333333333"
+        langfuse_host = "https://lf.example"
+        public_key = "pk-lf-test"
+        secret_key = "sk-lf-test"
+
+    async def _fake_bindings(session, tenant_id, project_ids):
+        return [_Binding()]
+
+    import shared.observability.bindings as _bindings
+    monkeypatch.setattr(_bindings, "load_bindings", _fake_bindings)
+
+    async def _unreachable(path, params, **kw):
+        return None  # what _lf_get yields on any HTTPError
+
+    monkeypatch.setattr(_traces, "_lf_get", _unreachable)
+
+    app.dependency_overrides[get_db_session] = _make_db_session_override(
+        [(_Binding.project_id, _Binding.workspace_id)]
+    )
+    try:
+        token = mint_token(
+            user_id="u9", tenant_id=TENANT_A,
+            permissions=["artifact:view", "cost:view", "settings:manage"],
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/cost", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        # Still degrades rather than 500ing -- the page must render.
+        assert data["rows"] == []
+        assert data["totalCostUsd"] == 0
+        # ...but it says so, which is the whole point.
+        assert data["degraded"] is True
+        assert data["degradedProjects"] == 1
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest.mark.unit
+async def test_budget_signal_comes_from_the_rollup_not_the_traced_window(
+    mint_token, monkeypatch
+):
+    """Utilization must be the number enforcement blocks on.
+
+    `budget_guard` refuses runs on LIFETIME `usage_monthly` spend. This endpoint
+    divided a 30-day Langfuse window by the same cap, so the page understated use for
+    any scope with older spend -- and, because an unreachable Langfuse degrades to
+    zero, drove TENANT_LLM_BUDGET_UTILIZATION to 0 mid-outage. Here Langfuse reports
+    nothing at all while the rollup says the org has spent $900 of its $1000 cap: the
+    signal must follow the rollup and flag the breach.
+    """
+    import httpx
+    from process_api import app
+    from shared.db import get_db_session
+    import shared.routers.traces as _traces
+
+    async def _no_traces(path, params, **kw):
+        return {"data": []}
+
+    import config.env as _env
+    monkeypatch.setattr(_env, "ENABLE_LANGFUSE", True)
+    monkeypatch.setattr(_traces, "_lf_get", _no_traces)
+    monkeypatch.setattr(
+        "shared.routers.cost.resolve_tenant_budget", lambda _t: 1000.0
+    )
+
+    app.dependency_overrides[get_db_session] = _make_db_session_override(
+        [], spend=[(TENANT_A, 900.0)]
+    )
+    try:
+        token = mint_token(
+            user_id="u10", tenant_id=TENANT_A,
+            permissions=["artifact:view", "cost:view", "settings:manage"],
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/cost", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        # Nothing traced in the window...
+        assert data["totalCostUsd"] == 0
+        # ...but the money of record says 90% of the cap is gone.
+        assert data["budgetUsd"] == 1000.0
+        assert round(data["utilization"], 4) == 0.9
+        assert data["breached80"] is True
     finally:
         app.dependency_overrides.pop(get_db_session, None)

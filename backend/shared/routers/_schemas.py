@@ -1051,6 +1051,13 @@ class CostBreakdownOut(BaseModel):
     budgetUsd: float
     utilization: float
     breached80: bool
+    # WHETHER THIS ANSWER IS COMPLETE. Every Langfuse read degrades to an empty
+    # result, so an unreachable instance produced zero spend and no rows behind a
+    # 200 -- a number that looks like a quiet month and invites nobody to check.
+    # `degraded` says the figures below are missing at least one project's spend,
+    # so the UI can decline to present them as the total.
+    degraded: bool = False
+    degradedProjects: int = 0
 
 
 # ── Traces (GET /traces, /traces/metrics, /traces/{id}) ───────────────────────

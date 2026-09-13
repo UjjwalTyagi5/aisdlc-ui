@@ -136,11 +136,15 @@ async def get_cost_breakdown(
     """Return the tenant's (or one workspace's) LLM spend aggregated by model.
 
     Sourced from Langfuse (the same feed as the /traces page) — the authoritative
-    per-model token+cost data, scoped by the mandatory tenant tag (+ the workspace tag
+    per-model token+cost ATTRIBUTION (the budget figures come from the durable
+    `usage_monthly` rollup instead; see the budget-signal note below), scoped by the mandatory tenant tag (+ the workspace tag
     when `workspace` is given) over the window. This is how the same model configured in
     two workspaces (BYOK, different keys) is separated: pick a workspace to attribute
     per-model spend to it. (agent_call_logs is deprecated; usage_monthly has no model dim.)
-    Degrades to empty rows + zero spend when Langfuse is disabled/unreachable.
+    Degrades to empty rows + zero spend when Langfuse is disabled/unreachable, and
+    sets `degraded`/`degradedProjects` when it does -- the zero is otherwise
+    indistinguishable from a quiet month, which is what let an ingestion outage run
+    for five days in 2026-09 without anyone noticing.
     """
     tenant_id = request.state.tenant_id
 
@@ -171,6 +175,9 @@ async def get_cost_breakdown(
     total_cost = Decimal("0")
     total_input = 0
     total_output = 0
+    # How many projects we asked about and could not get an answer for. Anything
+    # above zero means the totals below are a floor, not the spend.
+    degraded_projects = 0
 
     from config.env import ENABLE_LANGFUSE  # noqa: PLC0415
     if ENABLE_LANGFUSE:
@@ -235,6 +242,12 @@ async def get_cost_breakdown(
                 "/api/public/metrics", {"query": _json.dumps(_q)},
                 host=_b.langfuse_host, public_key=_b.public_key, secret_key=_b.secret_key,
             )
+            # `_lf_get` returns None for every failure -- unreachable host, bad keys,
+            # timeout. Counting it is what separates "this project spent nothing" from
+            # "we never found out", which this endpoint reported identically.
+            if _data is None:
+                degraded_projects += 1
+                continue
             for _row in (_data or {}).get("data") or []:
                 _model = _row.get("providedModelName")
                 if not _model:  # non-LLM spans carry no model and no cost
@@ -268,7 +281,22 @@ async def get_cost_breakdown(
             {"t": tenant_id},
         )).scalar()
         budget_usd = float(_org_budget) if _org_budget is not None else resolve_tenant_budget(tenant_id)
-    budget_signal = compute_budget_utilization(tenant_id, total_cost_usd, budget_usd)
+    # THE BUDGET SIGNAL COMES FROM THE ROLLUP, NOT FROM LANGFUSE. These are two
+    # different measurements and only one of them is the money:
+    #
+    #   totalCostUsd  - Langfuse, windowed (default 30d). The per-model/per-agent
+    #                   attribution, and the only source with a model dimension.
+    #   utilization   - `usage_monthly`, lifetime. What `budget_guard` blocks on.
+    #
+    # This divided the 30-day traced figure by a lifetime cap, which understated
+    # utilization for any scope with spend older than the window, and -- because
+    # an unreachable Langfuse degrades to zero -- drove TENANT_LLM_BUDGET_UTILIZATION
+    # to 0 during an outage. The one gauge that could have raised the alarm instead
+    # reported perfect health, which is how the 2026-09 outage stayed unnoticed.
+    _scope = "workspace" if workspace else "org"
+    _scope_id = str(workspace) if workspace else str(tenant_id)
+    _rollup_spend = (await _spend_map(db, tenant_id, _scope)).get(_scope_id, 0.0)
+    budget_signal = compute_budget_utilization(tenant_id, _rollup_spend, budget_usd)
 
     return CostBreakdownOut(
         windowDays=window_days,
@@ -280,6 +308,8 @@ async def get_cost_breakdown(
         budgetUsd=budget_signal["budget_usd"],
         utilization=budget_signal["utilization"],
         breached80=budget_signal["breached_80"],
+        degraded=degraded_projects > 0,
+        degradedProjects=degraded_projects,
     )
 
 
@@ -315,10 +345,24 @@ class BudgetSetIn(BaseModel):
 
 
 async def _spend_map(db: AsyncSession, tenant_id, scope: str) -> dict[str, float]:
+    """LIFETIME spend per scope_id from the durable rollup.
+
+    SUMS EVERY MONTH, matching `read_scope_spend` -- which is what actually blocks
+    runs. This filtered on `month_key()` and so reported the current calendar
+    month against a cap that is a lifetime total (`monthly_budget_usd` is a legacy
+    name; `budget_guard` treats it as the budget for the scope's whole life). The
+    two disagreed by construction: a project the guard was refusing to run at 100%
+    of its budget showed on the Cost page as using only what it had spent since the
+    1st, so a Project Admin saw ample headroom and could not start anything, and
+    breached80 stayed False through the breach.
+
+    `read_scope_spend` fixed exactly this for enforcement and carries the same note;
+    the reporting path was missed. The month grain remains a detail of the storage.
+    """
     rows = (await db.execute(
-        text("SELECT scope_id, cost_usd FROM usage_monthly "
-             "WHERE tenant_id = :t AND scope = :s AND month = :m"),
-        {"t": str(tenant_id), "s": scope, "m": month_key()},
+        text("SELECT scope_id, COALESCE(SUM(cost_usd), 0) FROM usage_monthly "
+             "WHERE tenant_id = :t AND scope = :s GROUP BY scope_id"),
+        {"t": str(tenant_id), "s": scope},
     )).all()
     return {str(sid): float(c or 0.0) for sid, c in rows}
 
@@ -344,11 +388,17 @@ async def get_cost_summary(
 ) -> CostSummaryOut:
     """GET /cost/summary?project_id=X (task #22's "GET /cost-summary" — nested under
     this router's existing /cost prefix, alongside /cost/budgets, rather than breaking
-    out a top-level route for one endpoint). One project's current-month spend against
-    its effective budget. A thin adapter over the same durable rollup GET /budgets
+    out a top-level route for one endpoint). One project's LIFETIME spend against its
+    effective budget. A thin adapter over the same durable rollup GET /budgets
     already reads (usage_monthly + workspace_alloc's effective_cap), deliberately NOT
     a new cost_events/token_pricing ledger: one already works here, and a second would
     just be a second number that can disagree with the first.
+
+    LIFETIME, not the current month, despite the field names. The cap it is compared
+    against (`monthly_budget_usd`) is a lifetime total -- a legacy column name, see
+    `budget_guard` -- so the spend has to accumulate the same way or the ratio is
+    meaningless. `monthlySpendUsd` and `month` keep their names only because renaming
+    a shipped response shape is a separate change; both now describe a total to date.
     """
     tenant_id = request.state.tenant_id
 

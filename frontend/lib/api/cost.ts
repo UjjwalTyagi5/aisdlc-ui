@@ -56,6 +56,14 @@ export const CostBreakdown = z.object({
   budgetUsd: z.number().nonnegative(),
   utilization: z.number().nonnegative(),
   breached80: z.boolean(),
+  /**
+   * Whether the figures above are missing at least one project's spend. A
+   * Langfuse read that fails degrades to an empty result, so the totals arrive as
+   * a confident zero behind HTTP 200 -- a number that reads as a quiet month.
+   * Default false so a response from an older backend still parses.
+   */
+  degraded: z.boolean().default(false),
+  degradedProjects: z.number().int().nonnegative().default(0),
 });
 export type CostBreakdown = z.infer<typeof CostBreakdown>;
 
