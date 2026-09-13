@@ -204,8 +204,15 @@ async def _probe_redis(redis_url: str) -> str:
     if not redis_url:
         return "not configured"
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(redis_url, socket_connect_timeout=2)
+        # THE SHARED FACTORY, not `aioredis.from_url`. Our Redis URLs carry two
+        # non-standard flags -- `cluster` and `tls_skip_hostname_check` -- which
+        # `from_url` forwards to the client constructor as unknown kwargs, so this
+        # probe raised TypeError and reported Redis as broken on every deployment
+        # that uses them. The app itself was fine; only the health check was wrong,
+        # which is worse than useless: a permanent false error is indistinguishable
+        # from a real outage and teaches everyone to ignore the field.
+        from shared.redis_client import redis_from_url  # noqa: PLC0415
+        client = redis_from_url(redis_url, socket_connect_timeout=2)
         await client.ping()
         await client.aclose()
         return "ok"
