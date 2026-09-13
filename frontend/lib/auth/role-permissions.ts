@@ -17,8 +17,10 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     // weaker role — had it, so every backend route behind the `artifact:view`
     // dependency (workspaces, projects, runs, audit, cost, traces) refused a
     // Business Unit Admin: they could administer a unit they could not open.
-    // Governance roles do not run agents (PRD §14.8) — that is why `agent:invoke`
-    // and `approve` stay absent — but being unable to READ was never the intent.
+    // Being unable to READ was never the intent. (This used to add that governance
+    // roles do not run agents per PRD §14.8, and that `agent:invoke`/`approve` were
+    // therefore absent — see the delivery block at the end of this list, which
+    // reverses that.)
     "artifact:view",
     "member:manage",
     "role:manage",
@@ -50,6 +52,40 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "workspace:manage",
     // Tier 2 of the governance escalation chain (project_admin → bu_admin → org_admin).
     "governance:decide",
+    // ── Delivery permissions, granted 2026-09-13 by product decision ──────────
+    //
+    // Mirrors backend `_ROLE_PERMISSIONS["bu_admin"]`, where the reasoning lives.
+    // In short: `role:manage` was useless without these, because the backend
+    // refuses to package a permission its creator does not hold, so a Business
+    // Unit Admin could not author any role containing delivery work.
+    //
+    // The trade is real — a BU Admin can now invoke agents and approve every
+    // artifact type in their unit themselves, not only delegate it. `settings:manage`
+    // stays out: organization-wide policy is not a unit's to change.
+    "agent:invoke",
+    "approve",
+    "run:create",
+    "run:view",
+    "run:cancel",
+    "artifact:delete",
+    "artifact:export",
+    "artifact:approve_requirements",
+    "artifact:approve_design",
+    "artifact:approve_development",
+    "artifact:approve_code_review",
+    "artifact:approve_security",
+    "artifact:approve_testing",
+    "artifact:approve_deployment",
+    "artifact:approve_documentation",
+    "artifact:approve_plan",
+    "artifact:approve_requirements_modernization",
+    "artifact:approve_discovery",
+    "connector:request",
+    "skill:edit",
+    "skill:edit:project",
+    "skill:import",
+    "skill:approve",
+    "skill:promote",
   ],
   // Onboarded, placed in a unit, and holding nothing until that unit's admin
   // assigns a real role. `artifact:view` is the read-only floor — enough to

@@ -88,6 +88,43 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "workspace:manage",
         # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
         "governance:decide",
+        # ── Delivery permissions, granted 2026-09-13 by product decision ──────
+        #
+        # THIS REVERSES THE PARAGRAPH ABOVE. That comment says governance roles do
+        # not run agents, citing PRD §14.8, and these were deliberately absent for
+        # that reason. They are here now because a Business Unit Admin could not
+        # compose a role for their own unit: `_assert_creator_holds` refuses to
+        # package a permission the creator lacks, so every custom role containing
+        # any delivery permission was rejected with "You cannot grant permissions
+        # you do not hold". role:manage without these is a role-manager who cannot
+        # author the roles their unit actually needs.
+        #
+        # THE COST, stated plainly: a BU Admin can now invoke agents and approve
+        # every artifact type in their unit themselves, not merely delegate the
+        # ability. The same person raises budget decisions (governance:decide,
+        # tier 2) and signs off deliverables, so separation of duties inside a
+        # unit is now a matter of convention rather than of permissions. If that
+        # is not wanted, the alternative is to keep this list short and let
+        # `_assert_creator_holds` consult a delegatable-permission set instead of
+        # the creator's own grants -- the mechanism, not this list, is the place
+        # to fix it.
+        #
+        # `settings:manage` is deliberately NOT here: it is organization-wide
+        # policy and compliance configuration, which is not a unit's to change.
+        "agent:invoke", "approve",
+        "run:create", "run:view", "run:cancel",
+        "artifact:delete", "artifact:export",
+        "artifact:approve_requirements", "artifact:approve_design",
+        "artifact:approve_development", "artifact:approve_code_review",
+        "artifact:approve_security", "artifact:approve_testing",
+        "artifact:approve_deployment", "artifact:approve_documentation",
+        "artifact:approve_plan",
+        # Track 3 (migration 0057).
+        "artifact:approve_requirements_modernization",
+        "artifact:approve_discovery",
+        "connector:request",
+        "skill:edit", "skill:edit:project", "skill:import",
+        "skill:approve", "skill:promote",
     ],
     # Onboarded into a unit and holding nothing until that unit's admin assigns a real
     # role. artifact:view is the read-only floor — enough to sign in and see the shell
