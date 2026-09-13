@@ -304,9 +304,16 @@ def test_delete_is_granted_to_delivery_roles_and_withheld_from_the_read_only_flo
     assert holders == {
         "project_admin", "ba", "architect", "developer", "qa",
         "security_engineer", "devops_engineer", "data_engineer", "scrum_master",
+        # bu_admin since 2026-09-13. It was excluded here as "governance performs no
+        # delivery act", which stopped being the rule when the unit admin was granted
+        # the delivery set so it could compose its unit's roles -- the composer
+        # refuses to package a permission its creator lacks. See permissions.py.
+        "bu_admin",
     }
-    # contributor is the floor; bu_admin is governance and performs no delivery act.
-    assert "contributor" not in holders and "bu_admin" not in holders
+    # contributor is still the read-only floor, which is what this test is really for:
+    # the ability to destroy an artifact must never fall out of merely being able to
+    # see one.
+    assert "contributor" not in holders
 
 
 @pytest.mark.unit
