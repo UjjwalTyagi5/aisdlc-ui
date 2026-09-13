@@ -122,9 +122,7 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         # Track 3 (migration 0057).
         "artifact:approve_requirements_modernization",
         "artifact:approve_discovery",
-        "connector:request",
-        "skill:edit", "skill:edit:project", "skill:import",
-        "skill:approve", "skill:promote",
+        "skill:edit",
     ],
     # Onboarded into a unit and holding nothing until that unit's admin assigns a real
     # role. artifact:view is the read-only floor — enough to sign in and see the shell
@@ -347,7 +345,12 @@ _PERMISSION_CATALOG: list[str] = [
     # Agents
     "agent:invoke",
     # Connectors
-    "connector:view", "connector:request", "connector:manage",
+    # NO connector:request. Granted to no role, required by no route, and offered on
+    # the Roles & Access page as "Request a connector" -- a checkbox that changed
+    # nothing when ticked. Same deletion, same reason, as eval:view below: requesting
+    # a connector goes through the governance request flow, which is gated by
+    # governance:decide on the approving side and by nothing on the asking side.
+    "connector:view", "connector:manage",
     # Governance
     # Deciding a governance request. NOT the same as being the person it is currently
     # waiting on: this says the role takes governance decisions at all, and
@@ -376,7 +379,16 @@ _PERMISSION_CATALOG: list[str] = [
     # enforcement is what this deletion is undoing.
     "audit:view", "cost:view", "trace:view",
     # Agent Studio
-    "skill:edit", "skill:edit:project", "skill:promote", "skill:approve", "skill:import",
+    # ONLY skill:edit. It is real: dependency.py maps it to the developer role and
+    # grant_guard.py uses it in the subset rule.
+    #
+    # skill:edit:project, skill:promote, skill:approve and skill:import were removed
+    # 2026-09-13. All four were granted to no role and enforced by nothing on either
+    # side -- the Agent Studio routes gate on artifact:view (agent_skills.py:407), so
+    # every one of those four checkboxes granted exactly nothing. Same rule as
+    # eval:view above, and the same instruction if the gates ever arrive: add the
+    # string back HERE and the require_permission call site in the SAME change.
+    "skill:edit",
 ]
 
 # Derived exports — computed once at import time.

@@ -80,12 +80,7 @@ export const ROLE_PERMISSIONS: Record<PlatformRole, readonly string[]> = {
     "artifact:approve_plan",
     "artifact:approve_requirements_modernization",
     "artifact:approve_discovery",
-    "connector:request",
     "skill:edit",
-    "skill:edit:project",
-    "skill:import",
-    "skill:approve",
-    "skill:promote",
   ],
   // Onboarded, placed in a unit, and holding nothing until that unit's admin
   // assigns a real role. `artifact:view` is the read-only floor — enough to
