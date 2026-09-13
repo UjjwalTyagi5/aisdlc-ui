@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class RequirementsArtifact(BaseModel):
@@ -134,7 +134,7 @@ class Stakeholder(BaseModel):
 
 
 class LegacyRepository(BaseModel):
-    """Where the legacy code lives — what Discovery & Assessment will clone."""
+    """Where the legacy code lives — what the Dependency and Risk agent will clone."""
 
     provider: str = ""
     project: str = ""
@@ -142,19 +142,194 @@ class LegacyRepository(BaseModel):
     url: str = ""
 
 
+def _slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _pick(value: Any, allowed: Dict[str, str], default: str) -> str:
+    """Normalise a free-text label onto one of `allowed` ("Re-platform" -> replatform)."""
+    slug = _slug(value)
+    if not slug:
+        return default
+    if slug in allowed:
+        return allowed[slug]
+    for key, label in allowed.items():
+        if slug.startswith(key):
+            return label
+    for key, label in allowed.items():  # "soc_2_compliance_deadline" -> compliance
+        if len(key) >= 4 and key in slug:
+            return label
+    return default
+
+
+#: Why a modernization happens — the categories the brief colours and groups by.
+DRIVER_CATEGORIES = {
+    "end_of_support": "end_of_support", "end_of_life": "end_of_support", "eol": "end_of_support",
+    "support": "end_of_support", "security": "security", "vulnerab": "security",
+    "cost": "cost", "hosting": "cost", "licen": "cost", "skills": "skills", "skill": "skills",
+    "hiring": "skills", "talent": "skills", "compliance": "compliance", "regulat": "compliance",
+    "audit": "compliance", "performance": "performance", "scal": "performance", "other": "other",
+}
+#: What happens to a part of the system.
+CHANGE_TYPES = {
+    "upgrade": "upgrade", "update": "upgrade", "rewrite": "rewrite", "rebuild": "rewrite",
+    "re_write": "rewrite", "replatform": "replatform", "re_platform": "replatform",
+    "rehost": "replatform", "re_host": "replatform", "migrate": "replatform",
+    "lift_and_shift": "replatform", "containeri": "replatform",
+    "replace": "replace", "retire": "retire", "decommission": "retire", "keep": "keep",
+    "retain": "keep", "new": "new", "add": "new",
+}
+#: Support status of today's technology (the same words Discovery uses).
+SUPPORT_STATUSES = {
+    "eol": "eol", "end_of_life": "eol", "unsupported": "eol", "approaching": "approaching",
+    "support_ending": "approaching", "legacy": "legacy", "supported": "supported",
+    "unknown": "unknown",
+}
+EFFORT_LEVELS = {"low": "low", "small": "low", "s": "low", "medium": "medium", "m": "medium",
+                 "moderate": "medium", "high": "high", "large": "high", "l": "high"}
+MILESTONE_KINDS = {
+    "freeze": "freeze", "compliance": "compliance", "audit": "compliance", "deadline": "deadline",
+    "exit": "deadline", "cutover": "cutover", "go_live": "cutover", "golive": "cutover",
+    "decommission": "decommission", "retire": "decommission", "start": "start", "other": "other",
+}
+
+
+class BusinessDriver(BaseModel):
+    """One reason the modernization is happening, tagged so the brief can group it."""
+
+    category: str = "other"
+    title: str = ""
+    detail: str = ""
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _category(cls, v: Any) -> str:
+        return _pick(v, DRIVER_CATEGORIES, "other")
+
+
+class LayerChange(BaseModel):
+    """One row of "the change at a glance": a part of the system, today and target."""
+
+    layer: str
+    current: str = ""
+    current_status: str = ""
+    target: str = ""
+    change_type: str = ""
+    modules: List[str] = []
+
+    @field_validator("current_status", mode="before")
+    @classmethod
+    def _status(cls, v: Any) -> str:
+        return _pick(v, SUPPORT_STATUSES, "") if v else ""
+
+    @field_validator("change_type", mode="before")
+    @classmethod
+    def _change(cls, v: Any) -> str:
+        return _pick(v, CHANGE_TYPES, "") if v else ""
+
+
+class Alternative(BaseModel):
+    option: str
+    why_not: str = ""
+
+
+class Recommendation(BaseModel):
+    """The target stack as the agent recommends it — labelled as a recommendation, and
+    accepted when the BA signs the brief off."""
+
+    summary: str = ""
+    recommended_by: str = "agent"
+    rationale: List[str] = []
+    alternatives: List[Alternative] = []
+
+    @field_validator("recommended_by", mode="before")
+    @classmethod
+    def _by(cls, v: Any) -> str:
+        return "user" if _slug(v) in {"user", "customer", "business", "ba"} else "agent"
+
+
+class ModuleChange(BaseModel):
+    """What happens to one module of the legacy code."""
+
+    module: str
+    path: str = ""
+    current: str = ""
+    current_status: str = ""
+    target: str = ""
+    change_type: str = ""
+    changes: List[str] = []
+    effort: str = ""
+
+    @field_validator("current_status", mode="before")
+    @classmethod
+    def _status(cls, v: Any) -> str:
+        return _pick(v, SUPPORT_STATUSES, "") if v else ""
+
+    @field_validator("change_type", mode="before")
+    @classmethod
+    def _change(cls, v: Any) -> str:
+        return _pick(v, CHANGE_TYPES, "") if v else ""
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort(cls, v: Any) -> str:
+        return _pick(v, EFFORT_LEVELS, "") if v else ""
+
+
+class TradeOff(BaseModel):
+    decision: str
+    gain: str = ""
+    cost: str = ""
+
+
+class Milestone(BaseModel):
+    date: str
+    label: str
+    kind: str = "other"
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _kind(cls, v: Any) -> str:
+        return _pick(v, MILESTONE_KINDS, "other")
+
+
+class SuccessMeasure(BaseModel):
+    """A measurable success criterion: the metric, where it is today, where it must be."""
+
+    metric: str
+    current: str = ""
+    target: str = ""
+
+
 class MigrationIntentArtifact(BaseModel):
     """-> runs.migration_intent_payload. The Track 3 Requirements agent's brief:
-    why the modernization is happening, from what to what, scope, constraints and
-    how success is measured. Not a story backlog — Track 3 has no INVEST stories."""
+    why the modernization is happening, what the system is today, the target the agent
+    recommends (or the user named), what changes in each module and the trade-offs,
+    scope, constraints, milestones and how success is measured. Not a story backlog —
+    Track 3 has no INVEST stories.
+
+    Version 2 added the structured sections (goal, tagged drivers, the change per layer
+    and per module, the recommendation, trade-offs, milestones, measures). Every one of
+    them defaults to empty, so a version-1 brief still loads and still renders."""
 
     system_name: str = ""
+    goal: str = ""
     business_drivers: List[str] = []
+    drivers: List[BusinessDriver] = []
     current_state: StackState = StackState()
     target_state: StackState = StackState()
+    layers: List[LayerChange] = []
+    recommendation: Optional[Recommendation] = None
+    module_changes: List[ModuleChange] = []
+    trade_offs: List[TradeOff] = []
     in_scope: List[str] = []
     out_of_scope: List[str] = []
     constraints: List[str] = []
+    deadline: str = ""
+    budget: str = ""
+    milestones: List[Milestone] = []
     success_criteria: List[str] = []
+    success_measures: List[SuccessMeasure] = []
     stakeholders: List[Stakeholder] = []
     assumptions: List[str] = []
     risks: List[str] = []
@@ -162,7 +337,7 @@ class MigrationIntentArtifact(BaseModel):
     legacy_repository: Optional[LegacyRepository] = None
     recorded_at: Optional[str] = None
     agent_session_id: Optional[str] = None
-    version: int = 1
+    version: int = 2
 
 
 class DiscoveryArtifact(BaseModel):

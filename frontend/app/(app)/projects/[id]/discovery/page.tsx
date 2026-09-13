@@ -6,19 +6,19 @@ import { Track3AgentPage } from "@/components/modernization/track3-agent-page";
 import { DiscoveryAssessment } from "@/lib/schemas/modernization";
 
 /**
- * Discovery & Assessment — Track 3 (Code Modernization), PRD §23.2.
+ * Dependency and Risk — Track 3 (Code Modernization), PRD §23.2.
  *
  * The assessment is data (modules, scores, tiers, a dependency graph, flags), not a
  * document, so it is shown as data. Every assessment the agent records is a new
  * version on the left; accepting one as the planning baseline is its Sign-off. The
- * legacy code is the project's one pulled checkout — the same the Requirements agent
+ * legacy code is the project's one pulled checkout — the same the Migration Intent agent
  * read — so "Pull legacy code" here and there fill the same thing.
  */
 export default function DiscoveryPage() {
   return (
     <Track3AgentPage
       phase="discovery"
-      runLabel="Run Discovery & Assessment"
+      runLabel="Run Dependency and Risk agent"
       intro="Reads the legacy repository read-only, maps its dependency graph, flags end-of-life and vulnerable dependencies, and scores every module for migration risk."
       noun="assessment"
       historyTitle="Assessments"
@@ -26,7 +26,7 @@ export default function DiscoveryPage() {
       guide={({ pull, run, legacy, legacyStatus }) => [
         {
           title: "Pull the legacy code",
-          body: "Choose the legacy repository — or use the one already pulled on the Requirements page; it is the same checkout. It is cloned read-only and never changed.",
+          body: "Choose the legacy repository — or use the one already pulled on the Migration Intent page; it is the same checkout. It is cloned read-only and never changed.",
           status: legacyStatus,
           action: {
             label: legacy?.pull ? "Pull again" : "Pull legacy code",
@@ -35,9 +35,9 @@ export default function DiscoveryPage() {
           },
         },
         {
-          title: "Run Discovery & Assessment",
+          title: "Run the Dependency and Risk agent",
           body: "It maps the modules and their dependencies, flags end-of-life, deprecated and vulnerable dependencies, and scores every module for migration risk — mechanical, LLM-assisted or manual-only. It uses the target stack from the migration-intent brief.",
-          action: { label: "Run Discovery & Assessment", onClick: run },
+          action: { label: "Run Dependency and Risk agent", onClick: run },
         },
         {
           title: "Open the assessment",

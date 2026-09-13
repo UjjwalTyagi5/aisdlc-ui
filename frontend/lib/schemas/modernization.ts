@@ -11,10 +11,41 @@ import { z } from "zod";
  */
 
 const strings = z.array(z.string()).default([]);
+const text = z.string().default("");
+
+/* Version 2 of the brief (structured sections). Every part defaults to empty, so a
+   version-1 brief parses and renders through the same view. */
+const BriefDriver = z.object({ category: z.string().default("other"), title: text, detail: text });
+const BriefLayer = z.object({
+  layer: text, current: text, current_status: text, target: text, change_type: text, modules: strings,
+});
+const BriefRecommendation = z.object({
+  summary: text,
+  recommended_by: z.string().default("agent"),
+  rationale: strings,
+  alternatives: z.array(z.object({ option: text, why_not: text })).default([]),
+});
+const BriefModuleChange = z.object({
+  module: text, path: text, current: text, current_status: text, target: text,
+  change_type: text, changes: strings, effort: text,
+});
+const BriefTradeOff = z.object({ decision: text, gain: text, cost: text });
+const BriefMilestone = z.object({ date: text, label: text, kind: z.string().default("other") });
+const BriefMeasure = z.object({ metric: text, current: text, target: text });
 
 export const MigrationIntentBrief = z.object({
   system_name: z.string().default(""),
+  goal: text,
   business_drivers: strings,
+  drivers: z.array(BriefDriver).default([]),
+  layers: z.array(BriefLayer).default([]),
+  recommendation: BriefRecommendation.nullable().default(null),
+  module_changes: z.array(BriefModuleChange).default([]),
+  trade_offs: z.array(BriefTradeOff).default([]),
+  deadline: text,
+  budget: text,
+  milestones: z.array(BriefMilestone).default([]),
+  success_measures: z.array(BriefMeasure).default([]),
   current_state: z.object({ stack: z.string().default(""), description: z.string().default("") })
     .default({ stack: "", description: "" }),
   target_state: z.object({ stack: z.string().default(""), description: z.string().default("") })
@@ -39,6 +70,10 @@ export const MigrationIntentBrief = z.object({
   recorded_at: z.string().nullable().default(null),
 });
 export type MigrationIntentBrief = z.infer<typeof MigrationIntentBrief>;
+export type BriefDriver = z.infer<typeof BriefDriver>;
+export type BriefLayer = z.infer<typeof BriefLayer>;
+export type BriefModuleChange = z.infer<typeof BriefModuleChange>;
+export type BriefMilestone = z.infer<typeof BriefMilestone>;
 
 export const MigrationTier = z.enum(["mechanical", "llm_assisted", "manual"]);
 export type MigrationTier = z.infer<typeof MigrationTier>;

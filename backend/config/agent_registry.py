@@ -232,7 +232,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     # `stage_order_for_track("modernization")` never mixes them with Portfolio 1.
     "requirements_modernization": AgentDefinition(
         id="requirements_modernization",
-        name="Requirements Agent (Migration Intent)",
+        name="Migration Intent Agent",
         pipeline_position=1,
         input_artifacts=[],
         output_artifact="migration_intent_payload",
@@ -250,7 +250,7 @@ AGENT_REGISTRY: dict[str, AgentDefinition] = {
     ),
     "discovery": AgentDefinition(
         id="discovery",
-        name="Discovery & Assessment Agent",
+        name="Dependency and Risk Agent",
         pipeline_position=2,
         input_artifacts=["migration_intent_payload"],
         output_artifact="discovery_artifacts",

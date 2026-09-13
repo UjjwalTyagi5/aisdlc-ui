@@ -192,6 +192,9 @@ export default function ProjectOverviewPage() {
   const isPendingApproval = project.approvalStatus === "pending_approval";
   const isRejected = project.approvalStatus === "rejected";
   const actionsLocked = isPendingApproval || isRejected;
+  // The agent an empty project starts with: a Code Modernization project begins with
+  // its own Migration Intent agent, not Portfolio 1's Requirements agent.
+  const firstPhase: Phase = project.track === "modernization" ? "requirements_modernization" : "requirements";
   // Falls back to the generic label rather than an empty string: a viewer bound
   // to no unit still sees a sentence that reads.
   const projectUnitName =
@@ -420,10 +423,10 @@ export default function ProjectOverviewPage() {
           action={
             <RequireRole capability="run:trigger" fallback={<Button disabled>Run agent</Button>}>
               {actionsLocked ? (
-                <Button disabled>Run Requirements agent</Button>
+                <Button disabled>Run {PHASE_LABEL[firstPhase]} agent</Button>
               ) : (
                 <Button asChild>
-                  <Link href={`/projects/${project.id}/requirements`}>Run Requirements agent</Link>
+                  <Link href={phaseHref(project.id, firstPhase)}>Run {PHASE_LABEL[firstPhase]} agent</Link>
                 </Button>
               )}
             </RequireRole>

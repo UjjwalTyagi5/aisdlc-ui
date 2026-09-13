@@ -63,8 +63,8 @@ export const PHASE_LABEL: Record<Phase, string> = {
   testing: "Testing",
   deployment: "Deployment",
   documentation: "Documentation",
-  requirements_modernization: "Requirements (migration intent)",
-  discovery: "Discovery & Assessment",
+  requirements_modernization: "Migration Intent",
+  discovery: "Dependency and Risk",
   strategy: "Strategy",
   migration_mapping: "Migration Mapping",
   validation: "Validation",
@@ -171,7 +171,7 @@ export const BUILT_AGENTS: readonly Phase[] = [
  * Modernization project's Design, Development and the rest are Track 3's OWN agents
  * (multi-track design §1.4), none of them built yet, so they stay "Coming soon" even
  * though Portfolio 1 agents with the same names are built. Track 3's first two are its
- * migration-intent Requirements agent and Discovery & Assessment.
+ * Migration Intent agent and the Dependency and Risk agent.
  *
  * Tracks 4 and 5 keep today's behaviour (`BUILT_AGENTS`) — changing what their tiles
  * show is a separate decision, not part of Track 3's work.
