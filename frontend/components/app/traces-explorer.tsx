@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Waypoints } from "lucide-react";
@@ -145,6 +146,15 @@ export function TracesExplorer({
             </TableHeader>
             <TableBody>
               {tracesQ.data!.map((t: TraceListItem) => (
+                // REACHABLE WITHOUT A MOUSE.
+                //
+                // This was a bare `onClick` on the row. A <tr> is not focusable and has
+                // no implicit role, so the accessibility tree showed ZERO interactive
+                // elements in this table — the trace detail was reachable only by
+                // clicking, and not at all by keyboard or screen reader. The row keeps
+                // its click target (the whole row is the affordance people expect), and
+                // the trace name is now a real link, which also restores open-in-new-tab
+                // and the status-bar URL preview.
                 <TableRow
                   key={t.id}
                   className="cursor-pointer"
@@ -152,7 +162,16 @@ export function TracesExplorer({
                 >
                   <TableCell>
                     <div className="flex flex-col">
-                      <span className="font-medium">{t.name}</span>
+                      <Link
+                        href={`/traces/${t.id}`}
+                        className="font-medium hover:underline focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-none"
+                        // The row's own handler would fire too and push the same route
+                        // twice, which leaves a duplicate history entry and makes Back
+                        // feel broken.
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {t.name}
+                      </Link>
                       <span className="text-muted-foreground font-mono text-[11px]">{t.id}</span>
                     </div>
                   </TableCell>
