@@ -18,10 +18,13 @@ EXPECTED_ROLES = {
     "custom",
 }
 
+# NO eval:view — removed from the catalogue. It was granted to no role and required by
+# no route (the eval endpoint gates on artifact:view), so it rendered as a checkbox on
+# Roles & Access that changed nothing when ticked.
 NEW_PERMISSIONS = {
     "run:view", "run:cancel", "artifact:export", "connector:view",
     "workspace:manage", "member:manage", "role:manage",
-    "audit:view", "cost:view", "eval:view", "settings:manage",
+    "audit:view", "cost:view", "settings:manage",
 }
 
 
@@ -74,6 +77,41 @@ def test_agent_access_stage_two_owner_roles_hold_governance_decide():
             f"{role} owns an agent_access stage-two phase but cannot pass the "
             "governance:decide permission floor to decide it"
         )
+
+
+def test_eval_view_is_not_in_the_catalogue():
+    """A grantable permission with no enforcement is worse than no permission.
+
+    eval:view sat in the catalogue, granted to no role and checked by no route —
+    shared/routers/eval.py gates GET /runs/{run_id}/eval on artifact:view — so the
+    Roles & Access page offered a checkbox that changed nothing. See finding 8 in
+    docs/rbac-audit-2026-08-17.md.
+
+    If evaluation visibility earns its own gate later, the string and a
+    require_permission call site belong in the same change.
+    """
+    assert "eval:view" not in ALL_PERMISSIONS
+    for role, perms in _ROLE_PERMISSIONS.items():
+        assert "eval:view" not in perms, f"{role} grants a permission nothing enforces"
+
+
+def test_the_traces_screen_matches_the_prd_visibility_matrix():
+    """PRD §35: Traces — Org Admin "All", BU Admin "Unit", Project Admin "own projects",
+    builders none, with the Security Engineer as the one contributor exception (§15.9).
+
+    bu_admin held audit:view and cost:view but NOT trace:view, so the governance role
+    accountable for a unit was refused the screen showing what that unit's agents did —
+    while holding the audit trail of the same runs. Scoping needed no work: a
+    business_unit binding already resolves to that unit's projects through
+    visible_project_ids; only the grant was missing.
+    """
+    holders = {r for r in ALL_ROLES if "trace:view" in _ROLE_PERMISSIONS[r]}
+    # org_admin reaches it through the admin:* wildcard rather than a literal grant.
+    assert "admin:*" in _ROLE_PERMISSIONS["org_admin"]
+    assert holders == {"bu_admin", "project_admin", "security_engineer"}, (
+        "trace:view holders drifted from the PRD §35 matrix. Traces carry prompt and "
+        "output previews, so widening this set is a deliberate decision, not a fix."
+    )
 
 
 def test_security_engineer_is_oversight_not_author():

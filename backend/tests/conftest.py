@@ -42,6 +42,22 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(_ENV_TEST_PATH, override=True)
 
+# THE SAME RULE AS THE DATABASE ABOVE, FOR THE SECOND SYSTEM THIS PROCESS CAN REACH.
+#
+# Business-unit routes provision a Langfuse ORGANISATION per unit, and this deployment's
+# Langfuse is a SHARED instance hosting a sibling product — not a local container. Pointing
+# the tests at an isolated Postgres does nothing about that: a test that creates a workspace
+# called `unit-a` or `Payments` reaches straight past the test database and writes an
+# organisation into the live one. That is not hypothetical; it produced roughly fifty junk
+# organisations (`Payments (PWC 2)` … `Payments (PWC 21)`) before this guard existed, each
+# run colliding with the last and disambiguating itself.
+#
+# Forced here rather than trusted to .env.test so that deleting a line from that file cannot
+# quietly re-enable it.
+os.environ["ENABLE_LANGFUSE"] = "false"
+os.environ["LANGFUSE_MANAGE_MEMBERSHIPS"] = "false"
+os.environ["LANGFUSE_DB_URL"] = ""
+
 import pytest  # noqa: E402
 
 from config.env import JWT_SECRET_KEY  # noqa: E402

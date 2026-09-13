@@ -204,8 +204,15 @@ async def _probe_redis(redis_url: str) -> str:
     if not redis_url:
         return "not configured"
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(redis_url, socket_connect_timeout=2)
+        # THE SHARED FACTORY, not `aioredis.from_url`. Our Redis URLs carry two
+        # non-standard flags -- `cluster` and `tls_skip_hostname_check` -- which
+        # `from_url` forwards to the client constructor as unknown kwargs, so this
+        # probe raised TypeError and reported Redis as broken on every deployment
+        # that uses them. The app itself was fine; only the health check was wrong,
+        # which is worse than useless: a permanent false error is indistinguishable
+        # from a real outage and teaches everyone to ignore the field.
+        from shared.redis_client import redis_from_url  # noqa: PLC0415
+        client = redis_from_url(redis_url, socket_connect_timeout=2)
         await client.ping()
         await client.aclose()
         return "ok"
@@ -267,12 +274,28 @@ async def _handle_artifact_ready(payload: dict) -> None:
 
 
 async def _artifact_event_listener() -> None:
-    """Subscribe to Redis artifact_events channel and route pipeline stage transitions."""
-    import redis.asyncio as aioredis
+    """Subscribe to Redis artifact_events channel and route pipeline stage transitions.
 
-    client = aioredis.from_url(REDIS_URL)
+    Returns quietly when Redis is unreachable. `subscribe` used to sit outside the try,
+    so an unavailable Redis killed this task with the exception still pending — and the
+    lifespan's `await artifact_listener_task` only catches CancelledError, so it surfaced
+    at SHUTDOWN as "Application shutdown failed. Exiting." rather than at startup as the
+    degraded feature it actually is. Pipeline stage transitions stop; the API does not.
+    """
+    from shared.redis_client import redis_pubsub_from_url
+
+    # Pub/sub needs the non-cluster client: RedisCluster has no .pubsub() at all.
+    client = redis_pubsub_from_url()
     pubsub = client.pubsub()
-    await pubsub.subscribe(_ARTIFACT_CHANNEL)
+    try:
+        await pubsub.subscribe(_ARTIFACT_CHANNEL)
+    except Exception as exc:
+        logger.warning(
+            "artifact_event_listener: Redis unavailable (%s) — stage transitions "
+            "will not be routed", type(exc).__name__,
+        )
+        await client.aclose()
+        return
     try:
         async for message in pubsub.listen():
             if message.get("type") == "message":
@@ -287,8 +310,14 @@ async def _artifact_event_listener() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await pubsub.unsubscribe(_ARTIFACT_CHANNEL)
-        await client.aclose()
+        try:
+            await pubsub.unsubscribe(_ARTIFACT_CHANNEL)
+        except Exception:  # Redis may have gone away; shutdown must still complete.
+            pass
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 async def _refresh_health(app: FastAPI) -> None:
@@ -511,9 +540,12 @@ async def lifespan(app: FastAPI):
     # ENABLE_SCIM flag so revocation is available from the moment tokens carry jti claims
     # (D-01, Wave A). In local dev without Redis, app.state.redis_denylist is None and
     # the denylist check is skipped (T-7.4-02: accepted residual risk for local dev).
-    import redis.asyncio as aioredis  # noqa: F811 — safe re-import for clarity
+    from shared.redis_client import redis_from_url  # noqa: PLC0415
     if REDIS_URL:
-        app.state.redis_denylist = aioredis.from_url(REDIS_URL)
+        # Bounded timeouts: this client is used by the auth middleware on EVERY
+        # request, and an unreachable Redis here used to stall each one for the full
+        # OS connect timeout before failing open as designed.
+        app.state.redis_denylist = redis_from_url()
         logger.info("Redis JTI denylist client initialized")
         # AuditRetryWorker (REQ-M8-05) — drains audit:dead_letter stream.
         # Started here because it requires Redis; gated on REDIS_URL being set.

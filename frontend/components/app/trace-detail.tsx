@@ -34,7 +34,7 @@ export function TraceDetail({ trace }: { trace: Trace }) {
               <h2 className="font-display truncate text-xl font-bold tracking-[-0.01em]">
                 {trace.name}
               </h2>
-              <StatusBadge status={trace.status} />
+              {trace.status && <StatusBadge status={trace.status} />}
             </div>
             <p className="text-muted-foreground mt-0.5 font-mono text-[12px]">{trace.id}</p>
           </div>

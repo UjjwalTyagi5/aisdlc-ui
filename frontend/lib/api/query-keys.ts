@@ -214,6 +214,7 @@ export const qk = {
     metrics: (windowDays?: number, filters?: unknown) =>
       ["traces", "metrics", windowDays ?? 30, filters ?? {}] as const,
     detail: (id: string) => ["traces", "detail", id] as const,
+    langfuseLinks: () => ["traces", "langfuse-links"] as const,
     projectSummary: (projectId: string, windowDays?: number) =>
       ["traces", "project-summary", projectId, windowDays ?? 7] as const,
   },

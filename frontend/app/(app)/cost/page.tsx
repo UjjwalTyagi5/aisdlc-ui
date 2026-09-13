@@ -9,7 +9,7 @@ import { ScopeChip } from "@/components/app/scope-indicator";
 import { useSession } from "@/hooks/use-session";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import { hasPermission } from "@/lib/auth/permissions";
-import { BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { scopeChipName } from "@/lib/scope";
 
 export default function CostPage() {
   const session = useSession({ required: true });
@@ -36,17 +36,10 @@ export default function CostPage() {
     );
   }
 
-  const unitBindings = bindings.filter((b) => b.kind === "business_unit");
-  const projectBindings = bindings.filter((b) => b.kind === "project");
-  const scopeName = isOrgWide
-    ? null
-    : level === "business_unit"
-      ? (managedBusinessUnitIds.length === 1
-          ? unitBindings.find((b) => b.scopeId === managedBusinessUnitIds[0])?.scopeName
-          : undefined) ?? `${managedBusinessUnitIds.length} ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`
-      : projectBindings.length === 1
-        ? projectBindings[0]!.scopeName
-        : `${projectBindings.length} projects`;
+  // `scopeChipName` owns this rule. Counting `managedBusinessUnitIds` here meant a
+  // Project Admin — who is bound at unit scope but administers no unit by design — saw
+  // "0 business units" while looking at their own unit's spend.
+  const scopeName = scopeChipName(level, { isOrgWide, bindings, managedBusinessUnitIds });
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">

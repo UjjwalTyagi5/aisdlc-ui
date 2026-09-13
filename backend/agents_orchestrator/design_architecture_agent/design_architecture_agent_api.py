@@ -51,7 +51,7 @@ from shared.tools.document_tools import (
 )
 from shared.models.design import parse_artifact_sections
 from shared.audit import AuditCallbackHandler
-from shared.observability import langfuse_langchain_extras
+from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.services.conversation_service import persist_turn
 from shared.services.standalone_prompt import resolve_agent_turn, resolve_agent_skills
@@ -250,10 +250,8 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         if isinstance(pipeline_context, dict):
             pipeline_context["project_id"] = _lf_pid
 
-    from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
-    _lf_ws = await workspace_id_for_project(tenant_id or "", _lf_pid)
     _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="design", project_id=_lf_pid, workspace_id=_lf_ws)
+    _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="design", project_id=_lf_pid)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler, *_lf_cbs], "metadata": _lf_meta}
     os.makedirs(input_directory, exist_ok=True)
 
@@ -534,8 +532,8 @@ async def chat(
     # tenant_id passed too: it keys the usage meter and the budget checks, and the WS
     # path has always supplied it.
     _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(
-        session_id=session_id, tenant_id=real_tenant_id or "", user_id=user_id,
+    _lf_cbs, _lf_meta = await agent_trace(
+        request=request, session_id=session_id,
         model=model_id, agent_type="design", project_id=_lf_pid,
     )
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}

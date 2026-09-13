@@ -5,7 +5,7 @@ import json
 import asyncio
 from datetime import datetime
 from uuid import uuid4
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import FileResponse
 import contextvars
 import base64
@@ -32,16 +32,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-# --- Part 2: SECURELY CONFIGURE THE AI MODEL ---
-# This part loads your secret key from the .env file and sets up the connection to Google's AI.
-logger.info("Loading API key and configuring Gemini...")
-load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-
-if not api_key:
-    raise ValueError(" ERROR: GOOGLE_API_KEY not found. Please create a .env file and add it.")
-
-genai.configure(api_key=api_key)
+# NO MODULE-LEVEL GEMINI CONFIG HERE. There was a block that read GOOGLE_API_KEY,
+# raised when it was absent, and called `genai.configure` — with `genai` never imported.
+# So this module raised ValueError without the key and NameError with it: it could not
+# be imported at all, which is why the agent had no traces and no routes. Nothing caught
+# that, because the only test touching this file reads it as TEXT rather than importing
+# it, and its own tests are excluded in pytest.ini.
+#
+# It was also redundant and against policy. llm_analysis.py already configures genai for
+# the embedding calls that actually use it, guarded by `if api_key:` so an absent key
+# degrades instead of raising. And a platform-wide Google key is exactly the fallback
+# BYOK forbids — this agent resolves its model per run via resolved_litellm_kwargs(),
+# which fails closed by design (_byok.py: "no platform-key fallback — BYOK D-4").
 
 esett = sdlcSettings()
 
@@ -195,7 +197,10 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.info(f"WebSocket context set for session: {session_id}")
 
             if message_data.get("type") == "user_message_with_files":
-                await process_user_message_ws(message_data, websocket, user_id)
+                await process_user_message_ws(
+                    message_data, websocket, user_id,
+                    tenant_id=claims.get("tenant_id", ""),
+                )
             elif message_data.get("type") == "clear_agents":
                 await manager.clear_agents()
                 logger.info("Agents cleared via WebSocket request")
@@ -398,7 +403,26 @@ async def encode_files_to_base64(file_paths: List[str]) -> List[Dict[str, str]]:
 #         logger.error(error_msg, exc_info=True)
 #         await manager.send_agent_response("Error Agent", error_msg, session_id)
 
-async def process_user_message_ws(message_data: dict, websocket: WebSocket, user_id: str):
+
+def _project_id_from_message(message_data: dict) -> str | None:
+    """The project a monitoring turn belongs to — it decides which Langfuse it writes to."""
+    try:
+        from agents_orchestrator.shared_utils.pipeline_context import (  # noqa: PLC0415
+            parse_pipeline_context,
+        )
+
+        pc = parse_pipeline_context(message_data.get("pipeline_context") or {})
+    except Exception:
+        pc = {}
+    return (
+        message_data.get("project_id")
+        or (message_data.get("context") or {}).get("project_id")
+        or (pc.get("project_id") if isinstance(pc, dict) else None)
+    )
+
+async def process_user_message_ws(
+    message_data: dict, websocket: WebSocket, user_id: str, tenant_id: str = ""
+):
     """Process user message with files and send real-time updates via WebSocket"""
     try:
         session_id = message_data.get("session_id", str(uuid4()))
@@ -470,6 +494,18 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
             await manager.send_agent_response("Monitoring Agent", response_msg, session_id)
             return
         # === Analysis flow ===
+        # BIND THIS RUN'S LANGFUSE PROJECT BEFORE ANY MODEL CALL. This agent reaches
+        # the model through litellm rather than LangChain, so no callback handler
+        # carries the destination — agent_trace binds the project's client to the run
+        # context, and traced_completion in llm_analysis picks it up from there. Without
+        # this the agent produces no traces at all, which is the state it was in.
+        from shared.observability import agent_trace  # noqa: PLC0415
+
+        await agent_trace(
+            session_id=session_id, run_id=session_id, tenant_id=tenant_id,
+            user_id=user_id, agent_type="monitoring",
+            project_id=_project_id_from_message(message_data),
+        )
         shared_state.chat_histories[session_id] = []  # reset for new analysis
         final_results = []
         if files_data:
@@ -533,6 +569,7 @@ async def handle_session_cleanup_ws(message_data: dict, websocket: WebSocket):
 # REST endpoint (UPDATED with full follow-up logic)
 @monitoring_feedback_router_orchestrator.post("/chat/")
 async def chat(
+    request: Request,
     session_id: str = Form(...),
     user_message: str = Form(None),
     conversation_context: str = Form(None),
@@ -593,6 +630,18 @@ async def chat(
     elif intent == "unknown":
         assistant_turn_content = {"responses": "I couldn't understand. Please paste logs or upload files.", "analysis_detail": []}
     elif intent == "analyze":
+        # Same reason as the socket path: bind this run's Langfuse project BEFORE any
+        # model call. This agent reaches the model through litellm rather than
+        # LangChain, so no callback handler carries the destination — agent_trace binds
+        # the project's client to the run context and traced_completion picks it up.
+        # Identity comes from request.state (the JWT), never the user_id form field.
+        from shared.observability import agent_trace  # noqa: PLC0415
+
+        await agent_trace(
+            request=request, session_id=session_id, run_id=session_id,
+            agent_type="monitoring",
+            project_id=_project_id_from_message({"pipeline_context": pipeline_context}),
+        )
         shared_state.chat_histories[session_id] = []  # reset
         final_results = []
         if uploaded_files:

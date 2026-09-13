@@ -10,7 +10,6 @@ import {
   filterByProject,
 } from "@/lib/mock/access-scope";
 import { GATES } from "@/lib/mock/approval-fixtures";
-import { TRACES } from "@/lib/mock/trace-fixtures";
 import { AUDIT_EVENTS, PROJECTS } from "@/mocks/fixtures";
 import type { PlatformRole } from "@/lib/roles";
 
@@ -153,20 +152,27 @@ describe("canReadGovernanceApproval", () => {
 describe("fixture coverage", () => {
   /**
    * Scope filtering makes empty fixtures indistinguishable from a broken filter,
-   * so every project a persona can reach needs at least one trace and one audit
-   * row. These two assertions are what caught the Business Unit Admin's blank
-   * Traces tab.
+   * so every project a persona can reach needs at least one row to filter. This
+   * is what caught the Business Unit Admin's blank Traces tab.
+   *
+   * The trace rows are declared here rather than imported. They used to come from
+   * `lib/mock/trace-fixtures`, which was deleted along with the rest of the mock
+   * traces path once the Traces pages moved onto the real API — and the companion
+   * assertion that the mock dataset covered all four projects went with it, since
+   * a dataset that no longer exists cannot be incomplete. What still needs pinning
+   * is the FILTER: one trace per project, and a bu_admin must see a non-empty
+   * subset of them.
    */
-  it("gives every active project at least one trace", () => {
-    const covered = new Set(TRACES.map((t) => t.projectId));
-    for (const id of ["mobile-onboarding", "payments-api", "core-ledger", "recon-bots"]) {
-      expect(covered.has(id as (typeof TRACES)[number]["projectId"])).toBe(true);
-    }
-  });
+  const TRACE_ROWS = [
+    { projectId: "mobile-onboarding" },
+    { projectId: "payments-api" },
+    { projectId: "core-ledger" },
+    { projectId: "recon-bots" },
+  ];
 
   it("gives a single-unit Business Unit Admin non-empty audit and trace sets", () => {
     const scope = scopeFor("bu_admin");
-    expect(filterByProject(scope, TRACES, (t) => t.projectId).length).toBeGreaterThan(0);
+    expect(filterByProject(scope, TRACE_ROWS, (t) => t.projectId).length).toBeGreaterThan(0);
     expect(filterByProject(scope, AUDIT_EVENTS, (e) => e.projectId).length).toBeGreaterThan(0);
   });
 });

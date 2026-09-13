@@ -6,7 +6,7 @@ import { Building2, FolderKanban, Globe2, Lock, ShieldCheck, Wrench } from "luci
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ROLE_META, type PlatformRole } from "@/lib/roles";
-import { SCOPE_META, type ScopeLevel } from "@/lib/scope";
+import { SCOPE_META, scopeChipName, type ScopeLevel } from "@/lib/scope";
 import { useAccessScope } from "@/hooks/use-access-scope";
 import type { ScopeKind } from "@/lib/schemas/access-scope";
 
@@ -201,23 +201,15 @@ export function ScopeContextBar({ className }: { className?: string }) {
 
   if (isLoading || isError || !scope) return null;
 
-  // Name the single scope being managed when there is exactly one; a
-  // multi-unit admin gets a count instead of an arbitrary first name.
-  const soleUnit =
-    managedBusinessUnitIds.length === 1
-      ? bindings.find(
-          (b) => b.kind === "business_unit" && b.scopeId === managedBusinessUnitIds[0],
-        )
-      : undefined;
-  const projectBindings = bindings.filter((b) => b.kind === "project");
-  const soleProject = projectBindings.length === 1 ? projectBindings[0] : undefined;
-
-  const name = scope.isOrgWide
-    ? null
-    : level === "business_unit"
-      ? (soleUnit?.scopeName ?? `${managedBusinessUnitIds.length} business units`)
-      : (soleProject?.scopeName ??
-        (projectBindings.length > 0 ? `${projectBindings.length} projects` : null));
+  // Name the single scope being managed when there is exactly one; a multi-unit admin
+  // gets a count instead of an arbitrary first name. `scopeChipName` owns the rule —
+  // this counted `managedBusinessUnitIds`, so a Project Admin bound at unit scope (who
+  // manages none by design) saw "0 business units" on every page in the app.
+  const name = scopeChipName(level, {
+    isOrgWide: scope.isOrgWide,
+    bindings,
+    managedBusinessUnitIds,
+  });
 
   return (
     <div className={cn("flex min-w-0 items-center gap-2", className)}>

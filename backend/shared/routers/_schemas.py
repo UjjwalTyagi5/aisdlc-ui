@@ -1010,11 +1010,21 @@ class EvalRecordOut(BaseModel):
 # ── CostBreakdownOut (REQ-M9-07, REQ-M9-09) ──────────────────────────────────
 
 class CostBreakdownRow(BaseModel):
-    """One per-model aggregate row in the GET /cost response.
+    """One aggregate row in the GET /cost response, per (agent, model).
 
-    Grouped by model only — the agent that made the call is not a meaningful cost
-    dimension (the same agent runs across projects and can use different models)."""
+    The agent WAS omitted here, on the argument that it is not a meaningful cost
+    dimension. The real reason was that it could not be produced: Langfuse's
+    daily-metrics endpoint groups by model alone. Meanwhile the Cost page's own copy
+    promised the split, because "which agent is expensive" is the question that decides
+    where to tune a prompt or downgrade a model — a per-model total cannot answer it.
 
+    /api/public/metrics takes dimensions, and our trace name is `sdlc:{agent_type}`, so
+    grouping by traceName and providedModelName produces both in one query.
+
+    OPTIONAL, because a trace not written by this platform's agents has no agent to
+    attribute — the row is honest about that rather than inventing a bucket."""
+
+    agentType: Optional[str] = None
     model: str
     inputTokens: int
     outputTokens: int
@@ -1041,6 +1051,13 @@ class CostBreakdownOut(BaseModel):
     budgetUsd: float
     utilization: float
     breached80: bool
+    # WHETHER THIS ANSWER IS COMPLETE. Every Langfuse read degrades to an empty
+    # result, so an unreachable instance produced zero spend and no rows behind a
+    # 200 -- a number that looks like a quiet month and invites nobody to check.
+    # `degraded` says the figures below are missing at least one project's spend,
+    # so the UI can decline to present them as the total.
+    degraded: bool = False
+    degradedProjects: int = 0
 
 
 # ── Traces (GET /traces, /traces/metrics, /traces/{id}) ───────────────────────
@@ -1053,11 +1070,6 @@ class TraceScoreOut(BaseModel):
     name: str
     value: float
     comment: Optional[str] = None
-
-
-class SpanModelOut(BaseModel):
-    provider: str
-    id: str
 
 
 class SpanOut(BaseModel):
@@ -1074,14 +1086,21 @@ class SpanOut(BaseModel):
     latencyMs: int
     status: str
     statusMessage: Optional[str] = None
-    model: Optional[SpanModelOut] = None
     cost: Optional[CostOut] = None
     inputPreview: Optional[str] = None
     outputPreview: Optional[str] = None
 
 
 class TraceListItemOut(BaseModel):
-    """Row in the traces table (list projection — no spans)."""
+    """Row in the traces table (list projection — no spans).
+
+    status AND worstLevel ARE OPTIONAL BECAUSE THE LIST PATH CANNOT KNOW THEM.
+    Langfuse's trace-list response carries observation *ids*, not observations, so
+    there are no per-span levels to fold into an outcome. They were previously
+    hardcoded to "approved"/"default", which meant a failed run rendered green in
+    the table and only turned red once opened — the table quietly disagreeing with
+    the detail view it links to. None now means "not known here"; the detail
+    endpoint, which does fetch observations, still fills both in."""
 
     id: str
     runId: Optional[str] = None
@@ -1089,15 +1108,35 @@ class TraceListItemOut(BaseModel):
     projectName: str
     name: str
     agentType: str
-    status: str
+    # The platform user whose turn produced this trace. On the LIST projection as well
+    # as the detail one, because the member filter and the "grouped by member" view
+    # (PRD 32.1 / 15.9) both operate on the table.
+    userId: Optional[str] = None
+    status: Optional[str] = None
     startedAt: str
     latencyMs: int
     cost: CostOut
     model: str
     spanCount: int
     environment: str
-    worstLevel: str
+    worstLevel: Optional[str] = None
     scores: List[TraceScoreOut] = []
+
+
+class LangfuseLinkOut(BaseModel):
+    """One project this caller may open in the Langfuse UI.
+
+    `access` is the honest part: "member" means they can open it now, "invited" means
+    Langfuse will let them in once they sign in for the first time, and anything else is
+    filtered out before it reaches the client. Without it the product would offer a link
+    to somebody who lands on an access-denied page — a worse answer than no link.
+    """
+
+    projectId: str
+    projectName: str
+    url: str
+    access: str
+    role: str
 
 
 class TraceOut(TraceListItemOut):
@@ -1106,22 +1145,28 @@ class TraceOut(TraceListItemOut):
     spans: List[SpanOut] = []
     langfuseUrl: Optional[str] = None
     release: Optional[str] = None
-    userId: Optional[str] = None
 
 
 class TraceMetricsByAgentOut(BaseModel):
     agentType: str
     traceCount: int
-    errorRate: float
+    # None, not 0.0 — see TraceMetricsOut.errorRate.
+    errorRate: Optional[float] = None
     latencyP50Ms: int
     latencyP95Ms: int
     costUsd: float
 
 
 class TraceMetricsOut(BaseModel):
+    """Windowed metrics for the traces page header strip.
+
+    errorRate is Optional for the same reason status is on TraceListItemOut: it is
+    computed from span levels, and the list-based aggregate has none. Reporting 0.0
+    made the page state, in a tile of its own, that nothing had ever failed."""
+
     windowDays: int
     totalTraces: int
-    errorRate: float
+    errorRate: Optional[float] = None
     latencyP50Ms: int
     latencyP95Ms: int
     totalCostUsd: float

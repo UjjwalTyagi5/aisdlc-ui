@@ -129,7 +129,12 @@ def test_only_the_owning_roles_hold_the_gate():
     from shared.authz.permissions import _ROLE_PERMISSIONS
 
     holders = {r for r, p in _ROLE_PERMISSIONS.items() if "artifact:approve_plan" in p}
-    assert holders == {"project_admin", "scrum_master"}
+    # bu_admin holds it as the unit's ADMINISTRATOR, not as an owner of the Plan
+    # agent — granted 2026-09-13 so it can compose roles containing the gate. The
+    # ownership claim this test is really about is asserted by
+    # test_the_owner_can_reach_the_agent_it_signs_off against AGENT_DEFAULT_REACH,
+    # where bu_admin does not appear.
+    assert holders == {"project_admin", "scrum_master", "bu_admin"}
 
 
 @pytest.mark.unit

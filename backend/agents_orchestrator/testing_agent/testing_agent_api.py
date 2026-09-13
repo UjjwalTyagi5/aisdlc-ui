@@ -29,7 +29,7 @@ from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.db import get_db_session_for_tenant
 from shared.models.testing import TestingArtifact
 from shared.audit import AuditCallbackHandler
-from shared.observability import langfuse_langchain_extras
+from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.services.conversation_service import persist_turn
 from shared.services.agent_session_store import patch_session_artifacts
@@ -810,7 +810,7 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
 
         _lf_pid = parsed_pipeline_context.get("project_id") if isinstance(parsed_pipeline_context, dict) else None
         _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
-        _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="testing", project_id=_lf_pid)
+        _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="testing", project_id=_lf_pid)
         from agents_orchestrator.testing_agent.agents.testing_agent import _initial_state as _build_initial
         _initial_ws = _build_initial(actual_user_message, input_file_path, previous_state)
 
@@ -1260,7 +1260,7 @@ async def chat(
         if real_user_id:
             previous_state["owner_id"] = real_user_id
         _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=real_tenant_id or "")
-        _lf_cbs_rest, _lf_meta_rest = langfuse_langchain_extras(session_id=session_id, agent_type="testing", project_id=_lf_pid_rest)
+        _lf_cbs_rest, _lf_meta_rest = await agent_trace(request=request, session_id=session_id, agent_type="testing", project_id=_lf_pid_rest)
         from agents_orchestrator.testing_agent.agents.testing_agent import _initial_state as _build_initial_rest
         _initial_rest = _build_initial_rest(
             actual_user_message,

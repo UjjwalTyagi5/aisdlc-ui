@@ -42,6 +42,12 @@ ALLOWLIST = {
     "stream",
     "activity",
     "tenant_id",
+    # langfuse_api_failures_total. Two values, fixed in code: http_error |
+    # unexpected. It exists to tell an unreachable Langfuse apart from a
+    # misbehaving one when the gauge is at 0, which is the difference between
+    # "the host is down" and "our request is wrong" -- and every Langfuse read
+    # degrades to an empty result, so neither is visible anywhere else.
+    "reason",
 }
 
 # tenant_id is reviewed-and-allowed ONLY on these metrics.

@@ -15,6 +15,8 @@ import uuid
 from typing import Any
 
 import redis.asyncio as aioredis
+
+from shared.redis_client import redis_from_url
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.env import REDIS_URL
@@ -106,7 +108,7 @@ class AuditEventService:
         (the emit() contract guarantees no raise under any condition).
         """
         try:
-            client = aioredis.from_url(REDIS_URL)
+            client = redis_from_url()
             try:
                 await client.xadd(
                     _DEAD_LETTER_STREAM,

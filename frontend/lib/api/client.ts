@@ -2,6 +2,37 @@ import { type z } from "zod";
 
 import { ApiError } from "@/lib/schemas";
 
+/**
+ * An HTTP status IS a machine-readable code, so a response carrying one is never
+ * an "unknown" error. This previously fell back to `unknown_error` for any body
+ * that wasn't the `{code, message}` envelope — and FastAPI's `HTTPException`
+ * raises a bare `{detail: "..."}`, which is most of this backend's 404s, 403s and
+ * 409s. The visible result was a trace detail page reading "Trace not found"
+ * under a red UNKNOWN_ERROR chip: the message knew exactly what had happened
+ * while the code claimed nobody knew anything. Only a status we genuinely cannot
+ * interpret is unknown now.
+ */
+function codeForStatus(status: number): string {
+  switch (status) {
+    case 400:
+      return "bad_request";
+    case 401:
+      return "unauthorized";
+    case 403:
+      return "forbidden";
+    case 404:
+      return "not_found";
+    case 409:
+      return "conflict";
+    case 422:
+      return "invalid_request";
+    case 429:
+      return "rate_limited";
+    default:
+      return status >= 500 ? "server_error" : "unknown_error";
+  }
+}
+
 export class ApiRequestError extends Error {
   public readonly status: number;
   public readonly code: string;
@@ -15,6 +46,13 @@ export class ApiRequestError extends Error {
    * instead of `details`, which is only populated when `body` matches ApiError.
    */
   public readonly rawBody: unknown;
+  /**
+   * Did the backend name a machine-readable code itself, as opposed to us
+   * inferring one from the HTTP status? Callers that want to know "did it bother
+   * to say why" must test this rather than comparing `code` to a sentinel —
+   * `code` is now always meaningful, so there is no sentinel left to compare to.
+   */
+  public readonly explained: boolean;
 
   constructor(status: number, body: unknown, fallback?: string) {
     const parsed = ApiError.safeParse(body);
@@ -44,12 +82,13 @@ export class ApiRequestError extends Error {
     const payload = parsed.success
       ? parsed.data
       : {
-          code: detailCode ?? "unknown_error",
+          code: detailCode ?? codeForStatus(status),
           message: detailMessage ?? fallback ?? "Request failed",
         };
     super(payload.message);
     this.status = status;
     this.code = payload.code;
+    this.explained = parsed.success || detailCode !== undefined;
     this.requestId = parsed.success ? parsed.data.requestId : undefined;
     this.details = parsed.success ? parsed.data.details : undefined;
     this.rawBody = body;

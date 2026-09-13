@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ActivityTabs } from "@/components/app/activity-tabs";
+import { OpenInLangfuse } from "@/components/app/open-in-langfuse";
 import { TraceMetricsStrip } from "@/components/app/trace-metrics-strip";
 import { TracesExplorer } from "@/components/app/traces-explorer";
 import { getTraceMetrics, type TraceFilters } from "@/lib/api/traces";
@@ -31,12 +32,12 @@ export default function TracesPage() {
   // table share one source of truth — picking a project rescopes both together.
   const [agent, setAgent] = React.useState<string>(ALL);
   const [project, setProject] = React.useState<string>(ALL);
-  const [status, setStatus] = React.useState<string>(ALL);
+  const [user, setUser] = React.useState<string>(ALL);
 
   const filters: TraceFilters = {
     agent: agent === ALL ? undefined : agent,
     project: project === ALL ? undefined : project,
-    status: status === ALL ? undefined : status,
+    user: user === ALL ? undefined : user,
   };
 
   const metricsQ = useQuery({
@@ -65,6 +66,12 @@ export default function TracesPage() {
           <PageTitle>Traces</PageTitle>
         </div>
 
+        <div className="ml-auto flex items-center gap-2">
+          {/* Renders nothing unless this viewer genuinely has a Langfuse grant — see
+              OpenInLangfuse on why that is a server decision, not a permission check. */}
+          <OpenInLangfuse className="border-line-soft" />
+        </div>
+
         <Select value={String(windowDays)} onValueChange={(v) => setWindowDays(Number(v))}>
           <SelectTrigger className="border-line-soft h-9 w-36" aria-label="Select window">
             <SelectValue />
@@ -90,10 +97,10 @@ export default function TracesPage() {
       <TracesExplorer
         agent={agent}
         project={project}
-        status={status}
+        user={user}
         onAgentChange={setAgent}
         onProjectChange={setProject}
-        onStatusChange={setStatus}
+        onUserChange={setUser}
       />
     </div>
   );

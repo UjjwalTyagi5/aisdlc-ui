@@ -48,6 +48,7 @@ from shared.services.budget_alloc import (
     assert_workspace_fits,
     effective_cap,
 )
+from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import (
     administered_workspace_ids,
@@ -135,11 +136,15 @@ async def get_cost_breakdown(
     """Return the tenant's (or one workspace's) LLM spend aggregated by model.
 
     Sourced from Langfuse (the same feed as the /traces page) — the authoritative
-    per-model token+cost data, scoped by the mandatory tenant tag (+ the workspace tag
+    per-model token+cost ATTRIBUTION (the budget figures come from the durable
+    `usage_monthly` rollup instead; see the budget-signal note below), scoped by the mandatory tenant tag (+ the workspace tag
     when `workspace` is given) over the window. This is how the same model configured in
     two workspaces (BYOK, different keys) is separated: pick a workspace to attribute
     per-model spend to it. (agent_call_logs is deprecated; usage_monthly has no model dim.)
-    Degrades to empty rows + zero spend when Langfuse is disabled/unreachable.
+    Degrades to empty rows + zero spend when Langfuse is disabled/unreachable, and
+    sets `degraded`/`degradedProjects` when it does -- the zero is otherwise
+    indistinguishable from a quiet month, which is what let an ingestion outage run
+    for five days in 2026-09 without anyone noticing.
     """
     tenant_id = request.state.tenant_id
 
@@ -170,48 +175,95 @@ async def get_cost_breakdown(
     total_cost = Decimal("0")
     total_input = 0
     total_output = 0
+    # How many projects we asked about and could not get an answer for. Anything
+    # above zero means the totals below are a floor, not the spend.
+    degraded_projects = 0
 
     from config.env import ENABLE_LANGFUSE  # noqa: PLC0415
     if ENABLE_LANGFUSE:
         from shared.routers.traces import _lf_get  # noqa: PLC0415
         _cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+        _to = datetime.now(timezone.utc).isoformat()
 
-        # ONE QUERY PER UNIT THE CALLER MAY SEE, summed — rather than one tenant-wide
-        # query. Langfuse ANDs its tag filter, so there is no single tag set meaning
-        # "these three workspaces"; and post-filtering is not available either, because
-        # the daily-metrics endpoint returns figures already aggregated across whatever
-        # it matched. Totalling per unit is the only shape that computes the answer FROM
-        # the allowed set rather than trimming it afterwards.
+        # PER-PROJECT, because that is where the traces now live. Each project has its
+        # own Langfuse project and key pair, so the old shape — one tenant/workspace
+        # tagged query against a shared project — reads a project that holds nothing and
+        # reports zero spend. That is worse than an error: "no spend" is a plausible
+        # answer, so nobody investigates.
         #
-        # An org-wide caller keeps the single untagged query — one call, as before.
-        if workspace:
-            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{workspace}"]]
-        elif allowed_ws is None:
-            _tag_sets = [[f"tenant:{tenant_id}"]]
-        else:
-            # Empty allowed set → no queries at all → zeroes, which is the honest
-            # answer for someone with no units rather than the organisation's total.
-            _tag_sets = [[f"tenant:{tenant_id}", f"workspace:{w}"] for w in allowed_ws]
+        # AND grouped by agent, which the model-only daily-metrics endpoint could not
+        # do. /api/public/metrics takes dimensions, and our trace name is
+        # `sdlc:{agent_type}`, so one query per project yields (agent, model, cost,
+        # tokens) together — the split the Cost page has always described and never had.
+        import json as _json  # noqa: PLC0415
 
-        per_model: dict[str, list] = {}  # model -> [in_tok, out_tok, cost, observations]
-        for _tags in _tag_sets:
+        from shared.observability.bindings import load_bindings  # noqa: PLC0415
+
+        _bound = (await db.execute(
+            text(
+                "select project_id, workspace_id from langfuse_bindings "
+                "where tenant_id = cast(:t as uuid) and is_active = true"
+            ),
+            {"t": str(tenant_id)},
+        )).all()
+        # Respect the same unit scoping the tag query used: a caller only ever
+        # aggregates over units they may read.
+        _pids = [
+            str(r[0]) for r in _bound
+            if (workspace is None or str(r[1]) == str(workspace))
+            and (allowed_ws is None or str(r[1]) in allowed_ws)
+        ]
+        _bindings = await load_bindings(db, str(tenant_id), _pids) if _pids else []
+
+        # key: (agent_type, model) -> [in, out, cost, calls]
+        _per: dict[tuple[str, str], list] = {}
+        for _b in _bindings:
+            _q = {
+                "view": "observations",
+                "metrics": [
+                    {"measure": "totalCost", "aggregation": "sum"},
+                    # THE SPLIT, NOT THE TOTAL. This asked for `totalTokens` and filed
+                    # every token under input, on the belief that Langfuse only reports a
+                    # total. It reports both: `inputTokens` and `outputTokens` are listed
+                    # measures, and asking for them returns the real division. The Cost
+                    # page therefore showed an output-token count of ZERO for every
+                    # project since the per-project move, with the output tokens silently
+                    # added to input — a number that looked plausible and was wrong in
+                    # both columns.
+                    {"measure": "inputTokens", "aggregation": "sum"},
+                    {"measure": "outputTokens", "aggregation": "sum"},
+                    {"measure": "count", "aggregation": "count"},
+                ],
+                "dimensions": [{"field": "traceName"}, {"field": "providedModelName"}],
+                "fromTimestamp": _cutoff,
+                "toTimestamp": _to,
+            }
             _data = await _lf_get(
-                "/api/public/metrics/daily",
-                {"tags": _tags, "fromTimestamp": _cutoff},
+                "/api/public/metrics", {"query": _json.dumps(_q)},
+                host=_b.langfuse_host, public_key=_b.public_key, secret_key=_b.secret_key,
             )
-            for _day in (_data or {}).get("data") or []:
-                for _u in _day.get("usage") or []:
-                    _m = _u.get("model")
-                    if not _m:  # skip the null-model bucket (non-LLM spans)
-                        continue
-                    _agg = per_model.setdefault(_m, [0, 0, 0.0, 0])
-                    _agg[0] += int(_u.get("inputUsage") or 0)
-                    _agg[1] += int(_u.get("outputUsage") or 0)
-                    _agg[2] += float(_u.get("totalCost") or 0.0)
-                    _agg[3] += int(_u.get("countObservations") or 0)
-        for _m, (_i, _o, _c, _n) in per_model.items():
+            # `_lf_get` returns None for every failure -- unreachable host, bad keys,
+            # timeout. Counting it is what separates "this project spent nothing" from
+            # "we never found out", which this endpoint reported identically.
+            if _data is None:
+                degraded_projects += 1
+                continue
+            for _row in (_data or {}).get("data") or []:
+                _model = _row.get("providedModelName")
+                if not _model:  # non-LLM spans carry no model and no cost
+                    continue
+                _name = str(_row.get("traceName") or "")
+                _agent = _name.split("sdlc:", 1)[1] if _name.startswith("sdlc:") else ""
+                _agg = _per.setdefault((_agent, _model), [0, 0, 0.0, 0])
+                _agg[0] += int(_row.get("sum_inputTokens") or 0)
+                _agg[1] += int(_row.get("sum_outputTokens") or 0)
+                _agg[2] += float(_row.get("sum_totalCost") or 0.0)
+                _agg[3] += int(_row.get("count_count") or 0)
+
+        for (_agent, _model), (_i, _o, _c, _n) in sorted(_per.items()):
             rows.append(CostBreakdownRow(
-                model=_m, inputTokens=_i, outputTokens=_o,
+                agentType=_agent or None,
+                model=_model, inputTokens=_i, outputTokens=_o,
                 costUsd=round(_c, 6), callCount=_n,
             ))
             total_input += _i
@@ -229,7 +281,22 @@ async def get_cost_breakdown(
             {"t": tenant_id},
         )).scalar()
         budget_usd = float(_org_budget) if _org_budget is not None else resolve_tenant_budget(tenant_id)
-    budget_signal = compute_budget_utilization(tenant_id, total_cost_usd, budget_usd)
+    # THE BUDGET SIGNAL COMES FROM THE ROLLUP, NOT FROM LANGFUSE. These are two
+    # different measurements and only one of them is the money:
+    #
+    #   totalCostUsd  - Langfuse, windowed (default 30d). The per-model/per-agent
+    #                   attribution, and the only source with a model dimension.
+    #   utilization   - `usage_monthly`, lifetime. What `budget_guard` blocks on.
+    #
+    # This divided the 30-day traced figure by a lifetime cap, which understated
+    # utilization for any scope with spend older than the window, and -- because
+    # an unreachable Langfuse degrades to zero -- drove TENANT_LLM_BUDGET_UTILIZATION
+    # to 0 during an outage. The one gauge that could have raised the alarm instead
+    # reported perfect health, which is how the 2026-09 outage stayed unnoticed.
+    _scope = "workspace" if workspace else "org"
+    _scope_id = str(workspace) if workspace else str(tenant_id)
+    _rollup_spend = (await _spend_map(db, tenant_id, _scope)).get(_scope_id, 0.0)
+    budget_signal = compute_budget_utilization(tenant_id, _rollup_spend, budget_usd)
 
     return CostBreakdownOut(
         windowDays=window_days,
@@ -241,6 +308,8 @@ async def get_cost_breakdown(
         budgetUsd=budget_signal["budget_usd"],
         utilization=budget_signal["utilization"],
         breached80=budget_signal["breached_80"],
+        degraded=degraded_projects > 0,
+        degradedProjects=degraded_projects,
     )
 
 
@@ -276,10 +345,24 @@ class BudgetSetIn(BaseModel):
 
 
 async def _spend_map(db: AsyncSession, tenant_id, scope: str) -> dict[str, float]:
+    """LIFETIME spend per scope_id from the durable rollup.
+
+    SUMS EVERY MONTH, matching `read_scope_spend` -- which is what actually blocks
+    runs. This filtered on `month_key()` and so reported the current calendar
+    month against a cap that is a lifetime total (`monthly_budget_usd` is a legacy
+    name; `budget_guard` treats it as the budget for the scope's whole life). The
+    two disagreed by construction: a project the guard was refusing to run at 100%
+    of its budget showed on the Cost page as using only what it had spent since the
+    1st, so a Project Admin saw ample headroom and could not start anything, and
+    breached80 stayed False through the breach.
+
+    `read_scope_spend` fixed exactly this for enforcement and carries the same note;
+    the reporting path was missed. The month grain remains a detail of the storage.
+    """
     rows = (await db.execute(
-        text("SELECT scope_id, cost_usd FROM usage_monthly "
-             "WHERE tenant_id = :t AND scope = :s AND month = :m"),
-        {"t": str(tenant_id), "s": scope, "m": month_key()},
+        text("SELECT scope_id, COALESCE(SUM(cost_usd), 0) FROM usage_monthly "
+             "WHERE tenant_id = :t AND scope = :s GROUP BY scope_id"),
+        {"t": str(tenant_id), "s": scope},
     )).all()
     return {str(sid): float(c or 0.0) for sid, c in rows}
 
@@ -305,13 +388,39 @@ async def get_cost_summary(
 ) -> CostSummaryOut:
     """GET /cost/summary?project_id=X (task #22's "GET /cost-summary" — nested under
     this router's existing /cost prefix, alongside /cost/budgets, rather than breaking
-    out a top-level route for one endpoint). One project's current-month spend against
-    its effective budget. A thin adapter over the same durable rollup GET /budgets
+    out a top-level route for one endpoint). One project's LIFETIME spend against its
+    effective budget. A thin adapter over the same durable rollup GET /budgets
     already reads (usage_monthly + workspace_alloc's effective_cap), deliberately NOT
     a new cost_events/token_pricing ledger: one already works here, and a second would
     just be a second number that can disagree with the first.
+
+    LIFETIME, not the current month, despite the field names. The cap it is compared
+    against (`monthly_budget_usd`) is a lifetime total -- a legacy column name, see
+    `budget_guard` -- so the spend has to accumulate the same way or the ratio is
+    meaningless. `monthlySpendUsd` and `month` keep their names only because renaming
+    a shipped response shape is a separate change; both now describe a total to date.
     """
     tenant_id = request.state.tenant_id
+
+    # SCOPE, NOT JUST TENANT. This took an arbitrary project_id and checked only that it
+    # belonged to the caller's tenant, so any cost:view holder — including a
+    # project_admin of a DIFFERENT project — could read any project's spend, budget and
+    # utilization by passing its id. That is the same class of finding
+    # docs/rbac-audit-2026-08-17.md section 4 fixed for /cost, /cost/budgets and
+    # /traces/project-summary; this endpoint was missed.
+    #
+    # 404 rather than 403, matching the traces twin: zeroes are themselves a fact about a
+    # project, and indistinguishable from "no spend yet", while a 403 would confirm the
+    # project exists.
+    if not is_org_wide(request):
+        visible = await visible_project_ids(
+            db,
+            user_id=getattr(request.state, "user_id", "") or "",
+            tenant_id=str(tenant_id),
+        )
+        if visible is not None and str(project_id) not in set(visible):
+            raise HTTPException(status_code=404, detail="project not found in this tenant")
+
     row = (await db.execute(
         text("SELECT id, monthly_budget_usd FROM projects WHERE id = :id AND tenant_id = :t"),
         {"id": project_id, "t": str(tenant_id)},

@@ -22,6 +22,7 @@ import os
 import pathlib
 import re
 import sys
+import urllib.parse
 
 import asyncpg
 from dotenv import load_dotenv
@@ -32,21 +33,32 @@ SQL_FILE = BACKEND / "scripts" / "grant_app_role.sql"
 APPEND_ONLY = ("audit_events", "governance_request_events")
 
 
-def _dsn() -> tuple[str, str, str, int, str]:
+def _dsn() -> tuple[str, str, str]:
+    """(dsn, host, dbname). The DSN is handed to asyncpg verbatim, deliberately.
+
+    IT USED TO BE PICKED APART WITH A REGEX and passed as discrete user/password/host
+    arguments, which breaks on any password that is percent-encoded in the URL — and it
+    has to be percent-encoded, because a Postgres password containing `@`, `#` or `$`
+    cannot appear literally in a DSN. asyncpg decodes a DSN it is given; it does not
+    decode a `password=` keyword argument. So a password written `p%24ss` in the DSN
+    reached the server with the escape still in it, as the literal characters, and
+    authentication failed — reported as a pg_hba/encryption error that points nowhere
+    near the real cause.
+
+    Parsing here is only for the log line.
+    """
     load_dotenv(BACKEND / ".env")
     raw = os.environ.get("POSTGRES_MIGRATIONS_CONN_STRING")
     if not raw:
         sys.exit("POSTGRES_MIGRATIONS_CONN_STRING is not set in backend/.env")
-    url = raw.replace("+asyncpg", "")
-    m = re.match(r"postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(\w+)", url)
-    if not m:
-        sys.exit(f"could not parse POSTGRES_MIGRATIONS_CONN_STRING: {url!r}")
-    return m.group(1), m.group(2), m.group(3), int(m.group(4)), m.group(5)
+    dsn = raw.replace("+asyncpg", "").replace("+psycopg", "")
+    parsed = urllib.parse.urlparse(dsn)
+    return dsn, parsed.hostname or "?", (parsed.path or "/?").lstrip("/")
 
 
 async def main() -> None:
-    user, password, host, port, dbname = _dsn()
-    print(f"applying grants to {dbname} on {host}:{port} as {user}")
+    dsn, host, dbname = _dsn()
+    print(f"applying grants to {dbname} on {host}")
 
     statements = [
         s.strip()
@@ -54,9 +66,16 @@ async def main() -> None:
         if s.strip() and not all(ln.strip().startswith("--") for ln in s.strip().splitlines())
     ]
 
-    conn = await asyncpg.connect(
-        user=user, password=password, host=host, port=port, database=dbname
-    )
+    # Azure Postgres Flexible Server refuses plaintext; a local server usually offers no
+    # TLS at all. Try encrypted first and fall back ONLY when the server turns out not to
+    # support TLS — never on an auth failure, which an unconditional retry would hide
+    # behind a misleading "no encryption" message from the second attempt.
+    try:
+        conn = await asyncpg.connect(dsn, ssl="require", timeout=30)
+    except (asyncpg.exceptions.InvalidAuthorizationSpecificationError, OSError) as exc:
+        if "does not support SSL" not in str(exc) and "server does not support" not in str(exc):
+            raise
+        conn = await asyncpg.connect(dsn, timeout=30)
     try:
         for stmt in statements:
             await conn.execute(stmt)

@@ -79,9 +79,52 @@ _ROLE_PERMISSIONS: dict[str, list[str]] = {
         "connector:manage", "connector:view",
         "project:create", "project:update", "model:manage",
         "audit:view", "cost:view",
+        # Traces at unit scope (PRD §35). This role held audit:view and cost:view but
+        # not trace:view, so a Business Unit Admin got a 403 on the screen showing what
+        # their unit's agents did, while holding the audit trail of the same runs.
+        # visible_project_ids already resolves a business_unit binding to that unit's
+        # projects, so no scoping work was needed — only the grant.
+        "trace:view",
         "workspace:manage",
         # Tier 2 of routing.REQUEST_ESCALATION_CHAIN.
         "governance:decide",
+        # ── Delivery permissions, granted 2026-09-13 by product decision ──────
+        #
+        # THIS REVERSES THE PARAGRAPH ABOVE. That comment says governance roles do
+        # not run agents, citing PRD §14.8, and these were deliberately absent for
+        # that reason. They are here now because a Business Unit Admin could not
+        # compose a role for their own unit: `_assert_creator_holds` refuses to
+        # package a permission the creator lacks, so every custom role containing
+        # any delivery permission was rejected with "You cannot grant permissions
+        # you do not hold". role:manage without these is a role-manager who cannot
+        # author the roles their unit actually needs.
+        #
+        # THE COST, stated plainly: a BU Admin can now invoke agents and approve
+        # every artifact type in their unit themselves, not merely delegate the
+        # ability. The same person raises budget decisions (governance:decide,
+        # tier 2) and signs off deliverables, so separation of duties inside a
+        # unit is now a matter of convention rather than of permissions. If that
+        # is not wanted, the alternative is to keep this list short and let
+        # `_assert_creator_holds` consult a delegatable-permission set instead of
+        # the creator's own grants -- the mechanism, not this list, is the place
+        # to fix it.
+        #
+        # `settings:manage` is deliberately NOT here: it is organization-wide
+        # policy and compliance configuration, which is not a unit's to change.
+        "agent:invoke", "approve",
+        "run:create", "run:view", "run:cancel",
+        "artifact:delete", "artifact:export",
+        "artifact:approve_requirements", "artifact:approve_design",
+        "artifact:approve_development", "artifact:approve_code_review",
+        "artifact:approve_security", "artifact:approve_testing",
+        "artifact:approve_deployment", "artifact:approve_documentation",
+        "artifact:approve_plan",
+        # Track 3 (migration 0057).
+        "artifact:approve_requirements_modernization",
+        "artifact:approve_discovery",
+        "connector:request",
+        "skill:edit", "skill:edit:project", "skill:import",
+        "skill:approve", "skill:promote",
     ],
     # Onboarded into a unit and holding nothing until that unit's admin assigns a real
     # role. artifact:view is the read-only floor — enough to sign in and see the shell
@@ -321,7 +364,17 @@ _PERMISSION_CATALOG: list[str] = [
     # enforced by PATCH /projects/{id}.
     "project:create", "project:update", "model:manage", "settings:manage", "workspace:manage",
     # Observability
-    "audit:view", "cost:view", "trace:view", "eval:view",
+    # NO eval:view. It was in this catalogue, granted to no role, and required by no
+    # route — GET /runs/{run_id}/eval gates on artifact:view (eval.py:42). So it
+    # rendered as a checkbox on the Roles & Access page that changed nothing when
+    # ticked, which is the failure docs/rbac-audit-2026-08-17.md section 8 describes:
+    # "a permission the UI offers and the enforcement path ignores is worse than
+    # neither". Removed rather than wired, because nothing was waiting on it.
+    #
+    # If evaluation visibility ever needs its own gate, add the string back here AND a
+    # require_permission call site in the same change — a catalogue entry with no
+    # enforcement is what this deletion is undoing.
+    "audit:view", "cost:view", "trace:view",
     # Agent Studio
     "skill:edit", "skill:edit:project", "skill:promote", "skill:approve", "skill:import",
 ]

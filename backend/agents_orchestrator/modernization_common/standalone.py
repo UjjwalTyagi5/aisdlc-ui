@@ -89,13 +89,27 @@ async def _run_config(session_id: str, tenant_id: str, user_id: str, project_id:
                       agent_id: str) -> dict:
     from shared.audit import AuditCallbackHandler  # noqa: PLC0415
     from shared.audit.service import audit_service  # noqa: PLC0415
-    from shared.observability.callbacks import langfuse_langchain_extras  # noqa: PLC0415
-    from shared.services.budget_store import workspace_id_for_project  # noqa: PLC0415
+    from shared.observability.callbacks import agent_trace  # noqa: PLC0415
 
-    workspace_id = await workspace_id_for_project(tenant_id or "", project_id)
-    callbacks, metadata = langfuse_langchain_extras(
-        session_id=session_id, tenant_id=tenant_id, user_id=user_id,
-        agent_type=agent_id, project_id=project_id, workspace_id=workspace_id,
+    # THROUGH `agent_trace`, NOT `langfuse_langchain_extras` DIRECTLY.
+    #
+    # The attribution this passed was complete, so the drift guard
+    # (tests/observability/test_trace_attribution.py) looked pedantic here. It was not:
+    # `agent_trace` also resolves the project's LANGFUSE BINDING, which is what decides
+    # WHICH Langfuse project the turn writes to. Without it these agents fall back to the
+    # single default client, so Track 3's traces land in a shared bucket instead of their
+    # own project — losing the per-project isolation migration 0057 exists to provide, and
+    # losing it silently, because traces still arrive.
+    #
+    # It also resolves `workspace_id` from the project (so the lookup here is redundant)
+    # and binds the run's client to a contextvar for agents that do not go through
+    # LangChain.
+    callbacks, metadata = await agent_trace(
+        session_id=session_id,
+        agent_type=agent_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
     )
     audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
     return {"configurable": {"thread_id": session_id}, "recursion_limit": 100,

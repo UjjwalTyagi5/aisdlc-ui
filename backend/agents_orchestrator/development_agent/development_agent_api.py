@@ -45,7 +45,7 @@ from agents_orchestrator.development_agent.config.session_state import (
     get_session,
 )
 from shared.audit import AuditCallbackHandler
-from shared.observability import langfuse_langchain_extras
+from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.authz.agent_access import assert_agent_access_for_chat
 from shared.services.conversation_service import persist_turn
@@ -492,7 +492,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         s.push_approved = _is_push_approval(task_intent, _incoming_text)
 
         _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
-        _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, tenant_id=tenant_id, agent_type="development", project_id=_project_id_from_message(message_data))
+        _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="development", project_id=_project_id_from_message(message_data))
         config = {"configurable": {"thread_id": session_id}, "recursion_limit": 160, "callbacks": [_audit_handler, *_lf_cbs], "metadata": _lf_meta}
         os.makedirs(input_directory, exist_ok=True)
 
@@ -726,7 +726,7 @@ async def chat(
             user_id=str(real_user_id), agent_id="development",
         )
     _audit_handler_rest = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id="")
-    _lf_cbs, _lf_meta = langfuse_langchain_extras(session_id=session_id, agent_type="development", project_id=_lf_pid)
+    _lf_cbs, _lf_meta = await agent_trace(request=request, session_id=session_id, agent_type="development", project_id=_lf_pid)
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 160, "callbacks": [_audit_handler_rest, *_lf_cbs], "metadata": _lf_meta}
     os.makedirs(input_directory, exist_ok=True)
 
