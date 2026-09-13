@@ -12,6 +12,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useSession } from "@/hooks/use-session";
 import { listLangfuseLinks } from "@/lib/api/traces";
 import type { LangfuseLink } from "@/lib/schemas/trace";
 import { qk } from "@/lib/api/query-keys";
@@ -52,11 +53,22 @@ export function pickLangfuseControl(
  * SCOPE COMES WITH IT. That endpoint reuses the same binding lookup the trace list does,
  * so this can never name a project whose traces the viewer is not allowed to see.
  *
+ * WHAT IT STILL CANNOT PROMISE. The grant is resolved for the SDLC identity, but the
+ * browser follows the link with whatever Langfuse session it already holds, and those
+ * are separate logins on separate origins. Signed into SDLC as one person and into
+ * Langfuse as another, you land on Langfuse's "Project Not Found" — correctly, because
+ * the account that arrived has no claim on that project. The earlier wording here
+ * claimed this never links somewhere you get refused; it cannot, because it does not
+ * control who the other end thinks you are. Hence the `title` below naming the account
+ * the link was computed for, so a refusal reads as "wrong account" rather than as a
+ * broken product.
+ *
  * Deliberately silent while loading and on error: a control that appears late is better
  * than one that appears and then vanishes, and an error here means "we could not tell
  * whether you have access", which must not render as "you do".
  */
 export function OpenInLangfuse({ className }: { className?: string }) {
+  const session = useSession({ required: true });
   const q = useQuery({
     queryKey: qk.traces.langfuseLinks(),
     queryFn: listLangfuseLinks,
@@ -69,13 +81,17 @@ export function OpenInLangfuse({ className }: { className?: string }) {
   const control = pickLangfuseControl(links, { loading: q.isLoading, error: q.isError });
   if (control.kind === "none") return null;
 
+  // Langfuse is a separate login. Say which account the access was worked out for, so
+  // that arriving as somebody else is legible instead of looking like a dead link.
+  const openAs = `Opens Langfuse in a new tab. Access was resolved for ${session.user.email} — sign in to Langfuse as that account.`;
+
   // One project is the common case — send them straight there rather than making them
   // choose from a menu of one.
   if (control.kind === "single") {
     const only = links[0]!;
     return (
       <Button variant="outline" size="sm" asChild className={className}>
-        <a href={only.url} target="_blank" rel="noreferrer">
+        <a href={only.url} target="_blank" rel="noreferrer" title={openAs}>
           <ExternalLink className="size-4" aria-hidden />
           Open in Langfuse
         </a>
@@ -86,7 +102,7 @@ export function OpenInLangfuse({ className }: { className?: string }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className={className}>
+        <Button variant="outline" size="sm" className={className} title={openAs}>
           <ExternalLink className="size-4" aria-hidden />
           Open in Langfuse
         </Button>
