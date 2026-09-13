@@ -82,8 +82,22 @@ class UsageMeterCallbackHandler(BaseCallbackHandler):
         # offering is resolved for this run.
         offering = self._offering()
         if offering:
-            from shared.services.model_rate_limit import record_usage  # noqa: PLC0415
-            await record_usage(self._tenant_id, offering, in_tok + out_tok, cost)
+            # ISOLATED, because the durable rollup below is the money and this is not.
+            # `record_usage` writes Redis, and an unguarded raise here unwound the whole
+            # of `_record` -- the outer handler swallowed it and the `usage_monthly`
+            # write never happened. So a Redis outage silently stopped all cost
+            # accounting while the comment below promised the opposite, and the Cost
+            # page and budget guard both read zero. Redis is a hot counter; losing it
+            # must not lose the ledger.
+            try:
+                from shared.services.model_rate_limit import record_usage  # noqa: PLC0415
+                await record_usage(self._tenant_id, offering, in_tok + out_tok, cost)
+            except Exception:
+                logger.warning(
+                    "usage meter: per-offering Redis meter failed for tenant %s "
+                    "(rate limiting degraded; durable rollup still recorded)",
+                    self._tenant_id, exc_info=True,
+                )
 
         # Hierarchical budget accounting (org → workspace → project): durable
         # usage_monthly rollup + hot Redis counters. ALWAYS runs (independent of the
@@ -96,7 +110,14 @@ class UsageMeterCallbackHandler(BaseCallbackHandler):
                 self._tenant_id, self._project_id or None, cost, in_tok + out_tok
             )
         except Exception:  # pragma: no cover - metering must never break a run
-            logger.debug("usage meter: budget rollup failed (swallowed)", exc_info=True)
+            # WARNING, not debug. This is a lost row of spend: the budget guard and the
+            # Cost page both read `usage_monthly`, so a swallowed failure here
+            # under-reports real money and silently raises the effective cap. Debug
+            # level meant it never appeared in a normal deployment.
+            logger.warning(
+                "usage meter: budget rollup FAILED for tenant %s -- spend not recorded",
+                self._tenant_id, exc_info=True,
+            )
 
     async def aon_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
