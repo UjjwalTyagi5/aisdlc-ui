@@ -152,6 +152,44 @@ TENANT_LLM_BUDGET_UTILIZATION = Gauge(
 )
 
 
+# ── Langfuse reachability ────────────────────────────────────────────────────
+#
+# WHY A METRIC AND NOT JUST A LOG. Every Langfuse read degrades to None on failure,
+# and the endpoints above it report the result as zero spend / no traces with HTTP
+# 200 -- an answer indistinguishable from a quiet month. The only existing signal
+# was a `logger.warning`, and an ingestion outage duly ran for five days in
+# 2026-09 before anyone noticed. These two are scraped from /metrics, so the
+# degraded state is visible without anyone opening the Cost page.
+#
+# Alert on `langfuse_api_up == 0` sustained, NOT on the counter alone: an
+# occasional failure is normal and self-heals from cache.
+
+LANGFUSE_API_UP = Gauge(
+    "langfuse_api_up",
+    "1 when the last Langfuse Public API read succeeded, 0 when it failed",
+    # Deliberately unlabelled. The host is process-wide configuration, and adding
+    # a project/tenant label here would make the series cardinality follow the
+    # binding count for a signal that is really about one upstream being reachable.
+)
+
+LANGFUSE_API_FAILURES = Counter(
+    "langfuse_api_failures_total",
+    "Langfuse Public API reads that failed and degraded to an empty result",
+    labelnames=["reason"],  # bounded: http_error | unexpected
+)
+
+
+def note_langfuse_read(ok: bool, reason: str = "") -> None:
+    """Record the outcome of one Langfuse read. Must NEVER raise -- a metrics
+    failure must not turn a degraded read into a broken endpoint."""
+    try:
+        LANGFUSE_API_UP.set(1 if ok else 0)
+        if not ok:
+            LANGFUSE_API_FAILURES.labels(reason=reason or "unexpected").inc()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def observe_connector_call(event: Any) -> None:
     """Record a connector call's duration + outcome (REQ-M9-03).
 

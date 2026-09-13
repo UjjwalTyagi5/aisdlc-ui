@@ -45,6 +45,7 @@ from config.env import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.services.metrics import note_langfuse_read
 from shared.authz.can_perform import visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.authz.read_scope import is_org_wide
@@ -187,18 +188,30 @@ async def _lf_get(
                 url, params=params, headers=_auth_header(public_key, secret_key)
             )
         if resp.status_code == 404:
+            # A reachable Langfuse answering "no such thing" -- that is an answer, not
+            # an outage, so it must not pull the reachability gauge down.
+            note_langfuse_read(True)
             return None
         resp.raise_for_status()
         _data = resp.json()
         _lf_cache_store(_key, _data)
+        note_langfuse_read(True)
         return _data
     except httpx.HTTPError as exc:
         # Langfuse unreachable / misconfigured host is an EXPECTED degraded state (the
         # endpoints still return empty/zeroed results). Log concisely — no traceback spam.
+        #
+        # The warning is NOT the signal. Callers turn this None into zero spend and an
+        # empty trace list behind HTTP 200, which reads exactly like a quiet month, so
+        # the only way anyone learns of an outage is by reading logs -- which is how the
+        # 2026-09 ingestion failure survived five days. `note_langfuse_read` puts it on
+        # /metrics where it can be alerted on.
+        note_langfuse_read(False, "http_error")
         logger.warning("Langfuse API call failed: %s (%s) — check LANGFUSE_HOST/keys",
                        path, type(exc).__name__)
         return None
     except Exception:
+        note_langfuse_read(False, "unexpected")
         logger.warning("Langfuse API call failed: %s", path, exc_info=True)
         return None
 
