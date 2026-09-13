@@ -167,3 +167,53 @@ async def test_audit_rows_cannot_be_altered_by_the_app_role(org):
         with pytest.raises(Exception) as ei:
             await s.execute(text("DELETE FROM audit_events"))
         assert "permission denied" in str(ei.value).lower(), str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_grant_is_audited_only_when_something_actually_changed(org):
+    """The mirror of the revoke rule above, which this side never had.
+
+    `grant_role` is idempotent and re-run constantly — `seed_org_admins` calls it on
+    every boot, and under `--reload` that is every code change. It audited
+    unconditionally, so 76 of the 105 audit events on the dev database were the same
+    no-op appointment of the same org admin, burying the six rows that recorded
+    something real.
+
+    `rowcount` cannot tell the difference (the upsert is DO UPDATE, so it is 1 either
+    way); `RETURNING (xmax = 0)` can.
+    """
+    subject = f"subject-{_uuid.uuid4()}"
+
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit"
+    )
+    assert len(await _events(org["org"], RBAC_ROLE_GRANTED)) == 1
+
+    # Same binding, twice more. Nothing changed, so nothing is recorded.
+    for _ in range(2):
+        await grant_role(
+            subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit"
+        )
+    assert len(await _events(org["org"], RBAC_ROLE_GRANTED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_extending_an_expiry_is_still_audited(org):
+    """An extension IS a change. The de-duplication above must not swallow it —
+    that is the whole reason the upsert is DO UPDATE rather than DO NOTHING.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    subject = f"subject-{_uuid.uuid4()}"
+    first = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        expires_at=first, granted_by="admin-1",
+    )
+    assert len(await _events(org["org"], RBAC_ROLE_GRANTED)) == 1
+
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        expires_at=first + timedelta(hours=4), granted_by="admin-1",
+    )
+    assert len(await _events(org["org"], RBAC_ROLE_GRANTED)) == 2
