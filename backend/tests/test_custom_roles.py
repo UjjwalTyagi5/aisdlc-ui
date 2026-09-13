@@ -380,7 +380,7 @@ def test_bu_admin_can_grant_the_delivery_permissions_it_now_holds():
     for p in ("agent:invoke", "approve", "run:create", "run:view", "run:cancel",
               "artifact:approve_requirements", "artifact:approve_design",
               "artifact:approve_development", "artifact:delete", "artifact:export",
-              "skill:edit", "skill:import", "connector:request"):
+              "skill:edit"):
         assert p in held, f"bu_admin cannot compose a role granting {p}"
 
     # Organization-wide policy is not a unit's to change, and no route requires it.
@@ -406,3 +406,30 @@ def test_bu_admin_mirrors_the_frontend_exactly():
         if not line.strip().startswith("//")
     )
     assert set(re.findall(r'"([^"]+)"', body)) == set(_ROLE_PERMISSIONS["bu_admin"])
+
+
+def test_the_dead_permissions_stay_dead():
+    """A permission the UI offers and no code enforces is worse than neither.
+
+    connector:request, skill:edit:project, skill:promote, skill:approve and
+    skill:import were removed 2026-09-13: granted to no role, gated by no route on
+    either side, and rendered as checkboxes that changed nothing when ticked. The
+    Agent Studio routes gate on artifact:view. Same deletion, same reasoning, as
+    eval:view before them.
+
+    If a gate ever arrives, add the string back to _PERMISSION_CATALOG AND the
+    require_permission call site in the SAME change -- that pairing is the whole
+    point, and this test is what notices when only half of it happens.
+    """
+    from shared.authz.permissions import ALL_PERMISSIONS, _ROLE_PERMISSIONS
+
+    catalog = set(ALL_PERMISSIONS)
+    for gone in ("connector:request", "skill:edit:project", "skill:promote",
+                 "skill:approve", "skill:import"):
+        assert gone not in catalog, f"{gone} is back in the catalogue without a gate"
+        holders = [r for r, v in _ROLE_PERMISSIONS.items() if gone in v]
+        assert not holders, f"{gone} is granted to {holders} but nothing enforces it"
+
+    # skill:edit is NOT dead: dependency.py maps it to developer and grant_guard.py
+    # uses it in the subset rule.
+    assert "skill:edit" in catalog
