@@ -241,6 +241,49 @@ class IngestBoardIn(BaseModel):
     provider: Optional[str] = None
 
 
+async def _project_owners(db: AsyncSession, project_ids: list) -> dict[str, list[dict]]:
+    """{project_id: [UserRef, ...]} for the project_admin of each project.
+
+    Returns the shape `lib/schemas/user.ts::UserRef` expects — id, name, initials,
+    and email when we have one. `users.email` is nullable (an account can exist
+    before onboarding completes), so the name falls back to the local part of the
+    email and then to the id rather than rendering an empty chip.
+    """
+    if not project_ids:
+        return {}
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT rb.scope_id::text AS project_id, rb.user_id, u.email "
+                "FROM role_bindings rb "
+                "LEFT JOIN users u ON u.id = rb.user_id "
+                "WHERE rb.scope_kind = 'project' "
+                "  AND rb.role_name = 'project_admin' "
+                "  AND rb.status = 'active' "
+                "  AND rb.scope_id = ANY(CAST(:ids AS uuid[])) "
+                "ORDER BY u.email NULLS LAST"
+            ),
+            {"ids": [str(i) for i in project_ids]},
+        )
+    ).all()
+
+    out: dict[str, list[dict]] = {}
+    for pid, user_id, email in rows:
+        local = (email or "").split("@")[0]
+        name = local or str(user_id)
+        initials = "".join(part[0] for part in local.replace(".", " ").split()[:2]).upper()
+        out.setdefault(pid, []).append(
+            {
+                "id": str(user_id),
+                "name": name,
+                "initials": initials or name[:2].upper(),
+                **({"email": email} if email else {}),
+            }
+        )
+    return out
+
+
 @projects_router.get("", response_model=Paginated[ProjectOut])
 async def list_projects(
     request: Request,
@@ -294,8 +337,22 @@ async def list_projects(
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(stmt)).scalars().all()
 
+    # WHO ADMINISTERS EACH PROJECT. The Owners column has been rendered since the
+    # table was written and has always been empty, because `from_orm_project` hard-
+    # coded `owners=[]` with the note "no owners relation in ORM". There is no
+    # relation, but there is a role binding, which is where the answer actually
+    # lives: scope_kind='project' + role_name='project_admin'.
+    #
+    # ONE query for the whole page rather than one per row -- the list is paginated
+    # but still up to `page_size` projects, and an N+1 here would be paid on the
+    # busiest screen in the product.
+    _owners = await _project_owners(db, [p.id for p in rows])
+
     return Paginated(
-        items=[ProjectOut.from_orm_project(p) for p in rows],
+        items=[
+            ProjectOut.from_orm_project(p, owners=_owners.get(str(p.id), []))
+            for p in rows
+        ],
         pagination=Pagination(page=page, pageSize=page_size, total=total),
     )
 

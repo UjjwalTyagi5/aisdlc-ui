@@ -238,14 +238,25 @@ function OwnerStack({ owners }: { owners: Project["owners"] }) {
 /** The project's creator (owners[0] — set once at creation, see
  *  createProjectRecord in lib/mock/project-fixtures.ts) — an avatar stack
  *  alone doesn't answer "who made this", so name it explicitly. */
+/**
+ * The project's administrators, under the Owners column.
+ *
+ * IT SAID "Created by" AND MEANT IT, but `owners` was hard-coded empty on the
+ * server, so this component returned null everywhere and the label was never once
+ * displayed. Now that the backend resolves owners from the `project_admin` role
+ * binding, the old wording would be a claim nobody checked: the administrator of a
+ * project is frequently not the person who created it — an Org Admin creates the
+ * project and appoints somebody else to run it.
+ */
 export function CreatedByLabel({ owners, className }: { owners: Project["owners"]; className?: string }) {
-  const creator = owners[0];
-  if (!creator) return null;
+  const [first, ...rest] = owners;
+  if (!first) return null;
   return (
     <div className={cn("flex min-w-0 items-center gap-1.5", className)}>
       <OwnerStack owners={owners} />
       <span className="text-muted-foreground truncate font-mono text-[10.5px]">
-        Created by <span className="text-foreground">{creator.name}</span>
+        <span className="text-foreground">{first.name}</span>
+        {rest.length > 0 && ` +${rest.length}`}
       </span>
     </div>
   );

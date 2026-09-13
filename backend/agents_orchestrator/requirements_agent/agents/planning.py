@@ -113,11 +113,18 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
     # paid that at import time — including `pytest --collect-only` and every
     # `uvicorn --reload` restart, neither of which is about to call a model.
     # Same pattern as copilot_api.py's ChatLiteLLM import.
-    import litellm
-
+    # TRACED, because this is a DIRECT litellm call. Every other model call in this
+    # agent goes through ChatLiteLLM, where the Langfuse handler that `agent_trace`
+    # attached observes it for free. This one bypassed LangChain entirely, so it
+    # produced no trace, no token count and no cost -- a chat turn that answered
+    # perfectly while leaving the Traces page, agent_call_logs and usage_monthly all
+    # empty (observed 2026-09-13). `traced_completion` falls back to the plain call
+    # when no client is bound, so nothing changes when tracing is off.
+    from shared.observability.litellm_trace import traced_completion  # noqa: PLC0415
     from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
 
-    response = litellm.completion(
+    response = traced_completion(
+        name="requirements:document",
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
         api_key=resolved.api_key,
