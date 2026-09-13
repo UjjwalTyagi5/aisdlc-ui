@@ -63,7 +63,7 @@ export const TOOL_STAGES: { id: string; label: string }[] = stagesFor(PHASE_ORDE
 
 /**
  * The stages a project on `track` can wire tools to — its OWN roster. A Code
- * Modernization project wires its repository connector to Discovery & Assessment,
+ * Modernization project wires its repository connector to Dependency and Risk,
  * which the Greenfield list does not have; without its own stages that project could
  * not give Discovery a repository to clone at all (the stage IS the access decision:
  * `connector_grants.effective_access` refuses a tool not wired to the stage).

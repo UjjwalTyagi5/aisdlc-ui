@@ -136,7 +136,7 @@ export interface PhasePipelineProps {
   /**
    * The project's delivery track. Determines which agents make up the
    * pipeline (PRD §6) — a Track 4 project has no Design or Code Review stage,
-   * and a Track 3 project has Discovery & Assessment and Strategy.
+   * and a Track 3 project has Dependency and Risk and Strategy.
    *
    * Omitted for surfaces with no project in scope, which fall back to the
    * Track 1 roster.

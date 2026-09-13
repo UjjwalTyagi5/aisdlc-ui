@@ -32,9 +32,9 @@ _REPORT_MODULE_LIMIT = 25
 
 
 def _no_checkout() -> str:
-    return ("No legacy code is pulled for this project and none is checked out in this "
-            "conversation. Ask the user to press **Pull legacy code** on the page, or call "
-            "list_legacy_repositories and clone_legacy_repository.")
+    return ("No legacy code is pulled yet and none is checked out in this conversation. "
+            "Offer to pull it: call list_legacy_repositories and clone_legacy_repository, or ask "
+            "the user for the repository's https URL.")
 
 
 def _ensure_checkout(s) -> bool:
@@ -43,14 +43,13 @@ def _ensure_checkout(s) -> bool:
     if s.work_dir and os.path.isdir(s.work_dir):
         return True
     from agents_orchestrator.discovery_agent.tools.repo_tools import adopt_project_checkout  # noqa: PLC0415
-    from agents_orchestrator.modernization_common.legacy_code import current_pull  # noqa: PLC0415
-    from config.ws_helper import get_project_id  # noqa: PLC0415
+    from agents_orchestrator.modernization_common.legacy_code import current_pull, current_scope  # noqa: PLC0415
 
-    project_id = str(get_project_id() or "")
-    pull = current_pull(project_id) if project_id else None
+    project_id, run_id = current_scope()
+    pull = current_pull(project_id, run_id) if project_id else None
     if not pull:
         return False
-    adopt_project_checkout(s, project_id, pull)
+    adopt_project_checkout(s, project_id, pull, run_id)
     return True
 
 
@@ -186,7 +185,7 @@ async def export_assessment_report(filename: str = "discovery_assessment.docx") 
     url = await announce_generated_file(FILE_SEGMENT, name, path, stage=STAGE)
     return export_result_message(
         name, url,
-        ["It is saved as a draft of the Discovery & Assessment stage — submitting it for "
+        ["It is saved as a draft of the Dependency and Risk stage — submitting it for "
          "approval is how the BA accepts the assessment as the planning baseline."],
     )
 

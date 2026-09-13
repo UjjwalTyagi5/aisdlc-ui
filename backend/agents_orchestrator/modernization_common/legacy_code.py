@@ -1,8 +1,8 @@
 """The project's legacy code: pulled once, read by both Track 3 agents.
 
-WHY ONE PULL PER PROJECT. The Requirements agent (migration intent) asks better
+WHY ONE PULL PER PROJECT. The Migration Intent agent asks better
 questions once it has seen the code — it can state the current stack instead of asking
-for it — and Discovery & Assessment assesses that same code. One read-only checkout per
+for it — and the Dependency and Risk agent assesses that same code. One read-only checkout per
 project serves both, at one commit, so the brief and the assessment describe the same
 code. It is pulled from either agent's page (`POST /projects/{id}/modernization/
 legacy-code`) or by Discovery's own clone tool, and whichever pulled last wins.
@@ -11,6 +11,13 @@ WHERE IT LIVES. `<FILES>/legacy-code/<project_id>/checkout`, with the pull's rec
 (`pull.json`) beside it. On disk rather than in the database on purpose: the record means
 nothing without the checkout next to it, and a column would need a migration that every
 other branch's database lacks.
+
+TWO SCOPES. The agent PAGES share the project's checkout (above). An ORCHESTRATOR
+conversation is self-contained: code pulled there lives in
+`<FILES>/legacy-code/<project_id>/runs/<run_id>/`, is read only by the agents in that
+conversation, and never changes what the pages show. `current_scope()` decides from the
+turn (the Orchestrator's dispatch marks its turns and binds its run), so every tool here
+reads and writes the right copy without being told.
 
 THE RECORD. `status` is the latest ATTEMPT (`pulling` / `ready` / `failed`); `pull` is
 the last GOOD pull — what the checkout holds right now. A failed re-pull leaves the
@@ -81,41 +88,53 @@ def _root() -> pathlib.Path:
     return pathlib.Path(sdlcSettings().FILES) / "legacy-code"
 
 
-def project_dir(project_id: str) -> pathlib.Path:
-    # A UUID and nothing else: the id becomes a directory name.
-    return _root() / str(uuid.UUID(str(project_id)))
+def project_dir(project_id: str, run_id: Optional[str] = None) -> pathlib.Path:
+    """The project's copy, or an Orchestrator conversation's own (`run_id`).
+    UUIDs and nothing else: both ids become directory names."""
+    base = _root() / str(uuid.UUID(str(project_id)))
+    return base / "runs" / str(uuid.UUID(str(run_id))) if run_id else base
 
 
-def checkout_dir(project_id: str) -> pathlib.Path:
-    return project_dir(project_id) / "checkout"
+def checkout_dir(project_id: str, run_id: Optional[str] = None) -> pathlib.Path:
+    return project_dir(project_id, run_id) / "checkout"
 
 
-def _record_file(project_id: str) -> pathlib.Path:
-    return project_dir(project_id) / "pull.json"
+def _record_file(project_id: str, run_id: Optional[str] = None) -> pathlib.Path:
+    return project_dir(project_id, run_id) / "pull.json"
 
 
-def read_record(project_id: str) -> Optional[dict]:
+def read_record(project_id: str, run_id: Optional[str] = None) -> Optional[dict]:
     try:
-        return json.loads(_record_file(project_id).read_text(encoding="utf-8"))
+        return json.loads(_record_file(project_id, run_id).read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError, OSError):
         return None
 
 
-def _write_record(project_id: str, record: dict) -> None:
-    path = _record_file(project_id)
+def _write_record(project_id: str, record: dict, run_id: Optional[str] = None) -> None:
+    path = _record_file(project_id, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
     os.replace(tmp, path)
 
 
-def current_pull(project_id: str) -> Optional[dict]:
-    """The last good pull, when its checkout is actually on disk; else None."""
-    record = read_record(project_id) or {}
+def current_pull(project_id: str, run_id: Optional[str] = None) -> Optional[dict]:
+    """The last good pull in this scope, when its checkout is actually on disk; else None."""
+    record = read_record(project_id, run_id) or {}
     pull = record.get("pull")
-    if pull and checkout_dir(project_id).is_dir():
+    if pull and checkout_dir(project_id, run_id).is_dir():
         return pull
     return None
+
+
+def current_scope() -> tuple[str, Optional[str]]:
+    """(project_id, run_id) whose code this turn reads: an Orchestrator conversation's
+    own copy on an Orchestrator turn, the project's (run_id None) on a page's chat."""
+    from config.ws_helper import get_orchestrator_run, get_project_id, get_run_id  # noqa: PLC0415
+
+    project_id = str(get_project_id() or "")
+    run_id = str(get_run_id() or "") if get_orchestrator_run() else ""
+    return project_id, (run_id or None)
 
 
 def public_record(project_id: str) -> dict:
@@ -247,8 +266,8 @@ def profile_markdown(pull: dict) -> str:
 # ── pulling ──────────────────────────────────────────────────────────────────
 
 
-_STAGE_LABELS = {"requirements_modernization": "Requirements (migration intent)",
-                 "discovery": "Discovery & Assessment"}
+_STAGE_LABELS = {"requirements_modernization": "Migration Intent",
+                 "discovery": "Dependency and Risk"}
 
 
 def stage_may_read() -> bool:
@@ -301,28 +320,29 @@ async def _connection_secret(url: str, *, tenant_id: str, project_id: str, user_
 
 
 async def pull_now(project_id: str, url: str, branch: str, *, user_id: str, secret: str = "",
-                   problem: str = "") -> dict:
-    """Clone `url` as the project's legacy checkout, profile it and record the pull.
+                   problem: str = "", run_id: Optional[str] = None) -> dict:
+    """Clone `url` as the legacy checkout of this scope — the project's, or an
+    Orchestrator conversation's (`run_id`) — profile it and record the pull.
 
-    Awaited by Discovery's clone tool; run in the background by `start_pull`. Returns
+    Awaited by the agents' pull tools; run in the background by `start_pull`. Returns
     the record. The previous checkout is only replaced once the new clone succeeded.
     """
     from agents_orchestrator.discovery_agent.tools.repo_tools import _CLONE_TIMEOUT_SECONDS, _clone  # noqa: PLC0415
     from shared.services.ado_repos import _force_rmtree  # noqa: PLC0415
 
     clean = _clean_url(url)
-    lock = _LOCKS.setdefault(str(project_id), asyncio.Lock())
+    lock = _LOCKS.setdefault(f"{project_id}:{run_id or ''}", asyncio.Lock())
     async with lock:
-        record = read_record(project_id) or {}
+        record = read_record(project_id, run_id) or {}
         request = {"url": clean, "branch": branch, "requestedBy": user_id,
                    "startedAt": (record.get("request") or {}).get("startedAt") if record.get("status") == "pulling" else _now()}
         record.update({"status": "pulling", "request": request, "error": ""})
-        _write_record(project_id, record)
+        _write_record(project_id, record, run_id)
 
-        staging = project_dir(project_id) / "checkout.new"
+        staging = project_dir(project_id, run_id) / "checkout.new"
         try:
             facts = await asyncio.to_thread(_clone, url, str(staging), branch, secret)
-            target = checkout_dir(project_id)
+            target = checkout_dir(project_id, run_id)
             if target.exists():
                 await asyncio.to_thread(_force_rmtree, target)
             os.replace(staging, target)
@@ -347,7 +367,7 @@ async def pull_now(project_id: str, url: str, branch: str, *, user_id: str, secr
                     "pulledBy": user_id, "pulledAt": _now(), "profile": profile,
                 },
             })
-            _write_record(project_id, record)
+            _write_record(project_id, record, run_id)
             return record
         if staging.exists():
             try:
@@ -355,7 +375,7 @@ async def pull_now(project_id: str, url: str, branch: str, *, user_id: str, secr
             except Exception:  # noqa: BLE001
                 pass
         record.update({"status": "failed", "error": error[:600]})
-        _write_record(project_id, record)
+        _write_record(project_id, record, run_id)
         return record
 
 
@@ -397,24 +417,23 @@ async def start_pull(*, tenant_id: str, project_id: str, user_id: str, url: str,
 # ── the tools ────────────────────────────────────────────────────────────────
 
 
-def _current_project() -> str:
-    from config.ws_helper import get_project_id  # noqa: PLC0415
-
-    return str(get_project_id() or "")
-
-
-def _no_code(project_id: str) -> str:
-    record = read_record(project_id) if project_id else None
+def _no_code(project_id: str, run_id: Optional[str] = None) -> str:
+    record = read_record(project_id, run_id) if project_id else None
     if record and record.get("status") == "pulling" and not _is_stale(record):
         return "The legacy code is being pulled right now — it will be ready in a minute or two."
     if record and record.get("status") == "failed" and not record.get("pull"):
         return f"The last attempt to pull the legacy code failed: {record.get('error')}"
-    return ("No legacy code has been pulled for this project yet. Ask the user to press "
-            "**Pull legacy code** on the agent's page and choose the repository.")
+    if run_id:
+        return ("No legacy code has been pulled in this conversation yet. Offer to pull it: the "
+                "user can name the repository or give its https URL, or ask you to list what the "
+                "project's connection can see.")
+    return ("No legacy code has been pulled for this project yet. Offer to pull it here in the "
+            "chat (the user names the repository or gives its URL), or the user can press "
+            "**Pull legacy code** on this page.")
 
 
-def _resolve(project_id: str, rel: str) -> pathlib.Path | str:
-    root = checkout_dir(project_id).resolve()
+def _resolve(project_id: str, rel: str, run_id: Optional[str] = None) -> pathlib.Path | str:
+    root = checkout_dir(project_id, run_id).resolve()
     rel = (rel or "").strip().replace("\\", "/").lstrip("/")
     if rel.startswith("..") or "/../" in f"/{rel}/" or os.path.isabs(rel):
         return "Paths are relative to the repository root and cannot leave it."
@@ -432,10 +451,10 @@ async def get_legacy_code_profile() -> str:
     languages, runtimes and whether they are still supported, platform features such as
     WebForms or WCF, and size. Call it at the start of a conversation, before asking
     about the current system — and state what it shows instead of asking for it."""
-    project_id = _current_project()
-    pull = current_pull(project_id) if project_id else None
+    project_id, run_id = current_scope()
+    pull = current_pull(project_id, run_id) if project_id else None
     if not pull:
-        return _no_code(project_id)
+        return _no_code(project_id, run_id)
     return profile_markdown(pull)
 
 
@@ -447,10 +466,10 @@ async def list_legacy_files(path: str = "", max_entries: int = 200) -> str:
         path: Relative to the repository root; "" for the root.
         max_entries: At most this many entries (up to 500).
     """
-    project_id = _current_project()
-    if not (project_id and current_pull(project_id)):
-        return _no_code(project_id)
-    target = _resolve(project_id, path)
+    project_id, run_id = current_scope()
+    if not (project_id and current_pull(project_id, run_id)):
+        return _no_code(project_id, run_id)
+    target = _resolve(project_id, path, run_id)
     if isinstance(target, str):
         return target
     if not target.is_dir():
@@ -471,10 +490,10 @@ async def read_legacy_file(path: str, start_line: int = 1, max_lines: int = 300)
         start_line: First line to return (1-based).
         max_lines: How many lines (up to 800).
     """
-    project_id = _current_project()
-    if not (project_id and current_pull(project_id)):
-        return _no_code(project_id)
-    target = _resolve(project_id, path)
+    project_id, run_id = current_scope()
+    if not (project_id and current_pull(project_id, run_id)):
+        return _no_code(project_id, run_id)
+    target = _resolve(project_id, path, run_id)
     if isinstance(target, str):
         return target
     if not target.is_file():
@@ -507,16 +526,16 @@ async def search_legacy_code(query: str, path: str = "", max_results: int = 40) 
     """
     from agents_orchestrator.discovery_agent.analysis.inventory import SKIP_DIRS  # noqa: PLC0415
 
-    project_id = _current_project()
-    if not (project_id and current_pull(project_id)):
-        return _no_code(project_id)
+    project_id, run_id = current_scope()
+    if not (project_id and current_pull(project_id, run_id)):
+        return _no_code(project_id, run_id)
     needle = (query or "").strip().lower()
     if not needle:
         return "Give me some text to search for."
-    base = _resolve(project_id, path)
+    base = _resolve(project_id, path, run_id)
     if isinstance(base, str):
         return base
-    root = checkout_dir(project_id).resolve()
+    root = checkout_dir(project_id, run_id).resolve()
     limit = max(1, min(int(max_results or 40), 200))
 
     def _scan() -> list[str]:
@@ -554,10 +573,110 @@ async def search_legacy_code(query: str, path: str = "", max_results: int = 40) 
 LEGACY_TOOLS = [get_legacy_code_profile, list_legacy_files, read_legacy_file, search_legacy_code]
 
 
-def repository_for_brief(project_id: str) -> Optional[dict[str, Any]]:
-    """The pulled repository in the brief's `legacy_repository` shape, or None."""
-    pull = current_pull(project_id) if project_id else None
+def repository_for_brief(project_id: str, run_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """The pulled repository (in this scope) in the brief's `legacy_repository` shape, or None."""
+    pull = current_pull(project_id, run_id) if project_id else None
     if not pull:
         return None
     return {"url": pull.get("url", ""), "name": pull.get("name", ""), "project": "",
             "provider": pull.get("provider", "")}
+
+
+# ── pulling from the chat ────────────────────────────────────────────────────
+
+#: Repository name -> clone URL from the last listing, per conversation, so the user can
+#: answer "the second one" or "Project 2" rather than paste a URL.
+_LISTED: dict[str, dict[str, str]] = {}
+
+
+def _conversation_key() -> str:
+    from config.ws_helper import get_session_id  # noqa: PLC0415
+
+    return str(get_session_id() or "default")
+
+
+def pull_tools(stage: str) -> list:
+    """`find_legacy_repositories` and `pull_legacy_code` for an agent on `stage`.
+
+    The credential is the connection the project wired to THIS stage, bound for the turn
+    by the page's socket or the Orchestrator's dispatch — the same three checks as the
+    Pull button (Business Unit grant, stage wiring, a level that admits read). Without a
+    permitted connection the pull still runs, credential-free: a public repository comes
+    through and a private one fails with the reason.
+    """
+    label = _STAGE_LABELS.get(stage, stage)
+
+    @tool
+    async def find_legacy_repositories(ado_project: str = "") -> str:
+        """List the repositories the project's Azure DevOps or GitHub connection can see,
+        so the user can say which one is the legacy system. Azure DevOps: call with no
+        argument to list its projects, then with the chosen project's name. Show the list
+        and ask which one — never guess a repository."""
+        from agents_orchestrator.discovery_agent.tools.repo_tools import repositories_data  # noqa: PLC0415
+
+        if not stage_may_read():
+            return connection_refusal(stage) + " The user can still give a public repository's https URL."
+        data = await repositories_data(ado_project.strip())
+        if data.get("problem"):
+            return data["problem"]
+        if data.get("projects") is not None:
+            names = data["projects"]
+            if not names:
+                return "No Azure DevOps projects are visible to this connection."
+            return ("Azure DevOps projects:\n" + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(names))
+                    + "\n\nWhich project holds the legacy system? Then list its repositories.")
+        repos = data.get("repositories") or []
+        if not repos:
+            return f"No repositories found{f' in {ado_project}' if ado_project else ''}."
+        _LISTED[_conversation_key()] = {r["name"]: r["url"] for r in repos if r.get("url")}
+        return ("Repositories:\n" + "\n".join(
+            f"{i + 1}. {r['name']}" + (f" (default branch: {r['defaultBranch']})" if r.get("defaultBranch") else "")
+            for i, r in enumerate(repos)) + "\n\nWhich one is the legacy system?")
+
+    @tool
+    async def pull_legacy_code(repository: str, branch: str = "") -> str:
+        """Pull the legacy repository READ-ONLY so you (and, later, the Dependency and Risk agent)
+        can read it. Returns what the code contains.
+
+        Args:
+            repository: A name from find_legacy_repositories, or a full https URL.
+            branch: Optional; omit for the repository's default branch.
+        """
+        from agents_orchestrator.discovery_agent.tools.repo_tools import (  # noqa: PLC0415
+            _stage_credentials,
+            validate_clone_url,
+        )
+        from config.ws_helper import get_user_id  # noqa: PLC0415
+
+        project_id, run_id = current_scope()
+        if not project_id:
+            return "This conversation is not attached to a project, so there is nowhere to pull the code to."
+        url = (repository or "").strip()
+        if not url.lower().startswith("https://"):
+            listed = _LISTED.get(_conversation_key(), {})
+            url = next((u for n, u in listed.items() if n.lower() == url.lower()), "")
+            if not url:
+                return (f"I don't know a repository called '{repository}'. List the repositories "
+                        "first, or ask the user for the repository's https URL.")
+        refusal = validate_clone_url(url)
+        if refusal:
+            return refusal.replace("Discovery may clone from", "can be pulled from")
+
+        secret, problem = "", ""
+        if stage_may_read():
+            provider, _org, found, problem = await _stage_credentials()
+            if found and provider == _host_provider(url):
+                secret = found
+        else:
+            problem = connection_refusal(stage)
+
+        record = await pull_now(project_id, url, branch.strip(), user_id=str(get_user_id() or ""),
+                                secret=secret, problem=problem, run_id=run_id)
+        if record.get("status") != "ready":
+            return f"The pull failed: {record.get('error') or 'unknown error'}"
+        where = "for this conversation" if run_id else "for this project"
+        return (f"Pulled read-only {where} using the {label} stage's connection"
+                + ("" if secret else " (no credential needed — a public repository)")
+                + ".\n\n" + profile_markdown(record["pull"]))
+
+    return [find_legacy_repositories, pull_legacy_code]

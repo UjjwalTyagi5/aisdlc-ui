@@ -61,7 +61,7 @@ CAPABILITIES: frozenset[str] = frozenset({
     "docs.aggregate", "docs.compile", "docs.api.reference.generate", "docs.changelog.generate",
     "docs.release.notes.generate", "docs.run.summary", "docs.publish",
     # Track 3 — Code Modernization: Requirements in migration-intent mode, and
-    # Discovery & Assessment (help/track3-agent-build-plan.md, "New capability tokens").
+    # Dependency and Risk (help/track3-agent-build-plan.md, "New capability tokens").
     "req.migration_intent.capture", "req.migration_intent.brief",
     "discovery.repo.clone", "discovery.dependency.graph.build",
     "discovery.dependency.eol.scan", "discovery.dependency.cve.scan",

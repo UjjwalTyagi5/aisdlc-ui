@@ -61,7 +61,7 @@ export const TRACK_META: Record<DeliveryTrack, TrackMeta> = {
     label: "Code modernization",
     shortLabel: "Modernization",
     summary:
-      "The full eight-stage shape plus Discovery & Assessment and Strategy — ten agents, for migrating an unfamiliar legacy system.",
+      "The full eight-stage shape plus Dependency and Risk and Strategy — ten agents, for migrating an unfamiliar legacy system.",
     entryContext:
       "Application inventory, repository, architecture, dependency and runtime data",
     prdSection: "§9",
@@ -118,7 +118,7 @@ const TRACK_AGENTS: Record<DeliveryTrack, readonly Phase[]> = {
     "deployment",
     "documentation",
   ],
-  // PRD §9 — 10 agents: Track 1's eight plus Discovery & Assessment and Strategy.
+  // PRD §9 — 10 agents: Track 1's eight plus Dependency and Risk and Strategy.
   // Its Requirements agent is its OWN (migration-intent mode), not Portfolio 1's —
   // each track owns its agents (multi-track design §1.4).
   modernization: [

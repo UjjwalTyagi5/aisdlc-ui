@@ -156,7 +156,7 @@ test("the ownership matrix carries all thirteen agents", async ({ page }) => {
   await signIn(page, ORG_ADMIN);
   await page.goto("/admin/access/roles");
 
-  for (const agent of ["Discovery", "Strategy", "Validation", "Data Engineering"]) {
+  for (const agent of ["Dependency and Risk", "Strategy", "Validation", "Data Engineering"]) {
     await expect(page.getByRole("columnheader", { name: agent })).toBeVisible();
   }
 });
