@@ -16,6 +16,13 @@
  *   · artifact:approve_<phase> — the code's per-phase split of the PRD's
  *                        single `approve (owned agent)` permission
  *
+ * REMOVED 2026-09-13, for the same reason `eval:view` went: granted to no role,
+ * required by no route, and therefore a checkbox that changed nothing when ticked —
+ * `connector:request`, `skill:edit:project`, `skill:promote`, `skill:approve` and
+ * `skill:import`. The Agent Studio routes gate on `artifact:view`
+ * (agent_skills.py:407). `skill:edit` stays: it is real, mapped to the developer role
+ * in dependency.py and used by grant_guard's subset rule.
+ *
  * `eval:view` used to be a third. It was granted to no role and required by no
  * route — the eval endpoint gates on artifact:view — so it was a checkbox here
  * that did nothing when ticked, and it has been removed from the vocabulary
@@ -135,11 +142,6 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         grants: "See which connectors/connections are available.",
       },
       {
-        id: "connector:request",
-        label: "Request a connector",
-        grants: "Request a new connector/connection.",
-      },
-      {
         id: "connector:manage",
         label: "Register / edit a connection",
         grants: "Register or edit a connection.",
@@ -207,26 +209,6 @@ export const PERMISSION_CATALOG: PermGroup[] = [
         id: "skill:edit",
         label: "Edit in own sandbox",
         grants: "Modify a skill/template configuration in the holder's own sandbox only.",
-      },
-      {
-        id: "skill:edit:project",
-        label: "Edit project defaults",
-        grants: "Modify a project-scope skill/template default.",
-      },
-      {
-        id: "skill:promote",
-        label: "Submit a promotion",
-        grants: "Submit a promotion request (sandbox→project or project→business unit).",
-      },
-      {
-        id: "skill:approve",
-        label: "Approve a promotion",
-        grants: "Approve or reject a promotion request — never the requester (four-eyes).",
-      },
-      {
-        id: "skill:import",
-        label: "Import a skill pack",
-        grants: "Import a skill/template pack from an external source or another business unit.",
       },
     ],
   },
