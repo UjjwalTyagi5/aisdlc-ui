@@ -111,13 +111,13 @@ export const PERMISSION_CATALOG: PermGroup[] = [
       { id: "artifact:approve_documentation", label: "Approve Documentation", legacy: true },
       {
         id: "artifact:approve_requirements_modernization",
-        label: "Approve Migration Intent",
+        label: "Approve Requirements (migration intent)",
         grants:
           "Baseline a Code Modernization project's migration-intent brief. Held by the BA, who owns the agent, and Project Admin as fallback approver.",
       },
       {
         id: "artifact:approve_discovery",
-        label: "Approve Dependency and Risk",
+        label: "Approve Discovery & Assessment",
         grants:
           "Accept a Code Modernization project's assessment as the planning baseline. Held by the BA, who owns the agent, and Project Admin as fallback approver.",
       },

@@ -34,7 +34,7 @@ export const AGENT_LABEL: Record<string, string> = {
   testing: "Testing",
   deployment: "Deployment",
   documentation: "Documentation",
-  discovery: "Dependency and Risk",
+  discovery: "Discovery & Assessment",
   strategy: "Strategy",
   migration_mapping: "Migration Mapping",
   validation: "Validation",
