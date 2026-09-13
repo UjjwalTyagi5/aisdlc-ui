@@ -43,7 +43,7 @@ import {
 import { ROLE_META } from "@/lib/roles";
 import { PHASE_LABEL } from "@/lib/agents";
 import { TRACK_META } from "@/lib/tracks";
-import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL } from "@/lib/scope";
+import { BUSINESS_UNIT_LABEL, BUSINESS_UNIT_LABEL_PLURAL, scopeChipName } from "@/lib/scope";
 import { listApprovals } from "@/lib/api/approvals";
 import { listGovernanceApprovals } from "@/lib/api/governance-approvals";
 import { OPEN_REQUEST_STATUSES } from "@/lib/schemas/governance-approval";
@@ -186,16 +186,23 @@ export default function DashboardPage() {
     managedBusinessUnitIds.length === 1
       ? units.find((u) => String(u.id) === managedBusinessUnitIds[0])
       : undefined;
-  const contextName = isOrg
-    ? null
-    : variant === "business_unit"
-      ? (soleUnit?.displayName ??
-        (managedBusinessUnitIds.length > 1
-          ? `${managedBusinessUnitIds.length} ${BUSINESS_UNIT_LABEL_PLURAL.toLowerCase()}`
-          : null))
-      : projects.length === 1
-        ? projects[0]!.name
-        : `${projects.length} ${projects.length === 1 ? "project" : "projects"}`;
+  // KIND AND NAME FROM THE SAME SOURCE.
+  //
+  // The chip takes its kind from `level` (the resolved scope) but took its name from
+  // `variant` (the viewer's ROLE), and those two disagree: a Project Admin bound at unit
+  // scope has variant "project_admin" while their level is "business_unit". The chip then
+  // rendered "BUSINESS UNIT / 0 projects" — a business-unit chip labelled with a count of
+  // projects, which also reads as "this unit has no projects" when the unit has one they
+  // simply do not administer.
+  //
+  // `scopeChipName` is the shared rule (lib/scope.ts), already used by Projects, Cost,
+  // Approvals and the app-wide scope bar. It answers from the scope, so the two halves of
+  // the chip can no longer contradict each other.
+  const contextName = scopeChipName(level, {
+    isOrgWide: isOrg,
+    bindings,
+    managedBusinessUnitIds,
+  });
 
   // ── Attention list (PRD §36: overdue approvals, budgets near/over cap,
   //    broken connectors; §37 adds integration errors) ────────────────────────
