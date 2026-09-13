@@ -12,6 +12,7 @@ expect — no BFF mapping needed.
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid as _uuid
 from datetime import datetime, timezone
@@ -24,7 +25,12 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.dependency import require_permission
-from shared.authz.grant import UnitAlreadyAdministeredError, grant_role, revoke_role
+from shared.authz.grant import (
+    TierConflictError,
+    UnitAlreadyAdministeredError,
+    grant_role,
+    revoke_role,
+)
 from shared.authz.grant_guard import assert_can_grant_role
 from shared.authz.read_scope import active_binding, allowed_workspace_ids, is_org_wide
 from shared.db import get_db_session
@@ -34,6 +40,8 @@ from shared.routers._schemas import BudgetIncreaseIn
 from shared.services.governance_requests import complete_role_assignment
 
 workspaces_router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -689,6 +697,17 @@ async def add_workspace_member(
             tenant_id=str(tenant_uuid), scope_kind="business_unit",
             granted_by=actor,
         )
+    except UnitAlreadyAdministeredError as exc:
+        # A unit has exactly one admin. 409, not 500: the caller asked for something
+        # the model forbids, and the message names who already holds it.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TierConflictError as exc:
+        # Governance and delivery in one scope is self-approval. This check did not
+        # run here at all until this route stopped writing RoleBinding directly — so
+        # the first thing it did once wired up was surface as an unhandled 500 with a
+        # stack trace, on the screen where members are added. It is a business rule
+        # with a readable explanation; say it.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -788,10 +807,33 @@ async def update_workspace_member_role(
                 tenant_id=str(tenant_uuid), scope_kind="business_unit",
                 granted_by=actor,
             )
-        except UnitAlreadyAdministeredError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+        except (UnitAlreadyAdministeredError, TierConflictError, ValueError) as exc:
+            # PUT THE OLD ROLE BACK BEFORE ANSWERING.
+            #
+            # The revoke above already committed — each helper owns its own
+            # transaction, so nothing rolls it back for us. Without this, a refused
+            # edit leaves the member with NO role on a unit they were working in:
+            # the request fails, the UI shows an error, and the damage is a
+            # permission they silently no longer have. `project_members.py` guards
+            # the identical sequence the same way.
+            #
+            # `TierConflictError` was not caught here at all, so that refusal
+            # answered 500 AND stripped the role.
+            if previous_role:
+                try:
+                    await grant_role(
+                        user_id, wid, previous_role,
+                        tenant_id=str(tenant_uuid), scope_kind="business_unit",
+                        granted_by=actor,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.error(
+                        "could not restore %s to %s on unit %s after a refused role "
+                        "change — they now hold no role there",
+                        user_id, previous_role, wid, exc_info=True,
+                    )
+            status = 422 if isinstance(exc, ValueError) else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
         # Close the onboarding-raised role_assignment request this discharges, if
         # one is open — see onboarding.py: "it closes when a role is actually
