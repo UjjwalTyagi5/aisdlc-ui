@@ -41,6 +41,24 @@ audit_router = APIRouter()
 audit_runs_router = APIRouter()
 
 
+def _actor_matches(actor: str):
+    """Filter clause for one actor, mirroring how the response NAMES actors.
+
+    `AuditEventOut` renders a null `actor_id` as the string "system" (see
+    _schemas.py), and the UI builds its "Any actor" dropdown from the rows it was
+    shown -- so it offers "system" and then filtered on `actor_id = 'system'`,
+    which matches nothing: system events carry NULL, not the literal. On this
+    database that is 27 of 28 rows, so choosing the only actor most events have
+    emptied the table.
+
+    The filter has to undo the same substitution the serializer applies, or the
+    dropdown offers a value the query can never match.
+    """
+    if actor == "system":
+        return AuditEvent.actor_id.is_(None)
+    return AuditEvent.actor_id == actor
+
+
 @audit_router.get(
     "",
     response_model=Paginated[AuditEventOut],
@@ -143,7 +161,7 @@ async def list_audit_events(
             AuditEvent.payload["project_id"].astext == project_id
         )
     if actor:
-        stmt = stmt.where(AuditEvent.actor_id == actor)
+        stmt = stmt.where(_actor_matches(actor))
     if action:
         stmt = stmt.where(AuditEvent.event_type == action)
 
@@ -200,7 +218,7 @@ async def get_run_audit(
         # agent_type is stored inside the payload JSONB column
         stmt = stmt.where(AuditEvent.payload["agent_type"].astext == agent)
     if actor:
-        stmt = stmt.where(AuditEvent.actor_id == actor)
+        stmt = stmt.where(_actor_matches(actor))
     if event_type:
         stmt = stmt.where(AuditEvent.event_type == event_type)
     if since:

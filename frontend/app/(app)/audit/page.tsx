@@ -52,7 +52,11 @@ const ACTION_VALUES: AuditAction[] = [
   "settings.updated",
 ];
 
-const ACTION_TONE: Partial<Record<AuditAction, string>> = {
+// Keyed by string, not AuditAction: the backend's action vocabulary is open (see
+// lib/schemas/audit.ts), so these maps colour the ones they know and fall back for
+// the rest. Typing them to the closed enum would not stop an unknown action
+// arriving — it would only stop this file compiling once the schema stopped lying.
+const ACTION_TONE: Record<string, string> = {
   "run.failed": "text-destructive",
   "run.rejected": "text-destructive",
   "run.approved": "text-success",
@@ -62,7 +66,7 @@ const ACTION_TONE: Partial<Record<AuditAction, string>> = {
 };
 
 /** Dot color per action tone — maps to inline style-free token classes. */
-const ACTION_DOT: Partial<Record<AuditAction, string>> = {
+const ACTION_DOT: Record<string, string> = {
   "run.failed": "bg-destructive",
   "run.rejected": "bg-destructive",
   "run.approved": "bg-success",

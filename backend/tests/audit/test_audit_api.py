@@ -136,3 +136,4 @@ async def test_get_run_audit_no_token_returns_401():
     assert response.status_code in (401, 403), (
         f"Expected 401 or 403 without token, got {response.status_code}"
     )
+
