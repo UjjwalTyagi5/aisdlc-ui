@@ -35,22 +35,29 @@ import type { AuditAction, AuditEvent } from "@/lib/schemas";
 
 const PAGE_SIZE = 50;
 
-const ACTION_VALUES: AuditAction[] = [
-  "project.created",
-  "project.archived",
-  "run.started",
-  "run.completed",
-  "run.failed",
-  "run.approved",
-  "run.rejected",
-  "artifact.created",
-  "artifact.updated",
-  "connector.installed",
-  "connector.revoked",
-  "user.invited",
-  "user.removed",
-  "settings.updated",
-];
+/**
+ * The actions the filter OFFERS are derived from the actions present, not from a
+ * fixed list.
+ *
+ * This was fifteen hardcoded values taken from the spec register, and on a live
+ * database not one of them occurs: the backend emits `rbac.role.granted`,
+ * `rbac.role.revoked`, `access.denied`, `artifact_upload`, `artifact_approve`,
+ * `agent_profile.published`. So every option in the dropdown filtered to nothing,
+ * and every action you could actually see was unfilterable — the control was
+ * exactly inverted.
+ *
+ * Derived from the loaded page, which is the honest scope: it can only offer what
+ * it has seen. A currently-selected action is always included so a deep link or a
+ * filter that now matches nothing stays selectable rather than silently resetting.
+ */
+function actionOptions(
+  events: { action: string }[],
+  selected: string,
+): string[] {
+  const seen = new Set(events.map((e) => e.action));
+  if (selected !== "all") seen.add(selected);
+  return [...seen].sort();
+}
 
 // Keyed by string, not AuditAction: the backend's action vocabulary is open (see
 // lib/schemas/audit.ts), so these maps colour the ones they know and fall back for
@@ -272,7 +279,7 @@ function AuditPageInner() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All actions</SelectItem>
-            {ACTION_VALUES.map((a) => (
+            {actionOptions(auditQ.data?.items ?? [], actionFilter).map((a) => (
               <SelectItem key={a} value={a} className="font-mono text-xs">
                 {a}
               </SelectItem>

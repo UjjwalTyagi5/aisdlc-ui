@@ -358,6 +358,12 @@ async def _probe_model_with_reason(
     at max_tokens=1 they can hit the limit having emitted nothing, which some
     providers report as a content/length error rather than success.
     """
+    # DELIBERATELY NOT TRACED. Every other direct litellm call in this codebase goes
+    # through shared/observability/litellm_trace.py; this one stays raw because it is
+    # not an agent turn. It is a credential probe -- "ping", 16 tokens -- run whenever
+    # somebody saves a model provider, and putting it on the Traces page would file
+    # configuration checks alongside real work and inflate the trace count with
+    # something no reader is looking for.
     import litellm
     kwargs: dict = dict(
         model=model,
