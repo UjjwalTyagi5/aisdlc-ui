@@ -423,3 +423,25 @@ def get_current_client():
         return _CURRENT_CLIENT.get()
     except Exception:
         return None
+
+
+# WHO the run belongs to, alongside WHERE it goes. The LangChain handler receives this
+# as metadata and writes it onto the trace; a direct-SDK caller has no handler, so its
+# traces arrived with userId=None, tags=[] and no session -- present on the Traces page
+# but unable to answer "who ran this", which is most of what the page is for.
+_CURRENT_TRACE_ATTRS: contextvars.ContextVar = contextvars.ContextVar(
+    "langfuse_current_trace_attrs", default=None
+)
+
+
+def set_current_trace_attrs(attrs: dict | None) -> None:
+    """Bind this run's trace identity (user, session, tags). Called by agent_trace."""
+    _CURRENT_TRACE_ATTRS.set(attrs)
+
+
+def get_current_trace_attrs() -> dict | None:
+    """This run's trace identity, or None when untraced."""
+    try:
+        return _CURRENT_TRACE_ATTRS.get()
+    except Exception:
+        return None

@@ -31,6 +31,27 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _apply_trace_identity(client: Any) -> None:
+    """Write this run's user, session and tags onto the current trace.
+
+    The LangChain handler does this from the metadata it is handed. A direct SDK
+    call has no handler, so without this the generation is created correctly and
+    lands with userId=None, tags=[] and no session -- a trace on the page that
+    cannot say who ran it, which is most of what the page is for.
+    """
+    try:
+        from shared.observability.bindings import get_current_trace_attrs  # noqa: PLC0415
+
+        attrs = get_current_trace_attrs()
+        if not attrs:
+            return
+        client.update_current_trace(
+            **{k: v for k, v in attrs.items() if v}
+        )
+    except Exception:  # pragma: no cover - identity is not worth a turn
+        logger.debug("could not attach trace identity (swallowed)", exc_info=True)
+
+
 def _current_client() -> Any | None:
     try:
         from shared.observability.bindings import get_current_client  # noqa: PLC0415
@@ -58,6 +79,7 @@ def traced_completion(*, name: str, **kwargs):
             model=kwargs.get("model"),
             input=kwargs.get("messages"),
         ) as gen:
+            _apply_trace_identity(client)
             response = litellm.completion(**kwargs)
             _record(gen, response)
             return response
@@ -82,6 +104,7 @@ async def traced_acompletion(*, name: str, **kwargs):
             model=kwargs.get("model"),
             input=kwargs.get("messages"),
         ) as gen:
+            _apply_trace_identity(client)
             response = await litellm.acompletion(**kwargs)
             _record(gen, response)
             return response
