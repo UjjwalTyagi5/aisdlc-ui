@@ -91,10 +91,14 @@ async def _llm_generate_async(prompt: str, system: str = "") -> str:
     full_text = []
     try:
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-        import litellm
+        import litellm  # noqa: F401 — kept for other uses in this module
+        from shared.observability.litellm_trace import (  # noqa: PLC0415
+            traced_acompletion,
+        )
         from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
 
-        response = await litellm.acompletion(
+        response = await traced_acompletion(
+            name="design:architecture",
             model=resolved.model,
             custom_llm_provider=resolved.litellm_provider,
             api_key=resolved.api_key,

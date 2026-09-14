@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { listNotifications, markNotificationsRead } from "@/lib/api/notifications";
+import type { Notification } from "@/lib/schemas";
 import { qk } from "@/lib/api/query-keys";
 import { useUiStore } from "@/stores/ui-store";
 
@@ -52,14 +53,50 @@ export function NotificationsBell() {
   const unreadStored = items.filter((n) => n.readAt === null).length;
   const count = streamCount + unreadStored;
 
+  /**
+   * Marking read used to be fire-and-forget: mutate, and invalidate on success. Three
+   * ways that stuck.
+   *
+   *   · A FAILED CALL SAID NOTHING. There was no onError, so a refused or dropped
+   *     request left the badge exactly as it was and the button looking dead. That is
+   *     the "sometimes it does nothing" -- it did do something, and the something
+   *     failed silently.
+   *   · NOTHING MOVED UNTIL THE SERVER CAME BACK. The dots and the count are computed
+   *     from the cached list, and that list only changes after the invalidate round
+   *     trips, so the panel sat visibly unread for as long as the request took.
+   *   · IT COULD FIRE TWICE. Opening the panel calls clear(), and the button calls it
+   *     again -- with the pre-refetch `unreadStored`, which is still non-zero. The
+   *     second call marks nothing and invalidates on top of the first.
+   *
+   * So: write the read state into the cache immediately, keep the previous list to put
+   * back if the call fails, and refuse to start a second one while the first is in
+   * flight.
+   */
   const markRead = useMutation({
     mutationFn: markNotificationsRead,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.notifications.list() }),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: qk.notifications.list() });
+      const previous = queryClient.getQueryData<Notification[]>(qk.notifications.list());
+      const now = new Date().toISOString();
+      queryClient.setQueryData<Notification[]>(qk.notifications.list(), (old) =>
+        (old ?? []).map((n) => (n.readAt === null ? { ...n, readAt: now } : n)),
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      // Put the unread state back. A badge that silently stays at zero after a failed
+      // call is worse than one that comes back: the reader would never know there was
+      // anything still waiting on them.
+      if (context?.previous) {
+        queryClient.setQueryData(qk.notifications.list(), context.previous);
+      }
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: qk.notifications.list() }),
   });
 
   function clear() {
     if (streamCount > 0) resetStream();
-    if (unreadStored > 0) markRead.mutate();
+    if (unreadStored > 0 && !markRead.isPending) markRead.mutate();
   }
 
   return (
@@ -95,14 +132,22 @@ export function NotificationsBell() {
             <button
               type="button"
               onClick={clear}
-              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 font-mono text-xs"
+              disabled={markRead.isPending}
+              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 font-mono text-xs disabled:opacity-50"
             >
               <Check className="size-3" aria-hidden />
-              Mark read
+              {markRead.isPending ? "Marking…" : "Mark read"}
             </button>
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="bg-line-soft" />
+
+        {/* The one thing the old version could not say. */}
+        {markRead.isError && (
+          <p role="alert" className="text-destructive px-2 pb-1 pt-2 text-center text-[12.5px]">
+            Couldn&apos;t mark these read. Try again.
+          </p>
+        )}
 
         {/* A FAILED FETCH IS NOT AN EMPTY BELL. Both rendered "Nothing yet." until
             now, which is the most misleading thing this control could say: it is the

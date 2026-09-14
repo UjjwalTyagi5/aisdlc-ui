@@ -68,7 +68,8 @@ def _litellm_generate(prompt: str) -> str:
         )
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     import litellm
-    response = litellm.completion(
+    response = traced_completion(
+            name="deployment:deploy",
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
         api_base=resolved.base_url or LITELLM_BASE_URL,

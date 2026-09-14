@@ -58,8 +58,11 @@ async def handle_follow_up_ws(manager, session_id: str, analysis_context: dict, 
     
     try:
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-        import litellm
-        response = await litellm.acompletion(
+        from shared.observability.litellm_trace import (  # noqa: PLC0415
+            traced_acompletion,
+        )
+        response = await traced_acompletion(
+            name="monitoring:follow-up-ws",
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),
         )
@@ -87,8 +90,11 @@ def generate_follow_up_rest(analysis_context: dict, chat_history: List[Dict], fo
     
     try:
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-        import litellm
-        response = litellm.completion(
+        from shared.observability.litellm_trace import (  # noqa: PLC0415
+            traced_completion,
+        )
+        response = traced_completion(
+            name="monitoring:follow-up-rest",
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),
         )
