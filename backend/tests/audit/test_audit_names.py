@@ -207,3 +207,64 @@ def test_the_scope_name_reaches_the_response():
     assert out.scope.kind == "business_unit"
     assert out.scope.id == "2da60668"
     assert out.scope.name == "Demo"
+
+
+# ── Write-time capture: the record must outlive what it points at ────────────
+
+
+@pytest.mark.unit
+def test_a_captured_scope_name_survives_the_thing_being_deleted():
+    """THE WHOLE POINT OF CAPTURING IT.
+
+    Read-time resolution joins the trail to mutable tables. `seed_dev_personas`
+    created "Core ledger — Java 8 to 21", granted seven roles in it, and the project
+    was later dropped — so those grants render as `Project fa5e4ce1…` and no join can
+    ever recover the name. An event that recorded the name at write time is legible
+    whether or not the project still exists, which is what PRD §34.9's "legible
+    without guessing" requires.
+
+    Modelled here as the resolver returning nothing, which is exactly what a deleted
+    row looks like from `_resolve_names`.
+    """
+    out = AuditEventOut.from_orm_audit(
+        _Event(payload={
+            "scope_kind": "project",
+            "scope_id": "fa5e4ce1-738f-49ea-99be-1bbbdd1363d5",
+            "scope_name": "Core ledger — Java 8 to 21",
+        }),
+        scope_name=None,
+    )
+    assert out.scope.name == "Core ledger — Java 8 to 21"
+
+
+@pytest.mark.unit
+def test_the_captured_scope_name_wins_over_a_later_rename():
+    """A unit renamed afterwards must not retitle the events under its old name."""
+    out = AuditEventOut.from_orm_audit(
+        _Event(payload={"scope_kind": "business_unit", "scope_id": "2da60668",
+                        "scope_name": "Demo (as it was called then)"}),
+        scope_name="Renamed Later",
+    )
+    assert out.scope.name == "Demo (as it was called then)"
+
+
+@pytest.mark.unit
+def test_captured_names_are_not_repeated_in_the_detail_blob():
+    """They have their own columns; the detail panel is for what is NOT on screen."""
+    out = AuditEventOut.from_orm_audit(
+        _Event(payload={
+            "scope_kind": "project", "scope_id": "p1", "scope_name": "Dummy T1",
+            "actor_name": "a@b.com", "resource_name": "c@d.com", "role": "developer",
+        }),
+    )
+    assert out.detail == {"scope_kind": "project", "scope_id": "p1", "role": "developer"}
+
+
+@pytest.mark.unit
+def test_the_writer_and_the_reader_look_in_the_same_tables():
+    """Two mappings that disagree would capture one name and resolve a different one."""
+    from shared.authz.audit import _NAME_SOURCES
+    from shared.routers.audit import _SCOPE_NAME_SOURCES
+
+    for kind, source in _NAME_SOURCES.items():
+        assert _SCOPE_NAME_SOURCES[kind] == source, kind

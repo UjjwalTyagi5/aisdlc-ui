@@ -558,16 +558,23 @@ class AuditEventOut(BaseModel):
       resource.name  = payload.get("resource_name") if payload else null
       ip             = payload.get("ip") if payload else null
 
-    NAMES ARE RESOLVED BY THE CALLER, NOT STORED. `actor_name` and `resource_name`
-    are payload keys that NOTHING WRITES -- not one of the 132 events on this
-    database carries either -- so both fell through to their fallbacks and the Audit
-    Trail rendered as three columns of raw UUID: who did it, and to what, both
-    unreadable. Denormalising a name at write time would not fix the events already
-    stored, and would go stale the first time somebody is renamed.
+    NAMES COME FROM TWO PLACES, AND THE ORDER MATTERS.
 
-    So `list_audit_events` looks the names up per page and passes them in here
-    (`shared/routers/audit.py::_resolve_names`). A payload value still wins when one
-    exists: it is what was true AT THE TIME, which is the stronger claim for a log.
+    `actor_name` / `resource_name` / `scope_name` are payload keys captured AT WRITE
+    TIME by `shared/authz/audit.py`. Nothing wrote them until 2026-09-15, which is why
+    every event before that renders through the second mechanism: `list_audit_events`
+    resolves the ids per page and passes the names in here
+    (`shared/routers/audit.py::_resolve_names`).
+
+    The payload wins. It is what was true AT THE TIME -- the stronger claim for a log,
+    since a unit renamed afterwards must not retitle the events that happened under
+    its old name -- and, more bluntly, it is the only one that still works once the
+    referenced row is deleted. Read-time resolution joins the trail to mutable tables;
+    delete a project and its eight role grants become `Project fa5e4ce1...` forever.
+
+    Neither mechanism can repair the rows written before the first existed:
+    `audit_events` has UPDATE revoked from the app role (migration 0005), so there is
+    no backfill and there was never meant to be one.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -624,10 +631,20 @@ class AuditEventOut(BaseModel):
                 # table lookup can do better than the name the file was given.
                 name=payload.get("resource_name") or resource_name or payload.get("filename"),
             ),
-            scope=AuditScopeOut(kind=scope_kind, id=scope_id, name=scope_name),
+            # The payload first for the same reason as actor/resource: a name captured
+            # at write time survives the deletion of the thing it names, which is the
+            # whole point of capturing it.
+            scope=AuditScopeOut(
+                kind=scope_kind, id=scope_id,
+                name=payload.get("scope_name") or scope_name,
+            ),
             at=_iso(event.created_at),
+            # The name keys are rendered as their own columns; repeating them in the
+            # raw detail blob is noise in the one place a reader goes for what is NOT
+            # already on screen.
             detail={k: v for k, v in payload.items()
-                    if k not in ("project_id", "actor_name", "resource_name", "ip")}
+                    if k not in ("project_id", "actor_name", "resource_name",
+                                 "scope_name", "ip")}
                    or None,
             ip=payload.get("ip"),
         )

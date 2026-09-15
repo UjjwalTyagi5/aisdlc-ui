@@ -53,6 +53,65 @@ RBAC_MEMBER_CREATED = "rbac.member.created"
 ACCESS_DENIED = "access.denied"
 
 
+# The tables that can name each thing an audit row points at. Deliberately the same
+# mapping `shared/routers/audit.py` reads with, because a name captured at write time
+# and a name resolved at read time must agree about where to look.
+_NAME_SOURCES: dict[str, tuple[str, str]] = {
+    "organization": ("organizations", "display_name"),
+    "business_unit": ("workspaces", "display_name"),
+    "workspace": ("workspaces", "display_name"),
+    "project": ("projects", "display_name"),
+}
+
+
+async def _name_of(session: AsyncSession, kind: str, ident: Optional[str]) -> Optional[str]:
+    """The display name of one scope, looked up NOW so the record keeps it forever.
+
+    WHY THE RECORD CANNOT RELY ON A LOOKUP LATER. Read-time resolution joins the
+    trail to the tables it references, which works right up until one of those rows is
+    deleted — and then eight role grants render as `Project fa5e4ce1…`, an id nothing
+    can turn back into a name because no name was ever written down. That is exactly
+    what happened here: `scripts/seed_dev_personas.py` created "Core ledger — Java 8
+    to 21", granted seven roles in it, and the project was later dropped. The grants
+    are still facts and they are no longer legible.
+
+    Deleting a project must not retroactively blind the trail that governs it, so the
+    name is captured at the moment of the write. PRD §34.9 asks for a record that is
+    legible "without guessing"; a foreign key into mutable data is a guess with good
+    odds, and this is the table where good odds are not the standard.
+
+    Best-effort and never raises: a name we could not read is a name the record does
+    without, and `AuditEventOut` still falls back to resolving it at read time.
+    """
+    source = _NAME_SOURCES.get(kind or "")
+    if not source or not ident:
+        return None
+    table, column = source
+    try:
+        row = (await session.execute(
+            text(f"SELECT {column} AS name FROM {table} WHERE id::text = :i"),
+            {"i": str(ident)},
+        )).first()
+        return str(row.name) if row is not None and row.name else None
+    except Exception:
+        logger.debug("audit: could not name %s %s", kind, ident, exc_info=True)
+        return None
+
+
+async def _actor_email(session: AsyncSession, actor_id: Optional[str]) -> Optional[str]:
+    """The actor's email, captured for the same reason — people leave."""
+    if not actor_id:
+        return None
+    try:
+        row = (await session.execute(
+            text("SELECT email FROM users WHERE id::text = :i"), {"i": str(actor_id)},
+        )).first()
+        return str(row.email) if row is not None and row.email else None
+    except Exception:
+        logger.debug("audit: could not name actor %s", actor_id, exc_info=True)
+        return None
+
+
 async def record_rbac_change(
     session: AsyncSession,
     *,
@@ -77,6 +136,20 @@ async def record_rbac_change(
     }
     if role:
         payload["role"] = role
+
+    # THE NAMES, CAPTURED NOW. See `_name_of`: a record that stores only ids stops
+    # being legible the day one of those rows is deleted, and an audit row outlives
+    # everything it points at by design.
+    scope_name = await _name_of(session, scope_kind, scope_id)
+    if scope_name:
+        payload["scope_name"] = scope_name
+    actor_name = await _actor_email(session, actor_id)
+    if actor_name:
+        payload["actor_name"] = actor_name
+    subject_name = await _actor_email(session, subject_id)
+    if subject_name:
+        payload["resource_name"] = subject_name
+
     if extra:
         payload.update(extra)
 
@@ -144,6 +217,16 @@ async def record_access_denied(
         from shared.db import get_db_session_for_tenant  # noqa: PLC0415 - avoids import cycle
 
         async with get_db_session_for_tenant(str(tenant_id)) as session:
+            # Same write-time capture as the change writer. A denial names the unit
+            # someone was refused on, and that unit can be deleted too.
+            scope_name = await _name_of(session, scope_kind or "", scope_id)
+            if scope_name:
+                payload["scope_name"] = scope_name
+                payload["resource_name"] = scope_name
+            actor_name = await _actor_email(session, actor_id)
+            if actor_name:
+                payload["actor_name"] = actor_name
+
             await session.execute(
                 text(
                     "INSERT INTO audit_events "
