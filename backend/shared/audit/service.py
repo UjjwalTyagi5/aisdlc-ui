@@ -14,8 +14,6 @@ import time
 import uuid
 from typing import Any
 
-import redis.asyncio as aioredis
-
 from shared.redis_client import redis_from_url
 from tenacity import retry, stop_after_attempt, wait_exponential
 

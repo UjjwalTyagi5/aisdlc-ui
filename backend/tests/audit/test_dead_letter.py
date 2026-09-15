@@ -42,7 +42,7 @@ async def test_failed_write_sends_to_dead_letter(mock_audit_service, mock_redis_
         payload={"tool_name": "fetch_work_items"},
     )
 
-    with patch("shared.audit.service.aioredis.from_url", return_value=mock_redis_client):
+    with patch("shared.audit.service.redis_from_url", return_value=mock_redis_client):
         await svc.emit(payload)
 
     # Give the background task a chance to run
@@ -76,7 +76,7 @@ async def test_failed_write_does_not_raise(mock_audit_service, mock_redis_client
         payload={},
     )
 
-    with patch("shared.audit.service.aioredis.from_url", return_value=mock_redis_client):
+    with patch("shared.audit.service.redis_from_url", return_value=mock_redis_client):
         # Must not raise
         await svc.emit(payload)
 
@@ -102,7 +102,7 @@ async def test_dead_letter_xadd_contains_payload_json(mock_redis_client):
         payload={"output": "pass"},
     )
 
-    with patch("shared.audit.service.aioredis.from_url", return_value=mock_redis_client):
+    with patch("shared.audit.service.redis_from_url", return_value=mock_redis_client):
         await svc.emit(payload)
 
     import asyncio
