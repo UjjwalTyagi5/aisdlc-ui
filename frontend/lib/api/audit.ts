@@ -4,18 +4,37 @@ import { AuditEvent, paginated } from "@/lib/schemas";
 
 import { api } from "./client";
 
+/**
+ * A page of the audit trail, walked by CURSOR rather than by page number.
+ *
+ * `total` is still here — "of 4,312 matching" is what tells a reader whether their
+ * filter did anything — but there is no page count, because with a cursor there is no
+ * such thing as jumping to page 40. That is the trade: offset paging on a table that
+ * only grows re-shows rows and skips others as new events arrive between clicks, and a
+ * consistent walk is worth more on an audit trail than a deep-linkable page number.
+ */
+export const AuditPage = z.object({
+  items: z.array(AuditEvent),
+  nextCursor: z.string().nullish(),
+  prevCursor: z.string().nullish(),
+  total: z.number().int().nonnegative().default(0),
+});
+export type AuditPage = z.infer<typeof AuditPage>;
+
 export const listAuditEvents = (query?: {
   projectId?: string;
   actor?: string;
   action?: string;
   /** Free-text. Matched SERVER-side — see shared/routers/audit.py::_search_clause. */
   q?: string;
-  page?: number;
+  /** Opaque, from a previous response. Omit for the newest page. */
+  cursor?: string;
+  direction?: "next" | "prev";
   pageSize?: number;
 }) =>
   api("/audit", {
     query,
-    schema: paginated(AuditEvent),
+    schema: AuditPage,
   });
 
 /**

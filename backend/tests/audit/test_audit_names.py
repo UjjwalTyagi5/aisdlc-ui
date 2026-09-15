@@ -412,3 +412,62 @@ def test_the_export_and_the_screen_share_one_query():
 
     list_src = inspect.getsource(mod.list_audit_events)
     assert "_query_audit_events" in list_src
+
+
+# ── Keyset cursors ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_a_cursor_round_trips():
+    from shared.routers.audit import _decode_cursor, _encode_cursor
+    import uuid as _uuid
+
+    when = datetime(2026, 9, 15, 12, 50, 37, tzinfo=timezone.utc)
+    ident = _uuid.uuid4()
+    got = _decode_cursor(_encode_cursor(when, ident))
+    assert got == (when, ident)
+
+
+@pytest.mark.unit
+def test_the_cursor_carries_the_id_as_well_as_the_time():
+    """`created_at` is not unique — the seeded personas took eleven roles in one second.
+
+    A cursor on the timestamp alone either repeats or skips every row sharing it, and
+    only under the bursts an audit trail records by nature.
+    """
+    import base64
+
+    from shared.routers.audit import _encode_cursor
+    import uuid as _uuid
+
+    ident = _uuid.uuid4()
+    raw = _encode_cursor(datetime(2026, 9, 15, tzinfo=timezone.utc), ident)
+    decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
+    assert "|" in decoded
+    assert str(ident) in decoded
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad",
+    ["", "not-base64!!", "Zm9v", "MjAyNi0wOS0xNXxub3QtYS11dWlk"],
+)
+def test_an_unusable_cursor_starts_from_the_top_rather_than_erroring(bad):
+    """A stale bookmark or a truncated copy-paste is not a 400.
+
+    The last case is a well-formed cursor whose id is not a UUID — it decodes, and
+    would reach the query as a cast error if this did not reject it here.
+    """
+    from shared.routers.audit import _decode_cursor
+
+    assert _decode_cursor(bad) is None
+
+
+@pytest.mark.unit
+def test_there_is_no_page_ceiling_left_to_tune():
+    """`?page=999999` was a scan anyone could ask for; a cursor cannot be forged into
+    one, because each page is reachable only by holding the previous page's last row."""
+    from shared.routers import audit as mod
+
+    assert not hasattr(mod, "_MAX_PAGE")
+    assert mod._MAX_PAGE_SIZE == 200

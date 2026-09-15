@@ -45,6 +45,14 @@ import type { AuditAction, AuditEvent } from "@/lib/schemas";
 const PAGE_SIZE = 50;
 
 /**
+ * Changing a filter restarts the walk. A cursor is a position in ONE result set, so
+ * carrying it across a filter change would anchor the new query to a row that may not
+ * be in it — landing the reader mid-way through results they have never seen, or on an
+ * empty page that looks like "no matches".
+ */
+const RESET_WALK = { cursor: undefined, dir: undefined, step: undefined } as const;
+
+/**
  * The first segment of a UUID — enough to recognise a repeat or paste into a search,
  * without spending a line of the row on it.
  *
@@ -128,7 +136,15 @@ function AuditPageInner() {
   const actionFilter = (searchParams.get("action") ?? "all") as "all" | AuditAction;
   const actorFilter = searchParams.get("actor") ?? "all";
   const search = searchParams.get("q") ?? "";
-  const page = Number(searchParams.get("page") ?? "1");
+  const cursor = searchParams.get("cursor") ?? undefined;
+  const direction = (searchParams.get("dir") === "prev" ? "prev" : "next") as "next" | "prev";
+  /**
+   * DISPLAY ONLY, and it has to be — a cursor knows where it is in the data, not how
+   * many pages you walked to get there. It counts the reader's steps so the footer can
+   * say "page 3" instead of nothing; it is never sent to the server, and a filter
+   * change resets it because the walk starts over.
+   */
+  const step = Number(searchParams.get("step") ?? "1");
 
   const updateParams = React.useCallback(
     (patch: Record<string, string | number | undefined>) => {
@@ -160,14 +176,16 @@ function AuditPageInner() {
       action: actionFilter,
       actor: actorFilter,
       q: debouncedSearch,
-      page,
+      cursor: cursor ?? null,
+      direction,
     }),
     queryFn: () =>
       listAuditEvents({
         action: actionFilter === "all" ? undefined : actionFilter,
         actor: actorFilter === "all" ? undefined : actorFilter,
         q: debouncedSearch || undefined,
-        page,
+        cursor,
+        direction,
         pageSize: PAGE_SIZE,
       }),
     // Keeps the current page on screen while the next one loads, so typing dims the
@@ -258,10 +276,9 @@ function AuditPageInner() {
     toast.success(`Exported ${rows.length} events`);
   };
 
-  const pagination = auditQ.data?.pagination;
-  const totalPages = pagination
-    ? Math.max(1, Math.ceil(pagination.total / pagination.pageSize))
-    : 1;
+  const total = auditQ.data?.total ?? 0;
+  const nextCursor = auditQ.data?.nextCursor ?? null;
+  const prevCursor = auditQ.data?.prevCursor ?? null;
 
   return (
     <div className="w-full space-y-6 p-4 md:px-10 md:py-8">
@@ -288,9 +305,9 @@ function AuditPageInner() {
                 filtered to their projects (app/api/audit/route.ts), and
                 overstating its completeness in an audit context is exactly the
                 wrong error to make. */}
-            {pagination && (
+            {auditQ.data && (
               <span className="text-muted-foreground font-mono text-[11.5px]">
-                {pagination.total} events · page {pagination.page} of {totalPages}
+                {total} events · page {step}
               </span>
             )}
           </div>
@@ -326,14 +343,14 @@ function AuditPageInner() {
       <div className="flex flex-wrap items-center gap-2">
         <Input
           value={search}
-          onChange={(e) => updateParams({ q: e.target.value || undefined, page: undefined })}
+          onChange={(e) => updateParams({ q: e.target.value || undefined, ...RESET_WALK })}
           placeholder="Search actor, action, resource…"
           className="border-line-soft h-9 w-64"
           aria-label="Search audit events"
         />
         <Select
           value={actionFilter}
-          onValueChange={(v) => updateParams({ action: v, page: undefined })}
+          onValueChange={(v) => updateParams({ action: v, ...RESET_WALK })}
         >
           <SelectTrigger className="border-line-soft h-9 w-56" aria-label="Filter by action">
             <SelectValue />
@@ -349,7 +366,7 @@ function AuditPageInner() {
         </Select>
         <Select
           value={actorFilter}
-          onValueChange={(v) => updateParams({ actor: v, page: undefined })}
+          onValueChange={(v) => updateParams({ actor: v, ...RESET_WALK })}
         >
           <SelectTrigger className="border-line-soft h-9 w-40" aria-label="Filter by actor">
             <SelectValue />
@@ -404,9 +421,7 @@ function AuditPageInner() {
           <div className="border-line-soft flex items-center gap-2 border-b px-5 py-3.5">
             <span className="font-display text-[13.5px] font-bold tracking-[-0.01em]">Events</span>
             <span className="text-muted-foreground font-mono text-[10.5px]">
-              {pagination
-                ? `${items.length} of ${pagination.total} matching`
-                : `${items.length} shown`}
+              {auditQ.data ? `${items.length} of ${total} matching` : `${items.length} shown`}
             </span>
           </div>
 
@@ -441,22 +456,26 @@ function AuditPageInner() {
         </div>
       )}
 
-      {pagination && pagination.total > pagination.pageSize && (
+      {(nextCursor || prevCursor) && (
         <nav
           aria-label="Pagination"
           className="border-line-soft text-muted-foreground flex items-center justify-between border-t pt-4 text-sm"
         >
+          {/* No "showing 51–100 of 4,312". That range is arithmetic on an offset, and
+              there is no offset any more — the walk knows which rows it is on, not how
+              many sit above them. The count of matches is the number that was doing the
+              work anyway, and it is still exact. */}
           <span className="font-mono text-xs">
-            Showing {(pagination.page - 1) * pagination.pageSize + 1}–
-            {Math.min(pagination.page * pagination.pageSize, pagination.total)} of{" "}
-            {pagination.total}
+            {items.length} of {total} matching
           </span>
           <div className="flex gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={pagination.page <= 1}
-              onClick={() => updateParams({ page: pagination.page - 1 })}
+              disabled={!prevCursor}
+              onClick={() =>
+                updateParams({ cursor: prevCursor!, dir: "prev", step: Math.max(1, step - 1) })
+              }
               className="border-line-soft"
             >
               Previous
@@ -464,8 +483,10 @@ function AuditPageInner() {
             <Button
               variant="outline"
               size="sm"
-              disabled={pagination.page >= totalPages}
-              onClick={() => updateParams({ page: pagination.page + 1 })}
+              disabled={!nextCursor}
+              onClick={() =>
+                updateParams({ cursor: nextCursor!, dir: "next", step: step + 1 })
+              }
               className="border-line-soft"
             >
               Next

@@ -20,11 +20,14 @@ Router mounting note (REQ-M8-06):
 """
 from __future__ import annotations
 
+import base64
+import logging
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import visible_project_ids
@@ -35,10 +38,11 @@ from shared.models.orm import AuditEvent
 from shared.routers._schemas import (
     AuditEventOut,
     CursorPage,
-    Paginated,
-    Pagination,
+    KeysetPage,
     derive_scope,
 )
+
+logger = logging.getLogger(__name__)
 
 audit_router = APIRouter()
 
@@ -125,10 +129,9 @@ async def _search_clause(db: AsyncSession, q: str):
 # table that only grows, this is how a memory limit gets discovered in production.
 _EXPORT_MAX = 10_000
 
-# Deep paging is the one way a caller can make this query expensive on purpose.
-# 2,000 pages of 200 covers any trail a person is actually reading through; past
-# that the export is the right tool.
-_MAX_PAGE = 2_000
+# There is no page cap any more: a cursor cannot be walked to an arbitrary depth the
+# way `?page=999999` could, because each page is reached only by holding the previous
+# one's last row. Page SIZE still needs a ceiling — that one is a memory bound.
 _MAX_PAGE_SIZE = 200
 
 _RESOURCE_NAME_SOURCES: dict[str, tuple[str, str]] = {
@@ -228,6 +231,46 @@ async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict
 
 
 # --------------------------------------------------------------------------
+# ── Keyset cursors ───────────────────────────────────────────────────────────
+#
+# A cursor is `(created_at, id)`, base64url-encoded so it is opaque on the wire and
+# safe in a query string. BOTH HALVES ARE REQUIRED: `created_at` is not unique — the
+# seeded personas were granted eleven roles inside the same second — and a cursor on
+# the timestamp alone either re-shows or skips every row sharing it, silently, and
+# only under load.
+#
+# It encodes nothing the caller cannot already see on the row it came from, so the
+# encoding is for opacity of CONTRACT, not secrecy: it keeps clients from building
+# their own cursors and pinning us to this shape.
+
+
+def _encode_cursor(created_at: datetime, event_id: Any) -> str:
+    raw = f"{created_at.isoformat()}|{event_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> Optional[tuple[datetime, _uuid.UUID]]:
+    """`(created_at, id)`, or None if the cursor is unusable.
+
+    A bad cursor is not an error: it means a stale link, a truncated copy-paste, or a
+    client that built its own. Returning None starts from the top, which is a page the
+    reader can act on — a 400 on the audit trail is not.
+    """
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        ts, _, event_id = base64.urlsafe_b64decode(padded.encode()).decode().partition("|")
+        parsed = datetime.fromisoformat(ts)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        # Parsed as a UUID, not carried as text: `audit_events.id` is a uuid column
+        # and a row comparison against a string is a cast error at query time rather
+        # than a miss — which would surface as a 500 on a stale bookmark.
+        return (parsed, _uuid.UUID(event_id)) if event_id else None
+    except Exception:
+        logger.debug("audit: unusable cursor %r — starting from the top", cursor[:24])
+        return None
+
+
 async def _query_audit_events(
     request: Request,
     project_id: Optional[str] = None,
@@ -235,10 +278,11 @@ async def _query_audit_events(
     actor: Optional[str] = None,
     action: Optional[str] = None,
     q: Optional[str] = None,
-    page: int = 1,
+    cursor: Optional[str] = None,
+    direction: str = "next",
     page_size: int = 20,
     db: AsyncSession = None,  # type: ignore[assignment]
-) -> tuple[list[AuditEventOut], int]:
+) -> tuple[list[AuditEventOut], int, Optional[str], Optional[str]]:
     """The audit query itself: `(serialized events, total matching)`.
 
     SHARED WITH THE EXPORT ON PURPOSE. An export that filtered differently from the
@@ -333,21 +377,47 @@ async def _query_audit_events(
     if q and q.strip():
         stmt = stmt.where(await _search_clause(db, q.strip()))
 
+    # The total is its own query, over the filtered set and before any windowing. It
+    # is what tells a reader whether their filter did anything, and the
+    # (tenant_id, created_at DESC) index answers it without touching the heap.
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total: int = (await db.execute(count_stmt)).scalar_one()
 
-    # BOUNDED, because OFFSET pays for every row it skips. Page 40,000 of a fifty-row
-    # page is Postgres walking two million index entries to discard them, and `page` is
-    # caller-supplied — a hand-written `?page=999999` is a table scan anyone can ask
-    # for. The real fix for deep paging is a keyset cursor (the run-scoped trail
-    # already uses one), but that changes the pagination contract this page renders
-    # "Showing X–Y of Z" from, so it is not a change to make silently.
-    page = max(1, min(page, _MAX_PAGE))
     page_size = max(1, min(page_size, _MAX_PAGE_SIZE))
 
-    stmt = stmt.order_by(AuditEvent.created_at.desc())
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    rows = (await db.execute(stmt)).scalars().all()
+    # KEYSET, NOT OFFSET. The ordering key is `(created_at DESC, id DESC)` — `id`
+    # because `created_at` is not unique, and a key that is not unique either repeats
+    # or skips the rows that share a value.
+    #
+    # Fetch ONE MORE ROW than asked for. Its presence is what says there is another
+    # page, and it is the only honest way to know: `total` cannot answer it once a
+    # cursor is in play, and "we returned a full page so there is probably more" shows
+    # a Next button that leads to nothing.
+    anchor = _decode_cursor(cursor) if cursor else None
+    going_back = direction == "prev" and anchor is not None
+
+    if anchor is not None:
+        ts, ident = anchor
+        if going_back:
+            # Walking backwards: everything NEWER than the anchor, oldest-first so the
+            # LIMIT takes the rows nearest to it, then reversed below. Ordering ASC and
+            # re-reversing is what makes Previous land on the page you came from rather
+            # than the newest page every time.
+            stmt = stmt.where(
+                tuple_(AuditEvent.created_at, AuditEvent.id) > tuple_(ts, ident)
+            ).order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+        else:
+            stmt = stmt.where(
+                tuple_(AuditEvent.created_at, AuditEvent.id) < tuple_(ts, ident)
+            ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    else:
+        stmt = stmt.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+
+    fetched = list((await db.execute(stmt.limit(page_size + 1))).scalars().all())
+    has_more = len(fetched) > page_size
+    rows = fetched[:page_size]
+    if going_back:
+        rows.reverse()
 
     actors, resources, projects, scopes = await _resolve_names(db, list(rows))
     items = [
@@ -360,12 +430,32 @@ async def _query_audit_events(
         )
         for e in rows
     ]
-    return items, total
+    # THE CURSORS ARE BUILT FROM THE ROWS, not from a page number.
+    #
+    # `has_more` describes the direction just travelled, so which end it bounds depends
+    # on which way we walked: going forward it means another older page exists; going
+    # back it means another newer one does. Getting this backwards yields a Next button
+    # on the last page and no Previous on the second — both of which look like data
+    # loss to a reader.
+    #
+    # A first page (no cursor) has nothing before it, which is why `prevCursor` is null
+    # there rather than pointing at its own first row.
+    next_cursor = prev_cursor = None
+    if rows:
+        first, last = rows[0], rows[-1]
+        if going_back:
+            next_cursor = _encode_cursor(last.created_at, last.id)
+            prev_cursor = _encode_cursor(first.created_at, first.id) if has_more else None
+        else:
+            next_cursor = _encode_cursor(last.created_at, last.id) if has_more else None
+            prev_cursor = _encode_cursor(first.created_at, first.id) if cursor else None
+
+    return items, total, next_cursor, prev_cursor
 
 
 @audit_router.get(
     "",
-    response_model=Paginated[AuditEventOut],
+    response_model=KeysetPage[AuditEventOut],
     # The ORGANISATION-WIDE trail, gated on the permission that names it. It sat on
     # the `artifact:view` floor that every role holds — including `contributor`, whose
     # entire point is holding nothing yet — so any signed-in account could read the
@@ -384,18 +474,25 @@ async def list_audit_events(
     actor: Optional[str] = None,
     action: Optional[str] = None,
     q: Optional[str] = None,
-    page: int = 1,
+    cursor: Optional[str] = None,
+    direction: str = "next",
     page_size: int = 20,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """One page of the tenant's audit trail. The query lives in `_query_audit_events`."""
-    items, total = await _query_audit_events(
+    """One page of the tenant's audit trail, walked by cursor.
+
+    `page` is GONE, and its absence is the point — see `KeysetPage`. Offset paging on
+    an append-heavy table is not merely slow at depth, it is inconsistent: an event
+    arriving between two clicks shifts every later row down one, so Next re-shows a row
+    you just read and another slips past unseen.
+    """
+    items, total, next_cursor, prev_cursor = await _query_audit_events(
         request, project_id=project_id, workspace_id=workspace_id,
-        actor=actor, action=action, q=q, page=page, page_size=page_size, db=db,
+        actor=actor, action=action, q=q,
+        cursor=cursor, direction=direction, page_size=page_size, db=db,
     )
-    return Paginated(
-        items=items,
-        pagination=Pagination(page=page, pageSize=page_size, total=total),
+    return KeysetPage(
+        items=items, total=total, nextCursor=next_cursor, prevCursor=prev_cursor,
     )
 
 
@@ -435,9 +532,9 @@ async def export_audit_events(
     """
     from shared.authz.audit import AUDIT_EXPORTED, record_rbac_change  # noqa: PLC0415
 
-    events, total = await _query_audit_events(
+    events, total, _next, _prev = await _query_audit_events(
         request, project_id=project_id, workspace_id=workspace_id,
-        actor=actor, action=action, q=q, page=1, page_size=_EXPORT_MAX, db=db,
+        actor=actor, action=action, q=q, page_size=_EXPORT_MAX, db=db,
     )
 
     actor_id = getattr(request.state, "user_id", None)

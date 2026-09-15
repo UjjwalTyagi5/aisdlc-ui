@@ -14,7 +14,12 @@ import { bffProxy } from "@/lib/bff/proxy";
 export async function GET(req: NextRequest) {
   const from = req.nextUrl.searchParams;
   const to = new URLSearchParams();
-  to.set("page", from.get("page") ?? "1");
+  // Cursor, not page. See KeysetPage in shared/routers/_schemas.py for why the page
+  // number went away rather than being kept alongside it.
+  const cursor = from.get("cursor");
+  if (cursor) to.set("cursor", cursor);
+  const direction = from.get("direction");
+  if (direction === "prev") to.set("direction", "prev");
   // Mirrors the previous 200-row ceiling — an unbounded page size on the audit
   // trail is a memory problem on a table that only ever grows.
   const pageSize = Math.min(Number(from.get("pageSize") ?? "20") || 20, 200);

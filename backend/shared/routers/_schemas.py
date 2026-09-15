@@ -1073,6 +1073,33 @@ class CursorPage(BaseModel, Generic[T]):
     nextCursor: Optional[str] = None
 
 
+class KeysetPage(BaseModel, Generic[T]):
+    """A page walked by cursor, in both directions, with the total still reported.
+
+    WHY NOT `Pagination`. Offset paging asks the database to produce and discard every
+    row before the one you wanted, so page 2,000 of 50 reads 100,000 rows to return 50.
+    On `audit_events` it is also WRONG, not merely slow: the table is append-heavy, so
+    an event arriving between two clicks shifts every later row down by one — "Next"
+    then re-shows a row you just read, and a row can slip between pages unseen. A
+    cursor anchors to a position in the data rather than a count of rows before it, so
+    the walk stays consistent while the table grows underneath it.
+
+    WHY NOT `CursorPage`. That one only goes forward, which is right for the run-scoped
+    trail (a timeline you scroll) and wrong for a paged table with a Previous button.
+
+    `total` survives because "of 4,312 matching" is what tells a reader whether their
+    filter did anything, and it is a separate query from the page — one that the
+    `(tenant_id, created_at DESC)` index answers without touching the heap.
+    """
+
+    items: List[T]
+    #: Opaque. Pass back as `cursor` with `direction=next`; null at the end.
+    nextCursor: Optional[str] = None
+    #: Opaque. Pass back as `cursor` with `direction=prev`; null on the first page.
+    prevCursor: Optional[str] = None
+    total: int = 0
+
+
 # ── EvalRecordOut (REQ-M9-14) ────────────────────────────────────────────────
 
 class EvalRecordOut(BaseModel):
