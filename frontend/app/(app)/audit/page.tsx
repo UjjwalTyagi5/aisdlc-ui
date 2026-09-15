@@ -33,6 +33,7 @@ import { ActivityTabs } from "@/components/app/activity-tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ScopeChip } from "@/components/app/scope-indicator";
 import { useAccessScope } from "@/hooks/use-access-scope";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -139,42 +140,37 @@ function AuditPageInner() {
   );
 
   // listAuditEvents query — preserved from original (BFF-backed)
+  // EVERY FILTER GOES TO THE SERVER. Two of them used to be applied to the rows
+  // already on screen: the page fetched 50, then narrowed those. On 132 events over
+  // three pages that meant the actor dropdown and the search box could only ever see
+  // a third of the trail — and reported what they found as "32 shown", which reads
+  // like an answer rather than a third of one. On a trail worth auditing it would be
+  // a rounding error of one.
+  //
+  // `q` is debounced because it fires per keystroke; the rest change on a click.
+  const debouncedSearch = useDebouncedValue(search, 300);
   const auditQ = useQuery({
-    queryKey: qk.audit.list({ action: actionFilter, page }),
+    queryKey: qk.audit.list({
+      action: actionFilter,
+      actor: actorFilter,
+      q: debouncedSearch,
+      page,
+    }),
     queryFn: () =>
       listAuditEvents({
         action: actionFilter === "all" ? undefined : actionFilter,
+        actor: actorFilter === "all" ? undefined : actorFilter,
+        q: debouncedSearch || undefined,
         page,
         pageSize: PAGE_SIZE,
       }),
+    // Keeps the current page on screen while the next one loads, so typing dims the
+    // table rather than collapsing it to a spinner on every keystroke.
     placeholderData: (prev) => prev,
   });
 
-  const items = React.useMemo(() => {
-    const base = auditQ.data?.items ?? [];
-    let next = base;
-    if (actorFilter !== "all") {
-      next = next.filter((e) =>
-        actorFilter === "agent"
-          ? e.actor.id === "agent"
-          : actorFilter === "system"
-            ? e.actor.id === "system"
-            : e.actor.id === actorFilter,
-      );
-    }
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      next = next.filter(
-        (e) =>
-          e.actor.name.toLowerCase().includes(q) ||
-          e.action.toLowerCase().includes(q) ||
-          e.resource.type.toLowerCase().includes(q) ||
-          e.resource.id.toLowerCase().includes(q) ||
-          (e.resource.name ?? "").toLowerCase().includes(q),
-      );
-    }
-    return next;
-  }, [auditQ.data, actorFilter, search]);
+  // The server already applied every filter — these ARE the matching rows.
+  const items = auditQ.data?.items ?? [];
 
   const [selected, setSelected] = React.useState<AuditEvent | null>(null);
 
@@ -370,7 +366,9 @@ function AuditPageInner() {
           <div className="border-line-soft flex items-center gap-2 border-b px-5 py-3.5">
             <span className="font-display text-[13.5px] font-bold tracking-[-0.01em]">Events</span>
             <span className="text-muted-foreground font-mono text-[10.5px]">
-              {items.length} shown
+              {pagination
+                ? `${items.length} of ${pagination.total} matching`
+                : `${items.length} shown`}
             </span>
           </div>
 
@@ -387,7 +385,7 @@ function AuditPageInner() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[7rem]">When</TableHead>
+                  <TableHead className="w-[11rem]">Date &amp; time</TableHead>
                   <TableHead className="w-[15rem]">Actor</TableHead>
                   <TableHead className="w-[12rem]">Action</TableHead>
                   <TableHead className="w-[14rem]">Scope</TableHead>
@@ -476,17 +474,31 @@ function changePair(detail: Record<string, unknown> | null | undefined) {
 function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => void }) {
   const dotClass = ACTION_DOT[event.action] ?? "bg-muted-foreground";
   const toneClass = ACTION_TONE[event.action] ?? "text-foreground";
-  const relativeTime = formatDistanceToNow(new Date(event.at), { addSuffix: true });
-  const isoTime = new Date(event.at).toISOString().replace("T", " ").slice(0, 19);
+  const at = new Date(event.at);
+  const relativeTime = formatDistanceToNow(at, { addSuffix: true });
+  const isoTime = at.toISOString().replace("T", " ").slice(0, 19);
+  // `YYYY-MM-DD HH:mm:ss` in the reader's own zone. Fixed-width by construction, so
+  // the column stays aligned and two rows a second apart are visibly two rows a
+  // second apart — which `toLocaleString()` would not guarantee across locales.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const localStamp =
+    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
+    `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
   const change = changePair(event.detail);
   const scope = event.scope;
 
   return (
     <TableRow className="cursor-pointer" onClick={onClick}>
-      {/* When — relative for scanning, exact on hover. Both matter: "~2 hours" is
-          how you find the incident, the timestamp is what you put in the report. */}
-      <TableCell className="text-muted-foreground align-top font-mono text-[11px] tabular-nums">
-        <span title={isoTime}>{relativeTime.replace(" ago", "").replace("about ", "~")}</span>
+      {/* THE TIMESTAMP LEADS, not "1 day".
+          A relative age is how you notice something; a date and time is what you act
+          on. Thirty rows all reading "1 day" cannot be ordered, cross-referenced with
+          an incident ticket, or quoted in a report — and an audit trail exists to be
+          quoted. The relative age moves to the tooltip, where it costs nothing.
+
+          Local time, not UTC: it is read by people who were in the room. The ISO/UTC
+          form is in the detail panel and both exports, which is what a regulator gets. */}
+      <TableCell className="text-muted-foreground align-top font-mono text-[11px] whitespace-nowrap tabular-nums">
+        <span title={`${relativeTime} · ${isoTime}Z`}>{localStamp}</span>
       </TableCell>
 
       {/* Actor — REACHABLE WITHOUT A MOUSE. A <tr> is not focusable and carries no

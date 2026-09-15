@@ -65,6 +65,52 @@ def _actor_matches(actor: str):
     return AuditEvent.actor_id == actor
 
 
+async def _search_clause(db: AsyncSession, q: str):
+    """A free-text clause that stays INDEXABLE on a table that grows forever.
+
+    The obvious implementation — ILIKE against every column, joined out to users and
+    workspaces so a name matches — cannot use an index for any of it, so on a large
+    trail every keystroke becomes a sequential scan plus a join per row. The audit
+    table is the one table on this platform that only ever grows.
+
+    So the term is resolved to IDS FIRST, in two small lookups against tables that are
+    orders of magnitude smaller (a tenant has tens of users, not millions of events),
+    and the audit query then filters on `actor_id` / `resource_id` — plain equality
+    against indexed columns. Searching "akshat" still finds their events; it just does
+    it by looking up who that is, rather than by reading the log.
+
+    `event_type` keeps a real ILIKE: it is a short, low-cardinality string and the
+    dropdown beside the box already offers the exact values.
+    """
+    like = f"%{q}%"
+    ids: set[str] = set()
+    for table, col in (("users", "email"), ("workspaces", "display_name"), ("projects", "display_name")):
+        rows = (await db.execute(
+            text(f"SELECT id::text AS id FROM {table} WHERE {col} ILIKE :q LIMIT 200"),
+            {"q": like},
+        )).fetchall()
+        ids.update(r.id for r in rows)
+
+    clauses = [
+        AuditEvent.event_type.ilike(like),
+        AuditEvent.resource_type.ilike(like),
+        AuditEvent.resource_id == q,
+        AuditEvent.actor_id == q,
+    ]
+    if ids:
+        id_list = list(ids)
+        clauses.append(AuditEvent.actor_id.in_(id_list))
+        clauses.append(AuditEvent.resource_id.in_(id_list))
+        # A project or unit is usually the event's SCOPE rather than its resource --
+        # an artifact upload names the file and files the project in its payload -- so
+        # searching "Dummy T1" has to reach the payload too or it finds nothing for
+        # every event that happened IN the thing you searched for.
+        clauses.append(AuditEvent.payload["project_id"].astext.in_(id_list))
+        clauses.append(AuditEvent.payload["scope_id"].astext.in_(id_list))
+        clauses.append(AuditEvent.payload["workspace_id"].astext.in_(id_list))
+    return or_(*clauses)
+
+
 # WHERE A RESOURCE ID CAN BE GIVEN A NAME: resource_type -> (table, name column).
 #
 # `role_binding` points at USERS on purpose. shared/authz/audit.py records the
@@ -191,6 +237,7 @@ async def list_audit_events(
     workspace_id: Optional[str] = None,
     actor: Optional[str] = None,
     action: Optional[str] = None,
+    q: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
     db: AsyncSession = Depends(get_db_session),
@@ -276,6 +323,12 @@ async def list_audit_events(
         stmt = stmt.where(_actor_matches(actor))
     if action:
         stmt = stmt.where(AuditEvent.event_type == action)
+    # SEARCH IS THE SERVER'S JOB, and it was the browser's. The page filtered the 50
+    # rows it had already been given, so on 132 events across three pages the box
+    # searched a third of the trail and reported "32 shown" as though that were the
+    # answer. On a real trail it would search a rounding error of it.
+    if q and q.strip():
+        stmt = stmt.where(await _search_clause(db, q.strip()))
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total: int = (await db.execute(count_stmt)).scalar_one()

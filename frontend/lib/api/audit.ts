@@ -8,6 +8,8 @@ export const listAuditEvents = (query?: {
   projectId?: string;
   actor?: string;
   action?: string;
+  /** Free-text. Matched SERVER-side — see shared/routers/audit.py::_search_clause. */
+  q?: string;
   page?: number;
   pageSize?: number;
 }) =>
