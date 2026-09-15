@@ -396,7 +396,7 @@ function AuditPageInner() {
                   <TableHead className="w-[12rem]">Action</TableHead>
                   <TableHead className="w-[14rem]">Scope</TableHead>
                   <TableHead>Resource</TableHead>
-                  <TableHead className="w-[12rem]">Change</TableHead>
+                  <TableHead className="w-[15rem]">Change</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -600,8 +600,17 @@ function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => v
       {/* Change — see changePair: empty until a writer records one. */}
       <TableCell className="align-top font-mono text-[11px]">
         {change ? (
-          <span className="inline-flex items-center gap-1">
-            <span className="text-muted-foreground line-through">{change.before}</span>
+          <span className="inline-flex flex-wrap items-center gap-1">
+            {/* "none" is a state, not a thing struck out — an appointment did not
+                delete anything, and a strikethrough there reads as if it had. */}
+            <span
+              className={cn(
+                "text-muted-foreground",
+                change.before !== "none" && "line-through",
+              )}
+            >
+              {change.before}
+            </span>
             <span aria-hidden>→</span>
             <span className="text-foreground">{change.after}</span>
           </span>

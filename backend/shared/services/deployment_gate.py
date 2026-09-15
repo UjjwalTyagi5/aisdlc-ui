@@ -132,10 +132,12 @@ async def approve_deployment(
             code="self_approval",
         )
 
+    # Before the assignment: one line later this reads back what we just set.
+    _was = dep.approval_status
     dep.approval_status = "approved"
     dep.approved_by = approver
     dep.approved_at = datetime.now(timezone.utc)
-    db.add(await _audit(db, tenant_id, approver, "deployment_approve", dep))
+    db.add(await _audit(db, tenant_id, approver, "deployment_approve", dep, before=_was, after="approved"))
     return dep
 
 
@@ -163,11 +165,13 @@ async def reject_deployment(
             f"Already approved by {dep.approved_by}.", code="already_approved"
         )
 
+    # Before the assignment: one line later this reads back what we just set.
+    _was = dep.approval_status
     dep.approval_status = "rejected"
     dep.approved_by = approver or None
     dep.approved_at = datetime.now(timezone.utc)
     dep.rejection_reason = reason or None
-    db.add(await _audit(db, tenant_id, approver, "deployment_reject", dep, reason=reason))
+    db.add(await _audit(db, tenant_id, approver, "deployment_reject", dep, reason=reason, before=_was, after="rejected"))
     return dep
 
 

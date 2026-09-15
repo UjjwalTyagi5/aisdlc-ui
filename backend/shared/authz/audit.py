@@ -172,12 +172,25 @@ async def record_rbac_change(
     scope_kind: str,
     scope_id: str,
     role: Optional[str] = None,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """Append one RBAC change to the audit trail, in the caller's transaction.
 
     `subject_id` is who the change is ABOUT; `actor_id` is who made it. They are
     frequently the same person and the difference is the entire point of the record.
+
+    `before` / `after` are PRD §34.9's prior and new state — "the prior state and the
+    new one, so a change is legible without guessing". A grant recorded only the role
+    it conferred, which answers "what do they hold now" and not "what changed", and
+    those are different questions: `developer -> project_admin` is a promotion,
+    `none -> project_admin` is an appointment, and a row reading `project_admin` is
+    both. They are plain strings rather than a diff because that is what a person
+    reads in a table cell; the structured detail is already in the payload.
+
+    Only the CALLER can supply them. By the time this runs the change is applied in
+    the same transaction, so anything read here would return the new state twice.
     """
     payload: dict[str, Any] = {
         "subject_id": subject_id,
@@ -186,6 +199,12 @@ async def record_rbac_change(
     }
     if role:
         payload["role"] = role
+    # Recorded even when empty-ish on one side: "none -> developer" is the shape of an
+    # appointment, and dropping the empty half would make it indistinguishable from a
+    # change with no prior state recorded at all.
+    if before is not None or after is not None:
+        payload["before"] = before
+        payload["after"] = after
 
     # THE NAMES, CAPTURED NOW. See `_name_of`: a record that stores only ids stops
     # being legible the day one of those rows is deleted, and an audit row outlives

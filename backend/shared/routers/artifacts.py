@@ -423,6 +423,9 @@ async def submit_artifact(
         return (await _with_actor_emails(
             db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
+    # The status it is LEAVING, read before the assignment overwrites it —
+    # PRD §34.9's before/after, unrecoverable one line later.
+    _was = artifact.approval_status or "draft"
     artifact.approval_status = "pending"
     db.add(
         AuditEvent(
@@ -435,6 +438,8 @@ async def submit_artifact(
                 db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
+                "before": _was,
+                "after": "pending",
                 "artifact_type": artifact.artifact_type,
             },
                 actor_id=getattr(request.state, "user_id", None),
@@ -506,6 +511,9 @@ async def approve_artifact(
                        "check storage access.",
             )
 
+    # The status it is LEAVING, read before the assignment overwrites it —
+    # PRD §34.9's before/after, unrecoverable one line later.
+    _was = artifact.approval_status or "draft"
     artifact.approval_status = "approved"
     artifact.approved_by = getattr(request.state, "user_id", None)
     artifact.approved_at = datetime.now(timezone.utc)
@@ -521,6 +529,8 @@ async def approve_artifact(
                 db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
+                "before": _was,
+                "after": "approved",
                 "artifact_type": artifact.artifact_type,
                 "blob_path": artifact.blob_path,
             },
@@ -582,6 +592,9 @@ async def reject_artifact(
                 artifact_id, type(exc).__name__,
             )
 
+    # The status it is LEAVING, read before the assignment overwrites it —
+    # PRD §34.9's before/after, unrecoverable one line later.
+    _was = artifact.approval_status or "draft"
     artifact.approval_status = "rejected"
     artifact.approved_by = getattr(request.state, "user_id", None)
     artifact.approved_at = datetime.now(timezone.utc)
@@ -598,6 +611,8 @@ async def reject_artifact(
                 db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
+                "before": _was,
+                "after": "rejected",
                 "artifact_type": artifact.artifact_type,
                 "reason": body.reason,
             },
