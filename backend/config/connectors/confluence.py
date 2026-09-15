@@ -181,6 +181,14 @@ class ConfluenceConnector(BaseConnector):
                 ),
                 "add_comment": CapabilityEntry(status="implemented"),
                 "delete_page": CapabilityEntry(status="implemented"),
+                "create_space": CapabilityEntry(
+                    status="implemented",
+                    description="v1 /rest/api/space — v2 exposes spaces read-only",
+                ),
+                "upload_attachment": CapabilityEntry(
+                    status="implemented",
+                    description="v1 multipart upload; re-uploading a filename versions the existing attachment",
+                ),
             },
         )
 
@@ -285,6 +293,9 @@ class ConfluenceConnector(BaseConnector):
             "add_comment": self.add_comment,
             "delete_page": self.delete_page,
             "delete_item": self.delete_page,
+            "create_space": self.create_space,
+            "upload_attachment": self.upload_attachment,
+            "publish_document": self.upload_attachment,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -522,6 +533,90 @@ class ConfluenceConnector(BaseConnector):
         """DELETE /wiki/api/v2/pages/{id} — moves the page to trash."""
         await self._confluence_request_with_retry("DELETE", f"/pages/{page_id}")
         return {"page_id": page_id, "deleted": True}
+
+    async def create_space(
+        self,
+        key: str,
+        name: str = "",
+        description: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """POST /wiki/rest/api/space — create a new space.
+
+        V1, AND NOT BY OVERSIGHT. The v2 API exposes spaces read-only; there is no
+        `POST /api/v2/spaces`, so creation has to go through the v1 content API. Same
+        reason `add_comment` and `search_content` are v1.
+
+        The key is what every later call resolves against (`_resolve_space_id`), and
+        Confluence will not let you change it afterwards — so it is normalised to the
+        uppercase alphanumeric form the API accepts rather than being passed through to
+        fail server-side with a message about a regex.
+        """
+        space_key = "".join(ch for ch in (key or "").upper() if ch.isalnum())
+        if not space_key:
+            raise ValueError(
+                "a space key is required, and must contain at least one letter or digit"
+            )
+        payload: Dict[str, Any] = {"key": space_key, "name": name or space_key}
+        if description:
+            payload["description"] = {
+                "plain": {"value": description, "representation": "plain"}
+            }
+        data, _ = await self._confluence_request_with_retry(
+            "POST", "/space", v1=True, json=payload
+        )
+        return {
+            "id": str(data.get("id", "")),
+            "key": data.get("key", space_key),
+            "name": data.get("name", ""),
+            "url": ((data.get("_links") or {}).get("webui") or ""),
+        }
+
+    async def upload_attachment(
+        self,
+        page_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """POST /wiki/rest/api/content/{id}/child/attachment — attach a file to a page.
+
+        TWO THINGS THIS ENDPOINT REQUIRES that no other call here does, and both are
+        silent failures if missed:
+
+          `X-Atlassian-Token: nocheck` — without it Confluence rejects the upload as a
+          suspected XSRF attempt, with a 403 whose body talks about tokens rather than
+          attachments.
+
+          multipart/form-data — the body is a file part named `file`, not JSON. The
+          request helper forwards **kwargs to httpx untouched, so `files=` works.
+
+        `allowDuplicated` is deliberately NOT set: re-uploading the same filename then
+        creates a SECOND attachment rather than a new version of the first, and a page
+        accumulating `report.docx` four times is worse than an error. The v1 API
+        versions the existing attachment instead, which is what a re-publish should do.
+        """
+        if not page_id:
+            raise ValueError("a page id is required to attach a file")
+        if not content:
+            raise ValueError(f"{filename or 'the file'} is empty — nothing to attach")
+
+        data, _ = await self._confluence_request_with_retry(
+            "POST",
+            f"/content/{page_id}/child/attachment",
+            v1=True,
+            headers={"X-Atlassian-Token": "nocheck"},
+            files={"file": (filename, content, content_type)},
+        )
+        results = (data or {}).get("results") or []
+        first = results[0] if results else {}
+        return {
+            "id": str(first.get("id", "")),
+            "title": first.get("title", filename),
+            "page_id": page_id,
+            "url": ((first.get("_links") or {}).get("download") or ""),
+        }
 
     async def add_comment(self, page_id: str, text: str, **kwargs: Any) -> Dict[str, Any]:
         """POST /wiki/rest/api/content/{id}/child/comment — the v1 comment shape.

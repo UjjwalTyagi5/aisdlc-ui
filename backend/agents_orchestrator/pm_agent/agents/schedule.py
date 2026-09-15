@@ -780,6 +780,19 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     logger.warning("PM agent: project document tools unavailable")
 
 try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM. Asked to publish an approved
+    # document to Confluence, this agent used to answer that the platform "only
+    # publishes to SharePoint" — truthfully, because the Confluence tools existed in
+    # the connector and were bound to no agent but Documentation. Bound the same way as
+    # SharePoint: agent and stage fixed here, never taken from a tool argument.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="plan", stage="plan")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("PM agent: Confluence document tools unavailable")
+
+try:
     from shared.tools.project_team import make_team_tools  # noqa: PLC0415
 
     # THE PEOPLE, which every other tool here is blind to. Sprints, capacity and work
@@ -807,6 +820,7 @@ tools = [
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_CONFLUENCE_TOOLS,
     *_TEAM_TOOLS,
 ]
 
