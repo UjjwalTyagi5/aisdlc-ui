@@ -51,8 +51,14 @@ const PAGE_SIZE = 50;
  * Only ever shown when the server could not name the thing: a seeded id like
  * `demo-dev` is already legible and is left alone.
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 function shortId(id: string): string {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id) ? `${id.slice(0, 8)}…` : id;
+  return isUuid(id) ? `${id.slice(0, 8)}…` : id;
 }
 
 /**
@@ -471,6 +477,29 @@ function changePair(detail: Record<string, unknown> | null | undefined) {
   return { before: render(before), after: render(after) };
 }
 
+/**
+ * An id the server could not put a name to.
+ *
+ * THIS IS NOT A RESOLUTION FAILURE, and it must not look like one. The trail
+ * outlives what it references: `fa5e4ce1-…` is a project that eight role grants were
+ * recorded against and that exists in no table today, and the record still has to
+ * say what happened. Rendering the bare id there read as "the name did not load",
+ * which is the one thing it does not mean.
+ *
+ * The id stays visible — it is the only handle left on a thing that is gone, and it
+ * is what a reader would paste into a search or a ticket.
+ */
+function Unresolved({ id, kind }: { id: string; kind: string }) {
+  return (
+    <span
+      title={`This ${kind} no longer exists in this organization. The audit trail outlives what it references — id ${id}`}
+    >
+      <span className="text-muted-foreground italic">not found</span>{" "}
+      <span className="text-muted-foreground/70 font-mono text-[10.5px]">{shortId(id)}</span>
+    </span>
+  );
+}
+
 function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => void }) {
   const dotClass = ACTION_DOT[event.action] ?? "bg-muted-foreground";
   const toneClass = ACTION_TONE[event.action] ?? "text-foreground";
@@ -541,7 +570,11 @@ function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => v
             <span className="text-muted-foreground">
               {SCOPE_LABEL[scope.kind] ?? scope.kind}
             </span>{" "}
-            <span className="font-medium">{scope.name ?? shortId(scope.id)}</span>
+            {scope.name ? (
+              <span className="font-medium">{scope.name}</span>
+            ) : (
+              <Unresolved id={scope.id} kind={(SCOPE_LABEL[scope.kind] ?? scope.kind).toLowerCase()} />
+            )}
           </span>
         ) : (
           <span className="text-muted-foreground">—</span>
@@ -549,9 +582,19 @@ function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => v
       </TableCell>
 
       {/* Resource — the specific object the action landed on. */}
-      <TableCell className="align-top font-mono text-[11px]" title={event.resource.id}>
+      <TableCell className="align-top font-mono text-[11px]">
         <span className="text-muted-foreground">{event.resource.type}</span>{" "}
-        <span className="text-foreground">{event.resource.name ?? shortId(event.resource.id)}</span>
+        {event.resource.name ? (
+          <span className="text-foreground" title={event.resource.id}>
+            {event.resource.name}
+          </span>
+        ) : isUuid(event.resource.id) ? (
+          <Unresolved id={event.resource.id} kind={event.resource.type.replace(/_/g, " ")} />
+        ) : (
+          // A seeded id like `demo-ba-30503` is not a UUID and carries its own
+          // meaning — replacing it with "not found" would throw information away.
+          <span className="text-foreground">{event.resource.id}</span>
+        )}
       </TableCell>
 
       {/* Change — see changePair: empty until a writer records one. */}
