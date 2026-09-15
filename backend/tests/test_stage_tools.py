@@ -167,3 +167,40 @@ def test_the_pm_agents_static_list_still_has_its_own_tools():
     names = {t.name for t in mod.tools}
     assert "list_sprints" in names
     assert not {n for n in names if "confluence" in n or "sharepoint" in n}
+
+
+# ── The picker is told which connectors can actually be acted on ─────────────
+
+
+@pytest.mark.unit
+def test_wired_and_unwired_do_not_overlap():
+    """A kind claiming both states would make the picker's annotation arbitrary."""
+    from shared.tools.stage_tools import UNWIRED_KINDS
+
+    assert not (wired_kinds() & UNWIRED_KINDS)
+
+
+@pytest.mark.unit
+def test_every_catalogue_kind_is_classified():
+    """A connector offered by the catalogue but in neither set is unclassified — the
+    picker would silently treat it as usable, which is the defect this closes."""
+    from shared.routers.connectors import _CATALOG_KINDS
+    from shared.tools.stage_tools import UNWIRED_KINDS
+
+    unclassified = set(_CATALOG_KINDS) - wired_kinds() - UNWIRED_KINDS
+    assert not unclassified, f"add these to stage_tools: {sorted(unclassified)}"
+
+
+@pytest.mark.unit
+def test_the_registry_kinds_are_all_real_catalogue_entries():
+    """Guards the other direction: a typo'd kind would silently never match."""
+    from shared.routers.connectors import _CATALOG_KINDS
+    from shared.tools.stage_tools import UNWIRED_KINDS
+
+    assert (wired_kinds() | UNWIRED_KINDS) <= set(_CATALOG_KINDS)
+
+
+@pytest.mark.unit
+def test_confluence_counts_as_wired_now():
+    """The connector at the centre of this: granted, and previously unusable."""
+    assert "confluence" in wired_kinds()

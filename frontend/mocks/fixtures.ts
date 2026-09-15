@@ -1242,6 +1242,8 @@ export const CONNECTORS: Connector[] = [
     id: "conn_jira" as Connector["id"],
     tenantId: TENANT_ID,
     kind: "jira",
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py: whether any agent has a tool for it.
+    agentToolsAvailable: true,
     name: "Jira Cloud — Acme",
     installed: true,
     health: "healthy",
@@ -1259,6 +1261,8 @@ export const CONNECTORS: Connector[] = [
     id: "conn_github" as Connector["id"],
     tenantId: TENANT_ID,
     kind: "github",
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py: whether any agent has a tool for it.
+    agentToolsAvailable: false,
     name: "GitHub — acme org",
     installed: true,
     health: "healthy",
@@ -1276,6 +1280,8 @@ export const CONNECTORS: Connector[] = [
     id: "conn_slack" as Connector["id"],
     tenantId: TENANT_ID,
     kind: "slack",
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py: whether any agent has a tool for it.
+    agentToolsAvailable: false,
     name: "Slack — Acme workspace",
     installed: true,
     health: "degraded",
@@ -1292,6 +1298,9 @@ export const CONNECTORS: Connector[] = [
     id: "conn_ado" as Connector["id"],
     tenantId: TENANT_ID,
     kind: "azure_devops",
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py: whether any agent has a tool for it.
+    agentToolsAvailable: true,
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py.
     name: "Azure DevOps",
     installed: false,
     health: "disconnected",
@@ -1304,6 +1313,9 @@ export const CONNECTORS: Connector[] = [
     id: "conn_gha" as Connector["id"],
     tenantId: TENANT_ID,
     kind: "github_actions",
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py: whether any agent has a tool for it.
+    agentToolsAvailable: false,
+    // Mirrors wired_kinds() in backend/shared/tools/stage_tools.py.
     name: "GitHub Actions",
     installed: false,
     health: "disconnected",

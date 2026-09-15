@@ -968,6 +968,18 @@ class ConnectorOut(BaseModel):
     capabilities: List[Any]
     lastCheckedAt: Optional[str]
     account: Optional[str] = None
+    #: Whether any agent has a TOOL for this connector, from
+    #: `shared/tools/stage_tools.wired_kinds()`.
+    #:
+    #: SEPARATE FROM `granted` ON PURPOSE, because they fail differently. `granted`
+    #: false means the unit was never given this connector — an access decision, fixed
+    #: by asking an Org Admin. `agentToolsAvailable` false means the grant would be
+    #: stored, enforced, and then never used, because no agent can act on it: the
+    #: "Tools per stage" picker offered a setting that cannot take effect, which is how
+    #: a PM agent came to tell a user it could only publish to SharePoint while
+    #: Confluence sat granted in that project's settings.
+    agentToolsAvailable: bool = True
+
     # Whether the requesting Business Unit was granted this kind (integration_grants).
     # Only set when the caller resolved a workspace (query param or header) — absent
     # otherwise, since "granted" has no meaning without a unit to check it against.

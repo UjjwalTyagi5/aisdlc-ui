@@ -74,24 +74,50 @@ def _sharepoint_spec() -> ConnectorToolSpec:
     )
 
 
-#: kind -> how to build its tools. THE PICKER SHOULD OFFER EXACTLY THESE KEYS: a
-#: connector absent here has no tool behind it for any agent, so granting it is a
-#: setting that cannot take effect. Kinds are added as their factories are written.
-#:
-#: Board connectors (jira, azure_devops) are deliberately NOT here yet. Their tools are
-#: already provider-agnostic and bound through `_BOARD_TOOLS`, which resolves the board
-#: kind per stage by a different route (`_stage_board_kind`); folding that into this
-#: registry means unpicking that resolution, and doing it in the same change as the
-#: mechanism would make both harder to review.
+#: kind -> how to build its tools, for the connectors this registry owns. Kinds are
+#: added here as their factories are written; `_WIRED_ELSEWHERE` below covers the ones
+#: whose tools exist but are bound by an older mechanism.
 _SPECS: dict[str, Callable[[], ConnectorToolSpec]] = {
     "confluence": _confluence_spec,
     "sharepoint": _sharepoint_spec,
 }
 
+#: Kinds whose agent tools exist but are bound by an OLDER mechanism than this registry,
+#: so granting them works while `_SPECS` knows nothing about them. Listed so the picker
+#: can tell "wired" from "does nothing" — leaving them out would make it hide settings
+#: that function.
+#:
+#: jira / azure_devops   `_BOARD_TOOLS` in requirements_agent/agents/planning.py — one
+#:                       provider-agnostic list resolving its board per call, imported
+#:                       by the agents that need it. Moving it into this registry means
+#:                       unpicking that resolution and belongs in its own change.
+#: figma                 three tools in design_architecture_agent/tools/figma_tools.py,
+#:                       whose session helper hardcodes `agent_id="design"`. Making it a
+#:                       factory would change WHICH stages can use Figma — a product
+#:                       decision, not a mechanical one.
+_WIRED_ELSEWHERE: frozenset[str] = frozenset({"jira", "azure_devops", "figma"})
+
+#: Kinds a project can grant today that NO agent has a tool for. Granting one is a
+#: setting that cannot take effect: the permission is stored, the picker shows it, and
+#: no agent can act on it. Named here rather than inferred from absence so that adding a
+#: connector to the catalogue without tools is a deliberate act with a visible cost.
+#:
+#: slack / ms_teams are a genuine open question rather than an oversight: both are
+#: reached today as NOTIFICATION targets (shared/services/notification_targets.py), not
+#: as agent tools, so a grant may be serving that purpose. Whether they should also be
+#: agent tools is a product call.
+UNWIRED_KINDS: frozenset[str] = frozenset(
+    {"github", "github_actions", "sonarqube", "slack", "ms_teams"}
+)
+
 
 def wired_kinds() -> frozenset[str]:
-    """Connector kinds that have tools behind them, for the picker to offer."""
-    return frozenset(_SPECS)
+    """Connector kinds an agent can actually act on, however they are bound.
+
+    What the "Tools per stage" picker should treat as real. A kind outside this set can
+    still be granted — the grant is stored and enforced — but nothing will use it.
+    """
+    return frozenset(_SPECS) | _WIRED_ELSEWHERE
 
 
 async def _granted_level(kind: str, tenant_id: str, project_id: str, agent_id: str) -> Optional[str]:
