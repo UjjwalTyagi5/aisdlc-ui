@@ -45,7 +45,8 @@ import { listConversations } from "@/lib/api/conversations";
 import { qk } from "@/lib/api/query-keys";
 import { builtAgentsForTrack, PHASE_LABEL, phaseHref, ROUTABLE_PHASES } from "@/lib/agents";
 import { tileStateFor } from "@/lib/agent-access";
-import { ROLE_META } from "@/lib/roles";
+import { getMyAgentAccess } from "@/lib/api/capabilities";
+import { ROLE_META, type Involvement } from "@/lib/roles";
 import { RequestAccessButton } from "@/components/requests/request-access-button";
 import { RequestAgentAccessDialog } from "@/components/app/request-agent-access-dialog";
 import { canRaiseType } from "@/lib/requests/routing";
@@ -68,6 +69,15 @@ export default function ProjectOverviewPage() {
   const projectQ = useQuery({
     queryKey: qk.projects.detail(id),
     queryFn: () => getProject(id),
+  });
+
+  // The API's own answer for which agents THIS viewer reaches here — extra agents
+  // granted from the Members page included. Until it arrives (or if it fails) the
+  // tiles fall back to the role's static reach, so nothing flashes unlocked.
+  const myAccessQ = useQuery({
+    queryKey: qk.myAgentAccess.forProject(id),
+    queryFn: () => getMyAgentAccess(id),
+    staleTime: 30_000,
   });
 
   // Delivery status is the Project Admin's to set, with the two tiers above
@@ -109,8 +119,9 @@ export default function ProjectOverviewPage() {
     // Per TRACK: a Code Modernization project's Design, Development and the rest are
     // Track 3's own agents, not yet built, even though Portfolio 1's are.
     const builtAgents: readonly Phase[] = builtAgentsForTrack(track);
-    return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents);
-  }, [viewerRole, projectQ.data?.track]);
+    const reach = myAccessQ.data?.reach as Partial<Record<Phase, Involvement>> | undefined;
+    return (phase: Phase) => tileStateFor(viewerRole, phase, track, builtAgents, reach);
+  }, [viewerRole, projectQ.data?.track, myAccessQ.data?.reach]);
 
   // The unit's real name, not the word "Business Unit" — the request names the
   // scope it is being raised in, and a label there says nothing.

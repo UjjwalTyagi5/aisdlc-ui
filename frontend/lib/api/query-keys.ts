@@ -133,6 +133,9 @@ export const qk = {
   agentAccessOverrides: {
     forProject: (id: ProjectId) => ["agent-access-overrides", id] as const,
   },
+  myAgentAccess: {
+    forProject: (id: ProjectId) => ["my-agent-access", id] as const,
+  },
   agentProfiles: {
     summary: (scope: string, scopeId?: string | null) =>
       ["agent-profiles", "summary", scope, scopeId ?? ""] as const,

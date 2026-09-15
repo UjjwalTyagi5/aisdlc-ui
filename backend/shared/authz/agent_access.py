@@ -36,7 +36,50 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
-async def check_agent_access(
+#: The UI's phase ids and the registry's agent ids agree everywhere but one place:
+#: the Code Review agent is phase `review` on the page and `code_review` in
+#: AGENT_REGISTRY (frontend/lib/agents.ts::CHAT_AGENT_PHASE is the other half). A
+#: grant is stored as the UI wrote it, so both spellings must mean the same agent.
+PHASE_TO_AGENT: dict[str, str] = {"review": "code_review"}
+AGENT_TO_PHASE: dict[str, str] = {v: k for k, v in PHASE_TO_AGENT.items()}
+
+
+def _agent_id(phase_or_agent: str) -> str:
+    return PHASE_TO_AGENT.get(phase_or_agent, phase_or_agent)
+
+
+async def extra_agents_for(
+    db: AsyncSession, *, project_id: str, user_id: str
+) -> set[str]:
+    """The agents `user_id` was granted on `project_id` BEYOND their role's own —
+    `role_bindings.extra_agents`, normalised to registry agent ids.
+
+    THIS COLUMN WAS WRITTEN AND NEVER READ. The Members page's "Extra agent access"
+    menu, the project-creation dialog and the governance effect that approves an
+    agent-access request all write it — and until now nothing on the access path
+    consulted it, so a Security Engineer granted Code Review saw it padlocked on the
+    project page and was refused by the API when they opened it anyway. A grant that
+    changes nothing is worse than no grant: it tells the admin it worked.
+    """
+    if not (project_id and user_id and _is_uuid(project_id)):
+        return set()
+    row = (
+        await db.execute(
+            text(
+                "SELECT extra_agents FROM role_bindings "
+                "WHERE user_id = :u AND scope_kind = 'project' "
+                "  AND scope_id = CAST(:p AS uuid) AND status = 'active' "
+                "  AND (expires_at IS NULL OR expires_at > now())"
+            ),
+            {"u": user_id, "p": project_id},
+        )
+    ).first()
+    if row is None or not row.extra_agents:
+        return set()
+    return {_agent_id(str(a)) for a in row.extra_agents if a}
+
+
+async def resolve_involvement(
     db: AsyncSession,
     *,
     tenant_id: str,
@@ -44,29 +87,22 @@ async def check_agent_access(
     role: str | None,
     user_id: str,
     agent_id: str,
-) -> bool:
-    """True if `role`/`user_id` may chat with and use `agent_id`'s Safe capabilities
-    on `project_id`. Resolution order: person-level override -> role-level override ->
-    the built-in default reach table -> deny."""
+    extra_agents: set[str] | None = None,
+) -> str:
+    """How `role`/`user_id` stands to `agent_id` on `project_id` — "owner", "use",
+    ... or "none" for no access. Resolution order: person-level override -> the
+    person's extra agents -> role-level override -> the built-in default reach table
+    -> "none".
+
+    `extra_agents` may be passed by a caller that resolves several agents for the
+    same person (the project page) so the binding is read once.
+    """
     if not project_id or not user_id:
-        return False
-
-    # `tenant_id`/`project_id` are genuine `uuid` columns on `agent_access_overrides`
-    # (unlike `user_id` — see the comment below), so both must actually be UUID-shaped
-    # before they reach the raw `CAST(... AS uuid)` SQL below. Mirrors
-    # `project_scope.py`'s own `_is_uuid` guard: a real project route is slug-addressed
-    # (`/security/{project_id}/...` where `{project_id}` is a slug like
-    # "payments-portal"), so a caller reaching this function with a slug or other
-    # garbage must fail closed (403 via `assert_agent_access`) rather than crash the
-    # DB call with "invalid input syntax for type uuid" (a 500).
+        return "none"
     if not tenant_id or not _is_uuid(tenant_id) or not _is_uuid(project_id):
-        return False
+        return "none"
+    agent_id = _agent_id(agent_id)
 
-    # user_id (agent_access_overrides, users.id) is a String(255) column, NOT uuid
-    # (migration 0025 adds it as sa.String, matching users.id's own type) — unlike
-    # tenant_id/project_id, which really are uuid columns. Casting :u to uuid here
-    # would compare a uuid literal against a varchar column and fail at the DB with
-    # "operator does not exist: character varying = uuid".
     person_row = (
         await db.execute(
             text(
@@ -78,7 +114,17 @@ async def check_agent_access(
         )
     ).first()
     if person_row is not None:
-        return person_row.involvement != "none"
+        return person_row.involvement or "none"
+
+    # A person-level grant, made by the project admin from the Members page (or by
+    # approving that person's request). Sits below an explicit person-level override
+    # — which is the one way to say "not this person, whatever they were granted" —
+    # and above the role's own reach, which is what "extra" means.
+    if extra_agents is None:
+        extra_agents = await extra_agents_for(db, project_id=project_id, user_id=user_id)
+    default = AGENT_DEFAULT_REACH.get(agent_id, {}).get(role or "", "none")
+    if agent_id in extra_agents and default == "none":
+        return "use"  # beyond the role's own; the role's own agent stays owned
 
     if role:
         role_row = (
@@ -92,10 +138,28 @@ async def check_agent_access(
             )
         ).first()
         if role_row is not None:
-            return role_row.involvement != "none"
+            return role_row.involvement or "none"
 
-    default = AGENT_DEFAULT_REACH.get(agent_id, {}).get(role or "", "none")
-    return default != "none"
+    return AGENT_DEFAULT_REACH.get(agent_id, {}).get(role or "", "none")
+
+
+async def check_agent_access(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    project_id: str,
+    role: str | None,
+    user_id: str,
+    agent_id: str,
+) -> bool:
+    """True if `role`/`user_id` may chat with and use `agent_id`'s Safe capabilities
+    on `project_id`. Resolution order: person-level override -> the person's extra
+    agents (role_bindings.extra_agents) -> role-level override -> the built-in default
+    reach table -> deny. See `resolve_involvement`."""
+    return await resolve_involvement(
+        db, tenant_id=tenant_id, project_id=project_id, role=role,
+        user_id=user_id, agent_id=agent_id,
+    ) != "none"
 
 
 async def assert_agent_access(

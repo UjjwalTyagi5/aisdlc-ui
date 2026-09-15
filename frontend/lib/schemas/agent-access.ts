@@ -39,3 +39,21 @@ export const AgentAccessOverrideInput = z.object({
   involvement: InvolvementLevel,
 });
 export type AgentAccessOverrideInput = z.infer<typeof AgentAccessOverrideInput>;
+
+/**
+ * THE CALLER'S OWN REACH on one project, as the API resolves it — person-level
+ * override, then the extra agents granted to them (Members page / an approved
+ * access request), then any role-level override, then the built-in table.
+ *
+ * `reach` is keyed by the UI's phase ids; an agent absent from it (a track's agent
+ * the registry does not know) is treated as `none` by `tileStateFor`. The page used
+ * to resolve a padlock from `AGENT_OWNERSHIP` alone, which is why a granted extra
+ * agent stayed locked: nothing on the client ever saw the grant.
+ */
+export const MyAgentAccess = z.object({
+  projectId: z.string(),
+  role: z.string().nullable(),
+  extraAgents: z.array(z.string()),
+  reach: z.record(z.string(), InvolvementLevel),
+});
+export type MyAgentAccess = z.infer<typeof MyAgentAccess>;

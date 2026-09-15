@@ -1,6 +1,7 @@
 """Three project-scoped surfaces the API used to answer empty for.
 
   GET/PUT/DELETE /projects/{id}/agent-access-overrides
+  GET            /projects/{id}/agent-access/me
   GET/PUT        /projects/{id}/integrations
   GET/DELETE     /admin/cross-bu-grants
 
@@ -73,6 +74,55 @@ async def _assert_can_write_project(db: AsyncSession, request: Request, project:
     project_members.py for why this stopped being written out here.
     """
     await assert_can_administer_project(db, request, project)
+
+
+# ── the caller's own reach ───────────────────────────────────────────────────
+
+
+@project_scoped_router.get("/projects/{project_id}/agent-access/me")
+async def my_agent_access(
+    project_id: str, request: Request, db: AsyncSession = Depends(get_db_session)
+) -> dict[str, Any]:
+    """Which agents THIS caller reaches on this project, as the API will decide it.
+
+    THE PAGE USED TO DECIDE FOR ITSELF. The project overview and each agent's page
+    resolved a padlock from the static role × agent table alone, so a person granted
+    an extra agent from the Members page — or by an approved access request — kept
+    seeing it locked, and could only "request access" to something they already had.
+    This answers from the same resolution the chat gates use
+    (`shared.authz.agent_access.resolve_involvement`: person override → extra agents
+    → role override → default), so what the page shows is what the API allows.
+
+    Keys are the UI's phase ids (`review` for the Code Review agent), values the
+    involvement: `none` (locked), `use`, `primary`, `owner`.
+    """
+    from config.agent_registry import AGENT_REGISTRY  # noqa: PLC0415
+    from shared.authz.agent_access import (  # noqa: PLC0415
+        AGENT_TO_PHASE,
+        extra_agents_for,
+        resolve_involvement,
+    )
+    from shared.authz.effective_role import effective_platform_role  # noqa: PLC0415
+
+    tenant_id = _tenant_id(request)
+    project = await _project_or_404(db, tenant_id, project_id)
+    user_id = getattr(request.state, "user_id", "") or ""
+    role = await effective_platform_role(db, request)
+    extras = await extra_agents_for(db, project_id=str(project.id), user_id=user_id)
+
+    reach: dict[str, str] = {}
+    for agent_id in AGENT_REGISTRY:
+        involvement = await resolve_involvement(
+            db, tenant_id=tenant_id, project_id=str(project.id), role=role,
+            user_id=user_id, agent_id=agent_id, extra_agents=extras,
+        )
+        reach[AGENT_TO_PHASE.get(agent_id, agent_id)] = involvement
+    return {
+        "projectId": str(project.id),
+        "role": role,
+        "extraAgents": sorted(AGENT_TO_PHASE.get(a, a) for a in extras),
+        "reach": reach,
+    }
 
 
 # ── agent access overrides ───────────────────────────────────────────────────
