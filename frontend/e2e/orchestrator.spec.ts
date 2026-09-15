@@ -14,7 +14,9 @@ import { expect, test, type Page } from "@playwright/test";
  *     the conversation — so "runs the roster stage by stage" describes nothing.
  *   · There are no gates and no sign-off (D5), so every gate assertion is gone.
  *   · There is no "Run the pipeline" button; the surface is a chat.
- *   · The right panel is Deliverables, not Artifacts (D11).
+ *   · The right panel's first tab is Deliverables, not Artifacts (D11). Since 2026-09-15
+ *     a THIRD tab called Artifacts lists the project's approved documents — a
+ *     different thing, offered only once a project is open.
  *   · The Copilot it replaced no longer exists (D18).
  *
  * SCOPE. This runs in the default `chromium` project, which boots with MSW mocks and no
@@ -68,9 +70,11 @@ test.describe("Orchestrator — the merged surface", () => {
     await expect(page.getByText(/you do not have access/i)).toHaveCount(0);
   });
 
-  test("the right panel is Deliverables, not Artifacts", async ({ page }) => {
+  test("the right panel's first tab is Deliverables, and Artifacts waits for a project", async ({ page }) => {
     // D11: what the Orchestrator's agents produce is a different concept from the
-    // approval-gated artifacts the standalone agents write, and the tab says so.
+    // approval-gated artifacts the standalone agents write, and the first tab says so.
+    // The Artifacts tab that DOES exist lists those approval-gated documents for the
+    // open project — so with no project picked, as here, it is not offered at all.
     await signInAsPlatformRole(page, /^Project Admin\b/i);
     await gotoOrchestrator(page);
 
@@ -82,8 +86,9 @@ test.describe("Orchestrator — the merged surface", () => {
     const deliverables = page.getByRole("tab", { name: /^deliverables$/i })
       .or(page.getByRole("button", { name: /show deliverables panel/i }));
     await expect(deliverables.first()).toBeVisible({ timeout: 15_000 });
-    // And never the retired name on this surface.
-    await expect(page.getByRole("tab", { name: /^artifacts$/i })).toHaveCount(0);
+    // No project is open, so there is no record to list and no Artifacts tab. (With a
+    // project it is the third tab — see components/orchestrator/project-artifacts-tab.tsx.)
+    await expect(page.getByRole("tab", { name: /^artifacts/i })).toHaveCount(0);
   });
 
   test("there is no pipeline rail and no gate controls", async ({ page }) => {

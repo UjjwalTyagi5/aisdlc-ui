@@ -787,6 +787,11 @@ export function OrchestratorCockpit({
               // interface with no data behind it, which on screen is exactly what an
               // agent that produced nothing looks like.
               tabLabel="Deliverables"
+              // The run's project, for the Artifacts tab: the project's APPROVED
+              // documents from every agent's own page, which the Orchestrator is now
+              // told about on every turn. Distinct from `deliverables` below, which
+              // is what THIS run produced.
+              projectId={projectId ? String(projectId) : null}
               artifacts={deliverables}
               openArtifactId={openDeliverableId}
               onSelectArtifact={setOpenDeliverableId}

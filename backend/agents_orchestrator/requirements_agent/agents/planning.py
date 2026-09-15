@@ -2941,7 +2941,7 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
     cache_key = (alias, model, credential_fingerprint(api_key, base_url), base_url or "")
     if cache_key in _ORCHESTRATOR_CACHE:
         return _ORCHESTRATOR_CACHE[cache_key]
-    from langchain_litellm import ChatLiteLLM  # deferred — see above
+    from shared.services.chat_litellm import ChatLiteLLM  # deferred — see above
 
     from shared.services.model_resolver import temperature_kwargs  # noqa: PLC0415
 
