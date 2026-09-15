@@ -3,7 +3,7 @@ import * as React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
@@ -125,6 +125,65 @@ describe("the deliverables panel", () => {
     });
     const group = screen.getByTestId("deliverable-group-security");
     expect(within(group).getAllByTestId("deliverable-time")).toHaveLength(2);
+  });
+
+  it("collapsing the group that holds the open deliverable deselects it, without a setState-in-render", () => {
+    // `toggleGroup` used to call the parent's `onSelectArtifact(null)` from inside its
+    // `setExpanded` updater. React runs updaters during render, so that was a parent
+    // setState during a child's render: "Cannot update a component (OrchestratorCockpit)
+    // while rendering a different component (ArtifactsTab)" on every collapse.
+    //
+    // A REAL PARENT, not a mock: React only raises that warning when the callback is
+    // another component's setState, so a `vi.fn()` here passes with the bug in place.
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      errors.push(args);
+    });
+    function Host() {
+      const [open, setOpen] = React.useState<string | null>("a");
+      return (
+        <>
+          <span data-testid="open">{open ?? "none"}</span>
+          <ArtifactsPanel
+            {...base}
+            activeStage="security"
+            tabLabel="Deliverables"
+            openArtifactId={open}
+            onSelectArtifact={setOpen}
+            artifacts={[art("a", "security", "Security Report")]}
+          />
+        </>
+      );
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <Host />
+        </QueryClientProvider>,
+      );
+      const group = screen.getByTestId("deliverable-group-security");
+      // The group header is the one button carrying aria-expanded; rows have none.
+      const header = () =>
+        within(group).getAllByRole("button").find((b) => b.hasAttribute("aria-expanded"))!;
+      // THREE CLICKS IN ONE BATCH. React computes a lone setState eagerly, in the
+      // event handler, and the bug hides. With updates already queued it defers the
+      // updater to the render phase — which is where the real page runs it, and where
+      // a parent setState from inside it is the error the user saw.
+      act(() => {
+        fireEvent.click(header()); // collapse (eager)
+        fireEvent.click(header()); // expand (queued)
+        fireEvent.click(header()); // collapse again — updater runs during render
+      });
+
+      expect(screen.getByTestId("open").textContent).toBe("none");
+      const setStateInRender = errors.filter((a) =>
+        String((a as unknown[])[0]).includes("while rendering a different component"),
+      );
+      expect(setStateInRender).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("shows no timestamp on a pointer, which has no single moment", () => {
