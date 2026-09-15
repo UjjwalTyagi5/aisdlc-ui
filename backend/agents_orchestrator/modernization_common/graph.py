@@ -74,7 +74,7 @@ def _chat_client(resolved: Any, max_tokens: int) -> Any:
         resolved.base_url or "", max_tokens,
     )
     if key not in _CLIENTS:
-        from langchain_litellm import ChatLiteLLM  # noqa: PLC0415 — ~7s import, deferred
+        from shared.services.chat_litellm import ChatLiteLLM  # noqa: PLC0415 — ~7s import, deferred
 
         _CLIENTS[key] = ChatLiteLLM(
             model=resolved.model,

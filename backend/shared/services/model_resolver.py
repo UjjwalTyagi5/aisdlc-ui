@@ -425,7 +425,7 @@ def resolve_chat_model(
         if offering_id and resolved.offering_id and resolved.offering_id != offering_id:
             logger.debug("node requested offering=%s but run resolved %s — using the run's",
                          offering_id, resolved.offering_id)
-        from langchain_litellm import ChatLiteLLM  # noqa: PLC0415 — importing litellm costs ~7s
+        from shared.services.chat_litellm import ChatLiteLLM  # noqa: PLC0415 — importing litellm costs ~7s
         llm = ChatLiteLLM(
             model=resolved.model,
             custom_llm_provider=resolved.litellm_provider,
@@ -450,7 +450,7 @@ def resolve_chat_model(
             "No BYOK model resolved for this run. An administrator must configure and "
             "verify a model provider in Org Settings -> Model Providers."
         )
-    from langchain_litellm import ChatLiteLLM  # noqa: PLC0415
+    from shared.services.chat_litellm import ChatLiteLLM  # noqa: PLC0415
     llm = ChatLiteLLM(
         model=ANTHROPIC_MODEL,
         custom_llm_provider="anthropic",

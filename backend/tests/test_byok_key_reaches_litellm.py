@@ -68,6 +68,8 @@ def test_every_byok_client_passes_the_named_key():
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
         for m in re.finditer(r"ChatLiteLLM\(", src):
+            if src[max(0, m.start() - 6):m.start()] == "class ":
+                continue  # shared/services/chat_litellm.py defines the class; it builds nothing
             # Look BEHIND as well as ahead: several sites build a `params` dict and
             # then splat it (`ChatLiteLLM(**params)`), so the credential kwargs sit
             # above the construction rather than inside it.
@@ -77,6 +79,104 @@ def test_every_byok_client_passes_the_named_key():
             if "litellm_key_kwargs" not in window:
                 offenders.append(f"{path.relative_to(root)}:{src[:m.start()].count(chr(10)) + 1}")
     assert not offenders, "ChatLiteLLM built with a key but no named-field override: " + ", ".join(offenders)
+
+
+# ── one call's credentials must not steer every other call ─────────────────────
+# Upstream `_client_params` runs on EVERY call and writes `api_base`, `api_key`, the
+# named key fields, `organization` and `extra_headers` onto `self.client` — the litellm
+# MODULE. Any later litellm call that does not pass its own value falls back to them.
+#
+# Live consequence (2026-09-15): a requirements run on azure/gpt-5-mini left
+# `litellm.api_base` on the business unit's Azure AI Foundry endpoint. Every "Test" of a
+# new Anthropic key after it — blank API base, valid sk-ant key — was sent THERE, came
+# back 404 "Resource not found", and read as "Reached an endpoint, but it has no such
+# model". The Anthropic key itself went to the Azure endpoint.
+_UNIT_A_BASE = "https://unit-a.services.ai.azure.com"
+_LITELLM_GLOBALS = (
+    "api_base", "api_key", "organization", "extra_headers",
+    "openai_key", "azure_key", "anthropic_key", "replicate_key", "cohere_key", "openrouter_key",
+)
+
+
+@pytest.fixture
+def litellm_globals():
+    """Snapshot litellm's module-level credentials and put them back afterwards, so a
+    client that still leaks cannot poison the tests that run after it."""
+    import litellm
+
+    before = {name: getattr(litellm, name, None) for name in _LITELLM_GLOBALS}
+    yield before
+    for name, value in before.items():
+        setattr(litellm, name, value)
+
+
+def _unit_a_client(**overrides):
+    from shared.services.chat_litellm import ChatLiteLLM
+
+    params = dict(
+        model="gpt-5-mini", custom_llm_provider="azure", api_base=_UNIT_A_BASE,
+        api_key="sk-unit-a", **litellm_key_kwargs("azure", "sk-unit-a"),
+    )
+    params.update(overrides)
+    return ChatLiteLLM(**params)
+
+
+def test_a_call_leaves_litellm_global_credentials_untouched(litellm_globals):
+    import litellm
+
+    _ = _unit_a_client(organization="org-unit-a")._client_params  # built on every call
+
+    assert {name: getattr(litellm, name, None) for name in _LITELLM_GLOBALS} == litellm_globals
+
+
+def test_each_call_carries_its_own_base_and_key(litellm_globals):
+    params = _unit_a_client()._client_params
+
+    assert params.get("api_base") == _UNIT_A_BASE
+    assert params.get("api_key") == "sk-unit-a"
+
+
+def test_the_byok_key_beats_a_platform_key_in_the_environment(litellm_globals, monkeypatch):
+    """ChatLiteLLM defaults `anthropic_api_key` from ANTHROPIC_API_KEY. The key this
+    client was built with is the one the call must send, override kwargs or not."""
+    from shared.services.chat_litellm import ChatLiteLLM
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-platform")
+    llm = ChatLiteLLM(model="claude-haiku-4-5", custom_llm_provider="anthropic", api_key="sk-byok")
+
+    assert llm._client_params.get("api_key") == "sk-byok"
+
+
+def test_the_organization_travels_with_the_call(litellm_globals):
+    params = _unit_a_client(organization="org-unit-a")._client_params
+
+    assert params.get("organization") == "org-unit-a"
+
+
+def test_no_code_builds_the_upstream_chatlitellm():
+    """One site still importing langchain_litellm's own class is enough to redirect every
+    other call in the process, so every construction goes through the shared one."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    allowed = root / "shared" / "services" / "chat_litellm.py"
+    upstream = re.compile(
+        r"from\s+langchain_litellm(?:\.[\w.]+)?\s+import\s+[^\n]*\bChatLiteLLM\b"
+        r"|langchain_litellm\.ChatLiteLLM\b"
+    )
+    offenders = []
+    for top in root.iterdir():
+        if not top.is_dir() or top.name in {".venv", "files", "tests"} or top.name.startswith("."):
+            continue
+        for path in top.rglob("*.py"):
+            if path == allowed or "tests" in path.parts or path.name.startswith("test_"):
+                continue
+            src = path.read_text(encoding="utf-8", errors="replace")
+            for m in upstream.finditer(src):
+                offenders.append(f"{path.relative_to(root)}:{src[:m.start()].count(chr(10)) + 1}")
+    for path in root.glob("*.py"):
+        src = path.read_text(encoding="utf-8", errors="replace")
+        for m in upstream.finditer(src):
+            offenders.append(f"{path.relative_to(root)}:{src[:m.start()].count(chr(10)) + 1}")
+    assert not offenders, "Build ChatLiteLLM from shared.services.chat_litellm: " + ", ".join(offenders)
 
 
 # ── temperature: a measured list, because provider metadata is wrong ──────────
