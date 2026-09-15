@@ -511,9 +511,21 @@ class AuditEventOut(BaseModel):
 
     Derived fields (no ORM equivalents):
       projectId      = payload.get("project_id") if payload else null
+      projectName    = resolved by the caller; null when it could not be
       actor.name     = payload.get("actor_name", "system") if payload else "system"
       resource.name  = payload.get("resource_name") if payload else null
       ip             = payload.get("ip") if payload else null
+
+    NAMES ARE RESOLVED BY THE CALLER, NOT STORED. `actor_name` and `resource_name`
+    are payload keys that NOTHING WRITES -- not one of the 132 events on this
+    database carries either -- so both fell through to their fallbacks and the Audit
+    Trail rendered as three columns of raw UUID: who did it, and to what, both
+    unreadable. Denormalising a name at write time would not fix the events already
+    stored, and would go stale the first time somebody is renamed.
+
+    So `list_audit_events` looks the names up per page and passes them in here
+    (`shared/routers/audit.py::_resolve_names`). A payload value still wins when one
+    exists: it is what was true AT THE TIME, which is the stronger claim for a log.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -521,6 +533,7 @@ class AuditEventOut(BaseModel):
     id: str
     tenantId: str
     projectId: Optional[str]
+    projectName: Optional[str] = None
     action: str
     actor: AuditActorOut
     resource: AuditResourceOut
@@ -529,23 +542,42 @@ class AuditEventOut(BaseModel):
     ip: Optional[str]
 
     @classmethod
-    def from_orm_audit(cls, event: Any) -> "AuditEventOut":
-        """Build an AuditEventOut from a shared.models.orm.AuditEvent instance."""
+    def from_orm_audit(
+        cls,
+        event: Any,
+        *,
+        actor_name: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+    ) -> "AuditEventOut":
+        """Build an AuditEventOut from a shared.models.orm.AuditEvent instance.
+
+        The three `*_name` arguments are the resolved labels; omit them and this
+        degrades to exactly the old behaviour, which is what the run-scoped trail and
+        the tests that predate resolution rely on.
+        """
         payload = event.payload or {}
         actor_id = event.actor_id or "system"
+        project_id = str(payload["project_id"]) if payload.get("project_id") else None
         return cls(
             id=str(event.id),
             tenantId=str(event.tenant_id),
-            projectId=str(payload["project_id"]) if payload.get("project_id") else None,
+            projectId=project_id,
+            projectName=project_name,
             action=event.event_type,
             actor=AuditActorOut(
                 id=actor_id,
-                name=payload.get("actor_name", actor_id),
+                # The payload first (what was true then), the resolved name second,
+                # and the id only when neither exists -- an id is still better than
+                # an empty cell, because it can at least be searched for.
+                name=payload.get("actor_name") or actor_name or actor_id,
             ),
             resource=AuditResourceOut(
                 type=event.resource_type or "unknown",
                 id=event.resource_id or "unknown",
-                name=payload.get("resource_name"),
+                # `filename` last: an upload names itself in its own payload, and no
+                # table lookup can do better than the name the file was given.
+                name=payload.get("resource_name") or resource_name or payload.get("filename"),
             ),
             at=_iso(event.created_at),
             detail={k: v for k, v in payload.items()

@@ -8,6 +8,12 @@ export const AuditEvent = z.object({
   tenantId: TenantId,
   projectId: ProjectId.nullable(),
   /**
+   * Resolved server-side per page, so the row can say "Dummy T1" where it used to
+   * print a UUID. `.nullish()` because a backend that predates the resolution omits
+   * it entirely, and because an event outside any project legitimately has none.
+   */
+  projectName: z.string().nullish(),
+  /**
    * NOT the `AuditAction` enum. That enum is 14 values written from the spec; the
    * backend's vocabulary is open and already emits families it never listed —
    * `rbac.role.granted`, `rbac.custom_role.created`, `access.denied`. Validating

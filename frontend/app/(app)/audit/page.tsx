@@ -36,6 +36,17 @@ import type { AuditAction, AuditEvent } from "@/lib/schemas";
 const PAGE_SIZE = 50;
 
 /**
+ * The first segment of a UUID — enough to recognise a repeat or paste into a search,
+ * without spending a line of the row on it.
+ *
+ * Only ever shown when the server could not name the thing: a seeded id like
+ * `demo-dev` is already legible and is left alone.
+ */
+function shortId(id: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id) ? `${id.slice(0, 8)}…` : id;
+}
+
+/**
  * The actions the filter OFFERS are derived from the actions present, not from a
  * fixed list.
  *
@@ -172,6 +183,7 @@ function AuditPageInner() {
         resource_id: e.resource.id,
         resource_name: e.resource.name ?? "",
         project_id: e.projectId ?? "",
+        project_name: e.projectName ?? "",
         ip: e.ip ?? "",
         detail: e.detail ? JSON.stringify(e.detail) : "",
       })),
@@ -185,6 +197,7 @@ function AuditPageInner() {
         { key: "resource_id", header: "resource_id" },
         { key: "resource_name", header: "resource_name" },
         { key: "project_id", header: "project_id" },
+        { key: "project_name", header: "project_name" },
         { key: "ip", header: "ip" },
         { key: "detail", header: "detail" },
       ],
@@ -442,19 +455,25 @@ function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => v
               {event.action}
             </Badge>
 
-            {/* Resource */}
-            <span className="text-muted-foreground font-mono text-[11px]">
+            {/* Resource — THE NAME LEADS, and the id only appears when there is no
+                name to lead with. This printed the full UUID first and appended the
+                name, so every row opened with 36 characters nobody can read and the
+                one legible part fell off the end of the line. The id is still on the
+                row as a title, in the detail panel, and in both exports. */}
+            <span className="text-muted-foreground font-mono text-[11px]" title={event.resource.id}>
               <span className="text-foreground font-semibold">{event.resource.type}</span>{" "}
-              {event.resource.id}
-              {event.resource.name ? ` · ${event.resource.name}` : ""}
+              {event.resource.name ?? shortId(event.resource.id)}
             </span>
           </div>
         </div>
 
-        {/* Project — right-aligned mono */}
+        {/* Project — right-aligned mono, named where the server could name it. */}
         {event.projectId && (
-          <span className="text-muted-foreground shrink-0 font-mono text-[10.5px]">
-            {event.projectId}
+          <span
+            className="text-muted-foreground shrink-0 font-mono text-[10.5px]"
+            title={event.projectId}
+          >
+            {event.projectName ?? shortId(event.projectId)}
           </span>
         )}
       </button>
@@ -490,11 +509,18 @@ function AuditDetail({ event, onClose }: { event: AuditEvent; onClose: () => voi
           <DetailRow label="Actor" value={`${event.actor.name} (${event.actor.id})`} />
           <DetailRow
             label="Resource"
-            value={`${event.resource.type} · ${event.resource.id}${
-              event.resource.name ? ` · ${event.resource.name}` : ""
+            value={`${event.resource.type} · ${
+              event.resource.name ? `${event.resource.name} (${event.resource.id})` : event.resource.id
             }`}
           />
-          {event.projectId && <DetailRow label="Project" value={event.projectId} />}
+          {event.projectId && (
+            <DetailRow
+              label="Project"
+              value={
+                event.projectName ? `${event.projectName} (${event.projectId})` : event.projectId
+              }
+            />
+          )}
           {event.ip && <DetailRow label="IP" value={event.ip} />}
           {event.detail && (
             <div className="mt-2">

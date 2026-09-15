@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.can_perform import visible_project_ids
@@ -57,6 +57,86 @@ def _actor_matches(actor: str):
     if actor == "system":
         return AuditEvent.actor_id.is_(None)
     return AuditEvent.actor_id == actor
+
+
+# WHERE A RESOURCE ID CAN BE GIVEN A NAME: resource_type -> (table, name column).
+#
+# `role_binding` points at USERS on purpose. shared/authz/audit.py records the
+# SUBJECT of the grant -- the person who received the role -- as the resource, not a
+# row in role_bindings: of the 87 rbac events on this database, 75 join to users and
+# NONE join to role_bindings. Looking them up in the table the type is named after
+# would therefore name none of them.
+#
+# A type absent from here keeps its id, which is the honest answer for a resource
+# this server cannot name.
+_RESOURCE_NAME_SOURCES: dict[str, tuple[str, str]] = {
+    "business_unit": ("workspaces", "display_name"),
+    "workspace": ("workspaces", "display_name"),
+    "project": ("projects", "display_name"),
+    "user": ("users", "email"),
+    "role_binding": ("users", "email"),
+}
+
+# Users have no display name on this schema -- `users` is (id, email, external_id,
+# password_hash, tenant_id, created_at, active) -- so the email IS the human label.
+_USER_LABEL = "email"
+
+
+async def _lookup(db: AsyncSession, table: str, name_col: str, ids: set[str]) -> dict[str, str]:
+    """`{id: name}` for the ids that exist, silently dropping the ones that do not.
+
+    Compares `id::text` rather than casting the parameter: a resource_id is a free-form
+    string column and holds things that are not UUIDs at all ("unknown", a run key), and
+    a cast would turn one such row into a 500 for the whole page.
+
+    `table` and `name_col` come from `_RESOURCE_NAME_SOURCES` above, never from the
+    request -- they are interpolated into SQL and must stay that way.
+    """
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        text(f"SELECT id::text AS id, {name_col} AS name FROM {table} WHERE id::text = ANY(:ids)"),
+        {"ids": list(ids)},
+    )).fetchall()
+    return {r.id: r.name for r in rows if r.name}
+
+
+async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict]:
+    """Names for one page of events: `(actors, resources, projects)`.
+
+    THE AUDIT TRAIL WAS THREE COLUMNS OF UUID. `actor_name` and `resource_name` are
+    payload keys that nothing writes, so every row fell through to the id -- you could
+    see that somebody was denied `role:manage` on a business unit, and not who or which.
+
+    One query per distinct table per page, not per row: at most four extra queries for
+    a page of fifty, all on the caller's own RLS session, so a name this caller may not
+    read simply does not come back.
+    """
+    actor_ids = {e.actor_id for e in rows if e.actor_id}
+    project_ids = {
+        str((e.payload or {}).get("project_id"))
+        for e in rows
+        if (e.payload or {}).get("project_id")
+    }
+
+    # Group the resource ids by the table that can name them, so two types sharing a
+    # table (user and role_binding both name a person) cost one query between them.
+    by_source: dict[tuple[str, str], set[str]] = {}
+    for e in rows:
+        source = _RESOURCE_NAME_SOURCES.get(e.resource_type or "")
+        if source and e.resource_id:
+            by_source.setdefault(source, set()).add(e.resource_id)
+
+    actors = await _lookup(db, "users", _USER_LABEL, actor_ids)
+    projects = await _lookup(db, "projects", "display_name", project_ids)
+
+    resolved: dict[tuple[str, str], str] = {}
+    for (table, name_col), ids in by_source.items():
+        found = await _lookup(db, table, name_col, ids)
+        for rtype, source in _RESOURCE_NAME_SOURCES.items():
+            if source == (table, name_col):
+                resolved.update({(rtype, rid): name for rid, name in found.items()})
+    return actors, resolved, projects
 
 
 @audit_router.get(
@@ -172,8 +252,17 @@ async def list_audit_events(
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(stmt)).scalars().all()
 
+    actors, resources, projects = await _resolve_names(db, list(rows))
     return Paginated(
-        items=[AuditEventOut.from_orm_audit(e) for e in rows],
+        items=[
+            AuditEventOut.from_orm_audit(
+                e,
+                actor_name=actors.get(e.actor_id or ""),
+                resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
+                project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
+            )
+            for e in rows
+        ],
         pagination=Pagination(page=page, pageSize=page_size, total=total),
     )
 
@@ -236,7 +325,18 @@ async def get_run_audit(
     stmt = stmt.order_by(AuditEvent.created_at.desc()).limit(page_size)
     rows = (await db.execute(stmt)).scalars().all()
 
-    items = [AuditEventOut.from_orm_audit(e) for e in rows]
+    # The same names here: one run's trail is mostly people acting on artifacts, and
+    # "who approved this" is the question it exists to answer.
+    actors, resources, projects = await _resolve_names(db, list(rows))
+    items = [
+        AuditEventOut.from_orm_audit(
+            e,
+            actor_name=actors.get(e.actor_id or ""),
+            resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
+            project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
+        )
+        for e in rows
+    ]
 
     # Build next cursor from the last row's created_at (none if fewer rows than page_size)
     next_cursor: Optional[str] = None
