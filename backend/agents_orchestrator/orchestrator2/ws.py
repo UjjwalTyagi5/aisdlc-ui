@@ -89,6 +89,9 @@ from agents_orchestrator.orchestrator2.attachments import attachment_context
 from agents_orchestrator.orchestrator2.context import handoff_context
 from agents_orchestrator.orchestrator2 import sessions
 from agents_orchestrator.orchestrator2.dispatch import run_agent
+from agents_orchestrator.orchestrator2.project_documents import (
+    approved_documents_context,
+)
 from agents_orchestrator.orchestrator2.router import (
     _HISTORY_LIMIT as _ROUTER_HISTORY_LIMIT,
     route,
@@ -759,6 +762,22 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
             )
 
             try:
+                # What the PROJECT has approved — every document any agent produced
+                # (or a person uploaded) that went through approval, on any page.
+                # Read ONCE per turn, before routing, because it has two readers:
+                # the router, whose direct-reply path is where "this appears to be a
+                # fresh or empty project context" came from, and the chosen agent,
+                # which holds `read_document` and needs the id to call it with.
+                #
+                # From the verified `runs` row's project, like every other
+                # project-scoped value on this path — never the frame's.
+                #
+                # This RAISES when the read failed, and the turn is then refused by
+                # the handler below — the posture `handoff_context` and
+                # `attachment_context` already take. An Orchestrator that routed
+                # anyway would tell the user their approved BRD does not exist.
+                documents = await approved_documents_context(project_id, tenant_id)
+
                 if override_agent:
                     agent_id = override_agent
                     reason = "You named this agent, so nothing was inferred."
@@ -786,6 +805,10 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # model AND the roster it is told about to this project's
                         # track's portfolio.
                         track=track,
+                        # The project's approved documents, so a question about what
+                        # exists is answered from the record, and a request about one
+                        # of them routes to the agent that produced it.
+                        documents=documents,
                     )
                     if decision.agent_id is None:
                         # Answered without a delivery agent. NO `agent.selected`:
@@ -852,6 +875,16 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 attached = await attachment_context(run_id, user_id=user_id)
                 if attached:
                     context = f"{attached}\n\n{context}" if context else attached
+
+                # The project's approved documents — the same block the router was
+                # given above — LAST, after the user's input and the run's own work.
+                # It is the smallest of the blocks and the one the agent acts on by
+                # calling a tool, so it sits where the tool instruction is freshest.
+                # A separate block rather than part of `handoff_context` for the
+                # reason `attachments.py` gives: a different key (project, not run), a
+                # different table (`artifacts`, approval-gated), a different question.
+                if documents:
+                    context = f"{context}\n\n{documents}" if context else documents
 
                 _remember(history, "user", text)
                 await sessions.record_turn(

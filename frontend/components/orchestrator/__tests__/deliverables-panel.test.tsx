@@ -13,6 +13,10 @@ import { ArtifactsPanel } from "@/components/orchestrator/artifacts-panel";
  * Phase 5 deleted that surface, and the distinction it encodes outlives it: what the
  * STANDALONE agents write really is an Artifact, approval-gated and in its own table,
  * while the Orchestrator's output is a different concept and says so.
+ *
+ * Since the panel grew a real Artifacts tab (the project's approved documents), the
+ * first tab defaults to "Deliverables": a first tab called "Artifacts" beside a third
+ * tab called "Artifacts" would be two tabs with one name.
  */
 
 vi.mock("@/lib/api/runs", () => ({ getRun: async () => ({ id: "run-1" }) }));
@@ -64,15 +68,20 @@ function draw(props: Record<string, unknown>) {
 }
 
 describe("the deliverables panel", () => {
-  it("labels the tab Artifacts by default, so the Copilot is untouched", () => {
+  it("labels the first tab Deliverables by default", () => {
     draw({ activeStage: "design", artifacts: [] });
-    expect(screen.getByRole("tab", { name: /^artifacts$/i })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /^deliverables$/i })).toBeTruthy();
   });
 
-  it("labels the tab Deliverables when asked", () => {
+  it("still honours a caller's own label for the first tab", () => {
+    draw({ activeStage: "design", artifacts: [], tabLabel: "Outputs" });
+    expect(screen.getByRole("tab", { name: /^outputs$/i })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: /^deliverables$/i })).toBeNull();
+  });
+
+  it("offers no Artifacts tab without a project — there is no record to list", () => {
     draw({ activeStage: "design", artifacts: [], tabLabel: "Deliverables" });
-    expect(screen.getByRole("tab", { name: /^deliverables$/i })).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: /^artifacts$/i })).toBeNull();
+    expect(screen.queryByRole("tab", { name: /^artifacts/i })).toBeNull();
   });
 
   it("groups agent-wise", () => {

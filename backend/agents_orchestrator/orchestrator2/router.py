@@ -731,12 +731,61 @@ whichever agent does that work, exactly as it would have on any other turn.
 """
 
 
+#: Appended to the routing prompt when the project holds approved documents.
+#:
+#: THE BUG. The router answers "a follow-up about something already produced" itself,
+#: and nothing told it what the PROJECT had produced — only what this run's
+#: conversation said. A project with an approved BRD on its Requirements page was
+#: described, in the same project's Orchestrator, as "a fresh or empty project context".
+#: The document artifact system was built beside this engine, not into it.
+#:
+#: The block itself is rendered by `project_documents.approved_documents_context` and
+#: is METADATA ONLY — titles, ids, who approved them. The rules below say what to do
+#: with it: answer "what exists" from the list, and route "read / export / build on"
+#: to the agent whose stage produced the document, because that is the agent holding
+#: `read_document` for it. No `route_to_*` is typed into this prose — the test that
+#: guards the base prompt against that is applied to this text too.
+_DOCUMENTS_TEMPLATE = """
+
+{block}
+WHAT THE LIST ABOVE MEANS FOR YOUR DECISION:
+
+- These documents EXIST and are APPROVED, whatever this conversation has said so far.
+  Never tell the user this project is fresh, empty, or has no documents or artifacts
+  while the list is non-empty.
+- A question about WHICH documents or artifacts exist — "what has been approved", "are
+  there any artifacts in this project", "list the documents" — is yours to answer
+  directly, from the list: name each document and the agent that produced it. Do not
+  start an agent to answer that.
+- A request to READ, summarise, review, export (PDF, Word, Markdown), publish, or build
+  on one of them is agent work: route it to the agent whose stage produced the
+  document — it holds `read_document` for exactly that id — or, for a project-wide
+  document, to the agent whose work the request is about. Mention the document's
+  title in `reason` so the user sees which one was picked up.
+"""
+
+
+def _system_prompt_with_documents(base: str, documents: str) -> str:
+    """`base`, plus the project's approved documents when there are any.
+
+    `documents` is the rendered block from `project_documents`, or `""`. An empty
+    block adds nothing — not a heading, not the rules — so a project with nothing
+    approved sends the exact prompt it always did, and the tests pinning that prompt
+    stay honest.
+    """
+    if not (documents or "").strip():
+        return base
+    return base + _DOCUMENTS_TEMPLATE.format(block=documents.rstrip("\n") + "\n")
+
+
 def _system_prompt_with_continuity(
     last_agent: str | None,
     capabilities: Mapping[str, Any] | None = None,
     track: str = DEFAULT_TRACK,
+    documents: str = "",
 ) -> str:
-    """`_system_prompt`, plus who is mid-conversation when anyone is.
+    """`_system_prompt`, plus who is mid-conversation when anyone is, plus what the
+    project has approved when anything is.
 
     An unknown agent id is treated as no agent rather than raising: this is a hint,
     and a routing turn is the wrong place to fail over one. `last_agent` outside
@@ -744,13 +793,17 @@ def _system_prompt_with_continuity(
     or never did — offer it) is treated the same way: naming it in the continuity
     note would tell the model to route back to an agent the tool list does not
     include, which `_validated` would then have to refuse anyway.
+
+    Continuity first, documents after: both are appended, so the order only decides
+    which the model reads last, and the list of documents is the longer of the two.
     """
     source = _default_capabilities() if capabilities is None else capabilities
-    if not last_agent or last_agent not in source:
-        return _system_prompt(capabilities, track)
-    return _system_prompt(capabilities, track) + _CONTINUITY_TEMPLATE.format(
-        name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
-    )
+    prompt = _system_prompt(capabilities, track)
+    if last_agent and last_agent in source:
+        prompt += _CONTINUITY_TEMPLATE.format(
+            name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
+        )
+    return _system_prompt_with_documents(prompt, documents)
 
 
 def _llm_kwargs(resolved: Any) -> dict:
@@ -791,7 +844,7 @@ def _build_llm(resolved: Any) -> Any:
     merely importing this module must never cost it. `ws.py` imports its orchestrator2
     dependency (`dispatch`) at module scope, i.e. at process start, so an eager import
     here would land on boot the moment routing is wired into that socket."""
-    from langchain_litellm import ChatLiteLLM  # noqa: PLC0415
+    from shared.services.chat_litellm import ChatLiteLLM  # noqa: PLC0415
 
     return ChatLiteLLM(**_llm_kwargs(resolved))
 
@@ -1172,8 +1225,16 @@ async def route(
     offering_id: str | None,
     last_agent: str | None = None,
     track: str = "greenfield",
+    documents: str = "",
 ) -> RoutingDecision:
     """Decide which agent in `track`'s portfolio handles `text`, or answer directly.
+
+    `documents` is the project's approved-documents block from
+    `project_documents.approved_documents_context`, or `""`. It changes what the model
+    is TOLD, never what it may choose: with it, "are there any artifacts in this
+    project?" is answered from the record instead of from nothing, and "give me a PDF
+    of the BRD" routes to the agent whose stage produced the BRD. `""` — no project, or
+    nothing approved — sends the prompt exactly as before.
 
     `prefilter` first: an explicit imperative naming an agent is answered without
     spending a model call, and the reason says so — "because you named it" is the only
@@ -1252,8 +1313,11 @@ async def route(
         offering_id=offering_id,
         # The one piece of turn-to-turn state this router has. It does not order the
         # agents and does not decide anything; it tells the model that a question is
-        # outstanding, which a bare "2" does not carry on its own.
-        system_prompt=_system_prompt_with_continuity(last_agent, capabilities, track),
+        # outstanding, which a bare "2" does not carry on its own. `documents` is the
+        # other fact about the run the model cannot see from the conversation alone.
+        system_prompt=_system_prompt_with_continuity(
+            last_agent, capabilities, track, documents=documents,
+        ),
         capabilities=capabilities,
     )
     return _validated(decision, valid_ids)

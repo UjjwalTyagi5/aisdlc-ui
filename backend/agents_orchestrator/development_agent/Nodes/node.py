@@ -39,7 +39,7 @@ async def _resolve_llm(state) -> object:
     resolved = await resolve_model_for_run(
         state.get("tenant_id", ""), state.get("model_id"), offering_id=state.get("offering_id"))
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    from langchain_litellm import ChatLiteLLM
+    from shared.services.chat_litellm import ChatLiteLLM
     from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
     return ChatLiteLLM(
         model=resolved.model,
