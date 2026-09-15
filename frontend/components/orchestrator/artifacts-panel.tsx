@@ -29,6 +29,11 @@ import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import { ArtifactViewer } from "@/components/orchestrator/artifact-viewer";
+import {
+  ProjectArtifactsTab,
+  isApprovedProjectArtifact,
+  useProjectArtifacts,
+} from "@/components/orchestrator/project-artifacts-tab";
 import { AGENT_STAGES, stageLabel } from "@/lib/orchestrator/stages";
 import type { Artifact, ArtifactKind } from "@/lib/orchestrator/artifacts";
 import type { ActivityItem, ConnState } from "@/lib/orchestrator/chat-types";
@@ -53,15 +58,23 @@ export interface ArtifactsPanelProps {
   /** WS connection status — drives the "Reconnecting…" banner. */
   connectionStatus?: ConnState;
   /**
-   * What the first tab is called. The Orchestrator passes `"Deliverables"`; the
-   * default is kept for any caller that does not.
+   * What the first tab is called. Defaults to `"Deliverables"`, which is what the
+   * Orchestrator passes.
    *
    * A PROP rather than a rename: this file was shared with the Copilot until Phase 5
    * deleted that surface, and the distinction it encodes outlives it — what the
    * STANDALONE agents write really is an Artifact, approval-gated and in its own
-   * table, while the Orchestrator's output is a different concept and says so.
+   * table, while the Orchestrator's output is a different concept and says so. The
+   * default used to be `"Artifacts"`; now that the third tab IS the project's
+   * artifacts, a first tab by that name would be two tabs with one name.
    */
   tabLabel?: string;
+  /**
+   * The run's project. When set, a third tab — Artifacts — lists the project's
+   * APPROVED documents from every agent's page (`ProjectArtifactsTab`). A run with no
+   * project has no record to list, so the tab is not offered rather than shown empty.
+   */
+  projectId?: string | null;
   className?: string;
 }
 
@@ -72,7 +85,12 @@ export interface ArtifactsPanelProps {
 //: Activity AND Context from the Copilot. The first two carry what THIS run produced
 //: and what it is doing; Context restated the run's stage and gate position, which is
 //: exactly the linear-pipeline framing the Orchestrator was built to remove.
-type Tab = "artifacts" | "activity";
+//:
+//: `project` is the third tab, added 2026-09-15: the PROJECT's approved artifacts, from
+//: every agent's own page. Named `project` internally because the first tab's internal
+//: id is still `artifacts` (it predates the label prop) and the two must not be confused
+//: — see `ProjectArtifactsTab` for the distinction.
+type Tab = "artifacts" | "activity" | "project";
 
 // Resizable panel bounds. The panel is anchored right; its handle lives on the
 // left edge (facing the chat). Design docs embed wide C4/ER diagrams and code, so
@@ -102,17 +120,17 @@ const LIST_KEY_STEP_COARSE = 80;
 const clampNum = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 
 /**
- * The right column: an `Artifacts | Activity | Context` tab strip.
+ * The right column: a `Deliverables | Activity | Artifacts` tab strip.
  *
- *  - Artifacts — a stage-grouped list of produced artifacts (current stage
- *    expanded) beside/above the selected artifact in `ArtifactViewer`. A live
- *    streaming artifact shows selected + building. Empty state when none yet.
+ *  - Deliverables — a stage-grouped list of what THIS RUN's agents produced (current
+ *    stage expanded) beside/above the selected item in `ArtifactViewer`. A live
+ *    streaming item shows selected + building. Empty state when none yet.
  *  - Activity — the live agent-action feed (tool calls, thinking, stage
  *    changes, turns) plus a working/stuck/reconnecting status line.
- *  - Context — the run's stage / approver / status / cost / id (relocated
- *    verbatim from the former `ArtifactPanel`).
+ *  - Artifacts — the PROJECT's approved documents from every agent's page, grouped
+ *    by producing agent, with download links. Only when the run has a project.
  *
- * Collapsible; the parent auto-opens (uncollapses) when an artifact arrives.
+ * Collapsible; the parent auto-opens (uncollapses) when a deliverable arrives.
  */
 export function ArtifactsPanel({
   runId,
@@ -128,9 +146,18 @@ export function ArtifactsPanel({
   stuck = false,
   idleSeconds = 0,
   connectionStatus = "idle",
-  tabLabel = "Artifacts",
+  tabLabel = "Deliverables",
+  projectId = null,
   className,
 }: ArtifactsPanelProps) {
+  // The project's approved documents — fetched only when there is a project. Read
+  // here rather than inside the tab so the badge on the tab strip can show the count
+  // before the tab is ever opened; the tab shares the same cached query.
+  const projectArtifactsQ = useProjectArtifacts(projectId);
+  const approvedCount = React.useMemo(
+    () => (projectArtifactsQ.data ?? []).filter(isApprovedProjectArtifact).length,
+    [projectArtifactsQ.data],
+  );
 
   // While the Development stage is active, always surface a live code-tree
   // artifact so the driver can watch the repo as the agent clones/edits it —
@@ -390,6 +417,16 @@ export function ArtifactsPanel({
               )}
             </span>
           </TabButton>
+          {projectId && (
+            <TabButton
+              id="project"
+              active={tab === "project"}
+              onClick={() => setTab("project")}
+              count={approvedCount}
+            >
+              Artifacts
+            </TabButton>
+          )}
         </div>
         <Button
           variant="ghost"
@@ -411,6 +448,8 @@ export function ArtifactsPanel({
           onSelectArtifact={onSelectArtifact}
           streamingArtifactId={streamingArtifactId}
         />
+      ) : tab === "project" && projectId ? (
+        <ProjectArtifactsTab projectId={projectId} />
       ) : (
         <ActivityTab
           activity={activity}
