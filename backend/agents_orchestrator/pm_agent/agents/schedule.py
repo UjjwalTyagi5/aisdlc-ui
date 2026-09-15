@@ -768,29 +768,13 @@ try:
 except Exception:  # noqa: BLE001
     _DOCUMENT_TOOLS = []
 
-try:
-    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+# CONNECTOR TOOLS ARE NOT LISTED HERE ANY MORE. They are resolved per run from what
+# this project granted THIS stage — see shared/tools/stage_tools. A literal list here
+# was the defect: the "Tools per stage" picker could grant a connector the agent had no
+# tool for, and this agent told a user it could only publish to SharePoint while
+# Confluence sat granted and read-write in that project's settings.
+from shared.tools.stage_tools import tools_for_stage  # noqa: E402
 
-    # Publishes APPROVED documents only, and cannot delete anything from the library —
-    # see shared/tools/sharepoint_artifacts. `agent_id` and `stage` are bound here and
-    # never taken from a tool argument, or a prompt could claim another agent's grant.
-    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="plan", stage="plan")
-except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
-    _SHAREPOINT_TOOLS = []
-    logger.warning("PM agent: project document tools unavailable")
-
-try:
-    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
-
-    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM. Asked to publish an approved
-    # document to Confluence, this agent used to answer that the platform "only
-    # publishes to SharePoint" — truthfully, because the Confluence tools existed in
-    # the connector and were bound to no agent but Documentation. Bound the same way as
-    # SharePoint: agent and stage fixed here, never taken from a tool argument.
-    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="plan", stage="plan")
-except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
-    _CONFLUENCE_TOOLS = []
-    logger.warning("PM agent: Confluence document tools unavailable")
 
 try:
     from shared.tools.project_team import make_team_tools  # noqa: PLC0415
@@ -819,8 +803,6 @@ tools = [
     save_plan,
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
-    *_SHAREPOINT_TOOLS,
-    *_CONFLUENCE_TOOLS,
     *_TEAM_TOOLS,
 ]
 
@@ -1066,7 +1048,10 @@ async def agent(state: AgentState):
         )
         # Bound HERE, not in the cached builder, so per-run MCP tools never leak across
         # runs through the shared orchestrator cache.
-        orch = orch.bind_tools(tools + get_mcp_tools())
+        # Connector tools alongside the MCP ones, resolved per run for the same
+        # reason: what this project granted this stage can change between runs,
+        # and a cached binding would serve a stale answer.
+        orch = orch.bind_tools(tools + get_mcp_tools() + await tools_for_stage("plan", "plan"))
         response = await guarded_completion(
             resolved, orch, clean, tenant_id=tenant_id, agent_type="plan",
             config={"metadata": {"user_api_key_alias": resolved.alias}},
@@ -1083,7 +1068,10 @@ async def agent(state: AgentState):
 async def action(state: AgentState):
     last = state["messages"][-1]
     results = []
-    available = {t.name: t for t in tools + get_mcp_tools()}
+    available = {
+        t.name: t
+        for t in tools + get_mcp_tools() + await tools_for_stage("plan", "plan")
+    }
     for tc in getattr(last, "tool_calls", []) or []:
         try:
             fn = available.get(tc["name"])
