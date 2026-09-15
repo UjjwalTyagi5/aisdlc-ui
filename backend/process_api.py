@@ -1211,8 +1211,9 @@ app.include_router(conversations_router, tags=["conversations"], dependencies=[_
 # Development agent modal before launching a session.  Gated by the artifact:view floor
 # (any authenticated platform user).  {project_id} path param reserved for future
 # per-project connector resolution — creds come from env for now.
-from shared.routers.dev_workspace import dev_workspace_router
+from shared.routers.dev_workspace import dev_workspace_router, repo_picker_router
 app.include_router(dev_workspace_router, prefix="/dev", tags=["dev-workspace"], dependencies=[_VIEW_DEP])
+app.include_router(repo_picker_router, prefix="/dev", tags=["dev-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.code_review_workspace import code_review_workspace_router
 app.include_router(code_review_workspace_router, prefix="/code-review", tags=["code-review-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.security_workspace import security_workspace_router

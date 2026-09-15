@@ -314,6 +314,24 @@ async def assert_agent_access_for_chat_on_track(
     return resolved_project_id
 
 
+def require_any_agent_access(*agent_ids: str, project_id_param: str = "project_id"):
+    """`require_agent_access` for a route that serves SEVERAL agents' pages.
+
+    THE REPO PICKER IS THE CASE. `/dev/{id}/sources`, `/ado/projects`, `/repos` and
+    `/branches` feed every target dialog on the platform — code review, security,
+    testing, deployment, documentation, development — but lived behind
+    `require_agent_access("development")`. A QA granted Code Review, and the
+    Architect who OWNS Code Review, got 403 on the cascade and a dialog that said
+    "No Azure DevOps projects found" — the connector was fine; the gate was another
+    agent's. The caller passes when they reach ANY of the named agents on the
+    project; the per-agent gates on the real work (prepare a review, pull a
+    workspace) stay exactly as strict as they were.
+    """
+    if not agent_ids:
+        raise ValueError("require_any_agent_access needs at least one agent id")
+    return _require_agents(tuple(agent_ids), project_id_param)
+
+
 def require_agent_access(agent_id: str, project_id_param: str = "project_id"):
     """Router-level dependency enforcing `check_agent_access` on `{project_id_param}`.
 
@@ -324,7 +342,10 @@ def require_agent_access(agent_id: str, project_id_param: str = "project_id"):
     `require_project_access`'s own no-project-in-path behavior — there is nothing to
     scope to.
     """
+    return _require_agents((agent_id,), project_id_param)
 
+
+def _require_agents(agent_ids: tuple[str, ...], project_id_param: str):
     async def _dep(
         request: Request, db: AsyncSession = Depends(get_db_session)
     ) -> None:
@@ -351,9 +372,16 @@ def require_agent_access(agent_id: str, project_id_param: str = "project_id"):
             raise HTTPException(status_code=404, detail="not found")
 
         role = await effective_platform_role(db, request)
-        await assert_agent_access(
-            db, tenant_id=str(tenant_id), project_id=str(project.id),
-            role=role, user_id=str(user_id), agent_id=agent_id,
+        for candidate in agent_ids:
+            if await check_agent_access(
+                db, tenant_id=str(tenant_id), project_id=str(project.id),
+                role=role, user_id=str(user_id), agent_id=candidate,
+            ):
+                return
+        named = ", ".join(agent_ids)
+        raise HTTPException(
+            status_code=403,
+            detail=f"You don't have access to the {named} agent on this project.",
         )
 
     _dep.__rbac_require_permission__ = True  # D-05 boot-scan sentinel
