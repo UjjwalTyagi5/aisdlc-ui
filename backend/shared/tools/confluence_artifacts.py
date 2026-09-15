@@ -71,7 +71,6 @@ async def _resolve(agent_id: str):
             project_id=project_id, agent_id=agent_id,
             owner_id=get_user_id() or "",
         )
-        return (connector, tenant_id, project_id), ""
     except Exception as exc:  # noqa: BLE001
         # Type name only: a connector error can carry a token or a site URL.
         return None, (
@@ -79,6 +78,82 @@ async def _resolve(agent_id: str):
             "connected for this project — an admin connects it on the project's "
             "Integrations page."
         )
+    if await _not_connected(connector, tenant_id):
+        return None, f"ERROR: {_not_connected_message()}"
+    return (connector, tenant_id, project_id), ""
+
+
+async def _not_connected(connector: Any, tenant_id: str) -> bool:
+    """True when the acting user has no Confluence credential on this project.
+
+    Checked once here rather than once per page: a publish of five documents would
+    otherwise report five identical failures, and a search would report httpx's
+    UnsupportedProtocol for the blank site URL an unconnected user resolves to.
+    Anything that is not a real connector (a test double) passes through.
+    """
+    auth_adapter = getattr(connector, "auth_adapter", None)
+    if not callable(auth_adapter):
+        return False
+    try:
+        auth = await auth_adapter(tenant_id=tenant_id)
+    except Exception:  # noqa: BLE001 — the request itself will say what is wrong
+        return False
+    return isinstance(auth, dict) and "token" in auth and not auth.get("token")
+
+
+def _why(exc: BaseException) -> str:
+    """What to tell the model about a failed call: the reason when it is one the user
+    can act on, otherwise the type name only (a connector error can carry a token or
+    a site URL)."""
+    try:
+        from config.connectors.confluence import ConfluenceNotConnected  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return type(exc).__name__
+    if isinstance(exc, ConfluenceNotConnected):
+        return str(exc)
+    return type(exc).__name__
+
+
+def _not_connected_message() -> str:
+    """The connector's own wording, plus what the model must do with it."""
+    from config.connectors.confluence import NOT_CONNECTED_MESSAGE  # noqa: PLC0415
+
+    return (
+        f"{NOT_CONNECTED_MESSAGE} Tell the user this plainly — it is their credential "
+        "that is missing, not a limitation of this agent."
+    )
+
+
+def attachment_card(name: str) -> str:
+    """The storage-format file card Confluence renders for an attached file."""
+    from html import escape  # noqa: PLC0415
+
+    return f'<p><ac:link><ri:attachment ri:filename="{escape(name, quote=True)}" /></ac:link></p>'
+
+
+async def _show_attachment_in_body(connector: Any, page_id: str, filename: str) -> None:
+    """Append the file card for `filename` to the page's body, once."""
+    page = await connector.read_adapter("fetch_page_detail", page_id=page_id)
+    body = page.get("content") or ""
+    card = attachment_card(filename)
+    if card in body:
+        return
+    await connector.write_adapter(
+        "update_page",
+        page_id=page_id,
+        title=page.get("title") or "",
+        content=body + card,
+        version=int(page.get("version") or 0) + 1 if page.get("version") else 0,
+    )
+
+
+async def _page_titled(connector: Any, space: str, title: str) -> Optional[dict]:
+    """The current page carrying `title` in `space`, or None."""
+    pages = await connector.read_adapter("list_pages", space=space, title=title)
+    for page in pages or []:
+        if (page.get("title") or "") == title and (page.get("status") or "current") == "current":
+            return page
+    return None
 
 
 def _space_required(space: str) -> Optional[str]:
@@ -102,6 +177,34 @@ def _url_suffix(page: dict) -> str:
     """` - <url>` when the API gave one, else nothing. Never a bare dash."""
     url = (page or {}).get("url") or ""
     return f" - {url}" if url else ""
+
+
+def page_body(name: str, *, attached: bool, attach_failed: bool = False) -> str:
+    """The storage-format body of a published document's page. Pure.
+
+    THE FILE HAS TO BE IN THE BODY. Confluence keeps attachments under the page's ⋯
+    menu; a body that merely says "the file is attached" shows prose and no file, and
+    the reader concludes the document never arrived — which is exactly what happened
+    with the first BRD published this way. An `<ac:link>` to `<ri:attachment>` is what
+    Confluence renders as a file card the reader can open.
+
+    Written in two passes because the attachment can only be uploaded to a page that
+    already exists: the page is created with `attached=False`, the file is uploaded,
+    and the body is then rewritten with `attached=True`. A body that linked the file
+    BEFORE the upload would, on an upload failure, promise a file that is not there.
+    """
+    from html import escape  # noqa: PLC0415
+
+    safe = escape(name, quote=True)
+    parts = [f"<p>Approved project document: <strong>{safe}</strong>.</p>"]
+    if attached:
+        parts.append(attachment_card(name) + "<p>The approved file is attached to this page.</p>")
+    elif attach_failed:
+        parts.append(
+            "<p>The approved file could not be attached to this page; the document "
+            "remains in the project's record.</p>"
+        )
+    return "".join(parts)
 
 
 def make_confluence_tools(agent_id: str, stage: str) -> list:
@@ -145,7 +248,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
             return f"ERROR creating the space: {exc}"
         except Exception as exc:  # noqa: BLE001
             return (
-                f"ERROR creating the space: {type(exc).__name__}. A space with that key "
+                f"ERROR creating the space: {_why(exc)}. A space with that key "
                 "may already exist, or this account may not be allowed to create spaces."
             )
         return (
@@ -183,8 +286,12 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         # two different answers about what is publishable.
         from shared.tools.sharepoint_artifacts import (  # noqa: PLC0415
             _approved_documents,
+            _approved_elsewhere,
+            _approved_owner_stage,
             _download,
             _unapproved_named,
+            nothing_to_publish,
+            owned_elsewhere,
         )
 
         docs = await _approved_documents(tenant_id, project_id, stage)
@@ -198,37 +305,56 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
                         "published to Confluence. Ask its owner to approve it first — "
                         "the Documents panel on this agent's screen is where that happens."
                     )
+                # Approved, but another stage's. The rule stands; the answer names the
+                # owner so the user goes there instead of re-approving.
+                owner = await _approved_owner_stage(tenant_id, project_id, filename)
+                if owner:
+                    return owned_elsewhere(filename, owner)
                 return f"ERROR: no approved document named {filename!r} on this project."
             docs = wanted
 
         if not docs:
-            return (
-                "There are no approved documents to publish yet. A document becomes "
-                "publishable once its owner approves it."
+            return nothing_to_publish(
+                stage, await _approved_elsewhere(tenant_id, project_id, stage)
             )
 
         published, failures = [], []
         for doc in docs:
             title = doc["name"].rsplit(".", 1)[0]
+            # PUBLISHING IS REPEATABLE. Confluence keeps page titles unique within a
+            # space, so a second publish of the same document — a new approved
+            # version, or a retry after the first attempt's reply was lost — got
+            # `400 A page with this title already exists` and the agent told the
+            # user to "check the space key". A page that already carries this title
+            # is that document's page: it is updated, and its attachment versioned,
+            # rather than refused.
+            page, existing = None, None
             try:
-                page = await connector.write_adapter(
-                    "create_page",
-                    space=space,
-                    title=title,
-                    content=(
-                        f"<p>Approved project document: <strong>{doc['name']}</strong>."
-                        "</p><p>The approved file is attached to this page.</p>"
-                    ),
-                    parent_id=parent_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"{doc['name']}: could not create its page ({type(exc).__name__})")
-                continue
+                existing = await _page_titled(connector, space, title)
+            except Exception:  # noqa: BLE001 — creation below still tells the truth
+                existing = None
+            if existing:
+                page = existing
+            else:
+                try:
+                    page = await connector.write_adapter(
+                        "create_page",
+                        space=space,
+                        title=title,
+                        # No attachment link yet — the file is uploaded to the page AFTER
+                        # it exists, and the body is rewritten once it has landed.
+                        content=page_body(doc["name"], attached=False),
+                        parent_id=parent_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"{doc['name']}: could not create its page ({_why(exc)})")
+                    continue
 
             page_id = str(page.get("id", ""))
-            note = ""
+            note = " (updated the existing page of that name)" if existing else ""
             if as_attachment and page_id:
                 data = await _download(doc["blob_path"])
+                attached = False
                 if data is None:
                     note = " (page created; its stored file could not be read to attach)"
                 elif len(data) > _MAX_ATTACHMENT_BYTES:
@@ -245,8 +371,25 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
                             content=data,
                             content_type=doc["content_type"],
                         )
+                        attached = True
                     except Exception as exc:  # noqa: BLE001
-                        note = f" (page created; attaching the file failed: {type(exc).__name__})"
+                        note = f" (page created; attaching the file failed: {_why(exc)})"
+                # SECOND PASS: make the body show the truth — a file card when the
+                # upload landed, a plain statement when it did not. Failing here loses
+                # nothing that was published, so it is noted rather than fatal.
+                try:
+                    await connector.write_adapter(
+                        "update_page",
+                        page_id=page_id,
+                        # The title we just created the page with — v2 rejects an
+                        # update without one, and passing it saves the connector a read.
+                        title=title,
+                        content=page_body(
+                            doc["name"], attached=attached, attach_failed=not attached,
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    note += f" (the page body could not be updated: {_why(exc)})"
             published.append((doc["name"], page.get("url", ""), note))
 
         if not published:
@@ -289,7 +432,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
                 content=content or "", parent_id=parent_id,
             )
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR creating the page: {type(exc).__name__}"
+            return f"ERROR creating the page: {_why(exc)}"
         return (
             f"Created page {page.get('title', title)!r} in {space} "
             f"(id: {page.get('id', '?')}){_url_suffix(page)}"
@@ -327,7 +470,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
                 "update_page", page_id=page_id, title=title, content=content,
             )
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR updating page {page_id}: {type(exc).__name__}"
+            return f"ERROR updating page {page_id}: {_why(exc)}"
         return f"Updated Confluence page {page.get('title', page_id)!r}{_url_suffix(page)}"
 
     @tool
@@ -347,7 +490,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         try:
             await connector.write_adapter("add_comment", page_id=page_id, text=text)
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR commenting on page {page_id}: {type(exc).__name__}"
+            return f"ERROR commenting on page {page_id}: {_why(exc)}"
         return f"Commented on Confluence page {page_id}."
 
     @tool
@@ -378,7 +521,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         try:
             hits = await connector.read_adapter("search_content", cql=cql)
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR searching Confluence: {type(exc).__name__}"
+            return f"ERROR searching Confluence: {_why(exc)}"
         if not hits:
             return f"Nothing in Confluence matches {query!r}."
         return NEWLINE.join(
@@ -438,8 +581,20 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
                 content=data, content_type=doc["content_type"],
             )
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR attaching {filename!r}: {type(exc).__name__}"
-        return f"Attached {filename!r} to Confluence page {page_id}."
+            return f"ERROR attaching {filename!r}: {_why(exc)}"
+        # THE FILE HAS TO BE IN THE BODY, here as in publish_approved_to_confluence:
+        # an attachment lives under the page's ⋯ menu, and a reader of a page that
+        # says "Design documentation for the QuickLink project." and shows no file
+        # concludes the file never arrived. So the page's body gains the file card.
+        try:
+            await _show_attachment_in_body(connector, page_id, filename)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"Attached {filename!r} to Confluence page {page_id}, but the page body "
+                f"could not be updated to show it ({_why(exc)}) — the file is under the "
+                "page's attachments."
+            )
+        return f"Attached {filename!r} to Confluence page {page_id}; the page now shows the file."
 
     @tool
     async def list_confluence_spaces() -> str:
@@ -451,7 +606,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         try:
             spaces = await connector.read_adapter("list_spaces")
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR listing Confluence spaces: {type(exc).__name__}"
+            return f"ERROR listing Confluence spaces: {_why(exc)}"
         if not spaces:
             return "This Confluence account can see no spaces."
         return "\n".join(
@@ -471,7 +626,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         try:
             pages = await connector.read_adapter("list_pages", space=space)
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR listing pages in {space}: {type(exc).__name__}"
+            return f"ERROR listing pages in {space}: {_why(exc)}"
         if not pages:
             return f"Space {space} has no pages yet."
         return "\n".join(
@@ -490,7 +645,7 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         try:
             page: Any = await connector.read_adapter("fetch_page_detail", page_id=page_id)
         except Exception as exc:  # noqa: BLE001
-            return f"ERROR reading that Confluence page: {type(exc).__name__}"
+            return f"ERROR reading that Confluence page: {_why(exc)}"
         if not page:
             return f"ERROR: no Confluence page with id {page_id!r}."
         body = page.get("body") or page.get("content") or ""
