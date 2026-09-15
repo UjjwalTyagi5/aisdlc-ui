@@ -27,16 +27,20 @@ import { SortableHead, type SortDir } from "@/components/ui/sortable-header";
 import { formatUsd } from "@/components/app/cost-dashboard";
 import { listTraces, type TraceFilters } from "@/lib/api/traces";
 import { qk } from "@/lib/api/query-keys";
-import { AgentType, type TraceListItem, type TraceScore } from "@/lib/schemas";
+import { AgentType, type TraceListItem } from "@/lib/schemas";
 
 const ALL = "all";
-const AGENT_OPTIONS = AgentType.options;
 
-function avgScore(scores: TraceScore[]): string {
-  if (scores.length === 0) return "—";
-  const avg = scores.reduce((a, s) => a + s.value, 0) / scores.length;
-  return avg.toFixed(2);
-}
+// SCORE IS NOT A COLUMN HERE. `_map_trace_list_item` in shared/routers/traces.py sets
+// `scores=[]` unconditionally, so the list endpoint has never carried one — and asking
+// Langfuse does not help: not one trace across all four bound projects has a score
+// attached (checked 2026-09-15), because nothing on this platform writes evaluations
+// yet. The column rendered "—" on every row for both reasons at once.
+//
+// The trace DETAIL endpoint does map real scores, so the data has a home the moment
+// evaluations start being written; bring the column back then, and populate it from
+// the `scores` key Langfuse already returns on the list rather than from `[]`.
+const AGENT_OPTIONS = AgentType.options;
 
 function fmtLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
@@ -48,11 +52,8 @@ function fmtLatency(ms: number): string {
  * those as text puts the slower trace first. Same trap with cost ("$0.0052") and score
  * ("—" for no scores).
  *
- * A trace with no scores sorts as -1 rather than 0, so "no score" and "scored zero"
- * do not interleave — they are different facts and a reader scanning for the worst
- * result should not find blanks mixed in among them.
  */
-type TraceSortKey = "name" | "agent" | "project" | "latency" | "cost" | "spans" | "score";
+type TraceSortKey = "name" | "agent" | "project" | "latency" | "cost" | "spans";
 
 const TRACE_SORTERS: Record<TraceSortKey, (t: TraceListItem) => string | number> = {
   name: (t) => t.name,
@@ -61,10 +62,6 @@ const TRACE_SORTERS: Record<TraceSortKey, (t: TraceListItem) => string | number>
   latency: (t) => t.latencyMs,
   cost: (t) => t.cost.usd,
   spans: (t) => t.spanCount,
-  score: (t) =>
-    t.scores.length === 0
-      ? -1
-      : t.scores.reduce((a, sc) => a + sc.value, 0) / t.scores.length,
 };
 
 export interface TracesExplorerProps {
@@ -205,7 +202,6 @@ export function TracesExplorer({
                 <SortableHead label="Latency" align="right" className="text-right" {...sortProps("latency")} />
                 <SortableHead label="Cost" align="right" className="text-right" {...sortProps("cost")} />
                 <SortableHead label="Spans" align="right" className="text-right" {...sortProps("spans")} />
-                <SortableHead label="Score" align="right" className="text-right" {...sortProps("score")} />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -248,9 +244,6 @@ export function TracesExplorer({
                     {formatUsd(t.cost.usd)}
                   </TableCell>
                   <TableCell className="text-right font-mono text-[12px]">{t.spanCount}</TableCell>
-                  <TableCell className="text-right font-mono text-[12px]">
-                    {avgScore(t.scores)}
-                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
