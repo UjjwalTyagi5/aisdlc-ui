@@ -268,3 +268,106 @@ def test_the_writer_and_the_reader_look_in_the_same_tables():
 
     for kind, source in _NAME_SOURCES.items():
         assert _SCOPE_NAME_SOURCES[kind] == source, kind
+
+
+# ── Every writer, not just the RBAC one ──────────────────────────────────────
+#
+# Artifacts, runs, deployments and artifact versions each build their own AuditEvent
+# and each stored ids alone, so each had the same failure: delete the project and the
+# record of what was approved inside it stops naming it, permanently. `capture_names`
+# is the single entry point they now share.
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_capture_names_reads_whichever_shape_the_writer_used():
+    """Four writers, four payload shapes, one answer for "what is this about"."""
+    from shared.authz.audit import capture_names
+
+    class _Session:
+        """Names a project `P`, a workspace `W`, and one user."""
+
+        async def execute(self, stmt, params=None):
+            sql = str(stmt)
+            ident = (params or {}).get("i", "")
+
+            class _R:
+                name = "P" if "projects" in sql else "W"
+                email = "a@b.com"
+
+            class _Res:
+                def first(_self):
+                    if "users" in sql:
+                        return _R() if ident == "u1" else None
+                    return _R() if ident in ("p1", "w1") else None
+
+            return _Res()
+
+    s = _Session()
+    assert (await capture_names(s, {"project_id": "p1"}, actor_id="u1"))["scope_name"] == "P"
+    assert (await capture_names(s, {"workspace_id": "w1"}))["scope_name"] == "W"
+    rbac = await capture_names(s, {"scope_kind": "business_unit", "scope_id": "w1"})
+    assert rbac["scope_name"] == "W"
+    assert (await capture_names(s, {"project_id": "p1"}, actor_id="u1"))["actor_name"] == "a@b.com"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_capture_names_never_overwrites_the_caller():
+    """A name the writer set deliberately is the one that was true; it wins."""
+    from shared.authz.audit import capture_names
+
+    class _S:
+        async def execute(self, *a, **k):
+            class _Res:
+                def first(_self):
+                    class _R:
+                        name = "Resolved"
+                        email = "resolved@b.com"
+                    return _R()
+            return _Res()
+
+    out = await capture_names(
+        _S(), {"project_id": "p1", "scope_name": "Kept", "actor_name": "kept@b.com"},
+        actor_id="u1",
+    )
+    assert out["scope_name"] == "Kept"
+    assert out["actor_name"] == "kept@b.com"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_failed_lookup_leaves_the_record_alone():
+    """An audit write must never fail because a name could not be read."""
+    from shared.authz.audit import capture_names
+
+    class _Broken:
+        async def execute(self, *a, **k):
+            raise RuntimeError("database is having a day")
+
+    out = await capture_names(_Broken(), {"project_id": "p1"}, actor_id="u1")
+    assert out == {"project_id": "p1"}
+
+
+@pytest.mark.unit
+def test_every_audit_writer_goes_through_capture_names():
+    """The sweep, pinned. A new writer that stores bare ids reintroduces the bug.
+
+    Checked as source text rather than behaviour because the alternative is a live
+    write per call site into an APPEND-ONLY table — there is no cleanup afterwards.
+    """
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2]
+    writers = [
+        "shared/routers/artifacts.py",
+        "shared/routers/runs.py",
+        "shared/services/deployment_gate.py",
+        "shared/services/artifact_versions.py",
+        "shared/audit/service.py",
+    ]
+    for rel in writers:
+        src = (backend / rel).read_text(encoding="utf-8")
+        assert "capture_names" in src, f"{rel} builds an AuditEvent without naming it"
+        # Every AuditEvent( construction in these files must take a captured payload.
+        assert src.count("payload=await capture_names(") >= src.count("AuditEvent("), rel

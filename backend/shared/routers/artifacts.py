@@ -35,6 +35,7 @@ from shared.authz.dependency import require_permission
 from shared.authz.project_scope import assert_can_administer_project
 from shared.authz.read_scope import is_org_wide
 from shared.db import get_db_session
+from shared.authz.audit import capture_names
 from shared.models.orm import Artifact, AuditEvent, Run
 from shared.routers._schemas import ArtifactOut, story_artifacts_from_run
 from shared.services.actor_labels import actor_labels, relabel
@@ -430,11 +431,14 @@ async def submit_artifact(
             event_type="artifact_submit",
             resource_type="artifact",
             resource_id=str(artifact.id),
-            payload={
+            payload=await capture_names(
+                db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
             },
+                actor_id=getattr(request.state, "user_id", None),
+            ),
         )
     )
     await db.flush()
@@ -513,12 +517,15 @@ async def approve_artifact(
             event_type="artifact_approve",
             resource_type="artifact",
             resource_id=str(artifact.id),
-            payload={
+            payload=await capture_names(
+                db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
                 "blob_path": artifact.blob_path,
             },
+                actor_id=getattr(request.state, "user_id", None),
+            ),
         )
     )
     # NO COMMIT HERE, and no refresh. `get_db_session` sets the RLS tenant with
@@ -587,12 +594,15 @@ async def reject_artifact(
             event_type="artifact_reject",
             resource_type="artifact",
             resource_id=str(artifact.id),
-            payload={
+            payload=await capture_names(
+                db, {
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
                 "artifact_type": artifact.artifact_type,
                 "reason": body.reason,
             },
+                actor_id=getattr(request.state, "user_id", None),
+            ),
         )
     )
     # See approve_artifact: the request-scoped dependency owns the commit.
@@ -665,7 +675,8 @@ async def delete_artifact(
             event_type="artifact_delete",
             resource_type="artifact",
             resource_id=str(artifact.id),
-            payload={
+            payload=await capture_names(
+                db, {
                 "run_id": str(artifact.run_id),
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
@@ -677,6 +688,8 @@ async def delete_artifact(
                 # destroying a real document and should not read the same in the log.
                 "had_stored_bytes": bool(artifact.blob_url) and is_blob,
             },
+                actor_id=getattr(request.state, "user_id", None),
+            ),
         )
     )
     await db.flush()
@@ -1069,7 +1082,8 @@ async def upload_artifact(
             event_type="artifact_upload",
             resource_type="artifact",
             resource_id=str(artifact.id),
-            payload={
+            payload=await capture_names(
+                db, {
                 "project_id": str(project.id),
                 "stage": stage,
                 "filename": filename,
@@ -1078,6 +1092,8 @@ async def upload_artifact(
                 # listed so the failure is visible rather than silent.
                 "stored": bool(getattr(artifact, "upload_succeeded", False)),
             },
+                actor_id=getattr(request.state, "user_id", None),
+            ),
         )
     )
     logger.info(

@@ -112,6 +112,56 @@ async def _actor_email(session: AsyncSession, actor_id: Optional[str]) -> Option
         return None
 
 
+async def capture_names(
+    session: AsyncSession,
+    payload: dict[str, Any],
+    *,
+    actor_id: Optional[str] = None,
+    resource_name: Optional[str] = None,
+) -> dict[str, Any]:
+    """`payload` with its `*_name` keys filled in, looked up NOW.
+
+    THE ONE ENTRY POINT for every audit writer that is not `record_rbac_change`.
+    Artifacts, runs, deployments and artifact versions all build their own
+    `AuditEvent` rows, and all of them stored ids alone — so all of them had the
+    failure this module documents: delete the project and the record of what was
+    approved inside it stops naming it, permanently, because `audit_events` cannot be
+    updated afterwards.
+
+    It reads the payload the caller already built rather than taking six arguments:
+    every one of these writers puts `project_id` in it, RBAC writers put
+    `scope_kind` + `scope_id`, and that is enough to know what to name. A caller that
+    names none of those gets its actor named and nothing else, which is correct.
+
+    Never raises and never overwrites: a key the caller set deliberately wins, and a
+    lookup that fails leaves the record exactly as it would have been.
+    """
+    out = dict(payload)
+
+    kind, ident = None, None
+    if out.get("scope_kind") and out.get("scope_id"):
+        kind, ident = str(out["scope_kind"]), str(out["scope_id"])
+    elif out.get("project_id"):
+        kind, ident = "project", str(out["project_id"])
+    elif out.get("workspace_id"):
+        kind, ident = "business_unit", str(out["workspace_id"])
+
+    if kind and not out.get("scope_name"):
+        name = await _name_of(session, kind, ident)
+        if name:
+            out["scope_name"] = name
+
+    if not out.get("actor_name"):
+        email = await _actor_email(session, actor_id)
+        if email:
+            out["actor_name"] = email
+
+    if resource_name and not out.get("resource_name"):
+        out["resource_name"] = resource_name
+
+    return out
+
+
 async def record_rbac_change(
     session: AsyncSession,
     *,

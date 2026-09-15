@@ -411,7 +411,7 @@ async def publish_version(
     row.published_by = published_by
     row.published_at = now
 
-    _audit(
+    await _audit(
         db, tenant_id=tenant_id, actor_id=published_by,
         event_type="artifact_version_publish", row=row,
         extra={
@@ -546,7 +546,7 @@ async def reject_version(
     row.status = "rejected"
     row.rejection_reason = reason.strip()
 
-    _audit(
+    await _audit(
         db, tenant_id=tenant_id, actor_id=rejected_by,
         event_type="artifact_version_reject", row=row,
         extra={"reason": row.rejection_reason},
@@ -564,7 +564,7 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
+async def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
            row: ArtifactVersion, extra: dict) -> None:
     """One audit row per decision, carrying the content hash.
 
@@ -573,21 +573,27 @@ def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
     """
     from shared.models.orm import AuditEvent  # noqa: PLC0415
 
+    from shared.authz.audit import capture_names  # noqa: PLC0415
+
     db.add(AuditEvent(
         tenant_id=tenant_id,
         actor_id=actor_id,
         event_type=event_type,
         resource_type="artifact_version",
         resource_id=str(row.id),
-        payload={
-            "project_id": str(row.project_id),
-            "stage": row.stage,
-            "version": row.version,
-            "content_hash": row.content_hash,
-            "produced_by": row.produced_by,
-            "covers": row.covers,
-            **extra,
-        },
+        payload=await capture_names(
+            db,
+            {
+                "project_id": str(row.project_id),
+                "stage": row.stage,
+                "version": row.version,
+                "content_hash": row.content_hash,
+                "produced_by": row.produced_by,
+                "covers": row.covers,
+                **extra,
+            },
+            actor_id=actor_id,
+        ),
     ))
 
 

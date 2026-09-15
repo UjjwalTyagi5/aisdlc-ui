@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
+from shared.authz.audit import capture_names
 from shared.models.orm import Artifact, AuditEvent, Project, Run
 from shared.services.attachment_store import (
     AttachmentError,
@@ -1023,13 +1024,19 @@ async def record_approval(
         event_type=f"run.{body.decision}d" if body.decision in ("approve", "reject") else "run.approval_recorded",
         resource_type="run",
         resource_id=str(run.id),
-        payload={
-            "decision": body.decision,
-            "reason": body.reason,
-            "idempotency_key": body.idempotencyKey,
-            "actor_name": actor_id,
-            "project_id": str(run.project_id),
-        },
+        # `actor_name` used to be set to `actor_id` here -- the id under the name's
+        # key, so the Audit Trail printed a UUID where it says it is printing a person.
+        # `capture_names` resolves the real one, and names the project while it exists.
+        payload=await capture_names(
+            db,
+            {
+                "decision": body.decision,
+                "reason": body.reason,
+                "idempotency_key": body.idempotencyKey,
+                "project_id": str(run.project_id),
+            },
+            actor_id=actor_id,
+        ),
     )
     db.add(audit)
     await db.flush()

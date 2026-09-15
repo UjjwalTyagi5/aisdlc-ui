@@ -78,6 +78,8 @@ class AuditEventService:
         Callers (emit, emit_blocking) must pass a payload that has already been through
         _redact_payload(); _write does NOT re-redact to keep the interface explicit.
         """
+        from shared.authz.audit import capture_names  # noqa: PLC0415 - import cycle
+
         start = time.monotonic()
         async with get_db_session_for_tenant(str(payload.tenant_id)) as session:
             session.add(
@@ -88,11 +90,15 @@ class AuditEventService:
                     event_type=payload.event_type,
                     resource_type=payload.resource_type,
                     resource_id=payload.resource_id or payload.run_id,
-                    payload={
-                        **payload.payload,
-                        "run_id": str(payload.run_id) if payload.run_id else None,
-                        "agent_type": payload.agent_type,
-                    },
+                    payload=await capture_names(
+                        session,
+                        {
+                            **payload.payload,
+                            "run_id": str(payload.run_id) if payload.run_id else None,
+                            "agent_type": payload.agent_type,
+                        },
+                        actor_id=payload.actor_id,
+                    ),
                 )
             )
         elapsed_ms = (time.monotonic() - start) * 1000

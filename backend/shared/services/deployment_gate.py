@@ -37,6 +37,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.authz.audit import capture_names
 from shared.models.orm import AuditEvent, Deployment
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ async def request_deployment(
     )
     db.add(dep)
     await db.flush()
-    db.add(_audit(tenant_id, requested_by, "deployment_request", dep))
+    db.add(await _audit(db, tenant_id, requested_by, "deployment_request", dep))
     return dep
 
 
@@ -134,7 +135,7 @@ async def approve_deployment(
     dep.approval_status = "approved"
     dep.approved_by = approver
     dep.approved_at = datetime.now(timezone.utc)
-    db.add(_audit(tenant_id, approver, "deployment_approve", dep))
+    db.add(await _audit(db, tenant_id, approver, "deployment_approve", dep))
     return dep
 
 
@@ -166,7 +167,7 @@ async def reject_deployment(
     dep.approved_by = approver or None
     dep.approved_at = datetime.now(timezone.utc)
     dep.rejection_reason = reason or None
-    db.add(_audit(tenant_id, approver, "deployment_reject", dep, reason=reason))
+    db.add(await _audit(db, tenant_id, approver, "deployment_reject", dep, reason=reason))
     return dep
 
 
@@ -211,7 +212,7 @@ async def claim_for_execution(
         )
 
     dep = await _load(db, deployment_id, tenant_id)
-    db.add(_audit(tenant_id, dep.approved_by or "system", "deployment_execute", dep))
+    db.add(await _audit(db, tenant_id, dep.approved_by or "system", "deployment_execute", dep))
     return dep
 
 
@@ -289,8 +290,8 @@ async def _load(
     return dep
 
 
-def _audit(
-    tenant_id: str, actor: str, event_type: str, dep: Deployment, **extra: Any
+async def _audit(
+    db: AsyncSession, tenant_id: str, actor: str, event_type: str, dep: Deployment, **extra: Any
 ) -> AuditEvent:
     """The record that survives whatever happens next.
 
@@ -303,14 +304,20 @@ def _audit(
         event_type=event_type,
         resource_type="deployment",
         resource_id=str(dep.id),
-        payload={
-            "project_id": str(dep.project_id),
-            "action": dep.action,
-            "target_kind": dep.target_kind,
-            "environment": dep.environment,
-            "request": dep.request,
-            "requested_by": dep.requested_by,
-            "approval_status": dep.approval_status,
-            **{k: v for k, v in extra.items() if v},
-        },
+        # Named at write time: a deployment record that cannot say WHICH project was
+        # deployed to, once that project is gone, is not evidence of anything.
+        payload=await capture_names(
+            db,
+            {
+                "project_id": str(dep.project_id),
+                "action": dep.action,
+                "target_kind": dep.target_kind,
+                "environment": dep.environment,
+                "request": dep.request,
+                "requested_by": dep.requested_by,
+                "approval_status": dep.approval_status,
+                **{k: v for k, v in extra.items() if v},
+            },
+            actor_id=actor or None,
+        ),
     )
