@@ -695,6 +695,12 @@ async def delete_artifact(
                 "run_id": str(artifact.run_id),
                 "project_id": str(artifact.project_id),
                 "stage": artifact.stage,
+                # A deletion's prior state is the thing itself. Recording the status
+                # it held is the difference between "an approved artifact was deleted"
+                # and "a draft was tidied up" — the same event_type, very different
+                # facts, and the row is the only place left to tell them apart.
+                "before": artifact.approval_status or "draft",
+                "after": "deleted",
                 "artifact_type": artifact.artifact_type,
                 "blob_path": blob_path,
                 "size_bytes": artifact.size_bytes,
@@ -1102,6 +1108,10 @@ async def upload_artifact(
                 "project_id": str(project.id),
                 "stage": stage,
                 "filename": filename,
+                # A creation: nothing was here before, and naming the file as the
+                # "after" is what makes the row legible without opening the payload.
+                "before": "none",
+                "after": filename,
                 "size_bytes": len(data),
                 # Whether the bytes actually landed. A row with no blob is still
                 # listed so the failure is visible rather than silent.

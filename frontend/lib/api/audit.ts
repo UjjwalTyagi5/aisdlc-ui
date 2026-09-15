@@ -18,6 +18,24 @@ export const listAuditEvents = (query?: {
     schema: paginated(AuditEvent),
   });
 
+/**
+ * The whole filtered trail, produced BY THE SERVER — which is what makes the export
+ * auditable. PRD §34.9 requires the act of exporting to be recorded, and a file the
+ * browser assembles from rows it already holds can only be recorded by asking the
+ * browser to own up. The same request that returns these rows writes that record.
+ *
+ * It also returns more than the page you are looking at: the old client-side export
+ * serialised the current 50 rows into a file named after the audit log.
+ */
+export const exportAuditEvents = (query?: {
+  fmt?: "csv" | "json";
+  projectId?: string;
+  workspaceId?: string;
+  actor?: string;
+  action?: string;
+  q?: string;
+}) => api("/audit/export", { query, schema: z.array(AuditEvent) });
+
 /** Org-level audit — all workspaces (admin only). Optional workspace_id narrows scope. */
 export const listOrgAuditEvents = (query?: {
   workspaceId?: string;

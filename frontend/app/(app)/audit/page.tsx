@@ -37,7 +37,7 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ApiErrorState } from "@/components/feedback/api-error-state";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
-import { listAuditEvents } from "@/lib/api/audit";
+import { exportAuditEvents, listAuditEvents } from "@/lib/api/audit";
 import { qk } from "@/lib/api/query-keys";
 import { downloadCsv, downloadJson } from "@/lib/export";
 import type { AuditAction, AuditEvent } from "@/lib/schemas";
@@ -180,10 +180,40 @@ function AuditPageInner() {
 
   const [selected, setSelected] = React.useState<AuditEvent | null>(null);
 
-  const exportCsv = () => {
+  const [exporting, setExporting] = React.useState(false);
+
+  /**
+   * The rows for an export, FROM THE SERVER — the whole filtered trail, not the page.
+   *
+   * Two things were wrong with building this here. It exported `items`, which is one
+   * page: "Export" on a four-thousand-event trail produced fifty rows in a file named
+   * after the audit log. And PRD §34.9 makes exporting an audited event, which a
+   * browser-side export cannot honestly be — the record has to be written by the thing
+   * that hands over the data, or it is a courtesy rather than a control.
+   */
+  const fetchExport = async (fmt: "csv" | "json") => {
+    setExporting(true);
+    try {
+      return await exportAuditEvents({
+        fmt,
+        actor: actorFilter === "all" ? undefined : actorFilter,
+        action: actionFilter === "all" ? undefined : actionFilter,
+        q: debouncedSearch || undefined,
+      });
+    } catch {
+      toast.error("Couldn't export — the trail was not read.");
+      return null;
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportCsv = async () => {
+    const rows = await fetchExport("csv");
+    if (!rows) return;
     downloadCsv(
       `audit-${new Date().toISOString().slice(0, 10)}.csv`,
-      items.map((e) => ({
+      rows.map((e) => ({
         id: e.id,
         at: e.at,
         actor_id: e.actor.id,
@@ -218,12 +248,14 @@ function AuditPageInner() {
         { key: "detail", header: "detail" },
       ],
     );
-    toast.success(`Exported ${items.length} events`);
+    toast.success(`Exported ${rows.length} events`);
   };
 
-  const exportJson = () => {
-    downloadJson(`audit-${new Date().toISOString().slice(0, 10)}.json`, items);
-    toast.success(`Exported ${items.length} events`);
+  const exportJson = async () => {
+    const rows = await fetchExport("json");
+    if (!rows) return;
+    downloadJson(`audit-${new Date().toISOString().slice(0, 10)}.json`, rows);
+    toast.success(`Exported ${rows.length} events`);
   };
 
   const pagination = auditQ.data?.pagination;
@@ -269,7 +301,7 @@ function AuditPageInner() {
             variant="outline"
             size="sm"
             onClick={exportCsv}
-            disabled={items.length === 0}
+            disabled={exporting || items.length === 0}
             className="border-line-soft"
           >
             <Download className="size-4" aria-hidden />
@@ -279,7 +311,7 @@ function AuditPageInner() {
             variant="outline"
             size="sm"
             onClick={exportJson}
-            disabled={items.length === 0}
+            disabled={exporting || items.length === 0}
             className="border-line-soft"
           >
             <Download className="size-4" aria-hidden />

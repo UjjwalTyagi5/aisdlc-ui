@@ -24,6 +24,14 @@ export async function GET(req: NextRequest) {
   if (projectId) to.set("project_id", projectId);
   const action = from.get("action");
   if (action) to.set("action", action);
+  // FORWARDED, because the page sends them and the backend applies them. This route
+  // dropped both, so `actor` and `q` were serialised into a request that then ignored
+  // them — the page asked the server to filter and the server returned everything,
+  // which looks exactly like a filter that does not work.
+  const actor = from.get("actor");
+  if (actor) to.set("actor", actor);
+  const q = from.get("q");
+  if (q) to.set("q", q);
 
   return bffProxy(`/audit?${to.toString()}`);
 }

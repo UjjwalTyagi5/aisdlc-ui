@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 # Event type vocabulary. Kept as constants because these strings are queried by the
 # audit UI and by compliance exports; a typo in a literal would silently produce a
 # category nothing reads.
+# PRD §34.9: "Export is itself an audited event." Taking the trail is an act on the
+# trail, and the only one that used to leave no mark on it.
+AUDIT_EXPORTED = "audit.exported"
+
 RBAC_ROLE_GRANTED = "rbac.role.granted"
 RBAC_ROLE_REVOKED = "rbac.role.revoked"
 RBAC_CUSTOM_ROLE_GRANTED = "rbac.custom_role.granted"

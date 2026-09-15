@@ -407,6 +407,8 @@ async def publish_version(
             superseded=current, replacement=row,
         )
 
+    # Read before the assignment overwrites it.
+    _was = row.status
     row.status = "published"
     row.published_by = published_by
     row.published_at = now
@@ -415,6 +417,14 @@ async def publish_version(
         db, tenant_id=tenant_id, actor_id=published_by,
         event_type="artifact_version_publish", row=row,
         extra={
+            # A publication REPLACES something, and which version it replaced is the
+            # part a reader cannot reconstruct later — v3 superseding v2 and v3 being
+            # the first published version are different facts about the same row.
+            "before": (
+                f"{_was}, superseding v{current.version}"
+                if current is not None else _was
+            ),
+            "after": f"published v{row.version}",
             "supersedes": current.version if current is not None else None,
             # THE PAYLOAD ITSELF, so the evidence of what was signed does not depend
             # on the artifact_versions row surviving unedited. The freeze trigger makes
@@ -543,13 +553,14 @@ async def reject_version(
             code="self_publication",
         )
 
+    _was = row.status
     row.status = "rejected"
     row.rejection_reason = reason.strip()
 
     await _audit(
         db, tenant_id=tenant_id, actor_id=rejected_by,
         event_type="artifact_version_reject", row=row,
-        extra={"reason": row.rejection_reason},
+        extra={"reason": row.rejection_reason, "before": _was, "after": "rejected"},
     )
     logger.info(
         "artifact version: %s/%s v%s rejected by %s", project_id, stage, version,

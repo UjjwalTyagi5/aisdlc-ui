@@ -121,6 +121,10 @@ async def _search_clause(db: AsyncSession, q: str):
 #
 # A type absent from here keeps its id, which is the honest answer for a resource
 # this server cannot name.
+# An export is a file a person opens, not a replication channel. Uncapped, on a
+# table that only grows, this is how a memory limit gets discovered in production.
+_EXPORT_MAX = 10_000
+
 _RESOURCE_NAME_SOURCES: dict[str, tuple[str, str]] = {
     "business_unit": ("workspaces", "display_name"),
     "workspace": ("workspaces", "display_name"),
@@ -217,21 +221,8 @@ async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict
     return actors, resolved, projects, scopes
 
 
-@audit_router.get(
-    "",
-    response_model=Paginated[AuditEventOut],
-    # The ORGANISATION-WIDE trail, gated on the permission that names it. It sat on
-    # the `artifact:view` floor that every role holds — including `contributor`, whose
-    # entire point is holding nothing yet — so any signed-in account could read the
-    # whole tenant's audit log over the API. The frontend already refused them the
-    # page; this is the backend catching up to that decision.
-    #
-    # `audit:view` is held by bu_admin and security_engineer (plus admin:*). The
-    # RUN-scoped trail below deliberately stays on the view floor: that is one run's
-    # own timeline, and reading it is part of reading the run.
-    dependencies=[Depends(require_permission("audit:view"))],
-)
-async def list_audit_events(
+# --------------------------------------------------------------------------
+async def _query_audit_events(
     request: Request,
     project_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
@@ -240,9 +231,15 @@ async def list_audit_events(
     q: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
-    db: AsyncSession = Depends(get_db_session),
-):
-    """Return a paginated audit event list scoped to the requesting tenant.
+    db: AsyncSession = None,  # type: ignore[assignment]
+) -> tuple[list[AuditEventOut], int]:
+    """The audit query itself: `(serialized events, total matching)`.
+
+    SHARED WITH THE EXPORT ON PURPOSE. An export that filtered differently from the
+    screen it was taken from would be the worst kind of wrong: a file that looks like
+    what you were reading and is not. One query, two page sizes.
+
+    Scoped to the requesting tenant.
 
     workspace_id filters to events whose payload.workspace_id matches — used by the
     workspace-scoped audit view and the org audit page's workspace picker.
@@ -338,19 +335,124 @@ async def list_audit_events(
     rows = (await db.execute(stmt)).scalars().all()
 
     actors, resources, projects, scopes = await _resolve_names(db, list(rows))
+    items = [
+        AuditEventOut.from_orm_audit(
+            e,
+            actor_name=actors.get(e.actor_id or ""),
+            resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
+            project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
+            scope_name=scopes.get(derive_scope(e)[1]),
+        )
+        for e in rows
+    ]
+    return items, total
+
+
+@audit_router.get(
+    "",
+    response_model=Paginated[AuditEventOut],
+    # The ORGANISATION-WIDE trail, gated on the permission that names it. It sat on
+    # the `artifact:view` floor that every role holds — including `contributor`, whose
+    # entire point is holding nothing yet — so any signed-in account could read the
+    # whole tenant's audit log over the API. The frontend already refused them the
+    # page; this is the backend catching up to that decision.
+    #
+    # `audit:view` is held by bu_admin and security_engineer (plus admin:*). The
+    # RUN-scoped trail below deliberately stays on the view floor: that is one run's
+    # own timeline, and reading it is part of reading the run.
+    dependencies=[Depends(require_permission("audit:view"))],
+)
+async def list_audit_events(
+    request: Request,
+    project_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    q: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """One page of the tenant's audit trail. The query lives in `_query_audit_events`."""
+    items, total = await _query_audit_events(
+        request, project_id=project_id, workspace_id=workspace_id,
+        actor=actor, action=action, q=q, page=page, page_size=page_size, db=db,
+    )
     return Paginated(
-        items=[
-            AuditEventOut.from_orm_audit(
-                e,
-                actor_name=actors.get(e.actor_id or ""),
-                resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
-                project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
-                scope_name=scopes.get(derive_scope(e)[1]),
-            )
-            for e in rows
-        ],
+        items=items,
         pagination=Pagination(page=page, pageSize=page_size, total=total),
     )
+
+
+@audit_router.get(
+    "/export",
+    response_model=list[AuditEventOut],
+    dependencies=[Depends(require_permission("audit:view"))],
+)
+async def export_audit_events(
+    request: Request,
+    fmt: str = "csv",
+    project_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    q: Optional[str] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The whole filtered trail, and a record that somebody took it.
+
+    PRD §34.9: "Export is itself an audited event." It was not one. The page built the
+    file in the browser out of rows it already had, so taking the trail left no trace —
+    on the one screen whose entire purpose is that things leave traces.
+
+    THE FILE IS PRODUCED HERE, and that is the control rather than an implementation
+    detail. A client-side export can only be audited by asking the client to report
+    itself, which is not a control at all. Producing it server-side makes the record a
+    precondition of getting the data: the request that returns the rows is the request
+    that writes the row saying who took them.
+
+    It also fixes what the browser version actually exported. It serialised `items` —
+    THE CURRENT PAGE — so "Export" on a four-thousand-event trail quietly handed you
+    fifty rows in a file named after the audit log.
+
+    `truncated` is on the record when the cap bites, so a partial export can never be
+    mistaken for the whole trail afterwards.
+    """
+    from shared.authz.audit import AUDIT_EXPORTED, record_rbac_change  # noqa: PLC0415
+
+    events, total = await _query_audit_events(
+        request, project_id=project_id, workspace_id=workspace_id,
+        actor=actor, action=action, q=q, page=1, page_size=_EXPORT_MAX, db=db,
+    )
+
+    actor_id = getattr(request.state, "user_id", None)
+    await record_rbac_change(
+        db,
+        tenant_id=str(request.state.tenant_id),
+        actor_id=actor_id,
+        event_type=AUDIT_EXPORTED,
+        subject_id=str(actor_id or "system"),
+        scope_kind="organization",
+        scope_id=str(request.state.tenant_id),
+        before="none",
+        after=f"{len(events)} events exported as {fmt}",
+        extra={
+            "format": fmt,
+            "row_count": len(events),
+            # WHAT THEY WERE LOOKING AT. Exporting one person's events is a different
+            # act from exporting everything, and the filters are the only record of
+            # which one happened.
+            "filters": {
+                k: v for k, v in {
+                    "project_id": project_id, "workspace_id": workspace_id,
+                    "actor": actor, "action": action, "q": q,
+                }.items() if v
+            } or None,
+            "truncated": total > len(events),
+            "matched_total": total,
+        },
+    )
+    return events
 
 
 @audit_runs_router.get(

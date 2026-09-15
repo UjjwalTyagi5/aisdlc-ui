@@ -1016,6 +1016,10 @@ async def record_approval(
     # Both decisions close it. A rejection does not leave the run paused waiting for the
     # same person to answer again — the stage is sent back, and re-running it is what
     # raises the next gate.
+    # Before the assignment: the gate's prior state is the "before" of this decision,
+    # and one line later it is gone. A run whose gate was already closed reads
+    # differently from one this decision actually closed.
+    _gate_was = "awaiting decision" if run.gate_pending else "not awaiting a decision"
     run.gate_pending = False
 
     audit = AuditEvent(
@@ -1034,6 +1038,8 @@ async def record_approval(
                 "reason": body.reason,
                 "idempotency_key": body.idempotencyKey,
                 "project_id": str(run.project_id),
+                "before": _gate_was,
+                "after": body.decision,
             },
             actor_id=actor_id,
         ),

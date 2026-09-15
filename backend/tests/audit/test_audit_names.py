@@ -371,3 +371,44 @@ def test_every_audit_writer_goes_through_capture_names():
         assert "capture_names" in src, f"{rel} builds an AuditEvent without naming it"
         # Every AuditEvent( construction in these files must take a captured payload.
         assert src.count("payload=await capture_names(") >= src.count("AuditEvent("), rel
+
+
+# ── PRD §34.9: "Export is itself an audited event" ───────────────────────────
+
+
+@pytest.mark.unit
+def test_the_export_action_has_a_name_of_its_own():
+    """Taking the trail is an act ON the trail, and needs its own vocabulary entry.
+
+    Filed with the other constants rather than written as a literal at the call site
+    for the reason that module already gives: these strings are queried by the UI and
+    by compliance exports, and a typo produces a category nothing reads.
+    """
+    from shared.authz.audit import AUDIT_EXPORTED
+
+    assert AUDIT_EXPORTED == "audit.exported"
+
+
+@pytest.mark.unit
+def test_the_export_is_bounded():
+    """An export is a file somebody opens, not a replication channel."""
+    from shared.routers.audit import _EXPORT_MAX
+
+    assert 0 < _EXPORT_MAX <= 50_000
+
+
+@pytest.mark.unit
+def test_the_export_and_the_screen_share_one_query():
+    """An export that filtered differently from the page it was taken from would be
+    the worst kind of wrong: a file that looks like what you were reading and is not.
+    """
+    import inspect
+
+    from shared.routers import audit as mod
+
+    src = inspect.getsource(mod.export_audit_events)
+    assert "_query_audit_events" in src
+    assert "record_rbac_change" in src, "an export that is not recorded is not audited"
+
+    list_src = inspect.getsource(mod.list_audit_events)
+    assert "_query_audit_events" in list_src
