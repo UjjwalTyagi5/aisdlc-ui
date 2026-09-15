@@ -52,22 +52,14 @@ from shared.models.artifacts import MigrationIntentArtifact
 # Orange TEXT is ACCENT (5.2:1 on white, 4.6:1 on TINT_10) or ACCENT_DEEP on a tint
 # (6.1:1). The brand orange itself, BRAND, is 3.3:1 on white: a fill, a rule or a mark.
 
-INK = "1F1F1F"
-BODY = "3D3D3D"
-MUTED = "6B6B6B"
-FAINT = "A3A3A3"  # rules, ticks and arrows only: too light for text
-RULE = "E5E5E5"
-PANEL = "F5F5F5"
-WHITE = "FFFFFF"
-BRAND = "FD5108"
-ACCENT = "C2410C"
-ACCENT_DEEP = "9A3412"
-TINT_5, TINT_8, TINT_10, TINT_12, TINT_15, TINT_20 = "FFF6F3", "FFF1EB", "FFEEE6", "FFEAE1", "FFE5DA", "FFDCCE"
-TINT_30, TINT_45, TINT_60, TINT_80 = "FECBB5", "FEB190", "FE976B", "FD7439"
-RED, RED_TINT = "B42318", "FDECEC"
-AMBER = "E09A00"
-GREEN, GREEN_TINT = "16A34A", "E3F4EA"
-GREY_TINT, GREY_INK = "EDEDED", "525252"
+# THE VALUES LIVE IN `shared/docs/pwc_style.py` since the Design agent's document
+# adopted this brief's look (2026-09-15): one palette, two documents. Re-exported here
+# under the names this module has always used.
+from shared.docs.pwc_style import (  # noqa: E402
+    ACCENT, ACCENT_DEEP, AMBER, BODY, BRAND, FAINT, GREEN, GREEN_TINT, GREY_INK, GREY_TINT,
+    INK, MUTED, PANEL, RED, RED_TINT, RULE, TINT_5, TINT_8, TINT_10, TINT_12, TINT_15,
+    TINT_20, TINT_30, TINT_45, TINT_60, TINT_80, WHITE,
+)
 
 STATUS = {  # (dot, label): today is grey, and only end of life is red
     "eol": (RED, RED), "approaching": (AMBER, MUTED), "legacy": (AMBER, MUTED), "supported": (GREEN, MUTED),

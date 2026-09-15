@@ -117,16 +117,19 @@ def test_the_prompt_says_why_a_broken_diagram_matters():
 
 @pytest.mark.unit
 def test_every_template_diagram_declares_a_supported_type():
-    """The eight mermaid blocks in the generation prompt were each checked against
+    """The mermaid blocks in the component templates were each checked against
     mermaid 11.15 and parse cleanly. This guards the cheaper property — that none of
-    them uses a type the prompt now forbids — so a future edit cannot introduce one."""
+    them uses a type the prompt now forbids — so a future edit cannot introduce one.
+
+    The templates live in `components.py` since the agent started producing only the
+    components asked for; the full prompt is the union of them."""
     import re
 
-    from agents_orchestrator.design_architecture_agent.prompts import (
-        architecture_generation as ag,
+    from agents_orchestrator.design_architecture_agent.components import (
+        build_generation_prompt,
     )
 
-    src = Path(ag.__file__).read_text(encoding="utf-8")
+    src = build_generation_prompt(["all"])
     blocks = re.findall(r"```mermaid\r?\n(.*?)```", src, re.S)
     assert blocks, "no mermaid templates found"
     for block in blocks:

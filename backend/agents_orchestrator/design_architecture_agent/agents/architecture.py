@@ -48,7 +48,7 @@ from config.ws_helper import broadcast_log, get_session_id, get_user_id, get_pro
 from config.connectors.context import get_connector
 from config.connectors.base import ConnectorNotAvailableError
 from agents_orchestrator.design_architecture_agent.config import shared
-from agents_orchestrator.design_architecture_agent.prompts.architecture_generation import ARCH_GEN_PROMPT
+from agents_orchestrator.design_architecture_agent import components as _components
 from shared.tools.spectral_tool import run_spectral_lint
 from agents_orchestrator.design_architecture_agent.tools.schema_validation_tool import validate_database_schema
 from agents_orchestrator.design_architecture_agent.tools.existing_system_tool import analyze_existing_system
@@ -217,15 +217,77 @@ async def _fetch_image_bytes(url: str) -> bytes | None:
     return await loop.run_in_executor(None, _fetch_image_bytes_sync, url)
 
 
-async def _markdown_to_docx(markdown_string: str, docx_path: str) -> str:
-    """Thin wrapper — injects design-agent callbacks into the shared converter."""
-    from shared.tools.docx_tools import markdown_to_docx as _convert
-    result = await _convert(
-        markdown_string,
-        docx_path,
-        fetch_image=_fetch_image_bytes,
-        render_mermaid=_render_mermaid_to_png,
+async def _design_meta(markdown: str) -> "DesignMeta":
+    """What the title band and facts strip say about this document.
+
+    The title is the document's own `#` heading (the same one `_architecture_filename`
+    slugs); the components are whichever sections the document holds; the project's
+    display name and track come from the run's project when there is one. Every
+    lookup degrades to blank — a document with an empty facts cell is still the
+    document; one that failed to save over a project-name lookup is not.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from agents_orchestrator.design_architecture_agent.design_document import DesignMeta  # noqa: PLC0415
+
+    match = re.search(r"(?m)^\s{0,3}#\s+(.+?)\s*$", markdown or "")
+    title = (match.group(1).strip() if match else "") or "Design document"
+    project_name, track = "", ""
+    try:
+        from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+
+        project_id, tenant_id = get_project_id(), get_tenant_id()
+        if project_id and tenant_id:
+            import uuid as _uuid  # noqa: PLC0415
+
+            from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+            from shared.models.orm import Project  # noqa: PLC0415
+
+            async with get_db_session_for_tenant(tenant_id) as session:
+                project = await session.get(Project, _uuid.UUID(str(project_id)))
+                if project is not None:
+                    project_name = getattr(project, "display_name", "") or ""
+                    track_id = getattr(project, "track", "") or ""
+                    track = {
+                        "greenfield": "Track 1 · Greenfield",
+                        "enhancement": "Track 2 · Enhancement",
+                        "modernization": "Track 3 · Code Modernization",
+                    }.get(track_id, "")
+    except Exception:  # noqa: BLE001 — a blank fact, never a lost document
+        logger.info("design document: project lookup skipped", exc_info=True)
+    return DesignMeta(
+        title=title,
+        project=project_name,
+        components=_components.sections_present(markdown),
+        source=getattr(shared, "design_source", "") or "",
+        generated_on=datetime.now(timezone.utc).strftime("%d %b %Y"),
+        track=track,
     )
+
+
+async def _markdown_to_docx(markdown_string: str, docx_path: str) -> str:
+    """Write the DESIGNED document — the platform's title band, facts strip, palette
+    and primitives (`design_document.render_design_docx`) — not Word's defaults.
+
+    Rendering is synchronous (it writes a file and fetches each diagram), so it runs
+    in an executor to keep the socket's event loop free, exactly as the generic
+    converter ran the mermaid renderer.
+    """
+    from agents_orchestrator.design_architecture_agent.design_document import (  # noqa: PLC0415
+        render_design_docx,
+    )
+
+    meta = await _design_meta(markdown_string)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: render_design_docx(
+            markdown_string, docx_path, meta=meta,
+            render_mermaid=_render_mermaid_to_png,
+            fetch_image=_fetch_image_bytes_sync,
+        ),
+    )
+    result = f"Successfully saved document to '{docx_path}'"
     # Update shared state so the API layer can broadcast file_generated
     try:
         session_id = get_session_id()
@@ -236,6 +298,77 @@ async def _markdown_to_docx(markdown_string: str, docx_path: str) -> str:
     except Exception:
         pass
     return result
+
+
+def _docx_to_pdf(docx_path: str, pdf_path: str) -> None:
+    """Convert the designed .docx to PDF with Word, through `docx2pdf`.
+
+    Synchronous and COM-bound: it runs in an executor thread, and COM on a worker
+    thread needs its own apartment (`CoInitialize`) or Word's Dispatch fails with
+    "CoInitialize has not been called". Raises whatever the conversion raises — the
+    caller decides what to do without Word.
+    """
+    import sys  # noqa: PLC0415
+
+    from docx2pdf import convert  # noqa: PLC0415
+
+    initialised = False
+    if sys.platform == "win32":
+        try:
+            import pythoncom  # noqa: PLC0415
+
+            pythoncom.CoInitialize()
+            initialised = True
+        except Exception:  # noqa: BLE001 — pywin32 missing: let convert() report it
+            pass
+    try:
+        convert(docx_path, pdf_path)
+    finally:
+        if initialised:
+            pythoncom.CoUninitialize()
+    if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+        raise RuntimeError("Word produced no PDF")
+
+
+_PDF_CONVERSION_TIMEOUT_S = 120.0
+
+
+async def _markdown_to_pdf(markdown_string: str, pdf_path: str, *, title: str = "") -> None:
+    """The PDF is the DESIGNED Word document, converted — Word first, PDF from it.
+
+    Rendering the markdown a second time with a plain PDF renderer would give the
+    user two documents that do not look alike. So: render the .docx to a scratch
+    name beside the PDF, convert it with Word, remove the scratch file, and only
+    when Word is not there (a Linux host, no COM, a hung conversion) fall back to the
+    plain renderer so the user still gets a PDF. The scratch .docx is removed because
+    nothing announces it: a file in the output directory that no reply links to is
+    one the user cannot reach, and `save_architecture` makes a Word file on request.
+    """
+    docx_path = os.path.splitext(pdf_path)[0] + ".pdf-source.docx"
+    try:
+        await _markdown_to_docx(markdown_string, docx_path)
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _docx_to_pdf(docx_path, pdf_path)),
+            timeout=_PDF_CONVERSION_TIMEOUT_S,
+        )
+        return
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "design document: Word conversion unavailable, rendering the PDF plainly",
+            exc_info=True,
+        )
+    finally:
+        try:
+            os.remove(docx_path)
+        except OSError:
+            pass
+
+    from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
+
+    await asyncio.get_event_loop().run_in_executor(
+        None, lambda: markdown_to_pdf(markdown_string, pdf_path, title=title),
+    )
 
 
 # ── Saving the document the agent just generated ───────────────────────────────
@@ -392,70 +525,117 @@ def read_uploaded_file(file_path: str) -> str:
 
 
 @tool
-async def generate_architecture(document_text: str, custom_prompt: str = "") -> str:
-    """Generate a comprehensive architecture document (HLD/LLD/C4/API/DB schema/ADR)
-    from document text or requirements.
+async def list_design_components() -> str:
+    """List the design components this agent can produce, with what each yields.
 
-    Args:
-        document_text: Full text extracted from uploaded documents (use read_uploaded_file first).
-        custom_prompt: Additional focus area or instructions from the user.
+    Call this when the user asks what you can make, or asks for "the architecture" /
+    "the design" without naming a component — then ask which they want. Costs nothing.
     """
-    broadcast_log(manager, "Generating architecture from document...", level="INFO")
-    prompt_text = ARCH_GEN_PROMPT.replace("{custom_prompt}",custom_prompt or "")
-    full_prompt = f"{prompt_text}\n\n--- DOCUMENT CONTENT ---\n{document_text}"
-    result = await _llm_generate_async(full_prompt)
+    return _components.menu_text()
+
+
+# ── scoped generation ──────────────────────────────────────────────────────────
+#
+# WHY THERE IS A `components` ARGUMENT AND WHY IT IS REQUIRED. Asked for "the HLD",
+# this agent produced the whole eight-section document — the template was one block and
+# the prompt said "ALL 8 sections, EVERY response". The catalogue in `components.py`
+# splits the template per component; these tools generate ONLY the ones named, and a
+# second call in the same session ADDS its sections to the document rather than
+# replacing it, so "the HLD" then "now the DB schema" ends as one document with both.
+#
+# Required, not defaulted to "all": a default is exactly how a model that forgot the
+# argument would hand the user everything again.
+
+_GENERATION_SYSTEM = (
+    "You are a Senior AI Solutions Architect. Produce ONLY the sections you are asked "
+    "for, following their templates exactly, each opening with its exact `##` header. "
+    "ALWAYS include valid Mermaid code blocks where a template requires a diagram. "
+    "A DB schema is full CREATE TABLE SQL; an API contract carries request/response JSON."
+)
+
+
+async def _generate_components(
+    source_label: str, source_text: str, components: List[str], custom_prompt: str,
+) -> str:
+    """Generate the named components from `source_text`, merge them into the session's
+    document, save it, and return the receipt + the WHOLE document.
+
+    Returns the refusal text (no model call) when a component is unknown — the agent
+    relays it, which is what the user needs to hear instead of a different document.
+    """
+    try:
+        ids = _components.resolve(components)
+    except _components.UnknownComponentError as exc:
+        return f"Error: {exc}"
+
+    labels = _components.labels_for(ids)
+    broadcast_log(manager, f"Generating {labels} from {source_label}...", level="INFO")
+    existing = getattr(shared, "last_architecture", "") or ""
+    # For the document's facts strip: where the requirements came from.
+    shared.design_source = {
+        "document content": "Uploaded document",
+        "conversation context": "Conversation and project context",
+    }.get(source_label, source_label)
+    prompt = (
+        _components.build_generation_prompt(ids, custom_prompt=custom_prompt)
+        + f"\n--- {source_label.upper()} (the source of requirements) ---\n{source_text}\n"
+        + _components.existing_sections_note(existing, ids)
+    )
+    result = await _llm_generate_async(prompt, _GENERATION_SYSTEM)
+
+    # The session's ONE document: what was there, plus what was just produced, in
+    # catalogue order, a regenerated section replacing its earlier self.
+    document = _components.merge_sections(existing, result) if existing.strip() else result
+    shared.last_architecture = document
     mermaid_match = re.search(r"```mermaid(.*?)```", result, re.DOTALL)
     if mermaid_match:
         shared.mermaid = mermaid_match.group(1).strip()
-    # Stashed here for the same reason generate_architecture_from_context stashes it —
-    # a later "save it as a PDF" falls back to this attribute when the model cannot
-    # echo a large document into a tool argument. This path did not stash, so the
-    # fallback was empty for anyone who designed from an UPLOADED file.
-    shared.last_architecture = result
-    receipt = await _autosave_architecture(result)
-    broadcast_log(manager, "Architecture generation complete.", level="INFO")
-    return _with_save_receipt(receipt, result)
+    receipt = await _autosave_architecture(document)
+    broadcast_log(manager, f"{labels} generated.", level="INFO")
+    return _with_save_receipt(receipt, document)
 
 
 @tool
-async def generate_architecture_from_context(context: str, user_requirements: str = "") -> str:
-    """Generate architecture based purely on conversation context (BRD, PDD, stories, etc.)
-    without requiring any uploaded file.
+async def generate_architecture(
+    document_text: str, components: List[str], custom_prompt: str = "",
+) -> str:
+    """Generate the named design components from uploaded document text.
+
+    Produces ONLY the components listed — nothing else — and adds them to this
+    session's design document; call it again with other components to add those.
 
     Args:
-        context: Complete context from conversation history (BRD, PDD, requirements, etc.).
+        document_text: Full text extracted from uploaded documents (use read_uploaded_file first).
+        components: Which components to produce, e.g. ["hld"], ["db", "api"], or ["all"]
+            for the full design document. See list_design_components for the ids.
+        custom_prompt: Additional focus area or instructions from the user.
+    """
+    return await _generate_components(
+        "document content", document_text, components, custom_prompt,
+    )
+
+
+@tool
+async def generate_architecture_from_context(
+    context: str, components: List[str], user_requirements: str = "",
+) -> str:
+    """Generate the named design components from conversation context (a BRD, PDD,
+    stories, an approved document you read) without an uploaded file.
+
+    Produces ONLY the components listed — nothing else — and adds them to this
+    session's design document; call it again with other components to add those.
+
+    Args:
+        context: Complete context from the conversation (BRD, PDD, requirements, etc.).
+        components: Which components to produce, e.g. ["hld"], ["db", "api"], or ["all"]
+            for the full design document. See list_design_components for the ids.
         user_requirements: Specific additional instructions from the user.
     """
-    broadcast_log(manager, "Generating architecture from context...", level="INFO")
     if not context.strip():
         return "Error: Context cannot be empty."
-
-    system_msg = (
-        "You are a Senior AI Solutions Architect. "
-        "You MUST produce a complete enterprise-grade architecture document following the template exactly. "
-        "NEVER skip a required section. ALWAYS include valid Mermaid code blocks for diagrams. "
-        "DB schema MUST be full CREATE TABLE SQL. API contracts MUST include request/response JSON."
+    return await _generate_components(
+        "conversation context", context, components, user_requirements,
     )
-    prompt = f"""{ARCH_GEN_PROMPT.replace("{custom_prompt}",user_requirements or "")}
-
---- CONVERSATION CONTEXT (use this as the source of requirements) ---
-{context}
-
-IMPORTANT: Replace every placeholder in the template above with content derived from the
-conversation context. All three C4 Mermaid diagrams are REQUIRED. DB schema SQL is REQUIRED.
-Do not leave any table cells empty in required sections."""
-
-    result = await _llm_generate_async(prompt, system_msg)
-    # Stash the generated markdown so save_architecture can persist it even when a
-    # weaker model fails to echo the (large) document back into the save tool's
-    # `content` argument — the common cause of an empty/failed .docx.
-    shared.last_architecture = result
-    mermaid_match = re.search(r"```mermaid(.*?)```", result, re.DOTALL)
-    if mermaid_match:
-        shared.mermaid = mermaid_match.group(1).strip()
-    receipt = await _autosave_architecture(result)
-    broadcast_log(manager, "Context-based architecture generation complete.", level="INFO")
-    return _with_save_receipt(receipt, result)
 
 
 @tool
@@ -474,6 +654,8 @@ async def update_response(query: str, content: str, file_paths: Optional[List[st
         extra_context = "\n\n--- ADDITIONAL FILE CONTEXT ---\n" + "\n\n".join(texts)
 
     prompt = f"""Update the content below based on the query. Preserve formatting and style.
+Keep every `##` section the content already has, with its exact header, unless the
+query asks to remove one; do not add sections the query does not ask for.
 
 QUERY: {query}
 
@@ -860,9 +1042,7 @@ async def save_architecture_pdf(content: str = "", filename: str = "architecture
     full_path = os.path.join(out_dir, filename)
 
     try:
-        from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
-
-        markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
+        await _markdown_to_pdf(content, full_path, title=filename.rsplit(".", 1)[0])
     except Exception as exc:  # noqa: BLE001
         return f"Error generating the PDF ({type(exc).__name__})."
 
@@ -962,7 +1142,16 @@ async def export_document(content: str = "", filename: str = "architecture.docx"
     full_path = os.path.join(out_dir, name)
 
     try:
-        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+        # Word and PDF are the DESIGNED document (title band, facts strip, palette);
+        # the generic renderer is Word's defaults and would not match what
+        # save_architecture produces. The other formats have no design to carry.
+        ext = os.path.splitext(name)[1].lower()
+        if ext == ".docx":
+            await _markdown_to_docx(content, full_path)
+        elif ext == ".pdf":
+            await _markdown_to_pdf(content, full_path, title=name.rsplit(".", 1)[0])
+        else:
+            await render_document(content, full_path, title=name.rsplit(".", 1)[0])
     except ValueError:
         # render_document refuses an extension it has no renderer for. Its message is
         # ours, not a connector's, but the sweep in test_board_write_failures cannot
@@ -1017,6 +1206,8 @@ tools = [
     # The project's requirements, ON DEMAND. Replaced the Design page's automatic
     # injection, which pushed every board item into context before the user had typed.
     read_project_requirements,
+    # What can be produced — the answer to a generic ask, from the catalogue.
+    list_design_components,
     generate_architecture,
     generate_architecture_from_context,
     update_response,
@@ -1062,8 +1253,29 @@ tools = [
 # asking. See tests/test_design_greeting_does_not_generate.py.
 DESIGN_SYS_MESSAGE = """\
 You are the Design & Architecture Agent — powered by Claude. You transform
-requirements, BRDs, PDDs, and user stories into comprehensive, enterprise-grade
-architecture documents structured across 8 standard artifacts.
+requirements, BRDs, PDDs, and user stories into enterprise-grade design components —
+the ones the user asks for, and only those.
+
+── WHAT YOU CAN PRODUCE, AND ONLY WHAT IS ASKED (CRITICAL) ───────────────────
+Your design components (ids in backticks are what the generation tools take):
+
+{components_roster}
+
+- A GENERIC ASK — "create the architecture", "design this", "make the design
+  document" — is NOT a request for everything. Call `list_design_components`, show the
+  user that list, and ask which they want; offer "the full design document" as one of
+  the choices. Do not generate until they choose.
+- A SPECIFIC ASK produces exactly what was named: "the HLD" → `components=["hld"]`;
+  "DB schema and API contract" → `components=["db", "api"]`; "the full design
+  document" / "everything" → `components=["all"]`. Never add a component that was
+  not asked for — no executive summary, deployment plan, risks or security review
+  unless requested or part of the full document.
+- ADDING LATER: "now add the DB schema" → call the generation tool again with just
+  `["db"]`. The tool merges it into this session's document — the earlier sections are
+  kept, and the document is re-saved with all of them. Regenerating a component the
+  document already has replaces that section only.
+- If you cannot produce what was named, the tool tells you what exists; relay that and
+  ask. Never substitute a different component.
 
 ── ACT, DON'T NARRATE (CRITICAL) ─────────────────────────────────────────────
 When the user ASKS you to generate, design, or save, you MUST emit the tool call
@@ -1188,9 +1400,11 @@ must be derived from the requirements provided — not invented.
    so never present them as permanent. If Figma is not connected, the tools say so —
    carry on from the written requirements rather than stopping.
 1. If the user provides file paths → call read_uploaded_file for EACH file first.
-2. Pass extracted text to generate_architecture.
-3. If no files → use generate_architecture_from_context with conversation context.
-4. VALIDATION LOOPS (run after generation, before asking to save):
+2. Pass extracted text to generate_architecture, with `components` naming ONLY what
+   the user asked for.
+3. If no files → use generate_architecture_from_context with conversation context,
+   again with `components` naming only what was asked for.
+4. VALIDATION LOOPS (run after generation, only for components that were produced):
    • API CONTRACT — save the OpenAPI YAML to a file, then call
      run_spectral_lint(spec_path). If it returns findings with severity "error",
      fix the spec and re-lint until clean (or "unavailable"). Advisory only —
@@ -1204,183 +1418,29 @@ must be derived from the requirements provided — not invented.
    NEVER pass 'content' — the system caches the last generated architecture automatically.
    Example: save_architecture(filename="project_architecture.docx")
 7. On update/refinement requests → call update_response.
-   When updating, preserve ALL 8 section headers — never drop a section when
-   refining only one part of the document.
+   When updating, preserve every section the document already has — never drop a
+   section when refining only one part of the document — and add none.
 
-── OUTPUT FORMAT (CRITICAL — frontend parses these exact headers) ─────────────
-Structure EVERY architecture response with ALL 8 sections using these EXACT
-headers (uppercase, no trailing punctuation):
+── OUTPUT FORMAT (CRITICAL — the platform parses these exact headers) ─────────
+Each component is one `##` section with its EXACT header (uppercase, no trailing
+punctuation): OVERVIEW, HIGH-LEVEL DESIGN, LOW-LEVEL DESIGN, C4 ARCHITECTURE
+DIAGRAMS, API CONTRACT, DATABASE SCHEMA, ARCHITECTURE DECISION RECORDS,
+TECHNOLOGY STACK, SECURITY DESIGN CHECKLIST. The document holds only the sections
+that were asked for; the platform splits on these headers to show each one.
 
-## HIGH-LEVEL DESIGN
-## LOW-LEVEL DESIGN
-## C4 ARCHITECTURE DIAGRAMS
-## API CONTRACT
-## DATABASE SCHEMA
-## ARCHITECTURE DECISION RECORDS
-## TECHNOLOGY STACK
-## SECURITY DESIGN CHECKLIST
+── WHAT EACH COMPONENT CONTAINS ──────────────────────────────────────────────
+The generation tools carry the full template for every component, so you never
+write a section by hand. For your own understanding and for answering the user:
 
-The frontend splits on these exact headers to render tabbed artifact panels.
-If a section is not yet applicable, include the header with a one-line note.
+{components_detail}
 
-── ARTIFACT TEMPLATES ────────────────────────────────────────────────────────
-
-### HIGH-LEVEL DESIGN
-1. System Overview (2–3 paragraphs)
-2. Component Architecture — MANDATORY Mermaid flowchart:
-   ```mermaid
-   graph TD
-       A[Browser / Mobile] --> B[React SPA]
-       B --> C[API Gateway]
-       C --> D[Service Layer]
-       D --> E[(Database)]
-   ```
-3. Data Flow — Mermaid sequence diagram for the primary use case
-4. Integration Points — table: System | Protocol | Auth | Purpose
-5. NFR Summary — table: Category | Requirement | Target
-
-### LOW-LEVEL DESIGN
-1. Component Specifications — per component: responsibilities, interfaces, dependencies
-2. Component / Class Diagram — MANDATORY Mermaid `classDiagram` (or detailed
-   `flowchart` if classes don't fit the domain) showing concrete classes/modules,
-   their key methods/fields, and relationships. NEVER omit this diagram.
-3. Sequence Diagrams — MANDATORY Mermaid sequence diagram for each key flow
-   ```mermaid
-   sequenceDiagram
-       participant U as User
-       participant API as REST API
-       participant DB as Database
-       U->>API: GET /resource
-       API->>DB: SELECT query
-       DB-->>API: Result rows
-       API-->>U: 200 JSON response
-   ```
-4. Class / Module Structure — class names, methods, data types per service
-5. Error Handling Strategy — error codes, retry policy, fallback behaviour
-
-### C4 ARCHITECTURE DIAGRAMS
-Use Mermaid C4 syntax for all three levels:
-
-Level 1 — Context:
-```mermaid
-C4Context
-    Person(user, "User", "Description")
-    System(sys, "System", "Description")
-    Rel(user, sys, "Uses", "HTTPS")
-```
-
-Level 2 — Container:
-```mermaid
-C4Container
-    Container(web, "Web App", "React", "SPA")
-    Container(api, "API", "FastAPI", "REST")
-    ContainerDb(db, "Database", "PostgreSQL", "Stores data")
-    Rel(web, api, "Calls", "HTTPS/JSON")
-    Rel(api, db, "Reads/Writes", "SQL")
-```
-
-Level 3 — Component:
-```mermaid
-C4Component
-    Component(ctrl, "Controller", "FastAPI", "Handles requests")
-    Component(svc, "Service", "Python", "Business logic")
-    Component(repo, "Repository", "SQLAlchemy", "Data access")
-    Rel(ctrl, svc, "Calls")
-    Rel(svc, repo, "Uses")
-```
-
-### API CONTRACT
-Produce full OpenAPI 3.0 YAML in a fenced yaml block:
-```yaml
-openapi: 3.0.3
-info:
-  title: <Service> API
-  version: 1.0.0
-paths:
-  /api/resource:
-    get:
-      summary: ...
-      parameters: [...]
-      responses:
-        '200':
-          description: ...
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ResourceResponse'
-components:
-  schemas:
-    ResourceResponse:
-      type: object
-      properties:
-        id: { type: integer }
-        name: { type: string }
-```
-
-### DATABASE SCHEMA
-Include ER diagram and DDL:
-```mermaid
-erDiagram
-    TABLE_A {
-        int id PK
-        string name
-    }
-    TABLE_B {
-        int id PK
-        int table_a_id FK
-    }
-    TABLE_A ||--o{ TABLE_B : "has"
-```
-```sql
-CREATE TABLE table_a (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL
-);
-CREATE TABLE table_b (
-    id SERIAL PRIMARY KEY,
-    table_a_id INTEGER NOT NULL REFERENCES table_a(id)
-);
-CREATE INDEX idx_table_b_a ON table_b(table_a_id);
-```
-
-### ARCHITECTURE DECISION RECORDS
-For each significant decision:
-
-**ADR-001: [Decision Title]**
-- Status: Accepted
-- Context: [Why a decision was needed]
-- Decision: [What was decided]
-- Rationale: [Why this option over alternatives]
-- Consequences: [Trade-offs, risks, impacts]
-- Alternatives Rejected: [Other options considered]
-
-### TECHNOLOGY STACK
-| Layer | Technology | Version | Justification |
-|-------|-----------|---------|---------------|
-| Frontend | ... | ... | ... |
-| Backend | ... | ... | ... |
-| Database | ... | ... | ... |
-| Auth | ... | ... | ... |
-| Hosting | ... | ... | ... |
-| CI/CD | ... | ... | ... |
-
-### SECURITY DESIGN CHECKLIST
-Review the designed APIs and data model against the OWASP Top 10 (2021). For EACH
-category, state the risk in the context of THIS design and the mitigating control:
-
-| OWASP Category | Applicable? | Risk in this design | Mitigation control |
-|----------------|-------------|---------------------|--------------------|
-| A01 Broken Access Control | ... | ... | ... |
-| A02 Cryptographic Failures | ... | ... | ... |
-| A03 Injection | ... | ... | ... |
-| A04 Insecure Design | ... | ... | ... |
-| A05 Security Misconfiguration | ... | ... | ... |
-| A06 Vulnerable & Outdated Components | ... | ... | ... |
-| A07 Identification & Authentication Failures | ... | ... | ... |
-| A08 Software & Data Integrity Failures | ... | ... | ... |
-| A09 Security Logging & Monitoring Failures | ... | ... | ... |
-| A10 Server-Side Request Forgery (SSRF) | ... | ... | ... |
-Tag any control you ASSUME (not stated in requirements) with ⚠️ [ASSUMPTION].
+Rules that apply WHEN a component is produced:
+- HIGH-LEVEL DESIGN includes a high-level architecture diagram (Mermaid graph/flowchart).
+- LOW-LEVEL DESIGN includes BOTH a component/class diagram AND a sequence diagram.
+- C4 ARCHITECTURE DIAGRAMS shows all three levels (context, container, component).
+- DATABASE SCHEMA includes both an ER diagram (Mermaid erDiagram) AND CREATE TABLE SQL.
+- API CONTRACT includes the full OpenAPI 3.0 YAML.
+- SECURITY DESIGN CHECKLIST assesses all 10 OWASP categories against THIS design.
 
 ── DIAGRAM RENDERING ─────────────────────────────────────────────────────────
 Primary: Use Mermaid (```mermaid blocks) for all standard diagrams — flowcharts,
@@ -1436,15 +1496,9 @@ Rules that prevent most parse failures:
 ── ABSOLUTE RULES ────────────────────────────────────────────────────────────
 - NEVER write architecture as a plain-text reply. ALWAYS call a tool first.
 - NEVER say you cannot access files — always call read_uploaded_file for a path, or read_document for an approved project document.
-- EVERY architecture output MUST have at least one ```mermaid``` block.
-- HIGH-LEVEL DESIGN MUST include a high-level architecture diagram (Mermaid graph/flowchart).
-- LOW-LEVEL DESIGN MUST include BOTH a component/class diagram (Mermaid classDiagram
-  or detailed flowchart) AND a sequence diagram (Mermaid sequenceDiagram) — never omit either.
-- C4 MUST show all three levels (Context, Container, Component).
-- DB schema MUST include both an ER diagram (Mermaid erDiagram) AND CREATE TABLE SQL.
-- API CONTRACT MUST include full OpenAPI 3.0 YAML.
-- EVERY architecture output MUST include the ## SECURITY DESIGN CHECKLIST section
-  with all 10 OWASP categories assessed against THIS design.
+- PRODUCE ONLY THE COMPONENTS THE USER ASKED FOR. The rules under "what each
+  component contains" apply to a component when it is produced — they never make a
+  component mandatory. A request for the HLD yields the HLD and nothing else.
 - Use descriptive filenames when saving: 'leave_mgmt_hld.docx'.
 - NEVER invent API endpoints, database tables, business rules, or user roles
   that are not present in the requirements. Tag any necessary assumption with
@@ -1472,14 +1526,18 @@ with the run_id from the session context and ALL relevant sections populated,
 INCLUDING security_checklist (the OWASP Top-10 review).
 
 ── FINAL REMINDER (HIGHEST PRIORITY) ─────────────────────────────────────────
-The user has already provided requirements/user stories in the structured pipeline
-context. When asked to generate/design/save, follow this EXACT tool sequence:
-  STEP 1 — call `generate_architecture_from_context` with the user stories passed as
-           the `context` argument (a single string). This returns the full markdown
-           architecture document AND writes it to a .docx; the result opens with the
-           "SAVED:" line carrying the filename and the download link.
-  STEP 2 — reply with that filename, that link, and the sections you produced. There
-           is no second save to make.
+When asked to produce a NAMED component (or "the full design document"), follow this
+EXACT tool sequence:
+  STEP 1 — call `generate_architecture_from_context` with the requirements passed as
+           the `context` argument (a single string) and `components` naming ONLY what
+           was asked for (e.g. ["hld"], or ["all"] for the full document). This
+           returns the session's design document with the new section(s) in it AND
+           writes the .docx; the result opens with the "SAVED:" line carrying the
+           filename and the download link.
+  STEP 2 — reply with that filename, that link, and the sections the document now
+           holds. There is no second save to make.
+When the ask names NO component ("design this", "create the architecture"), STEP 1
+is instead `list_design_components` and a question — not a generation.
 Call `save_architecture`, `save_architecture_pdf` or `export_document` ONLY when the
 user asks for a different filename or a different format — calling one on the document
 you just generated writes the same document a second time under a second name, and the
@@ -1488,6 +1546,18 @@ directly, and NEVER call any save tool with an empty `content`. NEVER end a turn
 only "I'll generate it now" and no tool call: that is a hard failure. Do not ask for
 requirements you already have.
 """
+
+# The component roster is RENDERED from the catalogue, in two places, so the prompt
+# cannot name a component the generation tools cannot produce. `.replace`, not
+# `.format`: the prompt is full of literal braces.
+DESIGN_SYS_MESSAGE = (
+    DESIGN_SYS_MESSAGE
+    .replace("{components_roster}", _components.roster_text())
+    .replace(
+        "{components_detail}",
+        "\n".join(f"- {c.label}: {c.yields}." for c in _components.COMPONENTS),
+    )
+)
 
 # Append the shared, agent-agnostic MCP provenance note (see shared/tools/mcp_runtime).
 DESIGN_SYS_MESSAGE = DESIGN_SYS_MESSAGE + MCP_TOOLS_PROMPT_NOTE
