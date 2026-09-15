@@ -35,7 +35,7 @@ async def main() -> None:
     projects = await conn.list_projects()
     print(f"  ✓ {len(projects)} project(s):")
     for p in projects[:10]:
-        print(f"    • {p['source_key']}  {p['title']!r}")
+        print(f"    • {p['key']}  {p['name']!r}")
 
     if not target_project:
         if projects:
