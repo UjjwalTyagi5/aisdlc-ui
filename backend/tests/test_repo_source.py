@@ -263,3 +263,41 @@ async def test_a_repository_that_is_not_there_says_which_host_it_looked_on(monke
         await rs.clone_and_diff("t1", "acme", "nope", "a", "b", "/w", provider="github")
 
     assert "GitHub" in str(exc.value) and "nope" in str(exc.value)
+
+
+async def test_the_pr_picker_passes_its_status_through_to_azure(monkeypatch):
+    """The Code Review and Security PR pickers call this with `status="active"` —
+    Azure DevOps' word. Until the facade accepted it, PR mode failed with
+    `TypeError: unexpected keyword argument 'status'`, a 500 the dialog rendered
+    as "Couldn't reach Azure DevOps" while branch mode worked a click away."""
+    seen = {}
+
+    class _Azure:
+        async def list_pull_requests(self, namespace, repo, *, status, pat, org_url):
+            seen.update(namespace=namespace, repo=repo, status=status, pat=pat, org_url=org_url)
+            return [{"id": "7", "title": "Link management", "source_branch": "feature/x", "target_branch": "main"}]
+
+    async def _azure(tenant_id, *, project_id="", owner_id="", provider=None):
+        return "ado", "https://dev.azure.com/srk02804", "pat-1"
+
+    monkeypatch.setattr(rs, "resolve", _azure)
+    monkeypatch.setattr(rs, "_backend", lambda p: _Azure())
+
+    chosen, prs = await rs.list_pull_requests("t", "QuickLink", "QuickLink", status="active", owner_id="u")
+    assert chosen == "ado" and [p["id"] for p in prs] == ["7"]
+    assert seen == {"namespace": "QuickLink", "repo": "QuickLink", "status": "active",
+                    "pat": "pat-1", "org_url": "https://dev.azure.com/srk02804"}
+
+
+async def test_github_pr_listing_ignores_the_azure_status_word(monkeypatch):
+    class _GitHub:
+        async def list_pull_requests(self, owner, repo, *, token):
+            return [{"id": "3", "title": "t", "source_branch": "a", "target_branch": "main"}]
+
+    async def _github(tenant_id, *, project_id="", owner_id="", provider=None):
+        return "github", "https://api.github.com", "ghp_X"
+
+    monkeypatch.setattr(rs, "resolve", _github)
+    monkeypatch.setattr(rs, "_backend", lambda p: _GitHub())
+    chosen, prs = await rs.list_pull_requests("t", "acme", "shop", status="active")
+    assert chosen == "github" and prs[0]["id"] == "3"

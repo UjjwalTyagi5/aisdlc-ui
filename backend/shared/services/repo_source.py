@@ -152,15 +152,23 @@ async def list_branches(
 
 async def list_pull_requests(
     tenant_id: str, namespace: str, repo: str, *, project_id: str = "", owner_id: str = "",
-    provider: Provider | str | None = None,
+    provider: Provider | str | None = None, status: str = "active",
 ) -> tuple[Provider, list[dict]]:
+    """Open pull requests, whichever host the project's source lives on.
+
+    `status` is Azure DevOps' word ("active"); GitHub only ever lists open PRs here.
+    Accepted because the Code Review and Security pickers pass it — and until it was,
+    their PR mode failed with `TypeError: unexpected keyword argument 'status'`, a
+    500 the dialog showed as "Couldn't reach Azure DevOps", on a project whose
+    Azure DevOps was connected and whose branch mode worked a click away.
+    """
     chosen, base, secret = await resolve(
         tenant_id, project_id=project_id, owner_id=owner_id, provider=provider)
     backend = _backend(chosen)
     if chosen == "github":
         return chosen, await backend.list_pull_requests(namespace, repo, token=secret)
     return chosen, await backend.list_pull_requests(
-        namespace, repo, pat=secret, org_url=base)
+        namespace, repo, status=status, pat=secret, org_url=base)
 
 
 async def get_pull_request(
