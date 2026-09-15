@@ -137,3 +137,73 @@ def test_no_resolution_at_all_is_the_old_behaviour():
     assert out.actor.name == "u1"
     assert out.resource.name is None
     assert out.projectName is None
+
+
+# ── PRD §34.9's Scope field ──────────────────────────────────────────────────
+#
+# WHERE a decision landed, which is not the same question as what it landed on: a
+# role grant's resource is the person who received it, its scope is the unit they
+# received it in. Three writers use three different payload shapes and the scope has
+# to be read out of all of them.
+
+
+@pytest.mark.unit
+def test_rbac_events_carry_their_own_scope():
+    from shared.routers._schemas import derive_scope
+
+    kind, sid = derive_scope(_Event(
+        event_type="rbac.role.granted",
+        resource_type="role_binding",
+        payload={"scope_kind": "business_unit", "scope_id": "2da60668", "role": "bu_admin"},
+    ))
+    assert (kind, sid) == ("business_unit", "2da60668")
+
+
+@pytest.mark.unit
+def test_a_project_payload_scopes_to_the_project():
+    from shared.routers._schemas import derive_scope
+
+    assert derive_scope(_Event(payload={"project_id": "6aa760d6"})) == ("project", "6aa760d6")
+
+
+@pytest.mark.unit
+def test_a_workspace_payload_scopes_to_the_unit():
+    from shared.routers._schemas import derive_scope
+
+    assert derive_scope(_Event(payload={"workspace_id": "2da60668"})) == (
+        "business_unit",
+        "2da60668",
+    )
+
+
+@pytest.mark.unit
+def test_a_business_unit_resource_is_its_own_scope():
+    """An access.denied names the unit as its resource and carries nothing else."""
+    from shared.routers._schemas import derive_scope
+
+    assert derive_scope(_Event(resource_type="business_unit", resource_id="2da60668")) == (
+        "business_unit",
+        "2da60668",
+    )
+
+
+@pytest.mark.unit
+def test_everything_else_happened_at_the_organization():
+    """The honest default: it is the one scope that always exists."""
+    from shared.routers._schemas import derive_scope
+
+    assert derive_scope(_Event(tenant_id="t-1", resource_type="thing", payload=None)) == (
+        "organization",
+        "t-1",
+    )
+
+
+@pytest.mark.unit
+def test_the_scope_name_reaches_the_response():
+    out = AuditEventOut.from_orm_audit(
+        _Event(payload={"scope_kind": "business_unit", "scope_id": "2da60668"}),
+        scope_name="Demo",
+    )
+    assert out.scope.kind == "business_unit"
+    assert out.scope.id == "2da60668"
+    assert out.scope.name == "Demo"

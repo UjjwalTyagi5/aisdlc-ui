@@ -21,6 +21,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { ActivityTabs } from "@/components/app/activity-tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ScopeChip } from "@/components/app/scope-indicator";
@@ -182,6 +190,9 @@ function AuditPageInner() {
         resource_type: e.resource.type,
         resource_id: e.resource.id,
         resource_name: e.resource.name ?? "",
+        scope_kind: e.scope?.kind ?? "",
+        scope_id: e.scope?.id ?? "",
+        scope_name: e.scope?.name ?? "",
         project_id: e.projectId ?? "",
         project_name: e.projectName ?? "",
         ip: e.ip ?? "",
@@ -196,6 +207,9 @@ function AuditPageInner() {
         { key: "resource_type", header: "resource_type" },
         { key: "resource_id", header: "resource_id" },
         { key: "resource_name", header: "resource_name" },
+        { key: "scope_kind", header: "scope_kind" },
+        { key: "scope_id", header: "scope_id" },
+        { key: "scope_name", header: "scope_name" },
         { key: "project_id", header: "project_id" },
         { key: "project_name", header: "project_name" },
         { key: "ip", header: "ip" },
@@ -360,12 +374,34 @@ function AuditPageInner() {
             </span>
           </div>
 
-          {/* Event rows */}
-          <ol aria-label="Audit events timeline">
-            {items.map((e) => (
-              <AuditEventRow key={e.id} event={e} onClick={() => setSelected(e)} />
-            ))}
-          </ol>
+          {/* THE COLUMNS ARE PRD §34.9's FIELDS, in its order: actor, action, scope,
+              when, before/after. A stream of prose rows could show the same values
+              and could not be scanned down — "every grant in this unit last week" is
+              a column comparison, and a comparison needs a column.
+
+              `Change` is the before/after pair. It is empty on every row today
+              because NO WRITER RECORDS ONE (shared/authz/audit.py stores the new
+              role and not the old), and it is here rather than hidden so the gap is
+              visible in the product instead of only in the spec. */}
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-[7rem]">When</TableHead>
+                  <TableHead className="w-[15rem]">Actor</TableHead>
+                  <TableHead className="w-[12rem]">Action</TableHead>
+                  <TableHead className="w-[14rem]">Scope</TableHead>
+                  <TableHead>Resource</TableHead>
+                  <TableHead className="w-[12rem]">Change</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((e) => (
+                  <AuditEventRow key={e.id} event={e} onClick={() => setSelected(e)} />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </div>
       )}
 
@@ -408,76 +444,117 @@ function AuditPageInner() {
   );
 }
 
-// ───────── Elevated audit event row (northstar stream-row style) ─────────
+// ───────── One audit row, as a table row ─────────
+
+/** PRD §34.9's Scope kinds, in the words the rest of the product uses. */
+const SCOPE_LABEL: Record<string, string> = {
+  organization: "Organization",
+  business_unit: "Business unit",
+  workspace: "Business unit",
+  project: "Project",
+};
+
+/**
+ * The before/after pair for one event, or null when the writer recorded none.
+ *
+ * NOTHING RECORDS ONE TODAY. `shared/authz/audit.py` stores the role that was
+ * granted and not the role it replaced, and no other writer carries a prior state
+ * either — so this returns null on all 132 events currently in the trail. It reads
+ * the pair rather than assuming its absence because the column becomes correct the
+ * moment a writer starts filling it in, with no second change here.
+ */
+function changePair(detail: Record<string, unknown> | null | undefined) {
+  if (!detail) return null;
+  const before = detail["before"] ?? detail["old_value"] ?? detail["previous"];
+  const after = detail["after"] ?? detail["new_value"];
+  if (before === undefined && after === undefined) return null;
+  const render = (v: unknown) =>
+    v === undefined || v === null ? "—" : typeof v === "string" ? v : JSON.stringify(v);
+  return { before: render(before), after: render(after) };
+}
 
 function AuditEventRow({ event, onClick }: { event: AuditEvent; onClick: () => void }) {
   const dotClass = ACTION_DOT[event.action] ?? "bg-muted-foreground";
   const toneClass = ACTION_TONE[event.action] ?? "text-foreground";
   const relativeTime = formatDistanceToNow(new Date(event.at), { addSuffix: true });
   const isoTime = new Date(event.at).toISOString().replace("T", " ").slice(0, 19);
+  const change = changePair(event.detail);
+  const scope = event.scope;
 
   return (
-    <li>
-      <button
-        type="button"
-        className="group border-line-soft hover:bg-surface-1 focus-visible:ring-ring flex w-full items-start gap-3 border-b px-5 py-3 text-left transition-colors last:border-b-0 focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
-        onClick={onClick}
-        aria-label={`View details for ${event.id}`}
-      >
-        {/* Mono timestamp */}
-        <span
-          className="text-muted-foreground w-[7ch] shrink-0 pt-0.5 font-mono text-[10.5px] tabular-nums"
-          title={isoTime}
+    <TableRow className="cursor-pointer" onClick={onClick}>
+      {/* When — relative for scanning, exact on hover. Both matter: "~2 hours" is
+          how you find the incident, the timestamp is what you put in the report. */}
+      <TableCell className="text-muted-foreground align-top font-mono text-[11px] tabular-nums">
+        <span title={isoTime}>{relativeTime.replace(" ago", "").replace("about ", "~")}</span>
+      </TableCell>
+
+      {/* Actor — REACHABLE WITHOUT A MOUSE. A <tr> is not focusable and carries no
+          role, so a bare row handler leaves the detail modal openable by click only
+          (the same lesson as the traces table). The actor is the button. */}
+      <TableCell className="align-top">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+          className="focus-visible:ring-ring inline-flex max-w-full items-center gap-1.5 rounded-sm text-left text-[12.5px] font-semibold focus-visible:ring-2 focus-visible:outline-none"
         >
-          {relativeTime.replace(" ago", "").replace("about ", "~")}
-        </span>
-
-        {/* Status dot */}
-        <span className={cn("mt-1.5 size-[6px] shrink-0 rounded-full", dotClass)} aria-hidden />
-
-        {/* Content */}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Actor icon + name */}
-            <span className="inline-flex items-center gap-1 text-sm font-semibold">
-              {event.actor.id === "agent" ? (
-                <Bot className="text-muted-foreground size-3.5" aria-hidden />
-              ) : event.actor.id === "system" ? (
-                <ScrollText className="text-muted-foreground size-3.5" aria-hidden />
-              ) : (
-                <User className="text-muted-foreground size-3.5" aria-hidden />
-              )}
-              {event.actor.name}
-            </span>
-
-            {/* Action badge — elevated font-mono tone */}
-            <Badge variant="outline" className={cn("font-mono text-[10px]", toneClass)}>
-              {event.action}
-            </Badge>
-
-            {/* Resource — THE NAME LEADS, and the id only appears when there is no
-                name to lead with. This printed the full UUID first and appended the
-                name, so every row opened with 36 characters nobody can read and the
-                one legible part fell off the end of the line. The id is still on the
-                row as a title, in the detail panel, and in both exports. */}
-            <span className="text-muted-foreground font-mono text-[11px]" title={event.resource.id}>
-              <span className="text-foreground font-semibold">{event.resource.type}</span>{" "}
-              {event.resource.name ?? shortId(event.resource.id)}
-            </span>
-          </div>
-        </div>
-
-        {/* Project — right-aligned mono, named where the server could name it. */}
-        {event.projectId && (
-          <span
-            className="text-muted-foreground shrink-0 font-mono text-[10.5px]"
-            title={event.projectId}
-          >
-            {event.projectName ?? shortId(event.projectId)}
+          <span className={cn("size-[6px] shrink-0 rounded-full", dotClass)} aria-hidden />
+          {event.actor.id === "agent" ? (
+            <Bot className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+          ) : event.actor.id === "system" ? (
+            <ScrollText className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+          ) : (
+            <User className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+          )}
+          <span className="truncate" title={event.actor.id}>
+            {event.actor.name}
           </span>
+        </button>
+      </TableCell>
+
+      {/* Action */}
+      <TableCell className="align-top">
+        <Badge variant="outline" className={cn("font-mono text-[10px]", toneClass)}>
+          {event.action}
+        </Badge>
+      </TableCell>
+
+      {/* Scope — the governance ladder, not the object. */}
+      <TableCell className="align-top text-[12px]">
+        {scope ? (
+          <span title={scope.id}>
+            <span className="text-muted-foreground">
+              {SCOPE_LABEL[scope.kind] ?? scope.kind}
+            </span>{" "}
+            <span className="font-medium">{scope.name ?? shortId(scope.id)}</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
         )}
-      </button>
-    </li>
+      </TableCell>
+
+      {/* Resource — the specific object the action landed on. */}
+      <TableCell className="align-top font-mono text-[11px]" title={event.resource.id}>
+        <span className="text-muted-foreground">{event.resource.type}</span>{" "}
+        <span className="text-foreground">{event.resource.name ?? shortId(event.resource.id)}</span>
+      </TableCell>
+
+      {/* Change — see changePair: empty until a writer records one. */}
+      <TableCell className="align-top font-mono text-[11px]">
+        {change ? (
+          <span className="inline-flex items-center gap-1">
+            <span className="text-muted-foreground line-through">{change.before}</span>
+            <span aria-hidden>→</span>
+            <span className="text-foreground">{change.after}</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -507,6 +584,14 @@ function AuditDetail({ event, onClose }: { event: AuditEvent; onClose: () => voi
         <dl className="grid gap-2 p-5 text-sm">
           <DetailRow label="When" value={new Date(event.at).toLocaleString()} />
           <DetailRow label="Actor" value={`${event.actor.name} (${event.actor.id})`} />
+          {event.scope && (
+            <DetailRow
+              label="Scope"
+              value={`${SCOPE_LABEL[event.scope.kind] ?? event.scope.kind} · ${
+                event.scope.name ? `${event.scope.name} (${event.scope.id})` : event.scope.id
+              }`}
+            />
+          )}
           <DetailRow
             label="Resource"
             value={`${event.resource.type} · ${

@@ -498,6 +498,48 @@ class AuditResourceOut(BaseModel):
     name: Optional[str] = None
 
 
+class AuditScopeOut(BaseModel):
+    """WHERE a decision landed — PRD §34.9's Scope field.
+
+    `kind` is one of organization / business_unit / project, which is the governance
+    ladder the product already draws everywhere else. It is NOT the resource: a role
+    grant's resource is the person who received it, while its scope is the unit they
+    received it IN, and a trail that shows only one of the two cannot answer either
+    "what happened to this person" or "what happened in this unit".
+    """
+
+    kind: str
+    id: str
+    name: Optional[str] = None
+
+
+def derive_scope(event: Any) -> tuple[str, str]:
+    """`(kind, id)` for one event, from whichever shape its writer used.
+
+    THREE WRITERS, THREE SHAPES, and the scope has to be read out of all of them:
+    RBAC events (shared/authz/audit.py) carry `scope_kind` + `scope_id`; resource
+    events carry `project_id` or `workspace_id`; and a business-unit denial names the
+    unit as its resource and nothing else. Anything matching none of those happened at
+    the organization, which is the honest default rather than a guess — it is the only
+    scope that always exists.
+
+    Shared with `shared/routers/audit.py::_resolve_names`, which needs the same answer
+    to know which ids to look names up for. Two copies of this would drift into two
+    different ideas of where an event happened.
+    """
+    payload = getattr(event, "payload", None) or {}
+    kind = payload.get("scope_kind")
+    if kind:
+        return str(kind), str(payload.get("scope_id") or "")
+    if payload.get("project_id"):
+        return "project", str(payload["project_id"])
+    if payload.get("workspace_id"):
+        return "business_unit", str(payload["workspace_id"])
+    if (getattr(event, "resource_type", None) or "") in ("business_unit", "workspace"):
+        return "business_unit", str(getattr(event, "resource_id", "") or "")
+    return "organization", str(getattr(event, "tenant_id", "") or "")
+
+
 class AuditEventOut(BaseModel):
     """ORM AuditEvent -> Zod AuditEvent shape.
 
@@ -537,6 +579,7 @@ class AuditEventOut(BaseModel):
     action: str
     actor: AuditActorOut
     resource: AuditResourceOut
+    scope: AuditScopeOut
     at: str
     detail: Optional[dict]
     ip: Optional[str]
@@ -549,6 +592,7 @@ class AuditEventOut(BaseModel):
         actor_name: Optional[str] = None,
         resource_name: Optional[str] = None,
         project_name: Optional[str] = None,
+        scope_name: Optional[str] = None,
     ) -> "AuditEventOut":
         """Build an AuditEventOut from a shared.models.orm.AuditEvent instance.
 
@@ -559,6 +603,7 @@ class AuditEventOut(BaseModel):
         payload = event.payload or {}
         actor_id = event.actor_id or "system"
         project_id = str(payload["project_id"]) if payload.get("project_id") else None
+        scope_kind, scope_id = derive_scope(event)
         return cls(
             id=str(event.id),
             tenantId=str(event.tenant_id),
@@ -579,6 +624,7 @@ class AuditEventOut(BaseModel):
                 # table lookup can do better than the name the file was given.
                 name=payload.get("resource_name") or resource_name or payload.get("filename"),
             ),
+            scope=AuditScopeOut(kind=scope_kind, id=scope_id, name=scope_name),
             at=_iso(event.created_at),
             detail={k: v for k, v in payload.items()
                     if k not in ("project_id", "actor_name", "resource_name", "ip")}

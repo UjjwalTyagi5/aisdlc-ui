@@ -32,7 +32,13 @@ from shared.authz.dependency import require_permission
 from shared.authz.read_scope import allowed_workspace_ids
 from shared.db import get_db_session
 from shared.models.orm import AuditEvent
-from shared.routers._schemas import AuditEventOut, CursorPage, Paginated, Pagination
+from shared.routers._schemas import (
+    AuditEventOut,
+    CursorPage,
+    Paginated,
+    Pagination,
+    derive_scope,
+)
 
 audit_router = APIRouter()
 
@@ -101,8 +107,20 @@ async def _lookup(db: AsyncSession, table: str, name_col: str, ids: set[str]) ->
     return {r.id: r.name for r in rows if r.name}
 
 
-async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict]:
-    """Names for one page of events: `(actors, resources, projects)`.
+# The table that can name each scope kind. Mirrors `_RESOURCE_NAME_SOURCES`, kept
+# separate because a scope kind is not a resource type: `organization` never appears
+# as a resource, and `project` names the unit an event happened in rather than the
+# thing it happened to.
+_SCOPE_NAME_SOURCES: dict[str, tuple[str, str]] = {
+    "organization": ("organizations", "display_name"),
+    "business_unit": ("workspaces", "display_name"),
+    "workspace": ("workspaces", "display_name"),
+    "project": ("projects", "display_name"),
+}
+
+
+async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict, dict]:
+    """Names for one page of events: `(actors, resources, projects, scopes)`.
 
     THE AUDIT TRAIL WAS THREE COLUMNS OF UUID. `actor_name` and `resource_name` are
     payload keys that nothing writes, so every row fell through to the id -- you could
@@ -127,6 +145,16 @@ async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict
         if source and e.resource_id:
             by_source.setdefault(source, set()).add(e.resource_id)
 
+    # Scopes, grouped the same way: `derive_scope` is the ONE place that decides where
+    # an event happened, shared with the serializer so the id we look up is the id it
+    # will render.
+    scope_wanted: dict[tuple[str, str], set[str]] = {}
+    for e in rows:
+        kind, sid = derive_scope(e)
+        source = _SCOPE_NAME_SOURCES.get(kind)
+        if source and sid:
+            scope_wanted.setdefault(source, set()).add(sid)
+
     actors = await _lookup(db, "users", _USER_LABEL, actor_ids)
     projects = await _lookup(db, "projects", "display_name", project_ids)
 
@@ -136,7 +164,11 @@ async def _resolve_names(db: AsyncSession, rows: list) -> tuple[dict, dict, dict
         for rtype, source in _RESOURCE_NAME_SOURCES.items():
             if source == (table, name_col):
                 resolved.update({(rtype, rid): name for rid, name in found.items()})
-    return actors, resolved, projects
+
+    scopes: dict[str, str] = {}
+    for (table, name_col), ids in scope_wanted.items():
+        scopes.update(await _lookup(db, table, name_col, ids))
+    return actors, resolved, projects, scopes
 
 
 @audit_router.get(
@@ -252,7 +284,7 @@ async def list_audit_events(
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(stmt)).scalars().all()
 
-    actors, resources, projects = await _resolve_names(db, list(rows))
+    actors, resources, projects, scopes = await _resolve_names(db, list(rows))
     return Paginated(
         items=[
             AuditEventOut.from_orm_audit(
@@ -260,6 +292,7 @@ async def list_audit_events(
                 actor_name=actors.get(e.actor_id or ""),
                 resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
                 project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
+                scope_name=scopes.get(derive_scope(e)[1]),
             )
             for e in rows
         ],
@@ -327,13 +360,14 @@ async def get_run_audit(
 
     # The same names here: one run's trail is mostly people acting on artifacts, and
     # "who approved this" is the question it exists to answer.
-    actors, resources, projects = await _resolve_names(db, list(rows))
+    actors, resources, projects, scopes = await _resolve_names(db, list(rows))
     items = [
         AuditEventOut.from_orm_audit(
             e,
             actor_name=actors.get(e.actor_id or ""),
             resource_name=resources.get((e.resource_type or "", e.resource_id or "")),
             project_name=projects.get(str((e.payload or {}).get("project_id") or "")),
+            scope_name=scopes.get(derive_scope(e)[1]),
         )
         for e in rows
     ]

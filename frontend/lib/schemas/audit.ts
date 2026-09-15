@@ -39,6 +39,17 @@ export const AuditEvent = z.object({
     // rejects a null one. Every row carries `"name": null`.
     name: z.string().nullish(),
   }),
+  /**
+   * WHERE it landed — PRD §34.9's Scope field, resolved server-side.
+   *
+   * Not the same thing as `resource`: a role grant's resource is the person who
+   * received it, while its scope is the unit they received it IN. Optional so a
+   * response from a backend that predates the field still parses; the table falls
+   * back to the organization when it is absent.
+   */
+  scope: z
+    .object({ kind: z.string(), id: z.string(), name: z.string().nullish() })
+    .nullish(),
   at: Timestamp,
   /** Truncated free-form payload shown in the row drawer. */
   detail: z.record(z.unknown()).nullish(),
