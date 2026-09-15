@@ -73,3 +73,6 @@ backend/.env.*.bak
 # It is reference material for wiring this app to their instance, not config this
 # app reads — and one `git add .` away from publishing all of it.
 langfuse_cred_help
+
+# Throwaway API-key connectivity check — the Anthropic key is pasted inline.
+test_claude_key.py
