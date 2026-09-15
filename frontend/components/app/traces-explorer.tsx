@@ -20,10 +20,10 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableHead, type SortDir } from "@/components/ui/sortable-header";
 import { formatUsd } from "@/components/app/cost-dashboard";
 import { listTraces, type TraceFilters } from "@/lib/api/traces";
 import { qk } from "@/lib/api/query-keys";
@@ -41,6 +41,31 @@ function avgScore(scores: TraceScore[]): string {
 function fmtLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
+
+/**
+ * How each column is ordered. Keyed off the UNDERLYING value, never the rendered
+ * string: `fmtLatency` turns 900ms into "900ms" and 1,100ms into "1.1s", and sorting
+ * those as text puts the slower trace first. Same trap with cost ("$0.0052") and score
+ * ("—" for no scores).
+ *
+ * A trace with no scores sorts as -1 rather than 0, so "no score" and "scored zero"
+ * do not interleave — they are different facts and a reader scanning for the worst
+ * result should not find blanks mixed in among them.
+ */
+type TraceSortKey = "name" | "agent" | "project" | "latency" | "cost" | "spans" | "score";
+
+const TRACE_SORTERS: Record<TraceSortKey, (t: TraceListItem) => string | number> = {
+  name: (t) => t.name,
+  agent: (t) => t.agentType ?? "",
+  project: (t) => t.projectName,
+  latency: (t) => t.latencyMs,
+  cost: (t) => t.cost.usd,
+  spans: (t) => t.spanCount,
+  score: (t) =>
+    t.scores.length === 0
+      ? -1
+      : t.scores.reduce((a, sc) => a + sc.value, 0) / t.scores.length,
+};
 
 export interface TracesExplorerProps {
   agent: string;
@@ -87,6 +112,45 @@ export function TracesExplorer({
     for (const t of tracesQ.data ?? []) if (t.userId) ids.add(t.userId);
     return Array.from(ids).map((id) => [id, id] as [string, string]);
   }, [tracesQ.data]);
+
+  /**
+   * SORTED IN THE BROWSER, and here that is the honest place for it.
+   *
+   * `listTraces` returns a flat array — every row the filters matched, up to the
+   * endpoint's limit — so this sorts the WHOLE result, not a page of it. The Audit
+   * Trail deliberately does the opposite: it is cursor-paginated, so sorting there
+   * happens server-side, because reordering one page and calling the trail sorted is
+   * a lie the reader cannot see through.
+   */
+  const [sortKey, setSortKey] = React.useState<TraceSortKey>("latency");
+  const [sortDir, setSortDir] = React.useState<SortDir>("desc");
+
+  const sorted = React.useMemo(() => {
+    const rows = [...(tracesQ.data ?? [])];
+    const pick = TRACE_SORTERS[sortKey];
+    rows.sort((a, b) => {
+      const av = pick(a);
+      const bv = pick(b);
+      // localeCompare for strings so "Æ" and "z" land where a reader expects, numeric
+      // subtraction for the rest; mixing the two silently sorts numbers as text and
+      // puts 10 before 9.
+      const cmp =
+        typeof av === "string" || typeof bv === "string"
+          ? String(av).localeCompare(String(bv), undefined, { numeric: true })
+          : (av as number) - (bv as number);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [tracesQ.data, sortKey, sortDir]);
+
+  const sortProps = (key: TraceSortKey) => ({
+    active: sortKey === key,
+    dir: sortDir,
+    onSort: (next: SortDir) => {
+      setSortKey(key);
+      setSortDir(next);
+    },
+  });
 
   return (
     <div className="space-y-4">
@@ -135,17 +199,17 @@ export function TracesExplorer({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Trace</TableHead>
-                <TableHead>Agent</TableHead>
-                <TableHead>Project</TableHead>
-                <TableHead className="text-right">Latency</TableHead>
-                <TableHead className="text-right">Cost</TableHead>
-                <TableHead className="text-right">Spans</TableHead>
-                <TableHead className="text-right">Score</TableHead>
+                <SortableHead label="Trace" {...sortProps("name")} />
+                <SortableHead label="Agent" {...sortProps("agent")} />
+                <SortableHead label="Project" {...sortProps("project")} />
+                <SortableHead label="Latency" align="right" className="text-right" {...sortProps("latency")} />
+                <SortableHead label="Cost" align="right" className="text-right" {...sortProps("cost")} />
+                <SortableHead label="Spans" align="right" className="text-right" {...sortProps("spans")} />
+                <SortableHead label="Score" align="right" className="text-right" {...sortProps("score")} />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {tracesQ.data!.map((t: TraceListItem) => (
+              {sorted.map((t: TraceListItem) => (
                 // REACHABLE WITHOUT A MOUSE.
                 //
                 // This was a bare `onClick` on the row. A <tr> is not focusable and has

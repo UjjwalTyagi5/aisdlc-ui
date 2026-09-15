@@ -30,6 +30,8 @@ export const listAuditEvents = (query?: {
   /** Opaque, from a previous response. Omit for the newest page. */
   cursor?: string;
   direction?: "next" | "prev";
+  /** Which way the trail runs. Server-side — the page is one slice of it. */
+  sort?: "newest" | "oldest";
   pageSize?: number;
 }) =>
   api("/audit", {

@@ -280,6 +280,7 @@ async def _query_audit_events(
     q: Optional[str] = None,
     cursor: Optional[str] = None,
     direction: str = "next",
+    sort: str = "newest",
     page_size: int = 20,
     db: AsyncSession = None,  # type: ignore[assignment]
 ) -> tuple[list[AuditEventOut], int, Optional[str], Optional[str]]:
@@ -396,22 +397,34 @@ async def _query_audit_events(
     anchor = _decode_cursor(cursor) if cursor else None
     going_back = direction == "prev" and anchor is not None
 
+    # TWO DIRECTIONS COMPOSE HERE, and keeping them separate is what makes the walk
+    # survive a sort flip. `newest_first` is which way the TRAIL runs; `going_back` is
+    # which way the READER is moving through it. Previous always means "toward the end
+    # you started at", whichever way the trail is pointing.
+    #
+    # Sorting is offered on this column ALONE. Actor and Scope are resolved after the
+    # query returns (see `_resolve_names`) and Change is derived from the payload, so
+    # ordering by them would mean ordering by a raw id the reader never sees, or
+    # sorting the fifty rows already fetched and calling 133 rows sorted. Both are
+    # worse than not offering it.
+    newest_first = sort != "oldest"
+    key = (AuditEvent.created_at, AuditEvent.id)
+    walking_down = newest_first != going_back  # away from the starting end
+
+    if walking_down:
+        order = (AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    else:
+        order = (AuditEvent.created_at.asc(), AuditEvent.id.asc())
+
     if anchor is not None:
         ts, ident = anchor
-        if going_back:
-            # Walking backwards: everything NEWER than the anchor, oldest-first so the
-            # LIMIT takes the rows nearest to it, then reversed below. Ordering ASC and
-            # re-reversing is what makes Previous land on the page you came from rather
-            # than the newest page every time.
-            stmt = stmt.where(
-                tuple_(AuditEvent.created_at, AuditEvent.id) > tuple_(ts, ident)
-            ).order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
-        else:
-            stmt = stmt.where(
-                tuple_(AuditEvent.created_at, AuditEvent.id) < tuple_(ts, ident)
-            ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
-    else:
-        stmt = stmt.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        # `<` pairs with DESC and `>` with ASC — a row comparison against the whole
+        # ordering key, which is why the id belongs in it.
+        stmt = stmt.where(
+            tuple_(*key) < tuple_(ts, ident) if walking_down
+            else tuple_(*key) > tuple_(ts, ident)
+        )
+    stmt = stmt.order_by(*order)
 
     fetched = list((await db.execute(stmt.limit(page_size + 1))).scalars().all())
     has_more = len(fetched) > page_size
@@ -476,6 +489,7 @@ async def list_audit_events(
     q: Optional[str] = None,
     cursor: Optional[str] = None,
     direction: str = "next",
+    sort: str = "newest",
     page_size: int = 20,
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -489,7 +503,7 @@ async def list_audit_events(
     items, total, next_cursor, prev_cursor = await _query_audit_events(
         request, project_id=project_id, workspace_id=workspace_id,
         actor=actor, action=action, q=q,
-        cursor=cursor, direction=direction, page_size=page_size, db=db,
+        cursor=cursor, direction=direction, sort=sort, page_size=page_size, db=db,
     )
     return KeysetPage(
         items=items, total=total, nextCursor=next_cursor, prevCursor=prev_cursor,

@@ -29,6 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableHead, type SortDir } from "@/components/ui/sortable-header";
 import { ActivityTabs } from "@/components/app/activity-tabs";
 import { RestrictedAccess } from "@/components/auth/restricted-access";
 import { ScopeChip } from "@/components/app/scope-indicator";
@@ -145,6 +146,12 @@ function AuditPageInner() {
    * change resets it because the walk starts over.
    */
   const step = Number(searchParams.get("step") ?? "1");
+  /**
+   * Sort runs on the SERVER, because the page is one cursor-walked slice of the trail.
+   * Sorting `items` here would reorder the fifty rows already fetched and present it
+   * as 133 rows sorted — the same lie the search box told before it moved server-side.
+   */
+  const sortDir: SortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
 
   const updateParams = React.useCallback(
     (patch: Record<string, string | number | undefined>) => {
@@ -178,6 +185,7 @@ function AuditPageInner() {
       q: debouncedSearch,
       cursor: cursor ?? null,
       direction,
+      sort: sortDir,
     }),
     queryFn: () =>
       listAuditEvents({
@@ -186,6 +194,7 @@ function AuditPageInner() {
         q: debouncedSearch || undefined,
         cursor,
         direction,
+        sort: sortDir === "asc" ? "oldest" : "newest",
         pageSize: PAGE_SIZE,
       }),
     // Keeps the current page on screen while the next one loads, so typing dims the
@@ -438,7 +447,20 @@ function AuditPageInner() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[11rem]">Date &amp; time</TableHead>
+                  {/* THE ONLY SORTABLE COLUMN, and deliberately. Actor and Scope are
+                      resolved after the query returns and Change is derived from the
+                      payload, so ordering by them means ordering by a raw id the
+                      reader never sees — or sorting one page and calling the trail
+                      sorted. A header that cannot honestly sort does not offer to. */}
+                  <SortableHead
+                    label="Date & time"
+                    className="w-[11rem]"
+                    active
+                    dir={sortDir}
+                    onSort={(next) =>
+                      updateParams({ sort: next === "asc" ? "asc" : undefined, ...RESET_WALK })
+                    }
+                  />
                   <TableHead className="w-[15rem]">Actor</TableHead>
                   <TableHead className="w-[12rem]">Action</TableHead>
                   <TableHead className="w-[14rem]">Scope</TableHead>

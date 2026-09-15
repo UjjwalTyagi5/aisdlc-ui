@@ -20,6 +20,8 @@ export async function GET(req: NextRequest) {
   if (cursor) to.set("cursor", cursor);
   const direction = from.get("direction");
   if (direction === "prev") to.set("direction", "prev");
+  const sort = from.get("sort");
+  if (sort === "oldest") to.set("sort", "oldest");
   // Mirrors the previous 200-row ceiling — an unbounded page size on the audit
   // trail is a memory problem on a table that only ever grows.
   const pageSize = Math.min(Number(from.get("pageSize") ?? "20") || 20, 200);
