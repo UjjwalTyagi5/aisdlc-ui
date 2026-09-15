@@ -130,6 +130,10 @@ REDIS_URL = os.environ.get("REDIS_URL", "")
 
 # Azure Blob Storage account URL (https://<account>.blob.core.windows.net)
 AZURE_BLOB_ACCOUNT_URL = os.environ.get("AZURE_BLOB_ACCOUNT_URL", "")
+# A directory to store generated documents in INSTEAD of Azure Blob Storage — the
+# local-dev and demo backend. Only consulted when AZURE_BLOB_ACCOUNT_URL is blank;
+# relative to backend/. See shared/storage/local_blob.py for what it does not do.
+ARTIFACT_STORAGE_ROOT = os.environ.get("ARTIFACT_STORAGE_ROOT", "")
 
 # Azure Key Vault URL (https://<vault-name>.vault.azure.net)
 # PLATFORM vault: secrets the app only ever READS (JWT signing key, Redis URL, webhook

@@ -174,12 +174,16 @@ def get_blob_client() -> Any:
         return _process_blob_client
     _blob_client_tried = True
     try:
-        from config.env import AZURE_BLOB_ACCOUNT_URL  # noqa: PLC0415
-        if not AZURE_BLOB_ACCOUNT_URL:
-            logger.info("AZURE_BLOB_ACCOUNT_URL unset — generated files stay local")
-            return None
-        from shared.storage.azure_blob import BlobStorageClient  # noqa: PLC0415
-        _process_blob_client = BlobStorageClient()
+        # The SAME decision the lifespan makes for `app.state.blob_client` — Azure,
+        # a local directory, or nothing — taken in one place so the request path and
+        # the agents' path can never store documents in two different places.
+        from shared.storage import build_blob_client  # noqa: PLC0415
+        _process_blob_client = build_blob_client()
+        if _process_blob_client is None:
+            logger.info(
+                "neither AZURE_BLOB_ACCOUNT_URL nor ARTIFACT_STORAGE_ROOT is set — "
+                "generated files stay local and unstored"
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Blob client unavailable: %s", type(exc).__name__)
         _process_blob_client = None

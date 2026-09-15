@@ -121,7 +121,8 @@ async def test_a_registry_gap_stops_the_process(monkeypatch):
         return None
 
     monkeypatch.setattr(process_api, "load_secret", _no_secret)
-    monkeypatch.setattr(process_api, "AZURE_BLOB_ACCOUNT_URL", "")
+    # The lifespan asks shared.storage which backend is configured; "none" here.
+    monkeypatch.setattr(process_api, "build_blob_client", lambda: None)
     monkeypatch.setattr(process_api, "_probe_postgres", _probe_ok)
     monkeypatch.setattr(process_api, "_probe_redis", _probe_ok)
     monkeypatch.setattr(process_api, "_probe_blob", _probe_ok)
