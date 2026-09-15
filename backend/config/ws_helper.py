@@ -77,6 +77,22 @@ def set_tenant_id(tenant_id):
 def set_project_id(project_id):
     PROJECT_ID.set(str(project_id) if project_id else None)
 
+def bind_turn_project(tenant_id, project_id) -> None:
+    """Bind the project a chat turn acts on, for every tool that asks
+    `get_project_id()` / `get_tenant_id()` — the document readers, the connector
+    publishers, the board tools.
+
+    Called from `assert_agent_access_for_chat`, so the project a turn is ALLOWED to
+    act on is, by construction, the project its tools act on. Before this, six of the
+    standalone agent handlers (development, testing, code review, security,
+    deployment, monitoring) never set these, and their `list_project_documents`
+    answered "this conversation is not attached to a project" from inside the
+    project's own page. The run id is left alone: a standalone chat turn belongs to
+    no pipeline run, and the handlers that do have one set it themselves.
+    """
+    set_tenant_id(tenant_id)
+    set_project_id(project_id)
+
 def set_run_id(run_id):
     RUN_ID.set(str(run_id) if run_id else None)
 

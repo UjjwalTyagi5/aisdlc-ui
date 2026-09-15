@@ -76,7 +76,58 @@ async def resolve_agent_turn(
     injected, skills, _profile = await prepare_agent_turn(
         agent_id, base_prompt, tenant_id, project_id
     )
+    if injected:
+        injected = await with_approved_documents(agent_id, injected, tenant_id, project_id)
     return injected, skills
+
+
+DOCUMENTS_UNAVAILABLE_NOTE = (
+    "--- APPROVED DOCUMENTS IN THIS PROJECT ---\n"
+    "The project's approved documents could not be listed for this turn. They may "
+    "still exist: call `list_project_documents` before telling the user there are none."
+    "\n--- END APPROVED DOCUMENTS IN THIS PROJECT ---"
+)
+
+
+async def with_approved_documents(
+    agent_id: str, prompt: str, tenant_id: Optional[str], project_id: Optional[str]
+) -> str:
+    """`prompt` plus the project's approved-documents block, for an agent that can read
+    them.
+
+    THE STANDALONE AGENTS WERE BUILT BESIDE THE DOCUMENT RECORD, NOT ON IT. Asked "does
+    this project have any approved artifacts?" from inside the project's own page, the
+    Development agent answered "no approved artifacts in this session" — its tools were
+    bound but nothing told it the record existed, and (until `bind_turn_project`) the
+    tools could not see the project anyway. The Orchestrator gained this block first
+    (`orchestrator2.project_documents`); this puts the same block, same wording, into
+    every standalone agent that binds `list_project_documents`/`read_document`, so
+    what an agent knows about the project's record does not depend on which door the
+    user came through.
+
+    Metadata only — names, ids, approvers — never contents; the agent reads what it
+    needs with `read_document`. Agents without the tools get nothing added: a block
+    that says "call read_document" to an agent that cannot is a trap. A failed read
+    is said, not hidden as "no documents".
+    """
+    if not (prompt and tenant_id and project_id):
+        return prompt
+    from shared.tools.project_documents import has_document_tools  # noqa: PLC0415
+
+    if not has_document_tools(agent_id):
+        return prompt
+    try:
+        from agents_orchestrator.orchestrator2.project_documents import (  # noqa: PLC0415
+            approved_documents_context,
+        )
+
+        block = await approved_documents_context(str(project_id), str(tenant_id))
+    except Exception:  # noqa: BLE001 — an outage is said, never read as "none"
+        logger.warning("approved documents block unavailable for %s", agent_id, exc_info=True)
+        block = DOCUMENTS_UNAVAILABLE_NOTE
+    if not block:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{block.strip()}"
 
 
 async def resolve_agent_skills(

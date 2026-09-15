@@ -147,6 +147,15 @@ async def assert_agent_access_for_chat(
 
     Returns the resolved project's UUID string, so callers don't need a second
     `resolve_project` round trip.
+
+    AND BINDS THE TURN'S PROJECT CONTEXT (`config.ws_helper.bind_turn_project`). Every
+    standalone chat handler calls this gate once per turn with the resolved tenant and
+    project — it is the one seam they all share — and the tools an agent then calls
+    (`list_project_documents`, `read_document`, the Confluence and SharePoint
+    publishers) read that context. Binding it here means the project a turn may act
+    on is the project its tools act on, for every handler, including the ones written
+    later. The handlers that also set it themselves (design, requirements, PM) are
+    simply setting it twice.
     """
     project = await _resolve_member_project(
         db, tenant_id=tenant_id, project_id=project_id, user_id=user_id,
@@ -158,7 +167,14 @@ async def assert_agent_access_for_chat(
         db, tenant_id=tenant_id, project_id=resolved_project_id,
         role=role, user_id=user_id, agent_id=agent_id,
     )
+    _bind_turn(tenant_id, resolved_project_id)
     return resolved_project_id
+
+
+def _bind_turn(tenant_id: str, project_id: str) -> None:
+    from config.ws_helper import bind_turn_project  # noqa: PLC0415 — keeps authz import-light
+
+    bind_turn_project(tenant_id, project_id)
 
 
 async def _resolve_member_project(
@@ -230,6 +246,7 @@ async def assert_agent_access_for_chat_on_track(
         db, tenant_id=tenant_id, project_id=resolved_project_id,
         role=role, user_id=user_id, agent_id=agent_id,
     )
+    _bind_turn(tenant_id, resolved_project_id)  # as assert_agent_access_for_chat does
     return resolved_project_id
 
 

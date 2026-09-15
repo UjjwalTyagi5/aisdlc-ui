@@ -168,12 +168,34 @@ def _set_ado_default_branch(s, project: str, repo_id: str, branch: str) -> None:
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
+ADO_NOT_CONNECTED = (
+    "Azure DevOps is not connected for you on this project. Azure DevOps credentials "
+    "are personal: save your own organisation URL and PAT (Code read & write) under "
+    "the project's Integrations page (Azure DevOps), then try again. Tell the user this "
+    "plainly — it is their credential that is missing, not a limitation of this agent."
+)
+
+
 async def _active_ado_creds() -> tuple[str, str]:
-    """Resolve (org_url, pat) for ADO, preferring the per-run tenant connector the
-    orchestrator bound (config.connectors.context) over the global env vars. This is
-    what lets a pipeline run use the tenant's Integrations-page ADO credentials
-    (secret store). With no connector bound, this returns ("", "") — there is no
-    process-wide PAT to fall back on."""
+    """Resolve (org_url, pat) for ADO for THIS turn. Three sources, in order:
+
+      1. the connector the Orchestrator bound for the run's stage
+         (config.connectors.context) — the pipeline path;
+      2. the signed-in user's credential on the turn's project — the STANDALONE path.
+         The chat gate (`assert_agent_access_for_chat`) binds the turn's tenant and
+         project; `ado_repos.resolve_auth` then finds the project-scoped personal
+         credential this user saved on the Integrations page, and nothing else,
+         because Azure DevOps is a personal credential (base.PERSONAL_CREDENTIAL_KINDS);
+      3. the credential the session already holds from binding a pre-pulled workspace.
+
+    THE STANDALONE PATH WAS MISSING. Only source 1 existed, so the standalone
+    Development agent — where no connector is ever bound — answered "No ADO
+    credentials configured" to a developer whose project had Azure DevOps connected
+    with read & write, and asked them to paste a PAT into the chat. The Orchestrator
+    had the same bug from the other side (tests/orchestrator2/test_connector_binding.py).
+
+    Returns ("", "") when nothing answers. Never a process-wide PAT.
+    """
     try:
         conn = get_active_connector()  # AzureDevOpsConnector bound for this run's stage
         auth = await conn.auth_adapter()  # {org_url, pat} — tenant secret store
@@ -182,6 +204,28 @@ async def _active_ado_creds() -> tuple[str, str]:
         if pat:
             return org, pat
     except Exception:  # noqa: BLE001 — no active connector (standalone)
+        pass
+
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+
+    tenant_id = get_tenant_id() or ""
+    if tenant_id:
+        try:
+            from shared.services import ado_repos  # noqa: PLC0415
+
+            org, pat = await ado_repos.resolve_auth(
+                tenant_id, project_id=get_project_id() or "", owner_id=get_user_id() or "",
+            )
+            if pat:
+                return org, pat
+        except Exception:  # noqa: BLE001 — fall through to what the session holds
+            pass
+
+    try:
+        s = get_session(get_session_id())
+        if getattr(s, "pat", ""):
+            return (getattr(s, "ado_org_url", "") or "").rstrip("/"), s.pat
+    except Exception:  # noqa: BLE001
         pass
     return "", ""
 
@@ -198,10 +242,7 @@ async def get_ado_context() -> str:
     org_url, pat = await _active_ado_creds()
 
     if not pat:
-        return _json.dumps({
-            "error": "No ADO credentials configured.",
-            "action": "Ask the user to configure the ADO connector in the Integrations page, or provide their org URL and PAT manually.",
-        })
+        return _json.dumps({"error": ADO_NOT_CONNECTED})
 
     session_id = get_session_id()
     s = get_session(session_id)
@@ -226,7 +267,7 @@ async def list_ado_projects() -> str:
 
     org_url, pat = await _active_ado_creds()
     if not pat:
-        return "Error: No ADO credentials configured. Ask the user to set up the ADO connector."
+        return f"Error: {ADO_NOT_CONNECTED}"
 
     try:
         projects = await ado_repos.list_projects(pat=pat, org_url=org_url)
@@ -258,7 +299,7 @@ async def list_ado_repos(project: str) -> str:
 
     org_url, pat = await _active_ado_creds()
     if not pat:
-        return "Error: No ADO credentials configured."
+        return f"Error: {ADO_NOT_CONNECTED}"
 
     try:
         repos = await ado_repos.list_repos(project, pat=pat, org_url=org_url)
@@ -864,8 +905,10 @@ def _pending_push_diff(work_dir: str) -> str:
 @tool
 def push_branch() -> str:
     """Push the current feature branch to origin.
-    Credentials are already embedded in the remote URL from clone_repo.
-    Also creates 'main' on the remote if it doesn't exist, so PR creation works.
+    Credentials are already embedded in the remote URL — from clone_repo, or from the
+    workspace that was pulled for this project — so this needs NO get_ado_context
+    call first. Also creates 'main' on the remote if it doesn't exist, so PR creation
+    works.
     """
     session_id = get_session_id()
     s = get_session(session_id)

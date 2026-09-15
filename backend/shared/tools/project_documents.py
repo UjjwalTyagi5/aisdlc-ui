@@ -38,6 +38,16 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
+#: The stages that have registered the tools, filled by `make_document_tools`. The
+#: standalone prompt layer asks this before telling an agent to call `read_document`
+#: — a prompt that names a tool the agent does not bind sends the model after a tool
+#: call that fails.
+_READERS: set[str] = set()
+
+
+def has_document_tools(agent_id: str) -> bool:
+    return agent_id in _READERS
+
 
 def make_document_tools(consumer_stage: str) -> list[Any]:
     """The two document tools, bound to the agent registering them.
@@ -122,4 +132,5 @@ def make_document_tools(consumer_stage: str) -> list[Any]:
             return f"That document could not be read: {note}"
         return text
 
+    _READERS.add(consumer_stage)
     return [list_project_documents, read_document]

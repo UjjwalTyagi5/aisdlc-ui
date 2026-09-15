@@ -590,18 +590,22 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             artifact_refs=_attachments or None,
         )
 
-        # MCP: bind this project's development-stage servers as tools for the graph
-        # run (interactive-chat surface). project_id comes from pipeline_context;
-        # absent project / disabled MCP -> no tools (no-op). Mirrors the pipeline path.
-        from shared.services.mcp_injection import mcp_tools_scope, project_stage_server_ids
-        _project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
-        _mcp_ids = await project_stage_server_ids(tenant_id or None, _project_id, "development")
-        _dev_skills = await resolve_agent_skills("development", tenant_id or None, _project_id)
+        # THE STAGE'S BOARD CONNECTOR, BOUND FOR THIS TURN — the same `agent_run_scope`
+        # the Requirements chat uses, and the one its module docstring said "the
+        # WS/REST chat handlers converge on". This handler never adopted it: it bound
+        # MCP tools only, so `get_work_item` / `list_work_items` (which read the bound
+        # connector) answered "no connector injected" to a developer whose project had
+        # Azure DevOps connected read & write, and the agent asked them to paste the
+        # epic into the chat. The scope also binds the MCP tools this used to bind
+        # directly; `session_id=None` because the upstream context was already built
+        # into the system prompt above. `project_id` is the gate-resolved one.
+        from shared.services.agent_run import agent_run_scope  # noqa: PLC0415
+        _dev_skills = await resolve_agent_skills("development", tenant_id or None, project_id)
 
         _final_response = ""
-        async with mcp_tools_scope(
-            tenant_id or None, _mcp_ids, "development",
-            project_id=_project_id, owner_id=str(user_id) or None,
+        async with agent_run_scope(
+            agent_id="development", tenant_id=tenant_id or None, session_id=None,
+            project_id=project_id, owner_id=str(user_id) or None,
         ), skill_context_scope("development", _dev_skills):
             _final_response = await _stream_agent_response(state, config, websocket, session_id)
 
@@ -770,8 +774,13 @@ async def chat(
     final_content = ""
     recursion_hit = False
     _dev_skills_rest = await resolve_agent_skills("development", None, _lf_pid)
+    from shared.services.agent_run import agent_run_scope  # noqa: PLC0415
     try:
-        async with skill_context_scope("development", _dev_skills_rest):
+        # The board connector for this turn, as the WS path binds it — see there.
+        async with agent_run_scope(
+            agent_id="development", tenant_id=str(real_tenant_id) or None, session_id=None,
+            project_id=_lf_pid, owner_id=str(real_user_id) or None,
+        ), skill_context_scope("development", _dev_skills_rest):
             async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
                 msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
                 if isinstance(msg_chunk, ToolMessage):

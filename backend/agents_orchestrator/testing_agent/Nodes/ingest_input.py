@@ -968,6 +968,14 @@ async def handle_follow_up_query(state: SuperAgentState):
     return {"final_user_message": answer, "chat_history": new_history}
 
 
+try:
+    from shared.tools.project_documents import make_document_tools as _make_document_tools
+
+    _DOCUMENT_TOOLS = _make_document_tools("testing")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _DOCUMENT_TOOLS = []
+
+
 async def _answer_with_optional_mcp(user_prompt: str, history, context_str: str) -> str:
     """Answer a QA chat turn, using BYO MCP tools when available (bounded loop)."""
     from langchain_core.messages import SystemMessage, ToolMessage
@@ -977,10 +985,17 @@ async def _answer_with_optional_mcp(user_prompt: str, history, context_str: str)
         mcp_tools = list(get_mcp_tools() or [])
     except Exception:
         mcp_tools = []
+    # The project's approved documents — the BRD, the design, the plan — are what a
+    # test plan is written against. Same two tools every other agent binds; the turn's
+    # project is bound by assert_agent_access_for_chat, so they answer for THIS project.
+    mcp_tools = [*mcp_tools, *_DOCUMENT_TOOLS]
 
     loop = asyncio.get_running_loop()
     sys = ("You are an expert QA assistant for an enterprise testing agent. Use the "
-           "context and any available tools to answer the user's question precisely.\n"
+           "context and any available tools to answer the user's question precisely. "
+           "The project's APPROVED documents (requirements, design, plan) are listed by "
+           "`list_project_documents` and read with `read_document` — consult them "
+           "before saying the project has no requirements or design.\n"
            f"CONTEXT:\n{context_str}")
 
     if not mcp_tools:
