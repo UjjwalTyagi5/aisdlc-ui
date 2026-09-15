@@ -233,3 +233,126 @@ async def test_list_sprints_pages_by_offset_and_stops_on_is_last(monkeypatch):
     assert len(out) == 2
     assert offsets == [0, 1]
     assert {s["time_frame"] for s in out} == {"past", "current"}
+
+
+# ── Fields and operations Jira could not reach at all ────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_update_item_writes_assignee_labels_and_acceptance_criteria(monkeypatch):
+    """None of these could be set through this connector before."""
+    sent = {}
+
+    async def _fake(method, path, **kw):
+        sent.update(kw.get("json") or {})
+        return {}, 0
+
+    c = _c()
+    monkeypatch.setattr(c, "_jira_request_with_retry", _fake)
+    await c.update_item(
+        issue_key="S-1", title="T", description="Body.",
+        acceptance_criteria="Given X", assignee="5b10a2844c", labels=["api", "urgent"],
+    )
+    fields = sent["fields"]
+    assert fields["summary"] == "T"
+    assert fields["assignee"] == {"accountId": "5b10a2844c"}
+    assert fields["labels"] == ["api", "urgent"]
+    assert "Given X" in str(fields["description"])
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_assignee_is_sent_as_an_account_id_not_a_name(monkeypatch):
+    """Jira Cloud removed username assignment when accounts became GDPR-scoped.
+    A display name silently assigns nobody on some sites and 400s on others."""
+    sent = {}
+
+    async def _fake(method, path, **kw):
+        sent.update(kw.get("json") or {})
+        return {}, 0
+
+    c = _c()
+    monkeypatch.setattr(c, "_jira_request_with_retry", _fake)
+    await c.update_item(issue_key="S-1", assignee="abc123")
+    assert "accountId" in sent["fields"]["assignee"]
+    assert "name" not in sent["fields"]["assignee"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_clearing_labels_is_distinguishable_from_not_touching_them(monkeypatch):
+    """`labels=[]` empties the field; `labels=None` leaves it alone. Collapsing the
+    two would make it impossible to clear labels, or would wipe them on every edit."""
+    sent = {}
+
+    async def _fake(method, path, **kw):
+        sent.clear()
+        sent.update(kw.get("json") or {})
+        return {}, 0
+
+    c = _c()
+    monkeypatch.setattr(c, "_jira_request_with_retry", _fake)
+
+    await c.update_item(issue_key="S-1", labels=[])
+    assert sent["fields"]["labels"] == []
+
+    await c.update_item(issue_key="S-1", title="Only the title")
+    assert "labels" not in sent["fields"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_attaching_a_file_sends_multipart_with_the_xsrf_header(monkeypatch):
+    """Without `X-Atlassian-Token: no-check` Jira refuses the upload as suspected
+    XSRF, with an error about tokens rather than files."""
+    captured = {}
+
+    async def _fake(method, path, **kw):
+        captured.update({"path": path, **kw})
+        return [{"id": "10", "filename": "brd.docx"}], 0
+
+    c = _c()
+    monkeypatch.setattr(c, "_jira_request_with_retry", _fake)
+    out = await c.upload_attachment("S-1", "brd.docx", b"bytes")
+    assert out["attached"] is True
+    assert captured["headers"]["X-Atlassian-Token"] == "no-check"
+    assert "files" in captured
+    assert captured["path"].endswith("/issue/S-1/attachments")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_empty_attachment_is_refused_before_the_request(monkeypatch):
+    c = _c()
+    out = await c.upload_attachment("S-1", "brd.docx", b"")
+    assert out["attached"] is False
+    assert "empty" in out["error"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_moving_an_issue_into_a_sprint_uses_the_agile_api(monkeypatch):
+    """Sprint membership is a board concept, not an issue field — writing the sprint
+    custom field directly is rejected on most Jira Cloud sites."""
+    captured = {}
+
+    async def _fake(method, path, **kw):
+        captured.update({"method": method, "path": path, **kw})
+        return {}, 0
+
+    c = _c()
+    monkeypatch.setattr(c, "_jira_request_with_retry", _fake)
+    out = await c.move_item_to_sprint("S-1", "42")
+    assert out["moved"] is True
+    assert captured["path"] == "/rest/agile/1.0/sprint/42/issue"
+    assert captured["json"] == {"issues": ["S-1"]}
+
+
+@pytest.mark.unit
+def test_the_new_operations_are_routed_and_declared():
+    """A capability the adapter cannot route is unreachable from an agent."""
+    c = _c()
+    manifest = c.capability_manifest()
+    for op in ("upload_attachment", "move_item_to_sprint"):
+        assert manifest.write_capabilities[op].status == "implemented"

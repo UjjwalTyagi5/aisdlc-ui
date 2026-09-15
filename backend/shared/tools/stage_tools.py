@@ -61,7 +61,14 @@ def _confluence_spec() -> ConnectorToolSpec:
 
     return ConnectorToolSpec(
         factory=make_confluence_tools,
-        write_tools=frozenset({"create_confluence_space", "publish_approved_to_confluence"}),
+        write_tools=frozenset({
+            "create_confluence_space",
+            "create_confluence_page",
+            "update_confluence_page",
+            "comment_on_confluence_page",
+            "publish_approved_to_confluence",
+            "attach_file_to_confluence_page",
+        }),
     )
 
 

@@ -204,3 +204,36 @@ def test_the_registry_kinds_are_all_real_catalogue_entries():
 def test_confluence_counts_as_wired_now():
     """The connector at the centre of this: granted, and previously unusable."""
     assert "confluence" in wired_kinds()
+
+
+@pytest.mark.unit
+def test_every_confluence_write_tool_is_declared_as_one():
+    """A write tool the registry thinks is a read gets bound to a read-only stage —
+    which is the one thing filtering-instead-of-guarding must not get wrong.
+
+    Checked by name prefix rather than a second hand-written list, so adding a tool
+    that creates or updates something fails here until it is declared.
+    """
+    from shared.tools.stage_tools import _SPECS
+
+    spec = _SPECS["confluence"]()
+    names = {t.name for t in spec.factory("plan", "plan")}
+    writes = {
+        n for n in names
+        if n.startswith(("create_", "update_", "comment_", "publish_", "attach_"))
+    }
+    assert spec.write_tools == writes, (
+        f"undeclared writes: {writes - spec.write_tools}; "
+        f"declared but absent: {spec.write_tools - names}"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_read_only_confluence_grant_gets_only_the_four_readers(monkeypatch):
+    _Ctx(monkeypatch, levels={"confluence": "read"})
+    names = {t.name for t in await tools_for_stage("plan", "plan")}
+    assert names == {
+        "list_confluence_spaces", "list_confluence_pages",
+        "read_confluence_page", "search_confluence",
+    }

@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 _MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
+#: CQL fragments. Kept as constants because the query is assembled from user text and
+#: the quoting is the part that breaks: a stray double quote closes the literal early.
+DQ = chr(34)
+BACKSLASH = chr(92)
+NEWLINE = chr(10)
+TEXT_CQL = 'text ~ "{term}"'
+SPACE_CQL = 'space = "{space}" AND {rest}'
+
 async def _resolve(agent_id: str):
     """(connector, tenant_id, project_id) for this session, or (None, reason).
 
@@ -88,6 +96,12 @@ def _space_required(space: str) -> Optional[str]:
         "ERROR: which Confluence space should this go in? Pass a space key (for "
         "example ENG), or call create_confluence_space first to make one."
     )
+
+
+def _url_suffix(page: dict) -> str:
+    """` - <url>` when the API gave one, else nothing. Never a bare dash."""
+    url = (page or {}).get("url") or ""
+    return f" - {url}" if url else ""
 
 
 def make_confluence_tools(agent_id: str, stage: str) -> list:
@@ -244,6 +258,190 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         return "\n".join(lines)
 
     @tool
+    async def create_confluence_page(
+        space: str = "", title: str = "", content: str = "", parent_id: str = ""
+    ) -> str:
+        """Create a Confluence page from content written here.
+
+        FOR AGENT-AUTHORED CONTENT - a summary, a runbook, a set of notes. It is NOT
+        the way to file a project document: `publish_approved_to_confluence` is, and it
+        refuses anything an owner has not approved. Passing an unapproved document's
+        text through this tool would launder it past that gate, so do not.
+
+        Args:
+            space:     the space key.
+            title:     the page title.
+            content:   Confluence storage format (HTML-like). Plain text works too.
+            parent_id: nest under this page. Omit for the space root.
+        """
+        refusal = _space_required(space)
+        if refusal:
+            return refusal
+        if not title.strip():
+            return "ERROR: a page title is required."
+        resolved, reason = await _resolve(agent_id)
+        if not resolved:
+            return reason
+        connector, _tenant, _project = resolved
+        try:
+            page = await connector.write_adapter(
+                "create_page", space=space, title=title,
+                content=content or "", parent_id=parent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR creating the page: {type(exc).__name__}"
+        return (
+            f"Created page {page.get('title', title)!r} in {space} "
+            f"(id: {page.get('id', '?')}){_url_suffix(page)}"
+        )
+
+    @tool
+    async def update_confluence_page(
+        page_id: str = "", title: str = "", content: str = ""
+    ) -> str:
+        """Edit an existing Confluence page. Ids come from `list_confluence_pages`.
+
+        Confluence versions every edit, so the previous text stays recoverable in the
+        page history - which is why editing is offered here and deleting is not.
+
+        REPLACES THE BODY, it does not append. Read the page first if you mean to add
+        to it: passing one paragraph here discards everything else on the page.
+
+        Args:
+            page_id: the page to change.
+            title:   new title. Omit to leave it.
+            content: new body, in storage format. Omit to leave it.
+        """
+        if not page_id.strip():
+            return "ERROR: a page id is required. Use list_confluence_pages to find one."
+        if not title.strip() and not content.strip():
+            return "ERROR: nothing to change - pass a new title, new content, or both."
+        resolved, reason = await _resolve(agent_id)
+        if not resolved:
+            return reason
+        connector, _tenant, _project = resolved
+        try:
+            # No `version` passed: the connector fetches the current one and derives
+            # the next. A guessed version is rejected by Confluence with a 409.
+            page = await connector.write_adapter(
+                "update_page", page_id=page_id, title=title, content=content,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR updating page {page_id}: {type(exc).__name__}"
+        return f"Updated Confluence page {page.get('title', page_id)!r}{_url_suffix(page)}"
+
+    @tool
+    async def comment_on_confluence_page(page_id: str = "", text: str = "") -> str:
+        """Add a comment to a Confluence page - a note, a question, a review remark.
+
+        Args:
+            page_id: from `list_confluence_pages`.
+            text:    the comment body.
+        """
+        if not page_id.strip() or not text.strip():
+            return "ERROR: both a page id and comment text are required."
+        resolved, reason = await _resolve(agent_id)
+        if not resolved:
+            return reason
+        connector, _tenant, _project = resolved
+        try:
+            await connector.write_adapter("add_comment", page_id=page_id, text=text)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR commenting on page {page_id}: {type(exc).__name__}"
+        return f"Commented on Confluence page {page_id}."
+
+    @tool
+    async def search_confluence(query: str = "", space: str = "") -> str:
+        """Search Confluence content by text, optionally within one space.
+
+        Searches the SITE, not this project - Confluence has no notion of which pages
+        belong to an SDLC project, so a result may come from anywhere this credential
+        can read. Narrow with `space` when that matters.
+
+        Args:
+            query: free text to look for.
+            space: restrict to this space key. Omit to search everywhere readable.
+        """
+        if not query.strip():
+            return "ERROR: what should I search for?"
+        resolved, reason = await _resolve(agent_id)
+        if not resolved:
+            return reason
+        connector, _tenant, _project = resolved
+
+        # QUOTED FOR CQL. An unescaped double quote in the term closes the literal
+        # early and turns the rest of the user's words into broken query syntax.
+        safe = query.replace(DQ, BACKSLASH + DQ)
+        cql = TEXT_CQL.format(term=safe)
+        if space.strip():
+            cql = SPACE_CQL.format(space=space.strip(), rest=cql)
+        try:
+            hits = await connector.read_adapter("search_content", cql=cql)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR searching Confluence: {type(exc).__name__}"
+        if not hits:
+            return f"Nothing in Confluence matches {query!r}."
+        return NEWLINE.join(
+            f"- {h.get('title', '?')} ({h.get('type', 'page')}, "
+            f"space {h.get('spaceKey', '?')}, id: {h.get('id', '?')})"
+            for h in hits[:40]
+        )
+
+    @tool
+    async def attach_file_to_confluence_page(page_id: str = "", filename: str = "") -> str:
+        """Attach one of this project's APPROVED documents to an existing page.
+
+        Approved-only for the same reason `publish_approved_to_confluence` is: an
+        attachment on a wiki page is read as the record, and a draft filed there is
+        hard to walk back.
+
+        Args:
+            page_id:  the page to attach to.
+            filename: the approved document's filename.
+        """
+        if not page_id.strip() or not filename.strip():
+            return "ERROR: both a page id and a filename are required."
+        resolved, reason = await _resolve(agent_id)
+        if not resolved:
+            return reason
+        connector, tenant_id, project_id = resolved
+
+        from shared.tools.sharepoint_artifacts import (  # noqa: PLC0415
+            _approved_documents,
+            _download,
+            _unapproved_named,
+        )
+
+        docs = [d for d in await _approved_documents(tenant_id, project_id, stage)
+                if d["name"] == filename]
+        if not docs:
+            status = await _unapproved_named(tenant_id, project_id, filename)
+            if status:
+                return (
+                    f"ERROR: {filename!r} is {status}, not approved, so it cannot be "
+                    "attached. Ask its owner to approve it first."
+                )
+            return f"ERROR: no approved document named {filename!r} on this project."
+
+        doc = docs[0]
+        data = await _download(doc["blob_path"])
+        if data is None:
+            return f"ERROR: {filename!r} is approved but its stored file could not be read."
+        if len(data) > _MAX_ATTACHMENT_BYTES:
+            return (
+                f"ERROR: {filename!r} is {len(data) // (1024 * 1024)} MB, over this "
+                "platform's 20 MB attachment limit."
+            )
+        try:
+            await connector.write_adapter(
+                "upload_attachment", page_id=page_id, filename=filename,
+                content=data, content_type=doc["content_type"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR attaching {filename!r}: {type(exc).__name__}"
+        return f"Attached {filename!r} to Confluence page {page_id}."
+
+    @tool
     async def list_confluence_spaces() -> str:
         """List the Confluence spaces this account can see, with their keys."""
         resolved, reason = await _resolve(agent_id)
@@ -303,9 +501,16 @@ def make_confluence_tools(agent_id: str, stage: str) -> list:
         return text[:40_000] + ("\n\n[truncated]" if len(text) > 40_000 else "")
 
     return [
-        create_confluence_space,
-        publish_approved_to_confluence,
+        # Reading first: every write below needs an id these produce.
         list_confluence_spaces,
         list_confluence_pages,
         read_confluence_page,
+        search_confluence,
+        # Writing.
+        create_confluence_space,
+        create_confluence_page,
+        update_confluence_page,
+        comment_on_confluence_page,
+        publish_approved_to_confluence,
+        attach_file_to_confluence_page,
     ]

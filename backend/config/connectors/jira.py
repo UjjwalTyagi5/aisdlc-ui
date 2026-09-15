@@ -333,6 +333,17 @@ class JiraConnector(BaseConnector):
                     description="Two-step: GET /transitions then POST transition id",
                 ),
                 "add_comment": CapabilityEntry(status="implemented"),
+                "upload_attachment": CapabilityEntry(
+                    status="implemented",
+                    description="Multipart POST to /issue/{key}/attachments",
+                ),
+                "move_item_to_sprint": CapabilityEntry(
+                    status="implemented",
+                    description=(
+                        "Agile API - sprint membership is a board concept, not an "
+                        "issue field"
+                    ),
+                ),
                 "delete_item": CapabilityEntry(
                     status="implemented",
                     description="DELETE /issue/{key}. Jira does not recycle-bin issues",
@@ -497,6 +508,10 @@ class JiraConnector(BaseConnector):
             "delete_item": self.delete_item,
             "move_item_state": self.move_item_state,
             "add_comment": self.add_comment,
+            "upload_attachment": self.upload_attachment,
+            "publish_document": self.upload_attachment,
+            "move_item_to_sprint": self.move_item_to_sprint,
+            "assign_item": self.update_item,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -1040,33 +1055,103 @@ class JiraConnector(BaseConnector):
             "url": data.get("self", ""),
         }
 
+    async def upload_attachment(
+        self,
+        issue_key: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """POST /rest/api/3/issue/{key}/attachments — attach a file to an issue.
+
+        Same two requirements as Confluence's upload and the same silent failures if
+        missed: the `X-Atlassian-Token: no-check` header, without which Jira rejects
+        the upload as suspected XSRF, and a multipart `file` part rather than JSON.
+        """
+        if not issue_key:
+            return {"attached": False, "error": "an issue key is required"}
+        if not content:
+            return {"attached": False, "error": f"{filename or 'the file'} is empty"}
+        data, _ = await self._jira_request_with_retry(
+            "POST",
+            f"/rest/api/3/issue/{issue_key}/attachments",
+            headers={"X-Atlassian-Token": "no-check"},
+            files={"file": (filename, content, content_type)},
+        )
+        first = (data or [{}])[0] if isinstance(data, list) else {}
+        return {
+            "attached": True,
+            "id": str(first.get("id", "")),
+            "filename": first.get("filename", filename),
+            "issue_key": issue_key,
+        }
+
+    async def move_item_to_sprint(
+        self, issue_key: str, sprint_id: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """POST /rest/agile/1.0/sprint/{id}/issue — move an issue into a sprint.
+
+        AGILE API, NOT THE ISSUE API. Sprint membership is not an issue field on Jira
+        Cloud: it is a board concept, and writing the sprint custom field directly is
+        rejected on most sites. This endpoint takes a list, so it is also how an issue
+        is moved BETWEEN sprints — Jira removes it from its previous one.
+
+        There is no "remove from sprint" here: the backlog is itself a destination, and
+        moving an issue out is `POST /backlog/issue` — a different endpoint that this
+        does not yet wrap.
+        """
+        if not issue_key or not sprint_id:
+            return {"moved": False, "error": "both an issue key and a sprint id are required"}
+        await self._jira_request_with_retry(
+            "POST",
+            f"/rest/agile/1.0/sprint/{sprint_id}/issue",
+            json={"issues": [issue_key]},
+        )
+        return {"moved": True, "issue_key": issue_key, "sprint_id": str(sprint_id)}
+
     async def update_item(
         self,
         project: str = "",
         issue_key: str = "",
         title: str = "",
         description: str = "",
+        acceptance_criteria: str = "",
         item_type: str = "",
+        assignee: str = "",
+        labels: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """PUT /rest/api/3/issue/{key} — update summary/description/issue type.
+        """PUT /rest/api/3/issue/{key} — update the fields a caller supplies.
 
         Only provided fields change. Status is NOT changed here — use move_item_state
         (Jira status changes go through the transitions API, not a field write).
+
+        `assignee` takes an ACCOUNT ID, not a username or an email. Jira Cloud removed
+        username-based assignment when it made accounts GDPR-scoped; sending a display
+        name silently assigns nobody on some sites and 400s on others. Account ids come
+        back on `fetch_item_detail`.
+
+        `labels` REPLACES the label set rather than adding to it, which is what the
+        Jira field does. Read the issue first if you mean to append.
         """
         fields: Dict[str, Any] = {}
         if title:
             fields["summary"] = title
-        if description:
-            fields["description"] = {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {"type": "paragraph", "content": [{"type": "text", "text": description}]}
-                ],
-            }
+        body = description or ""
+        if acceptance_criteria:
+            suffix = "Acceptance Criteria:" + chr(10) + acceptance_criteria
+            body = (body + chr(10) + chr(10) + suffix).lstrip()
+        if body:
+            # `_text_to_adf`, not the inline single paragraph this used to build, which
+            # collapsed every multi-line description onto one line.
+            fields["description"] = _text_to_adf(body)
         if item_type:
             fields["issuetype"] = {"name": item_type}
+        if assignee:
+            fields["assignee"] = {"accountId": assignee}
+        if labels is not None:
+            fields["labels"] = list(labels)
         if not fields:
             return {"issue_key": issue_key, "updated": False, "note": "no fields to update"}
         await self._jira_request_with_retry(
