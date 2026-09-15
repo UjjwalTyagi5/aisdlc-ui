@@ -74,12 +74,24 @@ def _sharepoint_spec() -> ConnectorToolSpec:
     )
 
 
+def _sonarqube_spec() -> ConnectorToolSpec:
+    from shared.tools.sonarqube_quality import make_sonarqube_tools  # noqa: PLC0415
+
+    return ConnectorToolSpec(
+        factory=make_sonarqube_tools,
+        write_tools=frozenset(
+            {"comment_on_sonarqube_issue", "transition_sonarqube_issue"}
+        ),
+    )
+
+
 #: kind -> how to build its tools, for the connectors this registry owns. Kinds are
 #: added here as their factories are written; `_WIRED_ELSEWHERE` below covers the ones
 #: whose tools exist but are bound by an older mechanism.
 _SPECS: dict[str, Callable[[], ConnectorToolSpec]] = {
     "confluence": _confluence_spec,
     "sharepoint": _sharepoint_spec,
+    "sonarqube": _sonarqube_spec,
 }
 
 #: Kinds whose agent tools exist but are bound by an OLDER mechanism than this registry,
@@ -102,12 +114,15 @@ _WIRED_ELSEWHERE: frozenset[str] = frozenset({"jira", "azure_devops", "figma"})
 #: no agent can act on it. Named here rather than inferred from absence so that adding a
 #: connector to the catalogue without tools is a deliberate act with a visible cost.
 #:
+#: github / github_actions have connector operations (issues; workflow dispatch, runs
+#: and logs) and no tools yet — the same shape sonarqube had, and the same fix.
+#:
 #: slack / ms_teams are a genuine open question rather than an oversight: both are
 #: reached today as NOTIFICATION targets (shared/services/notification_targets.py), not
 #: as agent tools, so a grant may be serving that purpose. Whether they should also be
 #: agent tools is a product call.
 UNWIRED_KINDS: frozenset[str] = frozenset(
-    {"github", "github_actions", "sonarqube", "slack", "ms_teams"}
+    {"github", "github_actions", "slack", "ms_teams"}
 )
 
 
