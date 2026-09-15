@@ -148,7 +148,7 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
         )
         params.update(kwargs)
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-        from langchain_litellm import ChatLiteLLM
+        from shared.services.chat_litellm import ChatLiteLLM
         return ChatLiteLLM(**params)
 
     # No resolved model in this context. The run resolves + stashes the model up
@@ -180,7 +180,7 @@ def build_llm(*, max_tokens: int = 8192, **kwargs) -> ChatLiteLLM:
     )
     params.update(kwargs)
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    from langchain_litellm import ChatLiteLLM
+    from shared.services.chat_litellm import ChatLiteLLM
     return ChatLiteLLM(**params)
 
 

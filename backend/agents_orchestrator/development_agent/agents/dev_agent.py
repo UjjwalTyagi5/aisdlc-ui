@@ -200,7 +200,7 @@ def _build_llm(model: str, litellm_provider: str, api_key: str,
     if cache_key in _LLM_CACHE:
         return _LLM_CACHE[cache_key]
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    from langchain_litellm import ChatLiteLLM
+    from shared.services.chat_litellm import ChatLiteLLM
     kwargs: dict = {
         "model": model,
         "custom_llm_provider": litellm_provider,

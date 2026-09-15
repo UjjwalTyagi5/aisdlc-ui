@@ -82,7 +82,7 @@ def _build_ui_llm() -> ChatLiteLLM:
             "configure and verify a model provider in Org Settings → Model Providers."
         )
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    from langchain_litellm import ChatLiteLLM
+    from shared.services.chat_litellm import ChatLiteLLM
     from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
     return ChatLiteLLM(
         model=resolved.model,

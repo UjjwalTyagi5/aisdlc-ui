@@ -747,7 +747,7 @@ def agent(state: AgentState):
     except (NoModelConfiguredError, ModelNotEnabledError) as e:
         return {"messages": [AIMessage(content=f"No usable model is configured for this run: {e}")]}
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-    from langchain_litellm import ChatLiteLLM
+    from shared.services.chat_litellm import ChatLiteLLM
     from shared.services.model_resolver import litellm_key_kwargs  # noqa: PLC0415
     orchestrator = ChatLiteLLM(
         model=resolved.model,
