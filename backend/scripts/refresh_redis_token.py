@@ -2,9 +2,11 @@
 
 WHY THIS IS NEEDED. Azure Managed Redis has access keys DISABLED on the shared cluster,
 so authentication is Entra-only — and with Entra, the access token IS the password. It
-expires in roughly 24 hours, after which every Redis call fails with "invalid
-username-password pair" and the app degrades exactly as if Redis were down: WebSocket
-tickets stop minting, so agents stop opening.
+expires in about an hour — `az` issues 60-90 minute tokens for the redis.azure.com scope,
+not the ~24 hours this file used to claim — after which every Redis call fails with
+"invalid username-password pair" and the app degrades exactly as if Redis were down:
+WebSocket tickets stop minting, so agents stop opening. Expect to re-run this several
+times a working day.
 
 `shared/redis_client.py` builds its client from REDIS_URL and does not refresh anything,
 by design — the URL is the single knob. That makes this script the refresh mechanism for
@@ -19,6 +21,9 @@ a deployment strategy.
 """
 from __future__ import annotations
 
+import base64
+import datetime
+import json
 import pathlib
 import re
 import subprocess
@@ -34,6 +39,24 @@ def _run(cmd: list[str]) -> str:
     if out.returncode != 0:
         raise SystemExit(f"`{' '.join(cmd[:3])}…` failed: {out.stderr.strip()[:300]}")
     return out.stdout.strip()
+
+
+def _expiry(token: str) -> str:
+    """Best-effort `exp` from the token, so the caller knows when to come back.
+
+    Unverified, and deliberately so: this decodes a token we were just handed by `az` to
+    print a time, it does not trust it for anything. Any parse problem degrades to a
+    shrug rather than failing a refresh that otherwise succeeded.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload))["exp"]
+        when = datetime.datetime.fromtimestamp(exp, datetime.timezone.utc).astimezone()
+        left = (when - datetime.datetime.now(when.tzinfo)).total_seconds() / 60
+        return f"{when:%H:%M %Z} ({left:.0f} min)"
+    except Exception:
+        return "an unknown time"
 
 
 def main() -> int:
@@ -75,10 +98,17 @@ def main() -> int:
             "(expected rediss://<object-id>:<token>@host)"
         )
 
-    ENV_PATH.write_text(text.replace(match.group(0), f"REDIS_URL={rebuilt}", 1), encoding="utf-8")
+    # Splice at the matched span rather than str.replace: replace() rewrites the FIRST
+    # occurrence anywhere in the file, which is not necessarily the line the regex found.
+    # A commented example or an OLD_REDIS_URL= line carrying the same value earlier in
+    # the file would swallow the new token and leave the live line stale — which fails
+    # indistinguishably from the expiry this script exists to prevent.
+    ENV_PATH.write_text(
+        f"{text[: match.start()]}REDIS_URL={rebuilt}{text[match.end() :]}", encoding="utf-8"
+    )
     host = rebuilt.split("@", 1)[1].split("/", 1)[0]
-    print(f"REDIS_URL refreshed for {oid[:8]}… against {host}")
-    print("Token is valid for roughly 24 hours; re-run this when Redis starts refusing.")
+    print(f"REDIS_URL refreshed for {oid[:8]}… against {host}, valid until {_expiry(token)}.")
+    print("Re-run this when Redis starts refusing; the tokens last 60-90 minutes.")
     return 0
 
 

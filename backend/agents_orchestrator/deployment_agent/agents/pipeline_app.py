@@ -341,7 +341,8 @@ def _generate_with_claude(system_prompt: str, user_content: str, max_tokens: int
         )
     # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
     import litellm
-    response = litellm.completion(
+    response = traced_completion(
+            name="deployment:pipeline",
         model=resolved.model,
         custom_llm_provider=resolved.litellm_provider,
         api_key=resolved.api_key,

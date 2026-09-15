@@ -139,8 +139,18 @@ class ProjectOut(BaseModel):
     createdAt: str
 
     @classmethod
-    def from_orm_project(cls, project: Any, spend_usd: float = 0.0) -> "ProjectOut":
-        """Build a ProjectOut from a shared.models.orm.Project instance."""
+    def from_orm_project(
+        cls, project: Any, spend_usd: float = 0.0, owners: list | None = None
+    ) -> "ProjectOut":
+        """Build a ProjectOut from a shared.models.orm.Project instance.
+
+        `owners` is the project's administrators as UserRef dicts. It defaults to
+        empty, which is what every caller got unconditionally until 2026-09-14 --
+        the Owners column on the Projects table was wired end to end and always
+        blank, because this said `owners=[]` and nothing ever looked. Callers that
+        can afford the lookup pass it; the rest keep the old behaviour rather than
+        paying for a join they do not render.
+        """
         _budget = getattr(project, "monthly_budget_usd", None)
         _ws = getattr(project, "workspace_id", None)
         return cls(
@@ -165,7 +175,7 @@ class ProjectOut(BaseModel):
                 _iso(dat) if (dat := getattr(project, "approval_decided_at", None)) else None
             ),
             approvalReason=getattr(project, "approval_reason", None),
-            owners=[],
+            owners=owners or [],
             pipeline=[],
             mcpServers=getattr(project, "mcp_servers", None) or {},
             connectors=getattr(project, "connectors", None) or {},

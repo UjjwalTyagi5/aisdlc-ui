@@ -35,6 +35,8 @@ from shared.observability.client import get_langfuse_client
 
 logger = logging.getLogger(__name__)
 
+from shared.observability.bindings import set_current_trace_attrs  # noqa: E402
+
 
 def _set_run_project(project_id: Optional[str]) -> None:
     """Best-effort: stash project id in the run-scoped contextvar for budget enforcement."""
@@ -221,7 +223,7 @@ async def agent_trace(
         except Exception:  # pragma: no cover - never fail a run over observability
             logger.debug("langfuse binding resolution failed (swallowed)", exc_info=True)
 
-    return langfuse_langchain_extras(
+    _extras = langfuse_langchain_extras(
         session_id=session_id,
         run_id=run_id,
         tenant_id=str(_tenant),
@@ -233,3 +235,25 @@ async def agent_trace(
         workspace_id=workspace_id,
         public_key=public_key,
     )
+
+    # Carry the SAME identity to callers that never touch LangChain. The metadata
+    # below is what the handler writes onto a trace; a direct `litellm.completion`
+    # has no handler, so without this its traces land with userId=None and no tags.
+    try:
+        _meta = _extras[1] or {}
+        set_current_trace_attrs(
+            {
+                "user_id": _meta.get("langfuse_user_id"),
+                "session_id": _meta.get("langfuse_session_id"),
+                "tags": _meta.get("langfuse_tags"),
+                "metadata": {
+                    k: _meta[k]
+                    for k in ("agent_type", "project_id", "run_id", "workspace_id", "model")
+                    if _meta.get(k) is not None
+                },
+            }
+        )
+    except Exception:  # pragma: no cover - never fail a run over observability
+        logger.debug("trace attrs binding failed (swallowed)", exc_info=True)
+
+    return _extras

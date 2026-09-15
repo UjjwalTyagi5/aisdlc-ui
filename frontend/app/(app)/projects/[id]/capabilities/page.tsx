@@ -46,6 +46,8 @@ import {
 } from "@/lib/api/capabilities";
 import { updateProject } from "@/lib/api/projects";
 import { listCustomRoles } from "@/lib/api/roles";
+import { useSession } from "@/hooks/use-session";
+import { hasPermission } from "@/lib/auth/permissions";
 import { qk } from "@/lib/api/query-keys";
 import { PHASE_LABEL } from "@/lib/agents";
 import { ROLE_META, ROLE_ORDER } from "@/lib/roles";
@@ -221,9 +223,21 @@ function RoleAccessOverridesCard({
     queryKey: qk.agentAccessOverrides.forProject(projectId),
     queryFn: () => listAgentAccessOverrides(projectId),
   });
+  // GET /admin/custom-roles is gated on `role:manage`, which only a Business Unit
+  // Admin holds. This fired for everyone, so a Project Admin opening Capabilities
+  // got a 403 -- and, because a refused request is audited, an `access.denied` row
+  // every single visit. Twelve of the twenty-three denials on this database came
+  // from this one query.
+  //
+  // Degrading is right here rather than hiding the page: the role picker still
+  // offers every BUILT-IN role, it simply cannot list a unit's custom ones for
+  // somebody who may not read them.
+  const session = useSession();
+  const mayReadCustomRoles = hasPermission(session, "role:manage");
   const customRolesQ = useQuery({
     queryKey: ["custom-roles", "list"],
     queryFn: () => listCustomRoles(),
+    enabled: mayReadCustomRoles,
   });
 
   const roleOptions: { value: string; label: string }[] = [

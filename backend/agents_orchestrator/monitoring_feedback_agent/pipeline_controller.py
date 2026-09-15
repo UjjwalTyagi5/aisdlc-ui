@@ -112,8 +112,12 @@ def process_pasted_logs_batch(input_data: str, user_message: str) -> list:
     try:
         print("[Pipeline] Making a SINGLE, all-in-one API call via LiteLLM...")
         # Deferred: importing litellm costs ~7s. sys.modules makes repeat calls free.
-        import litellm
-        response = litellm.completion(
+        import litellm  # noqa: F401 — kept for other uses in this module
+        from shared.observability.litellm_trace import (  # noqa: PLC0415
+            traced_completion,
+        )
+        response = traced_completion(
+            name="monitoring:pasted-logs",
             messages=[{"role": "user", "content": prompt}],
             **resolved_litellm_kwargs(),
         )

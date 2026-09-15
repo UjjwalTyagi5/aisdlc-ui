@@ -234,6 +234,27 @@ async def grant_role(
 
         # (b) Assign the role — ON CONFLICT on (user_id, scope_kind, scope_id, role_name).
         # ON CONFLICT (col list) is portable across constraint naming conventions.
+        # WHAT WAS THERE BEFORE. Read first, because the upsert cannot tell us: on the
+        # DO UPDATE path `RETURNING expires_at` yields the NEW value, so comparing it
+        # against what we just wrote is always equal and an extension would never be
+        # audited. (Found by test_extending_an_expiry_is_still_audited.) One extra
+        # SELECT on a path that runs at onboarding and boot, not per request.
+        _prior = (
+            await session.execute(
+                text(
+                    "SELECT expires_at FROM role_bindings "
+                    "WHERE user_id = :user_id AND scope_kind = :scope_kind "
+                    "  AND scope_id = :scope_id AND role_name = :role_name"
+                ),
+                {
+                    "user_id": user_id,
+                    "scope_kind": scope_kind,
+                    "scope_id": str(scope_uuid),
+                    "role_name": role_name,
+                },
+            )
+        ).first()
+
         await session.execute(
             text(
                 "INSERT INTO role_bindings "
@@ -263,23 +284,38 @@ async def grant_role(
             },
         )
 
+        # ONLY AUDIT A GRANT THAT GRANTED SOMETHING. This wrote an rbac.role.granted
+        # row on every call, and grant_role is idempotent and re-run constantly:
+        # `seed_org_admins` calls it on every boot, and under --reload that is every
+        # code change. 76 of the 105 audit events on this database were the same
+        # no-op appointment of the same org admin, burying the six rows that recorded
+        # something real. An audit trail nobody can read through is not a control.
+        #
+        # `revoke_role` already had this right ("Only audit an actual removal"); this
+        # side never matched it. An expiry EXTENSION is a real change and is still
+        # audited -- re-granting an identical binding is not.
+        # New binding, or an expiry that genuinely moved. Re-granting an identical
+        # binding changes nothing and is not an event.
+        _changed = _prior is None or _prior.expires_at != expires_at
+
         # Audited inside the same transaction as the write above, so the binding and
         # the record of it commit together — an audit row describing a grant that was
         # rolled back is worse than no row at all.
-        await record_rbac_change(
-            session,
-            tenant_id=str(tenant_uuid),
-            actor_id=granted_by,
-            event_type=RBAC_ROLE_GRANTED,
-            subject_id=user_id,
-            scope_kind=scope_kind,
-            scope_id=str(scope_uuid),
-            role=role_name,
-            extra={
-                "tier": effective_tier,
-                "expires_at": expires_at.isoformat() if expires_at else None,
-            },
-        )
+        if _changed:
+            await record_rbac_change(
+                session,
+                tenant_id=str(tenant_uuid),
+                actor_id=granted_by,
+                event_type=RBAC_ROLE_GRANTED,
+                subject_id=user_id,
+                scope_kind=scope_kind,
+                scope_id=str(scope_uuid),
+                role=role_name,
+                extra={
+                    "tier": effective_tier,
+                    "expires_at": expires_at.isoformat() if expires_at else None,
+                },
+            )
 
     # NO EPOCH BUMP HERE, and that is the design rather than an omission. Granting only
     # ever ADDS to what this user may do, so a token minted before it is stale in the

@@ -46,57 +46,8 @@ def resolved_litellm_kwargs() -> dict:
     }
 
 
-def traced_completion(*, name: str, **kwargs):
-    """`litellm.completion` with a Langfuse generation around it, when tracing is on.
-
-    WHY THIS AGENT NEEDS ITS OWN WRAPPER. Every other agent reaches the model through
-    LangChain, so the Langfuse CallbackHandler observes the call and records the model,
-    tokens and cost for free. This one calls litellm directly, which no handler sees —
-    which is why it was the last agent producing no traces at all, failing FR-08's
-    "traces for agent/tool/model execution" while looking perfectly healthy.
-
-    The client comes from the run's context rather than a module global, so the
-    generation lands in THIS project's Langfuse project and not whichever one a global
-    happened to hold. No client bound (tracing off, or an unbound project) means the
-    call runs exactly as before.
-    """
-    import litellm  # noqa: PLC0415 — deferred: importing litellm costs ~7s
-
-    try:
-        from shared.observability.bindings import get_current_client  # noqa: PLC0415
-
-        client = get_current_client()
-    except Exception:
-        client = None
-
-    if client is None:
-        return litellm.completion(**kwargs)
-
-    try:
-        with client.start_as_current_generation(
-            name=name,
-            model=kwargs.get("model"),
-            input=kwargs.get("messages"),
-        ) as gen:
-            response = litellm.completion(**kwargs)
-            try:
-                usage = getattr(response, "usage", None)
-                gen.update(
-                    output=response.choices[0].message.content,
-                    # litellm normalises provider usage onto these names, so cost and
-                    # token attribution work the same as the LangChain path.
-                    usage_details={
-                        "input": getattr(usage, "prompt_tokens", None),
-                        "output": getattr(usage, "completion_tokens", None),
-                        "total": getattr(usage, "total_tokens", None),
-                    } if usage else None,
-                )
-            except Exception:  # pragma: no cover - recording must never break the call
-                pass
-            return response
-    except Exception:
-        # Tracing is not worth an agent turn. Fall back to the untraced call rather
-        # than letting an observability failure surface as an analysis failure.
-        logger.warning("monitoring agent: traced completion failed, retrying untraced",
-                       exc_info=True)
-        return litellm.completion(**kwargs)
+# Moved to shared/observability/litellm_trace.py so every direct-litellm caller can
+# reach it. This agent was not "the last agent producing no traces", as the original
+# docstring here claimed -- it was the only one that had noticed. Re-exported so this
+# module's callers keep working unchanged.
+from shared.observability.litellm_trace import traced_completion  # noqa: E402,F401
