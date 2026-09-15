@@ -942,6 +942,9 @@ async def revoke_cross_bu_grant(
             scope_kind="project",
             scope_id=str(grant.project_id),
             role=row.role_name,
+            # The loan ending takes the role away; `row` still holds what it was.
+            before=row.role_name,
+            after="none",
             extra={"reason": "cross_bu_loan_ended"},
         )
     await db.flush()

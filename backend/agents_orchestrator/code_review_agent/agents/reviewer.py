@@ -69,6 +69,19 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _SHAREPOINT_TOOLS = []
 
+try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM. Asked to publish an approved
+    # document to Confluence, this agent used to answer that the platform "only
+    # publishes to SharePoint" — truthfully, because the Confluence tools existed in
+    # the connector and were bound to no agent but Documentation. Bound the same way as
+    # SharePoint: agent and stage fixed here, never taken from a tool argument.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="code_review", stage="code_review")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("Code review agent: Confluence document tools unavailable")
+
 _tools = [
     run_semgrep_scan,
     analyze_diff,
@@ -79,6 +92,7 @@ _tools = [
     submit_code_review,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_CONFLUENCE_TOOLS,
 ]
 
 

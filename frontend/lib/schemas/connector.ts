@@ -70,6 +70,16 @@ export const Connector = z.object({
   /** Whether the requesting Business Unit was granted this kind. Only meaningful
    *  (non-null) when the caller asked with a workspace in view — see GET /connectors. */
   granted: z.boolean().nullable().optional(),
+  /**
+   * Whether any agent has a TOOL for this connector.
+   *
+   * Not the same failure as `granted: false`, and the difference is what the stage
+   * picker needs. Ungranted means an Org Admin never gave this unit the connector —
+   * an access decision. Not-wired means the grant WOULD be stored and enforced and
+   * then never used, because no agent can act on it. Defaults true so a response from
+   * a backend that predates the field does not grey out every connector.
+   */
+  agentToolsAvailable: z.boolean().default(true),
 });
 export type Connector = z.infer<typeof Connector>;
 

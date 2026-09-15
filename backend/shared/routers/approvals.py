@@ -401,6 +401,10 @@ async def _decide(
         scope_kind=result["scopeKind"],
         scope_id=result["scopeId"],
         role=result["targetRole"],
+        # A request is only decidable while pending — `decide_request` raises
+        # otherwise — so the prior state is known without reading it back.
+        before="pending",
+        after=decision,
         extra={"request_id": result["id"]},
     )
     return result

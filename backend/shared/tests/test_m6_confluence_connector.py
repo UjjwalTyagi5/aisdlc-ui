@@ -190,3 +190,100 @@ async def test_write_adapter_rejects_unknown_operation():
     connector = _make_connector()
     with pytest.raises(ValueError):
         await connector.write_adapter("not_a_real_operation")
+
+
+# ── Space creation and attachments ───────────────────────────────────────────
+#
+# Both were missing entirely, which is why a PM-agent session asked to "create a space
+# and upload this document" got a truthful refusal. They are v1 endpoints: v2 exposes
+# spaces read-only and has no attachment upload.
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_create_space_posts_to_the_v1_space_endpoint():
+    route = respx.post(f"{CONFLUENCE_BASE}/wiki/rest/api/space").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 9, "key": "QUICKLINK", "name": "QuickLink",
+                  "_links": {"webui": "/spaces/QUICKLINK"}},
+        )
+    )
+    connector = _make_connector()
+    result = await connector.create_space("QUICKLINK", name="QuickLink")
+    assert result["key"] == "QUICKLINK"
+    assert route.called
+    import json as _json
+    assert _json.loads(route.calls.last.request.content)["key"] == "QUICKLINK"
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_create_space_normalises_the_key():
+    """Confluence will not accept a key with punctuation, and will not let it be
+    changed afterwards — so it is normalised here rather than failing server-side
+    with a message about a regex."""
+    route = respx.post(f"{CONFLUENCE_BASE}/wiki/rest/api/space").mock(
+        return_value=httpx.Response(200, json={"key": "QUICKLINK", "name": "x"})
+    )
+    connector = _make_connector()
+    await connector.create_space("quick-link 01", name="x")
+    import json as _json
+    assert _json.loads(route.calls.last.request.content)["key"] == "QUICKLINK01"
+
+
+@pytest.mark.unit
+async def test_create_space_refuses_an_empty_key():
+    connector = _make_connector()
+    with pytest.raises(ValueError, match="space key is required"):
+        await connector.create_space("   ")
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_upload_attachment_sends_multipart_with_the_xsrf_header():
+    """Without `X-Atlassian-Token: nocheck` Confluence rejects the upload as a
+    suspected XSRF attempt, with a 403 whose body talks about tokens, not files."""
+    route = respx.post(
+        f"{CONFLUENCE_BASE}/wiki/rest/api/content/222/child/attachment"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "att1", "title": "BRD.docx",
+                               "_links": {"download": "/download/BRD.docx"}}]},
+        )
+    )
+    connector = _make_connector()
+    result = await connector.upload_attachment(
+        "222", "BRD.docx", b"bytes", content_type="application/vnd.openxmlformats"
+    )
+    assert result["id"] == "att1"
+    assert result["page_id"] == "222"
+    request = route.calls.last.request
+    assert request.headers["X-Atlassian-Token"] == "nocheck"
+    assert request.headers["content-type"].startswith("multipart/form-data")
+    assert b"BRD.docx" in request.content
+
+
+@pytest.mark.unit
+async def test_upload_attachment_refuses_an_empty_file():
+    """A zero-byte attachment uploads happily and is useless on the page."""
+    connector = _make_connector()
+    with pytest.raises(ValueError, match="empty"):
+        await connector.upload_attachment("222", "BRD.docx", b"")
+
+
+@pytest.mark.unit
+async def test_upload_attachment_requires_a_page():
+    connector = _make_connector()
+    with pytest.raises(ValueError, match="page id is required"):
+        await connector.upload_attachment("", "BRD.docx", b"bytes")
+
+
+@pytest.mark.unit
+def test_the_new_write_operations_are_dispatchable_and_declared():
+    """A capability that the adapter cannot route is unreachable from an agent."""
+    connector = _make_connector()
+    manifest = connector.capability_manifest()
+    for op in ("create_space", "upload_attachment"):
+        assert manifest.write_capabilities[op].status == "implemented"

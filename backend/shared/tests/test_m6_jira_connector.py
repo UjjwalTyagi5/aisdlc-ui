@@ -40,6 +40,17 @@ _ISSUE_FIXTURE = {
         "issuetype": {"name": "Story"},
         "assignee": None,
         "priority": {"name": "Medium"},
+        # ADF, because that is what REST v3 actually returns. The fixture carried no
+        # description at all, so the connector discarding every one of them was
+        # invisible here — the assertion below now fails if it regresses.
+        "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {"type": "paragraph",
+                 "content": [{"type": "text", "text": "The issue body."}]}
+            ],
+        },
     },
 }
 _TRANSITIONS_FIXTURE = {
@@ -79,9 +90,17 @@ async def test_fetch_item_detail_returns_canonical_shape():
     connector = _make_connector()
     item = await connector.fetch_item_detail("PROJ", "PROJ-1")
     assert isinstance(item, dict)
-    canonical_keys = {"id", "title", "status", "type"}
-    assert canonical_keys <= item.keys() or True, (
-        f"CanonicalWorkItem missing keys; got {list(item.keys())}"
+    # `status` was never emitted — `make_board_item` calls it `state`. With `or True`
+    # on the end, the wrong key set and the missing description were equally invisible:
+    # the assertion could not fail, which is how a connector returning an empty
+    # description for every issue kept a green suite.
+    canonical_keys = {"id", "title", "state", "type", "description"}
+    assert canonical_keys <= item.keys(), (
+        f"missing canonical keys: {canonical_keys - item.keys()}"
+    )
+    # And the description must actually carry the fixture's text, not just exist.
+    assert "The issue body." in item["description"], (
+        "ADF description was not parsed"
     )
 
 

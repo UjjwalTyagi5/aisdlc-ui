@@ -2480,6 +2480,18 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
 #: both come from here, never from a tool argument the model could set.
 _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="requirements", stage="requirements")
 
+try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM, bound the same way. Asked to
+    # file an approved document to Confluence, an agent holding only the SharePoint
+    # tools answers that the platform "only publishes to SharePoint" — truthfully, and
+    # wrongly, because the connector could do it all along and nothing bound it here.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="requirements", stage="requirements")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("Requirements agent: Confluence document tools unavailable")
+
 tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # PDF output, and the explicit save the user is asked for before
          # anything is written to the project's shared artifact storage.
@@ -2498,7 +2510,8 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # refuses anything an owner has not accepted. There is no delete tool, here or
          # anywhere: taking a file out of the business's library is a person's job.
          *_DOCUMENT_TOOLS,
-         *_SHAREPOINT_TOOLS]
+         *_SHAREPOINT_TOOLS,
+         *_CONFLUENCE_TOOLS]
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────

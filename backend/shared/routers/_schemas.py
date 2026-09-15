@@ -498,6 +498,48 @@ class AuditResourceOut(BaseModel):
     name: Optional[str] = None
 
 
+class AuditScopeOut(BaseModel):
+    """WHERE a decision landed — PRD §34.9's Scope field.
+
+    `kind` is one of organization / business_unit / project, which is the governance
+    ladder the product already draws everywhere else. It is NOT the resource: a role
+    grant's resource is the person who received it, while its scope is the unit they
+    received it IN, and a trail that shows only one of the two cannot answer either
+    "what happened to this person" or "what happened in this unit".
+    """
+
+    kind: str
+    id: str
+    name: Optional[str] = None
+
+
+def derive_scope(event: Any) -> tuple[str, str]:
+    """`(kind, id)` for one event, from whichever shape its writer used.
+
+    THREE WRITERS, THREE SHAPES, and the scope has to be read out of all of them:
+    RBAC events (shared/authz/audit.py) carry `scope_kind` + `scope_id`; resource
+    events carry `project_id` or `workspace_id`; and a business-unit denial names the
+    unit as its resource and nothing else. Anything matching none of those happened at
+    the organization, which is the honest default rather than a guess — it is the only
+    scope that always exists.
+
+    Shared with `shared/routers/audit.py::_resolve_names`, which needs the same answer
+    to know which ids to look names up for. Two copies of this would drift into two
+    different ideas of where an event happened.
+    """
+    payload = getattr(event, "payload", None) or {}
+    kind = payload.get("scope_kind")
+    if kind:
+        return str(kind), str(payload.get("scope_id") or "")
+    if payload.get("project_id"):
+        return "project", str(payload["project_id"])
+    if payload.get("workspace_id"):
+        return "business_unit", str(payload["workspace_id"])
+    if (getattr(event, "resource_type", None) or "") in ("business_unit", "workspace"):
+        return "business_unit", str(getattr(event, "resource_id", "") or "")
+    return "organization", str(getattr(event, "tenant_id", "") or "")
+
+
 class AuditEventOut(BaseModel):
     """ORM AuditEvent -> Zod AuditEvent shape.
 
@@ -511,9 +553,28 @@ class AuditEventOut(BaseModel):
 
     Derived fields (no ORM equivalents):
       projectId      = payload.get("project_id") if payload else null
+      projectName    = resolved by the caller; null when it could not be
       actor.name     = payload.get("actor_name", "system") if payload else "system"
       resource.name  = payload.get("resource_name") if payload else null
       ip             = payload.get("ip") if payload else null
+
+    NAMES COME FROM TWO PLACES, AND THE ORDER MATTERS.
+
+    `actor_name` / `resource_name` / `scope_name` are payload keys captured AT WRITE
+    TIME by `shared/authz/audit.py`. Nothing wrote them until 2026-09-15, which is why
+    every event before that renders through the second mechanism: `list_audit_events`
+    resolves the ids per page and passes the names in here
+    (`shared/routers/audit.py::_resolve_names`).
+
+    The payload wins. It is what was true AT THE TIME -- the stronger claim for a log,
+    since a unit renamed afterwards must not retitle the events that happened under
+    its old name -- and, more bluntly, it is the only one that still works once the
+    referenced row is deleted. Read-time resolution joins the trail to mutable tables;
+    delete a project and its eight role grants become `Project fa5e4ce1...` forever.
+
+    Neither mechanism can repair the rows written before the first existed:
+    `audit_events` has UPDATE revoked from the app role (migration 0005), so there is
+    no backfill and there was never meant to be one.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -521,35 +582,69 @@ class AuditEventOut(BaseModel):
     id: str
     tenantId: str
     projectId: Optional[str]
+    projectName: Optional[str] = None
     action: str
     actor: AuditActorOut
     resource: AuditResourceOut
+    scope: AuditScopeOut
     at: str
     detail: Optional[dict]
     ip: Optional[str]
 
     @classmethod
-    def from_orm_audit(cls, event: Any) -> "AuditEventOut":
-        """Build an AuditEventOut from a shared.models.orm.AuditEvent instance."""
+    def from_orm_audit(
+        cls,
+        event: Any,
+        *,
+        actor_name: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+        scope_name: Optional[str] = None,
+    ) -> "AuditEventOut":
+        """Build an AuditEventOut from a shared.models.orm.AuditEvent instance.
+
+        The three `*_name` arguments are the resolved labels; omit them and this
+        degrades to exactly the old behaviour, which is what the run-scoped trail and
+        the tests that predate resolution rely on.
+        """
         payload = event.payload or {}
         actor_id = event.actor_id or "system"
+        project_id = str(payload["project_id"]) if payload.get("project_id") else None
+        scope_kind, scope_id = derive_scope(event)
         return cls(
             id=str(event.id),
             tenantId=str(event.tenant_id),
-            projectId=str(payload["project_id"]) if payload.get("project_id") else None,
+            projectId=project_id,
+            projectName=project_name,
             action=event.event_type,
             actor=AuditActorOut(
                 id=actor_id,
-                name=payload.get("actor_name", actor_id),
+                # The payload first (what was true then), the resolved name second,
+                # and the id only when neither exists -- an id is still better than
+                # an empty cell, because it can at least be searched for.
+                name=payload.get("actor_name") or actor_name or actor_id,
             ),
             resource=AuditResourceOut(
                 type=event.resource_type or "unknown",
                 id=event.resource_id or "unknown",
-                name=payload.get("resource_name"),
+                # `filename` last: an upload names itself in its own payload, and no
+                # table lookup can do better than the name the file was given.
+                name=payload.get("resource_name") or resource_name or payload.get("filename"),
+            ),
+            # The payload first for the same reason as actor/resource: a name captured
+            # at write time survives the deletion of the thing it names, which is the
+            # whole point of capturing it.
+            scope=AuditScopeOut(
+                kind=scope_kind, id=scope_id,
+                name=payload.get("scope_name") or scope_name,
             ),
             at=_iso(event.created_at),
+            # The name keys are rendered as their own columns; repeating them in the
+            # raw detail blob is noise in the one place a reader goes for what is NOT
+            # already on screen.
             detail={k: v for k, v in payload.items()
-                    if k not in ("project_id", "actor_name", "resource_name", "ip")}
+                    if k not in ("project_id", "actor_name", "resource_name",
+                                 "scope_name", "ip")}
                    or None,
             ip=payload.get("ip"),
         )
@@ -873,6 +968,18 @@ class ConnectorOut(BaseModel):
     capabilities: List[Any]
     lastCheckedAt: Optional[str]
     account: Optional[str] = None
+    #: Whether any agent has a TOOL for this connector, from
+    #: `shared/tools/stage_tools.wired_kinds()`.
+    #:
+    #: SEPARATE FROM `granted` ON PURPOSE, because they fail differently. `granted`
+    #: false means the unit was never given this connector — an access decision, fixed
+    #: by asking an Org Admin. `agentToolsAvailable` false means the grant would be
+    #: stored, enforced, and then never used, because no agent can act on it: the
+    #: "Tools per stage" picker offered a setting that cannot take effect, which is how
+    #: a PM agent came to tell a user it could only publish to SharePoint while
+    #: Confluence sat granted in that project's settings.
+    agentToolsAvailable: bool = True
+
     # Whether the requesting Business Unit was granted this kind (integration_grants).
     # Only set when the caller resolved a workspace (query param or header) — absent
     # otherwise, since "granted" has no meaning without a unit to check it against.
@@ -976,6 +1083,33 @@ class CursorPage(BaseModel, Generic[T]):
 
     items: List[T]
     nextCursor: Optional[str] = None
+
+
+class KeysetPage(BaseModel, Generic[T]):
+    """A page walked by cursor, in both directions, with the total still reported.
+
+    WHY NOT `Pagination`. Offset paging asks the database to produce and discard every
+    row before the one you wanted, so page 2,000 of 50 reads 100,000 rows to return 50.
+    On `audit_events` it is also WRONG, not merely slow: the table is append-heavy, so
+    an event arriving between two clicks shifts every later row down by one — "Next"
+    then re-shows a row you just read, and a row can slip between pages unseen. A
+    cursor anchors to a position in the data rather than a count of rows before it, so
+    the walk stays consistent while the table grows underneath it.
+
+    WHY NOT `CursorPage`. That one only goes forward, which is right for the run-scoped
+    trail (a timeline you scroll) and wrong for a paged table with a Previous button.
+
+    `total` survives because "of 4,312 matching" is what tells a reader whether their
+    filter did anything, and it is a separate query from the page — one that the
+    `(tenant_id, created_at DESC)` index answers without touching the heap.
+    """
+
+    items: List[T]
+    #: Opaque. Pass back as `cursor` with `direction=next`; null at the end.
+    nextCursor: Optional[str] = None
+    #: Opaque. Pass back as `cursor` with `direction=prev`; null on the first page.
+    prevCursor: Optional[str] = None
+    total: int = 0
 
 
 # ── EvalRecordOut (REQ-M9-14) ────────────────────────────────────────────────

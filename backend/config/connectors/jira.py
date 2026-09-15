@@ -41,6 +41,42 @@ from shared.services.metrics import CONNECTOR_RATE_LIMIT_BACKOFFS
 
 logger = logging.getLogger(__name__)
 
+# THE ADF HELPERS ALREADY EXISTED AND WERE NEVER IMPORTED. `config/jira_ingestion` is
+# otherwise dead — its only importer is a skipped test — but these two functions are
+# correct, and their absence is why every Jira description came back empty: REST v3
+# always returns Atlassian Document Format, `_canonical_detail` saw a dict and gave up,
+# and a working recursive extractor sat one import away the whole time.
+from config.jira_ingestion import _extract_adf_text, _text_to_adf  # noqa: E402
+
+#: Where acceptance criteria live on a Jira issue. Site-specific, because Jira has no
+#: standard field for them, so the first non-empty one wins.
+#:
+#: customfield_10016 IS DELIBERATELY ABSENT. `_jira_planning` reads it as STORY POINTS,
+#: which is what it is on most Jira Cloud sites. `jira_ingestion` probes it for
+#: acceptance criteria, and copying that list verbatim would write the story-point
+#: number into the AC of every ingested story.
+_AC_FIELD_IDS = ("customfield_10056", "customfield_10028", "customfield_70016")
+
+#: Page caps. Enough for any board a person reads through, bounded so a runaway
+#: loop against a very large project cannot hold a request open indefinitely.
+#: Hitting either is logged with the count, because a silently short answer is the
+#: exact failure the loops were added to fix.
+_MAX_SEARCH_PAGES = 20      # x100 issues
+_MAX_SPRINT_PAGES = 10      # x_SPRINT_PAGE_SIZE sprints
+_SPRINT_PAGE_SIZE = 50
+
+
+def _jira_acceptance_criteria(fields: dict) -> str:
+    """The first non-empty acceptance-criteria custom field, as plain text."""
+    for field_id in _AC_FIELD_IDS:
+        raw = fields.get(field_id)
+        if raw:
+            text = _extract_adf_text(raw).strip()
+            if text:
+                return text
+    return ""
+
+
 
 def _normalize_base_url(url: str) -> str:
     """Forgive a bare host: accept `yourco.atlassian.net` or a full URL and return a
@@ -257,8 +293,12 @@ class JiraConnector(BaseConnector):
                 "fetch_item_detail": CapabilityEntry(status="implemented"),
                 "list_stories": CapabilityEntry(status="implemented"),
                 "list_states": CapabilityEntry(
-                    status="not_supported",
-                    description="Jira uses project-specific workflows; use transitions endpoint",
+                    status="implemented",
+                    description=(
+                        "Distinct status names across the project's issue-type "
+                        "workflows. Moving an item still goes through move_item_state, "
+                        "which resolves the transition for that issue"
+                    ),
                 ),
                 "list_item_types": CapabilityEntry(
                     status="implemented",
@@ -293,9 +333,32 @@ class JiraConnector(BaseConnector):
                     description="Two-step: GET /transitions then POST transition id",
                 ),
                 "add_comment": CapabilityEntry(status="implemented"),
+                "upload_attachment": CapabilityEntry(
+                    status="implemented",
+                    description="Multipart POST to /issue/{key}/attachments",
+                ),
+                "move_item_to_sprint": CapabilityEntry(
+                    status="implemented",
+                    description=(
+                        "Agile API - sprint membership is a board concept, not an "
+                        "issue field"
+                    ),
+                ),
+                "delete_item": CapabilityEntry(
+                    status="implemented",
+                    description="DELETE /issue/{key}. Jira does not recycle-bin issues",
+                ),
+                "create_project": CapabilityEntry(
+                    status="implemented",
+                    description="Requires a Jira admin token; the caller becomes lead",
+                ),
                 "update_item_fields": CapabilityEntry(
-                    status="not_supported",
-                    description="Deferred to future plan",
+                    status="implemented",
+                    description=(
+                        "Summary, description, acceptance criteria and issue type. A "
+                        "status change is not a field edit — it goes through "
+                        "move_item_state"
+                    ),
                 ),
             },
         )
@@ -419,6 +482,19 @@ class JiraConnector(BaseConnector):
         }
         fn = _MAP.get(operation)
         if fn is None:
+            # DECLARED-UNSUPPORTED IS NOT UNKNOWN, and the agent needs to tell them
+            # apart. `list_teams`, `fetch_hierarchy` and `team_capacity` are called by
+            # the Requirements and PM agents, are declared `not_supported` in the
+            # manifest above, and were missing from this map — so the caller got
+            # "Unknown read operation", which reads like a bug in this platform rather
+            # than a fact about Jira. The manifest already holds the real reason, so it
+            # is the thing quoted.
+            declared = self.capability_manifest().read_capabilities.get(operation)
+            if declared is not None and declared.status != "implemented":
+                raise ConnectorNotAvailableError(
+                    f"Jira does not support {operation!r}: "
+                    f"{declared.description or declared.status}"
+                )
             raise ValueError(f"Unknown read operation: {operation!r}")
         return await fn(**kwargs)
 
@@ -432,6 +508,10 @@ class JiraConnector(BaseConnector):
             "delete_item": self.delete_item,
             "move_item_state": self.move_item_state,
             "add_comment": self.add_comment,
+            "upload_attachment": self.upload_attachment,
+            "publish_document": self.upload_attachment,
+            "move_item_to_sprint": self.move_item_to_sprint,
+            "assign_item": self.update_item,
         }
         fn = _MAP.get(operation)
         if fn is None:
@@ -521,11 +601,35 @@ class JiraConnector(BaseConnector):
             return []
         board_id = values[0].get("id")
 
-        data, _ = await self._jira_request_with_retry(
-            "GET", f"/rest/agile/1.0/board/{board_id}/sprint?maxResults=200"
-        )
+        # `startAt` HERE, unlike list_stories. The Agile 1.0 API is offset-paginated and
+        # reports `isLast`; the enhanced search API next door is token-paginated and
+        # ignores startAt. Two endpoints on the same product, two pagination schemes —
+        # using one convention for both silently truncates the other.
+        sprints: List[Dict[str, Any]] = []
+        start_at = 0
+        for _ in range(_MAX_SPRINT_PAGES):
+            data, _rc = await self._jira_request_with_retry(
+                "GET",
+                f"/rest/agile/1.0/board/{board_id}/sprint",
+                params={"startAt": start_at, "maxResults": _SPRINT_PAGE_SIZE},
+            )
+            page = (data or {}).get("values") or []
+            sprints.extend(page)
+            # THREE WAYS TO KNOW IT IS OVER, because relying on `isLast` alone is
+            # brittle: it is optional in the response, and defaulting a missing one
+            # either truncates (assume last) or spins (assume more). A short page is
+            # the reliable signal — Jira fills a page when it has more to give.
+            if (data or {}).get("isLast") is True or not page or len(page) < _SPRINT_PAGE_SIZE:
+                break
+            start_at += len(page)
+        else:
+            logger.warning(
+                "jira list_sprints: stopped at %d pages (%d sprints) for board %s",
+                _MAX_SPRINT_PAGES, len(sprints), board_id,
+            )
+
         out: List[Dict[str, Any]] = []
-        for s in (data or {}).get("values", []):
+        for s in sprints:
             state = str(s.get("state") or "").lower()
             out.append(
                 {
@@ -618,12 +722,11 @@ class JiraConnector(BaseConnector):
         priority = priority_obj.get("name", "")
         issuetype_obj = fields.get("issuetype") or {}
         item_type = issuetype_obj.get("name", "")
-        description_obj = fields.get("description") or {}
-        # Description may be Atlassian Document Format (ADF) or plain string.
-        if isinstance(description_obj, dict):
-            desc = ""  # ADF — not parsed in this implementation
-        else:
-            desc = str(description_obj) if description_obj else ""
+        # ADF or a plain string — `_extract_adf_text` handles both, so the isinstance
+        # fork is gone. It used to discard every dict, which is every description REST
+        # v3 returns, and `POST /projects/{id}/ingest-board` wrote the empty result
+        # straight into this platform's own stories.
+        desc = _extract_adf_text(fields.get("description")).strip()
         return make_board_item(
             provider_kind=self.connector_name,
             item_id=row.get("id"),
@@ -632,6 +735,7 @@ class JiraConnector(BaseConnector):
             item_type=item_type,
             state=status,
             description=desc,
+            acceptance_criteria=_jira_acceptance_criteria(fields),
             assigned_to=assigned_to,
             tags=fields.get("labels", []),
             url=row.get("url", ""),
@@ -686,6 +790,10 @@ class JiraConnector(BaseConnector):
 
     # ── CRUD operations ───────────────────────────────────────────────────
 
+    # NO PAGINATION HERE, DELIBERATELY: GET /rest/api/3/project is the legacy
+    # unpaginated list and returns every project in one response. The paginated
+    # successor is /project/search; switching to it would add a loop for no gain on the
+    # sites this runs against.
     async def list_projects(self, project: str = "") -> List[Dict[str, Any]]:
         """GET /rest/api/3/project → board-picker projects [{name, key, id}].
 
@@ -730,18 +838,48 @@ class JiraConnector(BaseConnector):
             "maxResults": 100,
             "fields": "summary,status,assignee,priority,issuetype,labels",
         }
-        data, _ = await self._jira_request_with_retry(
-            "GET", "/rest/api/3/search/jql", params=params
-        )
-        issues = data.get("issues", []) if isinstance(data, dict) else []
+
+        # TOKEN PAGINATION, NOT `startAt`. /search/jql is the ENHANCED search endpoint
+        # and pages by an opaque `nextPageToken`; it ignores `startAt` entirely, so the
+        # usual offset loop would silently re-read page one forever. This used to take
+        # the first 100 issues and return them as though they were the project — a
+        # board with 400 stories ingested 100 and reported success.
+        issues: List[Dict[str, Any]] = []
+        token = ""
+        for _ in range(_MAX_SEARCH_PAGES):
+            if token:
+                params["nextPageToken"] = token
+            data, _rc = await self._jira_request_with_retry(
+                "GET", "/rest/api/3/search/jql", params=params
+            )
+            if not isinstance(data, dict):
+                break
+            issues.extend(data.get("issues") or [])
+            token = data.get("nextPageToken") or ""
+            if not token:
+                break
+        else:
+            # The cap bit. Say so — a truncated result that claims to be the whole
+            # board is the failure this loop exists to remove, and an unbounded loop
+            # against a 50,000-issue project is the other one.
+            logger.warning(
+                "jira list_stories: stopped at %d pages (%d issues) for project %s; "
+                "later issues were not read",
+                _MAX_SEARCH_PAGES, len(issues), project,
+            )
         return [self._canonical_summary(issue, project) for issue in issues]
 
     async def fetch_item_detail(
         self, project: str, issue_key: str
     ) -> Dict[str, Any]:
-        """GET /rest/api/3/issue/{key} → canonical detail dict."""
+        """GET /rest/api/3/issue/{key} → canonical detail dict.
+
+        `fields=*all` because acceptance criteria live in a site-specific custom field
+        (`_AC_FIELD_IDS`), and a site whose default field set is narrowed would omit it —
+        making the extraction return nothing on exactly the sites that configured one.
+        """
         data, _ = await self._jira_request_with_retry(
-            "GET", f"/rest/api/3/issue/{issue_key}"
+            "GET", f"/rest/api/3/issue/{issue_key}", params={"fields": "*all"}
         )
         return self._canonical_detail(data, project)
 
@@ -814,6 +952,7 @@ class JiraConnector(BaseConnector):
         project: str,
         title: str = "",
         description: str = "",
+        acceptance_criteria: str = "",
         item_type: str = "Story",
         parent_id: str = "",
         **kwargs: Any,
@@ -840,17 +979,19 @@ class JiraConnector(BaseConnector):
             # (customfield_100xx) is deliberately NOT attempted: its id differs per
             # site, so guessing one writes to an unrelated field on some tenants.
             payload["fields"]["parent"] = {"key": str(parent_id)}
-        if description:
-            payload["fields"]["description"] = {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": description}],
-                    }
-                ],
-            }
+        # ACCEPTANCE CRITERIA WERE SILENTLY DROPPED HERE. The Requirements agent passes
+        # them and `azure_devops.create_item` honours them; this signature swallowed
+        # them in **kwargs, so the same tool call kept AC on ADO and lost it on Jira.
+        # Appended to the description because Jira has no standard field to write them
+        # to; the read path takes them from the site's custom field when one exists.
+        body = description or ""
+        if acceptance_criteria:
+            suffix = "Acceptance Criteria:\n" + acceptance_criteria
+            body = (body + "\n\n" + suffix).lstrip()
+        if body:
+            # `_text_to_adf`, not a hand-rolled single paragraph: the inline version
+            # collapsed every multi-line description into one line.
+            payload["fields"]["description"] = _text_to_adf(body)
         data, _ = await self._jira_request_with_retry(
             "POST", "/rest/api/3/issue", json=payload
         )
@@ -862,6 +1003,7 @@ class JiraConnector(BaseConnector):
             item_type=item_type,
             state="",
             description=description,
+            acceptance_criteria=acceptance_criteria,
             project=project,
             raw=data,
         )
@@ -913,33 +1055,103 @@ class JiraConnector(BaseConnector):
             "url": data.get("self", ""),
         }
 
+    async def upload_attachment(
+        self,
+        issue_key: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """POST /rest/api/3/issue/{key}/attachments — attach a file to an issue.
+
+        Same two requirements as Confluence's upload and the same silent failures if
+        missed: the `X-Atlassian-Token: no-check` header, without which Jira rejects
+        the upload as suspected XSRF, and a multipart `file` part rather than JSON.
+        """
+        if not issue_key:
+            return {"attached": False, "error": "an issue key is required"}
+        if not content:
+            return {"attached": False, "error": f"{filename or 'the file'} is empty"}
+        data, _ = await self._jira_request_with_retry(
+            "POST",
+            f"/rest/api/3/issue/{issue_key}/attachments",
+            headers={"X-Atlassian-Token": "no-check"},
+            files={"file": (filename, content, content_type)},
+        )
+        first = (data or [{}])[0] if isinstance(data, list) else {}
+        return {
+            "attached": True,
+            "id": str(first.get("id", "")),
+            "filename": first.get("filename", filename),
+            "issue_key": issue_key,
+        }
+
+    async def move_item_to_sprint(
+        self, issue_key: str, sprint_id: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """POST /rest/agile/1.0/sprint/{id}/issue — move an issue into a sprint.
+
+        AGILE API, NOT THE ISSUE API. Sprint membership is not an issue field on Jira
+        Cloud: it is a board concept, and writing the sprint custom field directly is
+        rejected on most sites. This endpoint takes a list, so it is also how an issue
+        is moved BETWEEN sprints — Jira removes it from its previous one.
+
+        There is no "remove from sprint" here: the backlog is itself a destination, and
+        moving an issue out is `POST /backlog/issue` — a different endpoint that this
+        does not yet wrap.
+        """
+        if not issue_key or not sprint_id:
+            return {"moved": False, "error": "both an issue key and a sprint id are required"}
+        await self._jira_request_with_retry(
+            "POST",
+            f"/rest/agile/1.0/sprint/{sprint_id}/issue",
+            json={"issues": [issue_key]},
+        )
+        return {"moved": True, "issue_key": issue_key, "sprint_id": str(sprint_id)}
+
     async def update_item(
         self,
         project: str = "",
         issue_key: str = "",
         title: str = "",
         description: str = "",
+        acceptance_criteria: str = "",
         item_type: str = "",
+        assignee: str = "",
+        labels: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """PUT /rest/api/3/issue/{key} — update summary/description/issue type.
+        """PUT /rest/api/3/issue/{key} — update the fields a caller supplies.
 
         Only provided fields change. Status is NOT changed here — use move_item_state
         (Jira status changes go through the transitions API, not a field write).
+
+        `assignee` takes an ACCOUNT ID, not a username or an email. Jira Cloud removed
+        username-based assignment when it made accounts GDPR-scoped; sending a display
+        name silently assigns nobody on some sites and 400s on others. Account ids come
+        back on `fetch_item_detail`.
+
+        `labels` REPLACES the label set rather than adding to it, which is what the
+        Jira field does. Read the issue first if you mean to append.
         """
         fields: Dict[str, Any] = {}
         if title:
             fields["summary"] = title
-        if description:
-            fields["description"] = {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {"type": "paragraph", "content": [{"type": "text", "text": description}]}
-                ],
-            }
+        body = description or ""
+        if acceptance_criteria:
+            suffix = "Acceptance Criteria:" + chr(10) + acceptance_criteria
+            body = (body + chr(10) + chr(10) + suffix).lstrip()
+        if body:
+            # `_text_to_adf`, not the inline single paragraph this used to build, which
+            # collapsed every multi-line description onto one line.
+            fields["description"] = _text_to_adf(body)
         if item_type:
             fields["issuetype"] = {"name": item_type}
+        if assignee:
+            fields["assignee"] = {"accountId": assignee}
+        if labels is not None:
+            fields["labels"] = list(labels)
         if not fields:
             return {"issue_key": issue_key, "updated": False, "note": "no fields to update"}
         await self._jira_request_with_retry(

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.authz.can_perform import can_perform, visible_project_ids
 from shared.authz.dependency import require_permission
 from shared.db import get_db_session
+from shared.authz.audit import capture_names
 from shared.models.orm import Artifact, AuditEvent, Project, Run
 from shared.services.attachment_store import (
     AttachmentError,
@@ -1015,6 +1016,10 @@ async def record_approval(
     # Both decisions close it. A rejection does not leave the run paused waiting for the
     # same person to answer again — the stage is sent back, and re-running it is what
     # raises the next gate.
+    # Before the assignment: the gate's prior state is the "before" of this decision,
+    # and one line later it is gone. A run whose gate was already closed reads
+    # differently from one this decision actually closed.
+    _gate_was = "awaiting decision" if run.gate_pending else "not awaiting a decision"
     run.gate_pending = False
 
     audit = AuditEvent(
@@ -1023,13 +1028,21 @@ async def record_approval(
         event_type=f"run.{body.decision}d" if body.decision in ("approve", "reject") else "run.approval_recorded",
         resource_type="run",
         resource_id=str(run.id),
-        payload={
-            "decision": body.decision,
-            "reason": body.reason,
-            "idempotency_key": body.idempotencyKey,
-            "actor_name": actor_id,
-            "project_id": str(run.project_id),
-        },
+        # `actor_name` used to be set to `actor_id` here -- the id under the name's
+        # key, so the Audit Trail printed a UUID where it says it is printing a person.
+        # `capture_names` resolves the real one, and names the project while it exists.
+        payload=await capture_names(
+            db,
+            {
+                "decision": body.decision,
+                "reason": body.reason,
+                "idempotency_key": body.idempotencyKey,
+                "project_id": str(run.project_id),
+                "before": _gate_was,
+                "after": body.decision,
+            },
+            actor_id=actor_id,
+        ),
     )
     db.add(audit)
     await db.flush()

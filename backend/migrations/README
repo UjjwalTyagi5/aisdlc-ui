@@ -1,1 +1,33 @@
 Generic single-database configuration.
+
+NOTHING RUNS THESE AUTOMATICALLY. Read this before assuming a deploy applied them.
+
+`azure-pipelines.yml` at the repo root builds the FRONTEND image and hands off to
+ArgoCD via a manifest bump. It never touches the database, and its own header says the
+backend has no pipeline yet. There is therefore no step, anywhere, that runs
+
+    alembic upgrade head
+
+against a deployed environment. Every migration in `versions/` reaches a database only
+because a person ran it there.
+
+WHY THIS MATTERS MORE THAN IT SOUNDS. An unapplied migration does not announce itself.
+The ones in this directory are mostly indexes and grants, and a missing index is a
+slow page rather than an error — `0061_audit_tenant_created_index` and
+`0062_audit_search_indexes` both fall into that category, and an environment without
+them serves the Audit Trail from sequential scans while looking perfectly healthy.
+`0005_audit_append_only` is worse: without it the app role keeps UPDATE and DELETE on
+`audit_events`, so the append-only guarantee the product claims is simply absent, and
+nothing fails to tell you.
+
+WHEN THE BACKEND GETS A PIPELINE, the upgrade belongs in it, ahead of the rollout and
+as its own step — not at application startup, where N replicas racing the same
+migration is its own failure mode.
+
+UNTIL THEN, per environment, after every deploy that includes a new file in
+`versions/`:
+
+    cd backend && alembic upgrade head
+
+`alembic current` says where an environment actually is; compare it against the newest
+file in `versions/` rather than assuming.

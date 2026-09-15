@@ -389,6 +389,17 @@ async def list_connectors(
     connectors = _build_connector_list(cache, tenant_id)
     connectors = await _overlay_tenant_credentials(connectors, tenant_id)
 
+    # WHETHER ANY AGENT CAN ACT ON IT — a property of the code, not of this unit, so
+    # it is answered with or without a workspace in view. Distinct from `granted`:
+    # ungranted means an Org Admin never gave it to this unit; not-wired means the
+    # grant would be stored, enforced and then never used, because nothing can act on
+    # it. The "Tools per stage" picker needs to tell those two apart.
+    from shared.tools.stage_tools import wired_kinds  # noqa: PLC0415
+
+    _wired = wired_kinds()
+    for c in connectors:
+        c.agentToolsAvailable = c.kind in _wired
+
     if workspace_id:
         if workspaceId:
             by_kind = {c.kind: c for c in connectors}

@@ -236,6 +236,14 @@ function StageMultiSelect({
                     >
                       <Check className={cn("mr-2 size-4", checked ? "opacity-100" : "opacity-0")} />
                       <span className="flex-1">{o.label}</span>
+                      {/* The MCP group below has always rendered its hint; the
+                          connector group dropped it, which is why "no agent can use
+                          this yet" had nowhere to appear. */}
+                      {o.hint && (
+                        <span className="text-muted-foreground max-w-[18rem] text-right text-[10px] leading-tight">
+                          {o.hint}
+                        </span>
+                      )}
                     </CommandItem>
                   );
                 })}
@@ -328,9 +336,24 @@ export function ToolsStagePicker({
   // this must not wait on `installed`. `granted` is only populated when a
   // workspace is in view (see GET /connectors); with none, nothing is offered
   // rather than guessing — see workspaceId's own doc comment above.
+  // ASSIGNABLE IS NOT THE SAME AS USABLE. A granted connector with no agent tool
+  // behind it can be wired to a stage, stored, and enforced — and then nothing will
+  // ever act on it. That is how a PM agent came to tell a user it could only publish
+  // to SharePoint while Confluence sat granted and read-write in this very screen.
+  //
+  // Still OFFERED rather than hidden: a grant can serve another purpose (Slack and
+  // Teams are reached as notification targets, not as agent tools), and silently
+  // dropping a connector somebody deliberately granted is its own confusion. It is
+  // labelled instead, so the setting is available and its effect is not a surprise.
   const connectorOptions: Opt[] = (connectors.data ?? [])
     .filter((c) => c.granted === true)
-    .map((c) => ({ id: c.kind, label: connectorKindLabel(c.kind) }));
+    .map((c) => ({
+      id: c.kind,
+      label: connectorKindLabel(c.kind),
+      hint: c.agentToolsAvailable
+        ? undefined
+        : "No agent can use this yet — it can be assigned, but nothing will act on it.",
+    }));
 
   const toggle = (
     map: StageMap,

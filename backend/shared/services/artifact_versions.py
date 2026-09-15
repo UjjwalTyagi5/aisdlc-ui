@@ -407,14 +407,24 @@ async def publish_version(
             superseded=current, replacement=row,
         )
 
+    # Read before the assignment overwrites it.
+    _was = row.status
     row.status = "published"
     row.published_by = published_by
     row.published_at = now
 
-    _audit(
+    await _audit(
         db, tenant_id=tenant_id, actor_id=published_by,
         event_type="artifact_version_publish", row=row,
         extra={
+            # A publication REPLACES something, and which version it replaced is the
+            # part a reader cannot reconstruct later — v3 superseding v2 and v3 being
+            # the first published version are different facts about the same row.
+            "before": (
+                f"{_was}, superseding v{current.version}"
+                if current is not None else _was
+            ),
+            "after": f"published v{row.version}",
             "supersedes": current.version if current is not None else None,
             # THE PAYLOAD ITSELF, so the evidence of what was signed does not depend
             # on the artifact_versions row surviving unedited. The freeze trigger makes
@@ -543,13 +553,14 @@ async def reject_version(
             code="self_publication",
         )
 
+    _was = row.status
     row.status = "rejected"
     row.rejection_reason = reason.strip()
 
-    _audit(
+    await _audit(
         db, tenant_id=tenant_id, actor_id=rejected_by,
         event_type="artifact_version_reject", row=row,
-        extra={"reason": row.rejection_reason},
+        extra={"reason": row.rejection_reason, "before": _was, "after": "rejected"},
     )
     logger.info(
         "artifact version: %s/%s v%s rejected by %s", project_id, stage, version,
@@ -564,7 +575,7 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
+async def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
            row: ArtifactVersion, extra: dict) -> None:
     """One audit row per decision, carrying the content hash.
 
@@ -573,21 +584,27 @@ def _audit(db: AsyncSession, *, tenant_id: str, actor_id: str, event_type: str,
     """
     from shared.models.orm import AuditEvent  # noqa: PLC0415
 
+    from shared.authz.audit import capture_names  # noqa: PLC0415
+
     db.add(AuditEvent(
         tenant_id=tenant_id,
         actor_id=actor_id,
         event_type=event_type,
         resource_type="artifact_version",
         resource_id=str(row.id),
-        payload={
-            "project_id": str(row.project_id),
-            "stage": row.stage,
-            "version": row.version,
-            "content_hash": row.content_hash,
-            "produced_by": row.produced_by,
-            "covers": row.covers,
-            **extra,
-        },
+        payload=await capture_names(
+            db,
+            {
+                "project_id": str(row.project_id),
+                "stage": row.stage,
+                "version": row.version,
+                "content_hash": row.content_hash,
+                "produced_by": row.produced_by,
+                "covers": row.covers,
+                **extra,
+            },
+            actor_id=actor_id,
+        ),
     ))
 
 
