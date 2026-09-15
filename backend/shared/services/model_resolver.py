@@ -244,6 +244,19 @@ async def resolve_model_for_run(
     )
     logger.debug("model resolved tenant=%s model=%s offering=%s alias=%s",
                  tenant_id, resolved.model, resolved.offering_id, resolved.alias)
+
+    # Teach this project's Langfuse what the model costs, so its traces stop reporting
+    # $0. HERE, and not in `agent_trace`, because this is the only funnel that knows the
+    # model: of the fifteen `agent_trace` call sites exactly one passes `model=`, and the
+    # graphs resolve their model after the callbacks are built anyway. Backgrounded —
+    # this runs before every agent turn and must not wait on a second database.
+    from shared.observability.model_prices import schedule_model_price_sync  # noqa: PLC0415
+
+    schedule_model_price_sync(
+        tenant_id=tenant_id,
+        project_id=project_id or _RUN_PROJECT.get(),
+        model=resolved.model,
+    )
     return resolved
 
 
