@@ -157,6 +157,7 @@ async def grant_role(
     tier: str | None = None,
     expires_at: datetime | None = None,
     granted_by: str | None = None,
+    system_reason: str | None = None,
 ) -> None:
     """Idempotently assign role_name to user_id at (scope_kind, scope_id) under tenant_id.
 
@@ -330,6 +331,7 @@ async def grant_role(
                 role=role_name,
                 before=_before,
                 after=_after,
+                system_reason=system_reason,
                 extra={
                     "tier": effective_tier,
                     "expires_at": expires_at.isoformat() if expires_at else None,
@@ -432,6 +434,7 @@ async def revoke_role(
     tenant_id: str,
     scope_kind: str = "business_unit",
     revoked_by: str | None = None,
+    system_reason: str | None = None,
 ) -> None:
     """Remove role_name from user_id at (scope_kind, scope_id) under tenant_id (idempotent).
 
@@ -493,6 +496,7 @@ async def revoke_role(
                 # prior state is not in doubt: they held it, and now they do not.
                 before=role_name,
                 after="none",
+                system_reason=system_reason,
             )
 
     # THE CASE THIS WHOLE MECHANISM EXISTS FOR. Deleting a binding used to change

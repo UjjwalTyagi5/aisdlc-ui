@@ -125,6 +125,12 @@ async def _search_clause(db: AsyncSession, q: str):
 # table that only grows, this is how a memory limit gets discovered in production.
 _EXPORT_MAX = 10_000
 
+# Deep paging is the one way a caller can make this query expensive on purpose.
+# 2,000 pages of 200 covers any trail a person is actually reading through; past
+# that the export is the right tool.
+_MAX_PAGE = 2_000
+_MAX_PAGE_SIZE = 200
+
 _RESOURCE_NAME_SOURCES: dict[str, tuple[str, str]] = {
     "business_unit": ("workspaces", "display_name"),
     "workspace": ("workspaces", "display_name"),
@@ -329,6 +335,15 @@ async def _query_audit_events(
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total: int = (await db.execute(count_stmt)).scalar_one()
+
+    # BOUNDED, because OFFSET pays for every row it skips. Page 40,000 of a fifty-row
+    # page is Postgres walking two million index entries to discard them, and `page` is
+    # caller-supplied — a hand-written `?page=999999` is a table scan anyone can ask
+    # for. The real fix for deep paging is a keyset cursor (the run-scoped trail
+    # already uses one), but that changes the pagination contract this page renders
+    # "Showing X–Y of Z" from, so it is not a change to make silently.
+    page = max(1, min(page, _MAX_PAGE))
+    page_size = max(1, min(page_size, _MAX_PAGE_SIZE))
 
     stmt = stmt.order_by(AuditEvent.created_at.desc())
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)

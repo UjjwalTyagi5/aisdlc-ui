@@ -178,6 +178,7 @@ async def record_rbac_change(
     role: Optional[str] = None,
     before: Optional[str] = None,
     after: Optional[str] = None,
+    system_reason: Optional[str] = None,
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """Append one RBAC change to the audit trail, in the caller's transaction.
@@ -195,6 +196,19 @@ async def record_rbac_change(
 
     Only the CALLER can supply them. By the time this runs the change is applied in
     the same transaction, so anything read here would return the new state twice.
+
+    `system_reason` is how a NULL actor EXPLAINS ITSELF. PRD §34.9 wants the actor to
+    be a real person — "never an agent, never a service account" — and a platform that
+    seeds its own org admins at boot legitimately has writes no person made. The
+    danger is not those; it is that a human action which loses its actor becomes
+    indistinguishable from them. `getattr(request.state, "user_id", None)` is the shape
+    that does it, and it appears at every grant call site.
+
+    So a NULL actor with a stated reason is a system action, and a NULL actor WITHOUT
+    one is a defect: it logs a warning and marks the row `actor_unattributed`, because
+    an audit record that cannot say who acted should say that it cannot, rather than
+    quietly reading as "system". It never raises — a broken attribution must not turn
+    a successful authorization into a 500.
     """
     payload: dict[str, Any] = {
         "subject_id": subject_id,
@@ -209,6 +223,17 @@ async def record_rbac_change(
     if before is not None or after is not None:
         payload["before"] = before
         payload["after"] = after
+
+    if not actor_id:
+        if system_reason:
+            payload["system_reason"] = system_reason
+        else:
+            payload["actor_unattributed"] = True
+            logger.warning(
+                "audit: %s recorded with NO ACTOR and no system_reason — if a person "
+                "did this, the trail cannot say who (subject=%s scope=%s:%s)",
+                event_type, subject_id, scope_kind, scope_id,
+            )
 
     # THE NAMES, CAPTURED NOW. See `_name_of`: a record that stores only ids stops
     # being legible the day one of those rows is deleted, and an audit row outlives

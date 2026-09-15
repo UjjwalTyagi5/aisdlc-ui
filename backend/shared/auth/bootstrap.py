@@ -136,6 +136,10 @@ async def seed_org_admins() -> None:
         await grant_role(
             user_id, org_id, ORG_ADMIN_ROLE,
             tenant_id=org_id, scope_kind="organization",
+            # No person did this: the platform appoints its configured org admins at
+            # boot. Naming the reason is what separates a legitimate system write from
+            # a human action that lost its actor — see record_rbac_change.
+            system_reason="startup_seeding",
         )
     logger.info(
         "seed_org_admins: ensured %d org admin(s) on '%s'",

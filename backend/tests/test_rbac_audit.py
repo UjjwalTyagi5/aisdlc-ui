@@ -283,3 +283,66 @@ async def test_a_revocation_records_what_was_taken_away(org):
     payload = (await _events(org["org"], RBAC_ROLE_REVOKED))[0]["payload"]
     assert payload["before"] == "qa"
     assert payload["after"] == "none"
+
+
+# ── PRD §34.9: the actor is a real person ────────────────────────────────────
+#
+# "The real person — never an agent, never a service account, never a role." A NULL
+# actor renders as "system", which is honest for the platform seeding its own org
+# admins at boot and a LIE for a human action that lost its actor on the way in.
+# `getattr(request.state, "user_id", None)` is the shape that loses it, and it appears
+# at every grant call site. The two cases must not look alike.
+
+
+@pytest.mark.asyncio
+async def test_a_system_write_says_why_it_had_no_actor(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        system_reason="startup_seeding",
+    )
+
+    e = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]
+    assert e["actor_id"] is None
+    assert e["payload"]["system_reason"] == "startup_seeding"
+    assert "actor_unattributed" not in e["payload"]
+
+
+@pytest.mark.asyncio
+async def test_an_unexplained_missing_actor_is_marked_on_the_row(org):
+    """The defect case. It must be visible in the trail, not just in a log line.
+
+    A row that cannot say who acted has to SAY that it cannot, rather than reading as
+    a system action and being filed with the boot-time seeding.
+    """
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(subject, org["bu"], "developer", tenant_id=org["org"], scope_kind="business_unit")
+
+    e = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]
+    assert e["actor_id"] is None
+    assert e["payload"]["actor_unattributed"] is True
+    assert "system_reason" not in e["payload"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_actor_is_never_marked_unattributed(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        granted_by="a-real-person",
+    )
+
+    payload = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]["payload"]
+    assert "actor_unattributed" not in payload
+    assert "system_reason" not in payload
+
+
+@pytest.mark.asyncio
+async def test_the_boot_seeder_names_itself(org):
+    """`seed_org_admins` is the one legitimate unattributed writer on the platform."""
+    import inspect
+
+    from shared.auth import bootstrap
+
+    src = inspect.getsource(bootstrap)
+    assert 'system_reason="startup_seeding"' in src
