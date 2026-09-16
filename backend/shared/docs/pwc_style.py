@@ -343,7 +343,9 @@ class WordCanvas:
         for i, head in enumerate(labels):
             cell = row.cells[i]
             self.shade(cell, HEAD_STEPS[round(i * last / max(len(labels) - 1, 1))])
-            p = self.para(cell, first=True, after=0)
+            # keep_with_next holds a header row to its first body row across a page
+            # break: a header alone at the foot of a page labels nothing.
+            p = self.para(cell, first=True, after=0, keep=True)
             self.run(p, head, size=7.5, bold=True, colour=ACCENT_DEEP, spacing=10)
 
     def card(self, *, tint: str, edge: Optional[tuple[str, int]] = None, pad=(140, 140, 220, 180)):
