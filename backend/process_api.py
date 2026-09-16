@@ -104,6 +104,7 @@ from shared.routers.model import (
     model_router,
     model_options_router,
     model_availability_router,
+    model_picker_router,
 )
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
@@ -1188,6 +1189,7 @@ app.include_router(auth_local_router, tags=["auth"])
 app.include_router(model_router, tags=["model"])
 app.include_router(model_options_router, tags=["model"])
 app.include_router(model_availability_router, tags=["model"])
+app.include_router(model_picker_router, tags=["model"])
 # Capabilities API (D7): read-only per-agent capability view for the UI panel.
 # Native tools are informational only; curated shown with default-on flag.
 # Router carries its own require_permission("artifact:view") gate — no _VIEW_DEP floor.
