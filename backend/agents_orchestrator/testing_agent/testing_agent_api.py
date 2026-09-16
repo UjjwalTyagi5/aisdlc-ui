@@ -258,6 +258,11 @@ def _with_testing_selection(
             pass
     return next_state
 
+#: (session_id, filename) → mtime of the file last filed as an artifact, so a
+#: follow-up turn that regenerates nothing does not file the same document twice.
+_RECORDED_OUTPUTS: dict[tuple[str, str], float] = {}
+
+
 async def _load_testing_mcp_tools(tenant_id: str, project_id: str | None) -> list:
     """Resolve the project's BYO MCP servers assigned to the testing stage into
     tools. Mirrors the other agents; only servers explicitly assigned to
@@ -807,6 +812,23 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
             previous_state["project_id"] = _ws_project_id
         if user_id:
             previous_state["owner_id"] = user_id
+        # THE PROJECT'S RECORD, for a standalone turn. The graph's upstream pull is
+        # keyed by session id, which a fresh page conversation never shares with the
+        # Requirements or Design runs, and its plan was derived from the prompt alone.
+        # Resolved here, on the main loop (the nodes run under asyncio.run in a worker
+        # thread, where the shared pool must not be touched): the approved documents'
+        # text, the per-stage payloads by project, the project's name for the
+        # document. The Orchestrator's own context arrives through pipeline_context
+        # and is left to the graph's session-keyed pull.
+        previous_state["orchestrator_driven"] = bool(conversation_context)
+        # Once per session: the session state carries it forward to later turns, and
+        # re-reading three documents (and recording three consumptions) on every
+        # message would be evidence noise for nothing.
+        if (tenant_id and _ws_project_id and not conversation_context
+                and not previous_state.get("approved_documents_text")):
+            from agents_orchestrator.testing_agent.project_record import grounding  # noqa: PLC0415
+
+            previous_state.update(await grounding(tenant_id, _ws_project_id, consumer_run_id=session_id))
 
         _lf_pid = parsed_pipeline_context.get("project_id") if isinstance(parsed_pipeline_context, dict) else None
         _audit_handler = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
@@ -957,6 +979,32 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
                 print(f"ERROR: Failed to create zip archive: {e}")
                 await manager.send_agent_response("Error Agent", f"Failed to create zip file: {e}", session_id)
         # --- MODIFICATION END ---
+
+        # INTO THE RECORD. Every document this run produced is filed as a DRAFT
+        # testing-stage artifact: it appears in the page's Documents list, the tester
+        # submits it for approval, and it survives this session directory (which the
+        # next session deletes). Download links alone could do none of that.
+        try:
+            from agents_orchestrator.testing_agent.project_record import record_outputs  # noqa: PLC0415
+            from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+
+            filed = await record_outputs(
+                output_directory, session_id=session_id, base_url=str(AGENTIC_BASE_URL),
+                user_id=str(user_id), already=_RECORDED_OUTPUTS,
+            )
+            if filed:
+                logger.info("testing: filed %s as draft artifacts", ", ".join(filed))
+                # The page refreshes its Documents list on this event; the node's own
+                # announcement came BEFORE the rows existed, so announce once more now.
+                # The chat dedups repeated announcements of one file by its url.
+                for name in filed:
+                    await manager.broadcast({
+                        "type": "file_generated", "session_id": session_id, "filename": name,
+                        "url": f"{AGENTIC_BASE_URL}/generated/{user_id}/orchestrator/{session_id}/output/{name}",
+                        "message": f"Filed {name} as a draft document — submit it for approval from the Documents list.",
+                    })
+        except Exception:  # noqa: BLE001 — the reply already went out
+            logger.warning("testing: could not file the run's documents", exc_info=True)
 
         await manager.broadcast({
 

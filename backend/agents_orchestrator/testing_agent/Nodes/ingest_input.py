@@ -40,6 +40,40 @@ _VCS_CI_HOSTS = (
     "app.circleci.com",
 )
 
+_WRITE_VERBS = r"(?:write|generate|create|draft|prepare|produce|make|design|derive|build)"
+_TEST_DOC_NOUNS = r"(?:test\s*cases?|test\s*plan|test\s*scenarios?|test\s*case\s*document|test\s*suite\s*document)"
+_ASK_TO_WRITE_RE = re.compile(
+    rf"\b{_WRITE_VERBS}\b[^.?!]{{0,80}}\b{_TEST_DOC_NOUNS}\b|\b{_TEST_DOC_NOUNS}\b[^.?!]{{0,40}}\b(?:for|from|based on|covering)\b",
+    re.IGNORECASE,
+)
+_TOOL_ASK_RE = re.compile(
+    r"\b(?:publish|push|upload|attach|post)\b.{0,60}\b(?:confluence|sharepoint|jira|azure\s*devops|ado|page|space)\b"
+    r"|\b(?:confluence|sharepoint)\b"
+    r"|\b(?:approved|project)\s+(?:documents?|artifacts?)\b"
+    r"|\b(?:list|read|open|show|summari[sz]e)\b.{0,40}\b(?:documents?|brd|hld|lld|design document|requirements?)\b"
+    r"|\b(?:work items?|epics?|user stories|stories)\b.{0,40}\b(?:board|assigned|ado|jira)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_to_write_test_cases(prompt: str | None) -> bool:
+    """"Write/generate/create ... test cases/plan", or "test cases for/from ...".
+    Not "run the functional tests" — that is execution, and the URL rule applies."""
+    text = " ".join((prompt or "").split())
+    if not text:
+        return False
+    if re.search(r"\b(?:run|execute|trigger|start)\b", text, re.IGNORECASE) and not re.search(
+        rf"\b{_WRITE_VERBS}\b", text, re.IGNORECASE
+    ):
+        return False
+    return bool(_ASK_TO_WRITE_RE.search(text))
+
+
+def _asks_for_a_tool(prompt: str | None) -> bool:
+    text = " ".join((prompt or "").split())
+    return bool(text) and bool(_TOOL_ASK_RE.search(text))
+
+
 def _extract_url(text: str) -> Optional[str]:
     url_pattern = re.compile(r'https?://[^\s/$.?#].[^\s]*')
     for match in url_pattern.finditer(text or ""):
@@ -531,6 +565,24 @@ async def classify_intent(state: SuperAgentState):
                 "final_user_message": None,
             }
 
+    # WRITING TEST CASES IS NOT RUNNING THEM. "Generate the functional test cases from
+    # the approved BRD" contains "functional test", and the URL rule below answered it
+    # with "please provide the application URL" — the tester wanted a document, not a
+    # browser run. A request to write/generate/create test cases or a test plan routes
+    # to the plan path first, whatever else the sentence mentions.
+    if not file_path and _asks_to_write_test_cases(user_prompt):
+        blog("Generating test cases from the project's requirements")
+        return {"classified_intent": "generate_plan_only"}
+
+    # A request that needs a TOOL — publish to Confluence or SharePoint, list or read
+    # the project's approved documents, look at the board — goes to the one node that
+    # binds tools (`handle_follow_up_query`). Before this, a first message of "publish
+    # the test cases to Confluence" classified as a greeting and got the capabilities
+    # list, because the dispatcher below knows only 'generate_plan_only' and 'greeting'.
+    if not file_path and _asks_for_a_tool(user_prompt):
+        blog("Answering with the project's tools")
+        return {"classified_intent": "follow_up_query"}
+
     # I3 — selected_test_types persists in the checkpoint after a run. A follow-up
     # message that does NOT itself request a test type must be answered as a follow-up,
     # not silently re-run the whole suite. Detect: type came only from the checkpoint
@@ -909,10 +961,17 @@ async def handle_greeting(state: SuperAgentState):
     # instead of showing the generic capabilities list (which makes the
     # user think nothing happened and reply "yes test it" â†' triggers a
     # mis-route).
-    is_orch_driven = (
-        state.get("clone_target") is None
-        and state.get("input_file_path") is None
-    )
+    # `orchestrator_driven` is set by the chat entrypoint when it knows; the older
+    # heuristic — "no clone target and no upload" — is also what every standalone
+    # "Hi" looks like, and it answered a tester's greeting with "the dev agent's
+    # handoff didn't reach me".
+    if state.get("orchestrator_driven") is not None:
+        is_orch_driven = bool(state.get("orchestrator_driven"))
+    else:
+        is_orch_driven = (
+            state.get("clone_target") is None
+            and state.get("input_file_path") is None
+        )
     upstream_dev = state.get("upstream_development") or {}
     has_upstream = (
         isinstance(upstream_dev, dict)
@@ -932,12 +991,22 @@ async def handle_greeting(state: SuperAgentState):
             "- Or paste a URL for UI testing"
         )
     else:
+        has_record = bool((state.get("approved_documents_text") or "").strip())
+        record_line = (
+            "the project's approved documents (the BRD, the design) are on file and I "
+            "will derive the cases from them"
+            if has_record else
+            "paste or upload the requirements, or ask me to read the project's approved documents"
+        )
         message = (
-            "Hello! I am a multi-talented testing agent. I can help you in a few ways:\n\n"
-            "1.  **Generate a Test Plan:** Provide a user story or requirements, and I will create a test plan.\n"
-            "2.  **Full Code Analysis & Testing:** Provide a `.zip` of a Python codebase for full analysis and unit testing.\n"
-            "3.  **Automated UI Testing:** Provide a URL and I will autonomously generate and execute UI tests.\n\n"
-            "How can I help you today?"
+            "Hello! I am the Testing agent. I can:\n\n"
+            f"1.  **Write test cases** \u2014 functional and technical, as a test case document "
+            f"you can put forward for approval; {record_line}.\n"
+            "2.  **Run tests** \u2014 pick a test type (unit, API, functional, UI) and a repository "
+            "branch on the left and press Run; I generate, execute and report.\n"
+            "3.  **Publish** \u2014 push an approved test case document or report to Confluence "
+            "or SharePoint, once a Project Admin has approved it.\n\n"
+            "What would you like to do?"
         )
     return {"final_user_message": message}
 
@@ -988,14 +1057,26 @@ async def _answer_with_optional_mcp(user_prompt: str, history, context_str: str)
     # The project's approved documents — the BRD, the design, the plan — are what a
     # test plan is written against. Same two tools every other agent binds; the turn's
     # project is bound by assert_agent_access_for_chat, so they answer for THIS project.
-    mcp_tools = [*mcp_tools, *_DOCUMENT_TOOLS]
+    # And the connectors the project granted this stage (Confluence, SharePoint, the
+    # board) — the tools that publish an approved test case document — bound exactly
+    # as the Requirements and PM agents bind theirs.
+    try:
+        from shared.tools.stage_tools import tools_for_stage  # noqa: PLC0415
+
+        connector_tools = list(await tools_for_stage("testing", "testing"))
+    except Exception as exc:  # noqa: BLE001 — no connectors is an ordinary state
+        logger.info("Testing chat: no connector tools bound (%s)", type(exc).__name__)
+        connector_tools = []
+    mcp_tools = [*mcp_tools, *_DOCUMENT_TOOLS, *connector_tools]
 
     loop = asyncio.get_running_loop()
     sys = ("You are an expert QA assistant for an enterprise testing agent. Use the "
            "context and any available tools to answer the user's question precisely. "
-           "The project's APPROVED documents (requirements, design, plan) are listed by "
-           "`list_project_documents` and read with `read_document` — consult them "
-           "before saying the project has no requirements or design.\n"
+           "The project's APPROVED documents (requirements, design, plan, test cases) are "
+           "listed by `list_project_documents` and read with `read_document` — consult "
+           "them before saying the project has no requirements or design. Publishing "
+           "tools (Confluence, SharePoint), when bound, publish only APPROVED documents "
+           "of this stage; if a tool refuses, relay its reason to the user verbatim.\n"
            f"CONTEXT:\n{context_str}")
 
     if not mcp_tools:
@@ -1067,5 +1148,23 @@ async def read_input_content(state: SuperAgentState):
             logger.error(f"Error reading file {file_path}: {exc}")
             blog(f"Error reading file: {exc}", level="ERROR")
 
+    # NOTHING UPLOADED MEANS THE PROJECT'S RECORD, not the prompt alone. A tester in
+    # the project's own page asking for "test cases for QuickLink from the approved
+    # BRD" had the BRD extracted from... the sentence "test cases for QuickLink from
+    # the approved BRD". The chat entrypoint seeds the approved documents' text for a
+    # standalone turn (`approved_documents_text`); it is the document content here.
+    source = ""
+    if not file_content.strip():
+        grounding = (state.get("approved_documents_text") or "").strip()
+        if grounding:
+            file_content = grounding
+            source = state.get("plan_source") or "the project's approved documents"
+            blog(f"Using {source} as the requirements source")
+    elif file_path:
+        source = os.path.basename(file_path)
+
     full_content = f"User Prompt: {prompt_text}\n\n--- Document Content ---\n{file_content}".strip()
-    return {"input_content": full_content}
+    out = {"input_content": full_content}
+    if source:
+        out["plan_source"] = source
+    return out

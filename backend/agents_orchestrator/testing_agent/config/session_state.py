@@ -97,6 +97,14 @@ class SuperAgentState(TypedDict, total=False):
     ui_scope: Optional[str]               # "feature_only" | "full" | None — UI browser test scope
     api_scope: Optional[str]              # "contract_only" | "functional" | "both" | None — API test scope
     selected_test_types: Optional[List[str]]  # ["unit", "functional", "api"] from direct UI / orchestrator gate
+    # Grounding the chat entrypoint seeds for a standalone turn (testing_agent_api):
+    # the project's approved documents as text (the BRD, the design), what the
+    # plan was derived from, the project's display name for the document, and
+    # whether the Orchestrator is driving (which changes what a greeting says).
+    approved_documents_text: Optional[str]
+    plan_source: Optional[str]
+    project_display_name: Optional[str]
+    orchestrator_driven: Optional[bool]
     api_timeout_s: Optional[float]         # per-request timeout for generated API tests
     awaiting_scope: Optional[bool]         # True while waiting for user to answer the scope question
     pending_testing_approval: Optional[str]  # "generate_unit_code" | "run_unit_tests" while staged testing waits for user approval
