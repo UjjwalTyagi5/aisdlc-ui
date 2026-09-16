@@ -88,6 +88,12 @@ export const SecurityArtifact = z.object({
     .array(z.object({ finding_id: z.string(), reason: z.string().default("") }))
     .default([]),
   compliance_frameworks: z.array(z.string()).default([]),
+  /** The filed Security Review Report; `artifact_id` is its document row (absent on
+   *  scans saved before reports were filed). */
+  document: z
+    .object({ filename: z.string(), url: z.string(), error: z.string(), artifact_id: z.string().nullable() })
+    .partial()
+    .default({}),
   metrics: z.object({
     critical: z.number().default(0),
     high: z.number().default(0),

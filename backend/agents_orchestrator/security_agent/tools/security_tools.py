@@ -10,13 +10,11 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 
 from langchain_core.tools import tool
 
 from agents_orchestrator.security_agent.config.session_state import get_session
-from agents_orchestrator.security_agent.tools.trivy_tool import run_trivy_scan
-from agents_orchestrator.security_agent.tools.semgrep_sast_tool import run_semgrep_sast
-from agents_orchestrator.security_agent.tools.gitleaks_tool import run_gitleaks_scan
 from config.connection_manager import manager
 from config.ws_helper import broadcast_log, get_session_id
 
@@ -37,90 +35,205 @@ def _work_dir() -> pathlib.Path | None:
     return pathlib.Path(s.work_dir) if s.work_dir else None
 
 
-@tool
-async def scan_dependencies() -> str:
-    """Run a dependency / vulnerability (SCA) scan on the checked-out repo (Trivy).
+async def _full_scan() -> dict | str:
+    """The one scan of this target — every scanner, once — or an error string.
 
-    Degrades gracefully if the scanner binary is unavailable. Returns scanner JSON.
+    THE SECURITY AGENT PASSED A BRANCH WITH NINE HIGH CVEs. Its `scan_dependencies` ran
+    Trivy on the raw checkout, and the branch commits no lockfile, so Trivy had nothing to
+    look at and reported nothing; `generate_sbom` parsed the manifests alone, so the
+    transitive `tar` that carries the CVEs was never listed. The same commit, reviewed by
+    the Code Review agent minutes earlier, showed 13 vulnerabilities — its scan resolves
+    the declared ranges in a scratch copy first (shared/services/code_security_scan.py)
+    and records each scanner's status. The four tools below are slices of THAT scan, run
+    once per prepared target and kept on the session.
     """
+    from shared.services.code_security_scan import run_code_security_scan  # noqa: PLC0415
+
     wd = _work_dir()
     if wd is None or not wd.exists():
         return "ERROR: no scan workspace prepared. Ask the user to select a branch or PR first."
-    result_json = await asyncio.to_thread(run_trivy_scan.invoke, {"target_path": str(wd)})
-    try:
-        parsed = json.loads(result_json)
-        if parsed.get("status") == "ok":
-            get_session(get_session_id()).last_trivy_findings = parsed.get("findings", [])
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    return result_json
+    s = get_session(get_session_id())
+    cached = getattr(s, "security_scan", None)
+    if cached and cached.get("_work_dir") == str(wd):
+        return cached
+    result = await asyncio.to_thread(
+        run_code_security_scan, str(wd),
+        progress=lambda m: broadcast_log(manager, m, level="INFO"),
+    )
+    result["_work_dir"] = str(wd)
+    s.security_scan = result
+    # `generate_sbom` and the report count vulnerabilities per component from this.
+    trivy_ok = any(sc.get("name") == "Trivy" and sc.get("status") == "ok" for sc in result.get("scanners", []))
+    s.last_trivy_findings = [
+        {"cve": v.get("id", ""), "severity": v.get("severity", ""), "package": v.get("package", ""),
+         "installed_version": v.get("installed", ""), "fixed_version": v.get("fixed", ""),
+         "title": v.get("title", ""), "target": v.get("manifest", "")}
+        for v in result.get("vulnerabilities", [])
+    ] if trivy_ok else None
+    return result
+
+
+#: Refusals of one review in one turn before submit stops taking attempts. A live run
+#: sent the same (correct) review eleven times to a gate that could not match it, and
+#: the turn ran into the recursion limit ten minutes later with nothing said.
+_MAX_REFUSALS = 3
+
+# `tar@6.2.1` → `tar`; `@types/node@20.1.0` → `@types/node` (the leading @ is the scope).
+_VERSION_SUFFIX = re.compile(r"(?<=.)@[^@/]*$")
+
+
+def _package_key(name: object) -> str:
+    """The bare package name, whichever way the model wrote it.
+
+    A live run recorded the package as `tar@6.2.1`; the gate compared it with the
+    scanner's `tar` and refused a review that addressed it."""
+    n = re.split(r"[\s:=,]", str(name or "").strip().lower(), maxsplit=1)[0]
+    return _VERSION_SUFFIX.sub("", n)
+
+
+def _tokens(value: object) -> set[str]:
+    """CVE / GHSA / finding ids from a string ("CVE-A, CVE-B") or a list of them."""
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {t.lower() for item in items for t in re.split(r"[\s,;]+", str(item or "")) if t}
+
+
+def _unaddressed_scan_results(scan: dict, payload: dict) -> str | None:
+    """The refusal for a review that leaves out what the scan found — or None.
+
+    A package is addressed by a finding naming it (in any version spelling) or any of
+    its CVE ids, or by a suppression whose finding_id is the package, one of its CVE
+    ids, or the id of a finding that names it."""
+    findings_in = [f for f in (payload.get("findings") or []) if isinstance(f, dict)]
+    suppressions = [e for e in (payload.get("suppression_log") or []) if isinstance(e, dict)]
+    packages = {_package_key(f.get("package")) for f in findings_in} - {""}
+    ids: set[str] = set()
+    for f in findings_in:
+        ids |= _tokens(f.get("cve")) | _tokens(f.get("id"))
+    for e in suppressions:
+        ref = _tokens(e.get("finding_id"))
+        ids |= ref
+        packages |= {_package_key(r) for r in ref}
+
+    unaddressed = sorted({
+        f"{v.get('package')} {v.get('installed')}"
+        for v in scan.get("vulnerabilities") or []
+        if (v.get("severity") or "").lower() in ("critical", "high")
+        and _package_key(v.get("package")) not in packages
+        and str(v.get("id") or "").lower() not in ids
+    })
+    if unaddressed:
+        return (
+            "ERROR: the scan found high/critical vulnerabilities that this review does not "
+            f"address: {', '.join(unaddressed)}. Record each package as ONE finding (category "
+            "sca, severity = the worst CVE, package = the package name, cve = the CVE ids, "
+            "reachability, triage — 'acceptable_risk' or 'false_positive' if you judge it "
+            "unreachable, with the reason in `description`) or add it to suppression_log with "
+            "finding_id = the package name or CVE id and a reason, then submit again."
+        )
+    if (scan.get("secrets") or []) and not any((f.get("category") or "") == "secret" for f in findings_in):
+        return (
+            f"ERROR: the scan found {len(scan['secrets'])} hardcoded secret(s) and this review "
+            "records none. Add a finding (category secret) per secret, then submit again."
+        )
+    return None
+
+
+def _refuse(s, refusal: str) -> str:
+    s.submit_refusals += 1
+    s.last_submit_refusal = refusal
+    if s.submit_refusals >= _MAX_REFUSALS:
+        return (
+            f"{refusal} This was refusal {s.submit_refusals} of {_MAX_REFUSALS}: do not call "
+            "submit_security_review again this turn. Tell the user plainly that the security "
+            "review was NOT saved, and why."
+        )
+    return refusal
+
+
+def _scanner(result: dict, name: str) -> dict:
+    return next((sc for sc in result.get("scanners", []) if sc.get("name") == name), {"status": "error", "message": f"{name} did not run"})
+
+
+@tool
+async def scan_dependencies() -> str:
+    """Run the dependency / vulnerability (SCA) scan on the checked-out repo (Trivy), with
+    the declared dependency ranges resolved first so a repo that commits no lockfile is
+    still checked. Returns JSON {status, findings_count, findings:[{cve, severity, package,
+    installed_version, fixed_version, title, target}], message}. A status other than "ok"
+    means the scanner did NOT run — never treat that as clean.
+    """
+    result = await _full_scan()
+    if isinstance(result, str):
+        return result
+    sc = _scanner(result, "Trivy")
+    findings = get_session(get_session_id()).last_trivy_findings or []
+    return json.dumps({
+        "status": sc.get("status"), "message": sc.get("message", ""),
+        "findings_count": len(findings) if sc.get("status") == "ok" else None,
+        "findings": findings if sc.get("status") == "ok" else [],
+        "notes": (result.get("sbom") or {}).get("notes", []),
+    })
 
 
 @tool
 async def scan_code() -> str:
-    """Run a static application security (SAST, OWASP) scan on the checked-out repo (Semgrep)."""
-    wd = _work_dir()
-    if wd is None or not wd.exists():
-        return "ERROR: no scan workspace prepared."
-    return await asyncio.to_thread(run_semgrep_sast.invoke, {"target_path": str(wd)})
+    """Run the static application security (SAST, OWASP Top 10) scan on the checked-out
+    repo (Semgrep). Returns JSON {status, findings_count, findings, message}; a status
+    other than "ok" means it did NOT run."""
+    result = await _full_scan()
+    if isinstance(result, str):
+        return result
+    sc = _scanner(result, "Semgrep")
+    findings = result.get("sast") or []
+    return json.dumps({"status": sc.get("status"), "message": sc.get("message", ""),
+                       "findings_count": len(findings) if sc.get("status") == "ok" else None,
+                       "findings": findings if sc.get("status") == "ok" else []})
 
 
 @tool
 async def scan_secrets() -> str:
-    """Scan the checked-out repo for hardcoded secrets / credentials (Gitleaks)."""
-    wd = _work_dir()
-    if wd is None or not wd.exists():
-        return "ERROR: no scan workspace prepared."
-    return await asyncio.to_thread(run_gitleaks_scan.invoke, {"target_path": str(wd)})
+    """Scan the checked-out repo for hardcoded secrets / credentials (Gitleaks). Returns
+    JSON {status, findings_count, findings, message}; a status other than "ok" means it
+    did NOT run."""
+    result = await _full_scan()
+    if isinstance(result, str):
+        return result
+    sc = _scanner(result, "Gitleaks")
+    findings = result.get("secrets") or []
+    return json.dumps({"status": sc.get("status"), "message": sc.get("message", ""),
+                       "findings_count": len(findings) if sc.get("status") == "ok" else None,
+                       "findings": findings if sc.get("status") == "ok" else []})
 
 
 @tool
 async def generate_sbom(max_components: int = 200) -> str:
-    """Build a lightweight SBOM by parsing dependency manifests in the repo.
+    """The software bill of materials for the checked-out repo: every declared AND
+    transitive component (dependency ranges are resolved first), each with its version,
+    licence, the direct dependency that brings it in (`via`) and its vulnerability count.
 
-    Returns JSON {components:[{name, version, manifest, vulnerabilities}], manifests:[...],
-    vulnerability_data:"trivy"|"not_scanned_yet"}.
-    `vulnerabilities` is populated from the same session's scan_dependencies (Trivy) run.
-    If scan_dependencies has NOT run this session, every component's `vulnerabilities` is
-    null (not 0) and the top-level `vulnerability_data` is "not_scanned_yet" -- a count is
-    never fabricated, and a real scanned "0 matches" is never confused with "unknown".
+    Returns JSON {components:[{name, version, license, direct, via, manifest,
+    vulnerabilities}], manifests:[...], notes:[...], vulnerability_data:"trivy"|"not_scanned"}.
+    `vulnerabilities` is null (not 0) when the vulnerability scanner did not run — a
+    count is never fabricated. Components with vulnerabilities are listed first.
     """
-    wd = _work_dir()
-    if wd is None or not wd.exists():
-        return "ERROR: no scan workspace prepared."
-    comps: list[dict] = []
-    seen_manifests: list[str] = []
-    for dirpath, dirs, files in os.walk(wd):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-        for fn in files:
-            if not _is_manifest(fn):
-                continue
-            fp = pathlib.Path(dirpath) / fn
-            rel = str(fp.relative_to(wd)).replace("\\", "/")
-            seen_manifests.append(rel)
-            try:
-                text = fp.read_text(encoding="utf-8", errors="replace")[:_MAX_FILE_BYTES]
-            except Exception:
-                continue
-            comps.extend(_parse_manifest(fn, text, rel))
-            if len(comps) >= max_components:
-                break
-
-    trivy_findings = get_session(get_session_id()).last_trivy_findings
-    for comp in comps:
-        if trivy_findings is None:
-            comp["vulnerabilities"] = None
-        else:
-            comp["vulnerabilities"] = sum(
-                1 for f in trivy_findings
-                if f.get("package", "").lower() == comp["name"].lower()
-                and comp["version"] and f.get("installed_version", "") == comp["version"]
-            )
-
+    result = await _full_scan()
+    if isinstance(result, str):
+        return result
+    sbom = result.get("sbom") or {}
+    comps = sorted(sbom.get("components") or [],
+                   key=lambda c: (-(c.get("vulnerabilities") or 0), not c.get("direct"), c.get("name") or ""))
+    trivy_ok = _scanner(result, "Trivy").get("status") == "ok"
     return json.dumps({
-        "components": comps[:max_components],
-        "manifests": seen_manifests,
-        "vulnerability_data": "trivy" if trivy_findings is not None else "not_scanned_yet",
+        "components": [
+            {"name": c.get("name"), "version": c.get("version"), "license": c.get("license"),
+             "direct": c.get("direct"), "via": c.get("via"), "manifest": c.get("manifest"),
+             "vulnerabilities": c.get("vulnerabilities") if trivy_ok else None}
+            for c in comps[:max_components]
+        ],
+        "total_components": len(comps),
+        "manifests": sbom.get("manifests", []),
+        "notes": sbom.get("notes", []),
+        "vulnerability_data": "trivy" if trivy_ok else "not_scanned",
     })
 
 
@@ -347,10 +460,33 @@ async def submit_security_review(review_json: str) -> str:
     from shared.models.security import SecurityArtifact, ScanContext, SecurityMetrics, Signoff
 
     s = get_session(get_session_id())
+    scan = getattr(s, "security_scan", None)
+    if not scan:
+        return (
+            "ERROR: the scanners have not run for this target. Call scan_dependencies, "
+            "scan_code and scan_secrets first — the report's scanner results and SBOM come "
+            "from them, not from this payload."
+        )
     try:
         payload = json.loads(review_json) if isinstance(review_json, str) else dict(review_json)
     except Exception as exc:
         return f"ERROR: review_json was not valid JSON ({exc}). Re-send a single JSON object."
+
+    # SIGN-OFF IS GATED ON THE SCAN. A live run signed off "pass, risk none, 0 findings"
+    # on a branch whose scan had 9 high/critical CVEs — the reviewer had judged them
+    # unreachable and simply left them out. A judgement is fine; hiding what the scanner
+    # found is not. Every package with a high or critical vulnerability must appear as
+    # a finding (with its reachability and triage) or in the suppression log with a
+    # reason; a hardcoded secret must appear as a finding.
+    if s.submit_refusals >= _MAX_REFUSALS:
+        return (
+            f"ERROR: submit_security_review has refused this review {s.submit_refusals} times this "
+            "turn and will not take another attempt. Do not call it again. Tell the user plainly "
+            f"that the security review was NOT saved, and why: {s.last_submit_refusal}"
+        )
+    refusal = _unaddressed_scan_results(scan, payload)
+    if refusal:
+        return _refuse(s, refusal)
 
     ctx = ScanContext(
         repo_name=s.repo_name, ado_project=s.ado_project, mode=s.mode or "branch",
@@ -370,18 +506,26 @@ async def submit_security_review(review_json: str) -> str:
             risk_score=payload.get("risk_score", "none"),
             signoff=Signoff(decision=sign.get("decision", "conditional"), rationale=sign.get("rationale", "")),
             findings=findings,
-            sbom=payload.get("sbom", []),
+            # THE SBOM IS THE SCANNER'S, NOT THE MODEL'S. The payload's `sbom` is whatever
+            # the model re-typed — four components of 475, in a live run.
+            sbom=[
+                {"name": c.get("name", ""), "version": c.get("version", ""), "license": c.get("license"),
+                 "vulnerabilities": c.get("vulnerabilities") or 0}
+                for c in (scan.get("sbom") or {}).get("components") or []
+            ],
             supply_chain=payload.get("supply_chain", []),
             remediation_plan=payload.get("remediation_plan", ""),
             suppression_log=payload.get("suppression_log", []),
             compliance_frameworks=payload.get("compliance_frameworks") or ["OWASP Top 10"],
             metrics=metrics,
             status="scanned",
+            scan={k: v for k, v in scan.items() if not k.startswith("_")},
         )
     except Exception as exc:
-        return f"ERROR: review did not match the required shape: {exc}"
+        return _refuse(s, f"ERROR: review did not match the required shape: {exc}")
 
     s.last_artifact = artifact.model_dump()
+    s.submit_refusals, s.last_submit_refusal = 0, ""
     broadcast_log(
         manager,
         f"Security scan complete: {metrics.total} findings ({metrics.critical} critical) "

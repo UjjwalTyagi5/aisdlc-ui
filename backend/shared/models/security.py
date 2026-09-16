@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
 FindingCategory = Literal[
@@ -45,6 +45,33 @@ class SecurityFinding(BaseModel):
     remediation: str = ""
     autofix_patch: Optional[str] = None
     compliance: List[str] = Field(default_factory=list)   # e.g. ["OWASP A03:2021", "CWE-89"]
+
+    # A LIVE SUBMISSION WAS REFUSED FOR ITS SPELLING, NOT ITS CONTENT: an SCA finding has
+    # no source line, and the model sent `"line": null`; it listed CVE ids as an array.
+    # Neither is a different review, so neither is a reason to reject one.
+    @field_validator("line", mode="before")
+    @classmethod
+    def _no_line(cls, v):
+        return 0 if v in (None, "") else v
+
+    @field_validator("cve", mode="before")
+    @classmethod
+    def _cve_list(cls, v):
+        if isinstance(v, (list, tuple)):
+            return ", ".join(str(x) for x in v if x) or None
+        return v
+
+    @field_validator("file", "description", "remediation", mode="before")
+    @classmethod
+    def _no_text(cls, v):
+        return "" if v is None else v
+
+    @field_validator("compliance", mode="before")
+    @classmethod
+    def _one_framework(cls, v):
+        if v is None:
+            return []
+        return [v] if isinstance(v, str) else v
 
 
 class SbomComponent(BaseModel):
@@ -91,3 +118,11 @@ class SecurityArtifact(BaseModel):
     compliance_frameworks: List[str] = Field(default_factory=lambda: ["OWASP Top 10"])
     metrics: SecurityMetrics = Field(default_factory=SecurityMetrics)
     status: Literal["pending", "scanned"] = "scanned"
+    #: The filed Security Review Report: {filename, url, artifact_id} — or {error}
+    #: when it could not be written. Set by the API when the scan is saved.
+    document: dict = Field(default_factory=dict)
+    #: THE SCANNERS' OWN RESULTS (shared/services/code_security_scan): scanners with their
+    #: status, vulnerabilities, secrets, static-analysis findings, the SBOM and totals.
+    #: Kept apart from `findings`, which are the reviewer's triage: a reviewer may judge
+    #: a CVE unreachable, but the scan that found it stays on the report unedited.
+    scan: dict = Field(default_factory=dict)

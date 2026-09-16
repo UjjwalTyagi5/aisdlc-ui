@@ -49,6 +49,7 @@ describe("every surface with a model picker sends what it picked", () => {
     "app/(app)/projects/[id]/design/page.tsx",
     "app/(app)/projects/[id]/development/page.tsx",
     "app/(app)/projects/[id]/requirements/page.tsx",
+    "app/(app)/projects/[id]/security/page.tsx",
     "app/(app)/projects/[id]/testing/page.tsx",
     "components/app/stage-workbench.tsx",
     // Track 3's shared agent shell — both of its first two agents' pages.
