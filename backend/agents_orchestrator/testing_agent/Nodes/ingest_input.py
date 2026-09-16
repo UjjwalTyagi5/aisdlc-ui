@@ -47,7 +47,10 @@ _ASK_TO_WRITE_RE = re.compile(
     re.IGNORECASE,
 )
 _TOOL_ASK_RE = re.compile(
-    r"\b(?:publish|push|upload|attach|post)\b.{0,60}\b(?:confluence|sharepoint|jira|azure\s*devops|ado|page|space)\b"
+    # "send / submit / raise … for approval" — a document put forward, which is a tool.
+    # NOT a bare "approve": that answers the staged "shall I run the tests?" gate.
+    r"\b(?:send|submit|raise|put|forward|request)\b.{0,60}\bfor\s+(?:an?\s+)?approval\b"
+    r"|\b(?:publish|push|upload|attach|post)\b.{0,60}\b(?:confluence|sharepoint|jira|azure\s*devops|ado|page|space)\b"
     r"|\b(?:confluence|sharepoint)\b"
     r"|\b(?:approved|project)\s+(?:documents?|artifacts?)\b"
     r"|\b(?:list|read|open|show|summari[sz]e)\b.{0,40}\b(?:documents?|brd|hld|lld|design document|requirements?)\b"
@@ -1026,10 +1029,9 @@ async def handle_follow_up_query(state: SuperAgentState):
         context_parts.append(f"LAST RUN RESULTS:\n{json.dumps(state['aggregated_results'], default=str)[:4000]}")
     context_str = "\n\n".join(context_parts) or "(no prior test run in this session yet)"
 
-    # MCP-enabled chat: bind the project's assigned BYO MCP tools (loaded by the
-    # API layer onto the mcp_runtime contextvar) so the QA assistant can call them
-    # — same capability the other agents' chats have. Falls back to a plain answer
-    # when no tools are present or the model can't tool-call.
+    # The tool-using answer: project documents, raise-for-approval, the connectors the
+    # project granted Testing and BYO MCP tools. See _answer_with_optional_mcp — it says
+    # what it cannot do rather than answering without the tool.
     answer = await _answer_with_optional_mcp(user_prompt, history, context_str)
 
     new_history = list(history) + [HumanMessage(content=user_prompt), AIMessage(content=answer)]
@@ -1037,81 +1039,104 @@ async def handle_follow_up_query(state: SuperAgentState):
     return {"final_user_message": answer, "chat_history": new_history}
 
 
-try:
-    from shared.tools.project_documents import make_document_tools as _make_document_tools
+from shared.tools.document_approval import make_approval_tools as _make_approval_tools  # noqa: E402
+from shared.tools.project_documents import make_document_tools as _make_document_tools  # noqa: E402
 
-    _DOCUMENT_TOOLS = _make_document_tools("testing")
-except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
-    _DOCUMENT_TOOLS = []
+#: Read the project's approved documents; raise one of THIS stage's drafts for approval —
+#: the same tools the Requirements agent binds, bound to the testing stage.
+_DOCUMENT_TOOLS = _make_document_tools("testing")
+_APPROVAL_TOOLS = _make_approval_tools("testing")
+
+#: A connector named in the request → the label to say when the project has not granted
+#: it to this stage. Matched against the bound tool names, which carry the kind.
+_PUBLISH_CONNECTORS = (("confluence", "Confluence"), ("sharepoint", "SharePoint"))
+
+#: Model calls per turn. Publishing to a new space is list spaces → create space → list
+#: documents → publish → answer: five. Four ended it with "please rephrase" first.
+_TOOL_STEPS = 8
+
+
+def _ungranted_connector(user_prompt: str, bound_names: set[str]) -> Optional[str]:
+    """The refusal for a request naming a connector this stage has no tool for, or None.
+
+    Said here, not left to the model: with no Confluence tool bound, a model asked to
+    "upload it to Confluence" answered "Published successfully" — there was nothing it
+    could have called."""
+    for kind, label in _PUBLISH_CONNECTORS:
+        if re.search(rf"\b{kind}\b", user_prompt or "", re.IGNORECASE) and not any(
+            kind in name for name in bound_names
+        ):
+            return (
+                f"{label} is not available to the Testing agent on this project: a project "
+                f"admin has not granted {label} to the Testing stage. Grant it in the "
+                f"project's Settings → Tools per stage → Testing, then ask again. "
+                "Nothing was published."
+            )
+    return None
 
 
 async def _answer_with_optional_mcp(user_prompt: str, history, context_str: str) -> str:
-    """Answer a QA chat turn, using BYO MCP tools when available (bounded loop)."""
+    """Answer a QA chat turn with the tools this stage has: the project's documents,
+    raising a draft for approval, the connectors the project granted Testing (Confluence,
+    SharePoint, the board) and any BYO MCP tools.
+
+    NO FALLBACKS. A request for a connector that is not granted is refused by name; a
+    model that cannot call tools is told so rather than asked to answer without them;
+    an empty reply is reported as one.
+    """
     from langchain_core.messages import SystemMessage, ToolMessage
 
-    try:
-        from shared.tools.mcp_runtime import get_mcp_tools
-        mcp_tools = list(get_mcp_tools() or [])
-    except Exception:
-        mcp_tools = []
-    # The project's approved documents — the BRD, the design, the plan — are what a
-    # test plan is written against. Same two tools every other agent binds; the turn's
-    # project is bound by assert_agent_access_for_chat, so they answer for THIS project.
-    # And the connectors the project granted this stage (Confluence, SharePoint, the
-    # board) — the tools that publish an approved test case document — bound exactly
-    # as the Requirements and PM agents bind theirs.
-    try:
-        from shared.tools.stage_tools import tools_for_stage  # noqa: PLC0415
+    from shared.tools.mcp_runtime import get_mcp_tools
+    from shared.tools.stage_tools import tools_for_stage  # noqa: PLC0415
 
-        connector_tools = list(await tools_for_stage("testing", "testing"))
-    except Exception as exc:  # noqa: BLE001 — no connectors is an ordinary state
-        logger.info("Testing chat: no connector tools bound (%s)", type(exc).__name__)
-        connector_tools = []
-    mcp_tools = [*mcp_tools, *_DOCUMENT_TOOLS, *connector_tools]
+    # `tools_for_stage` returns only what the project granted this stage, at the level it
+    # granted — never raises; an ungranted connector is simply absent.
+    connector_tools = list(await tools_for_stage("testing", "testing"))
+    candidates = [*(get_mcp_tools() or []), *_DOCUMENT_TOOLS, *_APPROVAL_TOOLS, *connector_tools]
+
+    # Dedup by name (model APIs reject duplicate names).
+    seen: set = set()
+    tools = []
+    for t in candidates:
+        n = getattr(t, "name", None)
+        if n and n not in seen:
+            seen.add(n)
+            tools.append(t)
+    by_name = {t.name: t for t in tools}
+
+    refusal = _ungranted_connector(user_prompt, set(by_name))
+    if refusal:
+        return refusal
 
     loop = asyncio.get_running_loop()
     sys = ("You are an expert QA assistant for an enterprise testing agent. Use the "
-           "context and any available tools to answer the user's question precisely. "
-           "The project's APPROVED documents (requirements, design, plan, test cases) are "
+           "context and your tools to answer the user's question precisely.\n"
+           "- The project's APPROVED documents (requirements, design, plan, test cases) are "
            "listed by `list_project_documents` and read with `read_document` — consult "
-           "them before saying the project has no requirements or design. Publishing "
-           "tools (Confluence, SharePoint), when bound, publish only APPROVED documents "
-           "of this stage; if a tool refuses, relay its reason to the user verbatim.\n"
+           "them before saying the project has no requirements or design.\n"
+           "- The Testing agent's documents (test_cases.docx, test_plan.xlsx, the QA report) "
+           "are recorded in the project's Documents as DRAFTS. When the user asks to send, "
+           "submit or raise one for approval, call `raise_document_for_approval` with its "
+           "exact file name. You never approve: a project admin approves or rejects it in "
+           "Requests & Approvals.\n"
+           "- Publishing tools (Confluence, SharePoint) publish only APPROVED documents of "
+           "this stage. Report a publish only when the tool confirmed it; if a tool refuses, "
+           "relay its reason to the user verbatim.\n"
+           "- Never write a link or URL that no tool returned.\n"
            f"CONTEXT:\n{context_str}")
-
-    if not mcp_tools:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "{system}"), *history, ("human", "{user_prompt}"),
-        ])
-        chain = prompt | get_llm() | StrOutputParser()
-        return await loop.run_in_executor(
-            None, chain.invoke, {"system": sys, "user_prompt": user_prompt}
-        )
-
-    # Dedup tools by name (model APIs reject duplicate names) and run a bounded
-    # tool-calling loop.
-    seen: set = set()
-    tools = []
-    for t in mcp_tools:
-        n = getattr(t, "name", None)
-        if n and n not in seen:
-            seen.add(n); tools.append(t)
-    by_name = {getattr(t, "name", ""): t for t in tools}
 
     try:
         model = get_llm().bind_tools(tools)
-    except Exception as exc:
-        logger.info("Testing chat: model can't bind tools (%s) — plain answer", exc)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "{system}"), *history, ("human", "{user_prompt}"),
-        ])
-        chain = prompt | get_llm() | StrOutputParser()
-        return await loop.run_in_executor(
-            None, chain.invoke, {"system": sys, "user_prompt": user_prompt}
+    except Exception as exc:  # noqa: BLE001 — said to the user, not papered over
+        logger.warning("Testing chat: the model cannot bind tools (%s)", type(exc).__name__)
+        return (
+            "The selected model cannot use tools, so I can't read documents, raise one for "
+            "approval or publish with it. Choose a model that supports tool calling and ask "
+            "again. Nothing was done."
         )
 
     messages = [SystemMessage(content=sys), *history, HumanMessage(content=user_prompt)]
-    for _ in range(4):
+    for _ in range(_TOOL_STEPS):
         resp = await loop.run_in_executor(None, model.invoke, messages)
         messages.append(resp)
         tool_calls = getattr(resp, "tool_calls", None) or []
@@ -1119,15 +1144,18 @@ async def _answer_with_optional_mcp(user_prompt: str, history, context_str: str)
             content = resp.content
             if isinstance(content, list):
                 content = "".join(b.get("text", "") for b in content if isinstance(b, dict))
-            return content or "(no response)"
+            return content or "The model returned an empty reply. Nothing else was done — please ask again."
         for tc in tool_calls:
-            tool = by_name.get(tc.get("name"))
+            tool_obj = by_name.get(tc.get("name"))
             try:
-                out = await tool.ainvoke(tc.get("args") or {}) if tool else f"unknown tool {tc.get('name')}"
-            except Exception as exc:
-                out = f"tool error: {exc}"
+                out = await tool_obj.ainvoke(tc.get("args") or {}) if tool_obj else f"Error: no tool named {tc.get('name')}"
+            except Exception as exc:  # noqa: BLE001 — the model relays the failure
+                out = f"Error: {tc.get('name')} failed ({type(exc).__name__}: {exc})"
             messages.append(ToolMessage(content=str(out)[:8000], tool_call_id=tc.get("id", "")))
-    return "I wasn't able to finish using the tools for that — please rephrase."
+    return (
+        f"I stopped after {_TOOL_STEPS} tool steps without finishing. Anything the tools "
+        "reported above is all that was done — please narrow the request and ask again."
+    )
 
 
 async def read_input_content(state: SuperAgentState):
