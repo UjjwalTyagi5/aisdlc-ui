@@ -19,7 +19,7 @@ class ReviewSessionState:
     project_id: str = ""
     tenant_id: str = ""
     # Prepared target
-    mode: str = ""                       # "branch" | "pr"
+    mode: str = ""                       # "branch" | "pr" | "repo" (whole branch)
     ado_project: str = ""
     repo_name: str = ""
     source_branch: str = ""
@@ -30,7 +30,15 @@ class ReviewSessionState:
     base_sha: str = ""
     diff_text: str = ""
     changed_files: List[dict] = field(default_factory=list)
+    #: Whole-branch target: branch_inventory() of the checkout.
+    inventory: dict = field(default_factory=dict)
+    owner_id: str = ""
+    provider: str = ""
     target_bound: bool = False           # diff injected into the system context yet?
+    prepared_at: str = ""                # which prepared target is bound (see the WS handler)
+    # Review progress
+    files_read: List[str] = field(default_factory=list)
+    security: Optional[dict] = None      # code_security_scan result for this checkout
     # Output
     last_artifact: Optional[dict] = None
     # Plumbing

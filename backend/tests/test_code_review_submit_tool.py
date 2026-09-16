@@ -84,10 +84,13 @@ def review_session():
     s.mode = "branch"
     s.source_branch = "feature/x"
     s.base_branch = "main"
+    # A review is only accepted once the security review of the checkout has run.
+    s.security = {"scanners": [], "totals": {}, "sbom": {"components": []}}
     yield s
     reset_session_id(token)
     s.last_artifact = None
     s.changed_files = []
+    s.security = None
 
 
 @pytest.mark.asyncio
