@@ -217,3 +217,76 @@ async def test_a_regenerated_document_is_filed_again(tmp_path):
         os.utime(tmp_path / "test_plan.xlsx", (1, 2_000_000_000))
         await pr.record_outputs(str(tmp_path), session_id="s1", base_url="http://x", user_id="u", already=already)
     assert registered == ["test_plan.xlsx", "test_plan.xlsx"]
+
+
+# ── the Run button's path is untouched ───────────────────────────────────────
+
+
+async def test_the_run_buttons_message_still_routes_to_a_run(monkeypatch):
+    """The Testing page's Run button sends "Run <type> tests on <repo> @ <branch>." with
+    an explicit clone target and execute_now. That must reach the run path, not the
+    writing rule (it says "tests") nor the tool rule."""
+    for label in ("Unit", "API", "Functional", "UI", "Contract"):
+        prompt = f"Run {label} tests on QuickLink @ feature/116-117-link-management."
+        assert not ii._asks_to_write_test_cases(prompt), prompt
+        assert not ii._asks_for_a_tool(prompt), prompt
+
+    out = await ii.classify_intent({
+        "user_prompt": "Run Unit tests on QuickLink @ main.",
+        "input_file_path": None, "chat_history": None,
+        "selected_test_types": ["unit"], "execute_now": True,
+        "clone_target": {"project": "QuickLink", "repo": "QuickLink", "branch": "main"},
+    })
+    assert out["classified_intent"] in ("full_test", "single_file_test")
+
+
+async def test_grounding_never_seeds_a_development_handoff():
+    """`classify_intent` reads an `upstream_development` with repo+branch as an
+    Orchestrator handoff and answers every message with the scope question; a
+    standalone turn must not be seeded with one from the project's last dev run."""
+    payloads = {
+        "requirements_payload": {"stories": [{"id": "1", "title": "x"}]},
+        "development_artifacts": {"repo_url": "https://dev.azure.com/o/p/_git/r", "branch_name": "feature/x"},
+    }
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    with patch("shared.db.get_db_session_for_tenant", lambda t: _Session()), \
+            patch("shared.services.artifact_versions.readable_documents", AsyncMock(return_value=[])), \
+            patch("config.context_broker._fetch_artifacts_for_project", AsyncMock(return_value=payloads)), \
+            patch.object(pr, "_project_display_name", AsyncMock(return_value="P")):
+        out = await pr.grounding(TENANT, PROJECT)
+
+    assert "upstream_requirements" in out and out["upstream_loaded"] is True
+    assert "upstream_development" not in out
+    # and the dispatcher, not the handoff branch, answers "hi" (the LLM is faked)
+    with patch.object(ii, "get_llm", lambda: SimpleNamespace(invoke=lambda prompt: SimpleNamespace(content="greeting"))):
+        greeting = await ii.classify_intent({**out, "user_prompt": "hi", "input_file_path": None,
+                                             "chat_history": None, "orchestrator_driven": False})
+    assert greeting["classified_intent"] == "greeting"
+
+
+# ── the picker's model reaches the run ───────────────────────────────────────
+
+
+def test_the_pickers_offering_and_the_run_buttons_model_reach_the_state():
+    """Every testing run resolved the ORG DEFAULT offering while the page's picker
+    said otherwise: the WS handler read `offering_id` / `model_id` from the state
+    and nothing copied them in from the message. On this tenant the default was an
+    Azure offering with a dead key, so a run picked as "xAI · grok-3-mini" died on
+    AzureException AuthenticationError and reported "could not analyze the codebase"."""
+    from agents_orchestrator.testing_agent.testing_agent_api import _with_model_choice
+
+    out = _with_model_choice({"clone_target": {"repo": "r"}},
+                             {"offering_id": "off-xai", "model": "xai/grok-3-mini"})
+    assert out["offering_id"] == "off-xai" and out["model_id"] == "xai/grok-3-mini"
+    assert out["clone_target"] == {"repo": "r"}, "the rest of the state is kept"
+
+    kept = _with_model_choice({"offering_id": "off-xai"}, {"text": "and the results?"})
+    assert kept == {"offering_id": "off-xai"}, "a follow-up without a pick keeps the session's"
+    assert _with_model_choice(None, {}) is None

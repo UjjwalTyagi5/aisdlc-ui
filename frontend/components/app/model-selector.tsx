@@ -134,6 +134,19 @@ export function ModelSelector({
     ? options.find((o) => o.offering_id === selectedId)
     : undefined;
 
+  // WHAT IS SHOWN IS WHAT RUNS. With no explicit choice this control DISPLAYS the org
+  // default (or the first option) but the page's value stayed undefined, so the run
+  // went out with no offering_id and the backend resolved its own default — which
+  // need not be the same offering. On a tenant whose backend default was an Azure
+  // offering with a dead key, a Testing run showing "xAI · grok-3-mini" died on
+  // AzureException. Report the resolved default once, so the page sends it.
+  const reportedDefault = React.useRef<string | undefined>(undefined);
+  React.useEffect(() => {
+    if (value || !selectedId || reportedDefault.current === selectedId) return;
+    reportedDefault.current = selectedId;
+    onValueChange(selectedId);
+  }, [value, selectedId, onValueChange]);
+
   return (
     <Select
       value={selectedId ?? ""}

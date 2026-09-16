@@ -64,15 +64,24 @@ class ReactRunner(LanguageRunner):
 
     # ── Detection ──────────────────────────────────────────────────────────
     def detect(self, work_dir: str) -> bool:
-        """React wins on a package.json containing 'react' OR loose JSX/TSX files."""
+        """Any Node project: a root package.json, or loose JSX/TSX files.
+
+        THIS RUNNER IS JEST, NOT REACT. It matched only a package.json naming react or
+        next, so a Node + Express service — the Development agent's own QuickLink
+        scaffold: `src/services/*.js`, Jest in devDependencies — was not detected,
+        fell back to python, found no .py files, and the run reported "could not
+        analyze the provided codebase". Everything below the detection already
+        handles plain JavaScript: the scanner reads .js/.ts, the skill prompt says to
+        test exported functions directly for a non-component module, and jest's
+        default testMatch picks up the generated file. A root package.json is a Node
+        project; that is the whole test.
+        """
         pkg = os.path.join(work_dir, "package.json")
         if os.path.exists(pkg):
             try:
                 with open(pkg, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
-                if "react" in deps or "next" in deps:
-                    return True
+                    json.load(f)
+                return True
             except Exception:
                 pass
         for root, _, files in os.walk(work_dir):

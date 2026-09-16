@@ -77,9 +77,12 @@ async def grounding(tenant_id: str, project_id: str, *, consumer_run_id: Optiona
             out["upstream_requirements"] = payloads["requirements_payload"]
         if payloads.get("design_artifacts"):
             out["upstream_design"] = payloads["design_artifacts"]
-        if payloads.get("development_artifacts"):
-            out["upstream_development"] = payloads["development_artifacts"]
-        if any(k in out for k in ("upstream_requirements", "upstream_design", "upstream_development")):
+        # NOT the development payload. `classify_intent` treats an
+        # `upstream_development` with a repo and branch as an Orchestrator handoff and
+        # answers every message — "hi", "thanks" — with "Development is complete,
+        # what testing would you like?". A standalone tester picks the branch in the
+        # target dialog; the handoff shape stays the Orchestrator's.
+        if any(k in out for k in ("upstream_requirements", "upstream_design")):
             out["upstream_loaded"] = True
     except Exception as exc:  # noqa: BLE001
         logger.info("testing grounding: upstream payloads unavailable (%s)", type(exc).__name__)

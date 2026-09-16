@@ -49,12 +49,15 @@ def test_import_hint_is_relative_to_the_test_file_not_the_repo_root():
         _fn("shippingCost", "src/pricing.js"),
     ])
 
+    # A repo with no package.json and no babel config is a CommonJS project to jest;
+    # the specifiers are `require()` lines. The path rule is the thing under test.
     hint = _react_import_hint(os.path.join("C:", os.sep, "repo"), analysis)
 
-    assert "from './pricing.js'" in hint
+    assert "require('./pricing.js')" in hint
     assert "./src/pricing.js" not in hint
-    # Both functions from one file collapse into a single import statement.
-    assert hint.count("import {") == 1
+    # Both functions from one file collapse into a single statement (the rule text
+    # mentions `require()` once more; count the specifier lines).
+    assert hint.count("= require(") == 1
     assert "applyDiscount, shippingCost" in hint
 
 
@@ -63,7 +66,7 @@ def test_import_hint_reaches_up_out_of_src_for_a_file_elsewhere():
 
     hint = _react_import_hint(os.path.join("C:", os.sep, "repo"), analysis)
 
-    assert "from '../lib/util.js'" in hint
+    assert "require('../lib/util.js')" in hint
 
 
 def test_import_hint_is_empty_when_there_is_nothing_to_import():
@@ -120,3 +123,42 @@ def test_present_packages_are_not_reinstalled(monkeypatch, tmp_path):
     ReactRunner().install(str(tmp_path), FakeSandbox())
 
     assert not [c for c in calls if "--no-save" in c]
+
+
+# ── module system ───────────────────────────────────────────────────────────
+def test_a_react_repo_keeps_esm_imports_and_a_plain_node_repo_gets_require(tmp_path):
+    """The run that looked green: an Express service with no transform got an ESM
+    test file, jest failed it with "unexpected token", and the repo's own two tests
+    were reported as the result. The hint, the file name and the jsdom docblock all
+    follow the repo's module system now."""
+    import json as _j
+
+    from agents_orchestrator.testing_agent.Nodes.dispatch_test_types import (
+        _node_is_react,
+        _node_module_style,
+        _output_path_for,
+    )
+
+    node = tmp_path / "express"
+    node.mkdir()
+    (node / "package.json").write_text(_j.dumps({"devDependencies": {"jest": "^29"}}), encoding="utf-8")
+    assert _node_module_style(str(node)) == "commonjs"
+    assert not _node_is_react(str(node))
+    assert _output_path_for(str(node), "unit", "react").endswith("generated_unit.test.js")
+    analysis = types.SimpleNamespace(functions=[_fn("createLink", "src/services/LinkService.js")])
+    hint = _react_import_hint(str(node), analysis)
+    assert "require('./services/LinkService.js')" in hint
+    assert "NO babel/ESM transform" in hint and "import" in hint.lower()
+
+    react = tmp_path / "spa"
+    react.mkdir()
+    (react / "package.json").write_text(_j.dumps({"dependencies": {"react": "^18"}}), encoding="utf-8")
+    assert _node_module_style(str(react)) == "esm"
+    assert _node_is_react(str(react))
+    assert _output_path_for(str(react), "unit", "react").endswith("generated_unit.test.jsx")
+    assert "import { createLink } from './services/LinkService.js';" in _react_import_hint(str(react), analysis)
+
+    esm = tmp_path / "esm"
+    esm.mkdir()
+    (esm / "package.json").write_text(_j.dumps({"type": "module"}), encoding="utf-8")
+    assert _node_module_style(str(esm)) == "esm"

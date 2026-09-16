@@ -185,13 +185,65 @@ def _output_path_for(work_dir: str, skill_name: str, language: str) -> str:
     if language == "react":
         target_dir = os.path.join(work_dir, "src")
         os.makedirs(target_dir, exist_ok=True)
-        return os.path.join(target_dir, f"generated_{skill_name}.test.jsx")
+        # .jsx only where JSX can be transformed; a plain Node service gets .test.js,
+        # which jest's default testMatch picks up and runs as CommonJS.
+        ext = "jsx" if _node_is_react(work_dir) else "js"
+        return os.path.join(target_dir, f"generated_{skill_name}.test.{ext}")
     # python (default)
     return os.path.join(work_dir, f"test_generated_{skill_name}.py")
 
 
 
 _JSDOM_DOCBLOCK = "/**\n * @jest-environment jsdom\n */\n"
+
+
+def _node_module_style(work_dir: str) -> str:
+    """"esm" when the repo can run `import` in a test file, else "commonjs".
+
+    THE RUN THAT LOOKED GREEN. On a plain Express service (no babel config, no
+    `"type": "module"`, no react) the generated `generated_unit.test.jsx` opened
+    with `import { createLink } from '../src/services/LinkService.js'` — the unit
+    skill's React rule says "ESM imports" — and jest answered "encountered an
+    unexpected token" and skipped the whole suite. The run then reported
+    "Passed 2/2": the repo's own two tests. Without a transform, jest runs test files
+    as CommonJS, so that is what the generated file must be.
+    """
+    import json as _j  # noqa: PLC0415
+
+    for name in ("babel.config.js", "babel.config.cjs", "babel.config.mjs", "babel.config.json", ".babelrc", ".babelrc.json"):
+        if os.path.exists(os.path.join(work_dir, name)):
+            return "esm"
+    pkg = os.path.join(work_dir, "package.json")
+    try:
+        with open(pkg, "r", encoding="utf-8") as fh:
+            data = _j.load(fh)
+    except Exception:  # noqa: BLE001
+        return "commonjs"
+    if data.get("type") == "module":
+        return "esm"
+    deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+    if any(k in deps for k in ("react", "next", "@babel/core", "babel-jest", "ts-jest", "vite", "vitest")):
+        return "esm"
+    return "commonjs"
+
+
+def _node_is_react(work_dir: str) -> bool:
+    import json as _j  # noqa: PLC0415
+
+    try:
+        with open(os.path.join(work_dir, "package.json"), "r", encoding="utf-8") as fh:
+            data = _j.load(fh)
+        deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+        if "react" in deps or "next" in deps:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    for root, _, files in os.walk(work_dir):
+        if "node_modules" in root:
+            continue
+        if any(f.endswith((".jsx", ".tsx")) for f in files):
+            return True
+    return False
 
 
 def _ensure_react_jsdom_docblock(code: str) -> str:
@@ -236,6 +288,7 @@ def _react_import_hint(work_dir: str, code_analysis) -> str:
     if not by_file:
         return ""
 
+    style = _node_module_style(work_dir)
     lines = []
     for fp, names in by_file.items():
         abs_src = fp if os.path.isabs(fp) else os.path.join(work_dir, fp)
@@ -245,17 +298,28 @@ def _react_import_hint(work_dir: str, code_analysis) -> str:
             continue
         if not rel.startswith("."):
             rel = "./" + rel
-        lines.append(f"import {{ {', '.join(names)} }} from '{rel}';")
+        if style == "commonjs":
+            lines.append(f"const {{ {', '.join(names)} }} = require('{rel}');")
+        else:
+            lines.append(f"import {{ {', '.join(names)} }} from '{rel}';")
     if not lines:
         return ""
     joined = "\n".join(lines)
+    module_rule = (
+        "This repository has NO babel/ESM transform: jest runs test files as CommonJS. "
+        "Use `require()` and `module.exports` only — an `import` or `export` statement "
+        "makes jest fail the whole file with \"unexpected token\". Do not import React "
+        "or any testing-library package; test the exported functions directly.\n\n"
+        if style == "commonjs" else ""
+    )
     return (
         "\n\n## CRITICAL IMPORT RULES — read carefully\n"
+        f"{module_rule}"
         "Your test file is saved in the `src/` directory. Import the code under test "
         "using EXACTLY these specifiers — they are relative to your test file, and any "
         "other path (including one starting `./src/`) will fail to resolve:\n\n"
         f"```\n{joined}\n```\n"
-        "Adjust only between named and default imports if the module exports a default."
+        "Adjust only between named and default exports if the module exports a default."
     )
 
 def _csharp_looks_complete(code: str) -> bool:
@@ -1075,7 +1139,7 @@ async def _run_skill(state: SuperAgentState, skill: Skill) -> Dict[str, Any]:
                 f"{skill.name}: generated C# was incomplete or syntactically unbalanced; "
                 f"saved diagnostic copy to {diagnostic_path}"
             )
-    if language == "react" and skill.name != "functional_api":
+    if language == "react" and skill.name != "functional_api" and _node_is_react(work_dir):
         code = _ensure_react_jsdom_docblock(code)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(code)
