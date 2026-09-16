@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import uuid
@@ -20,6 +21,8 @@ from langchain_core.tools import tool
 from agents_orchestrator.code_review_agent.config.session_state import get_session
 from config.ws_helper import broadcast_log, get_session_id
 from config.connection_manager import manager
+
+logger = logging.getLogger(__name__)
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "bin", "obj", "dist", "build"}
 _MAX_FILE_BYTES = 200_000
@@ -351,6 +354,34 @@ def _unread_on_small_branch(s) -> list[str]:
     return sorted(f["path"] for f in reviewable if f["path"] not in read)
 
 
+#: The approved documents a review checks code against — backend stage names.
+_UPSTREAM_STAGES = ("requirements", "design")
+
+
+def record_document_read(document_id: str, outcome: str) -> None:
+    """`read_document`'s callback for this agent: which approved documents this review
+    opened, and whether each could be read."""
+    if document_id:
+        get_session(get_session_id()).documents_read[document_id] = outcome
+
+
+async def _approved_upstream_documents(s) -> list[dict]:
+    """The project's APPROVED requirements and design documents — metadata only.
+
+    A real run on QuickLink had an approved BRD and architecture.docx on file, read
+    neither, and the report said the project had no requirements or design to check the
+    code against. Whether the model reads them is not left to the model.
+    """
+    if not (s.tenant_id and s.project_id):
+        return []
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.services.artifact_versions import readable_documents  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(s.tenant_id) as db:
+        docs = await readable_documents(db, s.project_id)
+    return [d for d in docs if d.get("stage") in _UPSTREAM_STAGES]
+
+
 @tool
 async def submit_code_review(review_json: str) -> str:
     """Submit the final structured code review. Call this ONCE when analysis is done.
@@ -386,6 +417,22 @@ async def submit_code_review(review_json: str) -> str:
             f"{len(unread)} reviewable file(s) have not been read: {', '.join(unread)}. "
             "Read each with read_repo_file, revise the review if what you read changes it, "
             "then call submit_code_review again."
+        )
+    try:
+        upstream = await _approved_upstream_documents(s)
+    except Exception as exc:  # noqa: BLE001 — said, never read as "there are none"
+        logger.warning("Code review: approved documents could not be listed", exc_info=True)
+        return (
+            f"ERROR: the project's approved documents could not be listed ({type(exc).__name__}), "
+            "so this review cannot show what it was checked against. Call submit_code_review again."
+        )
+    unopened = [d for d in upstream if d.get("id") not in s.documents_read]
+    if unopened:
+        listed = "; ".join(f'{d.get("title")} (id {d.get("id")}, {d.get("stage")})' for d in unopened)
+        return (
+            "ERROR: this project has approved requirements/design documents this review has not "
+            f"read: {listed}. Read each with read_document, map the code to them in "
+            "requirements_coverage and design_conformance, then call submit_code_review again."
         )
     try:
         payload = json.loads(review_json) if isinstance(review_json, str) else dict(review_json)
@@ -452,7 +499,15 @@ async def submit_code_review(review_json: str) -> str:
             metrics=metrics,
             diff=s.diff_text,
             status="reviewed",
-            scope=_review_scope(s),
+            scope={
+                **_review_scope(s),
+                # What the code was checked against, by name — the report says it.
+                "documents": [
+                    {"title": d.get("title"), "stage": d.get("stage"),
+                     "outcome": s.documents_read.get(d.get("id"), "")}
+                    for d in upstream
+                ],
+            },
             security=s.security,
             security_summary=str(payload.get("security_summary") or ""),
         )

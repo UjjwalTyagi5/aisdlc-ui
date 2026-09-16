@@ -58,7 +58,11 @@ try:
     # Bound to this agent's stage: it decides what "its own agent" means for an
     # approved-but-uncovered document, and it is what the evidence trail records as
     # the reader. Never a tool argument — a prompt could then claim another agent.
-    _DOCUMENT_TOOLS = make_document_tools("code_review")
+    from agents_orchestrator.code_review_agent.tools.review_tools import record_document_read  # noqa: PLC0415
+
+    # Reads are recorded so a review can show — and submit can check — which approved
+    # requirements and design documents the code was reviewed against.
+    _DOCUMENT_TOOLS = make_document_tools("code_review", on_read=record_document_read)
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 

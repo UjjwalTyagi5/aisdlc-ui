@@ -275,7 +275,7 @@ def review_session(repo):
     s = get_session(sid)
     s.work_dir, s.mode, s.repo_name, s.source_branch, s.head_sha = str(repo), "repo", "QuickLink", "main", "abc1234"
     s.inventory = branch_inventory(str(repo))
-    s.files_read, s.security, s.last_artifact = [], None, None
+    s.files_read, s.security, s.last_artifact, s.documents_read = [], None, None, {}
     return s
 
 
@@ -305,6 +305,58 @@ async def test_a_small_branch_cannot_be_submitted_with_files_unread(review_sessi
     await read_repo_file.ainvoke({"path": "package.json"})
     assert "Review submitted" in await submit_code_review.ainvoke(payload)
     assert review_session.last_artifact["scope"]["not_read"] == []
+
+
+@pytest.mark.asyncio
+async def test_approved_requirements_and_design_must_be_read_before_submitting(review_session, monkeypatch):
+    """A live run had an approved BRD and architecture.docx on file, read neither, and the
+    report said the project had nothing to check the code against."""
+    from agents_orchestrator.code_review_agent.tools import review_tools
+    from agents_orchestrator.code_review_agent.tools.review_tools import (
+        read_repo_file, record_document_read, submit_code_review,
+    )
+
+    docs = [
+        {"id": "brd-1", "title": "TEST_Project_BRD.docx", "stage": "requirements"},
+        {"id": "arch-1", "title": "architecture.docx", "stage": "design"},
+    ]
+    monkeypatch.setattr(review_tools, "_approved_upstream_documents", AsyncMock(return_value=docs))
+    review_session.security = {"scanners": [], "totals": {"vulnerabilities": 0}, "sbom": {"components": []}}
+    for path in ("src/app.js", "package.json"):
+        await read_repo_file.ainvoke({"path": path})
+    payload = {"review_json": json.dumps({"summary": "Small app.", "merge_recommendation": "approve"})}
+
+    out = await submit_code_review.ainvoke(payload)
+    assert out.startswith("ERROR") and "TEST_Project_BRD.docx" in out and "architecture.docx" in out
+    assert review_session.last_artifact is None
+
+    record_document_read("brd-1", "ok")
+    out = await submit_code_review.ainvoke(payload)
+    assert out.startswith("ERROR") and "architecture.docx" in out and "TEST_Project_BRD.docx" not in out
+
+    # A document that could not be read counts as attempted — it cannot lock submission —
+    # and the report says why.
+    record_document_read("arch-1", "that document's text could not be extracted")
+    assert "Review submitted" in await submit_code_review.ainvoke(payload)
+    assert review_session.last_artifact["scope"]["documents"] == [
+        {"title": "TEST_Project_BRD.docx", "stage": "requirements", "outcome": "ok"},
+        {"title": "architecture.docx", "stage": "design", "outcome": "that document's text could not be extracted"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_document_list_that_cannot_be_read_is_said_not_treated_as_none(review_session, monkeypatch):
+    from agents_orchestrator.code_review_agent.tools import review_tools
+    from agents_orchestrator.code_review_agent.tools.review_tools import read_repo_file, submit_code_review
+
+    monkeypatch.setattr(review_tools, "_approved_upstream_documents", AsyncMock(side_effect=ConnectionError("db down")))
+    review_session.security = {"scanners": [], "totals": {"vulnerabilities": 0}, "sbom": {"components": []}}
+    for path in ("src/app.js", "package.json"):
+        await read_repo_file.ainvoke({"path": path})
+
+    out = await submit_code_review.ainvoke({"review_json": json.dumps({"summary": "x", "merge_recommendation": "approve"})})
+    assert out.startswith("ERROR") and "could not be listed (ConnectionError)" in out
+    assert review_session.last_artifact is None
 
 
 @pytest.mark.asyncio
@@ -354,3 +406,22 @@ def test_the_agent_has_the_new_tools_and_is_told_to_use_them():
     assert {"run_security_review", "list_repo_files", "raise_document_for_approval"} <= names
     assert "WHOLE BRANCH" in CODE_REVIEW_SYSTEM_PROMPT and "run_security_review" in CODE_REVIEW_SYSTEM_PROMPT
     assert "security_summary" in CODE_REVIEW_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_the_reviewers_read_document_records_what_it_read(review_session, monkeypatch):
+    """The wiring, not just the callback: the reviewer's own read_document tool reports
+    every read — a success and a document that could not be read."""
+    from agents_orchestrator.code_review_agent.agents import reviewer
+
+    results = {"brd-1": ("# BRD\nFR-01 Create a short link", "ok"), "arch-1": (None, "that document has no stored file")}
+
+    async def _read(**kw):
+        return results[kw["artifact_id"]]
+
+    monkeypatch.setattr("shared.services.artifact_consumption.read_document_for_agent", _read)
+    read_document = {t.name: t for t in reviewer._DOCUMENT_TOOLS}["read_document"]
+
+    assert "FR-01" in await read_document.ainvoke({"document_id": "brd-1"})
+    assert "could not be read" in await read_document.ainvoke({"document_id": "arch-1"})
+    assert review_session.documents_read == {"brd-1": "ok", "arch-1": "that document has no stored file"}

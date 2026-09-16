@@ -109,6 +109,24 @@ describe("CodeReviewReport", () => {
     expect(screen.queryByRole("link", { name: /Download report/ })).not.toBeInTheDocument();
   });
 
+  it("names the approved documents the code was checked against, and one that could not be read", () => {
+    const base = artifact().scope!;
+    render(<CodeReviewReport artifact={artifact({ scope: { ...base, documents: [
+      { title: "TEST_Project_BRD.docx", stage: "requirements", outcome: "ok" },
+      { title: "architecture.docx", stage: "design", outcome: "that document has no stored file" },
+    ] } })} onOpenTab={() => {}} />);
+    expect(screen.getByText("TEST_Project_BRD.docx")).toBeInTheDocument();
+    expect(screen.getByText(/could not be read: that document has no stored file/)).toBeInTheDocument();
+    expect(screen.getByText(/with the project's approved requirements and design documents/)).toBeInTheDocument();
+  });
+
+  it("claims nothing about documents on a review saved before they were recorded", () => {
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}} />);
+    expect(screen.queryByText(/Checked against/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/approved requirements and design documents/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/had no approved requirements/)).not.toBeInTheDocument();
+  });
+
   it("orders findings by severity and links to the full tabs", () => {
     const onOpenTab = vi.fn();
     render(<CodeReviewReport artifact={artifact()} onOpenTab={onOpenTab} />);

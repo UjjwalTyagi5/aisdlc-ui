@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable, Optional
 
 from langchain_core.tools import tool
 
@@ -49,11 +49,19 @@ def has_document_tools(agent_id: str) -> bool:
     return agent_id in _READERS
 
 
-def make_document_tools(consumer_stage: str) -> list[Any]:
+def make_document_tools(
+    consumer_stage: str,
+    *,
+    on_read: Optional[Callable[[str, str], None]] = None,
+) -> list[Any]:
     """The two document tools, bound to the agent registering them.
 
     Returns them as a list to be spread into the agent's tool list, matching how the
     MCP tools are wired.
+
+    `on_read(document_id, outcome)` is told about every read — outcome "ok", or why the
+    document could not be read — for an agent that must show which documents it checked
+    its work against (Code Review).
     """
 
     @tool
@@ -128,6 +136,8 @@ def make_document_tools(consumer_stage: str) -> list[Any]:
             # read attributable to a run in the evidence view.
             consumer_run_id=get_session_id() or None,
         )
+        if on_read is not None:
+            on_read((document_id or "").strip(), "ok" if text is not None else note)
         if text is None:
             return f"That document could not be read: {note}"
         return text

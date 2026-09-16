@@ -255,7 +255,7 @@ def review_markdown(artifact: dict) -> str:
         _table(["Acceptance criterion", "Status", "Note"],
                [[c.get("ac_id"), (c.get("status") or "").title(), c.get("note")] for c in coverage])
         if coverage else
-        "No requirements were mapped to this code — the project had no requirements the reviewer could check against."
+        "No requirements coverage was recorded for this review."
     )
 
     # ── 06 design ──
@@ -265,7 +265,7 @@ def review_markdown(artifact: dict) -> str:
         _table(["Rule", "Status", "Note"],
                [[c.get("rule"), (c.get("status") or "").title(), c.get("note")] for c in conformance])
         if conformance else
-        "No design rules were checked — the project had no approved design the reviewer could check against."
+        "No design conformance was recorded for this review."
     )
 
     # ── 07 scope ──
@@ -291,7 +291,24 @@ def review_markdown(artifact: dict) -> str:
         items.append("**Scanners:** " + "; ".join(
             f"{sc.get('name')} ({'ran' if sc.get('status') == 'ok' else sc.get('status')})" for sc in scanners
         ))
-    items.append("**Method:** an AI reviewer read the code with the project's requirements and design; the security findings and SBOM come from the scanners, not from the reviewer.")
+    documents = scope.get("documents") or []
+    if documents:
+        items.append("**Checked against:** " + "; ".join(
+            f"{d.get('title')} ({d.get('stage')}"
+            + ("" if d.get("outcome") == "ok" else f" — could not be read: {d.get('outcome')}")
+            + ")"
+            for d in documents
+        ))
+    if documents:
+        against = " with the project's approved requirements and design documents"
+    elif "documents" in scope:
+        against = "; the project had no approved requirements or design document to check it against"
+    else:  # a review saved before documents were recorded — claim nothing it cannot show
+        against = ""
+    items.append(
+        f"**Method:** an AI reviewer read the code{against}; the security findings and SBOM "
+        "come from the scanners, not from the reviewer."
+    )
     blocks.append(_bullets(items))
     return "\n\n".join(b for b in blocks if b)
 

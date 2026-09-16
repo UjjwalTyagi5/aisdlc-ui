@@ -114,6 +114,27 @@ def test_a_whole_branch_states_its_coverage():
     assert "**Not read:** tests/x.test.js" in md
 
 
+def test_the_report_names_the_documents_the_code_was_checked_against():
+    from agents_orchestrator.code_review_agent.review_document import review_markdown
+
+    base = _artifact()["scope"]
+    checked = review_markdown(_artifact(scope={**base, "documents": [
+        {"title": "TEST_Project_BRD.docx", "stage": "requirements", "outcome": "ok"},
+        {"title": "architecture.docx", "stage": "design", "outcome": "that document's text could not be extracted"},
+    ]}))
+    assert "**Checked against:** TEST_Project_BRD.docx (requirements); architecture.docx (design — could not be read: that document's text could not be extracted)" in checked
+    assert "with the project's approved requirements and design documents" in checked
+
+    none_on_file = review_markdown(_artifact(scope={**base, "documents": []}))
+    assert "the project had no approved requirements or design document" in none_on_file
+
+    # A review saved before documents were recorded claims neither.
+    legacy = review_markdown(_artifact())
+    assert "Checked against" not in legacy
+    assert "approved requirements and design documents" not in legacy
+    assert "had no approved requirements" not in legacy
+
+
 def test_without_a_scan_nothing_about_security_is_claimed():
     from agents_orchestrator.code_review_agent.review_document import review_markdown
 

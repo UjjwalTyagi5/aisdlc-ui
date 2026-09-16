@@ -38,6 +38,9 @@ class ReviewSessionState:
     prepared_at: str = ""                # which prepared target is bound (see the WS handler)
     # Review progress
     files_read: List[str] = field(default_factory=list)
+    #: Approved document id -> "ok", or why read_document could not read it. Project-level,
+    #: not target-level, so a new target does not reset it.
+    documents_read: Dict[str, str] = field(default_factory=dict)
     security: Optional[dict] = None      # code_security_scan result for this checkout
     # Output
     last_artifact: Optional[dict] = None

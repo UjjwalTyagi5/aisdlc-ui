@@ -276,7 +276,7 @@ export function CodeReviewReport({ artifact, onOpenTab }: {
 
       <ReportSection n={4} title="Requirements and design" id="cr-requirements">
         {artifact.requirements_coverage.length === 0 && artifact.design_conformance.length === 0 ? (
-          <Callout>The project had no requirements or approved design the reviewer could check this code against.</Callout>
+          <Callout>No requirements coverage or design conformance was recorded for this review.</Callout>
         ) : (
           <div className="space-y-3">
             {artifact.requirements_coverage.length > 0 && (
@@ -331,8 +331,25 @@ export function CodeReviewReport({ artifact, onOpenTab }: {
               )}
             </div>
           )}
+          {(scope.documents?.length ?? 0) > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted-foreground text-xs">Checked against:</span>
+              {scope.documents!.map((d) => (
+                <span key={d.title} className="inline-flex items-center gap-1">
+                  <MonoChip>{d.title}</MonoChip>
+                  {d.outcome !== "ok" && <Pill tone="warning">could not be read: {d.outcome}</Pill>}
+                </span>
+              ))}
+            </div>
+          )}
           <p className="text-muted-foreground text-xs">
-            An AI reviewer read the code with the project&apos;s requirements and design. The security results and SBOM come from
+            An AI reviewer read the code
+            {(scope.documents?.length ?? 0) > 0
+              ? " with the project's approved requirements and design documents"
+              : scope.documents
+                ? "; the project had no approved requirements or design document to check it against"
+                : ""}
+            . The security results and SBOM come from
             the scanners{ran ? ` (${security.scanners.map((s) => `${s.name}: ${s.status === "ok" ? "ran" : s.status}`).join("; ")})` : ""}, not from the reviewer.
           </p>
         </div>

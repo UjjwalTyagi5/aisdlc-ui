@@ -169,6 +169,9 @@ export const ReviewScope = z
     not_read: z.array(z.string()),
     files_changed: z.number(),
     changed_files: z.array(z.string()),
+    /** The approved requirements/design documents the code was checked against; outcome
+     *  "ok" or why the document could not be read. Absent on reviews saved before it. */
+    documents: z.array(z.object({ title: z.string(), stage: z.string(), outcome: z.string() })),
   })
   .partial();
 export type ReviewScope = z.infer<typeof ReviewScope>;
