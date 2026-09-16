@@ -133,19 +133,71 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
     return response.choices[0].message.content or ""
 
 
-async def _load_ref_paths(file_names: list) -> tuple:
-    paths = []
-    for name in file_names:
-        if isinstance(name, str) and name.startswith("Error:"):
+#: Per session: the files attached to the conversation, by the name the model is
+#: shown ("--- Attached file: NAME ---"). Filled by the chat handler each turn.
+_SESSION_SOURCES: dict[str, dict[str, str]] = {}
+
+
+def register_source_files(session_id: str, paths) -> None:
+    """Record this turn's attachments so a tool can find each one by its name."""
+    if not session_id:
+        return
+    known = _SESSION_SOURCES.setdefault(str(session_id), {})
+    for path in paths or []:
+        if isinstance(path, str) and path and os.path.isfile(path):
+            known[os.path.basename(path)] = path
+
+
+def _session_input_dir() -> str:
+    return os.path.abspath(f"{esett.FILES}/{get_user_id()}/requirements_agent/{get_session_id()}/input")
+
+
+def _unknown_source_error(name: str, attached: dict) -> str:
+    shown = os.path.basename(name)
+    if attached:
+        return (
+            f"Error: no file named '{shown}' is attached to this conversation. "
+            f"Attached: {', '.join(sorted(attached))}. Nothing was generated — pass one of "
+            "those names exactly."
+        )
+    return (
+        f"Error: no files are attached to this conversation, so '{shown}' cannot be read. "
+        "Nothing was generated — ask the user to attach the file."
+    )
+
+
+async def _resolve_source_files(file_names) -> tuple:
+    """The on-disk paths for the files a tool was asked to read, or an error.
+
+    WHY BY NAME. A chat attachment reaches the model as its extracted text under
+    "--- Attached file: NAME ---" — the name is the only handle the model has. The
+    tools used to accept nothing but `.ref` files from upload_file, so
+    generate_brd(["transcript.md"]) answered "has not yet been uploaded" for a file the
+    user could see attached, and the turn ended with a BRD that was never written.
+
+    WHAT CAN BE READ: files attached to THIS conversation, and upload_file references
+    inside this session's own input directory. Not an arbitrary server path — a model
+    that names one gets the same error as a model that names a file nobody attached.
+    """
+    attached = _SESSION_SOURCES.get(str(get_session_id() or ""), {})
+    paths: list = []
+    for raw in file_names or []:
+        if not isinstance(raw, str) or not raw.strip():
             continue
-        if os.path.exists(name):
-            try:
-                async with aiofiles.open(name, "r") as f:
-                    paths.append((await f.read()).strip())
-            except Exception:
-                continue
-        else:
-            return paths, f"Error: file {name} has not yet been uploaded"
+        name = raw.strip()
+        by_name = attached.get(os.path.basename(name))
+        if by_name and os.path.isfile(by_name):
+            paths.append(by_name)
+            continue
+        if name.endswith(".ref"):
+            ref = os.path.abspath(name)
+            if ref.startswith(_session_input_dir() + os.sep) and os.path.isfile(ref):
+                async with aiofiles.open(ref, "r") as fh:
+                    target = (await fh.read()).strip()
+                if os.path.isfile(target):
+                    paths.append(target)
+                    continue
+        return [], _unknown_source_error(name, attached)
     return paths, None
 
 
@@ -181,17 +233,10 @@ async def broadcast_file_generated(session_id: str, filename: str, file_path: st
         print(f"ERROR: Failed to broadcast file generation: {str(e)}")
         return ""
 
-async def markdown_to_docx(markdown_string: str, docx_path: str):
-    """Write `markdown_string` as the designed Word document at `docx_path` — the
-    platform's title band, key-facts strip and palette (`shared/docs/markdown_docx`),
-    the same canvas the brief, the design document and the test case document use —
-    then announce and file it. The document's markdown is written beside it as
-    `<name>.md` for the Requirements page's report view.
-
-    This used to be a generic HTML-walking converter that produced Word's defaults:
-    the first document a client sees from the platform, and the one that looked
-    designed by nobody. See requirements_document.py.
-    """
+async def _write_designed_docx(markdown: str, docx_path: str) -> str:
+    """Render `markdown` as the designed Word document at `docx_path` and write its
+    markdown beside it (`<name>.md`, what the Requirements page renders). Raises on any
+    failure — see requirements_document.py for the canvas."""
     from agents_orchestrator.requirements_agent.requirements_document import (  # noqa: PLC0415
         RequirementsDocMeta,
         document_kind,
@@ -202,38 +247,87 @@ async def markdown_to_docx(markdown_string: str, docx_path: str):
         write_markdown_sibling,
     )
 
-    dedented_markdown = textwrap.dedent(markdown_string).strip()
+    dedented = textwrap.dedent(markdown or "").strip()
     filename = os.path.basename(docx_path)
-    kind = document_kind(dedented_markdown, filename)
-    session_id = get_session_id()
+    kind = document_kind(dedented, filename)
     project = await _project_display_name()
     meta = RequirementsDocMeta(
-        title=title_for(dedented_markdown, filename, kind, project),
+        title=title_for(dedented, filename, kind, project),
         kind=kind,
         project=project,
-        sources=source_names(_LAST_SOURCE_FILES.get(session_id, [])),
+        sources=source_names(_LAST_SOURCE_FILES.get(get_session_id(), [])),
         generated_on=today(),
     )
-    print(f"Starting markdown to docx conversion for: {docx_path}")
     os.makedirs(os.path.dirname(docx_path) or ".", exist_ok=True)
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, lambda: render_requirements_docx(dedented_markdown, docx_path, meta=meta),
-    )
-    try:
-        write_markdown_sibling(dedented_markdown, docx_path)
-    except OSError as exc:
-        print(f"DEBUG: markdown sibling not written: {exc}")
+    await loop.run_in_executor(None, lambda: render_requirements_docx(dedented, docx_path, meta=meta))
+    # The page's copy. NOT best-effort: a Word file the page cannot show is half a
+    # delivery, and the failure belongs in the tool's answer, not a print.
+    write_markdown_sibling(dedented, docx_path)
+    return docx_path
 
+
+async def markdown_to_docx(markdown_string: str, docx_path: str) -> str:
+    """Write the designed Word document and announce it — or say that it was not.
+
+    Every exit is either the real download link or an "Error:". It used to answer
+    "Successfully converted Markdown to X" when the announcement had failed and there
+    was no link to give, which is exactly the reply a model turns into "your document is
+    ready" and a link it writes itself.
+    """
+    from shared.tools.doc_export import export_result_message  # noqa: PLC0415
+
+    filename = os.path.basename(docx_path)
     try:
-        print(f"Saving document to {docx_path}")
-        _url = await broadcast_file_generated(session_id, filename, docx_path)
-        print(f"Successfully saved document to {docx_path}")
-        if _url:
-            return f"Saved '{filename}'. Download it here: {_url}"
-    except Exception as e:
-        print(f"An exception occurred while saving the doc file: {e}")
-    return f"Successfully converted Markdown to {os.path.basename(docx_path)}"
+        await _write_designed_docx(markdown_string, docx_path)
+    except Exception as exc:  # noqa: BLE001
+        broadcast_log(manager, f"Word document not written: {type(exc).__name__}", level="ERROR")
+        return (
+            f"Error: the Word document '{filename}' could not be written ({type(exc).__name__}). "
+            "Nothing was generated — tell the user."
+        )
+    url = await broadcast_file_generated(get_session_id(), filename, docx_path)
+    return export_result_message(filename, url)
+
+
+def _unique_output_name(out_dir: str, stem: str, ext: str = ".docx") -> str:
+    """`stem.docx`, or `stem_v2.docx`, `stem_v3.docx` … — a second BRD in the same
+    conversation must not overwrite the first one the user may already have opened."""
+    name = f"{stem}{ext}"
+    n = 2
+    while os.path.exists(os.path.join(out_dir, name)):
+        name = f"{stem}_v{n}{ext}"
+        n += 1
+    return name
+
+
+async def _save_generated_document(markdown: str, suffix: str) -> str:
+    """Write a generated BRD / PDD / risk register as its Word document, and return
+    what the model should know: the real link, then the content for follow-ups.
+
+    WHY THE GENERATOR SAVES. Generating and saving were two tool calls, and the second
+    was the model's to remember. A turn that skipped it — or whose generation had failed
+    — still ended "BRD Generated Successfully" with a link the model invented. A
+    generated document now IS a file, with a link, or the tool says it is not.
+    """
+    import re as _re  # noqa: PLC0415
+
+    project = await _project_display_name()
+    stem = (_re.sub(r"[^A-Za-z0-9]+", "_", project or "").strip("_") or "Requirements") + f"_{suffix}"
+    out_dir = f"{esett.FILES}/{get_user_id()}/requirements_agent/{get_session_id()}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    name = _unique_output_name(out_dir, stem)
+    result = await markdown_to_docx(markdown, os.path.join(out_dir, name))
+    if result.startswith("Error:"):
+        return result
+    return (
+        f"{result}\n"
+        "This Word document IS the deliverable and it is shown on the Requirements page. "
+        "Do not call export_document or markdowntodoc to make another Word copy; use "
+        "export_document only if the user asks for a different format.\n\n"
+        "--- DOCUMENT CONTENT (for follow-up questions; do not paste it back in full) ---\n"
+        f"{markdown}"
+    )
 
 
 async def _project_display_name() -> str:
@@ -363,11 +457,11 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
  
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional instructions needed based on users query, can be empty
     """
     broadcast_log(manager, f"---Executing tool: generate_brd for files: {file_names}---", level="INFO")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     # Files are optional: generate from the user's description (custom_prompt) alone when
@@ -383,11 +477,11 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         broadcast_log(manager, "BRD generation completed", level="INFO")
         _remember_doc(response)
-        return response
     except Exception as e:
         error_msg = _classify_error(e, "BRD generation")
         broadcast_log(manager, error_msg, level="ERROR")
         return error_msg
+    return await _save_generated_document(response, "BRD")
 
 @tool
 async def generate_pdd(file_names: List[str], custom_prompt: str):
@@ -397,11 +491,11 @@ async def generate_pdd(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print(f"Executing tool: generate_pdd for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
@@ -415,9 +509,9 @@ async def generate_pdd(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         print("PDD generation completed")
         _remember_doc(response)
-        return response
     except Exception as e:
         return _classify_error(e, "PDD generation")
+    return await _save_generated_document(response, "PDD")
 
 @tool
 async def generate_risk_register(file_names: List[str], custom_prompt: str):
@@ -427,11 +521,11 @@ async def generate_risk_register(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print("Executing tool: generate_risk_register for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
@@ -445,9 +539,9 @@ async def generate_risk_register(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         print("Risk Register generation completed")
         _remember_doc(response)
-        return response
     except Exception as e:
         return _classify_error(e, "Risk Register generation")
+    return await _save_generated_document(response, "Risk_Register")
 
 @tool
 async def template_pdd(content: str, files: List[str], filename : str = "template_pdd.docx"):
@@ -455,10 +549,10 @@ async def template_pdd(content: str, files: List[str], filename : str = "templat
         This function also saves the document it generates
     Args:
         content (str) : The content from which the PDD template fields will be extracted, if file is provided can be empty
-        files (List[str]) : A list of file names to analyze These names must be obtained from the upload_file tool
+        files (List[str]) : A list of file names to analyze Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         filename (str) : The filename for saving, should be of the format project_topic_template_pdd.docx
     """
-    file_paths, err = await _load_ref_paths(files)
+    file_paths, err = await _resolve_source_files(files)
     if err:
         return err
 
@@ -671,7 +765,7 @@ async def update_response(file_names: List[str], query: str, content: str):
     content (str): the actual content that needs to be updated
     """
     print(f"Executing tool: update_response for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     prompt = f"""Given the following content and attached files as context update the content provided to you based on the query
@@ -700,11 +794,11 @@ async def generate_mom(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print("Executing tool: generate_mom for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -728,11 +822,11 @@ async def general_query(file_names: List[str], query: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         query (str): the users query
     """
     print(f"Executing tool: general_query for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -754,11 +848,11 @@ async def generate_user_stories(file_names: List[str], custom_prompt: str = ""):
     which can include BRDs, meeting notes, requirements documents, or customer feedback.
     Args:
     file_names (List[str]): A list of file names to analyze
-    These names must be obtained from the upload_file tool
+    Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
     custom_prompt (str): Additional special instructions for user story generation
     """
     broadcast_log(manager, f"---Executing tool: generate_user_stories for files: {file_names}---", level="INFO")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -823,12 +917,12 @@ async def generate_planning_sheet(file_names: List[str], custom_prompt: str = ""
     This Function automatically saves the planning sheet
     Args:
         file_names (List[str]): A list of file names to analyze.
-                                These names must be obtained from the upload_file tool.
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'.
         custom_prompt (str): Additional instructions for the model, can be empty.
         filename (str): filename for saving, should be of the format project_topic_planning_sheet.xlsx
     """
     print(f"---Executing tool: generate_planning_sheet for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -1368,12 +1462,9 @@ async def markdowntopdf(content: str = "", output_path: str = "requirements_docu
         return f"Error generating the PDF ({type(exc).__name__})."
 
     url = await broadcast_file_generated(session_id, filename, full_path)
-    return (
-        f"Generated '{filename}'."
-        + (f" Download it here: {url}" if url else "")
-        + " It is NOT yet saved to the project's artifacts — ask the user whether to "
-          "It is awaiting a project admin's approval."
-    )
+    from shared.tools.doc_export import export_result_message  # noqa: PLC0415
+
+    return export_result_message(filename, url)
 
 
 
@@ -1419,7 +1510,12 @@ async def export_document(content: str = "", filename: str = "requirements_docum
     full_path = os.path.join(out_dir, name)
 
     try:
-        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+        if name.lower().endswith(".docx"):
+            # The same designed document generate_brd writes, with the page's copy
+            # beside it — not the generic converter, which the page cannot render.
+            await _write_designed_docx(content, full_path)
+        else:
+            await render_document(content, full_path, title=name.rsplit(".", 1)[0])
     except ValueError:
         # render_document refuses an extension it has no renderer for. Its message is
         # ours, not a connector's, but the sweep in test_board_write_failures cannot
@@ -2729,34 +2825,40 @@ Both take an optional `parent_id` that creates the item UNDER an existing one.
 Report ONLY what a tool actually returned. If a tool returned an error, the change did
 not happen — say so. Do not describe intended changes in the past tense, and do not
 summarise a plan as though it were a result.
+- NEVER write a link or URL that did not come from a tool result or from the user. A
+  document link you compose yourself points at nothing, and the platform flags it.
+- If a document tool returned "Error:", NO document exists. Say it was not generated,
+  quote the reason, and do not describe its contents as though it were written.
 
-── FLOW J: GENERATE DOCUMENTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-After requirements are confirmed and the gap report is reviewed, offer to export:
-- generate_brd_document(project, scope_summary, stories_json, gap_report_json)
-  → full BRD as DOCX, returns download URL
-- generate_user_stories_document(project, stories_json)
-  → all stories with Gherkin AC as DOCX, returns download URL
-- generate_risk_register_document(project, stories_json, gap_report_json)
-  → risk register based on stories and gap analysis, returns download URL
-Always present the download URL from the tool result as a clickable link in your response.
+── FLOW J: GENERATE DOCUMENTS ────────────────────────────────────────────────────
+  generate_brd(file_names, custom_prompt)            Business Requirements Document
+  generate_pdd(file_names, custom_prompt)            Process Definition Document
+  generate_risk_register(file_names, custom_prompt)  Risk register
+Each one WRITES the designed Word document, records it in the project's Documents and
+returns its download link. You do not need a second tool to save it.
+- file_names are the names of files ATTACHED to this conversation, exactly as they
+  appear in "--- Attached file: NAME ---". Pass [] to work from the conversation alone.
+- export_document is for a DIFFERENT format of a document (PDF, Excel, Markdown), or for
+  content you wrote yourself — not to re-save a document a generator already wrote.
+- Give the user the download link EXACTLY as the tool returned it.
 Post the gap report summary as a comment on the parent epic/item using add_board_comment.
 
-── FILE UPLOADS ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-- When the user's message says "please use the following files ..." followed by
-  one or more file paths, call read_uploaded_file for EACH path first.
-- Pass extracted text to generate_stories_from_brd or generate_user_stories.
+── FILE UPLOADS ──────────────────────────────────────────────────────────────────
+- Attached files are read for you: their text is already in the conversation under
+  "--- Attached file: NAME ---". Use it directly — there is no tool to call to read it.
+- To build a BRD, PDD or risk register from an attachment, pass its NAME in file_names.
 - Supported formats: .txt, .md, .csv, .xlsx, .xls, .docx, .pdf.
-- NEVER say you cannot access files — always call read_uploaded_file.
+- If the conversation says an attachment could not be read, tell the user so.
 
-
-── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, THEN APPROVED) ────────────────────
-Every document you generate is recorded in the project's artifacts automatically, as
-AWAITING APPROVAL. You do NOT ask whether to save it, and there is no tool to call.
+── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, AS A DRAFT) ───────────────────────
+Every document you generate is recorded in the project's Documents automatically, as a
+DRAFT. You do NOT ask whether to save it, and there is no tool to call.
 - After generating a document, tell the user it is ready and give the download link.
-- Then say it has been submitted for approval, and that a project admin decides whether
-  it joins the project's shared record.
+- Then say it is in the project's Documents as a draft: raising it for approval is the
+  user's next step, and a project admin decides whether it joins the project's shared
+  record.
 - Do NOT claim it has been "added to the project" or "saved to artifacts" — it is
-  waiting on someone else's decision, and saying otherwise sets the wrong expectation.
+  waiting on a decision nobody has made yet.
 - The download link works immediately either way.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
@@ -2772,9 +2874,9 @@ EXTENSION you pass:
 Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
 If they ask for a format not listed here, say which ones are available.
 
-Anything you generate is filed as a project document AWAITING APPROVAL — it is not part
-of the project's record until its owner accepts it on the Documents panel. Say so when
-you produce one, rather than implying the work is finished.
+Anything you generate is filed as a DRAFT project document — it is not part of the
+project's record until it is raised for approval and a project admin accepts it. Say so
+when you produce one, rather than implying the work is finished.
 
 ── SHAREPOINT ────────────────────────────────────────────────────────────────────────
   publish_approved_to_sharepoint   file APPROVED documents into the library

@@ -33,10 +33,12 @@ export function hasReportView(doc: Pick<GeneratedDoc, "url" | "name">): boolean 
   return markdownSiblingUrl(doc) !== null;
 }
 
+/** `null` when the document has no markdown copy (404); throws on any other failure,
+ *  so a broken fetch is reported as broken rather than as "no page view". */
 async function fetchMarkdown(url: string): Promise<string | null> {
   const res = await fetch(url, { cache: "no-store" });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Couldn't read the document (${res.status}).`);
+  if (!res.ok) throw new Error(`The document could not be loaded (HTTP ${res.status}).`);
   return res.text();
 }
 
@@ -52,20 +54,32 @@ export function DocumentReportView({ doc, project, status, onClose }: {
     queryFn: () => fetchMarkdown(mdUrl!),
     enabled: !!mdUrl,
     staleTime: Infinity,
-    // The .md is written a beat before the file_generated event; one retry covers it.
-    retry: 2,
+    // No retries: the .md is written BEFORE the file is announced
+    // (planning._write_designed_docx), so a miss is a real miss and is shown as one.
+    retry: false,
   });
   const name = doc.name ?? "document";
 
   if (!mdUrl) return null;
   if (q.isLoading) return <div className="p-6"><LoadingState variant="card" /></div>;
-  if (q.isError || q.data === null || q.data === undefined) {
+  if (q.isError) {
     return (
       <div className="mx-auto max-w-3xl p-6">
-        <Callout tone="neutral" title={name}>
-          This document has no report view — open the Word file instead.
+        <Callout tone="danger" title={name}>
+          {q.error instanceof Error ? q.error.message : "The document could not be loaded."}
+        </Callout>
+      </div>
+    );
+  }
+  if (q.data === null || q.data === undefined) {
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <Callout tone="warning" title={name}>
+          This document has no page view: it was generated without the markdown copy the page
+          renders (documents from before page rendering, or a Word file made by another tool).
+          The Word file itself is unaffected.
           {doc.url && (
-            <a href={doc.url} className="text-primary ml-2 underline underline-offset-2" download>Download</a>
+            <a href={doc.url} className="text-primary ml-2 underline underline-offset-2" download>Download Word</a>
           )}
         </Callout>
       </div>

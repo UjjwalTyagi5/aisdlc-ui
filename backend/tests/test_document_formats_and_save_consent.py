@@ -281,9 +281,16 @@ def test_neither_prompt_asks_the_user_for_permission_any_more(module, attr):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("module", "attr"), _PROMPTS)
-def test_both_prompts_say_the_document_is_awaiting_approval(module, attr):
+def test_both_prompts_say_the_document_is_a_draft_until_raised(module, attr):
+    """`register_generated_file` records every file as a DRAFT — listed, downloadable, in
+    nobody's approval queue until someone raises it. The prompts said "AWAITING APPROVAL"
+    and "it has been submitted for approval", which was true before drafts and has not
+    been since: the agent told users an approver was looking at a document nobody had
+    put forward."""
     flat = _prompt(module, attr)
-    assert "AWAITING APPROVAL" in flat
+    assert "AWAITING APPROVAL" not in flat
+    assert "submitted for approval" not in flat
+    assert "as a DRAFT" in flat
     assert "a project admin decides" in flat
 
 
