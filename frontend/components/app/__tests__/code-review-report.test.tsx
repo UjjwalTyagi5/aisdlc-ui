@@ -19,7 +19,9 @@ import {
   CodeReviewReport,
   SbomView,
   SecurityView,
+  approvalState,
   groupVulnerabilities,
+  reportDocumentFor,
   upgradeTo,
 } from "@/components/app/code-review-report";
 import { CodeReviewArtifact, PrepareResult } from "@/lib/schemas/code-review";
@@ -198,5 +200,70 @@ describe("BranchFilesView", () => {
     render(<BranchFilesView prepared={null} artifact={artifact()} />);
     expect(screen.getByText("read")).toBeInTheDocument();
     expect(screen.getByText("not read")).toBeInTheDocument();
+  });
+});
+
+function documentRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "doc-1", projectId: "p1", runId: "r1", type: "document", scope: "agent", stage: "code_review",
+    title: "QuickLink_Code_Review.docx", status: "draft", version: 1, contentHash: "h".repeat(64),
+    body: { kind: "document", filename: "QuickLink_Code_Review.docx", stored: true },
+    phase: "review", createdBy: "agent", createdAt: "2026-09-16T10:04:58Z", updatedAt: "2026-09-16T10:04:58Z",
+    approvedBy: null, approvedAt: null,
+    ...over,
+  } as never;
+}
+
+describe("The report's approval", () => {
+  it("links a review to its own document by id, even among identically named reports", () => {
+    const review = artifact({ document: { filename: "QuickLink_Code_Review.docx", url: "u", artifact_id: "doc-2" } });
+    const docs = [documentRow({ id: "doc-1" }), documentRow({ id: "doc-2", status: "approved" })];
+    expect((reportDocumentFor(review, docs) as { id: string }).id).toBe("doc-2");
+  });
+
+  it("links an older review (no id) to the same-named document saved closest to it, within ten minutes", () => {
+    const review = artifact({ document: { filename: "QuickLink_Code_Review.docx", url: "u" } });
+    const docs = [
+      documentRow({ id: "far", createdAt: "2026-09-16T09:00:00Z" }),
+      documentRow({ id: "near", createdAt: "2026-09-16T10:04:58Z" }),
+      documentRow({ id: "other-name", title: "Other.docx", createdAt: "2026-09-16T10:05:00Z" }),
+    ];
+    expect((reportDocumentFor(review, docs) as { id: string }).id).toBe("near");
+    expect(reportDocumentFor(review, [documentRow({ id: "far", createdAt: "2026-09-16T09:00:00Z" })])).toBeNull();
+  });
+
+  it("says Draft, Raised for approval, Approved or Rejected", () => {
+    expect(approvalState(documentRow()).label).toBe("Draft · not yet raised for approval");
+    expect(approvalState(documentRow({ status: "awaiting_approval" })).label).toBe("Raised for approval · waiting on the approver");
+    expect(approvalState(documentRow({ status: "approved", approvedBy: "sarthakk2004@gmail.com" })).label).toBe("Approved by sarthakk2004@gmail.com");
+    expect(approvalState(documentRow({ status: "rejected" })).label).toBe("Rejected");
+  });
+
+  it("shows the status in the report header and offers Raise for approval on a draft", () => {
+    const onRaise = vi.fn();
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}}
+      approval={{ document: documentRow(), mayRaise: true, raising: false, onRaise }} />);
+    expect(screen.getByText("Draft · not yet raised for approval")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Raise for approval" }));
+    expect(onRaise).toHaveBeenCalledTimes(1);
+  });
+
+  it("says it has been raised, and offers no second raise", () => {
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}}
+      approval={{ document: documentRow({ status: "awaiting_approval" }), mayRaise: true, raising: false, onRaise: vi.fn() }} />);
+    expect(screen.getByText("Raised for approval · waiting on the approver")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Raise for approval" })).not.toBeInTheDocument();
+  });
+
+  it("says Approved once it is", () => {
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}}
+      approval={{ document: documentRow({ status: "approved", approvedBy: "sarthakk2004@gmail.com" }), mayRaise: true, raising: false, onRaise: vi.fn() }} />);
+    expect(screen.getByText("Approved by sarthakk2004@gmail.com")).toBeInTheDocument();
+  });
+
+  it("offers no raise to someone who may not send it", () => {
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}}
+      approval={{ document: documentRow(), mayRaise: false, raising: false, onRaise: vi.fn() }} />);
+    expect(screen.queryByRole("button", { name: "Raise for approval" })).not.toBeInTheDocument();
   });
 });

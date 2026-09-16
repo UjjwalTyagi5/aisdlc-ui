@@ -166,7 +166,7 @@ async def test_the_saved_review_links_its_filed_report(tmp_path, monkeypatch):
 
     set_user_id("user-1")
     monkeypatch.setattr("config.sdlcSettings", lambda: type("S", (), {"FILES": str(tmp_path)})())
-    registered = AsyncMock()
+    registered = AsyncMock(return_value="art-42")
     broadcast = AsyncMock()
     with patch("shared.services.chat_artifacts.register_generated_file", registered), \
          patch.object(api.manager, "broadcast", broadcast):
@@ -175,6 +175,8 @@ async def test_the_saved_review_links_its_filed_report(tmp_path, monkeypatch):
     assert doc["filename"].endswith(".docx") and "/generated/user-1/code_review/sess-9/output/" in doc["url"]
     args, kwargs = registered.await_args
     assert args[0] == doc["filename"] and kwargs["stage"] == "code_review"
+    # The review points at ITS document row — every report for one commit shares a name.
+    assert doc["artifact_id"] == "art-42"
     assert broadcast.await_args.args[0]["type"] == "file_generated"
 
 

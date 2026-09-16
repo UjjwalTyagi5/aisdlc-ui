@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from sqlalchemy import select
 
@@ -94,8 +95,12 @@ _LAST_UPLOAD_OK: dict[str, bool] = {}
 async def register_generated_file(
     filename: str, file_path: str, url: str, *, stage: str,
     consented: bool | None = None, note: str | None = None,
-) -> None:
+) -> str | None:
     """Persist a chat-generated file as an Artifact row (+ notify). Never raises.
+
+    Returns the new artifact's id, or None when nothing was recorded — so a caller that
+    must point at THIS document later can. Several documents share a file name (a report
+    regenerated for the same commit), and a name alone cannot say which one was meant.
 
     STORING IS THE PROJECT ADMIN'S CALL. A generated document is downloadable from chat
     the moment it is written — the tool broadcasts a `/generated/...` link. Becoming
@@ -134,7 +139,7 @@ async def register_generated_file(
         project_id = get_project_id()
         if not tenant_id or not project_id:
             logger.debug("register_generated_file: no tenant/project in context — skip persist (%s)", filename)
-            return
+            return None
 
         # NO PER-TURN CONSENT STEP ANY MORE. It used to stage the file and have the
         # agent ask "shall I save this?", because storing put the document straight into
@@ -168,17 +173,21 @@ async def register_generated_file(
         # the enclosing try swallowed, silently skipping the notify and the log line
         # too. False is also the honest value: nothing was uploaded.
         _uploaded = False
+        artifact_id: str | None = None
 
         async with get_db_session_for_tenant(tenant_id) as session:
             run_id = await _get_or_create_chat_run(session, tenant_id, project_id, stage)
             if not run_id:
-                return
+                return None
 
             if data is None:
                 # Nothing to upload — record what we know so the panel still lists it.
                 # `blob_path=None` so the download route reports "no stored file"
                 # rather than handing a dead local path to Azure.
+                new_id = uuid.uuid4()
+                artifact_id = str(new_id)
                 session.add(Artifact(
+                    id=new_id,
                     run_id=run_id, tenant_id=tenant_id, artifact_type=artifact_type,
                     blob_url=None, blob_path=None, approval_status="draft",
                     content_type=content_type, size_bytes=None,
@@ -232,6 +241,7 @@ async def register_generated_file(
                 # approves and the bytes move out of the pending area — so reading it
                 # here would report a failed upload on every successful save.
                 _uploaded = bool(getattr(_art, "upload_succeeded", False))
+                artifact_id = str(getattr(_art, "id", "") or "") or None
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415
@@ -244,7 +254,9 @@ async def register_generated_file(
             "register_generated_file: persisted %s (%s) for run %s (blob upload %s)",
             filename, artifact_type, run_id, "ok" if _uploaded else "FAILED",
         )
+        return artifact_id
     except Exception:
         logger.warning("register_generated_file: failed to persist %s", filename, exc_info=True)
+        return None
 
 

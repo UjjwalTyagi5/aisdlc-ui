@@ -42,6 +42,9 @@ describe("every surface with a model picker sends what it picked", () => {
   //: The two files that own a ModelSelector AND a chat. `stage-workbench` is the
   //: shared header for seven stages, so it counts for all of them.
   const SURFACES = [
+    // Code Review had no picker at all until 16 Sep 2026: every review ran on the first
+    // provider connection, which had a revoked key.
+    "app/(app)/projects/[id]/code-review/page.tsx",
     "app/(app)/projects/[id]/deployment/page.tsx",
     "app/(app)/projects/[id]/design/page.tsx",
     "app/(app)/projects/[id]/development/page.tsx",

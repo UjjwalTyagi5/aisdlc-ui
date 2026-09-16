@@ -216,7 +216,9 @@ export const CodeReviewArtifact = z.object({
   security_summary: z.string().default(""),
   /** The Code Review & Security Report: its link, or why there is none. */
   document: z
-    .object({ filename: z.string(), url: z.string(), error: z.string() })
+    /** `artifact_id` is the report's own document row — its approval status is read from
+     *  it. Absent on reviews saved before 16 Sep 2026 (see reportDocumentFor). */
+    .object({ filename: z.string(), url: z.string(), error: z.string(), artifact_id: z.string().nullable() })
     .partial()
     .default({}),
 });

@@ -204,11 +204,14 @@ async def test_every_generated_file_is_recorded_immediately(tmp_path):
 
     f = tmp_path / "brd.docx"
     f.write_bytes(b"x")
-    store = AsyncMock(return_value=SimpleNamespace(blob_url=None, upload_succeeded=True))
+    store = AsyncMock(return_value=SimpleNamespace(id="art-7", blob_url=None, upload_succeeded=True))
     with _ctx(consented=True), patch("shared.services.artifact_store.store_artifact", store):
-        await ca.register_generated_file("brd.docx", str(f), "http://x/brd.docx", stage="requirements")
+        artifact_id = await ca.register_generated_file("brd.docx", str(f), "http://x/brd.docx", stage="requirements")
 
     store.assert_awaited()
+    # The row's id comes back, so a caller can point at THIS document later (a Code
+    # Review report shows its approval status; several reports share a file name).
+    assert artifact_id == "art-7"
 
 
 @pytest.mark.unit

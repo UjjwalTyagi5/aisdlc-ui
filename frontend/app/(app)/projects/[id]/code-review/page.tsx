@@ -42,6 +42,7 @@ import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
 import {
   BranchFilesView,
   CodeReviewReport,
+  reportDocumentFor,
   type ReviewTab,
   SbomView,
   SecurityView,
@@ -50,10 +51,12 @@ import {
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
 import { unchangedReviewNotice } from "@/lib/code-review/prepare-outcome";
 import { getProject } from "@/lib/api/projects";
 import { listReviews, getReview } from "@/lib/api/code-review";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import type { PrepareResult, Severity, CodeReviewArtifact } from "@/lib/schemas/code-review";
 import type { ProjectId } from "@/lib/schemas";
@@ -118,6 +121,14 @@ export default function CodeReviewPage() {
   // page asserting a stale one is a wrong first impression that cannot be clicked away.
   // A finished run still opens its own result — see the busy→idle effect below.
 
+  // The project's documents — the SAME query the Documents panel reads, so a report raised
+  // or approved anywhere updates both the panel and the report's own header.
+  const documentsQ = useQuery({
+    queryKey: qk.artifacts.forProject(id),
+    queryFn: () => listArtifacts(id),
+  });
+  const approvals = useRaiseForApproval(id);
+
   const reviewQ = useQuery({
     queryKey: qk.codeReview.review(id, activeReviewId ?? ""),
     queryFn: () => getReview(id, activeReviewId!),
@@ -135,7 +146,12 @@ export default function CodeReviewPage() {
     offeringId: agentModel,
     sessionKey: id,
     context: { page: "Code Review", project_id: id },
-    onArtifact: () => reviewsQ.refetch(),
+    // A turn can save a review, file its report, or send that report for approval — the
+    // last changes no review, only the document's status, so both lists refresh.
+    onArtifact: () => {
+      void reviewsQ.refetch();
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    },
   });
 
   // When a turn finishes (busy → idle), refresh the list and open the review THAT TURN
@@ -392,7 +408,19 @@ export default function CodeReviewPage() {
                   <LoadingState variant="card" />
                 ) : tab === "summary" ? (
                   artifact ? (
-                    <CodeReviewReport artifact={artifact} onOpenTab={setTab} />
+                    <CodeReviewReport
+                      artifact={artifact}
+                      onOpenTab={setTab}
+                      approval={(() => {
+                        const document = reportDocumentFor(artifact, documentsQ.data);
+                        return {
+                          document,
+                          mayRaise: approvals.mayRaise("code_review"),
+                          raising: !!document && approvals.raisingId === document.id,
+                          onRaise: () => document && approvals.raise(document),
+                        };
+                      })()}
+                    />
                   ) : (
                     <SummaryView mode={mode} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
                   )

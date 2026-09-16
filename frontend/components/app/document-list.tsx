@@ -41,11 +41,11 @@ import {
 } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDeleteArtifact } from "@/hooks/use-delete-artifact";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
 import {
-  approveArtifact, listArtifacts, rejectArtifact, submitArtifact, uploadArtifact,
+  approveArtifact, listArtifacts, rejectArtifact, uploadArtifact,
 } from "@/lib/api/artifacts";
-import { getMyAgentAccess } from "@/lib/api/capabilities";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
 import { PHASE_LABEL } from "@/lib/agents";
@@ -205,24 +205,9 @@ export function DocumentList({
   const deletion = useDeleteArtifact(projectId, onDeleted ? { onDeleted } : undefined);
 
   const canUpload = hasPermission(session, "run:create");
-  // WHO MAY SEND A DOCUMENT FOR APPROVAL — the route's rule (may_raise_for_approval):
-  // `run:create`, OR use of the agent the document belongs to. The button used to follow
-  // `run:create` alone, so QA could approve Testing documents but never send one, and a
-  // Security Engineer granted Code Review saw its report with no way to put it forward.
-  // Only fetched when `run:create` does not already settle it; the same query the agent
-  // pages draw their padlocks from.
-  const accessQ = useQuery({
-    queryKey: qk.myAgentAccess.forProject(projectId),
-    queryFn: () => getMyAgentAccess(projectId),
-    staleTime: 30_000,
-    enabled: !canUpload,
-  });
-  const mayRaise = (docStage: string | null | undefined) => {
-    if (canUpload) return true;
-    if (!docStage) return false; // a project-wide document belongs to no agent
-    const phase = docStage === "code_review" ? "review" : docStage;
-    return (accessQ.data?.reach?.[phase] ?? "none") !== "none";
-  };
+  // Who may send a document for approval, and the act itself — shared with the Code
+  // Review report's header so the two cannot disagree. See useRaiseForApproval.
+  const { mayRaise, raise, raisingId } = useRaiseForApproval(projectId);
   // The stage's own permission, or project administration for the project-wide ones.
   // Mirrors the route; see the note above about this being UX rather than the rule.
   const canApproveStage = hasPermission(session, `artifact:approve_${stage}`);
@@ -300,20 +285,6 @@ export function DocumentList({
     // The backend says WHY: a rejected extension, an oversized file, an unknown stage.
     // Three different things the user has to act on differently.
     onError: (e: Error) => toast.error(e.message || "Upload failed"),
-  });
-
-  const raise_ = useMutation({
-    mutationFn: (a: Artifact) => submitArtifact(a.id),
-    onMutate: (a) => setBusyId(a.id),
-    onSettled: () => setBusyId(null),
-    onSuccess: () => {
-      toast.success("Raised for approval");
-      void refresh();
-      // It has just entered somebody's queue, so the count beside Requests & Approvals
-      // is now wrong until this lands.
-      void queryClient.invalidateQueries({ queryKey: qk.approvals.list({}) });
-    },
-    onError: (e: Error) => toast.error(e.message || "Couldn't raise it for approval"),
   });
 
   const decide = useMutation({
@@ -525,7 +496,7 @@ export function DocumentList({
             const norm = normalisedStatus(a);
             const isDraft = norm === "draft";
             const pending = norm === "pending";
-            const busy = busyId === a.id;
+            const busy = busyId === a.id || raisingId === a.id;
             return (
               <li
                 key={a.id}
@@ -621,7 +592,7 @@ export function DocumentList({
                       size="sm"
                       variant="outline"
                       disabled={busy}
-                      onClick={() => raise_.mutate(a)}
+                      onClick={() => raise(a)}
                     >
                       {busy ? (
                         <Loader2 className="h-3 w-3 animate-spin" />

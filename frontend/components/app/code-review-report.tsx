@@ -9,6 +9,7 @@ import {
   FileSearch,
   KeyRound,
   ListChecks,
+  Loader2,
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
@@ -31,6 +32,7 @@ import {
   td,
   th,
 } from "@/components/app/report-primitives";
+import type { Artifact } from "@/lib/schemas";
 import type {
   CodeReviewArtifact,
   PrepareResult,
@@ -52,6 +54,55 @@ import type {
  */
 
 export type ReviewTab = "summary" | "findings" | "security" | "sbom" | "files" | "diff" | "documents";
+
+/**
+ * The report's own document row in the project's Documents.
+ *
+ * BY ID when the review recorded it (`document.artifact_id`, since 16 Sep 2026). Every
+ * report for one commit has the same file name, so for an older review the row is the
+ * one with that name saved closest to the review — the report is written seconds before
+ * the review is saved — and none further than ten minutes away, rather than a guess.
+ */
+export function reportDocumentFor(
+  review: CodeReviewArtifact,
+  documents: readonly Artifact[] | null | undefined,
+): Artifact | null {
+  const rows = (documents ?? []).filter((d) => d.type !== "story");
+  const id = review.document.artifact_id;
+  if (id) return rows.find((d) => d.id === id) ?? null;
+  const name = review.document.filename;
+  const savedAt = review.created_at ? Date.parse(review.created_at) : NaN;
+  if (!name || Number.isNaN(savedAt)) return null;
+  let best: Artifact | null = null;
+  let bestGap = 10 * 60 * 1000;
+  for (const d of rows) {
+    if (d.stage !== "code_review" || d.title !== name) continue;
+    const gap = Math.abs(Date.parse(d.createdAt) - savedAt);
+    if (gap <= bestGap) {
+      best = d;
+      bestGap = gap;
+    }
+  }
+  return best;
+}
+
+/** What the report says about its approval — the same four states the Documents panel shows. */
+export function approvalState(doc: Artifact): { label: string; tone: PillTone } {
+  if (doc.status === "draft") return { label: "Draft · not yet raised for approval", tone: "neutral" };
+  if (doc.status === "approved") {
+    return { label: doc.approvedBy ? `Approved by ${doc.approvedBy}` : "Approved", tone: "success" };
+  }
+  if (doc.status === "rejected") return { label: "Rejected", tone: "danger" };
+  return { label: "Raised for approval · waiting on the approver", tone: "warning" };
+}
+
+/** The report's approval, as the page resolved it. Omitted, the header says nothing. */
+export interface ReportApproval {
+  document: Artifact | null;
+  mayRaise: boolean;
+  raising: boolean;
+  onRaise: () => void;
+}
 
 const VERDICT: Record<string, { label: string; sentence: string; tone: PillTone }> = {
   approve: { label: "Approve", sentence: "No critical or high findings: the reviewed code is ready to merge.", tone: "success" },
@@ -160,9 +211,10 @@ function shortTitle(t: string, pkg: string): string {
 
 /* ── Summary: the report ────────────────────────────────────────────────────── */
 
-export function CodeReviewReport({ artifact, onOpenTab }: {
+export function CodeReviewReport({ artifact, onOpenTab, approval }: {
   artifact: CodeReviewArtifact;
   onOpenTab: (tab: ReviewTab) => void;
+  approval?: ReportApproval;
 }) {
   const ctx = artifact.context;
   const verdict = VERDICT[artifact.merge_recommendation] ?? VERDICT.needs_discussion!;
@@ -206,6 +258,20 @@ export function CodeReviewReport({ artifact, onOpenTab }: {
           aside={
             <>
               <Pill tone={verdict.tone} className="px-2.5 py-1 text-xs">{verdict.label}</Pill>
+              {/* THE REPORT'S APPROVAL, beside its verdict. Raising it used to change
+                  nothing on the report itself — only a chip in the side panel, among
+                  identically named reports — so it read as if nothing had happened. */}
+              {approval?.document && (
+                <Pill tone={approvalState(approval.document).tone} className="px-2.5 py-1 text-xs">
+                  {approvalState(approval.document).label}
+                </Pill>
+              )}
+              {approval?.document && approval.document.status === "draft" && approval.mayRaise && (
+                <Button size="sm" className="h-8 gap-1.5 text-xs" disabled={approval.raising} onClick={approval.onRaise}>
+                  {approval.raising && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+                  Raise for approval
+                </Button>
+              )}
               {artifact.document.url ? (
                 <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
                   <a href={artifact.document.url} download>

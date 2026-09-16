@@ -59,7 +59,9 @@ vi.mock("@/components/app/code-review-report", () => ({
   SecurityView: () => null,
   SbomView: () => null,
   scanRan: () => false,
+  reportDocumentFor: () => null,
 }));
+vi.mock("@/lib/api/artifacts", () => ({ listArtifacts: async () => [], submitArtifact: vi.fn() }));
 vi.mock("@/components/app/document-list", () => ({
   DocumentList: ({ stage }: { stage?: string }) => {
     state.documentStages.push(stage ?? "project-wide");

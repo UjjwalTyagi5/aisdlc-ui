@@ -76,6 +76,7 @@ vi.mock("@/lib/api/projects", () => ({
 }));
 vi.mock("@/lib/api/security", () => ({ listScans: async () => [], getScan: async () => null }));
 vi.mock("@/lib/api/code-review", () => ({ listReviews: async () => [], getReview: async () => null }));
+vi.mock("@/lib/api/artifacts", () => ({ listArtifacts: async () => [], submitArtifact: vi.fn() }));
 vi.mock("@/lib/api/deployment", () => ({
   getPreparedDeploy: async () => null, getRelease: async () => null,
 }));
