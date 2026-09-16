@@ -169,7 +169,7 @@ async def _stream(
     """
     from langgraph.errors import GraphRecursionError
 
-    final, got = "", False
+    final, got, failure = "", False, None
     try:
         async for chunk in review_app.astream(state, stream_mode="messages", config=config):
             msg = chunk[0] if isinstance(chunk, tuple) else chunk
@@ -193,14 +193,20 @@ async def _stream(
             websocket,
         )
     except Exception as e:
+        # A FAILURE AFTER SOME TEXT IS STILL A FAILURE. This used to be swallowed once
+        # anything had streamed, and the turn went on to announce "Review complete" over
+        # a review that stopped halfway. The caller reports it and ends the run as failed.
         logger.error("Code-review stream error: %s", e)
-        if not got:
-            raise
+        failure = e
     if before_end is not None:
+        # Runs on failure too: a review the agent SUBMITTED before the model failed (the
+        # closing summary is the last call) is a real review and is kept.
         try:
             await before_end()
         except Exception:  # noqa: BLE001 — a failed save must not strand the client
             logger.exception("Code-review: before_end hook failed for session %s", session_id)
+    if failure is not None:
+        raise failure
     await manager.send_personal_message(
         json.dumps({"type": "stream_end", "session_id": session_id}), websocket
     )
@@ -502,7 +508,45 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         })
     except Exception as e:
         logger.error("Code-review WS process error: %s", e)
-        await manager.send_agent_response("Error Agent", f"An error occurred: {e}", session_id)
+        reason = _failure_reason(e)
+        await manager.send_agent_response("Error Agent", f"An error occurred: {reason}", session_id)
+        # THE TURN MUST SAY IT IS OVER, and that it failed. The chat BFF ends a run on
+        # activity_update{complete} or agent_completed{success: false}; this path sent
+        # neither, so a model whose key had been revoked left the drawer on "Agent is
+        # working" with the composer locked — the user could not even retry.
+        await manager.broadcast({
+            "type": "agent_completed", "session_id": session_id,
+            "success": False, "error": reason,
+        })
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}), websocket
+        )
+        await manager.broadcast({
+            "type": "activity_update",
+            "activity": {
+                "id": str(uuid4()), "type": "complete",
+                "session_id": session_id, "message": "Review failed", "time": "Just now",
+            },
+        })
+
+
+#: Exceptions raised by a model provider's SDK. Their text can echo a BYOK key and does
+#: not say who fixes the problem, so they are answered by `friendly_model_error`.
+_PROVIDER_MODULES = frozenset({"litellm", "openai", "anthropic", "httpx"})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """What the person is told when a review turn fails.
+
+    A provider failure gets the actionable sentence ("the provider rejected the configured
+    credential…"), never the provider's own text. Anything else is this platform's own
+    error — a denied project, a failed git command — and its message IS the reason.
+    """
+    from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+    if (type(exc).__module__ or "").split(".")[0] in _PROVIDER_MODULES:
+        return friendly_model_error(exc)
+    return str(exc) or type(exc).__name__
 
 
 @code_review_router.post("/chat/")

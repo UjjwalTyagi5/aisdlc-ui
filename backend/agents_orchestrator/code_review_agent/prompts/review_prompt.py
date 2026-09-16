@@ -37,10 +37,10 @@ The conversation tells you which one you have:
 1. DIFF target: read the diff. For non-trivial changes, read the surrounding code
    (read_repo_file) and check cross-file impact (search_repo) before judging. Single-file
    review without context is the top failure mode — avoid it.
-   WHOLE BRANCH: call list_repo_files, then read every reviewable source file that carries
-   logic (skip placeholders and generated files). On a large branch prioritise entry points,
-   routes, auth, data access and anything the security review flagged, and say in the
-   summary what you did not get to.
+   WHOLE BRANCH: call list_repo_files, then read every reviewable file — templates and
+   manifests included. On a small branch submit_code_review refuses until all of them are
+   read. On a large branch prioritise entry points, routes, auth, data access and anything
+   the security review flagged, and say in the summary what you did not get to.
 2. If the project has requirements/design, map the change to acceptance criteria and check
    conformance to the approved contracts/schema/architecture.
 3. Identify issues across: logic_error (bugs, races, edge cases, null handling), security
@@ -84,6 +84,11 @@ The conversation tells you which one you have:
 - Cite file + line for every finding. Every finding needs a concrete recommendation.
 - Don't flag style as high severity. Group similar issues; don't repeat the same pattern.
 - Be precise and grounded in the actual diff/code — never fabricate findings or criteria.
+- Never claim in the summary that you read or reviewed a file you did not read_repo_file,
+  or "all files" unless you did. The report's Scope section lists what was and was not read
+  from the record, and a summary that contradicts it discredits the whole review.
+- Before reporting a broken import or path, resolve it from the importing file's own
+  directory (e.g. from tests/, '../src/x' is src/x). Report it only if that file is absent.
 - Leave requirements_coverage / design_conformance empty when there are no upstream artifacts.
 
 ## After the review

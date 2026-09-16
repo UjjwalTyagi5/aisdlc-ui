@@ -327,6 +327,30 @@ def _review_scope(s) -> dict:
     return scope
 
 
+#: A whole branch at or under both limits is read IN FULL before it can be submitted.
+#: Above them a complete read is not realistic, and the report lists what was not read.
+_READ_ALL_MAX_FILES = 40
+_READ_ALL_MAX_LINES = 6000
+
+
+def _unread_on_small_branch(s) -> list[str]:
+    """Reviewable files still unread on a whole branch small enough to read completely.
+
+    A real run on QuickLink (14 files, 325 lines) read 8, skipped every template and
+    package.json, and submitted a summary saying "All 14 reviewable files" were reviewed.
+    The Scope section told the truth; the summary did not. On a branch this size, reading
+    the rest costs a few tool calls, so "whole branch" is made true rather than qualified.
+    """
+    if s.mode != "repo":
+        return []
+    reviewable = [f for f in (s.inventory or {}).get("files", []) if f.get("reviewable")]
+    lines = sum(int(f.get("lines") or 0) for f in reviewable)
+    if len(reviewable) > _READ_ALL_MAX_FILES or lines > _READ_ALL_MAX_LINES:
+        return []
+    read = set(s.files_read)
+    return sorted(f["path"] for f in reviewable if f["path"] not in read)
+
+
 @tool
 async def submit_code_review(review_json: str) -> str:
     """Submit the final structured code review. Call this ONCE when analysis is done.
@@ -354,6 +378,14 @@ async def submit_code_review(review_json: str) -> str:
         return (
             "ERROR: the security review has not run for this target. Call run_security_review "
             "first, then submit — the report's security section and SBOM come from it."
+        )
+    unread = _unread_on_small_branch(s)
+    if unread:
+        return (
+            f"ERROR: this whole-branch review is small enough to read completely, and "
+            f"{len(unread)} reviewable file(s) have not been read: {', '.join(unread)}. "
+            "Read each with read_repo_file, revise the review if what you read changes it, "
+            "then call submit_code_review again."
         )
     try:
         payload = json.loads(review_json) if isinstance(review_json, str) else dict(review_json)

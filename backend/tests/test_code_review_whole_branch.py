@@ -289,9 +289,32 @@ async def test_a_review_cannot_be_submitted_without_the_security_review(review_s
 
 
 @pytest.mark.asyncio
-async def test_the_submitted_review_carries_the_scan_and_what_was_read(review_session):
+async def test_a_small_branch_cannot_be_submitted_with_files_unread(review_session):
+    """A real run read 8 of QuickLink's 14 files and summarised "All 14 reviewable files".
+    On a branch small enough to read completely, submit refuses and names what is left."""
     from agents_orchestrator.code_review_agent.tools.review_tools import read_repo_file, submit_code_review
 
+    review_session.security = {"scanners": [], "totals": {"vulnerabilities": 0}, "sbom": {"components": []}}
+    payload = {"review_json": json.dumps({"summary": "Small app.", "merge_recommendation": "approve"})}
+    await read_repo_file.ainvoke({"path": "src/app.js"})
+
+    out = await submit_code_review.ainvoke(payload)
+    assert out.startswith("ERROR") and "package.json" in out
+    assert review_session.last_artifact is None
+
+    await read_repo_file.ainvoke({"path": "package.json"})
+    assert "Review submitted" in await submit_code_review.ainvoke(payload)
+    assert review_session.last_artifact["scope"]["not_read"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_submitted_review_carries_the_scan_and_what_was_read(review_session, monkeypatch):
+    from agents_orchestrator.code_review_agent.tools import review_tools
+    from agents_orchestrator.code_review_agent.tools.review_tools import read_repo_file, submit_code_review
+
+    # A branch too large to read completely: submission is allowed, and the report says
+    # what was not read.
+    monkeypatch.setattr(review_tools, "_READ_ALL_MAX_FILES", 1)
     await read_repo_file.ainvoke({"path": "src/app.js"})
     review_session.security = {"scanners": [], "totals": {"vulnerabilities": 0}, "sbom": {"components": []}}
     out = await submit_code_review.ainvoke({"review_json": json.dumps({

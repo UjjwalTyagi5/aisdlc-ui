@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { ModelSelector } from "@/components/app/model-selector";
 import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
 import {
   BranchFilesView,
@@ -105,6 +106,10 @@ export default function CodeReviewPage() {
   const linkedSession = useChatDeepLink(setChatOpen);
   const [prepared, setPrepared] = React.useState<PrepareResult | null>(null);
   const [activeReviewId, setActiveReviewId] = React.useState<string | null>(null);
+  // The model this page's review runs on. Without it the chat resolved with no model and
+  // ran on whichever provider connection came first — a connection whose key had since
+  // been revoked failed every review, and the page offered no other choice.
+  const [agentModel, setAgentModel] = React.useState<string>();
 
   // NO AUTO-OPEN. The page starts clean and the reader chooses: past reviews are in
   // the switcher, a new one starts from Select target. Opening the newest review by
@@ -128,18 +133,27 @@ export default function CodeReviewPage() {
     // to put them and `attachFiles` returns silently. Passing projectId is what turns
     // the durable session on.
     projectId: id,
+    offeringId: agentModel,
     sessionKey: id,
     context: { page: "Code Review", project_id: id },
     onArtifact: () => reviewsQ.refetch(),
   });
 
-  // When a review run finishes (busy → idle), refresh the list and jump to the newest.
+  // When a turn finishes (busy → idle), refresh the list and open the review THAT TURN
+  // SAVED — never merely the newest one. A turn that failed, or a chat question that
+  // saved nothing, used to open the last PAST review and drop the prepared target, so
+  // an error read as a finished review of something else. The ids known when the turn
+  // started are what "saved by this turn" is measured against.
   const prevBusy = React.useRef(chat.busy);
+  const reviewIdsAtStart = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
+    if (!prevBusy.current && chat.busy) {
+      reviewIdsAtStart.current = new Set((reviewsQ.data ?? []).map((r) => r.id));
+    }
     if (prevBusy.current && !chat.busy) {
       reviewsQ.refetch().then((r) => {
         const newest = r.data?.[0]?.id;
-        if (newest) {
+        if (newest && !reviewIdsAtStart.current.has(newest)) {
           setActiveReviewId(newest);
           setPrepared(null);
           setTab("summary");
@@ -255,6 +269,12 @@ export default function CodeReviewPage() {
                 }}
               />
             )}
+            <ModelSelector
+              aria-label="Code Review agent model"
+              projectId={id}
+              value={agentModel}
+              onValueChange={setAgentModel}
+            />
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <FileDiff className="size-4" aria-hidden />
               Select target
