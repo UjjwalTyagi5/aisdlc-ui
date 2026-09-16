@@ -2,41 +2,36 @@
 
 import * as React from "react";
 import { useParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  BookText, Boxes, Download, FileText, GitBranch, GitPullRequest, History,
-  ListChecks, MessageSquare, Notebook, ScrollText, Sparkles, BookOpen,
+  BookText, Boxes, FileText, GitBranch, GitPullRequest, History,
+  ListChecks, Loader2, MessageSquare, Notebook, ScrollText, Sparkles, BookOpen,
   Users, GraduationCap,
 } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentReportView, hasReportView } from "@/components/app/document-report-view";
+import type { GeneratedDoc } from "@/components/app/generated-documents";
+import { ModelSelector } from "@/components/app/model-selector";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
-import { MarkdownMessage } from "@/components/app/markdown-message";
 import { DocTargetDialog } from "@/components/app/doc-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
-import { getDocSet } from "@/lib/api/documentation";
+import { getDocSet, getPreparedDocs } from "@/lib/api/documentation";
 import { qk } from "@/lib/api/query-keys";
-import type { PrepareDocResult, GeneratedDoc } from "@/lib/schemas/documentation";
-import type { ProjectId } from "@/lib/schemas";
-
-const TYPE_LABEL: Record<string, string> = {
-  doc_set: "Doc set", overview: "Overview", sdd: "Design", api_reference: "API",
-  code_summary: "Code", changelog: "Changelog", release_notes: "Release notes",
-  rtm: "RTM", run_summary: "Run summary", compliance: "Compliance",
-  runbook_update: "Runbook update", knowledge_article: "Knowledge article",
-  handover: "Handover", kt: "KT", custom: "Doc",
-};
+import { approvalState } from "@/lib/documents/report-document";
+import type { PrepareDocResult } from "@/lib/schemas/documentation";
+import type { Artifact, ProjectId } from "@/lib/schemas";
 
 interface QuickAction { key: string; label: string; icon: React.ComponentType<{ className?: string }>; prompt: string; }
 const QUICK_ACTIONS: QuickAction[] = [
@@ -56,16 +51,40 @@ export default function DocumentationPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
   useSession({ required: true });
+  const queryClient = useQueryClient();
 
   const projectQ = useQuery({ queryKey: qk.projects.detail(id), queryFn: () => getProject(id) });
 
   const [prepared, setPrepared] = React.useState<PrepareDocResult | null>(null);
+  // HYDRATED FROM THE SERVER, where the prepared workspace lives. In React state alone a
+  // refresh threw it away: "No documentation workspace yet", and Chat disabled, for a
+  // checkout the backend still held — the Deployment page's old bug, here too.
+  const preparedQ = useQuery({
+    queryKey: ["documentation", "prepared", id],
+    queryFn: () => getPreparedDocs(id),
+    staleTime: 30_000,
+  });
+  React.useEffect(() => {
+    const s = preparedQ.data;
+    if (!s || s.status !== "ready" || prepared) return;
+    setPrepared(s as PrepareDocResult);
+  }, [preparedQ.data, prepared]);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
   // A `?session=` link from the project overview opens the drawer on that
   // conversation rather than a blank one.
   const linkedSession = useChatDeepLink(setChatOpen);
-  const [selId, setSelId] = React.useState<string | null>(null);
+  // The model this page's documents are written with. Without it the chat ran on
+  // whichever provider connection resolved first — one whose key had been revoked.
+  const [agentModel, setAgentModel] = React.useState<string>();
+
+  // The project's documents — the SAME query the Documents panel reads, so a document
+  // raised or approved anywhere updates the panel and the open document's header alike.
+  const documentsQ = useQuery({
+    queryKey: qk.artifacts.forProject(id),
+    queryFn: () => listArtifacts(id),
+  });
+  const approvals = useRaiseForApproval(id);
 
   // projectId turns on the durable session the attachments are stored against —
   // see the Code Review page for why `attachFiles` needs one.
@@ -73,8 +92,13 @@ export default function DocumentationPage() {
     openSessionId: linkedSession,
     agent: "documentation",
     projectId: id,
+    offeringId: agentModel,
     sessionKey: id,
     context: { page: "Documentation", project_id: id },
+    // A turn can file a document or send one for approval — both change the panel.
+    onArtifact: () => {
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    },
   });
 
   const docsetQ = useQuery({
@@ -85,37 +109,37 @@ export default function DocumentationPage() {
   });
   const prevBusy = React.useRef(chat.busy);
   React.useEffect(() => {
-    if (prevBusy.current && !chat.busy) docsetQ.refetch();
+    if (prevBusy.current && !chat.busy) {
+      void docsetQ.refetch();
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    }
     prevBusy.current = chat.busy;
-  }, [chat.busy, docsetQ]);
+  }, [chat.busy, docsetQ, queryClient, id]);
 
-  // Memoised so the `?? []` fallback keeps a stable identity between renders —
-  // the auto-select effect below depends on it.
-  const docs: GeneratedDoc[] = React.useMemo(
-    () => docsetQ.data?.documents ?? [],
-    [docsetQ.data],
-  );
-  const prUrl = docsetQ.data?.pr_url ?? null;
-  // Auto-select the newest doc when the list grows.
+  // THE DOCUMENT IN THE CENTRE, opened by its artifact row — the page copy the agent
+  // filed with the Word file, exactly as the Requirements page opens a BRD. It used to
+  // render the chat session's in-memory markdown, which a refresh or a new chat threw
+  // away while the document itself sat in the panel with nothing to click.
+  const [openDoc, setOpenDoc] = React.useState<GeneratedDoc | null>(null);
+  const shownDocIds = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
-    const last = docs[docs.length - 1];
-    if (!last) { setSelId(null); return; }
-    if (!selId || !docs.some((d) => d.id === selId)) setSelId(last.id);
-  }, [docs, selId]);
-  const selected = docs.find((d) => d.id === selId) ?? null;
+    const fresh = chat.documents.filter((d) => hasReportView(d) && !shownDocIds.current.has(d.id));
+    if (fresh.length === 0) return;
+    for (const d of fresh) shownDocIds.current.add(d.id);
+    setOpenDoc(fresh[fresh.length - 1]!);
+  }, [chat.documents]);
+  const openArtifact = React.useCallback((a: Artifact) => {
+    setOpenDoc({ id: a.id, name: a.title, url: a.downloadUrl ?? null, documentId: a.id });
+  }, []);
+  const openRow = openDoc?.documentId
+    ? (documentsQ.data ?? []).find((a) => a.id === openDoc.documentId) ?? null
+    : null;
 
+  const prUrl = docsetQ.data?.pr_url ?? null;
+  const sessionDocs = docsetQ.data?.documents.length ?? 0;
   const onPrepared = (r: PrepareDocResult) => { setPrepared(r); };
   const runAction = (prompt: string) => { setChatOpen(false); void chat.send(prompt); };
   const openPr = () => { setChatOpen(false); void chat.send("Open a documentation PR with all the generated documents."); };
-
-  const download = (doc: GeneratedDoc) => {
-    const blob = new Blob([doc.contents], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = doc.filename || "document.md";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  };
 
   if (projectQ.isLoading) return <div className="w-full p-4 md:px-10 md:py-8"><LoadingState variant="card" /></div>;
   if (projectQ.isError || !projectQ.data)
@@ -144,6 +168,12 @@ export default function DocumentationPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <ModelSelector
+              aria-label="Documentation agent model"
+              projectId={id}
+              value={agentModel}
+              onValueChange={setAgentModel}
+            />
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <BookText className="size-4" aria-hidden />{prepared ? "New documentation" : "Open docs workspace"}
             </Button>
@@ -158,13 +188,13 @@ export default function DocumentationPage() {
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
             <EmptyState icon={BookText} title="No documentation workspace yet"
-              description="Pick a branch or PR. The agent clones it read-only, folds in any existing platform artifacts, and generates the deliverables you ask for — each saved to a file and shown in the list."
+              description="Pick a branch or PR. The agent clones it read-only, folds in any existing platform artifacts, and generates the deliverables you ask for — each filed as a Word document in Documents."
               action={<Button onClick={() => setPickerOpen(true)}><BookText className="size-4" aria-hidden />Open docs workspace</Button>} />
           </div>
           {/* The documents exist whether or not a docs workspace has been opened —
               they are uploaded and approved on this stage, not generated by it. The
-              sidebar holding them is inside the prepared branch below, so without this
-              they were unreachable on exactly the projects that have never run the
+              panel beside the documents is inside the prepared branch below, so without
+              this they were unreachable on exactly the projects that have never run the
               agent. */}
           <div className="mx-auto max-w-xl px-4 pb-12">
             <DocumentList projectId={id} stage="documentation" />
@@ -188,7 +218,7 @@ export default function DocumentationPage() {
               <a className="ml-auto" href={prUrl} target="_blank" rel="noreferrer">
                 <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs"><GitPullRequest className="size-3.5" aria-hidden />View docs PR</Button>
               </a>
-            ) : docs.length > 0 ? (
+            ) : sessionDocs > 0 ? (
               <RequireRole capability="run:trigger" fallback={null}>
                 <Button size="sm"
                   className="from-brand-gradient-from to-brand-gradient-to ml-auto h-7 gap-1.5 bg-gradient-to-br text-xs font-semibold text-white"
@@ -199,75 +229,50 @@ export default function DocumentationPage() {
             ) : null}
           </div>
 
-          {/* Split: left doc list + viewer */}
-          <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr] overflow-hidden">
-            <aside className="min-h-0 overflow-auto border-r">
-          <StageVersionPanel
-            projectId={id}
-            phase="documentation"
-            className="mb-3 shrink-0"
-          />
-          <DocumentList
-            projectId={id}
-            stage="documentation"
-            className="mb-4 shrink-0"
-          />
-              <div className="text-muted-foreground border-b px-3 py-2 text-[11px] font-medium uppercase tracking-wider">
-                Documents{docs.length > 0 && <span className="ml-1 lowercase opacity-70">({docs.length})</span>}
-              </div>
-              {docs.length === 0 ? (
-                <p className="text-muted-foreground p-3 text-xs">
-                  {chat.busy ? "Generating…" : "Nothing yet — use a Generate button above or open Chat and ask."}
-                </p>
-              ) : (
-                <ul className="p-2">
-                  {docs.map((d) => (
-                    <li key={d.id}>
-                      <button type="button" onClick={() => setSelId(d.id)}
-                        className={cn("flex w-full items-start gap-2 rounded-md border-l-2 px-2 py-1.5 text-left transition-colors",
-                          d.id === selId
-                            ? "border-brand-bright bg-brand-bright/10 text-foreground"
-                            : "hover:bg-accent/50 border-transparent")}>
-                        <FileText className={cn("mt-0.5 size-3.5 shrink-0", d.id === selId ? "text-brand-bright" : "opacity-60")} aria-hidden />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[13px] font-medium">{d.title || d.filename}</span>
-                          <span className="text-muted-foreground block truncate font-mono text-[10px]">{d.filename}</span>
-                        </span>
-                        <Badge variant="outline" className={cn("shrink-0 text-[9px]", d.id === selId && "border-brand-bright/40 text-brand-bright")}>{TYPE_LABEL[d.type] ?? "Doc"}</Badge>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+          {/* Split: the stage's documents + the open document */}
+          <div className="grid min-h-0 flex-1 grid-cols-[300px_1fr] overflow-hidden">
+            {/* ONE LIST. There used to be two: this panel, and the chat session's own
+                in-memory list below it — the same document twice, one of which could be
+                raised for approval and one of which vanished on refresh. */}
+            <aside aria-label="Documents" className="flex min-h-0 flex-col overflow-hidden border-r p-3">
+              <StageVersionPanel projectId={id} phase="documentation" className="mb-3 shrink-0" />
+              <DocumentList
+                projectId={id}
+                items={documentsQ.data ?? null}
+                stage="documentation"
+                className="flex min-h-0 flex-1 flex-col"
+                fillHeight
+                selectedId={openDoc?.documentId ?? null}
+                onSelect={openArtifact}
+              />
             </aside>
 
-            <div className="flex min-h-0 flex-col overflow-hidden">
-              {selected ? (
-                <>
-                  <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{selected.title || selected.filename}</p>
-                      <p className="text-muted-foreground truncate font-mono text-[10px]">{selected.filename} · {(selected.bytes / 1024).toFixed(1)} KB</p>
-                    </div>
-                    <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => download(selected)}>
-                      <Download className="size-3.5" aria-hidden />Download
+            <div className="flex min-h-0 flex-col overflow-auto">
+              {openDoc ? (
+                <DocumentReportView
+                  key={openDoc.id}
+                  doc={openDoc}
+                  project={projectQ.data?.name}
+                  status={openRow ? approvalState(openRow).label : undefined}
+                  actions={openRow && openRow.status === "draft" && approvals.mayRaise(openRow.stage) ? (
+                    <Button size="sm" className="h-8 gap-1.5 text-xs"
+                      disabled={approvals.raisingId === openRow.id}
+                      onClick={() => approvals.raise(openRow)}>
+                      {approvals.raisingId === openRow.id && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+                      Raise for approval
                     </Button>
-                  </div>
-                  <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
-                    <div className="mx-auto max-w-3xl">
-                      <MarkdownMessage content={selected.contents} />
-                    </div>
-                  </div>
-                </>
+                  ) : null}
+                  onClose={() => setOpenDoc(null)}
+                />
               ) : chat.busy ? (
                 <div className="mx-auto max-w-xl px-4 py-12">
                   <EmptyState icon={Sparkles} title="Generating…"
-                    description="The agent is reading the repo and any upstream artifacts, then writing your document. It will appear in the list on the left." variant="plain" />
+                    description="The agent is reading the repo and any upstream artifacts, then writing your document. It opens here when it is filed." variant="plain" />
                 </div>
               ) : (
                 <div className="mx-auto max-w-xl px-4 py-12">
                   <EmptyState icon={ScrollText} title="Pick what to generate"
-                    description="Use a Generate button above for a specific deliverable, or open Chat and ask for anything — e.g. “write the API reference” or “document the auth module”." variant="plain" />
+                    description="Use a Generate button above for a specific deliverable, open a document on the left, or open Chat and ask for anything — e.g. “write the handover document”." variant="plain" />
                 </div>
               )}
             </div>
@@ -281,11 +286,15 @@ export default function DocumentationPage() {
         open={chatOpen} onOpenChange={setChatOpen}
         context={{ page: "Documentation", artifactTitle: targetChip ?? undefined }}
         messages={chat.messages} onSend={chat.send} busy={chat.busy} onStop={chat.cancel}
+        sessions={chat.sessions}
+        activeSessionId={chat.sessionId}
+        onSelectSession={chat.selectSession}
+        onNewChat={chat.newChat}
         attachments={chat.attachments}
         onAttachFiles={chat.attachFiles}
         onRemoveAttachment={chat.removeAttachment}
         disabledReason={prepared ? undefined : "Open a docs workspace first."}
-        starterSuggestions={["Generate the full documentation set.", "Write the API reference.", "Generate release notes for this branch."]}
+        starterSuggestions={["Write the handover document for this system.", "Generate release notes for this branch.", "Send the handover document for approval."]}
       />
     </div>
   );

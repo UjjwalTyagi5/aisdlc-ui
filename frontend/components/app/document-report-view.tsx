@@ -38,10 +38,12 @@ export function hasReportView(doc: Pick<GeneratedDoc, "documentId">): boolean {
   return !!doc.documentId;
 }
 
-export function DocumentReportView({ doc, project, status, onClose }: {
+export function DocumentReportView({ doc, project, status, actions, onClose }: {
   doc: GeneratedDoc;
   project?: string;
   status?: string;
+  /** The page's own controls for this document (e.g. "Raise for approval"), shown first. */
+  actions?: React.ReactNode;
   onClose?: () => void;
 }) {
   const documentId = doc.documentId ?? null;
@@ -89,6 +91,7 @@ export function DocumentReportView({ doc, project, status, onClose }: {
       generatedAt={new Date().toISOString()}
       actions={
         <>
+          {actions}
           {doc.url && (
             <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
               <a href={doc.url} download>

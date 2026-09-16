@@ -21,6 +21,11 @@ export const PrepareDocResult = z.object({
 });
 export type PrepareDocResult = z.infer<typeof PrepareDocResult>;
 
+/** GET /documentation/{id}/prepared — the docs workspace already prepared for the project.
+ *  `status` is null when nothing is prepared (or its checkout is gone). */
+export const PreparedDocState = PrepareDocResult.partial().extend({ status: z.string().nullable() });
+export type PreparedDocState = z.infer<typeof PreparedDocState>;
+
 export const DocType = z.enum([
   "doc_set", "overview", "sdd", "api_reference", "code_summary",
   "changelog", "release_notes", "rtm", "run_summary", "compliance",

@@ -48,6 +48,8 @@ describe("every surface with a model picker sends what it picked", () => {
     "app/(app)/projects/[id]/deployment/page.tsx",
     "app/(app)/projects/[id]/design/page.tsx",
     "app/(app)/projects/[id]/development/page.tsx",
+    // Documentation had no picker until 16 Sep 2026, and its handler dropped the offering.
+    "app/(app)/projects/[id]/documentation/page.tsx",
     "app/(app)/projects/[id]/requirements/page.tsx",
     "app/(app)/projects/[id]/security/page.tsx",
     "app/(app)/projects/[id]/testing/page.tsx",
