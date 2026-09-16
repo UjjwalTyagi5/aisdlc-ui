@@ -107,8 +107,9 @@ def blob_path_for(
     workspace_id: str | None = None,
     project_id: str | None = None,
     agent: str | None = None,
+    document_id: str | None = None,
 ) -> str:
-    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{filename}`.
+    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/[{document}/]{filename}`.
 
     THE FIRST SEGMENT IS THE ISOLATION BOUNDARY and everything after it is
     organisation. Blob storage has no rows and no row-level security — it is a flat
@@ -133,6 +134,13 @@ def blob_path_for(
     same filename (`brd.docx`), and `upload_bytes` overwrites by default, so without it
     the second run silently destroys the first one's document.
 
+    THE DOCUMENT'S OWN ID, below the type, when the caller has one. The run segment was
+    meant to keep same-named documents apart, but a chat REUSES one run per project and
+    stage (`_get_or_create_chat_run`) — so eight Code Review reports of one commit, all
+    named alike, were written to ONE path, each overwriting the last, and every row's
+    download served whichever was written last. A document's id is unique by
+    construction. Rows written before this keep the paths they record.
+
     EVERY SEGMENT IS SANITISED, not just the filename. `artifact_type` comes from the
     agent rather than the user today, but it is one refactor away from being
     caller-supplied, and a `..` in any segment escapes the tenant prefix exactly as it
@@ -146,6 +154,7 @@ def blob_path_for(
             safe_leaf_name(str(agent)) if agent else _NO_AGENT,
             safe_leaf_name(str(run_id)),
             safe_leaf_name(artifact_type),
+            *([safe_leaf_name(str(document_id))] if document_id else []),
             safe_leaf_name(filename),
         )
     )
@@ -321,6 +330,7 @@ async def store_artifact(
         workspace_id=workspace_id,
         project_id=project_id,
         agent=agent,
+        document_id=str(artifact_id),
     )
 
     # THE BYTES GO TO THE PENDING AREA, NOT THE FINAL PATH. Until whoever runs the

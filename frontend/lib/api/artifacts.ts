@@ -148,3 +148,17 @@ export async function uploadArtifact(
   }
   return Artifact.parse(body);
 }
+
+/** The document's page copy — what the app renders as a report. See
+ *  backend `GET /artifacts/{id}/page`: 404 when the document has no page copy (an
+ *  upload, or one generated before page copies were kept), 410 once rejected. */
+export const ArtifactPage = z.object({
+  artifactId: z.string(),
+  filename: z.string(),
+  status: z.string(),
+  markdown: z.string(),
+});
+export type ArtifactPage = z.infer<typeof ArtifactPage>;
+
+export const getArtifactPage = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}/page`, { schema: ArtifactPage });

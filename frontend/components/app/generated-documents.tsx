@@ -39,6 +39,10 @@ export interface GeneratedDoc {
   /** Optional: the chat document type allows it to be absent. Without a URL there is
    *  nothing to open and nothing to fetch, so the row degrades to a plain name. */
   url?: string | null;
+  /** The document's artifact row — what the page view is fetched by. A document from
+   *  the Documents panel is its own row; one announced by the chat carries the row the
+   *  agent recorded. Without it there is no page view, only the file. */
+  documentId?: string | null;
 }
 
 /** `null` while the artifact list is still loading — "not recorded" must not be

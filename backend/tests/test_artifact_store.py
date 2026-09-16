@@ -237,8 +237,8 @@ async def test_it_uploads_under_the_composed_path_and_records_the_row():
     name, data, ctype = blob.uploads[0]
     # Bytes go to the PENDING area; the ROW records the final path it will be promoted
     # to. No project_id passed, so the middle segments are placeholders.
-    final = f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
-    assert name == f"{TENANT}/_pending/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
+    final = f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/{art.id}/brd.docx"
+    assert name == f"{TENANT}/_pending/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/{art.id}/brd.docx"
     assert data == b"hello"
     assert art.blob_path == final
     # No URL until an admin approves and the bytes reach the final path.
@@ -277,7 +277,7 @@ async def test_no_blob_configured_records_the_row_and_does_not_raise():
     assert art.blob_url is None
     assert art.upload_succeeded is False      # nowhere to upload to
     assert art.blob_path == (
-        f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/brd.docx"
+        f"{TENANT}/_no-business-unit/_no-project/_no-agent/{RUN}/requirements/{art.id}/brd.docx"
     )
     assert db.added == [art]
 
@@ -382,15 +382,33 @@ async def test_the_business_unit_is_looked_up_from_the_project():
     """The caller passes the project it already knows; passing the workspace TOO would
     let the two disagree and file the artifact under a unit that does not own it."""
     blob, db = _FakeBlob(), _ScopeSession()
-    await store_artifact(
+    art = await store_artifact(
         db, tenant_id=TENANT, run_id=RUN, artifact_type="document",
         filename="hld.docx", data=b"x", project_id=PROJECT, agent="design",
         blob_client=blob,
     )
     assert blob.uploads[0][0] == (
-        f"{TENANT}/_pending/{WORKSPACE}/{PROJECT}/design/{RUN}/document/hld.docx"
+        f"{TENANT}/_pending/{WORKSPACE}/{PROJECT}/design/{RUN}/document/{art.id}/hld.docx"
     )
     assert db.queries == 1
+
+
+@pytest.mark.unit
+async def test_two_same_named_documents_in_one_run_keep_their_own_bytes():
+    """A chat reuses one run per project and stage, so the run segment never told eight
+    Code Review reports of one commit apart: each overwrote the last, and every row's
+    download served the newest. The document's own id now keeps them apart."""
+    blob, db = _FakeBlob(), _FakeSession()
+    first = await store_artifact(db, tenant_id=TENANT, run_id=RUN, artifact_type="document",
+                                 filename="report.docx", data=b"one", blob_client=blob)
+    second = await store_artifact(db, tenant_id=TENANT, run_id=RUN, artifact_type="document",
+                                  filename="report.docx", data=b"two", blob_client=blob)
+    assert first.blob_path != second.blob_path
+    assert first.blob_path.endswith(f"/{first.id}/report.docx")
+    assert {name for name, _d, _c in blob.uploads} == {
+        f"{TENANT}/_pending/_no-business-unit/_no-project/_no-agent/{RUN}/document/{first.id}/report.docx",
+        f"{TENANT}/_pending/_no-business-unit/_no-project/_no-agent/{RUN}/document/{second.id}/report.docx",
+    }
 
 
 @pytest.mark.unit

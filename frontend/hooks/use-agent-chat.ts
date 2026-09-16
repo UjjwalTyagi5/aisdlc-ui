@@ -138,6 +138,9 @@ export interface GeneratedDocument {
   id: string;
   name?: string;
   url?: string;
+  /** The document's artifact row, when the agent recorded one — the page opens it by
+   *  this (GET /artifacts/{id}/page); `id` is only the chip key. */
+  documentId?: string;
 }
 
 /**
@@ -401,8 +404,11 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
                 const name = typeof (evt as { name?: unknown }).name === "string"
                   ? (evt as { name: string }).name
                   : undefined;
+                const documentId = typeof (evt as { documentId?: unknown }).documentId === "string"
+                  ? (evt as { documentId: string }).documentId
+                  : undefined;
                 setDocuments((cur) =>
-                  cur.some((d) => d.id === id) ? cur : [...cur, { id, name, url }],
+                  cur.some((d) => d.id === id) ? cur : [...cur, { id, name, url, documentId }],
                 );
               }
             }
@@ -522,7 +528,7 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
 type ChatEvent =
   | { type: "step.output.delta"; delta?: string }
   | { type: "run.completed"; status?: string }
-  | { type: "artifact.updated"; artifactId?: string; name?: string; url?: string }
+  | { type: "artifact.updated"; artifactId?: string; name?: string; url?: string; documentId?: string }
   | {
       type: "code.diff";
       path?: string;

@@ -201,6 +201,49 @@ async def get_artifact(
         db, tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
 
 
+@artifacts_router.get(
+    "/artifacts/{artifact_id}/page",
+    dependencies=[Depends(require_permission("artifact:view"))],
+)
+async def artifact_page(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The document's page copy — the markdown the app renders as a report.
+
+    Served from the artifact store, same-origin through the app, for anyone who may see
+    the project's documents. Unlike the download it is not gated on approval: reading a
+    draft on screen is how its author decides whether to raise it. A document with no
+    page copy (an upload, or one generated before page copies were kept) says so, and
+    the app offers the file instead. See shared/services/artifact_page.py.
+    """
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+    if artifact.approval_status == "rejected":
+        raise HTTPException(status_code=410, detail="This document was rejected and its file has been deleted.")
+    if not artifact.blob_path or not is_blob_path(artifact.blob_path, str(request.state.tenant_id)):
+        raise HTTPException(status_code=404, detail="This document has no page view.")
+
+    from shared.services.artifact_page import read_page_copy  # noqa: PLC0415
+
+    markdown = await read_page_copy(
+        getattr(request.app.state, "blob_client", None), artifact.blob_path, artifact.approval_status,
+    )
+    if markdown is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This document has no page view: it was uploaded, or generated before "
+                   "page copies were kept. The file itself is unaffected.",
+        )
+    return {
+        "artifactId": str(artifact.id),
+        "filename": (artifact.blob_path or "").rsplit("/", 1)[-1],
+        "status": artifact.approval_status or "draft",
+        "markdown": markdown,
+    }
+
+
 @artifacts_router.get("/artifacts/{artifact_id}/download")
 async def download_artifact(
     artifact_id: str,
@@ -505,6 +548,9 @@ async def approve_artifact(
                 artifact.blob_path,
                 content_type=artifact.content_type,
             )
+            from shared.services.artifact_page import promote_page_copy  # noqa: PLC0415
+
+            await promote_page_copy(blob_client, artifact.blob_path)
         except Exception as exc:  # noqa: BLE001
             # Type name only: an Azure error can carry a SAS token or the account URL.
             logger.warning(
@@ -589,6 +635,9 @@ async def reject_artifact(
     if artifact.blob_path and blob_client is not None:
         from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
 
+        from shared.services.artifact_page import discard_page_copy  # noqa: PLC0415
+
+        await discard_page_copy(blob_client, artifact.blob_path, "pending")
         try:
             await blob_client.delete_blob(pending_blob_path(artifact.blob_path))
         except Exception as exc:  # noqa: BLE001
@@ -726,6 +775,9 @@ async def delete_artifact(
     if is_blob and blob_path:
         blob_client = getattr(request.app.state, "blob_client", None)
         if blob_client is not None:
+            from shared.services.artifact_page import discard_page_copy  # noqa: PLC0415
+
+            await discard_page_copy(blob_client, blob_path, artifact.approval_status)
             try:
                 blob_deleted = await blob_client.delete_blob(blob_path)
             except Exception as exc:  # noqa: BLE001

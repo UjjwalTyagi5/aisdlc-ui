@@ -242,6 +242,22 @@ async def register_generated_file(
                 # here would report a failed upload on every successful save.
                 _uploaded = bool(getattr(_art, "upload_succeeded", False))
                 artifact_id = str(getattr(_art, "id", "") or "") or None
+                # THE PAGE COPY GOES WITH THE DOCUMENT. The agent leaves the markdown
+                # beside the Word file; the app renders that, and it must be reachable
+                # after the chat message is gone and from the app's own origin — see
+                # shared/services/artifact_page.py.
+                if _uploaded and getattr(_art, "blob_path", None):
+                    from shared.services.artifact_page import (  # noqa: PLC0415
+                        sibling_markdown_path, store_page_copy,
+                    )
+                    md_path = sibling_markdown_path(file_path)
+                    if md_path:
+                        try:
+                            with open(md_path, "r", encoding="utf-8") as fh:
+                                page_markdown = fh.read()
+                        except OSError:
+                            page_markdown = ""
+                        await store_page_copy(get_blob_client(), _art.blob_path, page_markdown)
 
         try:
             from shared.services.artifact_service import publish_artifact_ready  # noqa: PLC0415

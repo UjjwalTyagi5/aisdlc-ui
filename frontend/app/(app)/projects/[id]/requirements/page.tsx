@@ -249,6 +249,33 @@ export default function RequirementsPage() {
       router.replace(`/projects/${projectId}/requirements${qs ? `?${qs}` : ""}`);
     }
   }, [chat.documents, searchParams, router, projectId]);
+  // A DOCUMENT FROM THE PANEL OPENS HERE TOO. After a reload the chat's list is gone,
+  // and the panel row was the only trace of the BRD — with nothing to click. Clicking a
+  // row opens it exactly as "View" on the chat card does, by its artifact id.
+  const openArtifact = React.useCallback(
+    (a: Artifact) => {
+      setOpenDoc({ id: a.id, name: a.title, url: a.downloadUrl ?? null, documentId: a.id });
+      if (searchParams.get("artifact")) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/requirements${qs ? `?${qs}` : ""}`);
+      }
+    },
+    [searchParams, router, projectId],
+  );
+  // What the band says about the open document — its row's state, not a fixed label.
+  const openDocRow = openDoc?.documentId
+    ? (artifactsQ.data ?? []).find((a) => a.id === openDoc.documentId) ?? null
+    : null;
+  const openDocStatus = !openDocRow || openDocRow.status === "draft"
+    ? "Draft · not yet raised for approval"
+    : openDocRow.status === "approved"
+      ? `Approved${openDocRow.approvedBy ? ` by ${openDocRow.approvedBy}` : ""}`
+      : openDocRow.status === "rejected"
+        ? "Rejected"
+        : "Raised for approval · waiting on the approver";
+
   const openDocument = React.useCallback(
     (d: GeneratedDoc) => {
       setOpenDoc(d);
@@ -391,6 +418,8 @@ export default function RequirementsPage() {
             items={artifactsQ.data ?? null}
             stage="requirements"
             className="mb-4 shrink-0"
+            selectedId={selected ? null : openDoc?.documentId ?? null}
+            onSelect={openArtifact}
           />
           <h3 className="mb-2 text-sm font-medium">
             Stories{stories.length ? ` (${stories.length})` : ""}
@@ -435,7 +464,7 @@ export default function RequirementsPage() {
                 key={openDoc.id}
                 doc={openDoc}
                 project={projectQ.data?.name}
-                status="Draft · not yet raised for approval"
+                status={openDocStatus}
                 onClose={() => setOpenDoc(null)}
               />
             ) : selected && selected.body.kind === "story" ? (

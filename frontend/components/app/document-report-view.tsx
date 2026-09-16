@@ -9,37 +9,33 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { Callout } from "@/components/app/report-primitives";
 import { MarkdownReport } from "@/components/app/markdown-report";
 import type { GeneratedDoc } from "@/components/app/generated-documents";
+import { ApiRequestError } from "@/lib/api/client";
+import { getArtifactPage } from "@/lib/api/artifacts";
+import { qk } from "@/lib/api/query-keys";
+import type { ArtifactId } from "@/lib/schemas";
 
 /**
  * A generated Word document, rendered in the centre panel.
  *
- * THE WORD FILE IS NOT WHAT IS RENDERED. The agent writes the document's markdown
- * beside its `.docx` (`<name>.md`, see `requirements_document.write_markdown_sibling`)
- * under the same `/generated/` static mount the download link uses, so the page can
- * show the same document the file holds — as a report, not a download link.
+ * THE WORD FILE IS NOT WHAT IS RENDERED. The agent writes the document's markdown beside
+ * its `.docx`; registration keeps that copy with the document in the artifact store, and
+ * `GET /artifacts/{id}/page` serves it — through the app's own origin.
  *
- * Only a `.docx` at a `/generated/` URL has a sibling. Anything else (an approved
- * artifact served through `/api/artifacts/…/download`, a spreadsheet) has no
- * report view and this renders nothing, so the page falls back to what it showed.
+ * WHY NOT THE `/generated/` URL ANY MORE. The first version fetched the markdown straight
+ * from the backend's static mount by the URL in the chat message. The app's Content
+ * Security Policy (`connect-src 'self'`) refuses a fetch to that origin, so every
+ * document rendered as "Failed to fetch" while its download — a navigation, which
+ * `connect-src` does not govern — worked. And the URL lived only in the chat: after a
+ * reload the Documents panel had no way to open anything.
+ *
+ * A document with no page copy (an upload, or one generated before page copies were
+ * kept) renders nothing here; the caller falls back to what it showed, and the panel
+ * still offers the file.
  */
 
-export function markdownSiblingUrl(doc: Pick<GeneratedDoc, "url" | "name">): string | null {
-  const url = doc.url ?? "";
-  if (!/\.docx$/i.test(url) || !url.includes("/generated/")) return null;
-  return url.replace(/\.docx$/i, ".md");
-}
-
-export function hasReportView(doc: Pick<GeneratedDoc, "url" | "name">): boolean {
-  return markdownSiblingUrl(doc) !== null;
-}
-
-/** `null` when the document has no markdown copy (404); throws on any other failure,
- *  so a broken fetch is reported as broken rather than as "no page view". */
-async function fetchMarkdown(url: string): Promise<string | null> {
-  const res = await fetch(url, { cache: "no-store" });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`The document could not be loaded (HTTP ${res.status}).`);
-  return res.text();
+/** True when the document can be opened as a report: it has an artifact row to read. */
+export function hasReportView(doc: Pick<GeneratedDoc, "documentId">): boolean {
+  return !!doc.documentId;
 }
 
 export function DocumentReportView({ doc, project, status, onClose }: {
@@ -48,48 +44,46 @@ export function DocumentReportView({ doc, project, status, onClose }: {
   status?: string;
   onClose?: () => void;
 }) {
-  const mdUrl = markdownSiblingUrl(doc);
+  const documentId = doc.documentId ?? null;
   const q = useQuery({
-    queryKey: ["generated-document", "markdown", mdUrl],
-    queryFn: () => fetchMarkdown(mdUrl!),
-    enabled: !!mdUrl,
-    staleTime: Infinity,
-    // No retries: the .md is written BEFORE the file is announced
-    // (planning._write_designed_docx), so a miss is a real miss and is shown as one.
+    queryKey: qk.artifacts.page(documentId ?? ""),
+    queryFn: () => getArtifactPage(documentId as ArtifactId),
+    enabled: !!documentId,
+    // The copy is written once, with the document; a change of status is on the card.
+    staleTime: 5 * 60_000,
+    // A 404 is a real answer ("no page view"), not a flake — and the copy is stored
+    // before the file is announced, so a miss stays a miss.
     retry: false,
   });
   const name = doc.name ?? "document";
 
-  if (!mdUrl) return null;
+  if (!documentId) return null;
   if (q.isLoading) return <div className="p-6"><LoadingState variant="card" /></div>;
   if (q.isError) {
+    const missing = q.error instanceof ApiRequestError && (q.error.status === 404 || q.error.status === 410);
     return (
       <div className="mx-auto max-w-3xl p-6">
-        <Callout tone="danger" title={name}>
-          {q.error instanceof Error ? q.error.message : "The document could not be loaded."}
-        </Callout>
-      </div>
-    );
-  }
-  if (q.data === null || q.data === undefined) {
-    return (
-      <div className="mx-auto max-w-3xl p-6">
-        <Callout tone="warning" title={name}>
-          This document has no page view: it was generated without the markdown copy the page
-          renders (documents from before page rendering, or a Word file made by another tool).
-          The Word file itself is unaffected.
-          {doc.url && (
+        <Callout tone={missing ? "warning" : "danger"} title={name}>
+          {q.error instanceof ApiRequestError && q.error.status === 410
+            ? "This document was rejected and its file has been deleted."
+            : missing
+              ? "This document has no page view: it was uploaded, or generated before page copies were kept. The Word file itself is unaffected."
+              : q.error instanceof Error
+                ? q.error.message
+                : "The document could not be loaded."}
+          {missing && doc.url && (
             <a href={doc.url} className="text-primary ml-2 underline underline-offset-2" download>Download Word</a>
           )}
         </Callout>
       </div>
     );
   }
+  if (!q.data) return null;
 
   return (
     <MarkdownReport
-      markdown={q.data}
-      filename={name}
+      markdown={q.data.markdown}
+      filename={q.data.filename || name}
       project={project}
       status={status}
       generatedAt={new Date().toISOString()}

@@ -94,6 +94,7 @@ export function mapWsToSseEvent(wsMsg: unknown, runId: string): StreamEvent | nu
         status: "approved" as const,
         name: filename,
         url: typeof wsMsg.url === "string" ? wsMsg.url : undefined,
+        documentId: typeof wsMsg.artifact_id === "string" ? wsMsg.artifact_id : undefined,
         at: now,
       };
       return validateOrNull(event);

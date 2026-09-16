@@ -167,7 +167,11 @@ async def test_approval_promotes_the_bytes_to_the_real_path(patched):
 
     out = await mod.approve_artifact(str(art.id), _request(blob), db)
 
-    assert blob.moved == [(pending_blob_path(art.blob_path), art.blob_path)]
+    # The document's page copy (the markdown the app renders) follows the bytes.
+    assert blob.moved == [
+        (pending_blob_path(art.blob_path), art.blob_path),
+        (pending_blob_path(art.blob_path + ".page.md"), art.blob_path + ".page.md"),
+    ]
     assert art.approval_status == "approved"
     assert art.blob_url is not None
     assert out.status == "approved"
@@ -245,7 +249,11 @@ async def test_rejection_deletes_the_pending_bytes_and_keeps_the_row(patched):
         str(art.id), mod.ArtifactDecisionIn(reason="Out of scope"), _request(blob), db
     )
 
-    assert blob.deleted == [pending_blob_path(art.blob_path)]
+    # The page copy goes with the bytes.
+    assert blob.deleted == [
+        pending_blob_path(art.blob_path + ".page.md"),
+        pending_blob_path(art.blob_path),
+    ]
     assert art.approval_status == "rejected"
     assert art.rejection_reason == "Out of scope"
     assert out.status == "rejected"

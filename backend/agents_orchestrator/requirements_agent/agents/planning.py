@@ -270,23 +270,26 @@ async def broadcast_file_generated(session_id: str, filename: str, file_path: st
         # ({FILES}/{user_id}/requirements_agent/{session_id}/output) — the static mount
         # is /generated → FILES_DIR. The old "/orchestrator/" segment 404'd every download.
         file_url = f"{AGENTIC_BASE_URL}/generated/{user_id}/requirements_agent/{session_id}/output/{filename}"
+        # RECORDED FIRST, ANNOUNCED WITH ITS ID. The page opens the document by its
+        # artifact id (GET /artifacts/{id}/page) — the row has to exist, and the
+        # announcement has to name it, before the page hears about the file.
+        artifact_id = None
+        try:
+            from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+            artifact_id = await register_generated_file(filename, file_path, file_url, stage="requirements")
+        except Exception as _art_exc:  # noqa: BLE001
+            print(f"DEBUG: register_generated_file failed: {_art_exc}")
         await manager.broadcast({
             "type": "file_generated",
             "session_id": session_id,
             "filename": filename,
             "url": file_url,
+            "artifact_id": artifact_id,
             "file_size": file_size,
             "message": f"Generated file: {filename}"
         })
 
         print(f"DEBUG: Broadcasted file generation: {filename} ({file_size} bytes)")
-        # Also persist as a project Artifact row so the file shows in the artifacts panel,
-        # not only as a live in-chat download (best-effort; never blocks generation).
-        try:
-            from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
-            await register_generated_file(filename, file_path, file_url, stage="requirements")
-        except Exception as _art_exc:  # noqa: BLE001
-            print(f"DEBUG: register_generated_file failed: {_art_exc}")
         return file_url
     except Exception as e:
         print(f"ERROR: Failed to broadcast file generation: {str(e)}")
