@@ -73,6 +73,10 @@ class DocumentKind:
 
 
 KINDS: tuple[DocumentKind, ...] = (
+    DocumentKind("prd", "PRODUCT REQUIREMENTS DOCUMENT", "Product requirements",
+                 ("product overview", "problem statement", "target users", "goals and success metrics",
+                  "features", "functional requirements", "non-functional requirements", "user journeys",
+                  "release plan")),
     DocumentKind("brd", "BUSINESS REQUIREMENTS DOCUMENT", "Business requirements",
                  ("executive summary", "project objectives", "needs statement", "project scope", "requirements",
                   "project constraints", "key stakeholders", "schedule", "glossary")),
@@ -99,12 +103,17 @@ def document_kind(markdown: str, filename: str = "") -> DocumentKind:
             best, best_hits = kind, hits
     if best is GENERIC:
         name = (filename or "").lower()
+        by_id = {k.id: k for k in KINDS}
+        # By id, not position: a kind added at the front must not turn every "_BRD" file
+        # into something else. "prd" before "requirement", which a PRD's name may contain.
+        if "prd" in name:
+            return by_id["prd"]
         if "brd" in name or "requirement" in name:
-            return KINDS[0]
+            return by_id["brd"]
         if "pdd" in name or "process" in name:
-            return KINDS[1]
+            return by_id["pdd"]
         if "risk" in name:
-            return KINDS[2]
+            return by_id["risk"]
     return best
 
 

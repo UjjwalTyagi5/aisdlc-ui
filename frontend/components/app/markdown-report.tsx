@@ -27,12 +27,17 @@ import {
  */
 
 export interface DocumentKind {
-  id: "brd" | "pdd" | "risk" | "document";
+  id: "prd" | "brd" | "pdd" | "risk" | "document";
   eyebrow: string;
   label: string;
 }
 
 const KINDS: { kind: DocumentKind; markers: string[] }[] = [
+  {
+    kind: { id: "prd", eyebrow: "Product requirements document", label: "Product requirements" },
+    markers: ["product overview", "problem statement", "target users", "goals and success metrics",
+      "features", "functional requirements", "non-functional requirements", "user journeys", "release plan"],
+  },
   {
     kind: { id: "brd", eyebrow: "Business requirements document", label: "Business requirements" },
     markers: ["executive summary", "project objectives", "needs statement", "project scope", "requirements",
@@ -111,10 +116,13 @@ export function parseDocument(raw: string, filename = ""): ParsedDocument {
     if (hits > best) { kind = k.kind; best = hits; }
   }
   if (kind === GENERIC) {
+    // By id, not position (mirrors requirements_document.document_kind).
+    const byId = (id: DocumentKind["id"]) => KINDS.find((k) => k.kind.id === id)!.kind;
     const name = filename.toLowerCase();
-    if (name.includes("brd") || name.includes("requirement")) kind = KINDS[0]!.kind;
-    else if (name.includes("pdd") || name.includes("process")) kind = KINDS[1]!.kind;
-    else if (name.includes("risk")) kind = KINDS[2]!.kind;
+    if (name.includes("prd")) kind = byId("prd");
+    else if (name.includes("brd") || name.includes("requirement")) kind = byId("brd");
+    else if (name.includes("pdd") || name.includes("process")) kind = byId("pdd");
+    else if (name.includes("risk")) kind = byId("risk");
   }
   return { title, preamble: preamble.join("\n").trim(), sections, kind };
 }

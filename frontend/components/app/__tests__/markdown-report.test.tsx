@@ -48,6 +48,12 @@ describe("parseDocument", () => {
     expect(doc.kind.id).toBe("risk");
   });
 
+  it("recognises a PRD by its sections and by its file name", () => {
+    expect(parseDocument("## Product Overview\nx\n## Target Users\ny\n## Features\nz", "a.docx").kind.id).toBe("prd");
+    expect(parseDocument("## Notes\nhello", "QuickLink_PRD.docx").kind.id).toBe("prd");
+    expect(parseDocument("## Notes\nhello", "QuickLink_BRD.docx").kind.id).toBe("brd");
+  });
+
   it("falls back to the file name, then to the generic kind", () => {
     expect(parseDocument("## Notes\nhello", "QuickLink_BRD.docx").kind.id).toBe("brd");
     expect(parseDocument("## Notes\nhello", "output.docx").kind.id).toBe("document");

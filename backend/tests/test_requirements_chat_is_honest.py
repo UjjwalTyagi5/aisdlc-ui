@@ -30,6 +30,15 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _no_approved_documents(monkeypatch):
+    """The resolver also looks up the project's approved documents; these tests are about
+    attachments, so the project has none — and no test here reaches the database."""
+    from agents_orchestrator.requirements_agent.agents import planning
+
+    monkeypatch.setattr(planning, "_approved_documents", AsyncMock(return_value=[]))
+
 BRD = """## Executive Summary
 QuickLink shortens internal URLs.
 
