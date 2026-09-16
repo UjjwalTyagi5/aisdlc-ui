@@ -45,6 +45,7 @@ import { useSession } from "@/hooks/use-session";
 import {
   approveArtifact, listArtifacts, rejectArtifact, submitArtifact, uploadArtifact,
 } from "@/lib/api/artifacts";
+import { getMyAgentAccess } from "@/lib/api/capabilities";
 import { qk } from "@/lib/api/query-keys";
 import { hasPermission } from "@/lib/auth/permissions";
 import { PHASE_LABEL } from "@/lib/agents";
@@ -204,6 +205,24 @@ export function DocumentList({
   const deletion = useDeleteArtifact(projectId, onDeleted ? { onDeleted } : undefined);
 
   const canUpload = hasPermission(session, "run:create");
+  // WHO MAY SEND A DOCUMENT FOR APPROVAL — the route's rule (may_raise_for_approval):
+  // `run:create`, OR use of the agent the document belongs to. The button used to follow
+  // `run:create` alone, so QA could approve Testing documents but never send one, and a
+  // Security Engineer granted Code Review saw its report with no way to put it forward.
+  // Only fetched when `run:create` does not already settle it; the same query the agent
+  // pages draw their padlocks from.
+  const accessQ = useQuery({
+    queryKey: qk.myAgentAccess.forProject(projectId),
+    queryFn: () => getMyAgentAccess(projectId),
+    staleTime: 30_000,
+    enabled: !canUpload,
+  });
+  const mayRaise = (docStage: string | null | undefined) => {
+    if (canUpload) return true;
+    if (!docStage) return false; // a project-wide document belongs to no agent
+    const phase = docStage === "code_review" ? "review" : docStage;
+    return (accessQ.data?.reach?.[phase] ?? "none") !== "none";
+  };
   // The stage's own permission, or project administration for the project-wide ones.
   // Mirrors the route; see the note above about this being UX rather than the rule.
   const canApproveStage = hasPermission(session, `artifact:approve_${stage}`);
@@ -594,10 +613,10 @@ export function DocumentList({
                       </a>
                     </Button>
                   )}
-                  {/* WHOEVER CAN PRODUCE WORK CAN ASK FOR A DECISION ON IT, which is
-                      the same permission as uploading — asking is producing, not
-                      accepting. The owner still decides afterwards. */}
-                  {isDraft && canUpload && (
+                  {/* WHOEVER CAN PRODUCE WORK CAN ASK FOR A DECISION ON IT — anyone
+                      who may create runs, or use the agent this document belongs to.
+                      Asking is producing, not accepting. The approver still decides. */}
+                  {isDraft && mayRaise(a.stage) && (
                     <Button
                       size="sm"
                       variant="outline"

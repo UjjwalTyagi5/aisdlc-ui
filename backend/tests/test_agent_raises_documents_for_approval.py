@@ -2,7 +2,8 @@
 
 "Okay, can you send it for approval?" was answered "I cannot — that step must be performed
 by an owner or project admin". Raising is `run:create`, the permission of whoever ran the
-agent; approving is the admin's. These pin the tool to the button's behaviour: the same
+agent — and, since 2026-09-16, of whoever may use the agent the document belongs to;
+approving is the approver's. These pin the tool to the button's behaviour: the same
 shared implementation, the user's own permission, this stage's documents only, and a
 decided document never reopened.
 """
@@ -58,10 +59,12 @@ def turn():
         yield db
 
 
-async def _raise(name, docs, *, allowed=True):
+async def _raise(name, docs, *, allowed=True, uses_agent=False):
     from shared.tools import document_approval as da
 
     with patch("shared.authz.can_perform.can_perform", AsyncMock(return_value=allowed)) as perm, \
+         patch("shared.authz.effective_role.platform_role_for", AsyncMock(return_value="qa")), \
+         patch("shared.authz.agent_access.check_agent_access", AsyncMock(return_value=uses_agent)), \
          patch.object(da, "_documents_named", AsyncMock(return_value=docs)):
         out = await da.raise_for_approval(name, stage="requirements")
     return out, perm
@@ -122,8 +125,27 @@ async def test_the_tool_raises_the_draft_with_the_users_permission(turn):
 @pytest.mark.asyncio
 async def test_without_permission_nothing_changes(turn):
     doc = _doc("TEST_Project_BRD.docx")
-    out, _ = await _raise("TEST_Project_BRD.docx", [doc], allowed=False)
-    assert out.startswith("Error:") and "permission" in out
+    out, _ = await _raise("TEST_Project_BRD.docx", [doc], allowed=False, uses_agent=False)
+    assert out.startswith("Error:") and "access to the requirements agent" in out
+    assert doc.approval_status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_whoever_may_use_the_agent_may_send_its_document(turn):
+    """QA could approve Testing documents but not send one; a Security Engineer given Code
+    Review could not raise its report. Using the agent now carries putting its output
+    forward (product decision, 2026-09-16)."""
+    doc = _doc("TEST_Project_BRD.docx")
+    out, _ = await _raise("TEST_Project_BRD.docx", [doc], allowed=False, uses_agent=True)
+    assert out.startswith("Raised 'TEST_Project_BRD.docx' for approval")
+    assert doc.approval_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_project_wide_document_still_needs_run_create(turn):
+    doc = _doc("Security_Policy.pdf", stage=None)
+    out, _ = await _raise("Security_Policy.pdf", [doc], allowed=False, uses_agent=True)
+    assert out.startswith("Error:") and "project-wide" in out
     assert doc.approval_status == "draft"
 
 

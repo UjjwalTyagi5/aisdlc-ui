@@ -17,6 +17,56 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+async def may_raise_for_approval(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    stage: Optional[str],
+    permissions: Optional[list] = None,
+) -> bool:
+    """Who may put a document forward for approval.
+
+    Whoever holds `run:create` on the project — asking is producing, not accepting — OR
+    whoever can USE the agent the document belongs to: its owning role, or a person given
+    it as an extra agent.
+
+    THE SECOND HALF IS A PRODUCT DECISION (2026-09-16). QA could approve Testing documents
+    but not send one for approval, and a Security Engineer granted Code Review could run a
+    review but not raise its report — `run:create` is not in those roles. Using an agent
+    now carries putting its output forward. The owner still decides afterwards.
+
+    A project-wide document (no stage) belongs to no agent, so only `run:create` raises it.
+    `permissions` is the caller's already-resolved list when there is one (the REST route);
+    otherwise `run:create` is resolved for the project (the chat tool). Project membership
+    is the caller's check — both callers make it before asking this.
+    """
+    if permissions is not None:
+        from shared.authz.permissions import has_permission  # noqa: PLC0415
+
+        if has_permission(permissions, "run:create"):
+            return True
+    else:
+        from shared.authz.can_perform import can_perform  # noqa: PLC0415
+
+        if await can_perform(
+            db, user_id=str(user_id), permission="run:create", tenant_id=str(tenant_id),
+            resource_kind="project", resource_id=str(project_id),
+        ):
+            return True
+    if not stage:
+        return False
+    from shared.authz.agent_access import check_agent_access  # noqa: PLC0415
+    from shared.authz.effective_role import platform_role_for  # noqa: PLC0415
+
+    role = await platform_role_for(db, user_id=str(user_id), permissions=[])
+    return await check_agent_access(
+        db, tenant_id=str(tenant_id), project_id=str(project_id), role=role,
+        user_id=str(user_id), agent_id=stage,
+    )
+
+
 class AlreadyDecided(Exception):
     """The document was approved or rejected; it cannot be raised again."""
 

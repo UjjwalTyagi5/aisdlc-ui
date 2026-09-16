@@ -376,7 +376,9 @@ async def _artifact_for_decision(db: AsyncSession, request: Request, artifact_id
 @artifacts_router.post(
     "/artifacts/{artifact_id}/submit",
     response_model=ArtifactOut,
-    dependencies=[Depends(require_permission("run:create"))],
+    # The gate here is only "may see documents at all"; who may RAISE this one depends on
+    # its stage and is decided in the body — see may_raise_for_approval.
+    dependencies=[Depends(require_permission("artifact:view"))],
 )
 async def submit_artifact(
     artifact_id: str,
@@ -411,9 +413,25 @@ async def submit_artifact(
     artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
     await _assert_project_visible(db, request, artifact.project_id)
 
-    # The rule — which statuses may move, what is audited — is shared with the agents'
-    # raise_document_for_approval tool, so the button and the chat cannot disagree.
-    from shared.services.artifact_approval import AlreadyDecided, submit_for_approval  # noqa: PLC0415
+    # The rule — who may raise, which statuses may move, what is audited — is shared with
+    # the agents' raise_document_for_approval tool, so the button and the chat cannot
+    # disagree.
+    from shared.services.artifact_approval import (  # noqa: PLC0415
+        AlreadyDecided, may_raise_for_approval, submit_for_approval,
+    )
+
+    if not await may_raise_for_approval(
+        db, tenant_id=request.state.tenant_id, project_id=str(artifact.project_id),
+        user_id=str(getattr(request.state, "user_id", "") or ""), stage=artifact.stage,
+        permissions=getattr(request.state, "permissions", []) or [],
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "You can send a document for approval when you can use the agent it "
+                "belongs to on this project."
+            ),
+        )
 
     try:
         moved = await submit_for_approval(

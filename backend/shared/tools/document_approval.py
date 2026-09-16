@@ -3,14 +3,15 @@
 THE QUESTION THE AGENT COULD NOT ANSWER. "Okay, can you send it for approval?" got
 "I cannot send it for approval myself — that step must be performed by an owner or
 project admin". Both halves were wrong: the agent had no tool, and raising is NOT an
-owner's act — it is `run:create`, the same permission as running the agent (see
-`shared/routers/artifacts.py::submit_artifact`). The user asking could do it with a click;
-the agent refused on their behalf with an invented reason.
+owner's act. Whoever may use the agent the document belongs to may put it forward, and so
+may anyone holding `run:create` (see `shared.services.artifact_approval.may_raise_for_approval`).
+The user asking could do it with a click; the agent refused on their behalf with an
+invented reason.
 
 WHAT IT DOES. Exactly what the Documents panel's "Raise for approval" button does —
 through `shared.services.artifact_approval`, the one implementation both use — with the
 signed-in user's permission, checked here against this project. It never approves:
-approving stays a project admin's decision in Requests & Approvals.
+approving stays the approver's decision in Requests & Approvals.
 
 BOUND TO A STAGE BY A FACTORY. An agent raises its own stage's documents and project-wide
 ones, the same reach publishing has; a Design document is raised from the Design screen.
@@ -45,9 +46,10 @@ async def _documents_named(db, project_id: str, filename: str) -> list:
 async def raise_for_approval(filename: str, *, stage: str) -> str:
     """The tool's body, callable without LangChain for tests."""
     from config.ws_helper import get_project_id, get_tenant_id, get_user_id  # noqa: PLC0415
-    from shared.authz.can_perform import can_perform  # noqa: PLC0415
     from shared.db import get_db_session_for_tenant  # noqa: PLC0415
-    from shared.services.artifact_approval import AlreadyDecided, submit_for_approval  # noqa: PLC0415
+    from shared.services.artifact_approval import (  # noqa: PLC0415
+        AlreadyDecided, may_raise_for_approval, submit_for_approval,
+    )
 
     name = _leaf((filename or "").strip())
     if not name:
@@ -57,22 +59,6 @@ async def raise_for_approval(filename: str, *, stage: str) -> str:
         return "Error: this conversation is not attached to a project, so there is nothing to raise."
 
     async with get_db_session_for_tenant(tenant_id) as db:
-        allowed = await can_perform(
-            db, user_id=str(user_id), permission="run:create", tenant_id=str(tenant_id),
-            resource_kind="project", resource_id=str(project_id),
-        )
-        if not allowed:
-            # SAY WHO, or the model guesses. Told only "no permission", the Code Review
-            # agent answered that a project admin "must perform that step" — which is the
-            # approver, not the one who raises it.
-            return (
-                "Error: your role on this project cannot raise documents for approval (that "
-                "needs the run:create permission). Nothing was changed. Tell the user exactly "
-                "that: someone whose role on this project can raise documents — a Project "
-                "Admin, for example — has to raise it; the approval itself is decided "
-                "afterwards in Requests & Approvals."
-            )
-
         named = await _documents_named(db, str(project_id), name)
         if not named:
             return (
@@ -90,6 +76,28 @@ async def raise_for_approval(filename: str, *, stage: str) -> str:
         drafts = [a for a in mine if (a.approval_status or "draft") == "draft"]
         target = drafts[0] if drafts else mine[0]
 
+        # The same rule as the Documents panel's button: run:create, or use of the agent
+        # the document belongs to. Checked on THE DOCUMENT's stage — a project-wide one
+        # belongs to no agent and needs run:create.
+        if not await may_raise_for_approval(
+            db, tenant_id=str(tenant_id), project_id=str(project_id), user_id=str(user_id),
+            stage=target.stage,
+        ):
+            # SAY WHO, or the model guesses. Told only "no permission", the Code Review
+            # agent answered that a project admin "must perform that step" — which is the
+            # approver, not the one who raises it.
+            return (
+                f"Error: you cannot send '{name}' for approval: it is a project-wide "
+                "document, and those are raised by someone whose role can create runs on "
+                "this project (a Project Admin, for example). Nothing was changed. Tell the "
+                "user exactly that; the approval itself is decided afterwards in Requests & "
+                "Approvals."
+                if target.stage is None else
+                f"Error: you cannot send '{name}' for approval: that needs access to the "
+                f"{target.stage} agent on this project. Nothing was changed. Tell the user "
+                "exactly that."
+            )
+
         try:
             moved = await submit_for_approval(db, target, tenant_id=str(tenant_id), actor_id=str(user_id))
         except AlreadyDecided as decided:
@@ -102,12 +110,13 @@ async def raise_for_approval(filename: str, *, stage: str) -> str:
     logger.info("document %s raised for approval from the %s agent by %s", target_id, stage, user_id)
     if not moved:
         return (
-            f"'{name}' is already awaiting approval — nothing more to do. A project admin "
+            f"'{name}' is already awaiting approval — nothing more to do. Its approver "
             "decides it in Requests & Approvals."
         )
     return (
-        f"Raised '{name}' for approval. It is now PENDING in Requests & Approvals, where a "
-        "project admin approves or rejects it. It is not approved yet — do not say it is."
+        f"Raised '{name}' for approval. It is now PENDING in Requests & Approvals, where its "
+        "approver (the stage's owner or a Project Admin) approves or rejects it. It is not "
+        "approved yet — do not say it is."
     )
 
 
@@ -119,7 +128,7 @@ def make_approval_tools(stage: str) -> list[Any]:
         """Raise one of this project's DRAFT documents for approval — the same act as the
         "Raise for approval" button in the Documents panel, done with the signed-in user's
         permission. Call it when the user asks to send, submit or raise a document for
-        approval. It does NOT approve anything: a project admin decides afterwards.
+        approval. It does NOT approve anything: the approver decides afterwards.
 
         Args:
             filename: the document's file name exactly as it appears in the project's
