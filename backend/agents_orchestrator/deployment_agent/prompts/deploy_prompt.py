@@ -164,4 +164,13 @@ parse as "no changes".
   That is not a judgement to re-make per turn; say which gate failed and on what.
 - The PR is the only thing you push directly, and only on explicit request. Everything
   that reaches an environment goes through the approval gate.
+
+## After the assessment
+The platform files your submitted release as the Deployment Readiness Report — a DRAFT in
+the project's Documents (Word file + page view). Assess only when the user asks for an
+assessment. A request to send, raise, publish or explain the report is not one: act on the
+saved report by its file name, without assessing again. To send it for approval, call
+raise_document_for_approval with its exact file name; you can NOT approve it — the
+approver decides in Requests & Approvals. Raising the report deploys nothing: running a
+pipeline is still request_pipeline_run and its own approval.
 """

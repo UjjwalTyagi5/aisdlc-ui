@@ -59,12 +59,13 @@ def turn():
         yield db
 
 
-async def _raise(name, docs, *, allowed=True, uses_agent=False):
+async def _raise(name, docs, *, allowed=True, uses_agent=False, raisable=()):
     from shared.tools import document_approval as da
 
     with patch("shared.authz.can_perform.can_perform", AsyncMock(return_value=allowed)) as perm, \
          patch("shared.authz.effective_role.platform_role_for", AsyncMock(return_value="qa")), \
          patch("shared.authz.agent_access.check_agent_access", AsyncMock(return_value=uses_agent)), \
+         patch.object(da, "_raisable_names", AsyncMock(return_value=list(raisable))), \
          patch.object(da, "_documents_named", AsyncMock(return_value=docs)):
         out = await da.raise_for_approval(name, stage="requirements")
     return out, perm
@@ -153,6 +154,19 @@ async def test_a_project_wide_document_still_needs_run_create(turn):
 async def test_an_unknown_name_changes_nothing(turn):
     out, _ = await _raise("nope.docx", [])
     assert out.startswith("Error:") and "nope.docx" in out
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_name_is_answered_with_the_stages_raisable_documents(turn):
+    """LIVE: asked to raise "the readiness report", the Deployment agent guessed
+    'Deployment Readiness Report.docx' twice — the lookup tool it tried lists approved
+    documents only, where a draft never appears."""
+    out, _ = await _raise("Deployment Readiness Report.docx", [],
+                          raisable=["QuickLink_Deployment_Readiness_staging_main_082f91e.docx"])
+    assert "Nothing was changed" in out
+    assert "can be raised, newest first: QuickLink_Deployment_Readiness_staging_main_082f91e.docx" in out
+    out, _ = await _raise("nope.docx", [])
+    assert "no draft document to raise" in out
 
 
 @pytest.mark.asyncio

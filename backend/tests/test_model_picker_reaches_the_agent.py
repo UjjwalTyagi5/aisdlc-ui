@@ -43,6 +43,8 @@ WRAPPERS = {
     "security": "agents_orchestrator/security_agent/security_agent_api.py",
     "deployment": "agents_orchestrator/deployment_agent/deployment_agent_api.py",
     "documentation": "agents_orchestrator/documentation_agent/documentation_standalone_api.py",
+    # The route the Deployment page's chat actually uses (`/sdlc/agent/deployment/ws`).
+    "deployment_chat": "agents_orchestrator/deployment_agent/deployment_standalone_api.py",
 }
 
 

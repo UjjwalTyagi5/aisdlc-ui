@@ -43,6 +43,25 @@ async def _documents_named(db, project_id: str, filename: str) -> list:
     return [a for a in rows if a.artifact_type != "story" and _leaf(a.blob_path) == filename]
 
 
+async def _raisable_names(db, project_id: str, stage: str, limit: int = 8) -> list[str]:
+    """This stage's DRAFT documents, newest first — the names a raise can use."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.models.orm import Artifact  # noqa: PLC0415
+
+    rows = (await db.execute(
+        select(Artifact).where(Artifact.project_id == project_id, Artifact.stage == stage)
+        .order_by(Artifact.created_at.desc())
+    )).scalars().all()
+    names: list[str] = []
+    for a in rows:
+        leaf = _leaf(a.blob_path)
+        if a.artifact_type == "story" or not leaf or (a.approval_status or "draft") != "draft" or leaf in names:
+            continue
+        names.append(leaf)
+    return names[:limit]
+
+
 async def raise_for_approval(filename: str, *, stage: str) -> str:
     """The tool's body, callable without LangChain for tests."""
     from config.ws_helper import get_project_id, get_tenant_id, get_user_id  # noqa: PLC0415
@@ -61,9 +80,17 @@ async def raise_for_approval(filename: str, *, stage: str) -> str:
     async with get_db_session_for_tenant(tenant_id) as db:
         named = await _documents_named(db, str(project_id), name)
         if not named:
+            # NAME THE CANDIDATES. A live Deployment turn asked to raise "the readiness
+            # report" guessed 'Deployment Readiness Report.docx', was told only "check the
+            # exact file name", looked it up with a tool that lists APPROVED documents —
+            # where a draft never appears — and guessed the same name again.
+            candidates = await _raisable_names(db, str(project_id), stage)
             return (
                 f"Error: there is no document named '{name}' in this project's Documents. "
-                "Nothing was changed — check the exact file name."
+                "Nothing was changed. "
+                + (f"This stage's documents that can be raised, newest first: {', '.join(candidates)}. "
+                   "Use the exact name of the one the user means; if it is unclear which, ask."
+                   if candidates else "This stage has no draft document to raise.")
             )
         mine = [a for a in named if a.stage is None or a.stage == stage]
         if not mine:

@@ -174,39 +174,10 @@ def _failure_reason(exc: BaseException) -> str:
 
 
 async def _filed_documents_note(tenant_id: str, project_id: str) -> str:
-    """The Documentation documents already filed on this project, for a conversation
-    that starts after they were written — so "send the handover for approval" acts on
-    the saved document, by its file name, instead of writing it again."""
-    if not (tenant_id and project_id):
-        return ""
-    from sqlalchemy import select  # noqa: PLC0415
+    """The Documentation documents already filed on this project — see filed_documents."""
+    from shared.services.filed_documents import filed_documents_note  # noqa: PLC0415
 
-    from shared.models.orm import Artifact  # noqa: PLC0415
-
-    try:
-        async with get_db_session_for_tenant(tenant_id) as db:
-            rows = (await db.execute(
-                select(Artifact).where(
-                    Artifact.project_id == uuid.UUID(project_id), Artifact.stage == "documentation",
-                ).order_by(Artifact.created_at.desc()).limit(15)
-            )).scalars().all()
-    except Exception:  # noqa: BLE001 — a note, never a failed turn
-        logger.warning("filed-documents lookup failed for project %s", project_id, exc_info=True)
-        return ""
-    status = {"draft": "draft, not yet raised", "pending": "raised, waiting on the approver",
-              "approved": "approved", "rejected": "rejected"}
-    lines = [
-        f"- {(a.blob_path or '').replace(chr(92), '/').rsplit('/', 1)[-1]} "
-        f"({status.get(a.approval_status or 'draft', a.approval_status)}"
-        + (f", {a.created_at:%d %b %Y %H:%M} UTC" if getattr(a, "created_at", None) else "") + ")"
-        for a in rows if a.blob_path and a.artifact_type != "story"
-    ]
-    if not lines:
-        return ""
-    return ("\nDocuments this agent has already filed on this project, newest first:\n"
-            + "\n".join(lines)
-            + "\nA request to send, raise, publish or explain one of these is about that saved "
-            "document — act on it by its file name; do not write it again.\n")
+    return await filed_documents_note(tenant_id, project_id, "documentation")
 
 
 @documentation_standalone_router.websocket("/ws")

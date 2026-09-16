@@ -241,6 +241,8 @@ async def read_upstream_artifacts() -> str:
             stage=key, consumer_stage="documentation",
             legacy_reader=lambda c=col: _legacy(c),
         )
+        from shared.services.upstream_results import compact  # noqa: PLC0415
+
         out[key] = result.payload if result.found else None
         elsewhere = _other_repo(out[key], s.repo_name) if key in ("code_review", "security") else None
         if elsewhere:
@@ -251,6 +253,9 @@ async def read_upstream_artifacts() -> str:
                 f"stage as having no result for {s.repo_name}."
             )
             continue
+        # SMALL ENOUGH TO READ WHOLE: the security result alone is ~170 KB with its scan
+        # and SBOM, and this output is cut at 20 KB — see upstream_results.compact.
+        out[key] = compact(key, out[key])
         # Documentation compiles what it is given. Without this it would silently
         # publish a document with a whole section missing, and read as complete.
         if not result.found and not result.unenforced:
@@ -263,23 +268,11 @@ _PER_REPO_COLUMNS = {"code_review_artifacts", "security_artifacts"}
 
 
 def _other_repo(payload: object, repo_name: str) -> str | None:
-    """A description of the repository `payload` is about when that is NOT `repo_name`.
+    """See shared/services/upstream_results.other_repo — a live handover described a
+    .NET app reviewed minutes earlier as the QuickLink branch."""
+    from shared.services.upstream_results import other_repo  # noqa: PLC0415
 
-    A LIVE HANDOVER DESCRIBED THE WRONG SYSTEM. The project's newest code review was of
-    another repository someone had reviewed in the browser minutes earlier (a .NET app);
-    this tool returned it as "the code review", and the agent wrote that the QuickLink
-    branch "implements RadAuthPortal .NET instead of QuickLink" — about a Node.js
-    checkout it had just inspected. A result for another repository is not a result for
-    this one."""
-    if not isinstance(payload, dict) or not repo_name:
-        return None
-    ctx = payload.get("context") or {}
-    theirs = str(ctx.get("repo_name") or "").strip()
-    if not theirs or theirs.lower() == repo_name.strip().lower():
-        return None
-    branch = ctx.get("source_branch") or ctx.get("branch") or ""
-    sha = str(ctx.get("head_sha") or "")[:7]
-    return f"repository '{theirs}'" + (f", branch {branch}" if branch else "") + (f", commit {sha}" if sha else "")
+    return other_repo(payload, repo_name)
 
 
 _DOC_TYPES = {
