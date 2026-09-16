@@ -59,8 +59,10 @@ async def test_tool_output_is_never_streamed_as_the_agents_reply(monkeypatch):
 
     async def _astream(state, stream_mode, config):
         yield (ToolMessage(content="Error: file x.md has not yet been uploaded", tool_call_id="t1"), {})
-        yield (AIMessageChunk(content="", tool_calls=[{"name": "generate_brd", "args": {}, "id": "t2"}]), {})
-        yield (AIMessageChunk(content="The BRD could not be generated."), {})
+        # Real streams give each message's chunks its id — which is how the answer is told
+        # apart from the message that called the tool (see shared/services/answer_stream).
+        yield (AIMessageChunk(content="", id="m1", tool_calls=[{"name": "generate_brd", "args": {}, "id": "t2"}]), {})
+        yield (AIMessageChunk(content="The BRD could not be generated.", id="m2"), {})
 
     sent = []
 
@@ -289,3 +291,32 @@ def test_the_prompt_names_only_tools_the_agent_has():
         assert ghost not in prompt, f"the prompt tells the model to call {ghost}, which it does not have"
     for real in ("generate_brd", "generate_pdd", "generate_risk_register", "export_document"):
         assert real in names and real in prompt
+
+
+@pytest.mark.asyncio
+async def test_what_the_model_says_before_reading_an_attachment_is_not_the_reply(monkeypatch):
+    """Live: with a document attached, the reply opened "the document has not been uploaded
+    yet…" — text from the message that went on to read it — and only then answered."""
+    from agents_orchestrator.requirements_agent import requirements_agent_api as api
+
+    async def _astream(state, stream_mode, config):
+        yield (AIMessageChunk(content="The document has not been uploaded yet; ", id="m1"), {})
+        yield (AIMessageChunk(content="let me read it.", id="m1", tool_call_chunks=[
+            {"name": "read_document", "args": "{}", "id": "t1", "index": 0}]), {})
+        yield (ToolMessage(content="# Discovery call transcript", tool_call_id="t1"), {})
+        yield (AIMessageChunk(content="BRD generated: ", id="m2"), {})
+        yield (AIMessageChunk(content="QuickLink_BRD.docx", id="m2"), {})
+
+    sent = []
+
+    class _Manager:
+        async def send_personal_message(self, message, websocket):
+            sent.append(json.loads(message)["content"])
+
+    monkeypatch.setattr(api.planning_app, "astream", _astream)
+    monkeypatch.setattr(api, "manager", _Manager())
+
+    out = await api._stream_agent_response({}, {}, websocket=None, session_id="s1")
+
+    assert out == "BRD generated: QuickLink_BRD.docx"
+    assert not any("not been uploaded" in s for s in sent)

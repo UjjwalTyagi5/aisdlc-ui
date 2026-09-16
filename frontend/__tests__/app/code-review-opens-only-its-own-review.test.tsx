@@ -20,6 +20,8 @@ const state = vi.hoisted(() => ({
   reviews: [] as { id: string; label: string; repo_name: string; merge_recommendation: string;
     findings_count: number; critical_high: number; created_at: string }[],
   opened: [] as string[],
+  drawer: null as null | Record<string, unknown>,
+  documentStages: [] as string[],
 }));
 
 vi.mock("next/navigation", () => ({
@@ -33,7 +35,7 @@ vi.mock("@/hooks/use-session", () => ({
 }));
 vi.mock("@/hooks/use-agent-chat", () => ({
   useAgentChat: () => ({
-    busy: state.busy, messages: [], sessions: [], sessionId: null, attachments: [],
+    busy: state.busy, messages: [], sessions: [{ id: "c1", title: "Earlier review chat" }], sessionId: "c1", attachments: [],
     send: vi.fn(), cancel: vi.fn(), newChat: vi.fn(), selectSession: vi.fn(),
     attachFiles: vi.fn(), removeAttachment: vi.fn(), documents: [],
   }),
@@ -58,8 +60,18 @@ vi.mock("@/components/app/code-review-report", () => ({
   SbomView: () => null,
   scanRan: () => false,
 }));
-vi.mock("@/components/app/document-list", () => ({ DocumentList: () => null }));
-vi.mock("@/components/app/agent-chat-drawer", () => ({ AgentChatDrawer: () => null }));
+vi.mock("@/components/app/document-list", () => ({
+  DocumentList: ({ stage }: { stage?: string }) => {
+    state.documentStages.push(stage ?? "project-wide");
+    return null;
+  },
+}));
+vi.mock("@/components/app/agent-chat-drawer", () => ({
+  AgentChatDrawer: (props: Record<string, unknown>) => {
+    state.drawer = props;
+    return null;
+  },
+}));
 vi.mock("@/components/app/model-selector", () => ({ ModelSelector: () => null }));
 vi.mock("@/lib/api/projects", () => ({
   getProject: async () => ({ id: "p", name: "TEST Project", displayName: "TEST Project" }),
@@ -104,6 +116,8 @@ beforeEach(() => {
   state.busy = false;
   state.reviews = [row("old")];
   state.opened = [];
+  state.drawer = null;
+  state.documentStages = [];
 });
 afterEach(cleanup);
 
@@ -122,5 +136,24 @@ describe("Code Review page, after a turn ends", () => {
 
     await waitFor(() => expect(state.opened).toContain("new"));
     expect(await screen.findByText("report new")).toBeTruthy();
+  });
+});
+
+describe("Code Review page, like the other agent pages", () => {
+  it("gives the chat its history", async () => {
+    renderPage();
+    await screen.findByRole("button", { name: "stage the branch" });
+    expect(state.drawer?.sessions).toEqual([{ id: "c1", title: "Earlier review chat" }]);
+    expect(state.drawer?.activeSessionId).toBe("c1");
+    expect(typeof state.drawer?.onSelectSession).toBe("function");
+    expect(typeof state.drawer?.onNewChat).toBe("function");
+  });
+
+  it("keeps the Code Review documents beside the review, not in a tab", async () => {
+    await runTurn([row("new"), row("old")]);
+    expect(await screen.findByText("report new")).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Documents" })).toBeTruthy();
+    expect(state.documentStages).toContain("code_review");
+    expect(screen.queryByRole("button", { name: /^Documents$/ })).toBeNull();
   });
 });

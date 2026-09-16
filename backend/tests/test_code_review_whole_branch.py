@@ -425,3 +425,34 @@ async def test_the_reviewers_read_document_records_what_it_read(review_session, 
     assert "FR-01" in await read_document.ainvoke({"document_id": "brd-1"})
     assert "could not be read" in await read_document.ainvoke({"document_id": "arch-1"})
     assert review_session.documents_read == {"brd-1": "ok", "arch-1": "that document has no stored file"}
+
+
+@pytest.mark.asyncio
+async def test_a_new_chat_is_told_the_saved_report_so_it_does_not_review_again(review_session, monkeypatch):
+    """A new chat asked only to send the report for approval ran a whole new review first
+    and filed another copy of the report."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from agents_orchestrator.code_review_agent import code_review_agent_api as api
+
+    @asynccontextmanager
+    async def _db(_tenant):
+        yield None
+
+    saved = SimpleNamespace(
+        created_at=datetime(2026, 9, 16, 15, 5, tzinfo=timezone.utc),
+        code_review_artifacts={"merge_recommendation": "request_changes", "findings": [{}, {}],
+                               "document": {"filename": "QuickLink_Code_Review_main_abc1234.docx"}},
+    )
+    lookup = AsyncMock(return_value=saved)
+    monkeypatch.setattr(api, "get_db_session_for_tenant", _db)
+    monkeypatch.setattr("shared.routers.code_review_workspace._find_unchanged_review", lookup)
+
+    note = await api._saved_review_note(review_session, "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222")
+    assert "'QuickLink_Code_Review_main_abc1234.docx'" in note
+    assert "request_changes, 2 finding(s)" in note and "Do NOT review again" in note
+    assert lookup.await_args.kwargs["mode"] == "repo" and lookup.await_args.kwargs["head_sha"] == "abc1234"
+
+    lookup.return_value = None
+    assert await api._saved_review_note(review_session, "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222") == ""

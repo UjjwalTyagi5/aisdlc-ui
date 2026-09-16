@@ -146,3 +146,43 @@ async def test_a_successful_turn_ends_as_complete_and_not_failed(turn):
     assert types.index("stream_end") < len(types) - 1
     assert _complete(mgr.frames) == ["Review complete"]
     persist.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_the_graphs_own_nudge_never_reaches_the_readers_chat(turn, monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    class _App:
+        @staticmethod
+        async def astream(_state, **_kwargs):
+            yield (AIMessageChunk(content="Here is what I found."), {})
+            yield (HumanMessage(content="You wrote the review as prose instead of submitting it."), {})
+            yield (AIMessageChunk(content=" Submitted."), {})
+
+    mgr, _ = await turn(chunks=["x"])  # warm the fixture; the run below replaces the app
+    mgr.frames.clear()
+    monkeypatch.setattr(api, "review_app", _App)
+    await api._process_ws_message(
+        {"type": "user_message_with_files", "session_id": "s1", "project_id": "p1", "task_intent": "review it"},
+        websocket=object(), user_id="u1", tenant_id="t1",
+    )
+    streamed = "".join(f.get("content", "") for f in mgr.frames if f.get("type") == "stream_chunk")
+    assert streamed == "Here is what I found. Submitted."
+
+
+@pytest.mark.unit
+async def test_every_turn_is_written_to_the_transcript(turn, monkeypatch):
+    """The drawer listed this agent's past conversations and opened each one empty."""
+    saved = []
+
+    async def _persist(session_id, role, content, **kwargs):
+        saved.append((role, content))
+
+    monkeypatch.setattr(api, "persist_turn", _persist)
+    await turn(chunks=["Review submitted."])
+    assert saved == [("user", "review it"), ("agent", "Review submitted.")]
+
+    saved.clear()
+    await turn(boom=_auth_error())
+    assert saved[0] == ("user", "review it")
+    assert saved[-1][0] == "agent" and "rejected the configured credential" in saved[-1][1]

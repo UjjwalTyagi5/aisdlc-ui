@@ -9,6 +9,7 @@ Import as: from agents_orchestrator.code_review_agent.agents.reviewer import app
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
@@ -270,6 +271,33 @@ def _is_nudge_turn(state: AgentState) -> bool:
     return isinstance(content, str) and _SUBMIT_NUDGE in content
 
 
+#: The reader asking for a review, in the words the page and people use: "Please review the
+#: whole branch…", "Review the prepared change…", "review this PR", "re-review it". Not
+#: "Send the review report for approval" — a request ABOUT a review is not a review.
+_REVIEW_REQUEST_RE = re.compile(r"\b(?:re-?)?review\s+(?:the|this|that|my|it)\b", re.IGNORECASE)
+
+
+def _is_review_turn(state: AgentState) -> bool:
+    """True when this turn is a review: the reader asked for one, or the agent started the
+    review workflow (run_security_review is its first step, and submit refuses without it).
+
+    THE NUDGE FIRED ON EVERY TURN THAT DID NOT SUBMIT. Asked only "Send the review report
+    for approval.", the agent answered correctly — and was then made to call
+    submit_code_review, which filed another review of the branch nobody had asked for.
+    """
+    turn = _this_turn(state)
+    if turn and turn[0].__class__.__name__ == "HumanMessage":
+        asked = turn[0].content if isinstance(turn[0].content, str) else ""
+        if _REVIEW_REQUEST_RE.search(asked):
+            return True
+    for m in turn:
+        for tc in getattr(m, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name == "run_security_review":
+                return True
+    return False
+
+
 def route_fn(state: AgentState) -> str:
     """tools -> tools node; a prose 'review' with nothing submitted -> one nudge; else END.
 
@@ -288,7 +316,7 @@ def route_fn(state: AgentState) -> str:
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
         return "tools"
-    if not _has_submitted(state) and not _already_nudged(state):
+    if _is_review_turn(state) and not _has_submitted(state) and not _already_nudged(state):
         return "finalize"
     return END
 

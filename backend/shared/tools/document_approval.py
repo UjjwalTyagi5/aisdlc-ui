@@ -62,9 +62,15 @@ async def raise_for_approval(filename: str, *, stage: str) -> str:
             resource_kind="project", resource_id=str(project_id),
         )
         if not allowed:
+            # SAY WHO, or the model guesses. Told only "no permission", the Code Review
+            # agent answered that a project admin "must perform that step" — which is the
+            # approver, not the one who raises it.
             return (
-                "Error: you do not have permission to raise documents for approval on this "
-                "project. Nothing was changed."
+                "Error: your role on this project cannot raise documents for approval (that "
+                "needs the run:create permission). Nothing was changed. Tell the user exactly "
+                "that: someone whose role on this project can raise documents — a Project "
+                "Admin, for example — has to raise it; the approval itself is decided "
+                "afterwards in Requests & Approvals."
             )
 
         named = await _documents_named(db, str(project_id), name)

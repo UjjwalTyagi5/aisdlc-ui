@@ -275,20 +275,27 @@ async def _stream_agent_response(state: dict, config: dict, websocket: WebSocket
     second time, a dead model key failing twice. The caller reports the error instead.
     The terminal `stream_end` is still emitted by the caller on every path.
     """
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    # ONLY THE ANSWER, NOT THE WORKING. Given an attached document, the model wrote "the
+    # document has not been uploaded yet…" in the same message as its call to read it, and
+    # that sentence opened the reply before the real answer arrived. See AnswerStream.
+    answers = AnswerStream(_extract_text)
     final_content = ""
+
+    async def _send(content: str) -> None:
+        nonlocal final_content
+        if not content:
+            return
+        final_content += content
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
+            websocket,
+        )
+
     async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
-        msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
-        if isinstance(msg_chunk, ToolMessage):
-            continue
-        if not hasattr(msg_chunk, "content") or not msg_chunk.content:
-            continue
-        content = _extract_text(msg_chunk.content)
-        if content and not getattr(msg_chunk, "tool_calls", None):
-            final_content += content
-            await manager.send_personal_message(
-                json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
-                websocket,
-            )
+        await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+    await _send(answers.close())
     return final_content
 
 

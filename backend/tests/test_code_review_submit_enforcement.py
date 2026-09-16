@@ -86,3 +86,34 @@ def test_the_nudge_turn_is_detected_so_the_call_can_be_forced():
 
     ordinary = {"messages": [HumanMessage(content="review it")]}
     assert _is_nudge_turn(ordinary) is False
+
+
+def test_a_request_about_the_report_is_not_nudged_into_a_new_review():
+    """Live: "Send the review report for approval." was answered, then the nudge forced
+    submit_code_review and another review was filed."""
+    state = {"messages": [
+        HumanMessage(content="Send the review report for approval."),
+        AIMessage(content="", tool_calls=[{"name": "raise_document_for_approval", "args": {"filename": "r.docx"}, "id": "9"}]),
+        ToolMessage(content="Error: your role on this project cannot raise documents for approval", tool_call_id="9"),
+        AIMessage(content="Your role cannot raise it; a Project Admin can."),
+    ]}
+    assert route_fn(state) == END
+
+    greeting = {"messages": [HumanMessage(content="Hi"), AIMessage(content="Hello! Select a target to review.")]}
+    assert route_fn(greeting) == END
+
+
+def test_a_turn_that_started_the_review_workflow_is_still_nudged():
+    state = {"messages": [
+        HumanMessage(content="Please look at the branch and tell me what you think"),
+        AIMessage(content="", tool_calls=[{"name": "run_security_review", "args": {}, "id": "5"}]),
+        ToolMessage(content="Security review: 13 vulnerabilities", tool_call_id="5"),
+        _prose_review(),
+    ]}
+    assert route_fn(state) == "finalize"
+
+
+def test_the_pages_own_review_requests_count_as_review_turns():
+    for asked in ("Please review the whole branch, run the security review, and submit your findings.",
+                  "Review the prepared change and submit your findings.", "can you re-review this PR?"):
+        assert route_fn({"messages": [HumanMessage(content=asked), _prose_review()]}) == "finalize", asked

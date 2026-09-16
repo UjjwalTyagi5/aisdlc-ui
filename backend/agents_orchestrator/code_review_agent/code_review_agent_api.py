@@ -46,6 +46,7 @@ from shared.audit import AuditCallbackHandler
 from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.db import get_db_session_for_tenant
+from shared.services.conversation_service import persist_turn
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -123,6 +124,37 @@ def _review_context_block(s) -> str:
     )
 
 
+async def _saved_review_note(s, tenant_id: str, project_id: str) -> str:
+    """What is already on file for THIS target, for a conversation that starts after it.
+
+    A new chat asked only "Send the review report for approval." ran a whole new review
+    first — nothing told it a report already existed, or its name — and filed a seventh
+    copy of the same report before it got to the request.
+    """
+    if not (s.repo_name and s.head_sha and tenant_id and project_id):
+        return ""
+    from shared.routers.code_review_workspace import _find_unchanged_review  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as db:
+        run = await _find_unchanged_review(
+            db, tenant_id=tenant_id, project_id=project_id, repo_name=s.repo_name,
+            head_sha=s.head_sha, base_sha=s.base_sha, mode=s.mode or None,
+        )
+    if run is None:
+        return ""
+    art = run.code_review_artifacts or {}
+    report = (art.get("document") or {}).get("filename")
+    when = f" on {run.created_at:%d %b %Y %H:%M} UTC" if getattr(run, "created_at", None) else ""
+    return (
+        f"\nA review of this exact target is already saved{when}: "
+        f"{art.get('merge_recommendation') or 'no recommendation'}, "
+        f"{len(art.get('findings') or [])} finding(s)"
+        + (f"; its report is '{report}' in the project's Documents" if report else "")
+        + ". Do NOT review again unless the user asks for a new review — a request to send, "
+        "raise, publish or explain the report is about that saved report.\n"
+    )
+
+
 async def _load_mcp_tools(tenant_id: str, project_id: str | None) -> list:
     from config.env import MCP_ENABLED
 
@@ -169,24 +201,30 @@ async def _stream(
     """
     from langgraph.errors import GraphRecursionError
 
-    final, got, failure = "", False, None
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    final, failure = "", None
+    # THE AGENT'S ANSWERS ONLY — not the text it writes before calling a tool, not tool
+    # results, not the graph's own submit nudge (a HumanMessage that once reached the chat
+    # as "You wrote the review as prose instead of submitting it…"). See AnswerStream.
+    answers = AnswerStream(_extract_text)
+
+    async def _send(text: str) -> None:
+        nonlocal final
+        if not text:
+            return
+        final += text
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
+            websocket,
+        )
+
     try:
         async for chunk in review_app.astream(state, stream_mode="messages", config=config):
-            msg = chunk[0] if isinstance(chunk, tuple) else chunk
-            if isinstance(msg, ToolMessage) or not hasattr(msg, "content"):
-                continue
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                continue
-            text = _extract_text(msg.content)
-            if not text:
-                continue
-            final += text
-            got = True
-            await manager.send_personal_message(
-                json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
-                websocket,
-            )
+            await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+        await _send(answers.close())
     except GraphRecursionError:
+        await _send(answers.close())
         notice = "Step limit reached for this review. Send another message to continue."
         await manager.send_personal_message(
             json.dumps({"type": "stream_chunk", "content": f"\n\n> ⚠️ {notice}", "session_id": session_id}),
@@ -445,6 +483,10 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         first = not s.system_injected
         if first:
             ctx = _review_context_block(s)
+            if ctx:
+                ctx += await _saved_review_note(
+                    s, tenant_id or s.tenant_id, project_id or s.project_id
+                )
             content = (ctx + "\n" + user_text) if ctx else user_text
             state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
@@ -463,6 +505,14 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             attachment_paths_from_context(message_data.get("pipeline_context"))
         ):
             state["messages"].append(HumanMessage(content=_content))
+
+        # THE TRANSCRIPT, like every other agent's (§11A). The chat drawer listed this
+        # agent's past conversations and opened each one empty: nothing was ever written.
+        # Best-effort — persist_turn never fails a turn.
+        await persist_turn(
+            session_id, "user", user_text, tenant_id=tenant_id or s.tenant_id or None,
+            author_id=str(user_id) if user_id else None,
+        )
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="code_review", project_id=_project_id_from_message(message_data))
@@ -496,9 +546,13 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         try:
             async with prompt_override_scope("code_review", _injected):
                 async with skill_context_scope("code_review", _skills):
-                    await _stream(state, config, websocket, session_id, before_end=_save)
+                    reply = await _stream(state, config, websocket, session_id, before_end=_save)
         finally:
             clear_mcp_tools()
+        await persist_turn(
+            session_id, "agent", reply, tenant_id=tenant_id or s.tenant_id or None,
+            author_id="code_review", model=message_data.get("model_id"),
+        )
         await manager.broadcast({
             "type": "activity_update",
             "activity": {
@@ -510,6 +564,11 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         logger.error("Code-review WS process error: %s", e)
         reason = _failure_reason(e)
         await manager.send_agent_response("Error Agent", f"An error occurred: {reason}", session_id)
+        # A reopened conversation shows that this turn failed, and why.
+        await persist_turn(
+            session_id, "agent", f"An error occurred: {reason}", tenant_id=tenant_id or None,
+            author_id="code_review",
+        )
         # THE TURN MUST SAY IT IS OVER, and that it failed. The chat BFF ends a run on
         # activity_update{complete} or agent_completed{success: false}; this path sent
         # neither, so a model whose key had been revoked left the drawer on "Agent is

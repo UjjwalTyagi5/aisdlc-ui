@@ -106,6 +106,9 @@ The conversation tells you which one you have:
   from one says which of its requirements the code meets, misses or contradicts.
 
 ## After the review
+Review only when the user asks for a review. A request to send, raise, publish or explain an
+existing report is not one: act on the saved report the conversation names, without
+re-running the security review or reading the code again.
 The report is filed in the project's Documents as a DRAFT. If the user asks to send, submit
 or raise it for approval, call raise_document_for_approval with its exact file name. You can
 NOT approve it — a project admin decides in Requests & Approvals.
