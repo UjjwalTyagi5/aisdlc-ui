@@ -411,43 +411,27 @@ async def submit_artifact(
     artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
     await _assert_project_visible(db, request, artifact.project_id)
 
-    if artifact.approval_status in ("approved", "rejected"):
+    # The rule — which statuses may move, what is audited — is shared with the agents'
+    # raise_document_for_approval tool, so the button and the chat cannot disagree.
+    from shared.services.artifact_approval import AlreadyDecided, submit_for_approval  # noqa: PLC0415
+
+    try:
+        moved = await submit_for_approval(
+            db, artifact,
+            tenant_id=request.state.tenant_id,
+            actor_id=getattr(request.state, "user_id", None),
+        )
+    except AlreadyDecided as decided:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"That document is already {artifact.approval_status}; it cannot be put "
+                f"That document is already {decided.status}; it cannot be put "
                 "forward again."
             ),
         )
-    if artifact.approval_status == "pending":
+    if not moved:
         return (await _with_actor_emails(
             db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
-
-    # The status it is LEAVING, read before the assignment overwrites it —
-    # PRD §34.9's before/after, unrecoverable one line later.
-    _was = artifact.approval_status or "draft"
-    artifact.approval_status = "pending"
-    db.add(
-        AuditEvent(
-            tenant_id=request.state.tenant_id,
-            actor_id=getattr(request.state, "user_id", None),
-            event_type="artifact_submit",
-            resource_type="artifact",
-            resource_id=str(artifact.id),
-            payload=await capture_names(
-                db, {
-                "project_id": str(artifact.project_id),
-                "stage": artifact.stage,
-                "before": _was,
-                "after": "pending",
-                "artifact_type": artifact.artifact_type,
-            },
-                actor_id=getattr(request.state, "user_id", None),
-            ),
-        )
-    )
-    await db.flush()
-    await db.refresh(artifact)
     logger.info("Artifact %s submitted for approval", artifact_id)
     return (await _with_actor_emails(
         db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]

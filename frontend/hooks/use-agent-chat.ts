@@ -448,6 +448,12 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
               )
             : m,
         );
+        // THE TURN MAY HAVE CHANGED THE PROJECT WITHOUT MAKING A FILE. A generated file
+        // refreshes the page as it arrives (`artifact.updated` above), but "send it for
+        // approval" moves a document from Draft to Pending and emits nothing — the
+        // Documents panel kept offering "Raise for approval" on a document already
+        // raised. Refreshing once per finished turn covers every such change.
+        onArtifactRef.current?.();
         // (attachments were already cleared at send-time; not here, so a file staged
         //  during streaming for the NEXT turn survives.)
         // Refresh the rail so the new/just-used session surfaces newest-first.

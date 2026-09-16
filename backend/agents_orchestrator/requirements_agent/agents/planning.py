@@ -2493,6 +2493,12 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 
+#: "Send it for approval" from the chat: the same act as the Documents panel's button,
+#: with the signed-in user's permission. See shared/tools/document_approval.py.
+from shared.tools.document_approval import make_approval_tools  # noqa: E402
+
+_APPROVAL_TOOLS = make_approval_tools("requirements")
+
 #: Bound to THIS agent and THIS stage. The connector resolves its access level
 #: against `agent_id`, and `stage` decides which documents belong to this screen —
 #: both come from here, never from a tool argument the model could set.
@@ -2528,6 +2534,7 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # refuses anything an owner has not accepted. There is no delete tool, here or
          # anywhere: taking a file out of the business's library is a person's job.
          *_DOCUMENT_TOOLS,
+         *_APPROVAL_TOOLS,
          *_SHAREPOINT_TOOLS,
          *_CONFLUENCE_TOOLS]
 
@@ -2854,9 +2861,12 @@ Post the gap report summary as a comment on the parent epic/item using add_board
 Every document you generate is recorded in the project's Documents automatically, as a
 DRAFT. You do NOT ask whether to save it, and there is no tool to call.
 - After generating a document, tell the user it is ready and give the download link.
-- Then say it is in the project's Documents as a draft: raising it for approval is the
-  user's next step, and a project admin decides whether it joins the project's shared
-  record.
+- Then say it is in the project's Documents as a draft, and that once it is raised for
+  approval a project admin decides whether it joins the project's shared record.
+- When the user asks to send, submit or raise a document for approval, call
+  raise_document_for_approval with its exact file name. You CAN do this for them; never
+  say only an owner or admin can raise it. You can NOT approve anything — approving is a
+  project admin's decision in Requests & Approvals.
 - Do NOT claim it has been "added to the project" or "saved to artifacts" — it is
   waiting on a decision nobody has made yet.
 - The download link works immediately either way.
