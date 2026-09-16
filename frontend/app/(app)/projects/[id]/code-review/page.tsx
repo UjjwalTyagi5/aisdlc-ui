@@ -5,16 +5,20 @@ import { useParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Boxes,
   Check,
   ChevronDown,
   Copy,
   FileDiff,
+  FileSearch,
   FileText,
+  FolderGit2,
   GitBranch,
   GitPullRequest,
   ListChecks,
   MessageSquare,
   ScrollText,
+  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 
@@ -35,6 +39,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
+import {
+  BranchFilesView,
+  CodeReviewReport,
+  type ReviewTab,
+  SbomView,
+  SecurityView,
+  scanRan,
+} from "@/components/app/code-review-report";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
@@ -46,7 +58,7 @@ import { qk } from "@/lib/api/query-keys";
 import type { PrepareResult, Severity, CodeReviewArtifact } from "@/lib/schemas/code-review";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "summary" | "findings" | "diff" | "documents";
+type Tab = ReviewTab;
 
 const REC_META: Record<string, { label: string; cls: string }> = {
   approve: { label: "Approve", cls: "bg-success/15 text-success border-success/30" },
@@ -145,7 +157,7 @@ export default function CodeReviewPage() {
     // takes the decision to re-review away from the reader.
     setPrepared(result);
     setActiveReviewId(null);
-    setTab("diff");
+    setTab(result.mode === "repo" ? "files" : "diff");
 
     const notice = unchangedReviewNotice(result);
     if (notice) {
@@ -159,7 +171,11 @@ export default function CodeReviewPage() {
 
   const runReview = () => {
     setChatOpen(true);
-    void chat.send("Please review the prepared change and submit your findings.");
+    void chat.send(
+      prepared?.mode === "repo"
+        ? "Please review the whole branch, run the security review, and submit your findings."
+        : "Please review the prepared change, run the security review, and submit your findings.",
+    );
   };
 
   if (projectQ.isLoading) {
@@ -189,18 +205,14 @@ export default function CodeReviewPage() {
 
   // Target chip text.
   const targetChip = (() => {
-    if (prepared) {
-      return prepared.mode === "pr"
-        ? `PR #${prepared.pr_id} · ${prepared.source_branch} → ${prepared.base_branch}`
-        : `${prepared.source_branch} → ${prepared.base_branch}`;
-    }
-    if (ctx) {
-      return ctx.mode === "pr"
-        ? `PR #${ctx.pr_id} · ${ctx.source_branch} → ${ctx.base_branch}`
-        : `${ctx.source_branch} → ${ctx.base_branch}`;
-    }
-    return null;
+    const t = prepared ?? ctx;
+    if (!t) return null;
+    if (t.mode === "repo") return `${t.source_branch} · whole branch`;
+    return t.mode === "pr"
+      ? `PR #${t.pr_id} · ${t.source_branch} → ${t.base_branch}`
+      : `${t.source_branch} → ${t.base_branch}`;
   })();
+  const mode = prepared?.mode ?? ctx?.mode ?? "branch";
   const repoName = prepared?.repo_name ?? ctx?.repo_name ?? "";
   const diffText = prepared?.diff ?? artifact?.diff ?? "";
   const hasReview = !!artifact;
@@ -215,8 +227,10 @@ export default function CodeReviewPage() {
             <p className="text-muted-foreground text-xs">
               {targetChip ? (
                 <span className="inline-flex items-center gap-1">
-                  {prepared?.mode === "pr" || ctx?.mode === "pr" ? (
+                  {mode === "pr" ? (
                     <GitPullRequest className="size-3" aria-hidden />
+                  ) : mode === "repo" ? (
+                    <FolderGit2 className="size-3" aria-hidden />
                   ) : (
                     <GitBranch className="size-3" aria-hidden />
                   )}
@@ -225,7 +239,7 @@ export default function CodeReviewPage() {
                   <span className="font-mono">{targetChip}</span>
                 </span>
               ) : (
-                <span>Read-only review of a branch diff or a pull request.</span>
+                <span>Read-only review of a branch diff, a pull request or a whole branch, with a security review.</span>
               )}
             </p>
           </div>
@@ -291,7 +305,7 @@ export default function CodeReviewPage() {
               description={
                 reviews.length > 0
                   ? `Pick one of the ${reviews.length} past reviews from the switcher above, or select a new target and run a fresh review.`
-                  : "Select a branch-vs-base diff or an open PR, then run the review. Findings, a summary, and a merge recommendation appear here."
+                  : "Select a branch-vs-base diff, an open PR or a whole branch, then run the review. A report with findings, a security review, an SBOM and a merge recommendation appears here."
               }
               action={
                 <Button onClick={() => setPickerOpen(true)}>
@@ -322,9 +336,26 @@ export default function CodeReviewPage() {
                 </span>
               )}
             </TabBtn>
-            <TabBtn active={tab === "diff"} onClick={() => setTab("diff")} icon={FileDiff}>
-              Diff
+            <TabBtn active={tab === "security"} onClick={() => setTab("security")} icon={ShieldCheck}>
+              Security
+              {artifact && scanRan(artifact.security) && (artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0) > 0 && (
+                <span className="bg-destructive/15 ml-1 rounded-full px-1.5 text-[10px] text-red-700 dark:text-red-400">
+                  {(artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0)}
+                </span>
+              )}
             </TabBtn>
+            <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
+              SBOM
+            </TabBtn>
+            {mode === "repo" ? (
+              <TabBtn active={tab === "files"} onClick={() => setTab("files")} icon={FileSearch}>
+                Files
+              </TabBtn>
+            ) : (
+              <TabBtn active={tab === "diff"} onClick={() => setTab("diff")} icon={FileDiff}>
+                Diff
+              </TabBtn>
+            )}
             {/* DOCUMENTS AS A TAB — this page is a review viewer with no side column,
                 so there is nowhere else to put them. Without it a Code Review document
                 could be uploaded and approved with nowhere on this page to see it. */}
@@ -337,9 +368,19 @@ export default function CodeReviewPage() {
             {reviewQ.isLoading && activeReviewId ? (
               <LoadingState variant="card" />
             ) : tab === "summary" ? (
-              <SummaryView artifact={artifact} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
+              artifact ? (
+                <CodeReviewReport artifact={artifact} onOpenTab={setTab} />
+              ) : (
+                <SummaryView mode={mode} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
+              )
             ) : tab === "findings" ? (
-              <FindingsView artifact={artifact} onJump={() => setTab("diff")} />
+              <FindingsView artifact={artifact} onJump={() => setTab(mode === "repo" ? "files" : "diff")} />
+            ) : tab === "security" ? (
+              <SecurityView artifact={artifact} />
+            ) : tab === "sbom" ? (
+              <SbomView artifact={artifact} />
+            ) : tab === "files" ? (
+              <BranchFilesView prepared={prepared} artifact={artifact} />
             ) : tab === "documents" ? (
               <div className="p-4">
                 {/* The BACKEND stage name — the UI phase is `review`, the column says
@@ -379,7 +420,7 @@ export default function CodeReviewPage() {
         starterSuggestions={[
           "Review the prepared change and submit your findings.",
           "Focus on security and error handling.",
-          "Is this change safe to merge?",
+          "Send the review report for approval.",
         ]}
       />
     </div>
@@ -455,112 +496,38 @@ function ReviewSwitcher({
 }
 
 function SummaryView({
-  artifact,
+  mode,
   onRun,
   canRun,
   busy,
 }: {
-  artifact: CodeReviewArtifact | null;
+  mode: string;
   onRun: () => void;
   canRun: boolean;
   busy: boolean;
 }) {
-  if (!artifact) {
-    return (
-      <div className="mx-auto max-w-xl px-4 py-12">
-        <EmptyState
-          icon={Sparkles}
-          title={busy ? "Reviewing…" : "Diff ready — run the review"}
-          description={
-            busy
-              ? "The agent is analyzing the change. Findings and a recommendation will appear here."
-              : "The diff is staged in the Diff tab. Run the review to generate findings, a summary, and a merge recommendation."
-          }
-          action={
-            canRun ? (
-              <Button onClick={onRun}>
-                <Sparkles className="size-4" aria-hidden />
-                Run review
-              </Button>
-            ) : undefined
-          }
-        />
-      </div>
-    );
-  }
-  const rec = REC_META[artifact.merge_recommendation];
-  const m = artifact.metrics;
+  const branch = mode === "repo";
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <Badge variant="outline" className={cn("border px-3 py-1 text-sm", rec?.cls)}>
-          {rec?.label ?? artifact.merge_recommendation}
-        </Badge>
-        <span className="text-muted-foreground text-xs">
-          {artifact.findings.length} findings ·{" "}
-          {artifact.findings.filter((f) => f.severity === "critical" || f.severity === "high").length} critical/high
-        </span>
-      </div>
-
-      {/* Metrics */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Metric label="Files" value={`${m.files_changed}`} />
-        <Metric label="Added" value={`+${m.added}`} tone="text-success" />
-        <Metric label="Removed" value={`-${m.removed}`} tone="text-destructive" />
-        <Metric
-          label="Δ complexity"
-          value={m.complexity_delta != null ? `${m.complexity_delta > 0 ? "+" : ""}${m.complexity_delta}` : "—"}
-        />
-      </div>
-
-      {/* Summary markdown (rendered as readable prose) */}
-      {artifact.summary && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Review summary</h3>
-          <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap rounded-lg border bg-surface-1 p-4 text-sm leading-relaxed">
-            {artifact.summary}
-          </div>
-        </section>
-      )}
-
-      {artifact.requirements_coverage.length > 0 && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Requirements coverage</h3>
-          <ul className="space-y-1.5">
-            {artifact.requirements_coverage.map((c, i) => (
-              <li key={i} className="flex items-center gap-2 text-sm">
-                <Badge variant="outline" className="text-[10px]">{c.status}</Badge>
-                <span className="font-mono text-xs">{c.ac_id}</span>
-                {c.note && <span className="text-muted-foreground truncate">— {c.note}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {artifact.design_conformance.length > 0 && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Design conformance</h3>
-          <ul className="space-y-1.5">
-            {artifact.design_conformance.map((c, i) => (
-              <li key={i} className="flex items-center gap-2 text-sm">
-                <Badge variant="outline" className="text-[10px]">{c.status}</Badge>
-                <span className="truncate">{c.rule}</span>
-                {c.note && <span className="text-muted-foreground truncate">— {c.note}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-lg border bg-surface-1 p-3">
-      <div className={cn("font-mono text-lg font-semibold", tone)}>{value}</div>
-      <div className="text-muted-foreground text-[10px] uppercase tracking-wider">{label}</div>
+    <div className="mx-auto max-w-xl px-4 py-12">
+      <EmptyState
+        icon={Sparkles}
+        title={busy ? "Reviewing…" : branch ? "Branch ready — run the review" : "Diff ready — run the review"}
+        description={
+          busy
+            ? "The agent is reading the code and running the security review. The report will appear here."
+            : branch
+              ? "The branch's files are listed in the Files tab. Run the review to get findings, a security review, an SBOM and a merge recommendation for the whole branch."
+              : "The diff is staged in the Diff tab. Run the review to get findings, a security review, an SBOM and a merge recommendation."
+        }
+        action={
+          canRun ? (
+            <Button onClick={onRun}>
+              <Sparkles className="size-4" aria-hidden />
+              Run review
+            </Button>
+          ) : undefined
+        }
+      />
     </div>
   );
 }
