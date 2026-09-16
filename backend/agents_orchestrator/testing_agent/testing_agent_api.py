@@ -348,6 +348,22 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 
 
 
+def _with_model_choice(previous_state: Dict | None, message_data: dict) -> Dict | None:
+    """Carry the picker's `offering_id` (exact: connection + model) and the Run
+    button's `model` into the state `_stash_byok_model` reads. A message that names
+    neither leaves the state alone, so a follow-up turn keeps the session's choice."""
+    offering = message_data.get("offering_id")
+    model = message_data.get("model") or message_data.get("model_id")
+    if not (offering or model):
+        return previous_state
+    out = dict(previous_state or {})
+    if offering:
+        out["offering_id"] = offering
+    if model:
+        out["model_id"] = model
+    return out
+
+
 async def _stash_byok_model(tenant_id: str | None, project_id: str | None,
                             previous_state: dict | None) -> str:
     """Resolve the run's BYOK model and stash it on the contextvar before the graph runs.
@@ -744,6 +760,14 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
             api_timeout_s=message_data.get("api_timeout_s"),
             test_config=message_data.get("test_config"),
         )
+        # THE PICKER'S CHOICE. The page sends `offering_id` (exact: connection + model)
+        # and the Run button also sends `model`; `_stash_byok_model` reads both from
+        # the state — and nothing copied them in, so every run resolved the ORG
+        # DEFAULT offering while the picker said otherwise. On this tenant the default
+        # is an Azure offering whose key is dead, so a run with "xAI · grok-3-mini"
+        # selected died on "AzureException AuthenticationError" and reported "could
+        # not analyze the codebase". The Design and Development chats copy these.
+        previous_state = _with_model_choice(previous_state, message_data)
 
         if previous_state:
 
@@ -979,6 +1003,15 @@ async def process_user_message_ws(message_data: dict, websocket: WebSocket, user
                 print(f"ERROR: Failed to create zip archive: {e}")
                 await manager.send_agent_response("Error Agent", f"Failed to create zip file: {e}", session_id)
         # --- MODIFICATION END ---
+
+        # THE RUN REPORT the page renders: built while the run's state is in memory
+        # (stderr, generated files, the clone target) and persisted beside the files.
+        try:
+            from agents_orchestrator.testing_agent.run_report import write_run_report  # noqa: PLC0415
+
+            write_run_report(output_directory, session_id=session_id, state=final_state)
+        except Exception:  # noqa: BLE001
+            logger.warning("testing: run report not written", exc_info=True)
 
         # INTO THE RECORD. Every document this run produced is filed as a DRAFT
         # testing-stage artifact: it appears in the page's Documents list, the tester
@@ -1431,6 +1464,26 @@ async def download_generated_file(user_id: str, session_id: str, filename: str):
         if not isinstance(e, HTTPException):
             raise HTTPException(status_code=500, detail="An internal error occurred while trying to download the file.")
         raise e
+
+@testing_router_orchestrator.get("/report/{session_id}")
+async def get_run_report(request: Request, session_id: str, user_id: str = "default"):
+    """The run's report as structured JSON — verdict, execution, coverage per file,
+    each test, the generated cases, defects — for the page's Test Run Report view.
+    The signed-in caller's own session directory; `user_id` is the page's fallback
+    for the same path the QA report and downloads use."""
+    from agents_orchestrator.testing_agent.run_report import read_run_report  # noqa: PLC0415
+
+    owner = str(getattr(request.state, "user_id", "") or "") or user_id
+    output_dir = f"{esett.FILES}/{owner}/orchestrator/{session_id}/output"
+    # `available: false`, not 404 — the page polls this while the run is going, the
+    # same way it polls unit-result, and a 404 there reads as an error.
+    if not os.path.isdir(output_dir):
+        return {"available": False, "report": None}
+    report = read_run_report(output_dir, session_id=session_id, state=SESSION_STATES.get(session_id))
+    if report is None or report.get("verdict") == "no_tests" and not report.get("testCases"):
+        return {"available": False, "report": None}
+    return {"available": True, "report": report}
+
 
 @testing_router_orchestrator.get("/qa_report/{session_id}")
 async def get_qa_report_html(request: Request, session_id: str, user_id: str = "default"):

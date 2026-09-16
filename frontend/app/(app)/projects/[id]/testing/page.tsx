@@ -29,14 +29,16 @@ import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
+import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
+import { TestRunReport } from "@/components/app/test-run-report";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
-import { getUnitResult, openTestsPr, type UnitResult } from "@/lib/api/testing";
+import { getRunReport, getUnitResult, openTestsPr, type UnitResult } from "@/lib/api/testing";
 import { qk } from "@/lib/api/query-keys";
 import type { ProjectId } from "@/lib/schemas";
 
@@ -163,6 +165,16 @@ export default function TestingPage() {
     enabled: !!ranSession && !!chat.sessionId && ranType === "unit",
     refetchInterval: chat.busy ? 4000 : false,
   });
+  // THE RUN'S REPORT — the numbers the run wrote (`run_report.json`), rendered as a
+  // report in the Output pane. The agent's prose used to be all the pane showed:
+  // `##` and `**` on screen, and "did it pass" somewhere in paragraph six.
+  const reportQ = useQuery({
+    queryKey: qk.testing.runReport(id, chat.sessionId ?? ""),
+    queryFn: () => getRunReport(id, chat.sessionId ?? ""),
+    enabled: !!ranSession && !!chat.sessionId,
+    refetchInterval: (q) => (chat.busy || !q.state.data?.available ? 4000 : false),
+  });
+  const report = !chat.busy && reportQ.data?.available ? (reportQ.data.report ?? null) : null;
   const prMut = useMutation({
     mutationFn: () => openTestsPr(id, chat.sessionId ?? ""),
     onSuccess: () => { toast.success("Tests PR opened"); void unitQ.refetch(); },
@@ -356,13 +368,25 @@ export default function TestingPage() {
               </a>
             )}
           </div>
-          {ranType === "unit" && unitQ.data?.available && (
+          {ranType === "unit" && unitQ.data?.available && !(tab === "output" && report) && (
             <UnitResultBar data={unitQ.data} busy={chat.busy} pending={prMut.isPending} onOpenPr={() => prMut.mutate()} />
           )}
           <div className="min-h-0 flex-1 overflow-auto">
             {tab === "output" ? (
-              <OutputView messages={chat.messages} busy={chat.busy} onOpenChat={() => setChatOpen(true)} hasTarget={!!target}
-                onSelectTarget={() => setPickerOpen(true)} />
+              report ? (
+                <>
+                  <TestRunReport
+                    report={report}
+                    actions={
+                      <TestsPrAction data={unitQ.data} busy={chat.busy} pending={prMut.isPending} onOpenPr={() => prMut.mutate()} />
+                    }
+                  />
+                  <AgentNotes messages={chat.messages} onOpenChat={() => setChatOpen(true)} />
+                </>
+              ) : (
+                <OutputView messages={chat.messages} busy={chat.busy} onOpenChat={() => setChatOpen(true)} hasTarget={!!target}
+                  onSelectTarget={() => setPickerOpen(true)} />
+              )
             ) : ranSession ? (
               <iframe title="QA report" src={`/api/testing/${id}/qa/${ranSession}`} className="h-full w-full bg-white" />
             ) : (
@@ -479,6 +503,60 @@ function UnitResultBar({ data, busy, pending, onOpenPr }: {
           {files.length > 8 && <span className="text-muted-foreground text-[10px]">+{files.length - 8} more</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The tests-PR button the results bar used to own, for the report's corner. */
+function TestsPrAction({ data, busy, pending, onOpenPr }: {
+  data: UnitResult | undefined; busy: boolean; pending: boolean; onOpenPr: () => void;
+}) {
+  if (!data?.available) return null;
+  const files = data.generated_files ?? [];
+  if (data.pr_url) {
+    return (
+      <a href={data.pr_url} target="_blank" rel="noreferrer">
+        <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+          <CheckCircle2 className="text-success size-3.5" aria-hidden />View tests PR
+        </Button>
+      </a>
+    );
+  }
+  if (files.length === 0) return null;
+  return (
+    <RequireRole capability="run:trigger" fallback={null}>
+      <Button size="sm" className="from-brand-gradient-from to-brand-gradient-to h-8 gap-1.5 bg-gradient-to-br text-xs font-semibold text-white"
+        onClick={onOpenPr} disabled={busy || pending}>
+        {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <GitPullRequest className="size-3.5" aria-hidden />}
+        {pending ? "Opening PR…" : "Open tests PR"}
+      </Button>
+    </RequireRole>
+  );
+}
+
+/** What the agent said, folded under the report — the numbers lead, the prose is
+ *  there for whoever wants the reasoning. */
+function AgentNotes({ messages, onOpenChat }: {
+  messages: ReturnType<typeof useAgentChat>["messages"]; onOpenChat: () => void;
+}) {
+  const agentMsgs = messages.filter((m) => m.role === "agent" && m.content);
+  if (agentMsgs.length === 0) return null;
+  const last = agentMsgs[agentMsgs.length - 1]!;
+  return (
+    <div className="mx-auto max-w-5xl space-y-3 px-4 pb-6 md:px-6">
+      <details className="group rounded-xl border">
+        <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-4 py-2.5 text-xs font-semibold tracking-wide uppercase select-none">
+          <ScrollText className="size-3.5" aria-hidden />Agent notes
+          <span className="ml-auto font-normal normal-case tracking-normal group-open:hidden">show</span>
+          <span className="ml-auto hidden font-normal normal-case tracking-normal group-open:inline">hide</span>
+        </summary>
+        <div className="border-t px-4 py-3">
+          <MarkdownMessage content={last.content} />
+        </div>
+      </details>
+      <Button variant="outline" size="sm" onClick={onOpenChat}>
+        <MessageSquare className="size-4" aria-hidden />Ask a follow-up in chat
+      </Button>
     </div>
   );
 }

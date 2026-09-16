@@ -184,6 +184,8 @@ export const qk = {
   testing: {
     unitResult: (id: ProjectId, session: string) =>
       ["testing", "unit-result", id, session] as const,
+    runReport: (id: ProjectId, session: string) =>
+      ["testing", "run-report", id, session] as const,
   },
   documentation: {
     connectors: (id: ProjectId) => ["documentation", "connectors", id] as const,
