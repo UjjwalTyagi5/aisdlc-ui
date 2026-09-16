@@ -320,7 +320,7 @@ export default function CodeReviewPage() {
         >
           {/* The BACKEND stage name — the UI phase is `review`, the column says
               `code_review`, and passing the wrong one silently lists nothing. */}
-          <DocumentList projectId={id} stage="code_review" className="shrink-0" />
+          <DocumentList projectId={id} stage="code_review" className="flex min-h-0 flex-1 flex-col" fillHeight />
         </aside>
 
         <div className="flex min-h-0 flex-col overflow-hidden">

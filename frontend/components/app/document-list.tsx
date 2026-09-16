@@ -95,6 +95,13 @@ function normalisedStatus(a: Artifact): "draft" | "approved" | "rejected" | "pen
   return "pending";
 }
 
+/** "16 Sep, 21:33" — en-GB so the server and the browser render the same string. */
+function createdLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
 const STATUS_FILTER_LABEL: Record<string, string> = {
   draft: "Draft",
   approved: "Approved",
@@ -175,6 +182,11 @@ export interface DocumentListProps {
    *  artifact that no longer exists. */
   onDeleted?: (a: Artifact) => void;
   className?: string;
+  /** Let the list fill the column it sits in instead of capping at a few cards. For a
+   *  side column that holds nothing but documents (Code Review), the cap hid the
+   *  document that had just been raised behind the ones above it. The caller's
+   *  `className` must make the section a flex column with `min-h-0`. */
+  fillHeight?: boolean;
 }
 
 export function DocumentList({
@@ -189,6 +201,7 @@ export function DocumentList({
   onSelect,
   onDeleted,
   className,
+  fillHeight = false,
 }: DocumentListProps) {
   const session = useSession();
   const queryClient = useQueryClient();
@@ -253,7 +266,13 @@ export function DocumentList({
 
   const documents = React.useMemo(() => {
     const q = search.trim().toLowerCase();
-    return scoped.filter((a) => {
+    // NEWEST FIRST, WHATEVER HAPPENS TO A ROW. The API used to return storage order, in
+    // which an updated row moves last — so raising a draft sent it to the bottom of the
+    // panel, behind eight identically named reports, and the raise looked like nothing.
+    const ordered = [...scoped].sort(
+      (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || a.id.localeCompare(b.id),
+    );
+    return ordered.filter((a) => {
       // THROUGH THE SAME NORMALISER THE OPTIONS ARE BUILT FROM. This compared the raw
       // `a.status` against the option value, and the option for a waiting document is
       // "pending" while the status itself is "awaiting_approval" — so choosing Pending
@@ -473,7 +492,7 @@ export function DocumentList({
         // Stories further down the page — at fifteen documents the list below it was
         // off-screen entirely. `max-h` with its own overflow keeps the panel a fixed
         // share of the column no matter how much lands in it.
-        <ul className="max-h-80 divide-y overflow-y-auto rounded-md border">
+        <ul className={cn("divide-y overflow-y-auto rounded-md border", fillHeight ? "min-h-0 flex-1" : "max-h-80")}>
           {documents.map((a) => {
             const chip = statusChip(a);
             const isProjectWide = a.scope === "project";
@@ -543,6 +562,13 @@ export function DocumentList({
                     document still waiting, "who" is the person it is waiting ON, not
                     just who put it there: "Pending" alone tells you something is stuck
                     without telling you whose move it is. */}
+                {/* WHEN IT WAS MADE. Nine reports of one commit share a file name; the
+                    date is the only thing that tells the one just generated from the
+                    one generated an hour ago. One fixed format, so the server's and the
+                    browser's renders agree. */}
+                <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+                  {createdLabel(a.createdAt)}
+                </span>
                 <span className="text-muted-foreground truncate text-xs">
                   {a.status === "approved" && a.approvedBy
                     ? `${a.approvedBy}${

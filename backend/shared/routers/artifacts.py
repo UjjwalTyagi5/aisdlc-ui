@@ -124,10 +124,15 @@ async def list_artifacts_for_project(
     # without a run could not be listed — and since 0052 that is every hand-uploaded
     # one. The run is still joined (outer) because nothing else needs it, but it no
     # longer decides membership.
+    # NEWEST FIRST, AND STABLE. Without an ORDER BY Postgres returns rows in storage
+    # order, and an UPDATE rewrites the row at the end of the table — so raising a draft
+    # for approval moved it to the bottom of the Documents panel, behind eight
+    # identically named reports, and read as "nothing happened".
     stmt = (
         select(Artifact)
         .where(Artifact.project_id == project.id)
         .where(Artifact.tenant_id == tenant_id)
+        .order_by(Artifact.created_at.desc(), Artifact.id)
     )
     if phase:
         # A PROJECT-LEVEL document is not "in" any phase, so filtering by one must not

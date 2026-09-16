@@ -88,3 +88,23 @@ describe("Raise for approval", () => {
     expect(getMyAgentAccess).not.toHaveBeenCalled();
   });
 });
+
+describe("The list's order", () => {
+  it("is newest first and does not move a document when it is raised", async () => {
+    state.permissions = ["run:create"];
+    const older = draft("code_review", "QuickLink_Code_Review.docx");
+    const newer = { ...draft("code_review", "QuickLink_Code_Review.docx"), id: "id-newer", createdAt: "2026-09-16T15:00:00Z", status: "awaiting_approval" };
+    // The API used to return storage order, in which an updated row moves last: the raised
+    // (newer) report came after the older draft and disappeared below the fold.
+    renderList("code_review", [older, newer]);
+    await screen.findAllByText("QuickLink_Code_Review.docx");
+    const rows = screen.getAllByRole("listitem").map((r) => r.textContent ?? "");
+    expect(rows[0]).toContain("Pending");
+    expect(rows[1]).toContain("Draft");
+    // And each card says when it was made, since the names are identical — in the
+    // reader's own time zone, so the expectation is computed the same way.
+    const label = (iso: string) => new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+    expect(rows[0]).toContain(label("2026-09-16T15:00:00Z"));
+    expect(rows[1]).toContain(label("2026-09-16T12:00:00Z"));
+  });
+});
