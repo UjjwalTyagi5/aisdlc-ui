@@ -7,15 +7,11 @@ import contextvars
 import aiohttp
 import aiofiles
 import json
-from bs4 import BeautifulSoup, NavigableString, Tag
 from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_COLOR_INDEX
 from io import BytesIO
 from xhtml2pdf import pisa
 import textwrap
 import docx 
-import markdown
 from dotenv import load_dotenv
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import PyPDF2
@@ -153,33 +149,6 @@ async def _load_ref_paths(file_names: list) -> tuple:
     return paths, None
 
 
-def add_hyperlink(paragraph, text, url):
-    """
-    Adds a hyperlink to a paragraph.
- 
-    Args:
-        paragraph: The paragraph to add the hyperlink to.
-        text (str): The text to display for the link.
-        url (str): The URL the link should point to.
-    """
-    part = paragraph.part
-    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
-   
-    hyperlink = OxmlElement('w:hyperlink')
-    hyperlink.set(qn('r:id'), r_id)
-   
-    run = OxmlElement('w:r')
-    rPr = OxmlElement('w:rPr')
-    rStyle = OxmlElement('w:rStyle')
-    rStyle.set(qn('w:val'), 'Hyperlink')
-    rPr.append(rStyle)
-    run.append(rPr)
-    run.append(OxmlElement('w:t', text=text))
-   
-    hyperlink.append(run)
-    paragraph._p.append(hyperlink)
-    return hyperlink
-
 # Enhanced file_generated broadcast with file size
 async def broadcast_file_generated(session_id: str, filename: str, file_path: str):
     """Enhanced function to broadcast file generation with file size"""
@@ -213,133 +182,51 @@ async def broadcast_file_generated(session_id: str, filename: str, file_path: st
         return ""
 
 async def markdown_to_docx(markdown_string: str, docx_path: str):
-    """
-    Converts a Markdown or HTML string to a DOCX file with near-full feature support.
-    Now async to allow for real-time updates.
-    """
-    # Import OXML elements here to keep the function self-contained
-    from docx.oxml.shared import OxmlElement
-    from docx.oxml.ns import qn
- 
-    print(f"Starting markdown to docx conversion for: {docx_path}")
-    dedented_markdown = textwrap.dedent(markdown_string).strip()
-    doc = Document()
-    # Enable all necessary extensions for full feature support
-    html = markdown.markdown(dedented_markdown, extensions=['extra', 'sane_lists', 'tables', 'fenced_code', 'codehilite'])
-    soup = BeautifulSoup(html, 'html.parser')
- 
-    def _add_inline_content(paragraph, element: Tag):
-        """Recursively adds formatted runs to a paragraph."""
-        for child in element.children:
-            if isinstance(child, NavigableString):
-                if child.strip():
-                    run = paragraph.add_run(child)
-                    curr = child.parent
-                    # Apply formatting from parent tags
-                    while curr is not None and curr.name != element.name:
-                        if curr.name in ['strong', 'b']: run.bold = True
-                        if curr.name in ['em', 'i']: run.italic = True
-                        if curr.name in ['s', 'del']: run.strike = True
-                        if curr.name == 'code':
-                            run.font.name = 'Courier New'
-                        curr = curr.parent
-            elif isinstance(child, Tag):
-                if child.name == 'br':
-                    paragraph.add_run().add_break()
-                elif child.name == 'a':
-                    add_hyperlink(paragraph, child.get_text(), child.get('href'))
-                else:
-                    _add_inline_content(paragraph, child)
+    """Write `markdown_string` as the designed Word document at `docx_path` — the
+    platform's title band, key-facts strip and palette (`shared/docs/markdown_docx`),
+    the same canvas the brief, the design document and the test case document use —
+    then announce and file it. The document's markdown is written beside it as
+    `<name>.md` for the Requirements page's report view.
 
-    async def _parse_element(element, doc, list_info=None):
-        """Recursively parses a BeautifulSoup element and adds it to the document."""
-        if not hasattr(element, 'name') or element.name is None: 
-            return
- 
-        if element.name in [f'h{i}' for i in range(1, 7)]:
-            level = int(element.name[1])
-            p = doc.add_heading(level=level)
-            _add_inline_content(p, element)
-            print(f"Added heading level {level}")
-            await asyncio.sleep(0.001)  # Allow other tasks to run
-        elif element.name == 'p':
-            p = doc.add_paragraph()
-            _add_inline_content(p, element)
-            print("Added paragraph")
-            await asyncio.sleep(0.001)
-        elif element.name in ['ul', 'ol']:
-            list_style = 'List Bullet' if element.name == 'ul' else 'List Number'
-            parent_level = list_info[1] if list_info else -1
-            for li in element.find_all('li', recursive=False):
-                await _parse_element(li, doc, list_info=(list_style, parent_level + 1))
-        elif element.name == 'li':
-            if list_info:
-                style, level = list_info
-                p = doc.add_paragraph(style=style)
-                p.paragraph_format.left_indent = Inches(0.5 * level)
-                _add_inline_content(p, element)
-                for nested_list in element.find_all(['ul', 'ol'], recursive=False):
-                    await _parse_element(nested_list, doc, list_info)
-                print(f"Added list item at level {level}")
-                await asyncio.sleep(0.001)
-        elif element.name == 'table':
-            rows_data = element.find_all('tr')
-            if not rows_data: return
-            num_cols = len(rows_data[0].find_all(['th', 'td']))
-            table = doc.add_table(rows=len(rows_data), cols=num_cols)
-            table.style = 'Table Grid'
-            for i, row_element in enumerate(rows_data):
-                cells = row_element.find_all(['th', 'td'])
-                for j, cell_element in enumerate(cells):
-                    p = table.cell(i, j).paragraphs[0]
-                    _add_inline_content(p, cell_element)
-            print(f"Added table with {len(rows_data)} rows and {num_cols} columns")
-            await asyncio.sleep(0.001)
-        elif element.name == 'img':
-            src = element.get('src')
-            if src:
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(src) as response:
-                            if response.status == 200:
-                                image_data = await response.read()
-                                doc.add_picture(BytesIO(image_data), width=Inches(5.0))
-                                print(f"Added image from {src}")
-                            else:
-                                print(f"Warning: Could not fetch image from {src}. Status: {response.status}")
-                                doc.add_paragraph(f"[Image not found: {src}]").add_run().italic = True
-                except Exception as e:
-                    print(f"Warning: Could not fetch image from {src}. Error: {e}")
-                    doc.add_paragraph(f"[Image not found: {src}]").add_run().italic = True
-        elif element.name == 'hr':
-            doc.add_page_break()
-            print("Added page break")
-            await asyncio.sleep(0.001)
-        elif element.name == 'blockquote':
-            p = doc.add_paragraph(style='Quote')
-            p.paragraph_format.left_indent = Inches(0.5)
-            for child in element.children:
-                await _parse_element(child, doc)
-            print("Added blockquote")
-            await asyncio.sleep(0.001)
-        elif element.name == 'pre':
-            code_text = element.get_text()
-            p = doc.add_paragraph(style='No Spacing')
-            run = p.add_run(code_text)
-            run.font.name = 'Courier New'
-            run.font.size = Pt(10)
-            print("Added code block")
-            await asyncio.sleep(0.001)
- 
-    # Process all top-level tags from the parsed HTML
-    for element in soup.contents:
-        await _parse_element(element, doc)
-    
+    This used to be a generic HTML-walking converter that produced Word's defaults:
+    the first document a client sees from the platform, and the one that looked
+    designed by nobody. See requirements_document.py.
+    """
+    from agents_orchestrator.requirements_agent.requirements_document import (  # noqa: PLC0415
+        RequirementsDocMeta,
+        document_kind,
+        render_requirements_docx,
+        source_names,
+        title_for,
+        today,
+        write_markdown_sibling,
+    )
+
+    dedented_markdown = textwrap.dedent(markdown_string).strip()
+    filename = os.path.basename(docx_path)
+    kind = document_kind(dedented_markdown, filename)
+    session_id = get_session_id()
+    project = await _project_display_name()
+    meta = RequirementsDocMeta(
+        title=title_for(dedented_markdown, filename, kind, project),
+        kind=kind,
+        project=project,
+        sources=source_names(_LAST_SOURCE_FILES.get(session_id, [])),
+        generated_on=today(),
+    )
+    print(f"Starting markdown to docx conversion for: {docx_path}")
+    os.makedirs(os.path.dirname(docx_path) or ".", exist_ok=True)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None, lambda: render_requirements_docx(dedented_markdown, docx_path, meta=meta),
+    )
     try:
-        session_id = get_session_id()
+        write_markdown_sibling(dedented_markdown, docx_path)
+    except OSError as exc:
+        print(f"DEBUG: markdown sibling not written: {exc}")
+
+    try:
         print(f"Saving document to {docx_path}")
-        doc.save(docx_path)
-        filename = os.path.basename(docx_path)
         _url = await broadcast_file_generated(session_id, filename, docx_path)
         print(f"Successfully saved document to {docx_path}")
         if _url:
@@ -347,6 +234,31 @@ async def markdown_to_docx(markdown_string: str, docx_path: str):
     except Exception as e:
         print(f"An exception occurred while saving the doc file: {e}")
     return f"Successfully converted Markdown to {os.path.basename(docx_path)}"
+
+
+async def _project_display_name() -> str:
+    """The project's display name for the document's title band, or ""."""
+    try:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.models.orm import Project  # noqa: PLC0415
+
+        project_id, tenant_id = get_project_id(), get_tenant_id()
+        if not (project_id and tenant_id):
+            return ""
+        async with get_db_session_for_tenant(tenant_id) as db:
+            project = await db.get(Project, _uuid.UUID(str(project_id)))
+            return (getattr(project, "display_name", "") or "") if project else ""
+    except Exception:  # noqa: BLE001 — a blank fact, never a lost document
+        return ""
+
+
+#: Per session: the uploaded files the last document was generated from — the
+#: document's "Source" fact. Set by generate_brd / generate_pdd / generate_risk_register.
+_LAST_SOURCE_FILES: dict = {}
+
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
@@ -429,6 +341,13 @@ async def delete_file(file_name: str):
 _LAST_GENERATED_DOC: dict[str, str] = {}
 
 
+def _remember_sources(file_paths) -> None:
+    try:
+        _LAST_SOURCE_FILES[get_session_id()] = list(file_paths or [])
+    except Exception:
+        pass
+
+
 def _remember_doc(content: str) -> None:
     try:
         _LAST_GENERATED_DOC[get_session_id()] = content
@@ -456,6 +375,7 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the BRD should cover, or upload a source file."
     prompt = BRDPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         broadcast_log(manager, "Generating BRD content...", level="INFO")
         loop = asyncio.get_event_loop()
@@ -487,6 +407,7 @@ async def generate_pdd(file_names: List[str], custom_prompt: str):
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the PDD should cover, or upload a source file."
     prompt = PDDPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         print("Generating PDD content...")
         loop = asyncio.get_event_loop()
@@ -516,6 +437,7 @@ async def generate_risk_register(file_names: List[str], custom_prompt: str):
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the Risk Register should cover, or upload a source file."
     prompt = RISKPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         print("Generating Risk Register content...")
         loop = asyncio.get_event_loop()

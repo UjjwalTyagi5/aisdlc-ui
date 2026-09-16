@@ -17,7 +17,8 @@ import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { ArtifactList } from "@/components/app/artifact-list";
 import { DocumentList } from "@/components/app/document-list";
-import { GeneratedDocuments } from "@/components/app/generated-documents";
+import { DocumentReportView, hasReportView } from "@/components/app/document-report-view";
+import { GeneratedDocuments, type GeneratedDoc } from "@/components/app/generated-documents";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { TraceabilityPanel } from "@/components/app/traceability-panel";
 import { RequireRole } from "@/components/auth/require-role";
@@ -228,6 +229,39 @@ export default function RequirementsPage() {
     },
   });
 
+  // THE DOCUMENT IN THE CENTRE PANEL. A BRD used to be a link in the "Generated
+  // documents" card and nothing else — the first thing a client sees from the
+  // platform, offered as a download. The agent now leaves the document's markdown
+  // beside the Word file, and the newest one opens here as a report the moment it
+  // exists; "View" on the card brings back an earlier one. Opening a story (which
+  // sets ?artifact=) takes the panel; closing it returns the document.
+  const [openDoc, setOpenDoc] = React.useState<GeneratedDoc | null>(null);
+  const shownDocIds = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const fresh = chat.documents.filter((d) => hasReportView(d) && !shownDocIds.current.has(d.id));
+    if (fresh.length === 0) return;
+    for (const d of fresh) shownDocIds.current.add(d.id);
+    setOpenDoc(fresh[fresh.length - 1]!);
+    if (searchParams.get("artifact")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("artifact");
+      const qs = next.toString();
+      router.replace(`/projects/${projectId}/requirements${qs ? `?${qs}` : ""}`);
+    }
+  }, [chat.documents, searchParams, router, projectId]);
+  const openDocument = React.useCallback(
+    (d: GeneratedDoc) => {
+      setOpenDoc(d);
+      if (searchParams.get("artifact")) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("artifact");
+        const qs = next.toString();
+        router.replace(`/projects/${projectId}/requirements${qs ? `?${qs}` : ""}`);
+      }
+    },
+    [searchParams, router, projectId],
+  );
+
   // "Pull stories" → open the board-project picker, then ingest the chosen one.
   const [boardPickerOpen, setBoardPickerOpen] = React.useState(false);
   const onIngested = React.useCallback(() => {
@@ -390,10 +424,21 @@ export default function RequirementsPage() {
                   stage="requirements"
                   artifacts={artifactsQ.data ?? null}
                   className="rounded-lg border bg-muted/20 p-3"
+                  canOpen={hasReportView}
+                  onOpen={openDocument}
+                  openId={selected ? null : openDoc?.id ?? null}
                 />
               </div>
             )}
-            {selected && selected.body.kind === "story" ? (
+            {!selected && openDoc ? (
+              <DocumentReportView
+                key={openDoc.id}
+                doc={openDoc}
+                project={projectQ.data?.name}
+                status="Draft · not yet raised for approval"
+                onClose={() => setOpenDoc(null)}
+              />
+            ) : selected && selected.body.kind === "story" ? (
               <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
                 {/* READ-ONLY. These stories are PULLED FROM the board — the board is
                     the source of truth and this platform has no write-back yet. The
