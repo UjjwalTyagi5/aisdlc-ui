@@ -32,6 +32,7 @@ from agents_orchestrator.code_review_agent.tools.review_tools import (
 )
 from shared.tools.document_approval import make_approval_tools
 from shared.tools.stage_documents import make_export_document_tool
+from agents_orchestrator.code_review_agent.checklist import create_review_checklist
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node, MCP_TOOLS_PROMPT_NOTE
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -101,6 +102,8 @@ _tools = [
     read_requirements_payload,
     read_design_artifacts,
     submit_code_review,
+    # A checklist is structured: it fills the page's Checklist tab and is filed as Word.
+    create_review_checklist,
     # "Create a code review checklist as a docx": this agent used to paste the content and
     # tell the user to copy it into Word. Filed under code_review as a draft.
     make_export_document_tool(

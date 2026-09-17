@@ -59,7 +59,7 @@ import type {
  * download link opens it.
  */
 
-export type ReviewTab = "summary" | "findings" | "security" | "sbom" | "files" | "diff" | "documents";
+export type ReviewTab = "summary" | "findings" | "security" | "sbom" | "checklist" | "files" | "diff" | "documents";
 
 export { approvalState, type ReportApproval };
 

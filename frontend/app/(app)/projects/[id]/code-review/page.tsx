@@ -8,6 +8,7 @@ import {
   Boxes,
   Check,
   ChevronDown,
+  ClipboardCheck,
   Copy,
   FileDiff,
   FileSearch,
@@ -27,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { DocumentList } from "@/components/app/document-list";
+import { ReviewChecklistView } from "@/components/app/review-checklist-view";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
   DropdownMenu,
@@ -128,6 +130,7 @@ export default function CodeReviewPage() {
     queryFn: () => listArtifacts(id),
   });
   const approvals = useRaiseForApproval(id);
+  const [checklistId, setChecklistId] = React.useState<string | null>(null);
 
   const reviewQ = useQuery({
     queryKey: qk.codeReview.review(id, activeReviewId ?? ""),
@@ -178,6 +181,17 @@ export default function CodeReviewPage() {
     }
     prevBusy.current = chat.busy;
   }, [chat.busy, id, queryClient, reviewsQ]);
+
+  // A CHECKLIST THE CHAT JUST FILED fills the Checklist tab and opens it.
+  const shownChecklists = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const fresh = chat.documents.filter((d) => d.documentId && /checklist/i.test(d.name ?? "") && !shownChecklists.current.has(d.id));
+    if (fresh.length === 0) return;
+    for (const d of fresh) shownChecklists.current.add(d.id);
+    setChecklistId(fresh[fresh.length - 1]!.documentId!);
+    setTab("checklist");
+    void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+  }, [chat.documents, id, queryClient]);
 
   const onPrepared = (result: PrepareResult) => {
     // Always a clean slate for the newly picked target — same flow as the Security
@@ -392,6 +406,9 @@ export default function CodeReviewPage() {
                 <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
                   SBOM
                 </TabBtn>
+                <TabBtn active={tab === "checklist"} onClick={() => setTab("checklist")} icon={ClipboardCheck}>
+                  Checklist
+                </TabBtn>
                 {mode === "repo" ? (
                   <TabBtn active={tab === "files"} onClick={() => setTab("files")} icon={FileSearch}>
                     Files
@@ -430,6 +447,23 @@ export default function CodeReviewPage() {
                   <SecurityView artifact={artifact} />
                 ) : tab === "sbom" ? (
                   <SbomView artifact={artifact} />
+                ) : tab === "checklist" ? (
+                  <ReviewChecklistView
+                    documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                    selectedId={checklistId}
+                    onSelect={setChecklistId}
+                    approvals={approvals}
+                    busy={chat.busy}
+                    project={projectQ.data?.name}
+                    onAsk={() => {
+                      setChatOpen(true);
+                      void chat.send(
+                        artifact
+                          ? "Create a code review checklist for this review, marking each check from the review's results."
+                          : "Create a code review checklist for this project.",
+                      );
+                    }}
+                  />
                 ) : tab === "files" ? (
                   <BranchFilesView prepared={prepared} artifact={artifact} />
                 ) : (
