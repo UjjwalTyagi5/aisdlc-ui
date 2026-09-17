@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@testing-library/jest-dom/vitest";
 
@@ -13,6 +13,7 @@ import type * as SuitesApi from "@/lib/api/testing-suites";
  */
 
 const state = vi.hoisted(() => ({
+  runs: [] as { doc: string; body: unknown }[],
   generated: [] as unknown[],
   jobs: [] as unknown[],
   suiteCalls: [] as string[],
@@ -24,6 +25,10 @@ vi.mock("@/lib/api/testing-suites", async (orig) => {
   return {
     ...actual,
     listSuiteJobs: async () => ({ jobs: state.jobs }),
+    runSuite: async (_p: string, doc: string, body: unknown) => {
+      state.runs.push({ doc, body });
+      return { id: "r1", kind: "run_unit", project_id: "p", status: "queued", created_at: new Date().toISOString(), progress: [], result: { documents: [], failures: [] }, error: "", params: {} };
+    },
     generateSuites: async (_p: string, body: unknown) => {
       state.generated.push(body);
       return { id: "j2", kind: "generate", project_id: "p", status: "queued", created_at: new Date().toISOString(), progress: [], result: { documents: [], failures: [] }, error: "", params: {} };
@@ -64,7 +69,10 @@ function renderFlow(props: Partial<React.ComponentProps<typeof TestSuitesWorkflo
   );
 }
 
-beforeEach(() => { state.generated = []; state.jobs = []; state.suiteCalls = []; approvals.raise.mockClear(); });
+beforeEach(() => {
+  state.generated = []; state.jobs = []; state.suiteCalls = []; state.runs = []; approvals.raise.mockClear();
+  try { window.localStorage.clear(); } catch { /* no storage */ }
+});
 afterEach(cleanup);
 
 describe("Testing flow — step 1, test cases", () => {
@@ -101,13 +109,14 @@ describe("Testing flow — step 1, test cases", () => {
       doc("f1", "QUICKLINK_Url_shortner_Functional_Test_Cases.xlsx"),
       doc("brd", "Url_Shortner_1_BRD_v2.docx"),
     ] });
-    expect(screen.getByText("QUICKLINK_Url_shortner_Unit_Test_Cases.xlsx")).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
-    expect(screen.getAllByText("Not generated yet.")).toHaveLength(1);
-    expect(screen.getAllByRole("link", { name: /Excel/ }).map((a) => a.getAttribute("href")))
+    const step1 = within(screen.getByRole("region", { name: "Test cases" }));
+    expect(step1.getByText("QUICKLINK_Url_shortner_Unit_Test_Cases.xlsx")).toBeInTheDocument();
+    expect(step1.getByText("Approved")).toBeInTheDocument();
+    expect(step1.getAllByText("Not generated yet.")).toHaveLength(1);
+    expect(step1.getAllByRole("link", { name: /Excel/ }).map((a) => a.getAttribute("href")))
       .toEqual(["/api/artifacts/u1/download", "/api/artifacts/f2/download"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Raise for approval" }));
+    fireEvent.click(step1.getByRole("button", { name: "Raise for approval" }));
     expect(approvals.raise).toHaveBeenCalledTimes(1);
 
     const view = screen.getAllByRole("button", { name: /View cases/ });
@@ -115,5 +124,52 @@ describe("Testing flow — step 1, test cases", () => {
     expect(await screen.findByText("Create a short link")).toBeInTheDocument();
     expect(screen.getByText("Check the page shows “Link created successfully”")).toBeInTheDocument();
     expect(state.suiteCalls).toEqual(["f2"]);
+  });
+});
+
+const SUITES = () => [
+  doc("u1", "QUICKLINK_Url_shortner_Unit_Test_Cases.xlsx", "approved"),
+  doc("f1", "QUICKLINK_Url_shortner_Functional_Test_Cases.xlsx"),
+  doc("a1", "QUICKLINK_Url_shortner_API_Test_Cases.xlsx"),
+];
+
+describe("Testing flow — steps 2 and 3, runs", () => {
+  it("runs the unit suite on file with the page's model", async () => {
+    renderFlow({ documents: SUITES() });
+    fireEvent.click(screen.getByRole("button", { name: "Run unit tests" }));
+    await waitFor(() => expect(state.runs).toEqual([{ doc: "u1", body: { offering_id: "off-grok" } }]));
+  });
+
+  it("needs the application's URL before a functional or API run, and sends it with the browser choice", async () => {
+    renderFlow({ documents: SUITES() });
+    const functional = screen.getByRole("button", { name: "Run functional tests" });
+    expect(functional).toBeDisabled();
+    expect(screen.getAllByText("Enter the running application's URL above.")).toHaveLength(2);
+
+    fireEvent.change(screen.getByLabelText("Application URL"), { target: { value: "http://localhost:8080" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show the browser while functional tests run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run functional tests" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run api tests" }));
+    await waitFor(() => expect(state.runs).toHaveLength(2));
+    expect(state.runs[0]).toEqual({ doc: "f1", body: { base_url: "http://localhost:8080", headless: true, offering_id: "off-grok" } });
+    expect(state.runs[1]).toEqual({ doc: "a1", body: { base_url: "http://localhost:8080", offering_id: "off-grok" } });
+  });
+
+  it("shows every case's outcome and the filed report after a run", async () => {
+    state.jobs = [{
+      id: "r9", kind: "run_api", project_id: "p", status: "succeeded", created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(), progress: [], error: "", params: {},
+      result: { documents: [], failures: [], verdict: "Failed", totals: { Passed: 1, Failed: 1, Error: 0, "Not run": 1, total: 3 },
+        commit: "debfe6f1185e", target_url: "http://localhost:8080", suite_document: "x", rows: [
+          { id: "AT-001", title: "Create", subject: "POST /api/shorten", status: "Passed", message: "", evidence: "HTTP 201" },
+          { id: "AT-002", title: "Stats", subject: "GET /api/links/{{code}}/stats", status: "Failed", message: "Expected status 200, got 500.", evidence: "HTTP 500" },
+          { id: "AT-003", title: "Disable", subject: "POST /x", status: "Not run", message: "Not run: the application stopped responding during AT-002.", evidence: "" },
+        ] },
+    }];
+    renderFlow({ documents: [...SUITES(), doc("rep", "QUICKLINK_Url_shortner_API_Test_Report.xlsx")] });
+    expect(await screen.findByText("Expected status 200, got 500.")).toBeInTheDocument();
+    expect(screen.getByText("1 failed")).toBeInTheDocument();
+    expect(screen.getByText("Not run: the application stopped responding during AT-002.")).toBeInTheDocument();
+    expect(screen.getByText("QUICKLINK_Url_shortner_API_Test_Report.xlsx")).toBeInTheDocument();
   });
 });

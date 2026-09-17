@@ -1,4 +1,4 @@
-"""The work a suite job does — generation now; runs in `runs`.
+"""The work a suite job does: generating suites, and running one.
 
 Each workflow runs inside a background job (`jobs.start_job`) and binds the request's
 tenant, project and user into the context itself: a background task does not inherit
@@ -7,6 +7,7 @@ contextvars set after it was created, and `register_generated_file` reads them.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import tempfile
 
@@ -16,7 +17,7 @@ from agents_orchestrator.testing_agent.suites.excel import now_label, suite_file
 from agents_orchestrator.testing_agent.suites.generate import generate_suites
 from agents_orchestrator.testing_agent.suites.models import KIND_LABEL, SuiteMeta
 from agents_orchestrator.testing_agent.suites.page import suite_markdown
-from agents_orchestrator.testing_agent.suites.store import file_document
+from agents_orchestrator.testing_agent.suites.store import file_document, output_dir
 
 logger = logging.getLogger(__name__)
 
@@ -107,3 +108,84 @@ async def generate_workflow(job: jobs.Job, *, target: dict, kinds: list[str], of
         return {"documents": documents, "failures": failures, "commit": commit}
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def run_workflow(job: jobs.Job, *, document_id: str, base_url: str | None, headless: bool,
+                       offering_id: str | None) -> dict:
+    """Run the suite in a stored workbook and file its report."""
+    import dataclasses
+    import time
+
+    from agents_orchestrator.testing_agent.suites import reports
+    from agents_orchestrator.testing_agent.suites.excel import read_suite
+    from agents_orchestrator.testing_agent.suites.store import document_bytes
+
+    bind_context(job)
+    row, data = await document_bytes(job.tenant_id, job.project_id, document_id)
+    meta, cases, problems = read_suite(data)
+    suite_name = (row.blob_path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if not cases:
+        raise RuntimeError(f"{suite_name} has no runnable test case" + (f": {'; '.join(problems[:5])}" if problems else ""))
+    await jobs.log(job, f"Running {len(cases)} {KIND_LABEL[meta.kind].lower()} test case(s) from {suite_name}")
+
+    report_meta = reports.ReportMeta(
+        kind=meta.kind, project=meta.project, repository=meta.repository, branch=meta.branch,
+        suite_document=suite_name, suite_status=row.approval_status or "draft", started_at=now_label(),
+        target_url=base_url or "",
+    )
+    if problems:
+        report_meta.notes.append(f"{len(problems)} row(s) in the workbook could not run and are not in this report: "
+                                 + "; ".join(problems[:10]))
+    started = time.monotonic()
+    extra: dict = {}
+
+    async def say(message: str) -> None:
+        await jobs.log(job, message)
+
+    if meta.kind == "unit":
+        from agents_orchestrator.testing_agent.config.shared import build_llm  # noqa: PLC0415
+        from agents_orchestrator.testing_agent.suites import unit_run  # noqa: PLC0415
+
+        await resolve_model(job, offering_id)
+        work_dir = tempfile.mkdtemp(prefix="testing_unit_")
+        try:
+            target = {"ado_project": meta.source_project or meta.repository, "repo": meta.repository, "branch": meta.branch}
+            report_meta.commit = await clone_target(job, target, work_dir)
+            try:
+                rows, files, runner, notes = await unit_run.execute(cases, work_dir, build_llm(max_tokens=16_000), say)
+            except unit_run.UnitRunError as exc:
+                raise RuntimeError(str(exc)) from exc
+            report_meta.runner = runner
+            report_meta.notes += notes
+            extra["Generated tests"] = ([("File", 40), ("Code", 140)], [[p, c] for p, c in files.items()])
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+    elif meta.kind == "api":
+        from agents_orchestrator.testing_agent.suites import api_run  # noqa: PLC0415
+
+        rows, responses = await api_run.execute(cases, base_url or "", say)
+        report_meta.runner = "HTTP client"
+        extra["Responses"] = ([("ID", 10), ("Request", 50), ("Status", 10), ("Response", 100)], responses)
+    else:
+        from agents_orchestrator.testing_agent.suites import functional_run  # noqa: PLC0415
+
+        shots_dir = os.path.join(output_dir(job.user_id, job.id), "screenshots")
+        rows, steps = await functional_run.execute(cases, base_url or "", headless=headless, screenshots_dir=shots_dir, report=say)
+        report_meta.runner = "Chrome (Selenium)" + (" · headless" if headless else "")
+        extra["Steps"] = ([("ID", 10), ("Step", 6), ("Action", 50), ("Result", 10), ("Details", 80)], steps)
+
+    report_meta.duration_s = time.monotonic() - started
+    t = reports.totals(rows)
+    await jobs.log(job, f"{t['Passed']} passed · {t['Failed']} failed · {t['Error']} could not run · {t['Not run']} not run")
+    filed = await file_document(
+        reports.write_report(report_meta, rows, extra), reports.report_markdown(report_meta, rows),
+        reports.report_filename(meta.kind, meta.repository), user_id=job.user_id, job_id=job.id,
+        note=f"{KIND_LABEL[meta.kind]} test report: {reports.verdict(rows)} — {t['Passed']} of {t['total']} passed.",
+    )
+    await jobs.log(job, f"Filed {filed['name']} as a draft")
+    return {
+        "documents": [{"kind": meta.kind, **filed}], "failures": [],
+        "suite_kind": meta.kind, "suite_document_id": document_id, "suite_document": suite_name,
+        "verdict": reports.verdict(rows), "totals": t, "rows": [dataclasses.asdict(r) for r in rows],
+        "commit": report_meta.commit, "target_url": base_url or "",
+    }

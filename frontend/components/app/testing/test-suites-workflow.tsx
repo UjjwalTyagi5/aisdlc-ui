@@ -7,14 +7,17 @@ import { Download, Eye, EyeOff, FileSpreadsheet, GitBranch, Loader2, Sparkles } 
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Pill } from "@/components/app/report-primitives";
 import { SuiteCasesView } from "@/components/app/testing/suite-cases-view";
 import { SuiteJobProgress } from "@/components/app/testing/suite-job-progress";
+import { SuiteRunPanel } from "@/components/app/testing/suite-run-panel";
 import type { UseRaiseForApprovalResult } from "@/hooks/use-raise-for-approval";
 import { qk } from "@/lib/api/query-keys";
 import {
-  generateSuites, isActive, latestSuites, listSuiteJobs, SUITE_KINDS, SUITE_LABEL, suitesKeys,
-  type SuiteJob, type SuiteKind, type SuiteTarget,
+  generateSuites, isActive, latestReports, latestSuites, listSuiteJobs, RUN_JOB_KIND, runSuite, SUITE_KINDS, SUITE_LABEL,
+  suitesKeys, type SuiteJob, type SuiteKind, type SuiteTarget,
 } from "@/lib/api/testing-suites";
 import { approvalState } from "@/lib/documents/report-document";
 import type { Artifact, ProjectId } from "@/lib/schemas";
@@ -52,21 +55,54 @@ export function TestSuitesWorkflow({ projectId, target, onSelectTarget, offering
     queryFn: () => listSuiteJobs(projectId),
     refetchInterval: (q) => (q.state.data?.jobs.some(isActive) ? 2000 : false),
   });
-  const generation: SuiteJob | null = jobsQ.data?.jobs.find((j) => j.kind === "generate") ?? null;
+  const jobs = React.useMemo(() => jobsQ.data?.jobs ?? [], [jobsQ.data]);
+  const generation: SuiteJob | null = jobs.find((j) => j.kind === "generate") ?? null;
+  const lastRun = (k: SuiteKind): SuiteJob | null => jobs.find((j) => j.kind === RUN_JOB_KIND[k]) ?? null;
 
-  // A generation that just finished filed documents: refresh the lists that show them.
-  const wasActive = React.useRef(false);
+  // Work that just finished filed documents: refresh the lists that show them.
+  const activeIds = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
-    const active = isActive(generation);
-    if (wasActive.current && !active) {
+    const now = new Set(jobs.filter(isActive).map((j) => j.id));
+    const finished = [...activeIds.current].filter((id) => !now.has(id));
+    if (finished.length) {
       void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(projectId) });
-      if (generation?.status === "succeeded") {
-        const n = generation.result.documents.length;
-        toast.success(`${n} test case document${n === 1 ? "" : "s"} filed as draft${n === 1 ? "" : "s"}`);
+      for (const id of finished) {
+        const job = jobs.find((j) => j.id === id);
+        if (job?.status !== "succeeded") continue;
+        if (job.kind === "generate") {
+          const n = job.result.documents.length;
+          toast.success(`${n} test case document${n === 1 ? "" : "s"} filed as draft${n === 1 ? "" : "s"}`);
+        } else {
+          toast.success(`${String((job.result as { verdict?: string }).verdict ?? "Run")} — report filed as a draft`);
+        }
       }
     }
-    wasActive.current = active;
-  }, [generation, projectId, queryClient]);
+    activeIds.current = now;
+  }, [jobs, projectId, queryClient]);
+
+  // The running app's address, remembered on this device for the next run.
+  const urlKey = `testing:base-url:${projectId}`;
+  const [baseUrl, setBaseUrl] = React.useState("");
+  const [showBrowser, setShowBrowser] = React.useState(true);
+  React.useEffect(() => {
+    try { setBaseUrl(window.localStorage.getItem(urlKey) ?? ""); } catch { /* storage unavailable */ }
+  }, [urlKey]);
+  const rememberUrl = (value: string) => {
+    setBaseUrl(value);
+    try { window.localStorage.setItem(urlKey, value); } catch { /* storage unavailable */ }
+  };
+  const urlOk = /^https?:\/\/[^\s/]+/.test(baseUrl.trim());
+
+  const run = useMutation({
+    mutationFn: ({ kind, doc }: { kind: SuiteKind; doc: string }) => runSuite(projectId, doc, {
+      ...(kind === "unit" ? {} : { base_url: baseUrl.trim() }),
+      ...(kind === "functional" ? { headless: !showBrowser } : {}),
+      ...(offeringId ? { offering_id: offeringId } : {}),
+    }),
+    onSuccess: () => void jobsQ.refetch(),
+    onError: (e: Error, vars) => toast.error(`Could not start the ${SUITE_LABEL[vars.kind].toLowerCase()} run`, { description: e.message }),
+  });
+  const reports = latestReports(documents);
 
   const generate = useMutation({
     mutationFn: () => generateSuites(projectId, { target: target!, kinds, ...(offeringId ? { offering_id: offeringId } : {}) }),
@@ -168,6 +204,39 @@ export function TestSuitesWorkflow({ projectId, target, onSelectTarget, offering
             <SuiteCasesView projectId={projectId} documentId={suites[open]!.id} kind={open} />
           </div>
         )}
+      </section>
+
+      <section aria-labelledby="step-unit" className="space-y-4">
+        <StepHeader n={2} id="step-unit" title="Unit tests"
+          description="Write a test for every unit case, run them in the repository, and file a report of each case passed or failed." />
+        <SuiteRunPanel kind="unit" suite={suites.unit} job={lastRun("unit")} report={reports.unit} approvals={approvals}
+          canRun={!!suites.unit} running={run.isPending && run.variables?.kind === "unit"}
+          onRun={() => suites.unit && run.mutate({ kind: "unit", doc: suites.unit.id })} />
+      </section>
+
+      <section aria-labelledby="step-app" className="space-y-4">
+        <StepHeader n={3} id="step-app" title="Functional and API tests"
+          description="Run against the running application: the functional cases step by step in a browser, the API cases as requests to its endpoints." />
+        <div className="bg-surface-1 flex flex-wrap items-end gap-x-5 gap-y-3 rounded-lg border p-3">
+          <div className="min-w-64 flex-1 space-y-1">
+            <Label htmlFor="testing-base-url" className="text-xs">Application URL</Label>
+            <Input id="testing-base-url" type="url" placeholder="http://localhost:8080" value={baseUrl}
+              onChange={(e) => rememberUrl(e.target.value)} className="h-9 font-mono text-sm" />
+          </div>
+          <label className="inline-flex cursor-pointer items-center gap-2 pb-2 text-sm">
+            <Checkbox checked={showBrowser} onCheckedChange={(v) => setShowBrowser(v === true)} aria-label="Show the browser while functional tests run" />
+            Show the browser
+          </label>
+        </div>
+        <div className="grid gap-4">
+          {(["functional", "api"] as const).map((k) => (
+            <SuiteRunPanel key={k} kind={k} suite={suites[k]} job={lastRun(k)} report={reports[k]} approvals={approvals}
+              canRun={!!suites[k] && urlOk}
+              blockedReason={suites[k] && !urlOk ? "Enter the running application's URL above." : undefined}
+              running={run.isPending && run.variables?.kind === k}
+              onRun={() => suites[k] && run.mutate({ kind: k, doc: suites[k]!.id })} />
+          ))}
+        </div>
       </section>
 
       {children}

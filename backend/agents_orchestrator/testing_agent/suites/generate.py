@@ -60,6 +60,8 @@ Step actions (use ONLY these):
   assert_text     value = text that must be visible on the page, copied exactly from the template
   assert_not_text value = text that must NOT be visible
   assert_url      value = a fragment the address must contain
+EVERY CASE IS SELF-CONTAINED: when it needs data that may not exist yet (an existing short link, a
+record to edit), its own first steps create it through the UI — never assume an id or code exists.
 Every case starts with an "open" step and ENDS with at least one assert_text or assert_url step that
 verifies its expected result — a case without a check is rejected. Assert text that the page really
 shows after the action: a heading, a table value, or a message the route renders or redirects with,
@@ -68,7 +70,8 @@ copied exactly from the views and routes shown. Use only labels, texts and paths
     "api": """Write API test cases for the HTTP endpoints the routes define — requests a tester sends to the
 running application. Cover every endpoint: successful calls, validation errors (400/422), not-found
 (404) and method/format errors where the code handles them. Aim for 8–15 cases, ordered so data a
-later case needs is created by an earlier one.
+later case needs is created by an earlier one. Never use an id or code that no earlier case created
+(except in not-found cases, which should use a value that clearly does not exist).
 
 Each case:
   {"id": "AT-001", "title": "...", "requirement": "<BRD requirement>", "priority": "High" | "Medium" | "Low",

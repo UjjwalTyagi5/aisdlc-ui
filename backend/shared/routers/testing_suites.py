@@ -7,6 +7,7 @@ agent on that project — the same gate as its chat.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -60,6 +61,51 @@ async def generate(project_id: str, body: GenerateRequest, request: Request) -> 
         kind="generate", project_id=project_id, tenant_id=tenant_id, user_id=user_id,
         params={"target": target, "kinds": kinds},
         work=lambda job: generate_workflow(job, target=target, kinds=kinds, offering_id=body.offering_id),
+    )
+    return job.public()
+
+
+class RunRequest(BaseModel):
+    #: The running application — required for functional and API suites.
+    base_url: Optional[str] = None
+    #: Functional runs open a visible browser unless asked not to.
+    headless: bool = False
+    offering_id: Optional[str] = None
+
+
+_RUN_KIND = {"unit": "run_unit", "functional": "run_functional", "api": "run_api"}
+_URL = re.compile(r"^https?://[^\s/]+")
+
+
+@testing_suites_router.post("/{project_id}/suites/{document_id}/run", status_code=202)
+async def run_suite(project_id: str, document_id: str, body: RunRequest, request: Request) -> dict:
+    """Run the suite in a stored test case workbook; the job files its report."""
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.excel import SuiteFormatError, read_suite  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.store import document_bytes  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.workflows import run_workflow  # noqa: PLC0415
+
+    tenant_id, user_id = await _may_use_testing(request, project_id)
+    try:
+        _row, data = await document_bytes(tenant_id, project_id, document_id)
+        meta, cases, _problems = read_suite(data)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SuiteFormatError as exc:
+        raise HTTPException(status_code=422, detail=f"This document is not a runnable test case suite: {exc}") from exc
+    if not cases:
+        raise HTTPException(status_code=422, detail="This suite has no runnable test case.")
+    base_url = (body.base_url or "").strip().rstrip("/")
+    if meta.kind in ("functional", "api") and not _URL.match(base_url):
+        raise HTTPException(status_code=422, detail="Enter the running application's URL, e.g. http://localhost:8080.")
+    kind = _RUN_KIND[meta.kind]
+    if jobs.active_job(project_id, kind):
+        raise HTTPException(status_code=409, detail=f"A {meta.kind} run is already in progress for this project — follow that run.")
+    job = jobs.start_job(
+        kind=kind, project_id=project_id, tenant_id=tenant_id, user_id=user_id,
+        params={"document_id": document_id, "base_url": base_url, "headless": body.headless, "suite_kind": meta.kind},
+        work=lambda job: run_workflow(job, document_id=document_id, base_url=base_url or None,
+                                      headless=body.headless, offering_id=body.offering_id),
     )
     return job.public()
 

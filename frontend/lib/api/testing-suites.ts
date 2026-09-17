@@ -143,3 +143,59 @@ export function latestSuites(documents: readonly Artifact[] | null | undefined):
     api: rows.find((d) => SUITE_NAME.api.test(d.title)) ?? null,
   };
 }
+
+// ── runs ──────────────────────────────────────────────────────────────────────
+
+export const RUN_JOB_KIND: Record<SuiteKind, string> = { unit: "run_unit", functional: "run_functional", api: "run_api" };
+
+export const ResultRowSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  subject: z.string().default(""),
+  status: z.enum(["Passed", "Failed", "Error", "Not run"]),
+  duration_ms: z.number().nullable().optional(),
+  message: z.string().default(""),
+  evidence: z.string().default(""),
+});
+export type ResultRow = z.infer<typeof ResultRowSchema>;
+
+export const RunResult = z.object({
+  verdict: z.string().default(""),
+  totals: z.record(z.string(), z.number()).default({}),
+  rows: z.array(ResultRowSchema).default([]),
+  suite_document: z.string().default(""),
+  commit: z.string().default(""),
+  target_url: z.string().default(""),
+});
+export type RunResult = z.infer<typeof RunResult>;
+
+/** A run job's result, when it has one. */
+export function runResult(job: SuiteJob | null | undefined): RunResult | null {
+  if (!job || job.status !== "succeeded") return null;
+  const parsed = RunResult.safeParse(job.result);
+  return parsed.success && parsed.data.rows.length ? parsed.data : null;
+}
+
+export const runSuite = (
+  projectId: ProjectId,
+  documentId: string,
+  body: { base_url?: string; headless?: boolean; offering_id?: string },
+) => api(`/testing/${enc(projectId)}/suites/${enc(documentId)}/run`, { method: "POST", body, schema: SuiteJob });
+
+const REPORT_NAME: Record<SuiteKind, RegExp> = {
+  unit: /_Unit_Test_Report(_v\d+)?\.xlsx$/i,
+  functional: /_Functional_Test_Report(_v\d+)?\.xlsx$/i,
+  api: /_API_Test_Report(_v\d+)?\.xlsx$/i,
+};
+
+/** The newest run report of each kind in this project's Testing documents. */
+export function latestReports(documents: readonly Artifact[] | null | undefined): Record<SuiteKind, Artifact | null> {
+  const rows = (documents ?? [])
+    .filter((d) => d.stage === "testing" && d.status !== "rejected")
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return {
+    unit: rows.find((d) => REPORT_NAME.unit.test(d.title)) ?? null,
+    functional: rows.find((d) => REPORT_NAME.functional.test(d.title)) ?? null,
+    api: rows.find((d) => REPORT_NAME.api.test(d.title)) ?? null,
+  };
+}
