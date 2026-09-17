@@ -1,0 +1,148 @@
+"""`export_document` for an agent that writes documents on request — bound to ITS stage.
+
+WHY. Asked for "a code review checklist as a docx", the Code Review agent had no tool that
+writes a file: it pasted the checklist into chat and told the user to copy it into Word.
+The Project Manager agent borrowed the Design agent's export tool, which filed its effort
+estimate under `design`, where the Plan page never showed it and nobody could raise it.
+
+So one factory, bound per agent: the document is written as the platform's designed Word
+file with its markdown kept beside it (the page copy the app renders), registered as a DRAFT
+under the agent's own stage, and announced with its artifact id. PDF and Excel still work by
+extension; markdown and text become Word, because a document meant for approval is read by
+people, not rendered by a browser as source.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import pathlib
+import re
+import uuid
+from datetime import datetime, timezone
+
+from langchain_core.tools import StructuredTool
+
+logger = logging.getLogger(__name__)
+
+_FILES_DIR = str(pathlib.Path(__file__).resolve().parents[2] / "files")
+_WORD_INSTEAD = (".md", ".markdown", ".txt", ".doc", "")
+
+_H1 = re.compile(r"^\s*#\s+(?!#)(.+?)\s*#*\s*$", re.MULTILINE)
+_BOLD_TITLE = re.compile(r"\A\s*\*\*(.+?)\*\*\s*(?:\n|\Z)")
+_H2 = re.compile(r"^##\s+(?!#)", re.MULTILINE)
+
+
+def page_markdown(content: str) -> tuple[str, str]:
+    """(title, markdown) as the page and the Word canvas expect them.
+
+    A model often writes the title as a bold line and its sections as `###`. The page
+    renders `## ` headings as sections, so a document with none would be one undivided
+    block: `###` is promoted when there is no `##`, and the section numbers the model
+    typed are dropped (the canvas numbers sections itself)."""
+    from agents_orchestrator.requirements_agent.requirements_document import normalise_headers  # noqa: PLC0415
+
+    body = (content or "").replace("\r\n", "\n").strip()
+    title = ""
+    m = _H1.search(body)
+    if m and body[: m.start()].strip() == "":
+        title, body = m.group(1).strip(), body[m.end():].strip()
+    else:
+        b = _BOLD_TITLE.match(body)
+        if b:
+            title, body = b.group(1).strip(), body[b.end():].strip()
+    if not _H2.search(body):
+        body = re.sub(r"^###(\s+)", r"##\1", body, flags=re.MULTILINE)
+    return title, normalise_headers(body).strip()
+
+
+def _word_name(filename: str, default: str) -> str:
+    from shared.tools.doc_export import normalise_filename  # noqa: PLC0415
+
+    raw = os.path.basename((filename or "").strip())
+    stem, ext = os.path.splitext(raw)
+    if ext.lower() in _WORD_INSTEAD:
+        raw = f"{stem or os.path.splitext(default)[0]}.docx"
+    return normalise_filename(raw, default)
+
+
+def make_export_document_tool(*, stage: str, agent_name: str, eyebrow: str, default_filename: str,
+                              examples: str = "") -> StructuredTool:
+    """`export_document`, filing into `stage`. The stage is bound here, never a tool argument."""
+
+    async def export_document(content: str, filename: str = default_filename) -> str:
+        from config.connection_manager import manager  # noqa: PLC0415
+        from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+        from config.ws_helper import get_session_id, get_user_id  # noqa: PLC0415
+        from shared.docs.markdown_docx import render_markdown_docx  # noqa: PLC0415
+        from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+        from shared.tools.doc_export import render_document, supported_list  # noqa: PLC0415
+
+        if not (content and content.strip()):
+            return "Error: nothing to export — pass the document's markdown as `content`."
+        name = _word_name(filename, default_filename)
+        # Both are path segments of the file AND its link; a caller that never set them
+        # produced "/generated/None/orchestrator/None/…".
+        user_id = get_user_id() or "shared"
+        session_id = get_session_id() or uuid.uuid4().hex
+        out_dir = os.path.join(_FILES_DIR, str(user_id), "orchestrator", str(session_id), "output")
+        os.makedirs(out_dir, exist_ok=True)
+        stem, ext = os.path.splitext(name)
+        n = 2
+        while os.path.exists(os.path.join(out_dir, name)):
+            name = f"{stem}_v{n}{ext}"
+            n += 1
+        path = os.path.join(out_dir, name)
+        title, markdown = page_markdown(content)
+        title = title or stem.replace("_", " ")
+
+        try:
+            if ext.lower() == ".docx":
+                sections = [ln[3:].strip() for ln in markdown.splitlines() if ln.startswith("## ")]
+                today = f"{datetime.now(timezone.utc):%d %b %Y}"
+                render_markdown_docx(
+                    markdown, path, title=title, eyebrow=eyebrow, subject=f"{agent_name} document",
+                    subtitle=", ".join(sections[:4]) + (" …" if len(sections) > 4 else "") if sections else "",
+                    meta_line=f"{today} · Draft · not yet raised for approval",
+                    facts=[("Sections", str(len(sections)) if sections else ""), ("Generated", today)],
+                    footer=f"{title} · {agent_name}",
+                )
+                # The page copy: what the app renders when the document is opened.
+                with open(os.path.splitext(path)[0] + ".md", "w", encoding="utf-8") as fh:
+                    fh.write(f"# {title}\n\n{markdown}\n")
+            else:
+                await render_document(content, path, title=title)
+        except ValueError:
+            return f"Error: '{name}' has an unsupported extension. Supported: {supported_list()}"
+        except Exception as exc:  # noqa: BLE001 — said, not swallowed
+            logger.exception("%s export_document failed for %s", agent_name, name)
+            return f"Error: '{name}' could not be written ({type(exc).__name__}: {str(exc)[:200]}). Nothing was filed."
+
+        url = f"{AGENTIC_BASE_URL}/generated/{user_id}/orchestrator/{session_id}/output/{name}"
+        artifact_id = await register_generated_file(
+            name, path, url, stage=stage, note=f"Generated by the {agent_name} agent.",
+        )
+        if not artifact_id:
+            return (f"Wrote '{name}' ({url}), but it could NOT be recorded in the project's Documents, "
+                    "so it cannot be raised for approval. Tell the user exactly this.")
+        await manager.broadcast({
+            "type": "file_generated", "session_id": session_id, "filename": name, "url": url,
+            "artifact_id": artifact_id, "file_size": os.path.getsize(path),
+            "agent_name": agent_name, "message": f"Generated file: {name}",
+        })
+        return (f"Exported '{name}': {url}\nIt is filed in this project's {agent_name} documents as a "
+                "DRAFT — not yet raised for approval. Give the user this link exactly as written. If they "
+                f"want it approved, call raise_document_for_approval with \"{name}\"; do not export it again.")
+
+    return StructuredTool.from_function(
+        coroutine=export_document,
+        name="export_document",
+        description=(
+            f"Write a document the user asks for{examples} as a Word file (.docx) and file it in this "
+            f"project's {agent_name} documents as a DRAFT they can open, download and raise for approval. "
+            "USE THIS whenever the user asks for a document, a file, or a .docx — never paste the content "
+            "and tell them to copy it into Word. Word by default; ask for PDF or Excel by extension "
+            "(\"x.pdf\", \"x.xlsx\" — Excel exports the markdown tables); a .md or .txt name is written "
+            "as Word.\n\nArgs:\n    content: the full markdown of the document, title first as a "
+            "\"# Title\" line.\n    filename: the file name, e.g. \"" + default_filename + "\"."
+        ),
+    )

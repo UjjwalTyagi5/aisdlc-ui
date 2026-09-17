@@ -174,9 +174,15 @@ def _space_required(space: str) -> Optional[str]:
 
 
 def _url_suffix(page: dict) -> str:
-    """` - <url>` when the API gave one, else nothing. Never a bare dash."""
+    """` - <url>` when the API gave one — otherwise an explicit "no link".
+
+    It used to return nothing, and the Code Review agent then wrote the link itself:
+    "https://your-confluence-instance/spaces/URLSHORT/pages/3571713/…"."""
     url = (page or {}).get("url") or ""
-    return f" - {url}" if url else ""
+    if url:
+        return f" - {url}"
+    return (". Confluence returned no link for this page: give the user the space and page id, "
+            "and do NOT write a URL")
 
 
 def page_body(name: str, *, attached: bool, attach_failed: bool = False) -> str:

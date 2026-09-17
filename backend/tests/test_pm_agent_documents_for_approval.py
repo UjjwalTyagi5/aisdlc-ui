@@ -38,14 +38,14 @@ class _Manager:
 @pytest.fixture
 def ctx(tmp_path, monkeypatch):
     import config.connection_manager as cm
-    from agents_orchestrator.pm_agent import plan_documents
     from config.ws_helper import set_session_id, set_user_id
+    from shared.tools import stage_documents
 
     set_session_id("pm-doc-test")
     set_user_id("u1")
     mgr = _Manager()
     monkeypatch.setattr(cm, "manager", mgr)
-    monkeypatch.setattr(plan_documents, "_FILES_DIR", str(tmp_path))
+    monkeypatch.setattr(stage_documents, "_FILES_DIR", str(tmp_path))
     return mgr, tmp_path
 
 

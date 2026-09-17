@@ -1,4 +1,10 @@
-"""The Code Review & Security Report — a submitted review, as a designed document.
+"""The Code Review Report — a submitted review, as a designed document.
+
+A CODE REVIEW REPORT, NOT A SECURITY REPORT. It was titled "Code review & security
+report", which reads as a security audit. It is the standard review of a change: was all of
+it read, were the security checks run, does it meet the approved requirements and follow the
+approved architecture, what is wrong with it, and should it merge. The security scan is one
+of those checks — see `review_checklist`.
 
 WHAT IT IS BUILT FROM. The review artifact the agent submitted (summary, findings,
 requirements coverage, design conformance) and the security scan the SCANNERS produced
@@ -108,6 +114,78 @@ def _short_title(title: str, package: str) -> str:
     return t.strip()
 
 
+_CHECK_OK = ("Done", "No issues")
+
+
+def review_checklist(artifact: dict) -> list[dict]:
+    """The standard code review checklist, answered from the submitted review. Pure.
+
+    Each row is {check, result, detail}. A check nothing established says so ("Not run",
+    "Not checked") — never "Done"."""
+    findings = artifact.get("findings") or []
+    security = artifact.get("security") or {}
+    scanners = security.get("scanners") or []
+    totals = security.get("totals") or {}
+    scope = artifact.get("scope") or {}
+    rows: list[dict] = []
+
+    if scope.get("mode") == "repo":
+        read, total = scope.get("reviewable_files_read", 0) or 0, scope.get("reviewable_files", 0) or 0
+        rows.append({"check": "Whole change read", "result": "Done" if total and read >= total else "Partial",
+                     "detail": f"{read} of {total} reviewable files read"})
+    else:
+        rows.append({"check": "Whole change read", "result": "Done",
+                     "detail": f"{scope.get('files_changed', 0)} changed files reviewed"})
+
+    if not scanners:
+        rows.append({"check": "Security checks run", "result": "Not run",
+                     "detail": "secrets, static analysis and dependency scans did not run"})
+    else:
+        not_run = [sc.get("name") for sc in scanners if sc.get("status") != "ok"]
+        parts = []
+        for sc in scanners:
+            if sc.get("status") != "ok":
+                parts.append(f"{sc.get('name')}: not run")
+            elif sc.get("name") == "Trivy":
+                parts.append(f"Trivy: {totals.get('vulnerabilities', 0)} vulnerabilities ({totals.get('vulnerabilities_high', 0)} high+)")
+            else:
+                parts.append(f"{sc.get('name')}: {sc.get('findings', 0)} findings")
+        rows.append({"check": "Security checks run", "result": "Partial" if not_run else "Done", "detail": "; ".join(parts)})
+
+    blocking_security = [f for f in findings if f.get("category") == "security" and f.get("severity") in ("critical", "high")]
+    rows.append({"check": "Security issues resolved",
+                 "result": "Issues found" if blocking_security or (totals.get("secrets") or 0) > 0 else "No issues",
+                 "detail": (f"{len(blocking_security)} critical/high security finding(s)" if blocking_security else "no critical/high security finding")
+                 + (f"; {totals.get('secrets')} hardcoded secret(s)" if (totals.get("secrets") or 0) > 0 else "")})
+
+    coverage = artifact.get("requirements_coverage") or []
+    if not coverage:
+        rows.append({"check": "Meets the approved requirements", "result": "Not checked", "detail": "no requirements coverage recorded"})
+    else:
+        gaps = [c for c in coverage if c.get("status") in ("violated", "unimplemented", "partial")]
+        rows.append({"check": "Meets the approved requirements", "result": "Gaps" if gaps else "Done",
+                     "detail": f"{len(coverage) - len(gaps)} of {len(coverage)} acceptance criteria satisfied"})
+
+    conformance = artifact.get("design_conformance") or []
+    if not conformance:
+        rows.append({"check": "Follows the approved architecture", "result": "Not checked", "detail": "no design conformance recorded"})
+    else:
+        off = [c for c in conformance if c.get("status") in ("violates", "drifts")]
+        rows.append({"check": "Follows the approved architecture", "result": "Deviations" if off else "Done",
+                     "detail": f"{len(conformance) - len(off)} of {len(conformance)} design rules conform"})
+
+    for check, cats in (("Logic and correctness", ("logic_error",)), ("Performance", ("performance",)),
+                        ("Maintainability and style", ("maintainability", "style", "design", "other"))):
+        hits = [f for f in findings if f.get("category") in cats]
+        rows.append({"check": check, "result": "Issues found" if hits else "No issues",
+                     "detail": ", ".join(f"{f.get('id')} ({f.get('severity')})" for f in hits[:6]) or "none recorded"})
+
+    verdict = artifact.get("merge_recommendation") or "needs_discussion"
+    rows.append({"check": "Merge recommendation", "result": _VERDICT.get(verdict, verdict),
+                 "detail": _VERDICT_SENTENCE.get(verdict, "")})
+    return rows
+
+
 def review_markdown(artifact: dict) -> str:
     ctx = artifact.get("context") or {}
     findings = sorted(artifact.get("findings") or [], key=lambda f: _SEV_ORDER.get(f.get("severity", "info"), 9))
@@ -121,6 +199,11 @@ def review_markdown(artifact: dict) -> str:
     blocks.append("## Summary")
     blocks.append(_demote(artifact.get("summary") or "") or "The reviewer submitted no written summary.")
 
+    # ── the standard review checklist ──
+    blocks.append("## Review checklist")
+    blocks.append(_table(["Check", "Result", "Detail"],
+                         [[r["check"], r["result"], r["detail"]] for r in review_checklist(artifact)]))
+
     # ── 02 findings ──
     blocks.append("## Findings")
     if findings:
@@ -133,10 +216,10 @@ def review_markdown(artifact: dict) -> str:
     else:
         blocks.append("No issues were found in the reviewed code.")
 
-    # ── 03 security review ──
-    blocks.append("## Security review")
+    # ── security checks ──
+    blocks.append("## Security checks")
     if not security:
-        blocks.append("The security review did not run for this target, so nothing about its security is established.")
+        blocks.append("The security checks did not run for this target, so nothing about its security is established.")
     else:
         if artifact.get("security_summary"):
             blocks.append(_demote(artifact["security_summary"]))
@@ -350,7 +433,7 @@ def write_review_report(artifact: dict, out_dir: str) -> tuple[str, str]:
     render_markdown_docx(
         markdown, docx_path,
         title=f"{ctx.get('repo_name') or 'Repository'} — Code review",
-        eyebrow="CODE REVIEW & SECURITY REPORT",
+        eyebrow="CODE REVIEW REPORT",
         eyebrow_tail=tail,
         subtitle=f"{_VERDICT.get(verdict, verdict)}. {_VERDICT_SENTENCE.get(verdict, '')}",
         meta_line=" · ".join(p for p in (
@@ -366,8 +449,8 @@ def write_review_report(artifact: dict, out_dir: str) -> tuple[str, str]:
             ("SBOM", f"{totals.get('components', 0)} components" if security else "not built"),
             ("Scope", coverage),
         ],
-        footer=f"{ctx.get('repo_name') or 'Repository'} · Code review & security report",
-        subject="Code review & security report",
+        footer=f"{ctx.get('repo_name') or 'Repository'} · Code review report",
+        subject="Code review report",
     )
     md_path = os.path.splitext(docx_path)[0] + ".md"
     with open(md_path, "w", encoding="utf-8") as fh:

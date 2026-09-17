@@ -31,6 +31,7 @@ from agents_orchestrator.code_review_agent.tools.review_tools import (
     submit_code_review,
 )
 from shared.tools.document_approval import make_approval_tools
+from shared.tools.stage_documents import make_export_document_tool
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node, MCP_TOOLS_PROMPT_NOTE
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -100,6 +101,13 @@ _tools = [
     read_requirements_payload,
     read_design_artifacts,
     submit_code_review,
+    # "Create a code review checklist as a docx": this agent used to paste the content and
+    # tell the user to copy it into Word. Filed under code_review as a draft.
+    make_export_document_tool(
+        stage="code_review", agent_name="Code Review", eyebrow="CODE REVIEW",
+        default_filename="code_review_checklist.docx",
+        examples=" (a code review checklist, review guidelines, a findings summary for the team)",
+    ),
     # "Send the report for approval": the Documents panel's button, from the chat.
     *make_approval_tools("code_review"),
     *_DOCUMENT_TOOLS,

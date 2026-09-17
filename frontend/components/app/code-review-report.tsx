@@ -176,6 +176,84 @@ function shortTitle(t: string, pkg: string): string {
   return out.trim();
 }
 
+/* ── The standard review checklist ─────────────────────────────────────────── */
+
+export interface ChecklistRow { check: string; result: string; detail: string }
+
+const CHECK_TONE: Record<string, PillTone> = {
+  Done: "success", "No issues": "success", Partial: "warning", "Not run": "warning",
+  "Not checked": "neutral", Gaps: "danger", Deviations: "warning", "Issues found": "danger",
+};
+
+/**
+ * A CODE REVIEW REPORT, NOT A SECURITY REPORT. The standard checks of a review, answered
+ * from the submitted review — the same rows as the Word report
+ * (code_review_agent/review_document.review_checklist). Nothing established is "Done".
+ */
+export function reviewChecklist(artifact: CodeReviewArtifact): ChecklistRow[] {
+  const findings = artifact.findings;
+  const security = artifact.security;
+  const scanners = security?.scanners ?? [];
+  const totals = security?.totals ?? {};
+  const scope = artifact.scope ?? {};
+  const rows: ChecklistRow[] = [];
+
+  if (artifact.context.mode === "repo") {
+    const read = scope.reviewable_files_read ?? 0;
+    const total = scope.reviewable_files ?? 0;
+    rows.push({ check: "Whole change read", result: total && read >= total ? "Done" : "Partial", detail: `${read} of ${total} reviewable files read` });
+  } else {
+    rows.push({ check: "Whole change read", result: "Done", detail: `${scope.files_changed ?? artifact.metrics.files_changed ?? 0} changed files reviewed` });
+  }
+
+  if (scanners.length === 0) {
+    rows.push({ check: "Security checks run", result: "Not run", detail: "secrets, static analysis and dependency scans did not run" });
+  } else {
+    const notRun = scanners.filter((sc) => sc.status !== "ok");
+    const parts = scanners.map((sc) =>
+      sc.status !== "ok" ? `${sc.name}: not run`
+        : sc.name === "Trivy" ? `Trivy: ${totals.vulnerabilities ?? 0} vulnerabilities (${totals.vulnerabilities_high ?? 0} high+)`
+          : `${sc.name}: ${sc.findings ?? 0} findings`);
+    rows.push({ check: "Security checks run", result: notRun.length ? "Partial" : "Done", detail: parts.join("; ") });
+  }
+
+  const blocking = findings.filter((f) => f.category === "security" && (f.severity === "critical" || f.severity === "high"));
+  const secrets = totals.secrets ?? 0;
+  rows.push({
+    check: "Security issues resolved",
+    result: blocking.length || secrets > 0 ? "Issues found" : "No issues",
+    detail: (blocking.length ? `${blocking.length} critical/high security finding(s)` : "no critical/high security finding")
+      + (secrets > 0 ? `; ${secrets} hardcoded secret(s)` : ""),
+  });
+
+  const coverage = artifact.requirements_coverage;
+  if (coverage.length === 0) rows.push({ check: "Meets the approved requirements", result: "Not checked", detail: "no requirements coverage recorded" });
+  else {
+    const gaps = coverage.filter((c) => ["violated", "unimplemented", "partial"].includes(c.status)).length;
+    rows.push({ check: "Meets the approved requirements", result: gaps ? "Gaps" : "Done", detail: `${coverage.length - gaps} of ${coverage.length} acceptance criteria satisfied` });
+  }
+
+  const conformance = artifact.design_conformance;
+  if (conformance.length === 0) rows.push({ check: "Follows the approved architecture", result: "Not checked", detail: "no design conformance recorded" });
+  else {
+    const off = conformance.filter((c) => c.status === "violates" || c.status === "drifts").length;
+    rows.push({ check: "Follows the approved architecture", result: off ? "Deviations" : "Done", detail: `${conformance.length - off} of ${conformance.length} design rules conform` });
+  }
+
+  for (const [check, cats] of [
+    ["Logic and correctness", ["logic_error"]],
+    ["Performance", ["performance"]],
+    ["Maintainability and style", ["maintainability", "style", "design", "other"]],
+  ] as const) {
+    const hits = findings.filter((f) => (cats as readonly string[]).includes(f.category));
+    rows.push({ check, result: hits.length ? "Issues found" : "No issues", detail: hits.slice(0, 6).map((f) => `${f.id} (${f.severity})`).join(", ") || "none recorded" });
+  }
+
+  const verdict = VERDICT[artifact.merge_recommendation] ?? VERDICT.needs_discussion!;
+  rows.push({ check: "Merge recommendation", result: verdict.label, detail: verdict.sentence });
+  return rows;
+}
+
 /* ── Summary: the report ────────────────────────────────────────────────────── */
 
 export function CodeReviewReport({ artifact, onOpenTab, approval }: {
@@ -217,7 +295,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
     <article className="mx-auto max-w-5xl space-y-8 p-4 md:p-6">
       <header className="space-y-3">
         <ReportHero
-          eyebrow="Code review & security report"
+          eyebrow="Code review report"
           eyebrowTail={`${ctx.repo_name} · ${targetLine(ctx)}`}
           title={`${ctx.repo_name || "Repository"} — ${verdict.label}`}
           subtitle={verdict.sentence}
@@ -259,15 +337,27 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
         {artifact.summary ? <MarkdownBody markdown={artifact.summary} /> : <Callout>The reviewer submitted no written summary.</Callout>}
       </ReportSection>
 
+      <ReportSection n={2} title="Review checklist" id="cr-checklist">
+        <ReportTable dense head={<><th className={th}>Check</th><th className={cn(th, "w-32")}>Result</th><th className={th}>Detail</th></>}>
+          {reviewChecklist(artifact).map((r) => (
+            <tr key={r.check}>
+              <td className={cn(td, "font-medium")}>{r.check}</td>
+              <td className={td}><Pill tone={r.check === "Merge recommendation" ? verdict.tone : CHECK_TONE[r.result] ?? "neutral"}>{r.result}</Pill></td>
+              <td className={cn(td, "text-muted-foreground")}>{r.detail}</td>
+            </tr>
+          ))}
+        </ReportTable>
+      </ReportSection>
+
       <ReportSection
-        n={2}
-        title="Security review"
+        n={3}
+        title="Security checks"
         id="cr-security"
         aside={ran ? <button type="button" className="text-primary hover:underline" onClick={() => onOpenTab("security")}>Full results</button> : undefined}
       >
         {!ran ? (
           <Callout tone="warning" title="Not established">
-            The security review did not run for this review, so nothing about the code&apos;s security is established.
+            The security checks did not run for this review, so nothing about the code&apos;s security is established.
           </Callout>
         ) : (
           <>
@@ -283,7 +373,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
       </ReportSection>
 
       <ReportSection
-        n={3}
+        n={4}
         title="Findings"
         id="cr-findings"
         aside={findings.length ? <button type="button" className="text-primary hover:underline" onClick={() => onOpenTab("findings")}>All findings</button> : undefined}
@@ -307,7 +397,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
         )}
       </ReportSection>
 
-      <ReportSection n={4} title="Requirements and design" id="cr-requirements">
+      <ReportSection n={5} title="Requirements and design" id="cr-requirements">
         {artifact.requirements_coverage.length === 0 && artifact.design_conformance.length === 0 ? (
           <Callout>No requirements coverage or design conformance was recorded for this review.</Callout>
         ) : (
@@ -338,7 +428,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
         )}
       </ReportSection>
 
-      <ReportSection n={5} title="Scope and method" id="cr-scope">
+      <ReportSection n={6} title="Scope and method" id="cr-scope">
         <div className="space-y-3 text-sm">
           <p>
             Reviewed <span className="font-medium">{targetPhrase(ctx)}</span> in <span className="font-medium">{ctx.repo_name}</span>

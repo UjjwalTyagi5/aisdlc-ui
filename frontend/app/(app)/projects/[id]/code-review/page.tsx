@@ -202,8 +202,8 @@ export default function CodeReviewPage() {
     setChatOpen(true);
     void chat.send(
       prepared?.mode === "repo"
-        ? "Please review the whole branch, run the security review, and submit your findings."
-        : "Please review the prepared change, run the security review, and submit your findings.",
+        ? "Please review the whole branch and submit your findings."
+        : "Please review the prepared change and submit your findings.",
     );
   };
 

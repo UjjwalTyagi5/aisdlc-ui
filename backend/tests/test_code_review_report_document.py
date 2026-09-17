@@ -1,4 +1,4 @@
-"""The Code Review & Security Report: built from the review and the scan, never re-guessed.
+"""The Code Review Report: built from the review and the scan, never re-guessed.
 
 What must hold in the document a reader acts on:
 - a scanner that did not run is "Blocked" and its area "not established" — never clean;
@@ -89,7 +89,7 @@ def test_tables_are_single_blocks_and_findings_are_ordered_by_severity():
     from agents_orchestrator.code_review_agent.review_document import review_markdown
 
     md = review_markdown(_artifact())
-    findings = md.split("## Findings", 1)[1].split("## Security review", 1)[0].strip()
+    findings = md.split("## Findings", 1)[1].split("## Security checks", 1)[0].strip()
     rows = findings.splitlines()
     assert rows[0].startswith("| ID | Severity") and rows[1].startswith("|---")
     assert "F-001" in rows[2] and "F-002" in rows[3], "high before medium"
@@ -101,7 +101,7 @@ def test_the_agents_own_headings_do_not_become_report_sections():
 
     md = review_markdown(_artifact())
     sections = [ln for ln in md.splitlines() if ln.startswith("## ")]
-    assert sections == ["## Summary", "## Findings", "## Security review", "## Software bill of materials",
+    assert sections == ["## Summary", "## Review checklist", "## Findings", "## Security checks", "## Software bill of materials",
                         "## Requirements coverage", "## Design conformance", "## Scope and method"]
     assert "### Overview" in md
 
@@ -139,7 +139,7 @@ def test_without_a_scan_nothing_about_security_is_claimed():
     from agents_orchestrator.code_review_agent.review_document import review_markdown
 
     md = review_markdown(_artifact(security={}))
-    assert "The security review did not run for this target" in md
+    assert "The security checks did not run for this target" in md
     assert "No known vulnerabilities" not in md and "The SBOM was not built." in md
 
 
@@ -152,7 +152,7 @@ def test_the_word_report_is_on_the_canvas_with_its_facts_and_a_page_copy(tmp_pat
     assert os.path.basename(docx_path) == "QuickLink_Code_Review_feature_x_082f91e.docx"
     assert os.path.isfile(md_path) and open(md_path, encoding="utf-8").read().startswith("## Summary")
     band = "\n".join(c.text for t in Document(docx_path).tables for r in t.rows for c in r.cells)
-    for text in ("CODE REVIEW & SECURITY REPORT", "Whole branch · feature/x", "QuickLink — Code review",
+    for text in ("CODE REVIEW REPORT", "Whole branch · feature/x", "QuickLink — Code review",
                  "Request changes", "3 · 2 high+", "11 of 14 files"):
         assert text in band, text
     second, _ = write_review_report(_artifact(), str(tmp_path))
@@ -193,3 +193,22 @@ async def test_a_report_that_could_not_be_written_is_recorded_not_swallowed(monk
         doc = await api._write_review_document("sess-10", _artifact())
     assert doc == {"error": "The report document could not be written (OSError: disk full)"}
     registered.assert_not_awaited()
+
+
+def test_the_report_is_a_standard_code_review_with_its_checklist():
+    """Asked for: "a code review report of all the things a standard code review covers —
+    has the security test been done, does it follow the architecture" — not a security report."""
+    from agents_orchestrator.code_review_agent.review_document import review_checklist, review_markdown
+
+    rows = {r["check"]: r for r in review_checklist(_artifact())}
+    assert list(rows) == ["Whole change read", "Security checks run", "Security issues resolved",
+                          "Meets the approved requirements", "Follows the approved architecture",
+                          "Logic and correctness", "Performance", "Maintainability and style", "Merge recommendation"]
+    assert rows["Whole change read"]["result"] == "Partial"
+    assert rows["Merge recommendation"]["result"] == "Request changes"
+
+    unscanned = {r["check"]: r for r in review_checklist(_artifact(security={}))}
+    assert unscanned["Security checks run"]["result"] == "Not run"
+
+    md = review_markdown(_artifact())
+    assert "| Check | Result | Detail |" in md and "security report" not in md.lower()

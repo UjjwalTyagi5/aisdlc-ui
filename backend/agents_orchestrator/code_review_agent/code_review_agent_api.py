@@ -460,7 +460,7 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
                 message_data.get("task_intent")
                 or message_data.get("text")
                 or (
-                    "Please review the whole branch, run the security review, and submit your findings."
+                    "Please review the whole branch and submit your findings."
                     if s.mode == "repo" else
                     "Please review the prepared change and submit your findings."
                 )

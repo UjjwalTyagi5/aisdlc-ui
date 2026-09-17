@@ -22,6 +22,7 @@ import {
   approvalState,
   groupVulnerabilities,
   reportDocumentFor,
+  reviewChecklist,
   upgradeTo,
 } from "@/components/app/code-review-report";
 import { CodeReviewArtifact, PrepareResult } from "@/lib/schemas/code-review";
@@ -101,7 +102,7 @@ describe("CodeReviewReport", () => {
 
   it("says when a review has no security review at all", () => {
     render(<CodeReviewReport artifact={artifact({ security: undefined })} onOpenTab={() => {}} />);
-    expect(screen.getByText(/The security review did not run for this review/)).toBeInTheDocument();
+    expect(screen.getByText(/The security checks did not run for this review/)).toBeInTheDocument();
     expect(screen.getAllByText("not scanned").length).toBe(2);
   });
 
@@ -132,8 +133,9 @@ describe("CodeReviewReport", () => {
   it("orders findings by severity and links to the full tabs", () => {
     const onOpenTab = vi.fn();
     render(<CodeReviewReport artifact={artifact()} onOpenTab={onOpenTab} />);
+    // The findings table's rows start with the finding id (the checklist's mention ids in their detail).
     const rows = screen.getAllByRole("row").map((r) => r.textContent ?? "");
-    expect(rows.findIndex((r) => r.includes("F-001"))).toBeLessThan(rows.findIndex((r) => r.includes("F-002")));
+    expect(rows.findIndex((r) => r.startsWith("F-001"))).toBeLessThan(rows.findIndex((r) => r.startsWith("F-002")));
     fireEvent.click(screen.getByRole("button", { name: "Full results" }));
     expect(onOpenTab).toHaveBeenCalledWith("security");
   });
@@ -265,5 +267,25 @@ describe("The report's approval", () => {
     render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}}
       approval={{ document: documentRow(), mayRaise: false, raising: false, onRaise: vi.fn() }} />);
     expect(screen.queryByRole("button", { name: "Raise for approval" })).not.toBeInTheDocument();
+  });
+});
+
+describe("CodeReviewReport as a code review report", () => {
+  it("is titled a code review report and answers the standard review checklist", () => {
+    render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}} />);
+    expect(screen.getByText("Code review report", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText(/security report/i)).not.toBeInTheDocument();
+    for (const check of ["Whole change read", "Security checks run", "Meets the approved requirements",
+      "Follows the approved architecture", "Logic and correctness", "Merge recommendation"]) {
+      expect(screen.getByText(check)).toBeInTheDocument();
+    }
+  });
+
+  it("never marks a check done that nothing established", () => {
+    const rows = reviewChecklist(artifact({ security: undefined, requirements_coverage: [], design_conformance: [] }));
+    const byCheck = Object.fromEntries(rows.map((r) => [r.check, r.result]));
+    expect(byCheck["Security checks run"]).toBe("Not run");
+    expect(byCheck["Meets the approved requirements"]).toBe("Not checked");
+    expect(byCheck["Follows the approved architecture"]).toBe("Not checked");
   });
 });
