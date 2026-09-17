@@ -15,8 +15,9 @@ import {
   Loader2,
   MessageSquare,
   Play,
+  ListChecks,
   ScrollText,
-  Settings2,
+  SlidersHorizontal,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -34,6 +35,10 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
 import { TestRunReport } from "@/components/app/test-run-report";
 import { RequireRole } from "@/components/auth/require-role";
+import { TestSuitesWorkflow } from "@/components/app/testing/test-suites-workflow";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
+import { listArtifacts } from "@/lib/api/artifacts";
+import { listSuiteJobs, SuiteTarget, suitesKeys } from "@/lib/api/testing-suites";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
@@ -107,6 +112,8 @@ const TEST_TYPES: TType[] = [
 ];
 
 type Tab = "qa" | "output";
+/** The page's two modes: the test case flow, and the individual test types it grew from. */
+type Mode = "suites" | "advanced";
 
 export default function TestingPage() {
   const params = useParams<{ id: string }>();
@@ -121,7 +128,7 @@ export default function TestingPage() {
   // A `?session=` link from the project overview opens the drawer on that
   // conversation rather than a blank one.
   const linkedSession = useChatDeepLink(setChatOpen);
-  const [panelOpen, setPanelOpen] = React.useState(true);
+  const [mode, setMode] = React.useState<Mode>("suites");
   const [selectedType, setSelectedType] = React.useState<string>("unit");
   const [cfg, setCfg] = React.useState<Record<string, Record<string, string>>>({});
   const [tab, setTab] = React.useState<Tab>("output");
@@ -130,6 +137,19 @@ export default function TestingPage() {
   const [agentModel, setAgentModel] = React.useState<string>();
 
   const queryClient = useQueryClient();
+  // The project's documents — the SAME query the Documents panel reads, so a suite raised or
+  // approved anywhere updates its card in the flow too.
+  const documentsQ = useQuery({ queryKey: qk.artifacts.forProject(id), queryFn: () => listArtifacts(id) });
+  const approvals = useRaiseForApproval(id);
+  // THE BRANCH SURVIVES A RELOAD: until one is picked, the branch the last generation used.
+  const suiteJobsQ = useQuery({ queryKey: suitesKeys.jobs(id), queryFn: () => listSuiteJobs(id) });
+  React.useEffect(() => {
+    if (target) return;
+    const last = suiteJobsQ.data?.jobs.find((j) => j.kind === "generate")?.params?.target;
+    const parsed = SuiteTarget.safeParse(last);
+    if (parsed.success) setTarget({ ado_project: parsed.data.ado_project, repo: parsed.data.repo, branch: parsed.data.branch });
+  }, [suiteJobsQ.data, target]);
+
   const chat = useAgentChat({
     openSessionId: linkedSession,
     agent: "testing",
@@ -247,7 +267,7 @@ export default function TestingPage() {
                   <span className="font-mono">{target.branch}</span>
                 </span>
               ) : (
-                <span>Generate &amp; run tests of any type against a branch.</span>
+                <span>Generate test cases, get them approved, and run them against a branch and the running app.</span>
               )}
             </p>
           </div>
@@ -262,10 +282,6 @@ export default function TestingPage() {
               <GitBranch className="size-4" aria-hidden />
               Select target
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setPanelOpen((o) => !o)}>
-              <Settings2 className="size-4" aria-hidden />
-              New test run
-            </Button>
             <Button variant="outline" size="sm" onClick={() => setChatOpen(true)}>
               <MessageSquare className="size-4" aria-hidden />
               Chat
@@ -274,21 +290,36 @@ export default function TestingPage() {
         </div>
       </div>
 
-      <div className={cn("grid min-h-0 flex-1 overflow-hidden",
-        panelOpen ? "md:grid-cols-[360px_1fr]" : "grid-cols-1")}>
-        {/* Left config rail */}
-        {panelOpen && (
-          <aside className="min-h-0 overflow-auto border-b md:border-b-0 md:border-r">
-          <StageVersionPanel
-            projectId={id}
-            phase="testing"
-            className="mb-3 shrink-0"
-          />
-          <DocumentList
-            projectId={id}
-            stage="testing"
-            className="mb-4 shrink-0"
-          />
+      <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[320px_1fr]">
+        {/* THE DOCUMENTS BESIDE THE WORK, as on every agent page: test case workbooks and run
+            reports are listed, opened, raised and approved here. */}
+        <aside aria-label="Documents" className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r">
+          <StageVersionPanel projectId={id} phase="testing" className="mb-3 shrink-0" />
+          <DocumentList projectId={id} items={documentsQ.data ?? null} stage="testing" className="flex min-h-0 flex-1 flex-col" fillHeight />
+        </aside>
+
+        <div className="flex min-h-0 flex-col overflow-hidden">
+          <div className="flex items-center gap-1 border-b px-2 py-1.5" role="tablist" aria-label="Testing">
+            <TabBtn active={mode === "suites"} onClick={() => setMode("suites")} icon={ListChecks}>Test cases &amp; runs</TabBtn>
+            <TabBtn active={mode === "advanced"} onClick={() => setMode("advanced")} icon={SlidersHorizontal}>More test types</TabBtn>
+          </div>
+
+          {mode === "suites" ? (
+            <div className="min-h-0 flex-1 overflow-auto">
+              <TestSuitesWorkflow
+                projectId={id}
+                target={target}
+                onSelectTarget={() => setPickerOpen(true)}
+                offeringId={agentModel}
+                documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                approvals={approvals}
+              />
+            </div>
+          ) : (
+            /* THE INDIVIDUAL TEST TYPES, unchanged: smoke, performance, accessibility and the
+               rest still generate and run in one go from here. */
+            <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[340px_1fr]">
+              <div className="min-h-0 overflow-auto border-b md:border-b-0 md:border-r">
             <div className="space-y-4 p-3">
               <div>
                 <p className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">Test type</p>
@@ -354,10 +385,8 @@ export default function TestingPage() {
                 </p>
               </div>
             </div>
-          </aside>
-        )}
+              </div>
 
-        {/* Main results pane */}
         <main className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex items-center gap-1 border-b px-2 py-1.5">
             <TabBtn active={tab === "output"} onClick={() => setTab("output")} icon={ScrollText}>Output</TabBtn>
@@ -397,6 +426,9 @@ export default function TestingPage() {
             )}
           </div>
         </main>
+            </div>
+          )}
+        </div>
       </div>
 
       <TestTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onSelected={setTarget} />

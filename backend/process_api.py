@@ -1224,6 +1224,9 @@ from shared.routers.deployment_workspace import deployment_workspace_router
 app.include_router(deployment_workspace_router, prefix="/deployment", tags=["deployment-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.documentation_workspace import documentation_workspace_router
 app.include_router(documentation_workspace_router, prefix="/documentation", tags=["documentation-workspace"], dependencies=[_VIEW_DEP])
+# Test case suites: generate unit / functional / API cases as Excel, run them, file reports.
+from shared.routers.testing_suites import testing_suites_router
+app.include_router(testing_suites_router, prefix="/testing", tags=["testing-suites"], dependencies=[_VIEW_DEP])
 # Artifact publication (phase 2). Per-route gates: artifact:view to read, run:create to
 # snapshot, and require_stage_approval() — artifact:approve_<stage>, resolved from the
 # path — to publish or reject. No _VIEW_DEP blanket: the decision routes need the

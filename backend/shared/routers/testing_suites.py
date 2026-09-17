@@ -1,0 +1,101 @@
+"""Test case suites over HTTP: generate, follow the job, read a suite back.
+
+Mounted at `/testing` beside the other workspace routers. Every route is scoped to its
+`{project_id}` (`require_project_access`); starting work also requires use of the Testing
+agent on that project — the same gate as its chat.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from shared.authz.project_scope import require_project_access
+
+logger = logging.getLogger(__name__)
+
+testing_suites_router = APIRouter(dependencies=[Depends(require_project_access())])
+
+
+class Target(BaseModel):
+    ado_project: str = Field(min_length=1)
+    repo: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
+    provider: Optional[str] = None
+
+
+class GenerateRequest(BaseModel):
+    target: Target
+    kinds: list[Literal["unit", "functional", "api"]] = Field(default_factory=lambda: ["unit", "functional", "api"], min_length=1)
+    offering_id: Optional[str] = None
+
+
+async def _may_use_testing(request: Request, project_id: str) -> tuple[str, str]:
+    from shared.authz.agent_access import assert_agent_access_for_chat  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+
+    tenant_id = str(getattr(request.state, "tenant_id", "") or "")
+    user_id = str(getattr(request.state, "user_id", "") or "")
+    async with get_db_session_for_tenant(tenant_id) as db:
+        await assert_agent_access_for_chat(db, tenant_id=tenant_id, project_id=project_id, user_id=user_id,
+                                           agent_id="testing")
+    return tenant_id, user_id
+
+
+@testing_suites_router.post("/{project_id}/suites/generate", status_code=202)
+async def generate(project_id: str, body: GenerateRequest, request: Request) -> dict:
+    """Start writing the suites for a branch. Returns the job to follow."""
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.workflows import generate_workflow  # noqa: PLC0415
+
+    tenant_id, user_id = await _may_use_testing(request, project_id)
+    running = jobs.active_job(project_id, "generate")
+    if running:
+        raise HTTPException(status_code=409, detail="Test cases are already being generated for this project — follow that run.")
+    kinds = list(dict.fromkeys(body.kinds))
+    target = body.target.model_dump()
+    job = jobs.start_job(
+        kind="generate", project_id=project_id, tenant_id=tenant_id, user_id=user_id,
+        params={"target": target, "kinds": kinds},
+        work=lambda job: generate_workflow(job, target=target, kinds=kinds, offering_id=body.offering_id),
+    )
+    return job.public()
+
+
+@testing_suites_router.get("/{project_id}/suites/jobs")
+async def list_suite_jobs(project_id: str, kind: Optional[str] = None, limit: int = 20) -> dict:
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+
+    return {"jobs": [j.public() for j in jobs.list_jobs(project_id, kind=kind, limit=max(1, min(limit, 50)))]}
+
+
+@testing_suites_router.get("/{project_id}/suites/jobs/{job_id}")
+async def get_suite_job(project_id: str, job_id: str) -> dict:
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+
+    job = jobs.get_job(project_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such run for this project.")
+    return job.public()
+
+
+@testing_suites_router.get("/{project_id}/suites/{document_id}")
+async def read_suite_document(project_id: str, document_id: str, request: Request) -> dict:
+    """The suite in a stored test case workbook — what a run of it would execute."""
+    from agents_orchestrator.testing_agent.suites.excel import SuiteFormatError, read_suite  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.store import document_bytes  # noqa: PLC0415
+
+    tenant_id = str(getattr(request.state, "tenant_id", "") or "")
+    try:
+        row, data = await document_bytes(tenant_id, project_id, document_id)
+        meta, cases, problems = read_suite(data)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SuiteFormatError as exc:
+        raise HTTPException(status_code=422, detail=f"This document is not a runnable test case suite: {exc}") from exc
+    return {
+        "documentId": str(row.id), "status": row.approval_status or "draft",
+        "meta": meta.model_dump(), "cases": [c.model_dump() for c in cases], "problems": problems,
+    }
