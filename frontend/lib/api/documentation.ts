@@ -6,6 +6,7 @@ import {
   DocConnector,
   DocSetResponse,
   PrepareDocResult,
+  PreparedDocState,
 } from "@/lib/schemas/documentation";
 
 import { api } from "./client";
@@ -53,3 +54,7 @@ export const getDocSet = (projectId: ProjectId, sessionId: string) =>
   api(`/documentation/${enc(projectId)}/docset/${enc(sessionId)}`, {
     schema: DocSetResponse,
   });
+
+/** The docs workspace already prepared for this project — so a refresh keeps it. */
+export const getPreparedDocs = (projectId: ProjectId) =>
+  api(`/documentation/${enc(projectId)}/prepared`, { schema: PreparedDocState });

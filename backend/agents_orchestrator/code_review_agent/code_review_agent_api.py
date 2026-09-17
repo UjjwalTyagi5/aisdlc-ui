@@ -46,6 +46,7 @@ from shared.audit import AuditCallbackHandler
 from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.db import get_db_session_for_tenant
+from shared.services.conversation_service import persist_turn
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -90,7 +91,25 @@ def _extract_text(content) -> str:
 
 
 def _review_context_block(s) -> str:
-    """Render the prepared target + diff for injection into the first message."""
+    """Render the prepared target for injection into the conversation.
+
+    A WHOLE-BRANCH target has no diff: the block names the branch and lists its files, and
+    the agent reads what it needs (list_repo_files / read_repo_file). A diff target shows
+    the diff, as before.
+    """
+    if s.mode == "repo":
+        inv = s.inventory or {}
+        totals = inv.get("totals") or {}
+        listed = [f for f in inv.get("files", []) if f.get("reviewable")][:200]
+        lines = "\n".join(f"- {f['path']} ({f['lines']} lines, {f['language']})" for f in listed)
+        languages = ", ".join(f"{k} ({v})" for k, v in (inv.get("languages") or {}).items())
+        return (
+            f"You are reviewing the WHOLE BRANCH '{s.source_branch}' in repo '{s.repo_name}' "
+            f"at commit {s.head_sha[:12]} — every file on it, not a diff.\n"
+            f"The branch has {totals.get('files', 0)} files, {totals.get('reviewable_files', 0)} of them "
+            f"reviewable code ({totals.get('lines', 0)} lines). Languages: {languages or 'unknown'}.\n\n"
+            f"Reviewable files:\n{lines}\n"
+        )
     if not s.diff_text and not s.changed_files:
         return ""
     if s.mode == "pr":
@@ -102,6 +121,37 @@ def _review_context_block(s) -> str:
         f"You are reviewing {target} in repo '{s.repo_name}'.\n"
         f"Changed files ({len(s.changed_files)}): {files}\n\n"
         f"Unified diff under review:\n```diff\n{s.diff_text}\n```\n"
+    )
+
+
+async def _saved_review_note(s, tenant_id: str, project_id: str) -> str:
+    """What is already on file for THIS target, for a conversation that starts after it.
+
+    A new chat asked only "Send the review report for approval." ran a whole new review
+    first — nothing told it a report already existed, or its name — and filed a seventh
+    copy of the same report before it got to the request.
+    """
+    if not (s.repo_name and s.head_sha and tenant_id and project_id):
+        return ""
+    from shared.routers.code_review_workspace import _find_unchanged_review  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as db:
+        run = await _find_unchanged_review(
+            db, tenant_id=tenant_id, project_id=project_id, repo_name=s.repo_name,
+            head_sha=s.head_sha, base_sha=s.base_sha, mode=s.mode or None,
+        )
+    if run is None:
+        return ""
+    art = run.code_review_artifacts or {}
+    report = (art.get("document") or {}).get("filename")
+    when = f" on {run.created_at:%d %b %Y %H:%M} UTC" if getattr(run, "created_at", None) else ""
+    return (
+        f"\nA review of this exact target is already saved{when}: "
+        f"{art.get('merge_recommendation') or 'no recommendation'}, "
+        f"{len(art.get('findings') or [])} finding(s)"
+        + (f"; its report is '{report}' in the project's Documents" if report else "")
+        + ". Do NOT review again unless the user asks for a new review — a request to send, "
+        "raise, publish or explain the report is about that saved report.\n"
     )
 
 
@@ -151,42 +201,93 @@ async def _stream(
     """
     from langgraph.errors import GraphRecursionError
 
-    final, got = "", False
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    final, failure = "", None
+    # THE AGENT'S ANSWERS ONLY — not the text it writes before calling a tool, not tool
+    # results, not the graph's own submit nudge (a HumanMessage that once reached the chat
+    # as "You wrote the review as prose instead of submitting it…"). See AnswerStream.
+    answers = AnswerStream(_extract_text)
+
+    async def _send(text: str) -> None:
+        nonlocal final
+        if not text:
+            return
+        final += text
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
+            websocket,
+        )
+
     try:
         async for chunk in review_app.astream(state, stream_mode="messages", config=config):
-            msg = chunk[0] if isinstance(chunk, tuple) else chunk
-            if isinstance(msg, ToolMessage) or not hasattr(msg, "content"):
-                continue
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                continue
-            text = _extract_text(msg.content)
-            if not text:
-                continue
-            final += text
-            got = True
-            await manager.send_personal_message(
-                json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
-                websocket,
-            )
+            await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+        await _send(answers.close())
     except GraphRecursionError:
+        await _send(answers.close())
         notice = "Step limit reached for this review. Send another message to continue."
         await manager.send_personal_message(
             json.dumps({"type": "stream_chunk", "content": f"\n\n> ⚠️ {notice}", "session_id": session_id}),
             websocket,
         )
     except Exception as e:
+        # A FAILURE AFTER SOME TEXT IS STILL A FAILURE. This used to be swallowed once
+        # anything had streamed, and the turn went on to announce "Review complete" over
+        # a review that stopped halfway. The caller reports it and ends the run as failed.
         logger.error("Code-review stream error: %s", e)
-        if not got:
-            raise
+        failure = e
     if before_end is not None:
+        # Runs on failure too: a review the agent SUBMITTED before the model failed (the
+        # closing summary is the last call) is a real review and is kept.
         try:
             await before_end()
         except Exception:  # noqa: BLE001 — a failed save must not strand the client
             logger.exception("Code-review: before_end hook failed for session %s", session_id)
+    if failure is not None:
+        raise failure
     await manager.send_personal_message(
         json.dumps({"type": "stream_end", "session_id": session_id}), websocket
     )
     return final
+
+
+async def _write_review_document(session_id: str, artifact: dict) -> dict:
+    """Write the Code Review & Security Report, file it as a draft in the project's
+    Documents and announce it. Returns {filename, url} — or {error}, which the review
+    keeps and the page shows: a review whose report could not be written says so."""
+    import os  # noqa: PLC0415
+
+    from config import sdlcSettings  # noqa: PLC0415
+    from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+    from agents_orchestrator.code_review_agent.review_document import write_review_report  # noqa: PLC0415
+    from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+
+    s = get_session(session_id)
+    user_id = _ctx_user_id() or s.owner_id or "code_review"
+    out_dir = f"{sdlcSettings().FILES}/{user_id}/code_review/{session_id}/output"
+    try:
+        docx_path, _md_path = await asyncio.to_thread(write_review_report, artifact, out_dir)
+    except Exception as exc:  # noqa: BLE001 — recorded on the review, not swallowed
+        logger.exception("Code review report not written for session %s", session_id)
+        return {"error": f"The report document could not be written ({type(exc).__name__}: {exc})"}
+    filename = os.path.basename(docx_path)
+    url = f"{AGENTIC_BASE_URL}/generated/{user_id}/code_review/{session_id}/output/{filename}"
+    # THE REPORT'S OWN DOCUMENT ROW, by id. The page shows its approval status beside the
+    # review — Draft, Raised for approval, Approved — and every report for one commit has
+    # the same file name, so only the id says which document belongs to this review.
+    artifact_id = await register_generated_file(
+        filename, docx_path, url, stage="code_review",
+        note="Code review & security report generated by the Code Review agent.",
+    )
+    await manager.broadcast({
+        "type": "file_generated",
+        "session_id": session_id,
+        "filename": filename,
+        "url": url,
+        "file_size": os.path.getsize(docx_path),
+        "message": f"Generated file: {filename}",
+    })
+    return {"filename": filename, "url": url, "artifact_id": artifact_id}
 
 
 async def _persist_review_to_run(session_id: str, project_id: str | None, tenant_id: str) -> None:
@@ -196,6 +297,9 @@ async def _persist_review_to_run(session_id: str, project_id: str | None, tenant
     from shared.models.orm import Run
 
     artifact = dict(s.last_artifact)
+    # The report is part of the review: written before the row, so the saved review
+    # carries its link (or the reason there is none).
+    artifact["document"] = await _write_review_document(session_id, artifact)
     # EVERY COMPLETED REVIEW IS SAVED, including a re-review of a commit already
     # reviewed. This used to skip the insert when any run already carried this
     # head_sha, which SILENTLY DISCARDED the review the reader had just deliberately
@@ -303,32 +407,48 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         project_id = _effective_project
         s.project_id = _effective_project
 
-        # Bind the prepared review target (cloned repo + diff) on the first turn —
+        # Bind the prepared review target (cloned repo + diff, or a whole branch) —
         # keyed by project, like the dev workspace, so it survives the chat's own
-        # session id. Without this the agent has no diff to review.
-        if not s.target_bound:
-            prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
-            if prepared:
-                for k, v in prepared.items():
-                    setattr(s, k, v)
-                s.target_bound = True
-                # A RECORD RESTORED FROM DISK CARRIES NO TOKEN, deliberately — one
-                # credential exists, in the credential store, and a copy beside the
-                # checkout would outlive its revocation. So it is resolved here, as
-                # the person the target was prepared for.
-                #
-                # An empty result is not fatal: reading a checked-out repository needs
-                # no token, and only the push paths do — they say so themselves rather
-                # than failing halfway through a git command.
-                if not getattr(s, "pat", ""):
-                    from shared.services import prepared_targets  # noqa: PLC0415
+        # session id. Without this the agent has nothing to review.
+        #
+        # REBOUND WHEN A NEW TARGET IS PREPARED. This used to bind once per session, so
+        # selecting a second target on the same page kept reviewing the first. The
+        # security scan and the files read belong to a target, so they reset with it.
+        prepared = get_prepared(tenant_id or s.tenant_id, project_id or s.project_id)
+        new_target = bool(prepared) and (
+            not s.target_bound
+            or (prepared.get("prepared_at") and prepared.get("prepared_at") != s.prepared_at)
+        )
+        if new_target:
+            # The token belongs to the target it was prepared with; a record restored
+            # from disk has none, so it is re-resolved below rather than inherited.
+            s.pat = ""
+            for k, v in prepared.items():
+                setattr(s, k, v)
+            s.prepared_at = prepared.get("prepared_at") or ""
+            s.security = None
+            s.files_read = []
+            s.last_artifact = None
+            s.system_injected = False
+            s.target_bound = True
+        if new_target:
+            # A RECORD RESTORED FROM DISK CARRIES NO TOKEN, deliberately — one
+            # credential exists, in the credential store, and a copy beside the
+            # checkout would outlive its revocation. So it is resolved here, as
+            # the person the target was prepared for.
+            #
+            # An empty result is not fatal: reading a checked-out repository needs
+            # no token, and only the push paths do — they say so themselves rather
+            # than failing halfway through a git command.
+            if not getattr(s, "pat", ""):
+                from shared.services import prepared_targets  # noqa: PLC0415
 
-                    s.pat = await prepared_targets.resolve_secret(
-                        tenant_id=s.tenant_id or tenant_id or "",
-                        project_id=s.project_id or project_id or "",
-                        owner_id=str(getattr(s, "owner_id", "") or ""),
-                        provider=str(getattr(s, "provider", "") or ""),
-                    )
+                s.pat = await prepared_targets.resolve_secret(
+                    tenant_id=s.tenant_id or tenant_id or "",
+                    project_id=s.project_id or project_id or "",
+                    owner_id=str(getattr(s, "owner_id", "") or ""),
+                    provider=str(getattr(s, "provider", "") or ""),
+                )
 
         incoming = message_data.get("messages", [])
         if incoming:
@@ -339,7 +459,11 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             user_text = (
                 message_data.get("task_intent")
                 or message_data.get("text")
-                or "Please review the prepared change and submit your findings."
+                or (
+                    "Please review the whole branch and submit your findings."
+                    if s.mode == "repo" else
+                    "Please review the prepared change and submit your findings."
+                )
             )
 
         # project_id is load-bearing for model resolution, not just for logging:
@@ -362,6 +486,10 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         first = not s.system_injected
         if first:
             ctx = _review_context_block(s)
+            if ctx:
+                ctx += await _saved_review_note(
+                    s, tenant_id or s.tenant_id, project_id or s.project_id
+                )
             content = (ctx + "\n" + user_text) if ctx else user_text
             state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
@@ -380,6 +508,14 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             attachment_paths_from_context(message_data.get("pipeline_context"))
         ):
             state["messages"].append(HumanMessage(content=_content))
+
+        # THE TRANSCRIPT, like every other agent's (§11A). The chat drawer listed this
+        # agent's past conversations and opened each one empty: nothing was ever written.
+        # Best-effort — persist_turn never fails a turn.
+        await persist_turn(
+            session_id, "user", user_text, tenant_id=tenant_id or s.tenant_id or None,
+            author_id=str(user_id) if user_id else None,
+        )
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="code_review", project_id=_project_id_from_message(message_data))
@@ -413,9 +549,13 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         try:
             async with prompt_override_scope("code_review", _injected):
                 async with skill_context_scope("code_review", _skills):
-                    await _stream(state, config, websocket, session_id, before_end=_save)
+                    reply = await _stream(state, config, websocket, session_id, before_end=_save)
         finally:
             clear_mcp_tools()
+        await persist_turn(
+            session_id, "agent", reply, tenant_id=tenant_id or s.tenant_id or None,
+            author_id="code_review", model=message_data.get("model_id"),
+        )
         await manager.broadcast({
             "type": "activity_update",
             "activity": {
@@ -425,7 +565,50 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         })
     except Exception as e:
         logger.error("Code-review WS process error: %s", e)
-        await manager.send_agent_response("Error Agent", f"An error occurred: {e}", session_id)
+        reason = _failure_reason(e)
+        await manager.send_agent_response("Error Agent", f"An error occurred: {reason}", session_id)
+        # A reopened conversation shows that this turn failed, and why.
+        await persist_turn(
+            session_id, "agent", f"An error occurred: {reason}", tenant_id=tenant_id or None,
+            author_id="code_review",
+        )
+        # THE TURN MUST SAY IT IS OVER, and that it failed. The chat BFF ends a run on
+        # activity_update{complete} or agent_completed{success: false}; this path sent
+        # neither, so a model whose key had been revoked left the drawer on "Agent is
+        # working" with the composer locked — the user could not even retry.
+        await manager.broadcast({
+            "type": "agent_completed", "session_id": session_id,
+            "success": False, "error": reason,
+        })
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}), websocket
+        )
+        await manager.broadcast({
+            "type": "activity_update",
+            "activity": {
+                "id": str(uuid4()), "type": "complete",
+                "session_id": session_id, "message": "Review failed", "time": "Just now",
+            },
+        })
+
+
+#: Exceptions raised by a model provider's SDK. Their text can echo a BYOK key and does
+#: not say who fixes the problem, so they are answered by `friendly_model_error`.
+_PROVIDER_MODULES = frozenset({"litellm", "openai", "anthropic", "httpx"})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """What the person is told when a review turn fails.
+
+    A provider failure gets the actionable sentence ("the provider rejected the configured
+    credential…"), never the provider's own text. Anything else is this platform's own
+    error — a denied project, a failed git command — and its message IS the reason.
+    """
+    from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+    if (type(exc).__module__ or "").split(".")[0] in _PROVIDER_MODULES:
+        return friendly_model_error(exc)
+    return str(exc) or type(exc).__name__
 
 
 @code_review_router.post("/chat/")

@@ -10,8 +10,10 @@ repo + detected connector) is bound by project_id; BYO MCP tools are injected he
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from uuid import uuid4
@@ -42,6 +44,7 @@ from shared.audit import AuditCallbackHandler
 from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.db import get_db_session, get_db_session_for_tenant
+from shared.services.conversation_service import persist_turn
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -111,34 +114,113 @@ async def _load_mcp_tools(tenant_id: str, project_id: str | None) -> list:
         return []
 
 
-async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: str) -> str:
+async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: str,
+                  before_end=None) -> str:
+    """Stream the model's ANSWERS to the client; returns the text sent.
+
+    Narration from a message that goes on to call a tool is not an answer — a streamed
+    chunk carries no tool call until its message completes, so every "Let me inspect the
+    repo…" reached the reader. `AnswerStream` releases text once it is known to be one.
+    A failure is raised even after text has streamed: it used to be swallowed, and the
+    turn announced "Deployment assessment complete". `before_end` runs before
+    `stream_end` — the report must be filed by the time the page refetches.
+    """
     from langgraph.errors import GraphRecursionError
-    final, got = "", False
+
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    answers = AnswerStream(_extract_text)
+    final = ""
+    failure = None
+
+    async def _send(text: str) -> None:
+        nonlocal final
+        if not text:
+            return
+        final += text
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}), websocket
+        )
+
     try:
         async for chunk in deploy_app.astream(state, stream_mode="messages", config=config):
-            msg = chunk[0] if isinstance(chunk, tuple) else chunk
-            if isinstance(msg, ToolMessage) or not hasattr(msg, "content"):
-                continue
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                continue
-            text = _extract_text(msg.content)
-            if not text:
-                continue
-            final += text
-            got = True
-            await manager.send_personal_message(
-                json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}), websocket
-            )
+            await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+        await _send(answers.close())
     except GraphRecursionError:
-        await manager.send_personal_message(
-            json.dumps({"type": "stream_chunk", "content": "\n\n> ⚠️ Step limit reached. Send another message to continue.", "session_id": session_id}), websocket
-        )
-    except Exception as e:
+        await _send(answers.close())
+        await _send("\n\n> ⚠️ Step limit reached. Send another message to continue.")
+    except Exception as e:  # noqa: BLE001 — re-raised below, after the report is filed
         logger.error("Deployment stream error: %s", e)
-        if not got:
-            raise
+        failure = e
+    if before_end is not None:
+        try:
+            await before_end()
+        except Exception:  # noqa: BLE001 — a failed filing must not strand the client
+            logger.exception("Deployment: before_end hook failed for session %s", session_id)
+    if failure is not None:
+        raise failure
     await manager.send_personal_message(json.dumps({"type": "stream_end", "session_id": session_id}), websocket)
     return final
+
+
+#: Exceptions raised by a model provider's SDK: their text can echo a BYOK key and does
+#: not say who fixes the problem, so they are answered by `friendly_model_error`.
+_PROVIDER_MODULES = frozenset({"litellm", "openai", "anthropic", "httpx"})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+    if (type(exc).__module__ or "").split(".")[0] in _PROVIDER_MODULES:
+        return friendly_model_error(exc)
+    return str(exc) or type(exc).__name__
+
+
+async def _filed_documents_note(tenant_id: str, project_id: str) -> str:
+    from shared.services.filed_documents import filed_documents_note  # noqa: PLC0415
+
+    return await filed_documents_note(tenant_id, project_id, "deployment")
+
+
+async def _file_readiness_report(session_id: str, user_id: str) -> None:
+    """File the turn's release assessment as the Deployment Readiness Report — a DRAFT in
+    the project's Documents — and record {filename, url, artifact_id} (or {error}) on it.
+
+    Once per assessment: a turn that only talks about the report (or opens the PR, which
+    edits the same assessment) files nothing new."""
+    from config import sdlcSettings  # noqa: PLC0415
+    from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+
+    from agents_orchestrator.deployment_agent.readiness_report import write_readiness_report  # noqa: PLC0415
+    from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+
+    s = get_session(session_id)
+    artifact = s.last_artifact
+    if not artifact or artifact.get("document"):
+        return
+    owner = user_id or "deployment"
+    out_dir = f"{sdlcSettings().FILES}/{owner}/deployment/{session_id}/output"
+    try:
+        docx_path, _md = await asyncio.to_thread(write_readiness_report, artifact, out_dir)
+    except Exception as exc:  # noqa: BLE001 — recorded on the assessment, not swallowed
+        logger.exception("Deployment readiness report not written for session %s", session_id)
+        artifact["document"] = {"error": f"The report document could not be written ({type(exc).__name__}: {exc})"}
+        return
+    filename = os.path.basename(docx_path)
+    url = f"{AGENTIC_BASE_URL}/generated/{owner}/deployment/{session_id}/output/{filename}"
+    artifact_id = await register_generated_file(
+        filename, docx_path, url, stage="deployment",
+        note="Deployment readiness report generated by the Deployment agent.",
+    )
+    artifact["document"] = {"filename": filename, "url": url, "artifact_id": artifact_id} if artifact_id else {
+        "filename": filename, "url": url,
+        "error": "The report was written but could not be recorded in the project's Documents.",
+    }
+    await manager.broadcast({
+        "type": "file_generated", "session_id": session_id, "filename": filename, "url": url,
+        "artifact_id": artifact_id, "file_size": os.path.getsize(docx_path),
+        "message": f"Generated file: {filename}",
+    })
 
 
 @deployment_standalone_router.websocket("/ws")
@@ -232,14 +314,32 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             user_text = (message_data.get("task_intent") or message_data.get("text")
                          or "Assess deployment readiness and generate the deployment package.")
 
+        # THE TRANSCRIPT, like every other agent's — the drawer lists this agent's past
+        # conversations, and each opened empty because nothing was ever written.
+        await persist_turn(
+            session_id, "user", user_text, tenant_id=tenant_id or s.tenant_id or None,
+            author_id=str(user_id) if user_id else None,
+        )
+
+        # THE PAGE'S MODEL PICKER. The graph reads `state["offering_id"]`; this handler —
+        # the one the Deployment chat actually uses — never put it there, so the picker
+        # changed nothing and every turn ran on whichever connection resolved first.
+        _model_state = {
+            "tenant_id": tenant_id,
+            "project_id": _effective_project,
+            "model_id": message_data.get("model_id"),
+            "offering_id": message_data.get("offering_id"),
+        }
         first = not s.system_injected
         if first:
-            ctx = _deploy_context_block(s)
+            ctx = _deploy_context_block(s) + await _filed_documents_note(
+                tenant_id or s.tenant_id, _effective_project or s.project_id,
+            )
             content = (ctx + "\n" + user_text) if ctx else user_text
-            state = {"messages": [HumanMessage(content=content)], "tenant_id": tenant_id, "model_id": message_data.get("model_id")}
+            state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
         else:
-            state = {"messages": [HumanMessage(content=user_text)], "tenant_id": tenant_id, "model_id": message_data.get("model_id")}
+            state = {"messages": [HumanMessage(content=user_text)], **_model_state}
 
         # THE FILE THE PERSON ATTACHED, read here rather than left as a path.
         #
@@ -270,12 +370,19 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             "deployment", DEPLOY_SYSTEM_PROMPT,
             tenant_id or s.tenant_id, project_id or s.project_id,
         )
+        async def _file_report() -> None:
+            await _file_readiness_report(session_id, str(user_id or ""))
+
         try:
             async with prompt_override_scope("deployment", _injected):
                 async with skill_context_scope("deployment", _skills):
-                    await _stream(state, config, websocket, session_id)
+                    reply = await _stream(state, config, websocket, session_id, before_end=_file_report)
         finally:
             clear_mcp_tools()
+        await persist_turn(
+            session_id, "agent", reply, tenant_id=tenant_id or s.tenant_id or None,
+            author_id="deployment", model=message_data.get("model_id"),
+        )
 
         await manager.broadcast({
             "type": "activity_update",
@@ -284,7 +391,26 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         })
     except Exception as e:
         logger.error("Deployment WS process error: %s", e)
-        await manager.send_agent_response("Error Agent", f"An error occurred: {e}", session_id)
+        reason = _failure_reason(e)
+        await manager.send_agent_response("Error Agent", f"An error occurred: {reason}", session_id)
+        await persist_turn(
+            session_id, "agent", f"An error occurred: {reason}", tenant_id=tenant_id or None,
+            author_id="deployment",
+        )
+        # THE TURN MUST SAY IT IS OVER, and that it failed — the chat BFF ends a run on
+        # activity_update{complete} or agent_completed{success: false}; without them a
+        # dead model key left the drawer on "Agent is working" with the composer locked.
+        await manager.broadcast({
+            "type": "agent_completed", "session_id": session_id, "success": False, "error": reason,
+        })
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}), websocket
+        )
+        await manager.broadcast({
+            "type": "activity_update",
+            "activity": {"id": str(uuid4()), "type": "complete", "session_id": session_id,
+                         "message": "Deployment failed", "time": "Just now"},
+        })
 
 
 @deployment_standalone_router.post("/chat/")

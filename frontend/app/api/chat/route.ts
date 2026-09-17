@@ -204,6 +204,21 @@ async function openChatWsBridge(
     );
   } catch (err) {
     console.error("[chat-bridge] failed to open WS connection:", err);
+    // SAY IT IN THE CHAT. A failed run with no text was an empty agent bubble and a
+    // "Running the test agent..." banner that simply vanished; the tester read it as
+    // the agent breaking, when the backend's ticket store (Redis) was down and no
+    // connection was ever opened. The reason is one line the person can act on.
+    const reason = err instanceof Error ? err.message : String(err);
+    const detail = /503/.test(reason)
+      ? "the backend's session store is unavailable (is Redis running?)"
+      : reason;
+    writeSse({
+      type: "step.output.delta",
+      runId,
+      stepId: `${runId}:agent`,
+      delta: `Couldn't connect to the agent: ${detail}. Nothing was run — try again once the backend is healthy.`,
+      at: new Date().toISOString(),
+    });
     writeSse({ type: "run.completed", runId, status: "failed", at: new Date().toISOString() });
     closeStream();
     return;

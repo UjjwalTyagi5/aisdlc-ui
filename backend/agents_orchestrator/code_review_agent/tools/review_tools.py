@@ -1,14 +1,17 @@
 """Native tools for the Code Review agent (read-only on the repo).
 
-The diff under review is prepared by the API (clone + `git diff`) and injected
-into the agent's context; these tools let the agent (1) read surrounding code for
-semantic context, (2) pull light cross-file context, (3) read upstream
-requirements/design artifacts when the project has them, and (4) submit the
-final structured review. None of them mutate the repository.
+The target is prepared by the API: a diff (branch vs base, or a PR) or a WHOLE BRANCH
+(clone + file inventory, no diff). These tools let the agent (1) list and read the code,
+(2) pull cross-file context, (3) run the security review of the checkout — secrets,
+static analysis, vulnerable dependencies, SBOM — (4) read upstream requirements/design
+artifacts, and (5) submit the final structured review. None of them mutate the
+repository.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import pathlib
 import uuid
@@ -18,6 +21,8 @@ from langchain_core.tools import tool
 from agents_orchestrator.code_review_agent.config.session_state import get_session
 from config.ws_helper import broadcast_log, get_session_id
 from config.connection_manager import manager
+
+logger = logging.getLogger(__name__)
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "bin", "obj", "dist", "build"}
 _MAX_FILE_BYTES = 200_000
@@ -47,7 +52,94 @@ async def read_repo_file(path: str) -> str:
     if not target.exists() or not target.is_file():
         return f"ERROR: file not found: {path}"
     data = target.read_bytes()[:_MAX_FILE_BYTES]
+    # Recorded for the report's scope: on a whole-branch review, which files were
+    # actually read is the difference between "reviewed the branch" and "looked at it".
+    s = get_session(get_session_id())
+    rel = str(target.relative_to(root.resolve())).replace("\\", "/")
+    if rel not in s.files_read:
+        s.files_read.append(rel)
     return data.decode("utf-8", errors="replace")
+
+
+@tool
+async def list_repo_files() -> str:
+    """List every file on the branch under review: path, lines, language, and whether it
+    is reviewable code. Use it to plan a WHOLE-BRANCH review — read entry points, routes,
+    controllers, services, data access, auth and configuration before anything else.
+
+    Returns JSON {totals, languages, files: [{path, lines, language, reviewable}]}.
+    """
+    root = _work_dir()
+    if root is None or not root.exists():
+        return "ERROR: no review workspace prepared. Ask the user to select a branch or PR first."
+    s = get_session(get_session_id())
+    inventory = s.inventory
+    if not inventory:
+        from shared.services.branch_inventory import branch_inventory  # noqa: PLC0415
+
+        try:
+            inventory = await asyncio.to_thread(branch_inventory, str(root))
+        except RuntimeError as exc:
+            return f"ERROR: {exc}"
+        s.inventory = inventory
+    slim = [
+        {k: f[k] for k in ("path", "lines", "language", "reviewable")}
+        for f in inventory.get("files", [])
+    ]
+    return json.dumps({"totals": inventory.get("totals"), "languages": inventory.get("languages"), "files": slim})
+
+
+@tool
+async def run_security_review() -> str:
+    """Run the security review of the WHOLE checked-out branch — call it ONCE per review,
+    before submitting. It runs Gitleaks (hardcoded secrets), Semgrep with the OWASP Top 10
+    rules (static analysis) and Trivy (known vulnerabilities in dependencies), and builds
+    the SBOM with each package's version, licence and the direct dependency that brings
+    it in.
+
+    The full results are kept for the report; you get a summary to reason about. Treat a
+    scanner whose status is not "ok" as NOT RUN — never describe its area as clean.
+    """
+    root = _work_dir()
+    if root is None or not root.exists():
+        return "ERROR: no review workspace prepared. Ask the user to select a branch or PR first."
+    from shared.services.code_security_scan import run_code_security_scan  # noqa: PLC0415
+
+    s = get_session(get_session_id())
+
+    def _progress(message: str) -> None:
+        broadcast_log(manager, message, level="INFO")
+
+    try:
+        result = await asyncio.to_thread(run_code_security_scan, str(root), progress=_progress)
+    except RuntimeError as exc:
+        return f"ERROR: the security review could not run: {exc}"
+    s.security = result
+    comps = result["sbom"]["components"]
+    vulnerable = [c for c in comps if c.get("vulnerabilities")]
+    summary = {
+        "totals": result["totals"],
+        "scanners": [{k: sc[k] for k in ("name", "status", "findings", "message")} for sc in result["scanners"]],
+        "secrets": result["secrets"][:20],
+        "sast": result["sast"][:25],
+        "vulnerabilities": result["vulnerabilities"][:40],
+        "vulnerable_packages": [
+            {k: c.get(k) for k in ("name", "version", "via", "scope", "vulnerabilities")} for c in vulnerable
+        ],
+        "direct_dependencies": [
+            {k: c.get(k) for k in ("name", "declared", "version", "license", "scope")}
+            for c in comps if c.get("direct")
+        ],
+        "sbom_notes": result["sbom"]["notes"],
+    }
+    broadcast_log(
+        manager,
+        f"Security review: {result['totals']['vulnerabilities']} vulnerabilities, "
+        f"{result['totals']['secrets']} secrets, {result['totals']['sast']} static-analysis findings, "
+        f"{result['totals']['components']} SBOM components",
+        level="INFO",
+    )
+    return json.dumps(summary)
 
 
 @tool
@@ -213,6 +305,83 @@ async def read_design_artifacts() -> str:
     return json.dumps(result.payload)[:12000]
 
 
+def _review_scope(s) -> dict:
+    """What this review covered, stated from what the agent actually did."""
+    inventory = s.inventory or {}
+    totals = inventory.get("totals") or {}
+    reviewable = {f["path"] for f in inventory.get("files", []) if f.get("reviewable")}
+    read = list(s.files_read)
+    scope = {
+        "mode": s.mode or "branch",
+        "files_read": read,
+        "languages": inventory.get("languages") or {},
+    }
+    if s.mode == "repo":
+        scope.update({
+            "files_total": totals.get("files", 0),
+            "reviewable_files": totals.get("reviewable_files", 0),
+            "lines_total": totals.get("lines", 0),
+            "reviewable_files_read": len(reviewable & set(read)),
+            "not_read": sorted(reviewable - set(read)),
+        })
+    else:
+        changed = [f.get("path") for f in s.changed_files if isinstance(f, dict)]
+        scope.update({"files_changed": len(changed), "changed_files": changed})
+    return scope
+
+
+#: A whole branch at or under both limits is read IN FULL before it can be submitted.
+#: Above them a complete read is not realistic, and the report lists what was not read.
+_READ_ALL_MAX_FILES = 40
+_READ_ALL_MAX_LINES = 6000
+
+
+def _unread_on_small_branch(s) -> list[str]:
+    """Reviewable files still unread on a whole branch small enough to read completely.
+
+    A real run on QuickLink (14 files, 325 lines) read 8, skipped every template and
+    package.json, and submitted a summary saying "All 14 reviewable files" were reviewed.
+    The Scope section told the truth; the summary did not. On a branch this size, reading
+    the rest costs a few tool calls, so "whole branch" is made true rather than qualified.
+    """
+    if s.mode != "repo":
+        return []
+    reviewable = [f for f in (s.inventory or {}).get("files", []) if f.get("reviewable")]
+    lines = sum(int(f.get("lines") or 0) for f in reviewable)
+    if len(reviewable) > _READ_ALL_MAX_FILES or lines > _READ_ALL_MAX_LINES:
+        return []
+    read = set(s.files_read)
+    return sorted(f["path"] for f in reviewable if f["path"] not in read)
+
+
+#: The approved documents a review checks code against — backend stage names.
+_UPSTREAM_STAGES = ("requirements", "design")
+
+
+def record_document_read(document_id: str, outcome: str) -> None:
+    """`read_document`'s callback for this agent: which approved documents this review
+    opened, and whether each could be read."""
+    if document_id:
+        get_session(get_session_id()).documents_read[document_id] = outcome
+
+
+async def _approved_upstream_documents(s) -> list[dict]:
+    """The project's APPROVED requirements and design documents — metadata only.
+
+    A real run on QuickLink had an approved BRD and architecture.docx on file, read
+    neither, and the report said the project had no requirements or design to check the
+    code against. Whether the model reads them is not left to the model.
+    """
+    if not (s.tenant_id and s.project_id):
+        return []
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.services.artifact_versions import readable_documents  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(s.tenant_id) as db:
+        docs = await readable_documents(db, s.project_id)
+    return [d for d in docs if d.get("stage") in _UPSTREAM_STAGES]
+
+
 @tool
 async def submit_code_review(review_json: str) -> str:
     """Submit the final structured code review. Call this ONCE when analysis is done.
@@ -224,7 +393,10 @@ async def submit_code_review(review_json: str) -> str:
           findings: [{id, severity, category, file, line, description, recommendation, autofix_patch?}],
           requirements_coverage: [{ac_id, status, note}],
           design_conformance: [{rule, status, note}],
+          security_summary (markdown: what the security review found and what to fix first),
           metrics: {complexity_delta?, dupe_delta?, debt_delta?}
+    run_security_review must have run first — the report's security section and SBOM
+    come from it, not from this payload.
     Returns a confirmation string.
     """
     from shared.models.code_review import (
@@ -233,6 +405,35 @@ async def submit_code_review(review_json: str) -> str:
     )
 
     s = get_session(get_session_id())
+    if not s.security:
+        return (
+            "ERROR: the security review has not run for this target. Call run_security_review "
+            "first, then submit — the report's security section and SBOM come from it."
+        )
+    unread = _unread_on_small_branch(s)
+    if unread:
+        return (
+            f"ERROR: this whole-branch review is small enough to read completely, and "
+            f"{len(unread)} reviewable file(s) have not been read: {', '.join(unread)}. "
+            "Read each with read_repo_file, revise the review if what you read changes it, "
+            "then call submit_code_review again."
+        )
+    try:
+        upstream = await _approved_upstream_documents(s)
+    except Exception as exc:  # noqa: BLE001 — said, never read as "there are none"
+        logger.warning("Code review: approved documents could not be listed", exc_info=True)
+        return (
+            f"ERROR: the project's approved documents could not be listed ({type(exc).__name__}), "
+            "so this review cannot show what it was checked against. Call submit_code_review again."
+        )
+    unopened = [d for d in upstream if d.get("id") not in s.documents_read]
+    if unopened:
+        listed = "; ".join(f'{d.get("title")} (id {d.get("id")}, {d.get("stage")})' for d in unopened)
+        return (
+            "ERROR: this project has approved requirements/design documents this review has not "
+            f"read: {listed}. Read each with read_document, map the code to them in "
+            "requirements_coverage and design_conformance, then call submit_code_review again."
+        )
     try:
         payload = json.loads(review_json) if isinstance(review_json, str) else dict(review_json)
     except Exception as exc:
@@ -298,6 +499,17 @@ async def submit_code_review(review_json: str) -> str:
             metrics=metrics,
             diff=s.diff_text,
             status="reviewed",
+            scope={
+                **_review_scope(s),
+                # What the code was checked against, by name — the report says it.
+                "documents": [
+                    {"title": d.get("title"), "stage": d.get("stage"),
+                     "outcome": s.documents_read.get(d.get("id"), "")}
+                    for d in upstream
+                ],
+            },
+            security=s.security,
+            security_summary=str(payload.get("security_summary") or ""),
         )
     except Exception as exc:
         return f"ERROR: review did not match the required shape: {exc}"

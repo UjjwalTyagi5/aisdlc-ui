@@ -9,6 +9,7 @@ Import as: from agents_orchestrator.code_review_agent.agents.reviewer import app
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
@@ -21,12 +22,17 @@ from agents_orchestrator.code_review_agent.prompts.review_prompt import CODE_REV
 from agents_orchestrator.code_review_agent.tools.semgrep_tool import run_semgrep_scan
 from agents_orchestrator.code_review_agent.tools.diff_tool import analyze_diff
 from agents_orchestrator.code_review_agent.tools.review_tools import (
+    list_repo_files,
     read_repo_file,
+    run_security_review,
     search_repo,
     read_requirements_payload,
     read_design_artifacts,
     submit_code_review,
 )
+from shared.tools.document_approval import make_approval_tools
+from shared.tools.stage_documents import make_export_document_tool
+from agents_orchestrator.code_review_agent.checklist import create_review_checklist
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node, MCP_TOOLS_PROMPT_NOTE
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -55,7 +61,11 @@ try:
     # Bound to this agent's stage: it decides what "its own agent" means for an
     # approved-but-uncovered document, and it is what the evidence trail records as
     # the reader. Never a tool argument — a prompt could then claim another agent.
-    _DOCUMENT_TOOLS = make_document_tools("code_review")
+    from agents_orchestrator.code_review_agent.tools.review_tools import record_document_read  # noqa: PLC0415
+
+    # Reads are recorded so a review can show — and submit can check — which approved
+    # requirements and design documents the code was reviewed against.
+    _DOCUMENT_TOOLS = make_document_tools("code_review", on_read=record_document_read)
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 
@@ -83,6 +93,8 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     logger.warning("Code review agent: Confluence document tools unavailable")
 
 _tools = [
+    run_security_review,
+    list_repo_files,
     run_semgrep_scan,
     analyze_diff,
     read_repo_file,
@@ -90,6 +102,17 @@ _tools = [
     read_requirements_payload,
     read_design_artifacts,
     submit_code_review,
+    # A checklist is structured: it fills the page's Checklist tab and is filed as Word.
+    create_review_checklist,
+    # "Create a code review checklist as a docx": this agent used to paste the content and
+    # tell the user to copy it into Word. Filed under code_review as a draft.
+    make_export_document_tool(
+        stage="code_review", agent_name="Code Review", eyebrow="CODE REVIEW",
+        default_filename="code_review_checklist.docx",
+        examples=" (a code review checklist, review guidelines, a findings summary for the team)",
+    ),
+    # "Send the report for approval": the Documents panel's button, from the chat.
+    *make_approval_tools("code_review"),
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
     *_CONFLUENCE_TOOLS,
@@ -259,6 +282,33 @@ def _is_nudge_turn(state: AgentState) -> bool:
     return isinstance(content, str) and _SUBMIT_NUDGE in content
 
 
+#: The reader asking for a review, in the words the page and people use: "Please review the
+#: whole branch…", "Review the prepared change…", "review this PR", "re-review it". Not
+#: "Send the review report for approval" — a request ABOUT a review is not a review.
+_REVIEW_REQUEST_RE = re.compile(r"\b(?:re-?)?review\s+(?:the|this|that|my|it)\b", re.IGNORECASE)
+
+
+def _is_review_turn(state: AgentState) -> bool:
+    """True when this turn is a review: the reader asked for one, or the agent started the
+    review workflow (run_security_review is its first step, and submit refuses without it).
+
+    THE NUDGE FIRED ON EVERY TURN THAT DID NOT SUBMIT. Asked only "Send the review report
+    for approval.", the agent answered correctly — and was then made to call
+    submit_code_review, which filed another review of the branch nobody had asked for.
+    """
+    turn = _this_turn(state)
+    if turn and turn[0].__class__.__name__ == "HumanMessage":
+        asked = turn[0].content if isinstance(turn[0].content, str) else ""
+        if _REVIEW_REQUEST_RE.search(asked):
+            return True
+    for m in turn:
+        for tc in getattr(m, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name == "run_security_review":
+                return True
+    return False
+
+
 def route_fn(state: AgentState) -> str:
     """tools -> tools node; a prose 'review' with nothing submitted -> one nudge; else END.
 
@@ -277,7 +327,7 @@ def route_fn(state: AgentState) -> str:
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
         return "tools"
-    if not _has_submitted(state) and not _already_nudged(state):
+    if _is_review_turn(state) and not _has_submitted(state) and not _already_nudged(state):
         return "finalize"
     return END
 

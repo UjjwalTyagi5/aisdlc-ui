@@ -49,8 +49,11 @@ import { qk } from "@/lib/api/query-keys";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { tileStateFor } from "@/lib/agent-access";
 import { BUILT_AGENTS } from "@/lib/agents";
+import { getMyAgentAccess } from "@/lib/api/capabilities";
+import type { Involvement } from "@/lib/roles";
 import type { ChangeStatus } from "@/components/app/repo-file-tree";
 import type { DevPr, ProjectId } from "@/lib/schemas";
+import type { Phase } from "@/lib/schemas/enums";
 
 type LeftTab = "files" | "prs";
 
@@ -70,6 +73,12 @@ export default function DevelopmentPage() {
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
     queryFn: () => getProject(projectId),
+  });
+
+  const myAccessQ = useQuery({
+    queryKey: qk.myAgentAccess.forProject(projectId),
+    queryFn: () => getMyAgentAccess(projectId),
+    staleTime: 30_000,
   });
 
   const workspaceQ = useQuery({
@@ -191,7 +200,12 @@ export default function DevelopmentPage() {
   }
 
   const project = projectQ.data;
-  const tileState = role ? tileStateFor(role, "development", project.track, BUILT_AGENTS) : "locked";
+  // The API's answer for this viewer (extra agents included), the static table until
+  // it arrives — the same rule the overview's tiles follow.
+  const reach = myAccessQ.data?.reach as Partial<Record<Phase, Involvement>> | undefined;
+  const tileState = role
+    ? tileStateFor(role, "development", project.track, BUILT_AGENTS, reach)
+    : "locked";
   if (tileState === "locked" || tileState === "coming_soon") {
     return (
       <div className="mx-auto w-full max-w-lg p-6 md:p-10">

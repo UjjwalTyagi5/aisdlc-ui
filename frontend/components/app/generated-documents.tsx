@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CheckCircle2, Clock, FileText, Loader2, Upload, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, Eye, FileText, Loader2, Upload, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { submitArtifact, uploadArtifact } from "@/lib/api/artifacts";
@@ -39,6 +39,10 @@ export interface GeneratedDoc {
   /** Optional: the chat document type allows it to be absent. Without a URL there is
    *  nothing to open and nothing to fetch, so the row degrades to a plain name. */
   url?: string | null;
+  /** The document's artifact row — what the page view is fetched by. A document from
+   *  the Documents panel is its own row; one announced by the chat carries the row the
+   *  agent recorded. Without it there is no page view, only the file. */
+  documentId?: string | null;
 }
 
 /** `null` while the artifact list is still loading — "not recorded" must not be
@@ -93,6 +97,9 @@ export function GeneratedDocuments({
   stage,
   artifacts,
   className,
+  canOpen,
+  onOpen,
+  openId,
 }: {
   documents: GeneratedDoc[];
   projectId: ProjectId;
@@ -101,6 +108,12 @@ export function GeneratedDocuments({
   /** This project's artifacts, or null while they load. */
   artifacts: Artifact[] | null;
   className?: string;
+  /** VIEWING, when the page can render a document in its centre panel. `canOpen`
+   *  says which rows get the action (a Word file with a markdown sibling — see
+   *  `document-report-view.tsx`); `onOpen` shows it; `openId` marks the one showing. */
+  canOpen?: (doc: GeneratedDoc) => boolean;
+  onOpen?: (doc: GeneratedDoc) => void;
+  openId?: string | null;
 }) {
   const queryClient = useQueryClient();
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -190,6 +203,19 @@ export function GeneratedDocuments({
                   <FileText className="size-3.5" aria-hidden />
                   {name}
                 </span>
+              )}
+
+              {onOpen && canOpen?.(d) && (
+                <Button
+                  size="sm"
+                  variant={openId === d.id ? "secondary" : "outline"}
+                  className="h-6 px-2 text-[11px]"
+                  aria-pressed={openId === d.id}
+                  onClick={() => onOpen(d)}
+                >
+                  <Eye className="size-3" aria-hidden />
+                  {openId === d.id ? "Viewing" : "View"}
+                </Button>
               )}
 
               {chip && Icon && (

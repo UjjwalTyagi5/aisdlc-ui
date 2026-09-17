@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 from contextlib import asynccontextmanager
+from typing import Any
 
 # Force UTF-8 on stdout/stderr so logging/printing non-ASCII (e.g. "→" in agent
 # progress messages) never raises UnicodeEncodeError on a Windows cp1252 console —
@@ -46,7 +47,6 @@ from config.env import (
     JWT_SECRET_KEY,
     POSTGRES_CONN_STRING,
     REDIS_URL,
-    AZURE_BLOB_ACCOUNT_URL,
     ENABLE_LITELLM,
     LITELLM_BASE_URL,
     ENABLE_WORKER_POOL,
@@ -104,11 +104,12 @@ from shared.routers.model import (
     model_router,
     model_options_router,
     model_availability_router,
+    model_picker_router,
 )
 from shared.routers.capabilities import capabilities_router
 from shared.routers.conversations import conversations_router
 from shared.services.artifact_service import _ARTIFACT_CHANNEL
-from shared.storage.azure_blob import BlobStorageClient
+from shared.storage import build_blob_client
 from shared.keyvault import load_secret
 
 logger = logging.getLogger(__name__)
@@ -232,9 +233,14 @@ async def _probe_litellm(litellm_base_url: str) -> str:
         return f"error: {type(exc).__name__}"
 
 
-async def _probe_blob(blob_client: BlobStorageClient) -> str:
+async def _probe_blob(blob_client: Any) -> str:
     if blob_client is None:
         return "not configured"
+    # The local backend knows how to probe itself (a write under its root); the Azure
+    # client is asked for its service properties, as before.
+    probe = getattr(blob_client, "probe", None)
+    if probe is not None:
+        return await probe()
     try:
         await blob_client._client.get_service_properties()
         return "ok"
@@ -472,11 +478,11 @@ async def lifespan(app: FastAPI):
             KV_SECRET_POSTGRES_CONN,
         )
 
-    # Blob Storage — store client for health probe and artifact uploads
-    if AZURE_BLOB_ACCOUNT_URL:
-        app.state.blob_client = BlobStorageClient()
-    else:
-        app.state.blob_client = None
+    # Blob Storage — store client for health probe and artifact uploads. Azure when
+    # AZURE_BLOB_ACCOUNT_URL is set, a local directory when ARTIFACT_STORAGE_ROOT is,
+    # None otherwise — decided in ONE place so this and artifact_store.get_blob_client
+    # (the agents' path) cannot disagree about where documents live.
+    app.state.blob_client = build_blob_client()
 
     # Run the FIRST probe synchronously before yield so that the very first /health
     # request gets real probe results instead of "initializing" values.
@@ -1183,6 +1189,7 @@ app.include_router(auth_local_router, tags=["auth"])
 app.include_router(model_router, tags=["model"])
 app.include_router(model_options_router, tags=["model"])
 app.include_router(model_availability_router, tags=["model"])
+app.include_router(model_picker_router, tags=["model"])
 # Capabilities API (D7): read-only per-agent capability view for the UI panel.
 # Native tools are informational only; curated shown with default-on flag.
 # Router carries its own require_permission("artifact:view") gate — no _VIEW_DEP floor.
@@ -1206,8 +1213,9 @@ app.include_router(conversations_router, tags=["conversations"], dependencies=[_
 # Development agent modal before launching a session.  Gated by the artifact:view floor
 # (any authenticated platform user).  {project_id} path param reserved for future
 # per-project connector resolution — creds come from env for now.
-from shared.routers.dev_workspace import dev_workspace_router
+from shared.routers.dev_workspace import dev_workspace_router, repo_picker_router
 app.include_router(dev_workspace_router, prefix="/dev", tags=["dev-workspace"], dependencies=[_VIEW_DEP])
+app.include_router(repo_picker_router, prefix="/dev", tags=["dev-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.code_review_workspace import code_review_workspace_router
 app.include_router(code_review_workspace_router, prefix="/code-review", tags=["code-review-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.security_workspace import security_workspace_router

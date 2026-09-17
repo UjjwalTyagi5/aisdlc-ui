@@ -77,7 +77,9 @@ def test_save_document_records_an_artifact():
     # invites.
     assert "await register_generated_file(" in src
     assert 'stage="documentation"' in src, "recorded against the wrong stage"
-    assert "PENDING" in src, "the reply must say the document is awaiting approval"
+    # A DRAFT, and said so: it used to claim PENDING ("waiting on an owner") for a
+    # document nobody had raised, so nobody raised it.
+    assert "DRAFT" in src and "PENDING" not in src, "the reply must say the document is a draft"
 
 
 # -- the handover deliverable -------------------------------------------------
@@ -197,9 +199,7 @@ def test_the_new_types_are_accepted_by_save_document():
     """`save_document` silently downgrades an unknown doc_type to "custom". Both new
     deliverables would have been filed as "Doc" in the user's list — not an error, just
     a label quietly losing its meaning."""
-    src = inspect.getsource(doc_tools.save_document.coroutine)
-
-    assert '"handover"' in src and '"kt"' in src
+    assert {"handover", "kt"} <= doc_tools._DOC_TYPES
 
 
 # -- publishing stays behind approval ----------------------------------------

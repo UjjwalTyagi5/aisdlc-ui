@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import uuid4
 import contextvars
 
+from agents_orchestrator.requirements_agent.agents.planning import register_source_files
 from agents_orchestrator.requirements_agent.agents.planning import app as planning_app, INGESTION_SYS_MESSAGE
 from agents_orchestrator.requirements_agent.config import shared
 from config import sdlcSettings
@@ -241,15 +242,13 @@ def _extract_requirements_payload(final_state: dict) -> Any:
 
 
 
-def _process_agent_stream_for_chat_display(stream) -> list:
-    responses = []
-    for s in stream:
-        for message in s["messages"]:
-            if isinstance(message, (HumanMessage, ToolMessage, SystemMessage)):
-                continue
-            if not message.tool_calls:
-                responses.append(message.content)
-    return responses
+def _reply_texts(final_state: dict) -> list:
+    """The model's own messages in a finished graph state — no tool results, no
+    tool-call turns. Used by the REST chat, which returns the last one."""
+    return [
+        m.content for m in final_state.get("messages", [])
+        if not isinstance(m, (HumanMessage, ToolMessage, SystemMessage)) and not getattr(m, "tool_calls", None)
+    ]
 
 
 def _extract_text(content) -> str:
@@ -262,30 +261,71 @@ def _extract_text(content) -> str:
 
 
 async def _stream_agent_response(state: dict, config: dict, websocket: WebSocket, session_id: str) -> str:
-    """Stream agent tokens to the WebSocket. Returns final assembled content."""
+    """Stream the MODEL's reply to the WebSocket. Returns the assembled reply.
+
+    TOOL RESULTS ARE NOT THE AGENT SPEAKING. `stream_mode="messages"` yields the tools
+    node's ToolMessages too, and this forwarded every one: a turn whose tools failed
+    opened its reply with "Error: file … has not yet been uploadedError: local file not
+    found…" glued together, and a successful generate_brd would have poured the whole
+    BRD into the chat. Code Review, Deployment, Documentation and Development already
+    skipped them.
+
+    FAILURES PROPAGATE. This used to log the exception and return "", and the caller
+    answered "" by running the entire graph again, synchronously — every tool call a
+    second time, a dead model key failing twice. The caller reports the error instead.
+    The terminal `stream_end` is still emitted by the caller on every path.
+    """
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    # ONLY THE ANSWER, NOT THE WORKING. Given an attached document, the model wrote "the
+    # document has not been uploaded yet…" in the same message as its call to read it, and
+    # that sentence opened the reply before the real answer arrived. See AnswerStream.
+    answers = AnswerStream(_extract_text)
     final_content = ""
-    streaming_started = False
-    try:
-        async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
-            msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
-            if not hasattr(msg_chunk, "content") or not msg_chunk.content:
-                continue
-            content = _extract_text(msg_chunk.content)
-            if content and not getattr(msg_chunk, "tool_calls", None):
-                streaming_started = True
-                final_content += content
-                await manager.send_personal_message(
-                    json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
-                    websocket,
-                )
-        # NB: the terminal `stream_end` is emitted by the caller (_process_user_message_ws)
-        # for ALL paths — streaming, non-streaming fallback, and error — so the client's
-        # chat stream always closes and the composer never gets stuck disabled.
-    except Exception as exc:
-        # Sanitized message goes to the user; the real exception + traceback stays
-        # in the server log (exc_info) so failures are actually diagnosable.
-        logger.error("Streaming error: %s", _safe_error(exc, "streaming"), exc_info=True)
+
+    async def _send(content: str) -> None:
+        nonlocal final_content
+        if not content:
+            return
+        final_content += content
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": content, "session_id": session_id}),
+            websocket,
+        )
+
+    async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
+        await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+    await _send(answers.close())
     return final_content
+
+
+async def _flag_unsupported_links(reply: str, config: dict, websocket: WebSocket, session_id: str) -> str:
+    """Append a notice under the reply for any link no tool or person produced.
+
+    The turn that prompted this ended "BRD Generated Successfully" with a link to
+    example.com — every document tool had failed. Supported links are the ones in the
+    conversation's tool results and human messages; see shared.services.reply_integrity.
+    Returns the notice (already streamed), or "".
+    """
+    from shared.services.reply_integrity import (  # noqa: PLC0415
+        message_texts,
+        unsupported_links,
+        unsupported_links_notice,
+    )
+
+    graph_state = await planning_app.aget_state(config)
+    messages = (getattr(graph_state, "values", None) or {}).get("messages") or []
+    sources = message_texts(messages, (ToolMessage, HumanMessage, SystemMessage))
+    links = unsupported_links(reply, sources)
+    if not links:
+        return ""
+    logger.warning("requirements reply carried %d link(s) no tool produced: %s", len(links), links)
+    notice = unsupported_links_notice(links)
+    await manager.send_personal_message(
+        json.dumps({"type": "stream_chunk", "content": notice, "session_id": session_id}),
+        websocket,
+    )
+    return notice
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -505,10 +545,12 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     # extracted server-side — see document_tools.attachment_message_contents for why,
     # and for the Plan route that silently dropped every attachment without it.
     _attachments = pipeline_context.get("attachments") if isinstance(pipeline_context, dict) else None
-    for _content in attachment_message_contents(
-        file_names + attachment_paths_from_context(pipeline_context)
-    ):
+    _attachment_paths = file_names + attachment_paths_from_context(pipeline_context)
+    for _content in attachment_message_contents(_attachment_paths):
         state["messages"].append(HumanMessage(content=_content))
+    # The model sees each attachment by NAME ("--- Attached file: NAME ---"); the
+    # document tools resolve that name to this file. See planning._resolve_source_files.
+    register_source_files(session_id, _attachment_paths)
 
     await manager.broadcast({"type": "message_received", "session_id": session_id, "message": "Processing your request..."})
 
@@ -543,16 +585,16 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
         try:
             final_response = await _stream_agent_response(state, config, websocket, session_id)
             if not final_response:
-                responses = _process_agent_stream_for_chat_display(
-                    planning_app.stream(state, stream_mode="values", config=config)
-                )
-                if responses:
-                    final_response = responses[-1]
-                    await manager.send_agent_response("Requirements Agent", final_response, session_id)
+                # Said, not retried: the graph ran once and produced no words.
+                final_response = "The agent finished this turn without a reply. Nothing else was done — please ask again."
+                await manager.send_agent_response("Error Agent", final_response, session_id)
+            else:
+                final_response += await _flag_unsupported_links(final_response, config, websocket, session_id)
         except Exception as exc:
             err = _safe_error(exc, "agent processing")
             logger.error(err, exc_info=True)
-            await manager.send_agent_response("Error Agent", f"An error occurred: {err}", session_id)
+            final_response = f"An error occurred: {err}"
+            await manager.send_agent_response("Error Agent", final_response, session_id)
 
         # Always send a terminal stream_end so the client's chat stream closes and the
         # composer unlocks — on every path (streamed, fallback, or error). Without this
@@ -739,6 +781,7 @@ async def chat(
         state["messages"].append(
             HumanMessage(content=f"please use the following files {', '.join(file_names)}")
         )
+        register_source_files(session_id, file_names)
 
     # Run graph and capture final state. The `agent` node is async, so the graph
     # must be driven with the async API — calling the sync `.stream()` from inside
@@ -766,7 +809,7 @@ async def chat(
             logger.exception("Requirements chat agent processing failed (session=%s)", session_id)
             raise HTTPException(status_code=500, detail=_safe_error(exc, "agent processing")) from exc
 
-        responses = _process_agent_stream_for_chat_display([final_state]) if final_state else []
+        responses = _reply_texts(final_state) if final_state else []
 
         # ── Extract and persist typed artifacts ───────────────────────────────
         requirements_payload = _extract_requirements_payload(final_state)

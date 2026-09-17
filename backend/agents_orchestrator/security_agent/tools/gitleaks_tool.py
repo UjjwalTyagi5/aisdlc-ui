@@ -57,6 +57,18 @@ def run_gitleaks_scan(target_path: str) -> str:
             timeout=120,
         )
 
+        # Exit 0 = clean, 1 = leaks found. Anything else is Gitleaks failing, and its
+        # empty report must not read as "no secrets" — the same trap Trivy's wrapper
+        # documents.
+        if result.returncode not in (0, 1):
+            Path(report_path).unlink(missing_ok=True)
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            return json.dumps({
+                "status": "error",
+                "message": f"Gitleaks failed (exit code {result.returncode}): {(detail[-1] if detail else '')[:300]}",
+                "findings": [],
+            })
+
         findings = []
         try:
             with open(report_path, "r") as f:

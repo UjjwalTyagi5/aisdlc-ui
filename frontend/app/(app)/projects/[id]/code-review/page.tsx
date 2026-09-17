@@ -5,16 +5,20 @@ import { useParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Boxes,
   Check,
   ChevronDown,
+  ClipboardCheck,
   Copy,
   FileDiff,
-  FileText,
+  FileSearch,
+  FolderGit2,
   GitBranch,
   GitPullRequest,
   ListChecks,
   MessageSquare,
   ScrollText,
+  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 
@@ -24,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { DocumentList } from "@/components/app/document-list";
+import { ReviewChecklistView } from "@/components/app/review-checklist-view";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
   DropdownMenu,
@@ -34,19 +39,31 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { ModelSelector } from "@/components/app/model-selector";
 import { ReviewTargetDialog } from "@/components/app/review-target-dialog";
+import {
+  BranchFilesView,
+  CodeReviewReport,
+  reportDocumentFor,
+  type ReviewTab,
+  SbomView,
+  SecurityView,
+  scanRan,
+} from "@/components/app/code-review-report";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
 import { unchangedReviewNotice } from "@/lib/code-review/prepare-outcome";
 import { getProject } from "@/lib/api/projects";
 import { listReviews, getReview } from "@/lib/api/code-review";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { qk } from "@/lib/api/query-keys";
 import type { PrepareResult, Severity, CodeReviewArtifact } from "@/lib/schemas/code-review";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "summary" | "findings" | "diff" | "documents";
+type Tab = ReviewTab;
 
 const REC_META: Record<string, { label: string; cls: string }> = {
   approve: { label: "Approve", cls: "bg-success/15 text-success border-success/30" },
@@ -93,6 +110,10 @@ export default function CodeReviewPage() {
   const linkedSession = useChatDeepLink(setChatOpen);
   const [prepared, setPrepared] = React.useState<PrepareResult | null>(null);
   const [activeReviewId, setActiveReviewId] = React.useState<string | null>(null);
+  // The model this page's review runs on. Without it the chat resolved with no model and
+  // ran on whichever provider connection came first — a connection whose key had since
+  // been revoked failed every review, and the page offered no other choice.
+  const [agentModel, setAgentModel] = React.useState<string>();
 
   // NO AUTO-OPEN. The page starts clean and the reader chooses: past reviews are in
   // the switcher, a new one starts from Select target. Opening the newest review by
@@ -101,6 +122,15 @@ export default function CodeReviewPage() {
   // commit that may no longer be the one in hand. Selecting a review is one click; the
   // page asserting a stale one is a wrong first impression that cannot be clicked away.
   // A finished run still opens its own result — see the busy→idle effect below.
+
+  // The project's documents — the SAME query the Documents panel reads, so a report raised
+  // or approved anywhere updates both the panel and the report's own header.
+  const documentsQ = useQuery({
+    queryKey: qk.artifacts.forProject(id),
+    queryFn: () => listArtifacts(id),
+  });
+  const approvals = useRaiseForApproval(id);
+  const [checklistId, setChecklistId] = React.useState<string | null>(null);
 
   const reviewQ = useQuery({
     queryKey: qk.codeReview.review(id, activeReviewId ?? ""),
@@ -116,18 +146,32 @@ export default function CodeReviewPage() {
     // to put them and `attachFiles` returns silently. Passing projectId is what turns
     // the durable session on.
     projectId: id,
+    offeringId: agentModel,
     sessionKey: id,
     context: { page: "Code Review", project_id: id },
-    onArtifact: () => reviewsQ.refetch(),
+    // A turn can save a review, file its report, or send that report for approval — the
+    // last changes no review, only the document's status, so both lists refresh.
+    onArtifact: () => {
+      void reviewsQ.refetch();
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    },
   });
 
-  // When a review run finishes (busy → idle), refresh the list and jump to the newest.
+  // When a turn finishes (busy → idle), refresh the list and open the review THAT TURN
+  // SAVED — never merely the newest one. A turn that failed, or a chat question that
+  // saved nothing, used to open the last PAST review and drop the prepared target, so
+  // an error read as a finished review of something else. The ids known when the turn
+  // started are what "saved by this turn" is measured against.
   const prevBusy = React.useRef(chat.busy);
+  const reviewIdsAtStart = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
+    if (!prevBusy.current && chat.busy) {
+      reviewIdsAtStart.current = new Set((reviewsQ.data ?? []).map((r) => r.id));
+    }
     if (prevBusy.current && !chat.busy) {
       reviewsQ.refetch().then((r) => {
         const newest = r.data?.[0]?.id;
-        if (newest) {
+        if (newest && !reviewIdsAtStart.current.has(newest)) {
           setActiveReviewId(newest);
           setPrepared(null);
           setTab("summary");
@@ -138,6 +182,17 @@ export default function CodeReviewPage() {
     prevBusy.current = chat.busy;
   }, [chat.busy, id, queryClient, reviewsQ]);
 
+  // A CHECKLIST THE CHAT JUST FILED fills the Checklist tab and opens it.
+  const shownChecklists = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const fresh = chat.documents.filter((d) => d.documentId && /checklist/i.test(d.name ?? "") && !shownChecklists.current.has(d.id));
+    if (fresh.length === 0) return;
+    for (const d of fresh) shownChecklists.current.add(d.id);
+    setChecklistId(fresh[fresh.length - 1]!.documentId!);
+    setTab("checklist");
+    void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+  }, [chat.documents, id, queryClient]);
+
   const onPrepared = (result: PrepareResult) => {
     // Always a clean slate for the newly picked target — same flow as the Security
     // agent's Select target: the staged diff, nothing else, past reviews left in the
@@ -145,7 +200,7 @@ export default function CodeReviewPage() {
     // takes the decision to re-review away from the reader.
     setPrepared(result);
     setActiveReviewId(null);
-    setTab("diff");
+    setTab(result.mode === "repo" ? "files" : "diff");
 
     const notice = unchangedReviewNotice(result);
     if (notice) {
@@ -159,7 +214,11 @@ export default function CodeReviewPage() {
 
   const runReview = () => {
     setChatOpen(true);
-    void chat.send("Please review the prepared change and submit your findings.");
+    void chat.send(
+      prepared?.mode === "repo"
+        ? "Please review the whole branch and submit your findings."
+        : "Please review the prepared change and submit your findings.",
+    );
   };
 
   if (projectQ.isLoading) {
@@ -189,18 +248,14 @@ export default function CodeReviewPage() {
 
   // Target chip text.
   const targetChip = (() => {
-    if (prepared) {
-      return prepared.mode === "pr"
-        ? `PR #${prepared.pr_id} · ${prepared.source_branch} → ${prepared.base_branch}`
-        : `${prepared.source_branch} → ${prepared.base_branch}`;
-    }
-    if (ctx) {
-      return ctx.mode === "pr"
-        ? `PR #${ctx.pr_id} · ${ctx.source_branch} → ${ctx.base_branch}`
-        : `${ctx.source_branch} → ${ctx.base_branch}`;
-    }
-    return null;
+    const t = prepared ?? ctx;
+    if (!t) return null;
+    if (t.mode === "repo") return `${t.source_branch} · whole branch`;
+    return t.mode === "pr"
+      ? `PR #${t.pr_id} · ${t.source_branch} → ${t.base_branch}`
+      : `${t.source_branch} → ${t.base_branch}`;
   })();
+  const mode = prepared?.mode ?? ctx?.mode ?? "branch";
   const repoName = prepared?.repo_name ?? ctx?.repo_name ?? "";
   const diffText = prepared?.diff ?? artifact?.diff ?? "";
   const hasReview = !!artifact;
@@ -215,8 +270,10 @@ export default function CodeReviewPage() {
             <p className="text-muted-foreground text-xs">
               {targetChip ? (
                 <span className="inline-flex items-center gap-1">
-                  {prepared?.mode === "pr" || ctx?.mode === "pr" ? (
+                  {mode === "pr" ? (
                     <GitPullRequest className="size-3" aria-hidden />
+                  ) : mode === "repo" ? (
+                    <FolderGit2 className="size-3" aria-hidden />
                   ) : (
                     <GitBranch className="size-3" aria-hidden />
                   )}
@@ -225,7 +282,7 @@ export default function CodeReviewPage() {
                   <span className="font-mono">{targetChip}</span>
                 </span>
               ) : (
-                <span>Read-only review of a branch diff or a pull request.</span>
+                <span>Read-only review of a branch diff, a pull request or a whole branch, with a security review.</span>
               )}
             </p>
           </div>
@@ -241,6 +298,12 @@ export default function CodeReviewPage() {
                 }}
               />
             )}
+            <ModelSelector
+              aria-label="Code Review agent model"
+              projectId={id}
+              value={agentModel}
+              onValueChange={setAgentModel}
+            />
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <FileDiff className="size-4" aria-hidden />
               Select target
@@ -259,99 +322,158 @@ export default function CodeReviewPage() {
         </div>
       </div>
 
-      {/* ── Body: tabs + content ─────────────────────────── */}
-      {/* A FAILED LOAD IS NOT AN EMPTY ONE. `reviews` falls back to [] on error, so
-          without this branch a backend that is down, a 403, or a schema mismatch all
-          render as the cheerful "No review yet" — the past-reviews switcher silently
-          missing, with nothing on screen saying why. Cost a real debugging session. */}
-      {!prepared && !hasReview && reviewsQ.isError ? (
-        <div className="w-full p-4 md:px-10 md:py-8">
-          <ErrorState
-            title="Couldn't load this project's reviews"
-            description={
-              reviewsQ.error instanceof Error
-                ? reviewsQ.error.message
-                : "Something went wrong loading past reviews."
-            }
-            onRetry={() => reviewsQ.refetch()}
-          />
-        </div>
-      ) : !prepared && !hasReview && !reviewsQ.isLoading ? (
-        /* DOCUMENTS DO NOT DEPEND ON A REVIEW, so the no-review state cannot swallow
-           them. The first version of this tab lived only in the branch below and was
-           unreachable on exactly the projects with no review yet — every new one. */
-        <div className="flex-1 overflow-auto">
-          <div className="mx-auto max-w-xl px-4 py-12">
-            {/* Two different empty pages. With reviews on file the reader is not
-                stuck, they simply have none OPEN — saying "No review yet" there is
-                false and hides the switcher holding their history. */}
-            <EmptyState
-              icon={FileDiff}
-              title={reviews.length > 0 ? "No review open" : "No review yet"}
-              description={
-                reviews.length > 0
-                  ? `Pick one of the ${reviews.length} past reviews from the switcher above, or select a new target and run a fresh review.`
-                  : "Select a branch-vs-base diff or an open PR, then run the review. Findings, a summary, and a merge recommendation appear here."
-              }
-              action={
-                <Button onClick={() => setPickerOpen(true)}>
-                  <FileDiff className="size-4" aria-hidden />
-                  Select target
-                </Button>
-              }
-            />
-            {/* Shown, not tabbed away: the tab bar below belongs to the review that
-                does not exist yet. */}
-            <div className="mt-10">
-              <DocumentList projectId={id} stage="code_review" />
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          {/* Tab bar */}
-          <div className="flex items-center gap-1 border-b px-2 py-1.5">
-            <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} icon={ScrollText}>
-              Summary
-            </TabBtn>
-            <TabBtn active={tab === "findings"} onClick={() => setTab("findings")} icon={ListChecks}>
-              Findings
-              {artifact && artifact.findings.length > 0 && (
-                <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
-                  {artifact.findings.length}
-                </span>
-              )}
-            </TabBtn>
-            <TabBtn active={tab === "diff"} onClick={() => setTab("diff")} icon={FileDiff}>
-              Diff
-            </TabBtn>
-            {/* DOCUMENTS AS A TAB — this page is a review viewer with no side column,
-                so there is nowhere else to put them. Without it a Code Review document
-                could be uploaded and approved with nowhere on this page to see it. */}
-            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>
-              Documents
-            </TabBtn>
-          </div>
+      {/* ── Body: Documents beside the review ────────────── */}
+      {/* THE DOCUMENTS PANEL SITS BESIDE THE REVIEW, as on Requirements. It was a tab, or a
+          list under the empty state — so raising the report for approval meant leaving the
+          report to find it, and the chat was the only obvious way to do it. Documents do
+          not depend on a review either, so the panel is there on every state of the page. */}
+      <div className="grid min-h-0 flex-1 gap-0 overflow-hidden md:grid-cols-[340px_1fr] xl:grid-cols-[360px_1fr]">
+        <aside
+          aria-label="Documents"
+          className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
+        >
+          {/* The BACKEND stage name — the UI phase is `review`, the column says
+              `code_review`, and passing the wrong one silently lists nothing. */}
+          <DocumentList projectId={id} stage="code_review" className="flex min-h-0 flex-1 flex-col" fillHeight />
+        </aside>
 
-          <div className="min-h-0 flex-1 overflow-auto">
-            {reviewQ.isLoading && activeReviewId ? (
-              <LoadingState variant="card" />
-            ) : tab === "summary" ? (
-              <SummaryView artifact={artifact} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
-            ) : tab === "findings" ? (
-              <FindingsView artifact={artifact} onJump={() => setTab("diff")} />
-            ) : tab === "documents" ? (
-              <div className="p-4">
-                {/* The BACKEND stage name — the UI phase is `review`, the column says
-                    `code_review`, and passing the wrong one silently lists nothing. */}
-                <DocumentList projectId={id} stage="code_review" />
+        <div className="flex min-h-0 flex-col overflow-hidden">
+          {/* A FAILED LOAD IS NOT AN EMPTY ONE. `reviews` falls back to [] on error, so
+              without this branch a backend that is down, a 403, or a schema mismatch all
+              render as the cheerful "No review yet" — the past-reviews switcher silently
+              missing, with nothing on screen saying why. Cost a real debugging session. */}
+          {!prepared && !hasReview && reviewsQ.isError ? (
+            <div className="w-full p-4 md:px-10 md:py-8">
+              <ErrorState
+                title="Couldn't load this project's reviews"
+                description={
+                  reviewsQ.error instanceof Error
+                    ? reviewsQ.error.message
+                    : "Something went wrong loading past reviews."
+                }
+                onRetry={() => reviewsQ.refetch()}
+              />
+            </div>
+          ) : !prepared && !hasReview && !reviewsQ.isLoading ? (
+            /* No review open. The Documents panel beside this stays reachable — the first
+               version of it lived only in the review branch below and was unreachable on
+               exactly the projects with no review yet, every new one. */
+            <div className="flex-1 overflow-auto">
+              <div className="mx-auto max-w-xl px-4 py-12">
+                {/* Two different empty pages. With reviews on file the reader is not
+                    stuck, they simply have none OPEN — saying "No review yet" there is
+                    false and hides the switcher holding their history. */}
+                <EmptyState
+                  icon={FileDiff}
+                  title={reviews.length > 0 ? "No review open" : "No review yet"}
+                  description={
+                    reviews.length > 0
+                      ? `Pick one of the ${reviews.length} past reviews from the switcher above, or select a new target and run a fresh review.`
+                      : "Select a branch-vs-base diff, an open PR or a whole branch, then run the review. A report with findings, a security review, an SBOM and a merge recommendation appears here."
+                  }
+                  action={
+                    <Button onClick={() => setPickerOpen(true)}>
+                      <FileDiff className="size-4" aria-hidden />
+                      Select target
+                    </Button>
+                  }
+                />
               </div>
-            ) : (
-              <DiffView diff={diffText} files={prepared?.files ?? null} />
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              {/* Tab bar */}
+              <div className="flex items-center gap-1 border-b px-2 py-1.5">
+                <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} icon={ScrollText}>
+                  Summary
+                </TabBtn>
+                <TabBtn active={tab === "findings"} onClick={() => setTab("findings")} icon={ListChecks}>
+                  Findings
+                  {artifact && artifact.findings.length > 0 && (
+                    <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
+                      {artifact.findings.length}
+                    </span>
+                  )}
+                </TabBtn>
+                <TabBtn active={tab === "security"} onClick={() => setTab("security")} icon={ShieldCheck}>
+                  Security
+                  {artifact && scanRan(artifact.security) && (artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0) > 0 && (
+                    <span className="bg-destructive/15 ml-1 rounded-full px-1.5 text-[10px] text-red-700 dark:text-red-400">
+                      {(artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0)}
+                    </span>
+                  )}
+                </TabBtn>
+                <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
+                  SBOM
+                </TabBtn>
+                <TabBtn active={tab === "checklist"} onClick={() => setTab("checklist")} icon={ClipboardCheck}>
+                  Checklist
+                </TabBtn>
+                {mode === "repo" ? (
+                  <TabBtn active={tab === "files"} onClick={() => setTab("files")} icon={FileSearch}>
+                    Files
+                  </TabBtn>
+                ) : (
+                  <TabBtn active={tab === "diff"} onClick={() => setTab("diff")} icon={FileDiff}>
+                    Diff
+                  </TabBtn>
+                )}
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-auto">
+                {reviewQ.isLoading && activeReviewId ? (
+                  <LoadingState variant="card" />
+                ) : tab === "summary" ? (
+                  artifact ? (
+                    <CodeReviewReport
+                      artifact={artifact}
+                      onOpenTab={setTab}
+                      approval={(() => {
+                        const document = reportDocumentFor(artifact, documentsQ.data);
+                        return {
+                          document,
+                          mayRaise: approvals.mayRaise("code_review"),
+                          raising: !!document && approvals.raisingId === document.id,
+                          onRaise: () => document && approvals.raise(document),
+                        };
+                      })()}
+                    />
+                  ) : (
+                    <SummaryView mode={mode} onRun={runReview} canRun={!!prepared && !chat.busy} busy={chat.busy} />
+                  )
+                ) : tab === "findings" ? (
+                  <FindingsView artifact={artifact} onJump={() => setTab(mode === "repo" ? "files" : "diff")} />
+                ) : tab === "security" ? (
+                  <SecurityView artifact={artifact} />
+                ) : tab === "sbom" ? (
+                  <SbomView artifact={artifact} />
+                ) : tab === "checklist" ? (
+                  <ReviewChecklistView
+                    documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                    selectedId={checklistId}
+                    onSelect={setChecklistId}
+                    approvals={approvals}
+                    busy={chat.busy}
+                    project={projectQ.data?.name}
+                    onAsk={() => {
+                      setChatOpen(true);
+                      void chat.send(
+                        artifact
+                          ? "Create a code review checklist for this review, marking each check from the review's results."
+                          : "Create a code review checklist for this project.",
+                      );
+                    }}
+                  />
+                ) : tab === "files" ? (
+                  <BranchFilesView prepared={prepared} artifact={artifact} />
+                ) : (
+                  <DiffView diff={diffText} files={prepared?.files ?? null} />
+                )}
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       <ReviewTargetDialog
         open={pickerOpen}
@@ -368,6 +490,10 @@ export default function CodeReviewPage() {
         onSend={chat.send}
         busy={chat.busy}
         onStop={chat.cancel}
+        sessions={chat.sessions}
+        activeSessionId={chat.sessionId}
+        onSelectSession={chat.selectSession}
+        onNewChat={chat.newChat}
         attachments={chat.attachments}
         onAttachFiles={chat.attachFiles}
         onRemoveAttachment={chat.removeAttachment}
@@ -379,7 +505,7 @@ export default function CodeReviewPage() {
         starterSuggestions={[
           "Review the prepared change and submit your findings.",
           "Focus on security and error handling.",
-          "Is this change safe to merge?",
+          "Send the review report for approval.",
         ]}
       />
     </div>
@@ -455,112 +581,38 @@ function ReviewSwitcher({
 }
 
 function SummaryView({
-  artifact,
+  mode,
   onRun,
   canRun,
   busy,
 }: {
-  artifact: CodeReviewArtifact | null;
+  mode: string;
   onRun: () => void;
   canRun: boolean;
   busy: boolean;
 }) {
-  if (!artifact) {
-    return (
-      <div className="mx-auto max-w-xl px-4 py-12">
-        <EmptyState
-          icon={Sparkles}
-          title={busy ? "Reviewing…" : "Diff ready — run the review"}
-          description={
-            busy
-              ? "The agent is analyzing the change. Findings and a recommendation will appear here."
-              : "The diff is staged in the Diff tab. Run the review to generate findings, a summary, and a merge recommendation."
-          }
-          action={
-            canRun ? (
-              <Button onClick={onRun}>
-                <Sparkles className="size-4" aria-hidden />
-                Run review
-              </Button>
-            ) : undefined
-          }
-        />
-      </div>
-    );
-  }
-  const rec = REC_META[artifact.merge_recommendation];
-  const m = artifact.metrics;
+  const branch = mode === "repo";
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <Badge variant="outline" className={cn("border px-3 py-1 text-sm", rec?.cls)}>
-          {rec?.label ?? artifact.merge_recommendation}
-        </Badge>
-        <span className="text-muted-foreground text-xs">
-          {artifact.findings.length} findings ·{" "}
-          {artifact.findings.filter((f) => f.severity === "critical" || f.severity === "high").length} critical/high
-        </span>
-      </div>
-
-      {/* Metrics */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Metric label="Files" value={`${m.files_changed}`} />
-        <Metric label="Added" value={`+${m.added}`} tone="text-success" />
-        <Metric label="Removed" value={`-${m.removed}`} tone="text-destructive" />
-        <Metric
-          label="Δ complexity"
-          value={m.complexity_delta != null ? `${m.complexity_delta > 0 ? "+" : ""}${m.complexity_delta}` : "—"}
-        />
-      </div>
-
-      {/* Summary markdown (rendered as readable prose) */}
-      {artifact.summary && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Review summary</h3>
-          <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap rounded-lg border bg-surface-1 p-4 text-sm leading-relaxed">
-            {artifact.summary}
-          </div>
-        </section>
-      )}
-
-      {artifact.requirements_coverage.length > 0 && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Requirements coverage</h3>
-          <ul className="space-y-1.5">
-            {artifact.requirements_coverage.map((c, i) => (
-              <li key={i} className="flex items-center gap-2 text-sm">
-                <Badge variant="outline" className="text-[10px]">{c.status}</Badge>
-                <span className="font-mono text-xs">{c.ac_id}</span>
-                {c.note && <span className="text-muted-foreground truncate">— {c.note}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {artifact.design_conformance.length > 0 && (
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Design conformance</h3>
-          <ul className="space-y-1.5">
-            {artifact.design_conformance.map((c, i) => (
-              <li key={i} className="flex items-center gap-2 text-sm">
-                <Badge variant="outline" className="text-[10px]">{c.status}</Badge>
-                <span className="truncate">{c.rule}</span>
-                {c.note && <span className="text-muted-foreground truncate">— {c.note}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-lg border bg-surface-1 p-3">
-      <div className={cn("font-mono text-lg font-semibold", tone)}>{value}</div>
-      <div className="text-muted-foreground text-[10px] uppercase tracking-wider">{label}</div>
+    <div className="mx-auto max-w-xl px-4 py-12">
+      <EmptyState
+        icon={Sparkles}
+        title={busy ? "Reviewing…" : branch ? "Branch ready — run the review" : "Diff ready — run the review"}
+        description={
+          busy
+            ? "The agent is reading the code and running the security review. The report will appear here."
+            : branch
+              ? "The branch's files are listed in the Files tab. Run the review to get findings, a security review, an SBOM and a merge recommendation for the whole branch."
+              : "The diff is staged in the Diff tab. Run the review to get findings, a security review, an SBOM and a merge recommendation."
+        }
+        action={
+          canRun ? (
+            <Button onClick={onRun}>
+              <Sparkles className="size-4" aria-hidden />
+              Run review
+            </Button>
+          ) : undefined
+        }
+      />
     </div>
   );
 }

@@ -222,6 +222,9 @@ _RUN_STATUS_MAP = {
 _TERMINAL_RAW = {"approved", "rejected", "failed", "merged", "cancelled", "complete", "completed"}
 _FE_PHASE = {"requirements", "design", "development", "review", "testing", "deployment"}
 _FE_AGENT = {"orchestrator", "requirements", "design", "development", "review", "testing", "deployment"}
+#: Backend stage → the UI's Phase where the two names differ (approvals.py keeps the
+#: same table). `stage` goes out as the backend name; `phase` must be a UI Phase.
+_STAGE_TO_UI_PHASE = {"code_review": "review"}
 
 
 def _map_run_status(raw: Optional[str]) -> str:
@@ -820,7 +823,11 @@ class ArtifactOut(BaseModel):
                 _iso(artifact.approved_at)
                 if getattr(artifact, "approved_at", None) else None
             ),
-            phase=_stage or "requirements",
+            # THE UI'S NAME, NOT THE STAGE'S. `code_review` is not in the frontend's
+            # Phase enum, and one such row failed schema validation for the WHOLE
+            # list — the first Code Review report filed blanked every Documents panel
+            # on the project.
+            phase=_STAGE_TO_UI_PHASE.get(_stage, _stage) or "requirements",
             title=title,
             version=1,
             contentHash=content_hash,

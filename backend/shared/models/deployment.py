@@ -104,3 +104,6 @@ class DeploymentArtifact(BaseModel):
     pr_url: Optional[str] = None
     pr_title: Optional[str] = None
     status: Literal["assessed", "pr_opened"] = "assessed"
+    #: The filed Deployment Readiness Report: {filename, url, artifact_id} — or {error}
+    #: when it could not be written. Set by the chat handler once the turn submits.
+    document: dict = Field(default_factory=dict)

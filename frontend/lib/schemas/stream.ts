@@ -42,6 +42,10 @@ export const ArtifactUpdatedEvent = z.object({
    *  the chat-produced document can be surfaced + downloaded on the main screen. */
   name: z.string().optional(),
   url: z.string().optional(),
+  /** The document's own artifact row, when the agent recorded one — what the page
+   *  opens it by (GET /artifacts/{id}/page). `artifactId` above is a synthetic chip
+   *  key derived from the file name, not a row. */
+  documentId: z.string().optional(),
   at: Timestamp,
 });
 

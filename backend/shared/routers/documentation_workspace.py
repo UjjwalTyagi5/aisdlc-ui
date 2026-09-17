@@ -235,3 +235,32 @@ async def prepare_docs(project_id: str, body: PrepareDocRequest, request: Reques
         "pr_title": pr_title, "head_sha": result.get("commit_sha", ""),
         "languages": languages, "upstream_summary": upstream_summary,
     }
+
+
+@documentation_workspace_router.get("/{project_id}/prepared")
+async def get_prepared_docs(project_id: str, request: Request) -> dict:
+    """The docs workspace already prepared for this project, or `{status: null}`.
+
+    The page kept the prepared target in React state alone, so a refresh showed "No
+    documentation workspace yet" and disabled Chat while the backend held the checkout —
+    the same failure the Deployment page had (see `get_prepared_deploy`). The credential
+    is never returned: only the descriptive fields are projected.
+    """
+    from agents_orchestrator.documentation_agent.config.session_state import get_prepared  # noqa: PLC0415
+
+    data = get_prepared(request.state.tenant_id, project_id)
+    if not data:
+        return {"status": None}
+    return {
+        "status": "ready",
+        "provider": data.get("provider") or None,
+        "mode": data.get("mode") or "branch",
+        "repo_name": data.get("repo_name") or "",
+        "ado_project": data.get("ado_project") or "",
+        "branch": data.get("source_branch") or "",
+        "pr_id": data.get("pr_id") or None,
+        "pr_title": "",
+        "head_sha": data.get("head_sha") or "",
+        "languages": data.get("languages") or [],
+        "upstream_summary": data.get("upstream_summary") or "",
+    }

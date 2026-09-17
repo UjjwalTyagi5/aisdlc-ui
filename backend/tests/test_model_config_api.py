@@ -307,7 +307,7 @@ from httpx import ASGITransport, AsyncClient
 
 def _model_app(perms, tenant_id):
     from fastapi import FastAPI, Request
-    from shared.routers.model import model_router, model_options_router
+    from shared.routers.model import model_options_router, model_picker_router, model_router
 
     app = FastAPI()
 
@@ -320,6 +320,7 @@ def _model_app(perms, tenant_id):
 
     app.include_router(model_router)
     app.include_router(model_options_router)
+    app.include_router(model_picker_router)
     return app
 
 
@@ -363,6 +364,22 @@ async def test_options_requires_run_create_not_model_manage():
         r = await c.post("/model/providers", json={
             "provider": "anthropic", "display_name": "x", "api_key": "k", "enabled_models": [],
         })
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_options_is_readable_by_anyone_who_may_invoke_an_agent():
+    """The picker is part of invoking an agent. QA, Security Engineer, DevOps Engineer
+    and Scrum Master hold agent:invoke but not run:create, and the Testing page's
+    picker answered them 403 — the tester could not choose a model for a run."""
+    tenant = str(uuid.uuid4())
+    app = _model_app(["agent:invoke", "run:view"], tenant)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/model/options")
+    assert r.status_code == 200
+    # ...and still cannot change the project's allowed models (run:create's router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/model/allowed/project")
     assert r.status_code == 403
 
 

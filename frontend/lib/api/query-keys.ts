@@ -74,6 +74,8 @@ export const qk = {
         ? ["artifacts", "project", id, phase]
         : ["artifacts", "project", id]) as readonly unknown[],
     detail: (id: ArtifactId) => ["artifacts", "detail", id] as const,
+    /** The document's page copy (GET /artifacts/{id}/page). */
+    page: (id: string) => ["artifacts", "page", id] as const,
   },
   // Frozen stage payload versions and their publication state. Deliberately a
   // separate namespace from `artifacts` above: that one is blob documents, this one
@@ -133,6 +135,9 @@ export const qk = {
   agentAccessOverrides: {
     forProject: (id: ProjectId) => ["agent-access-overrides", id] as const,
   },
+  myAgentAccess: {
+    forProject: (id: ProjectId) => ["my-agent-access", id] as const,
+  },
   agentProfiles: {
     summary: (scope: string, scopeId?: string | null) =>
       ["agent-profiles", "summary", scope, scopeId ?? ""] as const,
@@ -181,6 +186,8 @@ export const qk = {
   testing: {
     unitResult: (id: ProjectId, session: string) =>
       ["testing", "unit-result", id, session] as const,
+    runReport: (id: ProjectId, session: string) =>
+      ["testing", "run-report", id, session] as const,
   },
   documentation: {
     connectors: (id: ProjectId) => ["documentation", "connectors", id] as const,

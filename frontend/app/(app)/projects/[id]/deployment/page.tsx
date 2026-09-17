@@ -2,9 +2,9 @@
 
 import * as React from "react";
 import { useParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Boxes, CheckCircle2, FileCode2, FileText, GitBranch, GitPullRequest, MessageSquare,
+  Boxes, CheckCircle2, Download, FileCode2, GitBranch, GitPullRequest, Loader2, MessageSquare,
   Rocket, ScrollText, ShieldCheck, ShieldAlert, Sparkles,
 } from "lucide-react";
 
@@ -20,17 +20,21 @@ import { DeployTargetDialog } from "@/components/app/deploy-target-dialog";
 import { DeploymentApprovals } from "@/components/app/deployment-approvals";
 import { DocumentList } from "@/components/app/document-list";
 import { ModelSelector } from "@/components/app/model-selector";
+import { Pill } from "@/components/app/report-primitives";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { getPreparedDeploy, getRelease } from "@/lib/api/deployment";
 import { qk } from "@/lib/api/query-keys";
+import { approvalState, type ReportApproval } from "@/lib/documents/report-document";
 import type { PrepareDeployResult, DeploymentArtifact } from "@/lib/schemas/deployment";
 import type { ProjectId } from "@/lib/schemas";
 
-type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments" | "documents";
+type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments";
 
 const RISK: Record<string, string> = {
   critical: "bg-destructive/15 text-destructive border-destructive/30",
@@ -52,6 +56,7 @@ export default function DeploymentPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as ProjectId;
   useSession({ required: true });
+  const queryClient = useQueryClient();
 
   const projectQ = useQuery({ queryKey: qk.projects.detail(id), queryFn: () => getProject(id) });
 
@@ -82,6 +87,13 @@ export default function DeploymentPage() {
   const linkedSession = useChatDeepLink(setChatOpen);
   const [tab, setTab] = React.useState<Tab>("readiness");
   const [agentModel, setAgentModel] = React.useState<string>();
+  // The project's documents — the SAME query the Documents panel reads, so the readiness
+  // report raised or approved anywhere updates the panel and the assessment's header alike.
+  const documentsQ = useQuery({
+    queryKey: qk.artifacts.forProject(id),
+    queryFn: () => listArtifacts(id),
+  });
+  const approvals = useRaiseForApproval(id);
 
   const chat = useAgentChat({
     openSessionId: linkedSession,
@@ -92,6 +104,10 @@ export default function DeploymentPage() {
     offeringId: agentModel,
     sessionKey: id,
     context: { page: "Deployment", project_id: id },
+    // A turn can file the readiness report or send it for approval.
+    onArtifact: () => {
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    },
   });
 
   const releaseQ = useQuery({
@@ -102,9 +118,12 @@ export default function DeploymentPage() {
   });
   const prevBusy = React.useRef(chat.busy);
   React.useEffect(() => {
-    if (prevBusy.current && !chat.busy) releaseQ.refetch();
+    if (prevBusy.current && !chat.busy) {
+      void releaseQ.refetch();
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    }
     prevBusy.current = chat.busy;
-  }, [chat.busy, releaseQ]);
+  }, [chat.busy, releaseQ, queryClient, id]);
 
   const onPrepared = (r: PrepareDeployResult) => {
     setPrepared(r);
@@ -129,6 +148,15 @@ export default function DeploymentPage() {
     ? `${prepared.repo_name} @ ${prepared.branch}`
     : ctx ? `${ctx.repo_name} @ ${ctx.source_branch}` : null;
   const deployVia = prepared?.deploy_via ?? ctx?.deploy_via ?? "unknown";
+  const reportRow = rel?.document.artifact_id
+    ? (documentsQ.data ?? []).find((d) => d.id === rel.document.artifact_id) ?? null
+    : null;
+  const approval: ReportApproval = {
+    document: reportRow,
+    mayRaise: approvals.mayRaise("deployment"),
+    raising: !!reportRow && approvals.raisingId === reportRow.id,
+    onRaise: () => { if (reportRow) approvals.raise(reportRow); },
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -166,75 +194,73 @@ export default function DeploymentPage() {
         </div>
       </div>
 
-      {!prepared ? (
-        <div className="flex-1 overflow-auto">
-          <div className="mx-auto max-w-3xl px-4 py-12">
-            <div className="mx-auto max-w-xl">
-              <EmptyState icon={Rocket} title="No deployment yet"
-                description="Set up a deployment: pick a branch/PR + environment. The agent detects your deploy connector, generates the package, assesses readiness, and prepares a deployment PR."
-                action={<Button onClick={() => setPickerOpen(true)}><Rocket className="size-4" aria-hidden />Set up deployment</Button>} />
-            </div>
-            {/* Anything already waiting on an approver is waiting whether or not this
-                browser has prepared a target. Hiding it behind the empty state would
-                hide the one thing on this page that needs somebody to act. */}
-            <div className="mt-10">
-              <h2 className="mb-3 text-sm font-medium">Deployment requests</h2>
-              <DeploymentApprovals projectId={id} />
-            </div>
-            {/* And the documents, for the same reason: they exist whether or not this
-                browser has prepared a deployment. The tab bar below lives inside the
-                prepared branch, so a Documents tab there alone would be unreachable on
-                exactly the projects that have never deployed — every new one. */}
-            <div className="mt-10">
-              <DocumentList projectId={id} stage="deployment" />
+      {/* THE DOCUMENTS PANEL SITS BESIDE THE RELEASE, as on Requirements, Code Review and
+          Security. It was a tab — so raising the readiness report for approval meant
+          leaving the assessment to find it — and a list under the empty state. Documents
+          do not depend on a prepared target, so the panel is there on every state. */}
+      <div className="grid min-h-0 flex-1 gap-0 overflow-hidden md:grid-cols-[340px_1fr] xl:grid-cols-[360px_1fr]">
+        <aside
+          aria-label="Documents"
+          className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
+        >
+          <DocumentList projectId={id} stage="deployment" className="flex min-h-0 flex-1 flex-col" fillHeight />
+        </aside>
+
+        {!prepared ? (
+          <div className="min-h-0 overflow-auto">
+            <div className="mx-auto max-w-3xl px-4 py-12">
+              <div className="mx-auto max-w-xl">
+                <EmptyState icon={Rocket} title="No deployment yet"
+                  description="Set up a deployment: pick a branch/PR + environment. The agent detects your deploy connector, generates the package, assesses readiness, and prepares a deployment PR."
+                  action={<Button onClick={() => setPickerOpen(true)}><Rocket className="size-4" aria-hidden />Set up deployment</Button>} />
+              </div>
+              {/* Anything already waiting on an approver is waiting whether or not this
+                  browser has prepared a target. Hiding it behind the empty state would
+                  hide the one thing on this page that needs somebody to act. */}
+              <div className="mt-10">
+                <h2 className="mb-3 text-sm font-medium">Deployment requests</h2>
+                <DeploymentApprovals projectId={id} />
+              </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center gap-1 border-b px-2 py-1.5">
-            <TabBtn active={tab === "readiness"} onClick={() => setTab("readiness")} icon={ShieldCheck}>Readiness</TabBtn>
-            <TabBtn active={tab === "artifacts"} onClick={() => setTab("artifacts")} icon={FileCode2}>
-              Artifacts{rel && rel.generated_files.length > 0 && <Count n={rel.generated_files.length} />}
-            </TabBtn>
-            <TabBtn active={tab === "runbooks"} onClick={() => setTab("runbooks")} icon={ScrollText}>Runbooks</TabBtn>
-            <TabBtn active={tab === "compliance"} onClick={() => setTab("compliance")} icon={Boxes}>Compliance</TabBtn>
-            <TabBtn active={tab === "deployments"} onClick={() => setTab("deployments")} icon={ShieldAlert}>Deployments</TabBtn>
-            {/* DOCUMENTS, and note it is NOT the "Artifacts" tab beside it — that one
-                lists the release package's generated FILES, which live in the release
-                payload and are never approved by anybody. These are the project's
-                approved documents for this stage. Two different things that would read
-                as one if this were folded into that tab. */}
-            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>Documents</TabBtn>
-            {rel?.pr_url && (
-              <a className="ml-auto" href={rel.pr_url} target="_blank" rel="noreferrer">
-                <Button variant="outline" size="sm"><GitPullRequest className="size-4" aria-hidden />View deployment PR</Button>
-              </a>
-            )}
+        ) : (
+          <div className="flex min-h-0 flex-col overflow-hidden">
+            <div className="flex items-center gap-1 border-b px-2 py-1.5">
+              <TabBtn active={tab === "readiness"} onClick={() => setTab("readiness")} icon={ShieldCheck}>Readiness</TabBtn>
+              <TabBtn active={tab === "artifacts"} onClick={() => setTab("artifacts")} icon={FileCode2}>
+                Artifacts{rel && rel.generated_files.length > 0 && <Count n={rel.generated_files.length} />}
+              </TabBtn>
+              <TabBtn active={tab === "runbooks"} onClick={() => setTab("runbooks")} icon={ScrollText}>Runbooks</TabBtn>
+              <TabBtn active={tab === "compliance"} onClick={() => setTab("compliance")} icon={Boxes}>Compliance</TabBtn>
+              <TabBtn active={tab === "deployments"} onClick={() => setTab("deployments")} icon={ShieldAlert}>Deployments</TabBtn>
+              {rel?.pr_url && (
+                <a className="ml-auto" href={rel.pr_url} target="_blank" rel="noreferrer">
+                  <Button variant="outline" size="sm"><GitPullRequest className="size-4" aria-hidden />View deployment PR</Button>
+                </a>
+              )}
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {tab === "deployments" ? (
+                <div className="p-4"><DeploymentApprovals projectId={id} /></div>
+              ) : !rel && chat.busy ? (
+                <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={Sparkles} title="Assessing…"
+                  description="Cloning, detecting the connector, generating the deployment package, and scoring release risk. This takes a moment." variant="plain" /></div>
+              ) : !rel ? (
+                <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={ShieldCheck} title="Preparing…"
+                  description="The agent is starting the assessment." variant="plain" /></div>
+              ) : tab === "readiness" ? (
+                <ReadinessView rel={rel} approval={approval} />
+              ) : tab === "artifacts" ? (
+                <ArtifactsView rel={rel} busy={chat.busy} onOpenPr={openPr} />
+              ) : tab === "runbooks" ? (
+                <RunbooksView rel={rel} />
+              ) : (
+                <ComplianceView rel={rel} />
+              )}
+            </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-            {tab === "deployments" ? (
-              <div className="p-4"><DeploymentApprovals projectId={id} /></div>
-            ) : tab === "documents" ? (
-              <div className="p-4"><DocumentList projectId={id} stage="deployment" /></div>
-            ) : !rel && chat.busy ? (
-              <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={Sparkles} title="Assessing…"
-                description="Cloning, detecting the connector, generating the deployment package, and scoring release risk. This takes a moment." variant="plain" /></div>
-            ) : !rel ? (
-              <div className="mx-auto max-w-xl px-4 py-12"><EmptyState icon={ShieldCheck} title="Preparing…"
-                description="The agent is starting the assessment." variant="plain" /></div>
-            ) : tab === "readiness" ? (
-              <ReadinessView rel={rel} />
-            ) : tab === "artifacts" ? (
-              <ArtifactsView rel={rel} busy={chat.busy} onOpenPr={openPr} />
-            ) : tab === "runbooks" ? (
-              <RunbooksView rel={rel} />
-            ) : (
-              <ComplianceView rel={rel} />
-            )}
-          </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <DeployTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onPrepared={onPrepared} />
 
@@ -254,7 +280,7 @@ export default function DeploymentPage() {
         onAttachFiles={chat.attachFiles}
         onRemoveAttachment={chat.removeAttachment}
         disabledReason={prepared ? undefined : "Set up a deployment first."}
-        starterSuggestions={["Is this branch safe to deploy to production?", "Generate a rollback runbook.", "Open the deployment PR now."]}
+        starterSuggestions={["Is this branch safe to deploy to production?", "Open the deployment PR now.", "Send the deployment readiness report for approval."]}
       />
     </div>
   );
@@ -273,7 +299,7 @@ function Prose({ children }: { children: React.ReactNode }) {
   return <div className="rounded-lg border bg-surface-1 p-4 text-sm leading-relaxed whitespace-pre-wrap">{children}</div>;
 }
 
-function ReadinessView({ rel }: { rel: DeploymentArtifact }) {
+function ReadinessView({ rel, approval }: { rel: DeploymentArtifact; approval?: ReportApproval }) {
   const dec = DECISION[rel.release_decision];
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
@@ -281,6 +307,33 @@ function ReadinessView({ rel }: { rel: DeploymentArtifact }) {
         <Badge variant="outline" className={cn("border px-3 py-1 text-sm", dec?.cls)}>Decision: {dec?.label ?? rel.release_decision}</Badge>
         <Badge variant="outline" className={cn("border px-3 py-1 text-sm", RISK[rel.risk_score])}>{rel.risk_score} risk</Badge>
         <Badge variant="outline" className="px-3 py-1 text-sm capitalize">{rel.readiness}</Badge>
+      </div>
+      {/* THE FILED REPORT, its approval state and the way to send it — the same pattern as
+          the Security and Code Review reports. The assessment used to exist only in the
+          chat session, so there was nothing here to approve. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {approval?.document && (
+          <Pill tone={approvalState(approval.document).tone} className="px-2.5 py-1 text-xs">
+            {approvalState(approval.document).label}
+          </Pill>
+        )}
+        {approval?.document && approval.document.status === "draft" && approval.mayRaise && (
+          <Button size="sm" className="h-8 gap-1.5 text-xs" disabled={approval.raising} onClick={approval.onRaise}>
+            {approval.raising && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+            Raise for approval
+          </Button>
+        )}
+        {rel.document.url ? (
+          <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+            <a href={rel.document.url} download>
+              <Download className="size-3.5" aria-hidden />
+              Download report
+            </a>
+          </Button>
+        ) : null}
+        {rel.document.error && (
+          <Pill tone="danger" className="max-w-xs whitespace-normal">{rel.document.error}</Pill>
+        )}
       </div>
       {rel.release_justification && <p className="text-muted-foreground text-sm">{rel.release_justification}</p>}
       {rel.gate_summary.length > 0 && (

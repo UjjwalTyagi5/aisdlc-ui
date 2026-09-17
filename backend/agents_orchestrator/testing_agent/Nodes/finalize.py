@@ -150,6 +150,46 @@ async def generate_final_message(state: SuperAgentState):
     return {"final_user_message": message, "chat_history": history}
 
 
+def _execution_rows(state: SuperAgentState) -> list[dict]:
+    """Executed tests and their outcomes, from whichever runner ran."""
+    rows: list[dict] = []
+    for r in state.get("ui_test_results") or []:
+        if isinstance(r, dict):
+            rows.append({"name": r.get("id") or r.get("description", ""), "status": r.get("status", ""),
+                         "detail": r.get("detail", "")})
+    for fr in state.get("functional_results") or []:
+        d = fr if isinstance(fr, dict) else getattr(fr, "model_dump", lambda: {})()
+        if not d:
+            continue
+        rows.append({
+            "name": f"{d.get('scenario_id', '')} {d.get('method', '')} {d.get('path', '')}".strip(),
+            "status": "Pass" if d.get("passed") else "Fail",
+            "detail": d.get("error") or f"HTTP {d.get('status_code_actual', '')}",
+        })
+    return rows
+
+
+def _write_test_case_document(state: SuperAgentState, path: str) -> str:
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from agents_orchestrator.testing_agent.test_case_document import (  # noqa: PLC0415
+        TestDocMeta,
+        render_test_cases_docx,
+    )
+
+    project = (state.get("project_display_name") or "").strip()
+    meta = TestDocMeta(
+        title=f"{project} — Test cases" if project else "Test cases",
+        project=project,
+        source=(state.get("plan_source") or "").strip(),
+        generated_on=datetime.now(timezone.utc).strftime("%d %b %Y"),
+        test_types=[str(t) for t in (state.get("selected_test_types") or []) if t],
+    )
+    return render_test_cases_docx(
+        state["test_plan"].test_cases, path, meta=meta, results=_execution_rows(state) or None,
+    )
+
+
 async def package_final_reports(state: SuperAgentState):
     logger.info("Packaging all final reports into memory...")
     blog("Packaging final reports...")
@@ -180,6 +220,19 @@ async def package_final_reports(state: SuperAgentState):
             async with aiofiles.open(excel_path, "wb") as f:
                 await f.write(excel_bytes)
             await broadcast_file_generated(session_id, "test_plan.xlsx", excel_path)
+
+            # THE RECORD, beside the working copy. The spreadsheet is what a tester
+            # edits; the designed Word document is what goes forward for approval and
+            # to Confluence, in the same family as the BRD and the design document.
+            docx_path = os.path.join(output_dir, "test_cases.docx")
+            try:
+                await loop.run_in_executor(
+                    None, lambda: _write_test_case_document(state, docx_path),
+                )
+                await broadcast_file_generated(session_id, "test_cases.docx", docx_path)
+            except Exception as exc:  # noqa: BLE001 — the spreadsheet still went out
+                logger.warning("test case document not written: %s", exc, exc_info=True)
+                blog(f"Test case document could not be written ({type(exc).__name__})", level="WARNING")
 
     # UI test results → Excel + HTML
     if state.get('ui_test_results'):

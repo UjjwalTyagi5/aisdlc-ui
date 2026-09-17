@@ -83,13 +83,22 @@ async def initiate_evidence_export(
     Returns 202 + {"job_id": ...} immediately. A background task builds the ZIP,
     uploads it to Azure Blob, and stores the download URL in Redis.
 
-    Returns 503 when Azure Blob storage is not configured (AZURE_BLOB_ACCOUNT_URL absent).
+    Returns 503 when Azure Blob storage is not configured (AZURE_BLOB_ACCOUNT_URL absent),
+    and when the configured storage is the local-directory backend: the download link
+    handed back is an Azure user-delegation SAS URL, and a directory has nothing
+    equivalent to mint.
     """
     blob_client = getattr(request.app.state, "blob_client", None)
     if blob_client is None:
         raise HTTPException(
             status_code=503,
             detail="Evidence export unavailable — Azure Blob Storage not configured.",
+        )
+    if not getattr(blob_client, "supports_sas_urls", True):
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence export unavailable — it needs Azure Blob Storage, and this "
+                   "deployment stores artifacts on local disk (ARTIFACT_STORAGE_ROOT).",
         )
 
     redis_pool = getattr(request.app.state, "redis_pool", None)

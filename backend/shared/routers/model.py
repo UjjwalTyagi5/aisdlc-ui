@@ -35,6 +35,14 @@ model_options_router = APIRouter(
 model_availability_router = APIRouter(
     prefix="/model", dependencies=[Depends(require_any_permission("model:manage", "run:create"))]
 )
+# GET /options is the model PICKER, and picking a model for an agent chat is part of
+# invoking the agent. Gated on run:create alone it answered 403 to every role that may
+# use an agent but not create a pipeline run — QA, Security Engineer, DevOps Engineer,
+# Scrum Master — so the Testing page's picker failed for the tester. Every role that
+# holds run:create also holds agent:invoke, so the wider gate loses nobody.
+model_picker_router = APIRouter(
+    prefix="/model", dependencies=[Depends(require_any_permission("run:create", "agent:invoke"))]
+)
 
 
 def _tenant_id(request: Request) -> str:
@@ -503,7 +511,7 @@ async def set_default_route(request: Request, body: SetDefaultIn) -> None:
         raise HTTPException(status_code=422, detail=str(exc))
 
 
-@model_options_router.get("/options")
+@model_picker_router.get("/options")
 async def get_options_route(request: Request, projectId: str | None = None) -> dict:
     """The model picker's list, scoped to the PROJECT and nothing else.
 

@@ -145,6 +145,63 @@ async def test_an_approved_document_is_not_reported_as_unapproved(project):
     assert await sp._unapproved_named(project["org"], project["project"], "signed.pdf") is None
 
 
+# -- another stage's approved document: refused, but by NAME and with the owner ---
+#
+# The rule (test_document_read_write_separation.py) is that publishing stays with the
+# producing stage. What this pins is the ANSWER when that rule bites: the Project
+# Manager agent, asked to file a Requirements BRD it could list and read, said "no
+# approved documents to publish" — true for its own stage, and read by the user as a
+# lost file and by the model as "a system-state mismatch". The refusal must say which
+# stage owns the document, so the user goes to that agent instead of re-approving.
+
+
+async def test_another_stages_approved_document_is_reported_with_its_owner(project):
+    await _doc(project, "brd.docx", stage="requirements")
+    await _doc(project, "hld.pdf", stage="design")
+    await _doc(project, "policy.pdf", stage=None)          # project-wide: publishable here
+    await _doc(project, "draft.pdf", stage="design", status="pending")  # not approved
+
+    elsewhere = await sp._approved_elsewhere(project["org"], project["project"], "plan")
+
+    assert sorted((d["name"], d["stage"]) for d in elsewhere) == [
+        ("brd.docx", "requirements"), ("hld.pdf", "design"),
+    ]
+
+
+async def test_the_owning_stage_of_a_named_document_is_answered(project):
+    await _doc(project, "brd.docx", stage="requirements")
+
+    assert await sp._approved_owner_stage(project["org"], project["project"], "brd.docx") == "requirements"
+    assert await sp._approved_owner_stage(project["org"], project["project"], "nope.docx") is None
+
+
+def test_the_nothing_to_publish_message_names_the_other_stages_documents():
+    msg = sp.nothing_to_publish("plan", [
+        {"name": "brd.docx", "stage": "requirements"},
+        {"name": "hld.pdf", "stage": "design"},
+    ])
+    assert "brd.docx" in msg and "Requirements" in msg
+    assert "hld.pdf" in msg and "Design" in msg
+    assert "produced" in msg.lower()
+    assert not msg.lower().startswith("there are no approved documents"), (
+        "the old answer, which reads as a lost file when documents plainly exist"
+    )
+    assert "re-approve" in msg.lower(), "the user must be told approval is not the problem"
+
+
+def test_the_nothing_to_publish_message_is_plain_when_nothing_exists_anywhere():
+    msg = sp.nothing_to_publish("plan", [])
+    assert "no approved documents" in msg.lower()
+    assert "approves" in msg
+
+
+def test_the_owned_elsewhere_refusal_names_the_agent_to_ask():
+    msg = sp.owned_elsewhere("brd.docx", "requirements")
+    assert "brd.docx" in msg
+    assert "Requirements" in msg
+    assert "approved" in msg.lower()
+
+
 # -- what the tool set does and does not contain ------------------------------
 
 

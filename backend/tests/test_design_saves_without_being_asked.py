@@ -110,7 +110,7 @@ async def test_generating_from_context_writes_the_docx_with_no_save_call(design)
     """THE BUG. The live run called this tool and nothing else, and produced no file."""
     a, out_dir, _ = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app", "components": ["all"]})
 
     written = _saved_files(out_dir)
     assert written, f"no .docx under {out_dir} — the document was generated and lost"
@@ -123,7 +123,7 @@ async def test_generating_from_a_document_writes_the_docx_too(design):
     path that still needs to be asked."""
     a, out_dir, _ = design
 
-    await a.generate_architecture.ainvoke({"document_text": "some uploaded requirements"})
+    await a.generate_architecture.ainvoke({"document_text": "some uploaded requirements", "components": ["all"]})
 
     assert _saved_files(out_dir), f"no .docx under {out_dir}"
 
@@ -136,7 +136,7 @@ async def test_the_file_lands_where_the_deliverables_panel_looks(design):
     under the session id is a document filed under the run."""
     a, out_dir, _ = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app", "components": ["all"]})
 
     written = _saved_files(out_dir)
     assert written
@@ -155,11 +155,19 @@ async def test_the_saved_docx_holds_the_document_not_a_stub(design):
 
     a, out_dir, _ = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app", "components": ["all"]})
 
-    text = "\n".join(p.text for p in Document(str(_saved_files(out_dir)[0])).paragraphs)
+    doc = Document(str(_saved_files(out_dir)[0]))
+    # The designed document puts its title in the title band (a table cell) and
+    # numbers its sections, so read tables too and match the label the catalogue uses.
+    texts = [p.text for p in doc.paragraphs]
+    for t in doc.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                texts.extend(p.text for p in cell.paragraphs)
+    text = "\n".join(texts)
     assert "Coffee Ordering App" in text
-    assert "High-Level Design" in text
+    assert "High-level design" in text
 
 
 @pytest.mark.unit
@@ -168,7 +176,7 @@ async def test_a_file_generated_event_announces_the_save(design):
     file without announcing it is a document the user never learns exists."""
     a, _, fake_manager = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee ordering app", "components": ["all"]})
 
     kinds = [c.args[0].get("type") for c in fake_manager.broadcast.await_args_list if c.args]
     assert "file_generated" in kinds
@@ -183,7 +191,7 @@ async def test_the_tool_result_hands_the_model_a_real_download_url(design):
     save (the live failure) or invents a URL, and an invented `/generated/` link 404s."""
     a, _, _ = design
 
-    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     assert f"/generated/{USER_ID}/orchestrator/{RUN_ID}/output/" in result
     assert ".docx" in result
@@ -200,7 +208,7 @@ async def test_the_document_reaches_the_caller_through_the_return_value(design):
     """
     a, _, _ = design
 
-    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     assert "## High-Level Design (HLD)" in result
     assert "| orders | one row per order |" in result
@@ -220,7 +228,7 @@ async def test_the_receipt_never_lands_inside_a_rendered_section(design):
 
     a, _, _ = design
 
-    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+    result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     sections, _persist = parse_design_markdown(result)
     assert sections, "the document no longer parses into panel sections at all"
@@ -254,7 +262,7 @@ async def test_a_half_set_run_context_writes_no_stray_file(tmp_path, user_id, se
                 patch.object(a, "get_session_id", lambda: session_id), \
                 patch.object(a, "manager", fake_manager), \
                 patch.object(a, "_llm_generate_async", AsyncMock(return_value=DOC)):
-            result = await a.generate_architecture_from_context.ainvoke({"context": "x"})
+            result = await a.generate_architecture_from_context.ainvoke({"context": "x", "components": ["all"]})
     finally:
         a._FILES_DIR = original_dir
 
@@ -271,7 +279,7 @@ async def test_the_stashed_copy_stays_clean_markdown(design):
 
     a, _, _ = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     assert shared.last_architecture == DOC
 
@@ -283,7 +291,7 @@ async def test_the_filename_comes_from_the_documents_own_title(design):
     Project Manager already names its file `Coffee_Ordering_App_Delivery_Plan.pdf`."""
     a, out_dir, _ = design
 
-    await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+    await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     name = _saved_files(out_dir)[0].name.lower()
     assert "coffee" in name and name.endswith(".docx")
@@ -300,7 +308,7 @@ async def test_a_failed_write_never_costs_the_document(design):
     a, out_dir, _ = design
 
     with patch.object(a, "_markdown_to_docx", AsyncMock(side_effect=OSError("disk full"))):
-        result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app"})
+        result = await a.generate_architecture_from_context.ainvoke({"context": "coffee app", "components": ["all"]})
 
     assert "## High-Level Design (HLD)" in result
     assert not _saved_files(out_dir)

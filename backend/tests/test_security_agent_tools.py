@@ -114,167 +114,108 @@ def test_semgrep_sast_tool_preserves_cwe_tags_alongside_owasp():
 import pathlib as _pathlib
 
 
-@pytest.mark.asyncio
-async def test_generate_sbom_cross_references_cached_trivy_findings():
-    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
-    from agents_orchestrator.security_agent.tools import security_tools
-    from config.ws_helper import set_session_id
-
-    session_id = "sbom-cross-ref-test"
-    clear_session(session_id)
-    set_session_id(session_id)
-    s = get_session(session_id)
-    s.last_trivy_findings = [
-        {"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"},
-        {"cve": "CVE-2019-1010083", "package": "flask", "installed_version": "0.12.2"},
-    ]
-
-    with patch.object(
-        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
-    ), patch.object(
-        security_tools.pathlib.Path, "exists", return_value=True
-    ), patch.object(
-        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
-    ), patch.object(
-        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
-    ):
-        result_json = await security_tools.generate_sbom.ainvoke({})
-
-    result = json.loads(result_json)
-    assert result["vulnerability_data"] == "trivy"
-    flask_component = next(c for c in result["components"] if c["name"] == "flask")
-    assert flask_component["vulnerabilities"] == 2
-
-    clear_session(session_id)
+# ── the scanner tools are slices of ONE shared scan ─────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_generate_sbom_leaves_vulnerabilities_null_when_no_trivy_scan_ran_yet():
-    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
-    from agents_orchestrator.security_agent.tools import security_tools
-    from config.ws_helper import set_session_id
-
-    session_id = "sbom-cross-ref-empty-test"
-    clear_session(session_id)
-    set_session_id(session_id)
-    # No last_trivy_findings set -- get_session() default is None ("not scanned yet").
-
-    with patch.object(
-        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
-    ), patch.object(
-        security_tools.pathlib.Path, "exists", return_value=True
-    ), patch.object(
-        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
-    ), patch.object(
-        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
-    ):
-        result_json = await security_tools.generate_sbom.ainvoke({})
-
-    result = json.loads(result_json)
-    assert result["vulnerability_data"] == "not_scanned_yet"
-    flask_component = next(c for c in result["components"] if c["name"] == "flask")
-    assert flask_component["vulnerabilities"] is None
-
-    clear_session(session_id)
-
-
-@pytest.mark.asyncio
-async def test_generate_sbom_reports_a_real_zero_when_trivy_ran_but_found_no_match():
-    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
-    from agents_orchestrator.security_agent.tools import security_tools
-    from config.ws_helper import set_session_id
-
-    session_id = "sbom-no-match-test"
-    clear_session(session_id)
-    set_session_id(session_id)
-    s = get_session(session_id)
-    # scan_dependencies DID run (list is non-empty, so not None) but found nothing for flask.
-    s.last_trivy_findings = [
-        {"cve": "CVE-9999-0001", "package": "django", "installed_version": "1.0"},
-    ]
-
-    with patch.object(
-        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
-    ), patch.object(
-        security_tools.pathlib.Path, "exists", return_value=True
-    ), patch.object(
-        security_tools.os, "walk", return_value=[("/fake/does/not/matter", [], ["requirements.txt"])]
-    ), patch.object(
-        security_tools.pathlib.Path, "read_text", return_value="flask==0.12.2\n"
-    ):
-        result_json = await security_tools.generate_sbom.ainvoke({})
-
-    result = json.loads(result_json)
-    assert result["vulnerability_data"] == "trivy"
-    flask_component = next(c for c in result["components"] if c["name"] == "flask")
-    # A REAL zero (scanned, no match) -- distinct from None (never scanned).
-    assert flask_component["vulnerabilities"] == 0
-
-    clear_session(session_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "trivy_output, expected_cache",
-    [
-        pytest.param(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "findings": [
-                        {"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"}
-                    ],
-                }
-            ),
-            [{"cve": "CVE-2018-1000656", "package": "flask", "installed_version": "0.12.2"}],
-            id="ok-caches-findings",
-        ),
-        pytest.param(
-            json.dumps({"status": "unavailable", "message": "trivy not installed"}),
-            None,
-            id="unavailable-leaves-cache-untouched",
-        ),
-        pytest.param(
-            "ERROR: trivy blew up and this is not JSON",
-            None,
-            id="non-json-leaves-cache-untouched",
-        ),
+_SCAN = {
+    "scanners": [
+        {"name": "Gitleaks", "purpose": "secrets", "status": "ok", "findings": 0, "seconds": 0.1, "message": ""},
+        {"name": "Semgrep", "purpose": "sast", "status": "error", "findings": None, "seconds": 0.1, "message": "Semgrep exited with code 2"},
+        {"name": "Trivy", "purpose": "deps", "status": "ok", "findings": 2, "seconds": 0.1, "message": ""},
     ],
-)
-async def test_scan_dependencies_caches_findings_only_on_a_successful_scan(
-    trivy_output, expected_cache
-):
-    from agents_orchestrator.security_agent.config.session_state import get_session, clear_session
-    from agents_orchestrator.security_agent.tools import security_tools
+    "secrets": [], "sast": [],
+    "vulnerabilities": [
+        {"id": "CVE-A", "severity": "critical", "package": "tar", "installed": "6.2.1", "fixed": "7.5.19", "title": "gzip bomb", "manifest": "package.json"},
+        {"id": "CVE-B", "severity": "high", "package": "tar", "installed": "6.2.1", "fixed": "7.5.21", "title": "traversal", "manifest": "package.json"},
+    ],
+    "sbom": {
+        "components": [
+            {"name": "sqlite3", "version": "5.1.7", "license": "BSD-3-Clause", "direct": True, "via": "", "manifest": "package.json", "vulnerabilities": 0},
+            {"name": "tar", "version": "6.2.1", "license": "ISC", "direct": False, "via": "sqlite3", "manifest": "package.json", "vulnerabilities": 2},
+        ],
+        "manifests": ["package.json"],
+        "notes": ["package.json: no lockfile is committed — versions were resolved from the declared ranges at scan time"],
+    },
+    "totals": {"vulnerabilities": 2},
+}
+
+
+def _bind(session_id: str):
+    from agents_orchestrator.security_agent.config.session_state import clear_session, get_session
     from config.ws_helper import set_session_id
 
-    session_id = "scan-deps-cache-test"
     clear_session(session_id)
     set_session_id(session_id)
-    s = get_session(session_id)
-    assert s.last_trivy_findings is None  # default sentinel: not scanned yet
+    return get_session(session_id)
 
-    # Patch the whole tool object (a pydantic StructuredTool won't accept a patched
-    # attribute), so no real Trivy binary is needed.
-    fake_trivy_tool = MagicMock()
-    fake_trivy_tool.invoke.return_value = trivy_output
 
-    with patch.object(
-        security_tools, "_work_dir", return_value=_pathlib.Path("/fake/does/not/matter")
-    ), patch.object(
-        security_tools.pathlib.Path, "exists", return_value=True
-    ), patch.object(
-        security_tools, "run_trivy_scan", fake_trivy_tool
-    ):
-        result = await security_tools.scan_dependencies.ainvoke({})
+@pytest.mark.asyncio
+async def test_the_four_tools_share_one_scan_of_the_target():
+    """THE SECURITY AGENT PASSED A BRANCH WITH NINE HIGH CVEs: its own Trivy call saw no
+    lockfile and found nothing, while Code Review's scan of the same commit — which
+    resolves the declared ranges first — found 13. The tools now answer from that scan,
+    run once per target."""
+    from agents_orchestrator.security_agent.tools import security_tools
 
-    fake_trivy_tool.invoke.assert_called_once_with(
-        {"target_path": str(_pathlib.Path("/fake/does/not/matter"))}
-    )
-    assert result == trivy_output  # raw scanner output is returned verbatim
-    assert get_session(session_id).last_trivy_findings == expected_cache
+    s = _bind("shared-scan-test")
+    scan = MagicMock(return_value=dict(_SCAN))
+    with patch.object(security_tools, "_work_dir", return_value=_pathlib.Path("/fake/checkout")), \
+         patch.object(security_tools.pathlib.Path, "exists", return_value=True), \
+         patch("shared.services.code_security_scan.run_code_security_scan", scan):
+        deps = json.loads(await security_tools.scan_dependencies.ainvoke({}))
+        sbom = json.loads(await security_tools.generate_sbom.ainvoke({}))
+        code = json.loads(await security_tools.scan_code.ainvoke({}))
+        secrets = json.loads(await security_tools.scan_secrets.ainvoke({}))
 
-    clear_session(session_id)
+    scan.assert_called_once()
+    assert scan.call_args.args[0] == str(_pathlib.Path("/fake/checkout"))
+    assert deps["status"] == "ok" and deps["findings_count"] == 2
+    assert deps["findings"][0] == {"cve": "CVE-A", "severity": "critical", "package": "tar", "installed_version": "6.2.1",
+                                   "fixed_version": "7.5.19", "title": "gzip bomb", "target": "package.json"}
+    assert "no lockfile" in deps["notes"][0]
+    # The transitive package that carries the CVEs is in the SBOM, with what brings it in.
+    assert sbom["vulnerability_data"] == "trivy"
+    assert sbom["components"][0] == {"name": "tar", "version": "6.2.1", "license": "ISC", "direct": False,
+                                     "via": "sqlite3", "manifest": "package.json", "vulnerabilities": 2}
+    assert secrets["status"] == "ok" and secrets["findings_count"] == 0
+    # A scanner that did not run says so — never a clean zero.
+    assert code["status"] == "error" and code["findings_count"] is None and "exited with code 2" in code["message"]
+    assert s.last_trivy_findings is not None and len(s.last_trivy_findings) == 2
+
+
+@pytest.mark.asyncio
+async def test_when_the_vulnerability_scanner_did_not_run_nothing_is_counted():
+    from agents_orchestrator.security_agent.tools import security_tools
+
+    s = _bind("trivy-failed-test")
+    failed = dict(_SCAN)
+    failed["scanners"] = [dict(sc, status="error", findings=None, message="trivy: unavailable") if sc["name"] == "Trivy" else sc for sc in _SCAN["scanners"]]
+    with patch.object(security_tools, "_work_dir", return_value=_pathlib.Path("/fake/checkout")), \
+         patch.object(security_tools.pathlib.Path, "exists", return_value=True), \
+         patch("shared.services.code_security_scan.run_code_security_scan", MagicMock(return_value=failed)):
+        deps = json.loads(await security_tools.scan_dependencies.ainvoke({}))
+        sbom = json.loads(await security_tools.generate_sbom.ainvoke({}))
+
+    assert deps["status"] == "error" and deps["findings"] == [] and deps["findings_count"] is None
+    assert sbom["vulnerability_data"] == "not_scanned"
+    assert all(c["vulnerabilities"] is None for c in sbom["components"])
+    assert s.last_trivy_findings is None
+
+
+@pytest.mark.asyncio
+async def test_a_new_target_is_scanned_again():
+    from agents_orchestrator.security_agent.tools import security_tools
+
+    _bind("rescan-test")
+    scan = MagicMock(return_value=dict(_SCAN))
+    with patch.object(security_tools.pathlib.Path, "exists", return_value=True), \
+         patch("shared.services.code_security_scan.run_code_security_scan", scan):
+        with patch.object(security_tools, "_work_dir", return_value=_pathlib.Path("/checkout/a")):
+            await security_tools.scan_secrets.ainvoke({})
+            await security_tools.scan_secrets.ainvoke({})
+        with patch.object(security_tools, "_work_dir", return_value=_pathlib.Path("/checkout/b")):
+            await security_tools.scan_secrets.ainvoke({})
+    assert scan.call_count == 2
 
 
 # ── run_trivy_scan: a crash is not a clean scan ──────────────────────────────

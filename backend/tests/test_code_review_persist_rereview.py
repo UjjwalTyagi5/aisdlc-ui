@@ -30,6 +30,16 @@ async def _dispose_shared_engine():
     await engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _no_report_document(monkeypatch):
+    """Persisting now also writes the review's report document; these tests are about
+    the saved row, so the document step is stubbed rather than writing into files/."""
+    from agents_orchestrator.code_review_agent import code_review_agent_api as api
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(api, "_write_review_document", AsyncMock(return_value={"filename": "r.docx", "url": "u"}))
+
+
 HEAD = "ed17288d9965176516c5c3da05950f6a4152d7f0"
 
 
