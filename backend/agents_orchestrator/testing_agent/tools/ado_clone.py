@@ -65,7 +65,11 @@ def clone_branch(
     os.makedirs(work_dir, exist_ok=True)
     org_seg = _normalise_org_url(org_url)
     safe_pat = quote(pat, safe="")
-    url = f"https://anything:{safe_pat}@{org_seg}/{project}/_git/{repo}"
+    # THE PROJECT AND REPO ARE PATH SEGMENTS, and ADO names are free text. A project named
+    # "QUICKLINK(Url shortner)" went into the URL raw; git refused it ("URL rejected:
+    # Malformed input to a URL function"), the run had no code, and every Testing run on
+    # that project ended "The run did not complete".
+    url = f"https://anything:{safe_pat}@{org_seg}/{quote(project, safe='')}/_git/{quote(repo, safe='')}"
 
     cmd = [
         "git", "clone",
