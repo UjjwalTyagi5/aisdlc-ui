@@ -19,11 +19,13 @@ const VERDICT_TONE: Record<string, PillTone> = { Passed: "success", Failed: "dan
  * One kind of run: what it runs, the button, the work as it happens, every case's outcome, and
  * the report filed for it. The table is the run's own result — the same rows as the workbook.
  */
-export function SuiteRunPanel({ kind, suite, job, report, approvals, canRun, blockedReason, running, onRun }: {
+export function SuiteRunPanel({ kind, suite, job, report, reportRemoved, approvals, canRun, blockedReason, running, onRun }: {
   kind: SuiteKind;
   suite: Artifact | null;
   job: SuiteJob | null;
   report: Artifact | null;
+  /** The name of the report this run filed, when it has since been removed from the project's documents. */
+  reportRemoved?: string;
   approvals: UseRaiseForApprovalResult;
   canRun: boolean;
   /** Why the run cannot start yet, shown under the button. */
@@ -113,6 +115,11 @@ export function SuiteRunPanel({ kind, suite, job, report, approvals, canRun, blo
             )}
           </span>
         </div>
+      )}
+      {reportRemoved && !report && (
+        <p className="text-warning text-xs">
+          The report <span className="font-mono">{reportRemoved}</span> was removed from the project&apos;s documents.
+        </p>
       )}
       {!result && !job && !report && suite && (
         <Callout>No {label.toLowerCase()} run yet.</Callout>

@@ -1,4 +1,4 @@
-"""Test case suites over HTTP: generate, follow the job, read a suite back.
+"""Test case suites over HTTP: generate, run, follow the job, list the history, read a suite back.
 
 Mounted at `/testing` beside the other workspace routers. Every route is scoped to its
 `{project_id}` (`require_project_access`); starting work also requires use of the Testing
@@ -33,8 +33,10 @@ class GenerateRequest(BaseModel):
     offering_id: Optional[str] = None
 
 
-async def _may_use_testing(request: Request, project_id: str) -> tuple[str, str]:
+async def _may_use_testing(request: Request, project_id: str) -> tuple[str, str, str]:
+    """(tenant, user id, user's name) for a caller who may use the Testing agent here."""
     from shared.authz.agent_access import assert_agent_access_for_chat  # noqa: PLC0415
+    from shared.authz.effective_role import actor_display_name  # noqa: PLC0415
     from shared.db import get_db_session_for_tenant  # noqa: PLC0415
 
     tenant_id = str(getattr(request.state, "tenant_id", "") or "")
@@ -42,7 +44,8 @@ async def _may_use_testing(request: Request, project_id: str) -> tuple[str, str]
     async with get_db_session_for_tenant(tenant_id) as db:
         await assert_agent_access_for_chat(db, tenant_id=tenant_id, project_id=project_id, user_id=user_id,
                                            agent_id="testing")
-    return tenant_id, user_id
+        user_name = await actor_display_name(db, request)
+    return tenant_id, user_id, user_name
 
 
 @testing_suites_router.post("/{project_id}/suites/generate", status_code=202)
@@ -51,14 +54,14 @@ async def generate(project_id: str, body: GenerateRequest, request: Request) -> 
     from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
     from agents_orchestrator.testing_agent.suites.workflows import generate_workflow  # noqa: PLC0415
 
-    tenant_id, user_id = await _may_use_testing(request, project_id)
+    tenant_id, user_id, user_name = await _may_use_testing(request, project_id)
     running = jobs.active_job(project_id, "generate")
     if running:
         raise HTTPException(status_code=409, detail="Test cases are already being generated for this project — follow that run.")
     kinds = list(dict.fromkeys(body.kinds))
     target = body.target.model_dump()
     job = jobs.start_job(
-        kind="generate", project_id=project_id, tenant_id=tenant_id, user_id=user_id,
+        kind="generate", project_id=project_id, tenant_id=tenant_id, user_id=user_id, user_name=user_name,
         params={"target": target, "kinds": kinds},
         work=lambda job: generate_workflow(job, target=target, kinds=kinds, offering_id=body.offering_id),
     )
@@ -85,7 +88,7 @@ async def run_suite(project_id: str, document_id: str, body: RunRequest, request
     from agents_orchestrator.testing_agent.suites.store import document_bytes  # noqa: PLC0415
     from agents_orchestrator.testing_agent.suites.workflows import run_workflow  # noqa: PLC0415
 
-    tenant_id, user_id = await _may_use_testing(request, project_id)
+    tenant_id, user_id, user_name = await _may_use_testing(request, project_id)
     try:
         _row, data = await document_bytes(tenant_id, project_id, document_id)
         meta, cases, _problems = read_suite(data)
@@ -102,7 +105,7 @@ async def run_suite(project_id: str, document_id: str, body: RunRequest, request
     if jobs.active_job(project_id, kind):
         raise HTTPException(status_code=409, detail=f"A {meta.kind} run is already in progress for this project — follow that run.")
     job = jobs.start_job(
-        kind=kind, project_id=project_id, tenant_id=tenant_id, user_id=user_id,
+        kind=kind, project_id=project_id, tenant_id=tenant_id, user_id=user_id, user_name=user_name,
         params={"document_id": document_id, "base_url": base_url, "headless": body.headless, "suite_kind": meta.kind},
         work=lambda job: run_workflow(job, document_id=document_id, base_url=base_url or None,
                                       headless=body.headless, offering_id=body.offering_id),
@@ -125,6 +128,29 @@ async def get_suite_job(project_id: str, job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail="No such run for this project.")
     return job.public()
+
+
+@testing_suites_router.get("/{project_id}/suites/history")
+async def list_history(project_id: str, limit: int = 20, offset: int = 0) -> dict:
+    """What was generated and run before, one entry per generation, latest activity first."""
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.history import build_history  # noqa: PLC0415
+
+    entries = build_history(jobs.all_jobs(project_id))
+    limit, offset = max(1, min(limit, 50)), max(0, offset)
+    return {"entries": entries[offset:offset + limit], "total": len(entries)}
+
+
+@testing_suites_router.get("/{project_id}/suites/history/{entry_id}")
+async def get_history_entry(project_id: str, entry_id: str) -> dict:
+    """One history entry — a generation and its runs — to open in the page."""
+    from agents_orchestrator.testing_agent.suites import jobs  # noqa: PLC0415
+    from agents_orchestrator.testing_agent.suites.history import build_history  # noqa: PLC0415
+
+    entry = next((e for e in build_history(jobs.all_jobs(project_id)) if e["id"] == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Nothing in this project's testing history has that id.")
+    return entry
 
 
 @testing_suites_router.get("/{project_id}/suites/{document_id}")

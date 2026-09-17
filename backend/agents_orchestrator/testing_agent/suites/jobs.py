@@ -5,8 +5,8 @@ that long, and a chat turn is the wrong shape for it: the page needs to know wha
 work is at and, afterwards, exactly what it produced or why it failed.
 
 A job is recorded in memory and written to disk on every change (`files/testing-jobs/`), so
-the page can show the last result after a reload. A job that was running when the backend
-stopped is reported as interrupted, never as still running.
+its result outlives the request and a restart; the page lists them in its history. A job
+that was running when the backend stopped is reported as interrupted, never as still running.
 """
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ class Job:
     project_id: str
     tenant_id: str
     user_id: str
+    #: Who started it, as the platform names them — shown in the page's history.
+    user_name: str = ""
     status: str = "queued"               # queued | running | succeeded | failed | interrupted
     created_at: str = field(default_factory=_now)
     started_at: Optional[str] = None
@@ -98,10 +100,15 @@ def get_job(project_id: str, job_id: str) -> Optional[Job]:
     return next((j for j in _load(project_id) if j.id == job_id), None)
 
 
-def list_jobs(project_id: str, *, kind: Optional[str] = None, limit: int = 20) -> list[Job]:
+def all_jobs(project_id: str) -> list[Job]:
+    """Every job of the project, on disk or in flight."""
     merged = {j.id: j for j in _load(project_id)}
     merged.update({j.id: j for j in _jobs.values() if j.project_id == project_id})
-    jobs = [j for j in merged.values() if kind is None or j.kind == kind]
+    return list(merged.values())
+
+
+def list_jobs(project_id: str, *, kind: Optional[str] = None, limit: int = 20) -> list[Job]:
+    jobs = [j for j in all_jobs(project_id) if kind is None or j.kind == kind]
     return sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]
 
 
@@ -117,11 +124,11 @@ async def log(job: Job, message: str, level: str = "info") -> None:
 
 
 def start_job(*, kind: Kind, project_id: str, tenant_id: str, user_id: str, params: dict,
-              work: Callable[[Job], Awaitable[dict]]) -> Job:
+              work: Callable[[Job], Awaitable[dict]], user_name: str = "") -> Job:
     """Create the job and run `work(job)` in the background. `work` returns the job's result;
     an exception fails the job with its message."""
     job = Job(id=uuid.uuid4().hex, kind=kind, project_id=project_id, tenant_id=tenant_id, user_id=user_id,
-              params=params)
+              user_name=user_name, params=params)
     _jobs[job.id] = job
     _save(job)
 

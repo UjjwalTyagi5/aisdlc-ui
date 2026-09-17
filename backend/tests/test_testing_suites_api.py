@@ -49,7 +49,7 @@ async def test_a_second_generation_while_one_runs_is_refused():
         await gate.wait()
         return {"documents": []}
 
-    with patch.object(api, "_may_use_testing", AsyncMock(return_value=("t1", "u1"))), \
+    with patch.object(api, "_may_use_testing", AsyncMock(return_value=("t1", "u1", "Sarthak"))), \
          patch("agents_orchestrator.testing_agent.suites.workflows.generate_workflow", slow):
         first = await api.generate(PROJECT, _body(), _request())
         await asyncio.sleep(0)
@@ -70,7 +70,7 @@ async def test_a_failed_job_keeps_its_reason_and_survives_a_restart():
         await jobs.log(job, "Checking out QUICKLINK @ feature/x")
         raise RuntimeError("git clone failed: repository not found")
 
-    with patch.object(api, "_may_use_testing", AsyncMock(return_value=("t1", "u1"))), \
+    with patch.object(api, "_may_use_testing", AsyncMock(return_value=("t1", "u1", "Sarthak"))), \
          patch("agents_orchestrator.testing_agent.suites.workflows.generate_workflow", boom):
         started = await api.generate(PROJECT, _body(), _request())
         for _ in range(50):

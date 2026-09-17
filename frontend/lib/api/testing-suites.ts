@@ -1,12 +1,12 @@
 import { z } from "zod";
 
-import type { Artifact, ProjectId } from "@/lib/schemas";
+import type { ProjectId } from "@/lib/schemas";
 
 import { api } from "./client";
 
 /**
- * Test case suites — generate unit / functional / API cases as Excel, follow the job, read a
- * suite back. Backend: shared/routers/testing_suites.py.
+ * Test case suites — generate unit / functional / API cases as Excel, run them, follow the job,
+ * list the history, read a suite back. Backend: shared/routers/testing_suites.py.
  */
 
 const enc = encodeURIComponent;
@@ -38,6 +38,7 @@ export const SuiteJob = z.object({
   kind: z.string(),
   project_id: z.string(),
   user_id: z.string().default(""),
+  user_name: z.string().default(""),
   status: z.enum(["queued", "running", "succeeded", "failed", "interrupted"]),
   created_at: z.string(),
   started_at: z.string().nullable().optional(),
@@ -124,25 +125,9 @@ export const getSuite = (projectId: ProjectId, documentId: string) =>
 export const suitesKeys = {
   jobs: (id: ProjectId) => ["testing", "suite-jobs", id] as const,
   suite: (id: ProjectId, doc: string) => ["testing", "suite", id, doc] as const,
+  history: (id: ProjectId) => ["testing", "suite-history", id] as const,
+  entry: (id: ProjectId, entry: string) => ["testing", "suite-history", id, "entry", entry] as const,
 };
-
-const SUITE_NAME: Record<SuiteKind, RegExp> = {
-  unit: /_Unit_Test_Cases(_v\d+)?\.xlsx$/i,
-  functional: /_Functional_Test_Cases(_v\d+)?\.xlsx$/i,
-  api: /_API_Test_Cases(_v\d+)?\.xlsx$/i,
-};
-
-/** The newest test case workbook of each kind in this project's Testing documents. */
-export function latestSuites(documents: readonly Artifact[] | null | undefined): Record<SuiteKind, Artifact | null> {
-  const rows = (documents ?? [])
-    .filter((d) => d.stage === "testing" && d.status !== "rejected")
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return {
-    unit: rows.find((d) => SUITE_NAME.unit.test(d.title)) ?? null,
-    functional: rows.find((d) => SUITE_NAME.functional.test(d.title)) ?? null,
-    api: rows.find((d) => SUITE_NAME.api.test(d.title)) ?? null,
-  };
-}
 
 // ── runs ──────────────────────────────────────────────────────────────────────
 
@@ -182,20 +167,82 @@ export const runSuite = (
   body: { base_url?: string; headless?: boolean; offering_id?: string },
 ) => api(`/testing/${enc(projectId)}/suites/${enc(documentId)}/run`, { method: "POST", body, schema: SuiteJob });
 
-const REPORT_NAME: Record<SuiteKind, RegExp> = {
-  unit: /_Unit_Test_Report(_v\d+)?\.xlsx$/i,
-  functional: /_Functional_Test_Report(_v\d+)?\.xlsx$/i,
-  api: /_API_Test_Report(_v\d+)?\.xlsx$/i,
-};
+// ── history ───────────────────────────────────────────────────────────────────
 
-/** The newest run report of each kind in this project's Testing documents. */
-export function latestReports(documents: readonly Artifact[] | null | undefined): Record<SuiteKind, Artifact | null> {
-  const rows = (documents ?? [])
-    .filter((d) => d.stage === "testing" && d.status !== "rejected")
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return {
-    unit: rows.find((d) => REPORT_NAME.unit.test(d.title)) ?? null,
-    functional: rows.find((d) => REPORT_NAME.functional.test(d.title)) ?? null,
-    api: rows.find((d) => REPORT_NAME.api.test(d.title)) ?? null,
-  };
+/**
+ * One generation and every run of the test cases it filed, newest run first. A run of a
+ * workbook no generation filed is an entry of its own, with no generation.
+ */
+export const HistoryEntry = z.object({
+  id: z.string(),
+  updated_at: z.string(),
+  active: z.boolean().default(false),
+  generation: SuiteJob.nullable(),
+  runs: z.array(SuiteJob).default([]),
+});
+export type HistoryEntry = z.infer<typeof HistoryEntry>;
+
+export const HistoryPage = z.object({ entries: z.array(HistoryEntry), total: z.number() });
+export type HistoryPage = z.infer<typeof HistoryPage>;
+
+export const listHistory = (projectId: ProjectId, page: { limit?: number; offset?: number } = {}) =>
+  api(`/testing/${enc(projectId)}/suites/history`, {
+    query: { limit: page.limit ?? 20, offset: page.offset ?? 0 },
+    schema: HistoryPage,
+  });
+
+export const getHistoryEntry = (projectId: ProjectId, entryId: string) =>
+  api(`/testing/${enc(projectId)}/suites/history/${enc(entryId)}`, { schema: HistoryEntry });
+
+const RUN_KIND = Object.fromEntries(Object.entries(RUN_JOB_KIND).map(([k, v]) => [v, k])) as Record<string, SuiteKind>;
+
+/** The suite kind a run job ran. */
+export const runKind = (job: SuiteJob): SuiteKind | null => RUN_KIND[job.kind] ?? null;
+
+/** What an entry holds for one kind of test. */
+export interface EntryKind {
+  /** The workbook the generation filed — or, for an entry without one, the workbook its run used. */
+  documentId: string | null;
+  documentName: string;
+  cases: number | null;
+  /** Why the generation did not write this kind, when it tried. */
+  failure: string;
+  /** Asked for by the generation (so, while it runs, still to come). */
+  requested: boolean;
+  /** The latest run, then every run, newest first. */
+  run: SuiteJob | null;
+  runs: SuiteJob[];
+  /** The report the latest run filed. */
+  reportId: string | null;
+  reportName: string;
+}
+
+export function entryKinds(entry: HistoryEntry | null | undefined): Record<SuiteKind, EntryKind> {
+  const gen = entry?.generation ?? null;
+  const kinds = Array.isArray(gen?.params.kinds) ? (gen.params.kinds as string[]) : [];
+  const out = {} as Record<SuiteKind, EntryKind>;
+  for (const k of SUITE_KINDS) {
+    const filed = gen?.result.documents.find((d) => d.kind === k) ?? null;
+    const runs = (entry?.runs ?? []).filter((r) => runKind(r) === k);
+    const run = runs[0] ?? null;
+    const report = run?.result.documents[0] ?? null;
+    out[k] = {
+      documentId: filed?.artifact_id ?? (gen ? null : (run?.params.document_id as string | undefined) ?? null),
+      documentName: filed?.name ?? "",
+      cases: filed?.cases ?? null,
+      failure: gen?.result.failures.find((f) => f.kind === k)?.error ?? "",
+      requested: kinds.includes(k),
+      run,
+      runs,
+      reportId: report?.artifact_id ?? null,
+      reportName: report?.name ?? "",
+    };
+  }
+  return out;
+}
+
+/** The branch an entry's generation was written for. */
+export function entryTarget(entry: HistoryEntry | null | undefined): SuiteTarget | null {
+  const parsed = SuiteTarget.safeParse(entry?.generation?.params.target);
+  return parsed.success ? parsed.data : null;
 }

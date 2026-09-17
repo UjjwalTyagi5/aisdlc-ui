@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams } from "next/navigation";
+import { usePathname, useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -12,6 +12,7 @@ import {
   FlaskConical,
   GitBranch,
   GitPullRequest,
+  History,
   Loader2,
   MessageSquare,
   Play,
@@ -35,10 +36,11 @@ import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
 import { TestRunReport } from "@/components/app/test-run-report";
 import { RequireRole } from "@/components/auth/require-role";
+import { SuiteHistory } from "@/components/app/testing/suite-history";
 import { TestSuitesWorkflow } from "@/components/app/testing/test-suites-workflow";
 import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { listArtifacts } from "@/lib/api/artifacts";
-import { listSuiteJobs, SuiteTarget, suitesKeys } from "@/lib/api/testing-suites";
+import { entryTarget, getHistoryEntry, suitesKeys } from "@/lib/api/testing-suites";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
@@ -112,8 +114,8 @@ const TEST_TYPES: TType[] = [
 ];
 
 type Tab = "qa" | "output";
-/** The page's two modes: the test case flow, and the individual test types it grew from. */
-type Mode = "suites" | "advanced";
+/** The page's modes: the test case flow, what it did before, and the individual test types it grew from. */
+type Mode = "suites" | "history" | "advanced";
 
 export default function TestingPage() {
   const params = useParams<{ id: string }>();
@@ -141,14 +143,44 @@ export default function TestingPage() {
   // approved anywhere updates its card in the flow too.
   const documentsQ = useQuery({ queryKey: qk.artifacts.forProject(id), queryFn: () => listArtifacts(id) });
   const approvals = useRaiseForApproval(id);
-  // THE BRANCH SURVIVES A RELOAD: until one is picked, the branch the last generation used.
-  const suiteJobsQ = useQuery({ queryKey: suitesKeys.jobs(id), queryFn: () => listSuiteJobs(id) });
+
+  // THE PAGE OPENS EMPTY. The work on it is named in the address (`?history=`) — a generation
+  // started here, or an entry opened from History — so a reload or a shared link keeps it,
+  // and arriving without one never pours in whatever ran last.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const entryId = searchParams.get("history");
+  const setEntryId = React.useCallback((next: string | null) => {
+    const qs = new URLSearchParams(searchParams.toString());
+    if (next) qs.set("history", next); else qs.delete("history");
+    const q = qs.toString();
+    router.replace(`${pathname}${q ? `?${q}` : ""}`, { scroll: false });
+  }, [pathname, router, searchParams]);
+  const entryQ = useQuery({
+    queryKey: suitesKeys.entry(id, entryId ?? ""),
+    queryFn: () => getHistoryEntry(id, entryId!),
+    enabled: !!entryId,
+    refetchInterval: (q) => (q.state.data?.active ? 2000 : false),
+  });
+  const entry = entryId ? entryQ.data ?? null : null;
+  // An opened entry brings its branch with it — once per entry, so a branch picked afterwards stands.
+  const hydratedFor = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (target) return;
-    const last = suiteJobsQ.data?.jobs.find((j) => j.kind === "generate")?.params?.target;
-    const parsed = SuiteTarget.safeParse(last);
-    if (parsed.success) setTarget({ ado_project: parsed.data.ado_project, repo: parsed.data.repo, branch: parsed.data.branch });
-  }, [suiteJobsQ.data, target]);
+    if (!entry || hydratedFor.current === entry.id) return;
+    hydratedFor.current = entry.id;
+    const t = entryTarget(entry);
+    if (t) setTarget({ ado_project: t.ado_project, repo: t.repo, branch: t.branch });
+  }, [entry]);
+  const pickTarget = (t: TestTarget) => {
+    setTarget(t);
+    // A different branch is different work: the page starts over for it.
+    const open = entryTarget(entry);
+    if (open && (open.ado_project !== t.ado_project || open.repo !== t.repo || open.branch !== t.branch)) {
+      hydratedFor.current = null;
+      setEntryId(null);
+    }
+  };
 
   const chat = useAgentChat({
     openSessionId: linkedSession,
@@ -301,18 +333,40 @@ export default function TestingPage() {
         <div className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex items-center gap-1 border-b px-2 py-1.5" role="tablist" aria-label="Testing">
             <TabBtn active={mode === "suites"} onClick={() => setMode("suites")} icon={ListChecks}>Test cases &amp; runs</TabBtn>
+            <TabBtn active={mode === "history"} onClick={() => setMode("history")} icon={History}>History</TabBtn>
             <TabBtn active={mode === "advanced"} onClick={() => setMode("advanced")} icon={SlidersHorizontal}>More test types</TabBtn>
           </div>
 
           {mode === "suites" ? (
             <div className="min-h-0 flex-1 overflow-auto">
-              <TestSuitesWorkflow
+              {entryId && entryQ.isLoading ? (
+                <div className="mx-auto max-w-5xl p-4 md:p-6"><LoadingState variant="card" /></div>
+              ) : (
+                <TestSuitesWorkflow
+                  projectId={id}
+                  target={target}
+                  onSelectTarget={() => setPickerOpen(true)}
+                  offeringId={agentModel}
+                  documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                  approvals={approvals}
+                  entry={entry}
+                  entryError={entryId && entryQ.isError ? (entryQ.error instanceof Error ? entryQ.error.message : "Unknown error.") : undefined}
+                  onOpenEntry={(next) => {
+                    // Starting over empties the page, branch included.
+                    if (!next) { hydratedFor.current = null; setTarget(null); }
+                    setEntryId(next);
+                  }}
+                  onShowHistory={() => setMode("history")}
+                />
+              )}
+            </div>
+          ) : mode === "history" ? (
+            <div className="min-h-0 flex-1 overflow-auto">
+              <SuiteHistory
                 projectId={id}
-                target={target}
-                onSelectTarget={() => setPickerOpen(true)}
-                offeringId={agentModel}
                 documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
-                approvals={approvals}
+                openEntryId={entryId}
+                onOpen={(next) => { setEntryId(next); setMode("suites"); }}
               />
             </div>
           ) : (
@@ -431,7 +485,7 @@ export default function TestingPage() {
         </div>
       </div>
 
-      <TestTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onSelected={setTarget} />
+      <TestTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onSelected={pickTarget} />
 
       <AgentChatDrawer
         open={chatOpen}
