@@ -18,7 +18,7 @@ import * as React from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileText, MessageSquare } from "lucide-react";
+import { FileText, Loader2, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -29,11 +29,14 @@ import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
 import { DocumentCard } from "@/components/app/document-card";
+import { DocumentReportView } from "@/components/app/document-report-view";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 
 import { useSession } from "@/hooks/use-session";
 import { useArtifactApproval } from "@/hooks/use-artifact-approval";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
+import { approvalState } from "@/lib/documents/report-document";
 import { GATE_POLICY } from "@/lib/agents";
 import { toBackendStage } from "@/lib/api/artifact-versions";
 import { listArtifacts, updateArtifact } from "@/lib/api/artifacts";
@@ -120,6 +123,7 @@ export function StageWorkbench({
   );
 
   const approval = useArtifactApproval(projectId);
+  const raising = useRaiseForApproval(projectId);
 
   // The list owns the delete now; this stays because the PAGE owns the URL, and a
   // deleted artifact must not be left named in ?artifact=.
@@ -156,6 +160,20 @@ export function StageWorkbench({
       artifactTitle: selected?.title,
     },
   });
+
+  // THE DOCUMENT THE CHAT JUST FILED OPENS HERE, by its artifact row. The chat's link
+  // pointed at the backend's /generated/ file, which for a markdown export opened as raw
+  // text in a new tab, and the page itself kept showing whatever was selected before.
+  const shownDocIds = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const fresh = chat.documents.filter((d) => d.documentId && !shownDocIds.current.has(d.id));
+    if (fresh.length === 0) return;
+    for (const d of fresh) shownDocIds.current.add(d.id);
+    const newest = fresh[fresh.length - 1]!;
+    const next = new URLSearchParams(searchParams);
+    next.set("artifact", newest.documentId!);
+    router.replace(`/projects/${projectId}/${routeSegment}?${next.toString()}`);
+  }, [chat.documents, searchParams, router, projectId, routeSegment]);
 
   const decisionMutation = useMutation({
     mutationFn: async (input: {
@@ -331,15 +349,30 @@ export function StageWorkbench({
                   <ul className="space-y-1">
                     {chat.documents.map((d) => (
                       <li key={d.id}>
-                        <a
-                          href={d.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
-                        >
-                          <FileText className="size-3.5" aria-hidden />
-                          {d.name ?? "document"}
-                        </a>
+                        {d.documentId ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = new URLSearchParams(searchParams);
+                              next.set("artifact", d.documentId!);
+                              router.replace(`/projects/${projectId}/${routeSegment}?${next.toString()}`);
+                            }}
+                            className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
+                          >
+                            <FileText className="size-3.5" aria-hidden />
+                            {d.name ?? "document"}
+                          </button>
+                        ) : (
+                          <a
+                            href={d.url ?? undefined}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-info inline-flex items-center gap-1.5 text-sm hover:underline"
+                          >
+                            <FileText className="size-3.5" aria-hidden />
+                            {d.name ?? "document"}
+                          </a>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -359,6 +392,25 @@ export function StageWorkbench({
                     })}
                   </p>
                 </header>
+
+                {/* A DOCUMENT IS SHOWN AS THE DOCUMENT: its page copy rendered as a report,
+                    with its approval state and Raise for approval — as on Requirements. */}
+                {selected.body.kind === "document" && (
+                  <DocumentReportView
+                    key={selected.id}
+                    doc={{ id: selected.id, name: selected.title, url: selected.downloadUrl ?? null, documentId: selected.id }}
+                    project={projectQ.data?.name}
+                    status={approvalState(selected).label}
+                    actions={selected.status === "draft" && raising.mayRaise(selected.stage) ? (
+                      <Button size="sm" className="h-8 gap-1.5 text-xs"
+                        disabled={raising.raisingId === selected.id}
+                        onClick={() => raising.raise(selected)}>
+                        {raising.raisingId === selected.id && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+                        Raise for approval
+                      </Button>
+                    ) : null}
+                  />
+                )}
 
                 <ArtifactBody artifact={selected} approval={approval} />
 

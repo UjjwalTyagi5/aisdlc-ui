@@ -748,10 +748,11 @@ async def cost_plan(schedule_json: str, rates_json: str) -> str:
 
 _SHARED_TOOLS: List[Any] = []
 try:  # pragma: no cover - import guard only
-    from agents_orchestrator.design_architecture_agent.agents.architecture import (
-        export_document,
-        generate_diagram,
-    )
+    from agents_orchestrator.design_architecture_agent.agents.architecture import generate_diagram
+    # THE PROJECT MANAGER'S OWN EXPORT. The Design agent's filed every document under
+    # `design`: an estimate exported here landed in Design's Documents and never on the
+    # Plan page or in anybody's approvals. See pm_agent/plan_documents.
+    from agents_orchestrator.pm_agent.plan_documents import export_document
 
     _SHARED_TOOLS = [export_document, generate_diagram]
 except Exception:  # noqa: BLE001
@@ -774,6 +775,7 @@ except Exception:  # noqa: BLE001
 # tool for, and this agent told a user it could only publish to SharePoint while
 # Confluence sat granted and read-write in that project's settings.
 from shared.tools.stage_tools import tools_for_stage  # noqa: E402
+from shared.tools.document_approval import make_approval_tools  # noqa: E402
 
 
 try:
@@ -804,6 +806,8 @@ tools = [
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
     *_TEAM_TOOLS,
+    # An exported document is a DRAFT; this is the Documents panel's "Raise for approval".
+    *make_approval_tools("plan"),
 ]
 
 
@@ -948,6 +952,14 @@ The platform stores NO labour rate. If the user wants a plan costed, ask what pe
 roles cost; do not assume a day rate. Effort with no matching rate comes back as
 uncosted, and that is the honest answer — a total built on an invented rate is a number
 somebody will put in front of a client.
+
+── DOCUMENTS AND APPROVAL ────────────────────────────────────────────────────
+`export_document` writes a document (an effort estimate, a plan, a report) as Word and
+files it in this project's Plan documents as a DRAFT. Say exactly that. When the user asks
+to send, submit or raise it for approval, call `raise_document_for_approval` with the file
+name `export_document` returned — in the same turn as the export when both were asked for.
+Raising is not approving: the approver decides in Requests & Approvals. Never export a
+document again just because the user asked to send it.
 
 ── SAVING ────────────────────────────────────────────────────────────────────
 Call `save_plan` when the user is satisfied. The plan is recorded as AWAITING APPROVAL:
