@@ -483,6 +483,12 @@ async def lifespan(app: FastAPI):
     # None otherwise — decided in ONE place so this and artifact_store.get_blob_client
     # (the agents' path) cannot disagree about where documents live.
     app.state.blob_client = build_blob_client()
+    # ONE client, built on THIS loop. The agents' path would otherwise build a second
+    # one inside a graph node's throwaway `asyncio.run()` loop — see
+    # artifact_store.set_process_blob_client.
+    from shared.services.artifact_store import set_process_blob_client  # noqa: PLC0415
+
+    set_process_blob_client(app.state.blob_client)
 
     # Run the FIRST probe synchronously before yield so that the very first /health
     # request gets real probe results instead of "initializing" values.
