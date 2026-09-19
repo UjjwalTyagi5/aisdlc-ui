@@ -55,3 +55,55 @@ describe("DocumentReportView", () => {
     expect(getArtifactPage).not.toHaveBeenCalled();
   });
 });
+
+describe("DocumentReportView — a document with no page copy", () => {
+  function renderWithFallback(over: Record<string, unknown> = {}) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <DocumentReportView
+          doc={{ id: "a1", name: "QuickLink_Project_Plan.xlsx", url: "/api/artifacts/a1/download", documentId: "a1" }}
+          status="Approved"
+          fallback={<div data-testid="file-card">QuickLink_Project_Plan.xlsx</div>}
+          {...over}
+        />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("shows the caller's own view when there is nothing to render", async () => {
+    // A spreadsheet or a deck: the backend has no preview to give, so the page keeps its card.
+    getArtifactPage.mockRejectedValue(new ApiRequestError(404, { detail: "This document has no page view." }));
+    renderWithFallback();
+    expect(await screen.findByTestId("file-card")).toBeInTheDocument();
+  });
+
+  it("still explains a rejected document rather than showing the card", async () => {
+    getArtifactPage.mockRejectedValue(new ApiRequestError(410, { detail: "This document was rejected and its file has been deleted." }));
+    const { container } = renderWithFallback();
+    expect(await screen.findByText(/rejected and its file has been deleted/)).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="file-card"]')).toBeNull();
+  });
+
+  it("says when the text was read back from the Word file", async () => {
+    // LIVE: architecture.docx had no page copy, so the backend derives one from the file.
+    getArtifactPage.mockResolvedValue({
+      artifactId: "a1", filename: "architecture.docx", status: "approved", derived: true,
+      markdown: "## 01 Overview\nQuickLink replaces a withdrawn public shortener.",
+    });
+    const { container } = renderWithFallback();
+    expect(await screen.findByRole("article")).toBeInTheDocument();
+    expect(container.textContent).toContain("Read from the Word file");
+    expect(container.textContent).toContain("QuickLink replaces a withdrawn public shortener.");
+  });
+
+  it("does not say so when the agent's own page copy is what rendered", async () => {
+    getArtifactPage.mockResolvedValue({
+      artifactId: "a1", filename: "architecture.docx", status: "approved", derived: false,
+      markdown: "## 01 Overview\nBody.",
+    });
+    const { container } = renderWithFallback();
+    expect(await screen.findByRole("article")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("Read from the Word file");
+  });
+});

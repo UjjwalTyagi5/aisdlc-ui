@@ -13,6 +13,7 @@ import { LoadingState } from "@/components/ui/loading-state";
 
 import { AdrViewer } from "@/components/app/adr-viewer";
 import { DocumentCard } from "@/components/app/document-card";
+import { DocumentReportView } from "@/components/app/document-report-view";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -416,8 +417,12 @@ function ArtifactViewer({
       );
     case "adr":
       return <AdrViewer markdown={body.markdown} />;
-    case "document":
-      return (
+    case "document": {
+      // THE DOCUMENT, NOT ITS FILE NAME. Clicking a generated design used to show a
+      // download card and nothing else. It is read on the page now — from the page copy
+      // when the agent wrote one, otherwise from the Word file itself — and the card is
+      // what a format with no page view (a spreadsheet, a deck) falls back to.
+      const card = (
         <DocumentCard
           artifactId={artifact.id}
           filename={body.filename}
@@ -433,6 +438,25 @@ function ArtifactViewer({
           deciding={approval.decidingId === artifact.id}
         />
       );
+      if (!body.stored || body.rejected) return card;
+      return (
+        <DocumentReportView
+          doc={{ id: artifact.id, documentId: artifact.id, name: body.filename, url: artifact.downloadUrl ?? null }}
+          status={artifact.status === "approved" ? "Approved" : body.awaitingApproval ? "Awaiting approval" : "Draft"}
+          fallback={card}
+          actions={
+            approval.canDecide && body.awaitingApproval ? (
+              <>
+                <Button size="sm" className="h-8 text-xs" disabled={approval.decidingId === artifact.id}
+                  onClick={() => approval.approve(artifact.id)}>Approve</Button>
+                <Button size="sm" variant="outline" className="h-8 text-xs" disabled={approval.decidingId === artifact.id}
+                  onClick={() => approval.reject(artifact.id)}>Reject</Button>
+              </>
+            ) : null
+          }
+        />
+      );
+    }
     case "raw":
       // AdrViewer captions its output "Architecture Decision Record", which is right
       // for an ADR and wrong for everything else that lands here.

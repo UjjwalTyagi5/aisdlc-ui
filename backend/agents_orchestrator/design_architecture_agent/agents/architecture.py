@@ -287,6 +287,17 @@ async def _markdown_to_docx(markdown_string: str, docx_path: str) -> str:
             fetch_image=_fetch_image_bytes_sync,
         ),
     )
+    # THE MARKDOWN GOES BESIDE THE FILE. `register_generated_file` keeps this sibling with
+    # the document as its page copy, which is what the app renders when the document is
+    # opened (shared/services/artifact_page.py). Without it a design could only be
+    # downloaded: clicking it showed a file card. Best-effort — a document that cannot
+    # write its copy is still a document.
+    try:
+        with open(os.path.splitext(docx_path)[0] + ".md", "w", encoding="utf-8") as fh:
+            fh.write(markdown_string)
+    except OSError:
+        logger.warning("design document: page copy not written beside %s", docx_path, exc_info=True)
+
     result = f"Successfully saved document to '{docx_path}'"
     # Update shared state so the API layer can broadcast file_generated
     try:
