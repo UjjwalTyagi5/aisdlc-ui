@@ -5,7 +5,6 @@ import { useParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  Boxes,
   Check,
   ChevronDown,
   ClipboardCheck,
@@ -18,7 +17,6 @@ import {
   ListChecks,
   MessageSquare,
   ScrollText,
-  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 
@@ -46,9 +44,6 @@ import {
   CodeReviewReport,
   reportDocumentFor,
   type ReviewTab,
-  SbomView,
-  SecurityView,
-  scanRan,
 } from "@/components/app/code-review-report";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
@@ -395,17 +390,6 @@ export default function CodeReviewPage() {
                     </span>
                   )}
                 </TabBtn>
-                <TabBtn active={tab === "security"} onClick={() => setTab("security")} icon={ShieldCheck}>
-                  Security
-                  {artifact && scanRan(artifact.security) && (artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0) > 0 && (
-                    <span className="bg-destructive/15 ml-1 rounded-full px-1.5 text-[10px] text-red-700 dark:text-red-400">
-                      {(artifact.security.totals.vulnerabilities ?? 0) + (artifact.security.totals.secrets ?? 0)}
-                    </span>
-                  )}
-                </TabBtn>
-                <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
-                  SBOM
-                </TabBtn>
                 <TabBtn active={tab === "checklist"} onClick={() => setTab("checklist")} icon={ClipboardCheck}>
                   Checklist
                 </TabBtn>
@@ -443,10 +427,6 @@ export default function CodeReviewPage() {
                   )
                 ) : tab === "findings" ? (
                   <FindingsView artifact={artifact} onJump={() => setTab(mode === "repo" ? "files" : "diff")} />
-                ) : tab === "security" ? (
-                  <SecurityView artifact={artifact} />
-                ) : tab === "sbom" ? (
-                  <SbomView artifact={artifact} />
                 ) : tab === "checklist" ? (
                   <ReviewChecklistView
                     documents={documentsQ.isLoading ? null : documentsQ.data ?? []}

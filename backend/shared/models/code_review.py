@@ -112,10 +112,6 @@ class CodeReviewArtifact(BaseModel):
     #: What was reviewed: {mode, files_total, reviewable_files, lines_total, languages,
     #: files_read: [...], files_changed?}. Whole-branch reviews state coverage from it.
     scope: Dict[str, Any] = Field(default_factory=dict)
-    #: shared.services.code_security_scan output — produced by the scanners, not the model.
-    security: Dict[str, Any] = Field(default_factory=dict)
-    #: The agent's reading of the security scan (markdown).
-    security_summary: str = ""
     #: The report document: {filename, url} or {error}.
     document: Dict[str, Any] = Field(default_factory=dict)
 

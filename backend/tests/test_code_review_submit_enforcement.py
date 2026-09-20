@@ -106,8 +106,8 @@ def test_a_request_about_the_report_is_not_nudged_into_a_new_review():
 def test_a_turn_that_started_the_review_workflow_is_still_nudged():
     state = {"messages": [
         HumanMessage(content="Please look at the branch and tell me what you think"),
-        AIMessage(content="", tool_calls=[{"name": "run_security_review", "args": {}, "id": "5"}]),
-        ToolMessage(content="Security review: 13 vulnerabilities", tool_call_id="5"),
+        AIMessage(content="", tool_calls=[{"name": "list_repo_files", "args": {}, "id": "5"}]),
+        ToolMessage(content='{"totals": {"files": 20, "reviewable": 14}}', tool_call_id="5"),
         _prose_review(),
     ]}
     assert route_fn(state) == "finalize"

@@ -2,10 +2,14 @@
 
 The target is prepared by the API: a diff (branch vs base, or a PR) or a WHOLE BRANCH
 (clone + file inventory, no diff). These tools let the agent (1) list and read the code,
-(2) pull cross-file context, (3) run the security review of the checkout — secrets,
-static analysis, vulnerable dependencies, SBOM — (4) read upstream requirements/design
-artifacts, and (5) submit the final structured review. None of them mutate the
-repository.
+(2) pull cross-file context, (3) read upstream requirements/design artifacts, and
+(4) submit the final structured review. None of them mutate the repository.
+
+NO SCANNING HERE. `run_security_review` used to run Gitleaks, Semgrep and Trivy over the
+checkout and build an SBOM — the SECURITY agent's job (PRD 21.5), which runs the same
+`shared/services/code_security_scan`. Both reports then carried the same SBOM. This agent
+judges the change (PRD 21.4); static analysis it uses to inform findings lives in
+`semgrep_tool.run_semgrep_scan`.
 """
 from __future__ import annotations
 
@@ -87,59 +91,6 @@ async def list_repo_files() -> str:
         for f in inventory.get("files", [])
     ]
     return json.dumps({"totals": inventory.get("totals"), "languages": inventory.get("languages"), "files": slim})
-
-
-@tool
-async def run_security_review() -> str:
-    """Run the security review of the WHOLE checked-out branch — call it ONCE per review,
-    before submitting. It runs Gitleaks (hardcoded secrets), Semgrep with the OWASP Top 10
-    rules (static analysis) and Trivy (known vulnerabilities in dependencies), and builds
-    the SBOM with each package's version, licence and the direct dependency that brings
-    it in.
-
-    The full results are kept for the report; you get a summary to reason about. Treat a
-    scanner whose status is not "ok" as NOT RUN — never describe its area as clean.
-    """
-    root = _work_dir()
-    if root is None or not root.exists():
-        return "ERROR: no review workspace prepared. Ask the user to select a branch or PR first."
-    from shared.services.code_security_scan import run_code_security_scan  # noqa: PLC0415
-
-    s = get_session(get_session_id())
-
-    def _progress(message: str) -> None:
-        broadcast_log(manager, message, level="INFO")
-
-    try:
-        result = await asyncio.to_thread(run_code_security_scan, str(root), progress=_progress)
-    except RuntimeError as exc:
-        return f"ERROR: the security review could not run: {exc}"
-    s.security = result
-    comps = result["sbom"]["components"]
-    vulnerable = [c for c in comps if c.get("vulnerabilities")]
-    summary = {
-        "totals": result["totals"],
-        "scanners": [{k: sc[k] for k in ("name", "status", "findings", "message")} for sc in result["scanners"]],
-        "secrets": result["secrets"][:20],
-        "sast": result["sast"][:25],
-        "vulnerabilities": result["vulnerabilities"][:40],
-        "vulnerable_packages": [
-            {k: c.get(k) for k in ("name", "version", "via", "scope", "vulnerabilities")} for c in vulnerable
-        ],
-        "direct_dependencies": [
-            {k: c.get(k) for k in ("name", "declared", "version", "license", "scope")}
-            for c in comps if c.get("direct")
-        ],
-        "sbom_notes": result["sbom"]["notes"],
-    }
-    broadcast_log(
-        manager,
-        f"Security review: {result['totals']['vulnerabilities']} vulnerabilities, "
-        f"{result['totals']['secrets']} secrets, {result['totals']['sast']} static-analysis findings, "
-        f"{result['totals']['components']} SBOM components",
-        level="INFO",
-    )
-    return json.dumps(summary)
 
 
 @tool
@@ -393,10 +344,9 @@ async def submit_code_review(review_json: str) -> str:
           findings: [{id, severity, category, file, line, description, recommendation, autofix_patch?}],
           requirements_coverage: [{ac_id, status, note}],
           design_conformance: [{rule, status, note}],
-          security_summary (markdown: what the security review found and what to fix first),
           metrics: {complexity_delta?, dupe_delta?, debt_delta?}
-    run_security_review must have run first — the report's security section and SBOM
-    come from it, not from this payload.
+    Scanning — dependency vulnerabilities, secrets, the SBOM, the security sign-off — is the
+    SECURITY agent's report, not this one.
     Returns a confirmation string.
     """
     from shared.models.code_review import (
@@ -405,11 +355,6 @@ async def submit_code_review(review_json: str) -> str:
     )
 
     s = get_session(get_session_id())
-    if not s.security:
-        return (
-            "ERROR: the security review has not run for this target. Call run_security_review "
-            "first, then submit — the report's security section and SBOM come from it."
-        )
     unread = _unread_on_small_branch(s)
     if unread:
         return (
@@ -508,8 +453,6 @@ async def submit_code_review(review_json: str) -> str:
                     for d in upstream
                 ],
             },
-            security=s.security,
-            security_summary=str(payload.get("security_summary") or ""),
         )
     except Exception as exc:
         return f"ERROR: review did not match the required shape: {exc}"
